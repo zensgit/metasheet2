@@ -36,7 +36,9 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
     for (const t of ['multitable.record.created', 'multitable.record.updated', 'multitable.record.deleted']) {
       expect(expandConsumerKeysForEvent(t)).toEqual(['automation-record-trigger', 'webhook-event-bridge'])
     }
-    expect(expandConsumerKeysForEvent('multitable.comment.created')).toEqual(['webhook-event-bridge'])
+    // REMOVED from v1 (owner closure item 2): no producer exists anywhere for this event type — a route
+    // nobody produces is dead configuration; family-6 (real comment producer) re-adds it as manifest v2.
+    expect(expandConsumerKeysForEvent('multitable.comment.created')).toBeUndefined()
     // BUS event type (what univer-meta emits + automation-service subscribes) — NOT the trigger type
     // 'form.submitted' the lock's prose shorthand used; the bare trigger-type literal routes nothing.
     expect(expandConsumerKeysForEvent('multitable.form.submitted')).toEqual(['automation-record-trigger'])
@@ -51,7 +53,6 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
       'approval.rejected',
       'approval.revoked',
       'approval.task_created',
-      'multitable.comment.created',
       'multitable.form.submitted',
       'multitable.record.created',
       'multitable.record.deleted',

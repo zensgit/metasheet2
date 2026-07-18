@@ -283,7 +283,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
   test('V2: commit-then-crash-before-dispatch → rows are durable; a later tick (restart) delivers', async () => {
     // "crash": no dispatcher runs. Rows sit durable & pending (run-unique key — only ours):
     const key2 = `uv2_${RUN}`
-    const r2 = await enqueueUnique('multitable.comment.created', `evt_${RUN}_v2`, key2)
+    const r2 = await enqueueUnique('multitable.record.deleted', `evt_${RUN}_v2`, key2)
     expect(await consumerStatuses(r2.outboxId)).toEqual({ [key2]: 'pending' })
     // "restart": a fresh tick delivers.
     const seen: string[] = []

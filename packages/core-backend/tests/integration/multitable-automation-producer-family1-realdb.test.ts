@@ -286,4 +286,45 @@ describeIfDatabase('P1#2e — producer family 1: approval completion + task_crea
     expect(rows).toHaveLength(1)
     expect(rows[0].event_type).toBe('approval.approved')
   })
+
+  // F1-G6 — atomicity for the task_created IN-TXN leg (owner closure item 1): the per-recipient enqueue at
+  // the end of createApproval's manual BEGIN..COMMIT must be atomic with the instance + assignment writes —
+  // an enqueue failure rolls back EVERYTHING (no instance, no assignments, no rows), proving the leg shares
+  // the SOURCE transaction rather than re-writing post-commit.
+  test('F1-G6 atomicity: injected task_created-outbox failure rolls back instance + assignments + enqueue together', async () => {
+    process.env[DURABLE_FLAG] = 'true'
+    const trg = `f1g6_${TS}`
+    const before = Number(
+      (await q('SELECT count(*)::int AS n FROM approval_instances WHERE template_id = $1', [manualTemplateId])).rows[0].n,
+    )
+    await q(`CREATE OR REPLACE FUNCTION ${trg}() RETURNS trigger AS $fn$
+             BEGIN
+               RAISE EXCEPTION 'injected task_created outbox failure' USING ERRCODE = 'P0001';
+             END $fn$ LANGUAGE plpgsql`)
+    await q(`CREATE TRIGGER ${trg}_trg BEFORE INSERT ON meta_automation_outbox
+             FOR EACH ROW WHEN (NEW.event_type = 'approval.task_created' AND NEW.payload->'approval'->>'templateId' = '${manualTemplateId}')
+             EXECUTE FUNCTION ${trg}()`)
+    try {
+      await expect(
+        approvals.createApproval({ templateId: manualTemplateId, formData: { summary: 'f1g6' } }, requesterActor()),
+      ).rejects.toThrow(/injected task_created outbox failure/)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${trg}_trg ON meta_automation_outbox`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${trg}()`).catch(() => {})
+    }
+    // The WHOLE source transaction rolled back: no new instance, no assignments, no outbox rows.
+    const after = Number(
+      (await q('SELECT count(*)::int AS n FROM approval_instances WHERE template_id = $1', [manualTemplateId])).rows[0].n,
+    )
+    expect(after).toBe(before)
+    const orphanAssignments = await q(
+      `SELECT a.id FROM approval_assignments a
+        WHERE a.instance_id NOT IN (SELECT id FROM approval_instances)`,
+    )
+    expect(orphanAssignments.rows).toHaveLength(0)
+    // A clean retry (trigger gone) commits instance + assignments + the task_created enqueue atomically.
+    const dto = await approvals.createApproval({ templateId: manualTemplateId, formData: { summary: 'f1g6b' } }, requesterActor())
+    const rows = (await outboxRowsForInstance(dto.id)).filter((r) => r.event_type === 'approval.task_created')
+    expect(rows.length).toBeGreaterThanOrEqual(1)
+  })
 })

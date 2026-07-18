@@ -2352,7 +2352,15 @@ export class MetaSheetServer {
         if (this.durableDeliveryLoop) this.logger.info('Durable delivery dispatch loop started (AUTOMATION_DURABLE_DELIVERY_ENABLED)')
       }
     } catch (e) {
-      this.logger.error('Durable delivery dispatch loop initialization failed; continuing in degraded mode', e as Error)
+      // Owner closure item 4 — startup fail-closed. With the flag ON the producer families suppress their
+      // legacy emits, so continuing without a dispatch loop is not "degraded": it silently strands every
+      // outbox row (total delivery outage). The disposition helper (unit-tested) decides per flag.
+      const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
+      if (durableBootFailureDisposition() === 'fail-closed') {
+        this.logger.error('Durable delivery boot FAILED with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — aborting startup (fail-closed: legacy emits are suppressed, a loop-less process would strand all outbox rows)', e as Error)
+        throw e
+      }
+      this.logger.error('Durable delivery dispatch loop initialization failed (flag OFF — nothing suppressed, legacy path delivers); continuing', e as Error)
     }
 
     try {

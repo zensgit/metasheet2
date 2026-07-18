@@ -108,6 +108,17 @@ export interface BootOptions extends DispatchTickOptions {
 }
 
 /**
+ * Startup FAIL-CLOSED policy for a durable-delivery boot failure (owner closure item 4). With the flag ON,
+ * the wired producer families SUPPRESS their legacy post-commit emits — so a swallowed boot failure does not
+ * "degrade" to the legacy path, it strands EVERY outbox row with no dispatcher draining them: a silent,
+ * total delivery outage strictly worse than a crash. Flag ON ⇒ 'fail-closed' (the boot site MUST rethrow /
+ * abort startup). Flag OFF ⇒ 'degraded-ok' (nothing is suppressed; legacy delivers; log and continue).
+ */
+export function durableBootFailureDisposition(env: NodeJS.ProcessEnv = process.env): 'fail-closed' | 'degraded-ok' {
+  return isDurableDeliveryEnabled(env) ? 'fail-closed' : 'degraded-ok'
+}
+
+/**
  * Startup entry: flag OFF → null (byte-for-byte no-op); flag ON → registry + BIDIRECTIONAL manifest
  * completeness assertion (a boot misconfiguration fails loudly before any claim) + dispatch loop.
  *

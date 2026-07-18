@@ -11,8 +11,15 @@
  *   approval.{approved,rejected,revoked,cancelled} → approval-bridge, approval-trigger, approval-projection
  *   approval.task_created                          → approval-task-trigger
  *   multitable.record.{created,updated,deleted}    → automation-record-trigger, webhook-event-bridge
- *   multitable.comment.created                     → webhook-event-bridge
  *   multitable.form.submitted                      → automation-record-trigger
+ *
+ * REMOVED from v1 (owner closure item 2, 2026-07-17): `multitable.comment.created` → webhook-event-bridge.
+ * NOTHING in the codebase emits that event type (repo-wide census; the comment feature writes rows but has
+ * never emitted a bus event, so even the LEGACY webhook bridge's subscription to it has been inert since it
+ * shipped). A manifest route nobody produces is dead configuration masquerading as coverage. Wiring a real
+ * comment producer is a deliberate FEATURE enable (it would create webhook deliveries that have never fired
+ * = a flag-OFF behavior change), so it ships as its own family-6 slice with a manifest v2 — not as a v1
+ * literal. The legacy bridge's inert subscription is left untouched (removing it is that slice's business).
  *
  * NOTE on the form-submission literal: the lock's §283-291 prose names the family by its TRIGGER TYPE
  * (`form.submitted`), but the manifest keys on BUS EVENT TYPES — and the lock's own grounding citation
@@ -78,7 +85,6 @@ export const ROUTING_MANIFEST_V1: RoutingManifest = deepFreezeManifest({
     'multitable.record.created': ['automation-record-trigger', 'webhook-event-bridge'],
     'multitable.record.updated': ['automation-record-trigger', 'webhook-event-bridge'],
     'multitable.record.deleted': ['automation-record-trigger', 'webhook-event-bridge'],
-    'multitable.comment.created': ['webhook-event-bridge'],
     'multitable.form.submitted': ['automation-record-trigger'],
   },
 })
