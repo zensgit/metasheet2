@@ -156,6 +156,26 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     const TYPES = readFileSync(join(__dirname, '../src/router/types.ts'), 'utf8')
     expect(TYPES).toContain("INTEGRATION_STOCK_PREPARATION: 'integration-stock-preparation'")
   })
+
+  // Regression pin for the plm-workbench focus allowlist fix: the guard allowlist is inline in
+  // main.ts (no unit seam until the P2 manifest-driven refactor), so pin it at source level like the
+  // route block above. Deleting '/stock-prep' from the allowlist turns this red. The permission
+  // semantics are NOT relaxed by the allowlist: main.ts runs the isRoutePermitted check BEFORE the
+  // focus-mode allowlists, and the /stock-prep route keeps its integration:write gate (asserted on
+  // the route block above) — the allowlist only restores reachability for authorized users.
+  it('plm-workbench focus allowlist contains exactly /stock-prep alongside the workbench prefixes', () => {
+    const MAIN = readFileSync(join(__dirname, '../src/main.ts'), 'utf8')
+    const focusIdx = MAIN.indexOf('isPlmWorkbenchFocused')
+    expect(focusIdx, 'plm-workbench focus block must exist in main.ts').toBeGreaterThan(-1)
+    const listStart = MAIN.indexOf('allowedPrefixes', focusIdx)
+    expect(listStart, 'plm-workbench allowedPrefixes must exist').toBeGreaterThan(-1)
+    const listEnd = MAIN.indexOf(']', listStart)
+    const allowlist = MAIN.slice(listStart, listEnd + 1)
+    expect(allowlist).toContain("'/stock-prep'")
+    expect(allowlist).toContain("'/integrations'")
+    // Permission check ordering: isRoutePermitted must appear BEFORE the focus-mode blocks.
+    expect(MAIN.indexOf('isRoutePermitted')).toBeLessThan(focusIdx)
+  })
 })
 
 describe('StockPreparationWorkspace shell', () => {
