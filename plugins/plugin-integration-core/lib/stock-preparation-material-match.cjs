@@ -35,8 +35,13 @@ const VERSION_POLICIES = Object.freeze({
 // `category_rule` stays RESERVED in the wider vocabulary (stock-preparation-mvp-generation.cjs
 // VERSION_POLICIES) but has NO branch — so it, like any unknown stored string, must NEVER
 // auto-match and never fall into the tail heuristic (fail-closed; #4391 doctrine: stored legacy
-// rows are not trusted either).
-const IMPLEMENTED_VERSION_POLICIES = Object.freeze(new Set(Object.values(VERSION_POLICIES)))
+// rows are not trusted either). Enumerated EXPLICITLY (never derived from the enum object) so a
+// future vocabulary widening cannot silently widen this guard without adding a matcher branch.
+const IMPLEMENTED_VERSION_POLICIES = Object.freeze(new Set([
+  VERSION_POLICIES.DRAWING_AND_VERSION,
+  VERSION_POLICIES.DRAWING_ONLY,
+  VERSION_POLICIES.MANUAL,
+]))
 
 class StockPreparationMaterialMatchError extends Error {
   constructor(message, details = {}) {
@@ -137,11 +142,12 @@ function mappingMatchesLine(mapping, drawingNo, version) {
 
 function mappingIsVersionConflict(mapping, drawingNo, version) {
   if (!sameText(mapping.plmDrawingNo, drawingNo)) return false
-  if (mapping.matchStatus === MATCH_STATUSES.VERSION_CONFLICT) return true
   const policy = optionalString(mapping.versionPolicy) || VERSION_POLICIES.MANUAL
-  // OD2 fail-closed: an unimplemented policy is never REPORTED as a version conflict either — the
-  // row simply never participates (missing_mapping is the visible exception, not version_conflict).
+  // OD2 fail-closed (round 2): the policy guard runs BEFORE the stored-status short-circuit — a
+  // legacy row carrying an unimplemented policy must not force version_conflict via a stored
+  // matchStatus either. It never participates at all; the visible exception is the missing path.
   if (!IMPLEMENTED_VERSION_POLICIES.has(policy)) return false
+  if (mapping.matchStatus === MATCH_STATUSES.VERSION_CONFLICT) return true
   if (policy !== VERSION_POLICIES.DRAWING_AND_VERSION) return false
   const mappingVersion = optionalString(mapping.plmVersion)
   return Boolean(mappingVersion && version && !sameText(mappingVersion, version))

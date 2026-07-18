@@ -14,7 +14,7 @@
 //        latest-complete auto-pick SKIPS an orphaned newer batch;
 //   (g)  staging/business split — business projectId as locator => 409 NOT_PROVISIONED, zero writes;
 //   (h)  R6 XOR + confirm-existing patch shape (EXACT key set) + notes variant + target-incomplete 409
-//        + inactive 409 + already-confirmed skip + key-ambiguity 500;
+//        + inactive 409 + already-confirmed skip + key-ambiguity 500 + stored unimplemented policy 422;
 //   (i)  R6 create-confirmed — closed allowlist, both-ERP-ids required, policy vocabulary, version
 //        required under drawing_and_version, replay skips;
 //   (j)  R7 / R11 retire — patch EXACTLY { isActive: false }, replay skips, retire-then-recreate with
@@ -487,6 +487,30 @@ async function main() {
   })
 
   // ---- (i) R6 create-confirmed ----
+  await run('R6 confirm-existing refuses a stored candidate carrying an unimplemented versionPolicy (422, zero writes)', async () => {
+    // OD2 round-2: stamping a legacy category_rule (or junk-policy) candidate matched would plant a
+    // confirmed row the engines can never select — the 'dead confirmed row' class this function
+    // refuses elsewhere. Recovery path is retire + re-create with an implemented policy.
+    const provisioning = makeProvisioning()
+    for (const unimplementedPolicy of ['category_rule', 'totally_bogus']) {
+      const api = makeRecordsApi()
+      api.seed(SHEET.mapping, { mappingId: 'map_unimpl', plmDrawingNo: 'D', erpMaterialCode: 'C', erpMaterialInternalId: 'I', versionPolicy: unimplementedPolicy, matchStatus: 'pending_confirm', isActive: true })
+      const caught = await expectError(
+        confirmMaterialMapping({ permission: 'admin', recordsApi: api, provisioning, targetProjectId: STAGING_PROJECT_ID, mappingId: 'map_unimpl', confirmedBy: OPERATOR }),
+        { status: 422, code: 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED' },
+      )
+      assert.deepEqual(caught.details, { field: 'versionPolicy' }, 'details carry ONLY the field name')
+      assert.equal(caught.message.includes(unimplementedPolicy), false, 'error message is values-free')
+      assert.equal(api.patchCalls.length + api.createCalls.length, 0, 'refusal happens before any write')
+    }
+    // A policy-less stored candidate stays confirmable (absence folds to manual at match time).
+    const api = makeRecordsApi()
+    api.seed(SHEET.mapping, { mappingId: 'map_nopolicy', plmDrawingNo: 'D', erpMaterialCode: 'C', erpMaterialInternalId: 'I', matchStatus: 'pending_confirm', isActive: true })
+    const confirmed = await confirmMaterialMapping({ permission: 'admin', recordsApi: api, provisioning, targetProjectId: STAGING_PROJECT_ID, mappingId: 'map_nopolicy', confirmedBy: OPERATOR })
+    assert.equal(confirmed.mode, 'confirmed')
+    assert.equal(api.patchCalls.length, 1)
+  })
+
   await run('R6 create-confirmed validates the closed allowlist and required fields', async () => {
     const provisioning = makeProvisioning()
     const create = (api, mapping) => confirmMaterialMapping({ permission: 'admin', recordsApi: api, provisioning, targetProjectId: STAGING_PROJECT_ID, mapping, confirmedBy: OPERATOR })

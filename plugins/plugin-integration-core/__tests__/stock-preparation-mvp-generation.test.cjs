@@ -180,6 +180,18 @@ function main() {
         },
       ],
     }), EXCEPTION_TYPES.MISSING_MAPPING)
+    // Round 2 (guard ordering): a stored matchStatus='version_conflict' must not FORCE the
+    // version_conflict exception either — the policy guard runs BEFORE the stored-status
+    // short-circuit, so the row never participates and the line degrades to missing_mapping.
+    assertSingleException(generate({
+      materialMappings: [
+        {
+          ...clone(baseInput().materialMappings[0]),
+          versionPolicy: unimplementedPolicy,
+          matchStatus: MATERIAL_MATCH_STATUSES.VERSION_CONFLICT,
+        },
+      ],
+    }), EXCEPTION_TYPES.MISSING_MAPPING)
   }
 
   assertSingleException(generate({ erpMaterials: [] }), EXCEPTION_TYPES.MISSING_MATERIAL_MASTER)

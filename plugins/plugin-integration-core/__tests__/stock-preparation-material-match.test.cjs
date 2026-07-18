@@ -153,6 +153,14 @@ function main() {
       confirmedMappings: [{ ...storedRow, plmVersion: 'B' }],
     })
     assert.equal(mismatch.mappingRows[0].matchStatus, MATCH_STATUSES.NOT_FOUND, `${unimplementedPolicy} version mismatch is not reported as version_conflict`)
+    // Round 2 (guard ordering): a stored matchStatus='version_conflict' must not FORCE the
+    // version_conflict path either — the policy guard runs BEFORE the stored-status short-circuit,
+    // so the row never participates and the line degrades to the visible missing path.
+    const storedConflict = result({
+      erpMaterials: [],
+      confirmedMappings: [{ ...storedRow, matchStatus: MATCH_STATUSES.VERSION_CONFLICT }],
+    })
+    assert.equal(storedConflict.mappingRows[0].matchStatus, MATCH_STATUSES.NOT_FOUND, `${unimplementedPolicy} stored version_conflict status degrades to the missing path`)
   }
 
   // OD2 input boundary (engine backstop; the confirm-writes validator rejects first with 422): a

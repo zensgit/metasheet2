@@ -159,11 +159,12 @@ function mappingMatchesLine(mapping, line) {
 
 function mappingHasVersionConflict(mapping, line) {
   if (!sameText(mapping.plmDrawingNo, line.childDrawingNo)) return false
-  if (mapping.matchStatus === MATERIAL_MATCH_STATUSES.VERSION_CONFLICT) return true
   const policy = optionalString(mapping.versionPolicy) || VERSION_POLICIES.MANUAL
-  // OD2 fail-closed: an unimplemented policy is never REPORTED as a version conflict either — the
-  // row simply never participates (missing_mapping is the visible exception, not version_conflict).
+  // OD2 fail-closed (round 2): the policy guard runs BEFORE the stored-status short-circuit — a
+  // legacy row carrying an unimplemented policy must not force version_conflict via a stored
+  // matchStatus either. It never participates at all; the visible exception is missing_mapping.
   if (!IMPLEMENTED_VERSION_POLICIES.has(policy)) return false
+  if (mapping.matchStatus === MATERIAL_MATCH_STATUSES.VERSION_CONFLICT) return true
   if (policy !== VERSION_POLICIES.DRAWING_AND_VERSION) return false
   const mappingVersion = optionalString(mapping.plmVersion)
   const lineVersion = optionalString(line.childVersion)

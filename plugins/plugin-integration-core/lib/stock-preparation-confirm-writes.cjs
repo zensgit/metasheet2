@@ -426,6 +426,14 @@ async function confirmMaterialMapping(input = {}) {
     if (data.isActive === false) {
       throw new StockPreparationConfirmWriteError(409, 'CONFIRM_MAPPING_INACTIVE', 'material mapping is retired; re-create it to confirm', { mappingId })
     }
+    // OD2 round-2 hardening: a STORED candidate carrying an unimplemented versionPolicy (the
+    // reserved category_rule or junk — absence folds to manual and stays confirmable) must not be
+    // stamped matched: the match engines will never select it, so confirming it would plant exactly
+    // the 'dead confirmed row' class this function refuses elsewhere. Retire/re-create instead.
+    const storedVersionPolicy = optionalString(data.versionPolicy)
+    if (storedVersionPolicy && !IMPLEMENTED_VERSION_POLICY_SET.has(storedVersionPolicy)) {
+      throw new StockPreparationConfirmWriteError(422, 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED', 'material mapping carries an unimplemented version policy; retire and re-create it', { field: 'versionPolicy' })
+    }
     if (data.matchStatus === MATCH_STATUSES.MATCHED && isStamped(data)) {
       return { persisted: false, mode: 'skipped_already_confirmed', mappingId, evidence: buildConfirmEvidence('mapping', 'skipped_already_confirmed') }
     }

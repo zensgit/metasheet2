@@ -102,7 +102,8 @@ export interface StockPreparationMaterialMappingCandidateRow {
   matchStatus: StockPreparationMatchStatus | 'unknown'
   /** Absent when the stored row carries no method; junk stored values fold to `unknown`. */
   matchMethod?: StockPreparationMatchMethod | 'unknown'
-  versionPolicy: StockPreparationVersionPolicy | 'unknown'
+  // READ vocabulary ≠ write whitelist: confirm-reads still projects a legacy stored 'category_rule' verbatim.
+  versionPolicy: StockPreparationVersionPolicy | 'category_rule' | 'unknown'
   confidence: number | null
   isActive: boolean
   confirmed: boolean
