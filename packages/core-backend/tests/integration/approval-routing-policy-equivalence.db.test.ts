@@ -150,6 +150,9 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
   const cleanupUsers: string[] = []
   const cleanupAccountIds: string[] = []
   const cleanupIntegrationIds: string[] = []
+  // gate P3: departments created on the SHARED 'default' local integration are not covered by the
+  // org/integration cascades below — track and delete them by id.
+  const cleanupDepartmentIds: string[] = []
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
@@ -181,6 +184,7 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
         await pool.query(`DELETE FROM approval_templates WHERE id = ANY($1)`, [tids])
       }
       for (const id of cleanupAccountIds.splice(0)) await query(`DELETE FROM directory_accounts WHERE id = $1`, [id])
+      for (const id of cleanupDepartmentIds.splice(0)) await query(`DELETE FROM directory_departments WHERE id = $1`, [id])
       for (const id of cleanupIntegrationIds.splice(0)) await query(`DELETE FROM directory_integrations WHERE id = $1`, [id])
       for (const org of cleanupOrgs.splice(0)) await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [org])
       for (const uid of cleanupUsers.splice(0)) await query(`DELETE FROM users WHERE id = $1`, [uid])
@@ -229,7 +233,11 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
     expect(viaDtSentinel.primaryTitle).toBe('DT-SENTINEL')
 
     // 2) EQUIVALENCE — align the titles, then the §10.1 triple must be IDENTICAL across sources
-    await query(`UPDATE directory_accounts SET title = 'Engineer' WHERE title IN ('LOCAL-SENTINEL','DT-SENTINEL')`)
+    // (gate P3: scoped to THIS test's two integrations — an unscoped title UPDATE could clobber a
+    // parallel run's sentinel rows on a shared dev DB, or rewrite foreign rows with these titles)
+    await query(`UPDATE directory_accounts SET title = 'Engineer' WHERE title IN ('LOCAL-SENTINEL','DT-SENTINEL') AND integration_id = ANY($1)`, [
+      [local.id, dt],
+    ])
     await setPolicy(org, local.id)
     const viaLocal = await resolveApprovalRequesterOrgRelations(requester, query)
     await setPolicy(org, dt)
@@ -259,6 +267,7 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
     // local side (product writers): dept + accounts + primary + is_manager
     const local = await getOrCreateLocalIntegration('default')
     const lDept = await createLocalDepartment({ orgId: 'default', name: `B6 Inflight ${TS}` })
+    cleanupDepartmentIds.push(lDept.id)
     const lReq = await createLocalAccount({ orgId: 'default', localUserId: REQ, title: 'Local Title' })
     const lMgr = await createLocalAccount({ orgId: 'default', localUserId: MGR, title: 'Local Mgr' })
     cleanupAccountIds.push(lReq.id, lMgr.id)
