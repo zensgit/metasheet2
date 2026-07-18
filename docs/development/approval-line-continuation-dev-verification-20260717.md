@@ -89,6 +89,15 @@ S3-S5 绿。harness 约束（stop() 会 end 共享 pool）已在 spec 头注文�
 push 后回读远端 SHA=1d3854c7a 确认。**状态=工程侧修复交付、待 owner 复审**（在复审通过前 #4337 不可合，
 不再主张「全为 owner 门」）。
 
+### 1.6 终态：#4337 MERGED（2026-07-18，squash `dfc9318fc`）
+owner 对 head ed2394b7f COMMENT-review **APPROVE**（无新 P1/P2；正式追认两处字面量修正），并在其会话
+补强 publish-last readiness（构造+init+规则加载全成后才发布）与 boot 依赖全验证→dispatcher 最后启动
+（失败路径 stop-and-null 回滚），启动矩阵扩至 **8/8**（含 init()/load 两 rung 注入 + dispatcher DB-tick
+探针）。授权机械合并后：两轮 rebase（热 main）均以产品 diff md5 核验不变（`ce3d1714e…`）→ push 回读 →
+armed auto-merge → **MERGED main**。非阻塞 P3 备忘：程序化 start() 拒绝时更早启动的非 durable 后台服务
+仍存活（生产入口立即退出进程）。线剩余=flag 全 OFF→UAT→分级 ON（owner 门）；8 场景正式验收（S6/S8 依赖
+FWB 栈合入，S1-S5/S7 可先行）；family-6 comment producer + manifest v2（菜单）。
+
 ## 2. #4342 附件 runtime — 闭合审计（review-ready，owner 门）
 - opus 审计对 head 23e090807：**REVIEW-READY**。两 P1（G7 下载字节路径隐藏字段红线 / G15 reconciler 误删
   活 blob）在真码上变异证明 CLOSED（中和守卫→指定测试 RED，正控 12+4 绿）；17 个可识别 findings 全闭；
