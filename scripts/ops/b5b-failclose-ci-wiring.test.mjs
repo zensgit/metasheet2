@@ -4,11 +4,12 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-// B5-b CI two-point wiring contract. The routing-policy schema suite proves the resolver over the (org,purpose)
-// policy store's DB invariants (cross-org FK-impossible, closed purpose set, RESTRICT) against real
-// Postgres — meaningless without a DB. It needs BOTH (1) the vitest.config.ts exclude (so the no-DB
-// job cannot skip-green it) AND (2) the plugin-tests.yml directory real-DB whole-file step. Removing
-// either point silently disables the proof while CI stays green. Runs in the gating no-DB test job.
+// B5-b P1 fail-close CI two-point wiring contract. The fail-close suite proves a broken/unreadable
+// routing policy fail-closes ALL FOUR org assignee sources at approval create (422/503, zero
+// instances, zero assignments) against a real server + real Postgres — meaningless without a DB.
+// It needs BOTH (1) the vitest.config.ts exclude (so the no-DB job cannot skip-green it) AND
+// (2) the plugin-tests.yml APPROVAL real-DB whole-file step. Removing either point silently
+// disables the fail-open regression proof while CI stays green. Runs in the gating no-DB test job.
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const FILE = 'tests/integration/approval-routing-policy-failclose.api.test.ts'
