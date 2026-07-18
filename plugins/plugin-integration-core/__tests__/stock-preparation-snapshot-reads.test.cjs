@@ -10,6 +10,9 @@
 //   - PROJECT-SCOPE SPLIT: findObjectSheet uses the STAGING targetProjectId (business project => null),
 //     so using the business project as the locator finds nothing (kills a revert of the split);
 //   - COMPLETENESS: a batch with a row but zero lines OR a missing run row => incomplete:true;
+//   - H-1 GATE (#4452 P4 round-1): diff + diff/rows refuse an incomplete CURRENT or BASE (explicit
+//     AND auto-picked — no silent skip to an older complete batch) with 409
+//     SNAPSHOT_DIFF_BATCH_INCOMPLETE and closed values-free details { target, reason };
 //   - admin-denied => 403 before any read (fail closed);
 //   - READONLY: createRecord/patchRecord/deleteRecord are NEVER called;
 //   - values-free: a planted drawing number / quantity / exception message never reaches a summary.
@@ -383,6 +386,12 @@ async function main() {
         { snapshotLineId: 'l1', snapshotBatchId: 'b1', childDrawingNo: 'A', childVersion: 'V1', pathKey: '/root/A', designQty: 1 },
         { snapshotLineId: 'l3', snapshotBatchId: 'b3', childDrawingNo: 'A', childVersion: 'V3', pathKey: '/root/A', designQty: 1 },
       ],
+      // H-1: run rows so b1/b3 (the gated current/base pair) are COMPLETE — this test locks the base-
+      // override validation codes, not the completeness gate (which has its own tests below).
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'r1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'r3', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
     }
     // Explicit base b1 (predecessor auto-pick would choose b2): version change A V1 -> V3 counts.
     const result = await getSnapshotDiff({
@@ -465,6 +474,11 @@ async function main() {
         { snapshotLineId: 'c2', snapshotBatchId: 'd2', childDrawingNo: 'B', childVersion: 'V2', pathKey: '/root/B', designQty: 1 },
         { snapshotLineId: 'c3', snapshotBatchId: 'd2', childDrawingNo: 'C', childVersion: 'V1', pathKey: '/root/C', designQty: 1 },
       ],
+      // H-1: run rows so both sides of the browsed pair are complete (the gate has its own tests).
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'r1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'r2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
     }
     const DIFF_ROW_KEY_SET = new Set([
       'diffId', 'diffType', 'reviewStatus', 'changeTypes', 'reason', 'rowCount',
@@ -540,6 +554,10 @@ async function main() {
         { snapshotBatchId: 'big1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, syncRunId: 'r1' },
       ],
       [SHEET_IDS[LINE_OBJECT_ID]]: manyLines,
+      // H-1: big1 must be COMPLETE so the read reaches the row-cap check (not the completeness 409).
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'r1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
     }
     let caught = null
     try {
@@ -555,6 +573,175 @@ async function main() {
     }
     assert.equal(caught && caught.status, 422)
     assert.equal(caught && caught.code, 'SNAPSHOT_READS_ROWS_TOO_LARGE')
+  })
+
+  // ---- H-1 (#4452 P4 round-1): SERVER-SIDE diff completeness gate ----
+  // The FE only DISABLES the diff entry for an incomplete batch; deep links / list-vs-diff races reach
+  // the endpoints directly. Any incomplete side => 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE, values-free.
+  const expectIncomplete409 = async (fn, args) => {
+    let caught = null
+    try {
+      await fn({
+        provisioning: makeProvisioning(),
+        targetProjectId: STAGING_PROJECT,
+        permission: 'admin',
+        ...args,
+      })
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught, 'an incomplete side must not be answered')
+    assert.ok(caught instanceof StockPreparationTargetProvisioningError)
+    assert.equal(caught.status, 409)
+    assert.equal(caught.code, 'SNAPSHOT_DIFF_BATCH_INCOMPLETE')
+    return caught
+  }
+
+  // a1 COMPLETE (v1) < a2 INCOMPLETE (v2, zero lines, run row present) < a3 COMPLETE (v3): the
+  // auto-pick for a3 is a2 (highest version strictly below 3) — the incomplete one.
+  const h1AutoBaseFixture = () => ({
+    [SHEET_IDS[BATCH_OBJECT_ID]]: [
+      { snapshotBatchId: 'a1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'superseded', syncRunId: 'ar1', createdAt: 'x' },
+      { snapshotBatchId: 'a2', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'ar2' },
+      { snapshotBatchId: 'a3', projectId: BUSINESS_PROJECT, snapshotVersion: 3, snapshotStatus: 'active', syncRunId: 'ar3', createdAt: 'x' },
+    ],
+    [SHEET_IDS[LINE_OBJECT_ID]]: [
+      { snapshotLineId: 'al1', snapshotBatchId: 'a1', childDrawingNo: 'A', childVersion: 'V1', pathKey: '/root/A', designQty: 1 },
+      // a2: NO lines — the 0-line orphan sitting between two complete batches.
+      { snapshotLineId: 'al3', snapshotBatchId: 'a3', childDrawingNo: 'A', childVersion: 'V2', pathKey: '/root/A', designQty: 2 },
+    ],
+    [SHEET_IDS[RUN_OBJECT_ID]]: [
+      { runId: 'ar1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      { runId: 'ar2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      { runId: 'ar3', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+    ],
+  })
+
+  await run('H-1 gate: current batch with zero lines => 409 incomplete {target: current}', async () => {
+    // Run row PRESENT + zero lines: isolates the lineCount signal of the shared predicate.
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'g1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'gr1', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [{ runId: 'gr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' }],
+    }
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: 'g1',
+    })
+    assert.deepEqual(caught.details, { target: 'current', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: current with lines but missing run row => 409 incomplete {target: current}', async () => {
+    // fullFixture b4: 1 line, no run4 row. Its auto-pick b3 is ALSO incomplete — the CURRENT side is
+    // checked first, so target must say 'current'.
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(fullFixture()),
+      snapshotBatchId: 'b4',
+    })
+    assert.deepEqual(caught.details, { target: 'current', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: explicit base incomplete (0-line orphan) => 409 incomplete {target: base}', async () => {
+    // The 0-line orphan as an EXPLICIT base is exactly the fabricated all-'added' diff H-1 closes.
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'e1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'er1' },
+        { snapshotBatchId: 'e2', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'active', syncRunId: 'er2', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        // e1 has NO lines (orphan); e2 is complete.
+        { snapshotLineId: 'el2', snapshotBatchId: 'e2', childDrawingNo: 'A', childVersion: 'V1', pathKey: '/root/A', designQty: 1 },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'er1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'er2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
+    }
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: 'e2',
+      baseSnapshotBatchId: 'e1',
+    })
+    assert.deepEqual(caught.details, { target: 'base', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: AUTO-picked predecessor incomplete => 409 {target: base}, never a silent skip', async () => {
+    // a1 (older) is COMPLETE: a silent-skip implementation would answer with base a1 and silently
+    // change the diff result. The lock chose loud-409 — the incomplete auto-picked a2 must surface.
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(h1AutoBaseFixture()),
+      snapshotBatchId: 'a3',
+    })
+    assert.deepEqual(caught.details, { target: 'base', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: both sides complete => diff and diff/rows answer exactly as before (regression)', async () => {
+    const diffResult = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(fullFixture()),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'b2',
+      permission: 'admin',
+    })
+    assert.equal(diffResult.baseSnapshotBatchId, 'b1')
+    assert.deepEqual(diffResult.changeCounts, {
+      added: 1,
+      removed: 1,
+      quantityChanged: 1,
+      unitChanged: 0,
+      versionChanged: 0,
+      pathChanged: 0,
+      missingChildBom: 0,
+      fingerprintChanged: 0,
+    })
+    assert.equal(diffResult.blockingExceptionCount, 2)
+    const rowsResult = await listSnapshotDiffRows({
+      recordsApi: makeRecordsApi(fullFixture()),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'b2',
+      permission: 'admin',
+    })
+    assert.equal(rowsResult.baseSnapshotBatchId, 'b1')
+    assert.ok(rowsResult.rowCount >= 3, 'changed + removed + added rows still surface under the gate')
+  })
+
+  await run('H-1 gate: diff/rows is gated identically (incomplete current AND incomplete auto base)', async () => {
+    const caughtCurrent = await expectIncomplete409(listSnapshotDiffRows, {
+      recordsApi: makeRecordsApi(fullFixture()),
+      snapshotBatchId: 'b4',
+    })
+    assert.deepEqual(caughtCurrent.details, { target: 'current', reason: 'incomplete' })
+    const caughtBase = await expectIncomplete409(listSnapshotDiffRows, {
+      recordsApi: makeRecordsApi(h1AutoBaseFixture()),
+      snapshotBatchId: 'a3',
+    })
+    assert.deepEqual(caughtBase.details, { target: 'base', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: 409 error is values-free — details carry ONLY {target, reason}, no ids or counts', async () => {
+    // Plant the secret into the HANDLES the gate touches (batch id / run id): none of them may appear
+    // anywhere in the thrown 409 (closed details shape + fixed values-free message).
+    const batchId = `batch_${SECRET}`
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: batchId, projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: `run_${SECRET}` },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [],
+    }
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: batchId,
+    })
+    assert.deepEqual(Object.keys(caught.details).sort(), ['reason', 'target'])
+    assert.equal(caught.details.target, 'current')
+    assert.equal(caught.details.reason, 'incomplete')
+    const serialized = JSON.stringify({ message: caught.message, details: caught.details })
+    assert.equal(serialized.includes(SECRET), false, 'no handle/value leaks through the 409')
+    assert.equal(/\d/.test(JSON.stringify(caught.details)), false, 'no counts leak into the details')
   })
 
   console.log(`\nstock-preparation-snapshot-reads.test.cjs: ${passed} passed, ${failed} failed`)

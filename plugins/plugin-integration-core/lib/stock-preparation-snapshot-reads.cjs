@@ -192,6 +192,12 @@ async function queryAllRecords(target, filters) {
 // A batch is `incomplete` when the multi-step persist path (batch row -> lines -> run row) did not
 // finish: zero lines OR no matching run row. A batch row alone is NOT proof of completeness — an
 // orphaned batch (crash mid-commit) must not be presented as normal.
+// This single structural predicate backs BOTH the list's `incomplete` flag and the H-1 diff gate
+// (assertDiffBatchComplete below) — one definition of completeness, not two drifting copies.
+function isBatchIncomplete(lineCount, runPresent) {
+  return lineCount === 0 || runPresent !== true
+}
+
 function batchSummary(batchRecord, lineCount, runPresent) {
   return {
     snapshotBatchId: optionalString(readCell(batchRecord, 'snapshotBatchId')),
@@ -201,7 +207,7 @@ function batchSummary(batchRecord, lineCount, runPresent) {
     lineCount,
     // Presence of the createdAt stamp only — never the timestamp value itself (values-free).
     createdAtPresent: optionalString(readCell(batchRecord, 'createdAt')) !== null,
-    incomplete: lineCount === 0 || runPresent !== true,
+    incomplete: isBatchIncomplete(lineCount, runPresent),
   }
 }
 
@@ -319,6 +325,38 @@ async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projec
   return null
 }
 
+// H-1 (P4 design-lock #4452, round-1 owner ruling): SERVER-SIDE diff completeness gate. The FE only
+// DISABLES the diff entry for an incomplete batch (list `incomplete` flag); a deep link or a
+// list-vs-diff race can still reach the diff endpoints directly, where an incomplete CURRENT serves a
+// silently partial diff and a 0-line orphan BASE fabricates an all-'added' diff. So after base
+// resolution BOTH sides are verified against the SAME structural predicate the list uses
+// (isBatchIncomplete: at least one line AND the run row named by the batch row's syncRunId exists) and
+// any incomplete side fails LOUD: 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE. This applies to the AUTO-picked
+// predecessor too — silently skipping past an incomplete predecessor to an older complete batch would
+// silently change the diff result; the lock chose loud-409 over silent-skip.
+// `batchRow` null (a base row that vanished between resolution and the gate) fails closed the same
+// way: no row -> no verifiable run link -> incomplete. An absent RUN sheet likewise leaves runPresent
+// false (exactly the list path's semantics).
+// The details shape is CLOSED and values-free: ONLY { target: 'current'|'base', reason: 'incomplete' }
+// — no counts, no ids; the message is a fixed values-free string.
+async function assertDiffBatchComplete({ lineSheet, runSheet, batchRow, snapshotBatchId, target }) {
+  const lineRows = lineSheet ? await queryAllRecords(lineSheet, { snapshotBatchId }) : []
+  const syncRunId = optionalString(readCell(batchRow, 'syncRunId'))
+  let runPresent = false
+  if (runSheet && syncRunId) {
+    const runRows = await queryAllRecords(runSheet, { runId: syncRunId })
+    runPresent = runRows.length > 0
+  }
+  if (isBatchIncomplete(lineRows.length, runPresent)) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'SNAPSHOT_DIFF_BATCH_INCOMPLETE',
+      'snapshot diff refuses an incomplete snapshot batch',
+      { target, reason: 'incomplete' },
+    )
+  }
+}
+
 /**
  * Values-free diff of a snapshot batch against its immutable predecessor batch.
  * The batch id arrives from the route PATH. `targetProjectId` (STAGING) locates the MVP tables; the
@@ -326,6 +364,8 @@ async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projec
  * FE diff call carries no projectId), falling back to `businessProjectId` when the batch row is absent.
  * An optional `baseSnapshotBatchId` overrides the predecessor auto-pick with a validated caller-chosen
  * pair; when absent the original predecessor semantics are preserved unchanged.
+ * H-1: both sides are completeness-gated after base resolution — an incomplete current or base
+ * (explicit OR auto-picked) fails loud with 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE, never a partial diff.
  */
 async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, businessProjectId, snapshotBatchId, baseSnapshotBatchId: baseOverride, permission } = {}) {
   assertAdminPermission(permission)
@@ -373,6 +413,31 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
     requestedBase,
     currentBatchRowPresent: Boolean(currentBatchRow),
   })
+
+  // H-1 completeness gate — AFTER base resolution (explicit-base validation errors keep precedence),
+  // BEFORE any diff is computed. Runs only when the current batch ROW exists: a ghost current keeps
+  // the #4002 graceful empty shape on the auto path (locked by the existing ghost test) and already
+  // 404s on the explicit-base path inside resolveDiffBase.
+  const runSheet = await findMvpSheet(api, prov, stagingProjectId, RUN_OBJECT_ID)
+  if (currentBatchRow) {
+    await assertDiffBatchComplete({
+      lineSheet,
+      runSheet,
+      batchRow: currentBatchRow,
+      snapshotBatchId: currentSnapshotBatchId,
+      target: 'current',
+    })
+  }
+  if (baseSnapshotBatchId) {
+    const baseRows = batchSheet ? await queryAllRecords(batchSheet, { snapshotBatchId: baseSnapshotBatchId }) : []
+    await assertDiffBatchComplete({
+      lineSheet,
+      runSheet,
+      batchRow: baseRows[0] || null,
+      snapshotBatchId: baseSnapshotBatchId,
+      target: 'base',
+    })
+  }
 
   // Lines for the current + predecessor batches (never mutated; passed straight to the diff engine).
   const currentLines = lineSheet
@@ -472,12 +537,11 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
 
   let projectId = optionalString(businessProjectId)
   let currentVersion = null
-  let currentBatchRowPresent = false
+  let currentBatchRow = null
   if (batchSheet) {
     const currentRows = await queryAllRecords(batchSheet, { snapshotBatchId: currentSnapshotBatchId })
-    const currentBatchRow = currentRows[0] || null
+    currentBatchRow = currentRows[0] || null
     if (currentBatchRow) {
-      currentBatchRowPresent = true
       projectId = optionalString(readCell(currentBatchRow, 'projectId')) || projectId
       currentVersion = toNumber(readCell(currentBatchRow, 'snapshotVersion'))
     }
@@ -488,8 +552,31 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
     projectId,
     currentVersion,
     requestedBase,
-    currentBatchRowPresent,
+    currentBatchRowPresent: Boolean(currentBatchRow),
   })
+
+  // H-1 completeness gate — identical to getSnapshotDiff's (same order, same 409, same closed
+  // values-free details): the per-row browse must not answer for an incomplete side either.
+  const runSheet = await findMvpSheet(api, prov, stagingProjectId, RUN_OBJECT_ID)
+  if (currentBatchRow) {
+    await assertDiffBatchComplete({
+      lineSheet,
+      runSheet,
+      batchRow: currentBatchRow,
+      snapshotBatchId: currentSnapshotBatchId,
+      target: 'current',
+    })
+  }
+  if (baseSnapshotBatchId) {
+    const baseRows = batchSheet ? await queryAllRecords(batchSheet, { snapshotBatchId: baseSnapshotBatchId }) : []
+    await assertDiffBatchComplete({
+      lineSheet,
+      runSheet,
+      batchRow: baseRows[0] || null,
+      snapshotBatchId: baseSnapshotBatchId,
+      target: 'base',
+    })
+  }
 
   const currentLines = lineSheet
     ? (await queryAllRecords(lineSheet, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
@@ -545,6 +632,8 @@ module.exports = {
     toNumber,
     queryAllRecords,
     batchSummary,
+    isBatchIncomplete,
+    assertDiffBatchComplete,
     orderBatches,
     changeCountsFromEvidence,
     pickPredecessor,
