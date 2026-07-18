@@ -157,55 +157,121 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     expect(TYPES).toContain("INTEGRATION_STOCK_PREPARATION: 'integration-stock-preparation'")
   })
 
-  // Regression pin for the plm-workbench focus allowlist fix (round-7 hardening: the original pin's
-  // indexOf('isRoutePermitted') matched the IMPORT at the top of main.ts, not the real guard call —
-  // a mutation deleting the call still passed). The pin now walks the TypeScript AST: it locates the
-  // ACTUAL isRoutePermitted(...) call expression and the ACTUAL isPlmWorkbenchFocused() call inside
-  // the router guard and compares their positions, and it parses the allowedPrefixes array literal
-  // for an EXACT membership comparison. Deleting '/stock-prep', deleting the permission call, or
-  // moving it after the focus block turns this red (mutation-verified). Runtime semantics: the
-  // allowlist never relaxes the route's integration:write gate (route-block pin above).
-  it('plm-workbench focus allowlist is exactly the workbench prefixes + /stock-prep, and the real permission call precedes the focus block (AST)', async () => {
+  // Regression pin for the plm-workbench focus allowlist fix (round-8 hardening). History: the
+  // round-6 indexOf pin matched the IMPORT, not the call; the round-7 AST pin proved the call exists
+  // and where — but not that its RETURN VALUE controls the deny branch (a bare isRoutePermitted(...)
+  // statement still passed), and it walked the whole file (a same-named call in an uncalled helper
+  // could fake it). This version locates STRUCTURE, scoped to the router.beforeEach callback:
+  //   1. the beforeEach callback itself;
+  //   2. inside it, the IfStatement whose condition is EXACTLY !isRoutePermitted(...);
+  //   3. that branch must contain return next(...) — the call ENFORCES, not merely runs;
+  //   4. the flags.isPlmWorkbenchFocused() condition block in the SAME callback, positioned AFTER 2;
+  //   5. allowedPrefixes must live INSIDE that focus block, compared EXACTLY.
+  // Mutations (all verified RED): delete the call; keep the call but strip the enforcing if; move the
+  // enforcing if after the focus block; relocate it to a helper outside the callback; drop '/stock-prep'.
+  it('router.beforeEach: !isRoutePermitted(...) ENFORCES (return next) before the plm-workbench focus block, whose allowlist is exactly the workbench prefixes + /stock-prep (AST)', async () => {
     const ts = (await import('typescript')).default
+    type TsNode = import('typescript').Node
     const MAIN = readFileSync(join(__dirname, '../src/main.ts'), 'utf8')
     const source = ts.createSourceFile('main.ts', MAIN, ts.ScriptTarget.ES2022, true)
 
-    let permittedCallPos = -1
-    let plmFocusCallPos = -1
-    let allowlist: string[] | null = null
-    const visit = (node: import('typescript').Node): void => {
-      if (ts.isCallExpression(node)) {
-        const callee = node.expression
-        if (ts.isIdentifier(callee) && callee.text === 'isRoutePermitted' && permittedCallPos === -1) {
-          permittedCallPos = node.getStart(source)
-        }
-        if (
-          ts.isPropertyAccessExpression(callee) &&
-          callee.name.text === 'isPlmWorkbenchFocused' &&
-          plmFocusCallPos === -1
-        ) {
-          plmFocusCallPos = node.getStart(source)
-        }
-      }
+    // 1. locate the router.beforeEach(...) callback.
+    let guardBody: TsNode | null = null
+    const findGuard = (node: TsNode): void => {
       if (
-        ts.isVariableDeclaration(node) &&
-        ts.isIdentifier(node.name) &&
-        node.name.text === 'allowedPrefixes' &&
-        node.initializer &&
-        ts.isArrayLiteralExpression(node.initializer)
+        guardBody === null &&
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'beforeEach' &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === 'router' &&
+        node.arguments.length >= 1 &&
+        (ts.isArrowFunction(node.arguments[0]) || ts.isFunctionExpression(node.arguments[0]))
       ) {
-        allowlist = node.initializer.elements
-          .filter((el): el is import('typescript').StringLiteral => ts.isStringLiteral(el))
-          .map((el) => el.text)
+        guardBody = (node.arguments[0] as import('typescript').ArrowFunction).body
+        return
       }
-      ts.forEachChild(node, visit)
+      ts.forEachChild(node, findGuard)
     }
-    visit(source)
+    findGuard(source)
+    expect(guardBody, 'router.beforeEach(callback) must exist').not.toBeNull()
 
-    expect(permittedCallPos, 'the real isRoutePermitted(...) CALL must exist (imports do not count)').toBeGreaterThan(-1)
-    expect(plmFocusCallPos, 'the real isPlmWorkbenchFocused() call must exist').toBeGreaterThan(-1)
-    expect(permittedCallPos, 'permission check must run BEFORE the plm-workbench focus block').toBeLessThan(plmFocusCallPos)
-    expect(allowlist, 'plm-workbench allowedPrefixes array must exist').not.toBeNull()
+    const containsReturnNext = (node: TsNode): boolean => {
+      let found = false
+      const walk = (n: TsNode): void => {
+        if (
+          ts.isReturnStatement(n) &&
+          n.expression &&
+          ts.isCallExpression(n.expression) &&
+          ts.isIdentifier(n.expression.expression) &&
+          n.expression.expression.text === 'next'
+        ) {
+          found = true
+        }
+        if (!found) ts.forEachChild(n, walk)
+      }
+      walk(node)
+      return found
+    }
+
+    // 2-5. scoped scan of the guard body only.
+    let enforcingIfPos = -1
+    let plmFocusIfPos = -1
+    let allowlist: string[] | null = null
+    const scan = (node: TsNode): void => {
+      if (ts.isIfStatement(node)) {
+        const cond = node.expression
+        if (
+          enforcingIfPos === -1 &&
+          ts.isPrefixUnaryExpression(cond) &&
+          cond.operator === ts.SyntaxKind.ExclamationToken &&
+          ts.isCallExpression(cond.operand) &&
+          ts.isIdentifier(cond.operand.expression) &&
+          cond.operand.expression.text === 'isRoutePermitted' &&
+          containsReturnNext(node.thenStatement)
+        ) {
+          enforcingIfPos = node.getStart(source)
+        }
+        let mentionsPlmFocusCall = false
+        const inspectCond = (n: TsNode): void => {
+          if (
+            ts.isCallExpression(n) &&
+            ts.isPropertyAccessExpression(n.expression) &&
+            n.expression.name.text === 'isPlmWorkbenchFocused'
+          ) {
+            mentionsPlmFocusCall = true
+          }
+          ts.forEachChild(n, inspectCond)
+        }
+        inspectCond(cond)
+        if (mentionsPlmFocusCall && plmFocusIfPos === -1) {
+          plmFocusIfPos = node.getStart(source)
+          // 5. allowedPrefixes must live INSIDE this focus block.
+          const findAllowlist = (n: TsNode): void => {
+            if (
+              ts.isVariableDeclaration(n) &&
+              ts.isIdentifier(n.name) &&
+              n.name.text === 'allowedPrefixes' &&
+              n.initializer &&
+              ts.isArrayLiteralExpression(n.initializer)
+            ) {
+              allowlist = n.initializer.elements
+                .filter((el): el is import('typescript').StringLiteral => ts.isStringLiteral(el))
+                .map((el) => el.text)
+            }
+            ts.forEachChild(n, findAllowlist)
+          }
+          findAllowlist(node.thenStatement)
+        }
+      }
+      ts.forEachChild(node, scan)
+    }
+    scan(guardBody!)
+
+    expect(enforcingIfPos, 'the guard must contain if (!isRoutePermitted(...)) { ... return next(...) } — a bare call does not enforce').toBeGreaterThan(-1)
+    expect(plmFocusIfPos, 'the plm-workbench focus if-block must exist inside the guard').toBeGreaterThan(-1)
+    expect(enforcingIfPos, 'the enforcing permission check must precede the plm-workbench focus block').toBeLessThan(plmFocusIfPos)
+    expect(allowlist, 'allowedPrefixes must be declared INSIDE the plm-workbench focus block').not.toBeNull()
     expect(allowlist).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
   })
 })
