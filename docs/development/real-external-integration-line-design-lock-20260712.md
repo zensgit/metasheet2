@@ -14,7 +14,8 @@
 
 ## 0. 为什么这是新线,不是备料 MVP 的漏项
 
-备料 MVP 的 W3-W6 on-prem 包已实体机 runtime 验收 **PASS**(#4101 CLOSED,2026-07-12):
+备料 MVP 的 W3-W6 on-prem 包已实体机 runtime 验收 **PASS**(首次 PASS=corrective-7 包,
+2026-07-12;验收弧最终以 **corrective-6 包 rerun 全判据 PASS 收口,#4101 CLOSED=2026-07-17**):
 `mvpSmoke.pass=true` · `auditActionsCovered=8/8` · **`externalPlmK3ErpWrite=false`**。
 
 最后一个字段是关键:**当前验收明确没有触碰任何真实外部写**。备料 MVP 用的是
@@ -102,6 +103,10 @@
 
 > 表决方式:逐行回帖(如「OD-E3: 否」「OD-E6: 批」),每行独立生效。证据锚 `9048c27e2`。
 > 推荐是我的倾向,不是预设;任何一行 owner 可改判。
+>
+> **round-1 review(2026-07-17)owner 预决五行(以修正后 owner 正式回帖为准,未回帖前不生效)**:
+> OD6=ratify 全 blocking · OD-E3=否 · OD-E4=仅 smoke · OD-E5=externalWrite=false · OD-E6=批;
+> 其余行等客户样本。另 OD2 须先按上表三选一裁 category_rule 的堵洞方式。
 
 | # | 证据(现状,可核) | 选项 | 推荐 | 批准影响 |
 |---|---|---|---|---|
@@ -117,7 +122,7 @@
 | # | 证据(现状,可核) | 选项 | 推荐 | 批准影响 |
 |---|---|---|---|---|
 | **OD1** 图号/版本字段 | DN_PDM read plan 钉死为默认且逐请求可覆写(`bom-expansion.cjs:157-207`:IdentityNo/SysVer);mapper 接地校验拒绝未接地映射 | ratify DN_PDM 为默认 / 逐客户收样后裁 | **逐客户**(E1 采样回填);DN_PDM 只是一家 schema,不宜升格为裁决 | 与 OD3/OD4 同批 → 解锁 `sp-export-import-templates` |
-| **OD2** 版本是否 ERP-区分 | **无服务端默认**:route 逐请求必填(`http-routes.cjs:4280` 注释「OD2: no server default」);词表 drawing_and_version/drawing_only/manual;`category_rule` 是词表接受的合法输入但**无任何实现分支**(服务端实现面唯一命中=词表常量 `mvp-generation.cjs:38`;FE 类型/白名单与 postdeploy-smoke 按契约回显同一枚举,同样无实现) | 保持逐请求必填 / 设服务端默认 / 实现品类规则 | **保持逐请求必填**(现状即安全解);品类规则等具名客户需求再立项 | 决定模板中 versionPolicy 默认值口径;不批则模板该字段留空必填 |
+| **OD2** 版本是否 ERP-区分 | **无服务端默认**:route 逐请求必填(`http-routes.cjs:4280` 注释「OD2: no server default」)。⚠️ **`category_rule` 当前不是安全状态**:FE 白名单可选(`materialMapping.ts:35,53`)、route 接受,但匹配器只显式实现 drawing_only/drawing_and_version——其余值落**尾部兜底**(`material-match.cjs:116-136`:缺任一版本即按图号放行,且 `mappingIsVersionConflict` 对非 drawing_and_version 恒 false)=行为等同 manual 而用户以为是品类规则,**静默错配风险** | (owner 定三选一)①暂从 UI/输入词表移除 ②服务端 fail-closed(未实现值 422)③完整实现品类规则 | **②服务端 fail-closed 先行**(最小改动立即堵洞),叠加①隐藏 FE 选项;③等具名客户需求再立项 | 选①/②=独立小 hardening 切片(非本 PR);选③=新设计门;裁后模板 versionPolicy 词表随之收敛 |
 | **OD3** 领料单位口径 | FIssueUnit 别名链钉死(`unit-rule-match.cjs:90-91`);无值→HELD `missing_issue_unit`(`:282-285`);规则确认 tri-XOR、未确认永不自动生效 | ratify FIssueUnit 链 / 逐客户裁 | **逐客户**核实 K3 领料实践(基础/库存/领料单位分歧场景)后裁 | 同 OD1 |
 | **OD4** 取整/最小领料量 | **机制已建但惰性**:none/ceil/floor/nearest/pack_size + minimum floor 全在(`mvp-generation.cjs:240-263`),默认 none,仅用户确认 unit rule 时手输,无品类默认表 | 保持逐规则手输 / 建品类默认表 | 保持手输至客户品类规则到位;品类默认表=模板工作,与 OD1/OD3 同批 | 同 OD1 |
 | **OD5** 确认粒度 | 任何粒度的 prep-line confirm 均未建;行无 human_preserved、重跑刷新(`generation-runtime.cjs:20`);现有确认全在底座级(mapping/unit,内容 hash 键) | project / BOM snapshot / 生产工单 | **客户流程访谈后裁**(无代码可证);裁前 C4 apply 本就 barred,无额外风险 | 决定未来 prep-line confirm 写面与 C4 apply 面的形状(E4/E5 前置) |
