@@ -5,8 +5,10 @@
 > （明确标注 MERGED 者除外）。模型分工：机械/规格化实现→sonnet 或 fable 子代理；同事务/幂等等精细切片与
 > 全部对抗审阅→opus；集成、冲突解决、变异验证、收口→主循环（fable）。
 >
-> **状态：FINAL（2026-07-17 收口）。** 所有开发车道 build+push+review-ready；剩余项全部为 §5 所列
-> owner 门。CI 状态以各 PR 当前 head 的 checks 为权威（本文数字绑定文中注明的 SHA）。
+> **状态：LIVING（2026-07-18 收尾轮进行中）。** 「剩余全为 owner 门」的旧表述经 owner 复核**不成立**
+> （FWB 栈测试漂移红检 / #4439 冲突 / 多 PR 落后 main 均为工程侧事项），§5 已改为「工程侧 vs owner 门」
+> 双栏对账。本文在收尾序列（FWB 栈落地→#4439 解冲→8 场景→本 MD 终版）完成后才转 FINAL。
+> CI 状态以各 PR 当前 head 的 checks 为权威（本文数字绑定文中注明的 SHA）。
 
 ## 0. 接手时的权威状态
 - #4196 durable-delivery 链 6/6 已全部串行落 main（fingerprint / S6 lease / RULE_CHANGED / Class-A /
@@ -28,7 +30,9 @@
 | F5 univer-meta ×4 | routes/univer-meta.ts（undelete/reset/form-submit） | fable 子代理建、主循环集成；reset 路径逐行 in-txn 构建 payload（changes=revisionPatch 只在事务内可得，诚实偏离「事务前构建」并已注释） | route 级真库 8/8（supertest 驱动真路由；form.submitted 扇出断言=manifest 修正端到端证明）；变异 2/2 |
 | F1 approval completion ×6 + task_created ×9 | ApprovalProductService.ts + 两个 choke 模块 | opus 子代理建至验证中段死于 session limit；主循环抢救（未提交 WIP 先 checkpoint 提交）后接管收尾：新 seam `enqueueApprovalEventIfDurable`（顶层 eventId、depth 0）；两 choke 单点 REPLACE suppression；task_created 复查/去重/构建抽出共享 `collectLiveApprovalTaskCreatedEvents` 核心（flag-ON 事务内腿 / flag-OFF post-commit 腿共用，语义不可漂移；quad eventId 与 legacy 字节一致） | F1-G1..G5 真库 6/6（fresh DB；terminal 扇出 3 consumer / per-recipient quad / auto-approve 级联零 task 行 / flag-OFF legacy+零 outbox / 注入失败原子性）+ 单测 8/8 + collector 5/5；变异 3/3 击杀（choke suppression→F1-G1+G3 红；单站点 enqueue 删除→F1-G3 红；is_active 复查中和→collector 专用 mutation-catch 单测红[共享单核=双腿覆盖]）；worktree 全量单测 6735/0 |
 - un-routed 事件（approval.admin_jumped / bulk_reassigned / automation.notification）保持 legacy（正确不接）。
-- `multitable.comment.created`：manifest 有路由但全仓无发射方=两路径皆惰性（预先存在，PR body 注明）。
+- `multitable.comment.created`：本轮初期记录为「manifest 有路由但全仓无发射方=两路径皆惰性」；该状态在
+  §1.4 item 2 被 owner 判为不可接受并已**从 v1 manifest 移除**（本行按 owner inline review 修正为与 §1.4
+  一致——最终事实=v1 不再路由该事件；真 producer=family-6 + manifest v2 菜单项）。
 
 ### 1.2 Sink 可回收性（owner P1 边界的另一半）
 - **审计**（fable 子代理，63/63 既有 spec 复跑）：projection sink=RECOVERABLE-AS-BUILT（advisory xact lock
@@ -150,7 +154,13 @@ FWB 栈合入，S1-S5/S7 可先行）；family-6 comment producer + manifest v2�
   ⑤**node-config 级 diff 深度**（版本 diff 目前只到节点增删改名级）；⑥版本 retention 策略（需先定
   产品口径=owner 决策）；⑦画布 UX（拖连/缩放）与用户文档（量大、放最后）。
 
-## 5. 剩余 owner 门（本轮不可代决）
-- #4337 合并；#4342 合并形态裁决+合并；#4450 ratify；FWB 栈 #4341/#4343/#4344 审合（已 rebase 就绪）；
-  #4433/#4439 修复后审合；3 个 runtime flag（durable/CLASSA/CLASSB）全 OFF→UAT→分级 flag-ON；
-  8 场景验收矩阵在 #4337 落 main 后按全家族 scope 正式重跑。
+## 5. 剩余事项（与 §1.6 及 GitHub 实况对账；owner 2026-07-18 inline review 更正后重写）
+**工程侧（非 owner-only，2026-07-18 收尾轮处理中）**：
+- ~~#4337 合并~~（**已 MERGED main `dfc9318fc`**，见 §1.6）。
+- FWB 栈：#4341 曾有 required 红检（测试仍查 #4340 拆分前的旧 ledger 表名→42703；已修=四处引用改
+  `meta_fwb_action_applied`，真库 4/4 复绿）→ rebase 落地后依次 #4343 → #4344。
+- #4439 曾 CONFLICTING/DIRTY：需解冲突+重验证后才可复核（处理中）；#4433/#4342/#4450 落后 main，
+  需 rebase/re-green（处理中）。
+- 8 场景验收矩阵**拆分**：S1-S5/S7 现在即可跑（#4337 已落）；S6/S8 阻塞于 FWB 栈合入。
+**owner 门**：#4342 合并形态裁决+合并；#4450 ratify；#4433/#4439 复核审合；3 个 runtime flag
+（durable/CLASSA/CLASSB）全 OFF→UAT→按 durable→Class A→Class B 分级开启。
