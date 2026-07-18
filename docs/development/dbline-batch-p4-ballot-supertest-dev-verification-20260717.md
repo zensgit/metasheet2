@@ -200,6 +200,7 @@
 
 历轮文本中的 commit id 均为当时的 exact head（pre-rebase），与本表对应；正文不作回溯改写。
 
-补记：#4468 合并后 owner round-7/8 复审发现其回归钉空转（indexOf 命中 import 非真实调用；AST 版只证
-调用存在不证 enforcement）——运行时代码经复审保持正确，承重测试以 follow-up **PR #4469** 闭合
-（结构定位 scoped 于 router.beforeEach + enforcing-if + 五组 mutation 全红），届时并入本台账。
+补记：#4468 合并后 owner rounds 7-9 复审逐层收紧其回归钉（indexOf 命中 import 非真实调用；AST 版
+只证调用存在不证 enforcement；containsReturnNext 不验拒绝目标与权限回调语义）——运行时代码经
+复审保持正确，承重测试由 follow-up **PR #4469 承担、截至本文本仍未闭合（HOLD 复审中）**。
+本台账按 owner round-9 裁决改为 **#4469 合入之后最后合**，届时补记其终态。
