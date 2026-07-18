@@ -308,6 +308,9 @@ async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projec
       throw new StockPreparationTargetProvisioningError(400, 'SNAPSHOT_DIFF_BASE_INVALID', 'baseSnapshotBatchId must differ from the diffed batch', { field: 'baseSnapshotBatchId' })
     }
     const baseRows = batchSheet ? await queryAllRecords(batchSheet, { snapshotBatchId: requestedBase }) : []
+    // Round-4: the ambiguity check MUST precede any [0] read — with duplicate base identities the
+    // outcome otherwise depended on database return order (first-twin project match vs mismatch).
+    if (baseRows.length > 1) diffBatchAmbiguous('base')
     const baseRow = baseRows[0] || null
     if (!baseRow) {
       throw new StockPreparationTargetProvisioningError(404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND', 'base snapshot batch was not found', { field: 'baseSnapshotBatchId' })

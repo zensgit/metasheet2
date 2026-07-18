@@ -800,6 +800,25 @@ async function main() {
     })
     assert.deepEqual(caughtBase.details, { target: 'base', reason: 'ambiguous' })
 
+    // Round-4: REVERSED twin order must yield the SAME verdict — before the fix the outcome depended
+    // on database return order ([other-project twin first] surfaced BASE_PROJECT_MISMATCH instead).
+    const reversedRows = {
+      ...rows,
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        rows[SHEET_IDS[BATCH_OBJECT_ID]][0],
+        { snapshotBatchId: 'baseX', projectId: 'proj_other', snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br2', createdAt: 'x' },
+        { snapshotBatchId: 'baseX', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br1', createdAt: 'x' },
+      ],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caughtReversed = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(reversedRows),
+        snapshotBatchId: 'cur1',
+        baseSnapshotBatchId: 'baseX',
+      })
+      assert.deepEqual(caughtReversed.details, { target: 'base', reason: 'ambiguous' })
+    }
+
     // Duplicate RUN identity for the current batch -> ambiguous {target: 'current'} (both endpoints).
     const runDupRows = {
       [SHEET_IDS[BATCH_OBJECT_ID]]: [
