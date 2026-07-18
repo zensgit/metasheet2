@@ -443,6 +443,17 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
   const currentLines = lineSheet
     ? (await queryAllRecords(lineSheet, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
     : []
+  // H-1 round-2 residual: a GHOST current (no batch row) whose id still has orphan LINE rows would
+  // otherwise serve a fabricated all-'added' diff with no gate (the row-conditioned gate above
+  // skipped, auto base null). Genuinely empty ghost ids keep the #4002 graceful shape.
+  if (!currentBatchRow && currentLines.length > 0) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'SNAPSHOT_DIFF_BATCH_INCOMPLETE',
+      'snapshot diff refuses an incomplete snapshot batch',
+      { target: 'current', reason: 'incomplete' },
+    )
+  }
   const previousLines = lineSheet && baseSnapshotBatchId
     ? (await queryAllRecords(lineSheet, { snapshotBatchId: baseSnapshotBatchId })).map(recordData)
     : []
@@ -581,6 +592,15 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
   const currentLines = lineSheet
     ? (await queryAllRecords(lineSheet, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
     : []
+  // H-1 round-2 residual — identical to getSnapshotDiff's ghost-with-orphan-lines gate.
+  if (!currentBatchRow && currentLines.length > 0) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'SNAPSHOT_DIFF_BATCH_INCOMPLETE',
+      'snapshot diff refuses an incomplete snapshot batch',
+      { target: 'current', reason: 'incomplete' },
+    )
+  }
   const previousLines = lineSheet && baseSnapshotBatchId
     ? (await queryAllRecords(lineSheet, { snapshotBatchId: baseSnapshotBatchId })).map(recordData)
     : []

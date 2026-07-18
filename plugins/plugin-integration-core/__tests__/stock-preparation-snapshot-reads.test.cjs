@@ -721,6 +721,34 @@ async function main() {
     assert.deepEqual(caughtBase.details, { target: 'base', reason: 'incomplete' })
   })
 
+  await run('H-1 round-2: GHOST current (no batch row) with orphan LINE rows => 409, never a fabricated all-added diff; empty ghost keeps the #4002 graceful shape', async () => {
+    // Orphan line rows under an id that has NO batch row: the row-conditioned gate cannot fire, so a
+    // dedicated ghost-with-lines gate must. A genuinely empty ghost id (second call) still answers
+    // the locked graceful shape.
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'gl1', snapshotBatchId: 'ghost_with_lines', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caught = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(rows),
+        snapshotBatchId: 'ghost_with_lines',
+      })
+      assert.deepEqual(caught.details, { target: 'current', reason: 'incomplete' })
+    }
+    const emptyGhost = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(rows),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'ghost_truly_empty',
+      permission: 'admin',
+    })
+    assert.equal(emptyGhost.baseSnapshotBatchId, null)
+  })
+
   await run('H-1 gate: 409 error is values-free — details carry ONLY {target, reason}, no ids or counts', async () => {
     // Plant the secret into the HANDLES the gate touches (batch id / run id): none of them may appear
     // anywhere in the thrown 409 (closed details shape + fixed values-free message).
