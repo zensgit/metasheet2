@@ -3101,6 +3101,54 @@ export class DirectorySyncInProgressError extends Error {
 }
 
 /**
+ * Transfer MVP T2 (§12.2): an ACTIVE org transfer freezes its SOURCE integration's sync. The
+ * dangerous write a mid-transfer sync performs is the unconditional absence sweep — a source
+ * tenant being emptied/migrated looks exactly like "everyone left", and the sweep would mark the
+ * whole directory inactive. Thrown BEFORE the run lease is claimed, so a frozen trigger creates
+ * no run row and leaves nothing to reclaim. The admin override (§12.2 "unless an explicit admin
+ * override is supplied") is the transfer row's `freeze_source_sync` flag — flipping it to false
+ * un-freezes THIS transfer without cancelling it.
+ */
+export class DirectorySyncFrozenByTransferError extends Error {
+  readonly statusCode = 409
+  readonly code = 'DIRECTORY_SYNC_FROZEN_BY_TRANSFER'
+  readonly transferId: string
+
+  constructor(transferId: string) {
+    super(`Directory sync is frozen by an active org transfer for this integration (transfer ${transferId})`)
+    this.name = 'DirectorySyncFrozenByTransferError'
+    this.transferId = transferId
+  }
+}
+
+/**
+ * T2 freeze gate. `to_regclass` first: environments whose schema predates the T1 migration have
+ * no transfer table and therefore no transfers — proceeding unfrozen is the semantically correct
+ * outcome there (logged loudly so a mis-deployed production schema cannot stay silent), while a
+ * bare query would brick every sync with a relation-not-found error.
+ */
+async function assertDirectorySyncNotFrozenByTransfer(integrationId: string): Promise<void> {
+  const tableProbe = await query<{ reg: string | null }>(
+    `SELECT to_regclass('provider_org_transfers')::text AS reg`,
+  )
+  if (!tableProbe.rows[0]?.reg) {
+    logger.warn('provider_org_transfers table absent — T2 sync-freeze gate inert (schema predates the T1 migration?)')
+    return
+  }
+  const frozen = await query<{ id: string }>(
+    `SELECT id FROM provider_org_transfers
+      WHERE source_integration_id = $1
+        AND status NOT IN ('applied', 'cancelled')
+        AND freeze_source_sync = true
+      LIMIT 1`,
+    [integrationId],
+  )
+  if (frozen.rows.length > 0) {
+    throw new DirectorySyncFrozenByTransferError(frozen.rows[0].id)
+  }
+}
+
+/**
  * Thrown when a run reaches its completion write only to find its row is no longer
  * `running` — the lease was reclaimed as stale while this process was still alive
  * (heartbeat starved: event-loop stall, saturated pool, network partition). Thrown
@@ -3212,6 +3260,9 @@ export async function syncDirectoryIntegration(
   if (!integration) throw new Error('Directory integration not found')
 
   const config = parseIntegrationConfig(integration)
+  // T2 (§12.2): freeze gate BEFORE the lease claim — a frozen trigger must not create a run
+  // row, consume provider quota, or reach the absence sweep. See the error class for why.
+  await assertDirectorySyncNotFrozenByTransfer(integrationId)
   let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
   // DT-HARDEN-05: claim the run lease BEFORE the first DingTalk call. The API pull that
   // follows is the expensive, quota-consuming part; a transaction-scoped lock around the
