@@ -189,6 +189,17 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
     expect(bad7.status).toBe(409)
     expect(JSON.stringify(bad7.body)).toContain('ROUTING_POLICY_LOCAL_NOT_ENABLED')
 
+    // Gate P2 (restack round): the gate must STRICT-parse — a falsy-ish string an operator sets
+    // to mean OFF ('false', '0') must NOT enable local canonical. Pins isLocalCanonicalEnabled's
+    // `v === '1' || v === 'true'` shape: loosening it to Boolean(v) turns these legs red.
+    for (const falsy of ['false', '0']) {
+      process.env.DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED = falsy
+      const bad8 = await request(adminApp).patch(`${BASE}/approval_routing`).send({ canonicalIntegrationId: local.id })
+      expect(bad8.status, `env=${falsy}`).toBe(409)
+      expect(JSON.stringify(bad8.body)).toContain('ROUTING_POLICY_LOCAL_NOT_ENABLED')
+    }
+    delete process.env.DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED
+
     expect(await auditCount('directory.routing_policy.set', rid)).toBe(0)
     const count = await query<{ n: number }>(`SELECT count(*)::int AS n FROM org_directory_routing_policy WHERE org_id = $1`, [orgId])
     expect(count.rows[0].n).toBe(0) // none of the rejects wrote a row
