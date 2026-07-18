@@ -276,10 +276,15 @@ function changeCountsFromEvidence(diff) {
 
 // Predecessor rule: the batch (same business project) with the HIGHEST snapshotVersion strictly LESS
 // than the current batch's version. null when the current version is unknown or nothing precedes it.
+// Round-5: when the highest predecessor version is carried by MORE THAN ONE distinct snapshotBatchId
+// (the substrate has no logical unique index and P4 is not landed — concurrent writers can produce
+// such history), the auto-pick would otherwise depend on database return order. That is refused loud
+// as 409 {target:'base', reason:'ambiguous'}; an EXPLICIT base keeps the existing rules (the caller
+// named one specific batch).
 function pickPredecessor(batchRows, currentSnapshotBatchId, currentVersion) {
   if (currentVersion === null) return null
-  let best = null
   let bestVersion = null
+  let bestIds = new Set()
   for (const row of batchRows) {
     const snapshotBatchId = optionalString(readCell(row, 'snapshotBatchId'))
     if (!snapshotBatchId || snapshotBatchId === currentSnapshotBatchId) continue
@@ -287,10 +292,14 @@ function pickPredecessor(batchRows, currentSnapshotBatchId, currentVersion) {
     if (version === null || version >= currentVersion) continue
     if (bestVersion === null || version > bestVersion) {
       bestVersion = version
-      best = snapshotBatchId
+      bestIds = new Set([snapshotBatchId])
+    } else if (version === bestVersion) {
+      bestIds.add(snapshotBatchId)
     }
   }
-  return best
+  if (bestIds.size === 0) return null
+  if (bestIds.size > 1) diffBatchAmbiguous('base')
+  return bestIds.values().next().value
 }
 
 // Resolve the diff BASE batch id. An EXPLICIT `requestedBase` is a caller-chosen pair and must be

@@ -841,6 +841,53 @@ async function main() {
     }
   })
 
+  await run('R5: AUTO base tie — two distinct predecessors at the same highest version => 409 ambiguous on BOTH endpoints, forward AND reversed order', async () => {
+    // Two COMPLETE predecessor batches share the highest prior version (substrate has no logical
+    // unique index; concurrent writers can produce this). The auto-pick previously depended on
+    // database return order ({"ab":"base_a","ba":"base_b"} at the pre-fix head).
+    const makeRows = (reversed) => {
+      const preds = [
+        { snapshotBatchId: 'base_a', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'ta1', createdAt: 'x' },
+        { snapshotBatchId: 'base_b', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'tb1', createdAt: 'x' },
+      ]
+      return {
+        [SHEET_IDS[BATCH_OBJECT_ID]]: [
+          { snapshotBatchId: 'tie_cur', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'tc1', createdAt: 'x' },
+          ...(reversed ? [...preds].reverse() : preds),
+        ],
+        [SHEET_IDS[LINE_OBJECT_ID]]: [
+          { snapshotLineId: 'tc_l1', snapshotBatchId: 'tie_cur', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+          { snapshotLineId: 'ta_l1', snapshotBatchId: 'base_a', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+          { snapshotLineId: 'tb_l1', snapshotBatchId: 'base_b', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+        ],
+        [SHEET_IDS[RUN_OBJECT_ID]]: [
+          { runId: 'tc1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+          { runId: 'ta1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+          { runId: 'tb1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        ],
+      }
+    }
+    for (const reversed of [false, true]) {
+      for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+        const caught = await expectIncomplete409(fn, {
+          recordsApi: makeRecordsApi(makeRows(reversed)),
+          snapshotBatchId: 'tie_cur',
+        })
+        assert.deepEqual(caught.details, { target: 'base', reason: 'ambiguous' })
+      }
+    }
+    // Positive control: an EXPLICIT base pick between the twins remains allowed (caller named one).
+    const explicit = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(makeRows(false)),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'tie_cur',
+      baseSnapshotBatchId: 'base_a',
+      permission: 'admin',
+    })
+    assert.equal(explicit.baseSnapshotBatchId, 'base_a')
+  })
+
   await run('H-1 gate: 409 error is values-free — details carry ONLY {target, reason}, no ids or counts', async () => {
     // Plant the secret into the HANDLES the gate touches (batch id / run id): none of them may appear
     // anywhere in the thrown 409 (closed details shape + fixed values-free message).
