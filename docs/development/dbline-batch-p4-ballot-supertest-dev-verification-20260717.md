@@ -114,7 +114,7 @@
 | PR | 内容 | 关键证据 |
 |---|---|---|
 | **#4460** | H-2 stale 指针 409 + H-3 显式行数上限（persist hardening）——**round-6 GO 后已 MERGED `38f9f1250`** | **42/42**；六轮修复累计：全历史无条件扫描 / 严格版本解析器（正安全整数+`^[1-9]\d*$`，plan+persist 共享，preview=commit 同拒）/ crash 序列判别 / 6 处 mutation 逐字 RED |
-| **#4461** | H-1 diff 服务端完整性门——**round-6 GO，armed（head `7a450c147`，merge SHA 落地后见 §14）** | **23/23**；六轮修复累计：双端点双侧 gate / ghost+孤儿行 / 恰好一行（twin 绕过）/ 计数前置于 `[0]` 读 / **auto-base 同版本平局 409 ambiguous**（正反序×双端点） |
+| **#4461** | H-1 diff 服务端完整性门——**round-6 GO 后已 MERGED `60e9ecbec`** | **23/23**；六轮修复累计：双端点双侧 gate / ghost+孤儿行 / 恰好一行（twin 绕过）/ 计数前置于 `[0]` 读 / **auto-base 同版本平局 409 ambiguous**（正反序×双端点） |
 | **#4463** | OD2 category_rule fail-closed（4 执行点 + FE 摘除） | 全插件链绿 + vue-tsc 0；两引擎守卫 + 输入边界 422 + confirm-existing 422；mutation 逐字 RED；「唯一映射为 category_rule 的行从静默匹配退化为可见 HELD」= 有意 fail-closed 方向 |
 | **#4462** | wave-1 批量迁移（stacked on #4454）：10 suites / 280 站点 | 基线 636→356（drain-only tripwire 锁定）；全量 lane 5658/5658 @ retry=0；对抗采样审 APPROVE |
 
@@ -196,6 +196,10 @@
 | #4468 | `fbbe21e33` | `df14ee3ca` → `ed379bb99` |
 | #4467 | `a3c4642ff` | `e110a2606` → `7d815991b` → `bf31100d8` |
 | #4460 | **`38f9f1250`** | `4ffd329d8`(R3) → `9c94e4ec5`(R4) → `8cb1b7c41`(R5) → `bddc1e9dc` → `24d2417ba` |
-| #4461 | **（armed，待填）** | `0c7d178c4`(R3) → `a2bebf3dc`(R4) → `f747c7693`(R5) → `ee4d3f8f7` → `5be2576da` → `7a450c147` |
+| #4461 | **`60e9ecbec`** | `0c7d178c4`(R3) → `a2bebf3dc`(R4) → `f747c7693`(R5) → `ee4d3f8f7` → `5be2576da` → `7a450c147` |
 
 历轮文本中的 commit id 均为当时的 exact head（pre-rebase），与本表对应；正文不作回溯改写。
+
+补记：#4468 合并后 owner round-7/8 复审发现其回归钉空转（indexOf 命中 import 非真实调用；AST 版只证
+调用存在不证 enforcement）——运行时代码经复审保持正确，承重测试以 follow-up **PR #4469** 闭合
+（结构定位 scoped 于 router.beforeEach + enforcing-if + 五组 mutation 全红），届时并入本台账。
