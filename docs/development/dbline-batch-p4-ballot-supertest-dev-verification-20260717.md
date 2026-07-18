@@ -113,8 +113,8 @@
 
 | PR | 内容 | 关键证据 |
 |---|---|---|
-| **#4460** | H-2 stale project 指针 409 + H-3 显式行数上限（persist hardening） | 37/37；CW4-existing 以 crash-injection 复现（未修代码=静默 200）；3 处 mutation 逐字 RED（指针块/上限/单调守卫）；相邻 5 套件绿 |
-| **#4461** | H-1 diff 服务端完整性门 | 20/20；双端点双侧 gated；auto-base 不静默跳过；FE 409 呈现核验；双 mutation 逐字 RED |
+| **#4460** | H-2 stale 指针 409 + H-3 显式行数上限（persist hardening）——**round-3 后 HOLD 复审中，非闭合** | 38/38；CW4-existing crash-injection 复现；4 处 mutation 逐字 RED；R3 修复=单调守卫扫**项目全批次历史**（完整孤儿批次绕过已堵，owner 复现的 V1→V3崩→V2 序列现 422 零写） |
+| **#4461** | H-1 diff 服务端完整性门——**round-3 后 HOLD 复审中，非闭合** | 22/22；双端点双侧 gated；R3 修复=current/base/run 恰好一行（重复业务身份 twin 绕过已堵，409 `{reason:'ambiguous'}`） |
 | **#4463** | OD2 category_rule fail-closed（4 执行点 + FE 摘除） | 全插件链绿 + vue-tsc 0；两引擎守卫 + 输入边界 422 + confirm-existing 422；mutation 逐字 RED；「唯一映射为 category_rule 的行从静默匹配退化为可见 HELD」= 有意 fail-closed 方向 |
 | **#4462** | wave-1 批量迁移（stacked on #4454）：10 suites / 280 站点 | 基线 636→356（drain-only tripwire 锁定）；全量 lane 5658/5658 @ retry=0；对抗采样审 APPROVE |
 
@@ -136,8 +136,9 @@
 
 ## 9. 诚实边界（批次 2）
 
-- H-2 的判别器在**版本单调纪律下**成立——该纪律现由 create 守卫强制；存量乱序版本数据的 replay
-  会 fail-closed（409），不静默、不修复。
+- H-2 的判别器在**版本单调纪律下**成立——round-3 后该纪律由 create 守卫以**项目全批次历史最大
+  版本**强制（此前仅比指针版本，可被完整孤儿批次绕过，owner 复现后已修）；存量乱序版本/歧义
+  身份数据的 replay 与 diff 一律 fail-closed（409），不静默、不修复。
 - OD2 选择了 fail-closed 方向：唯一映射是 category_rule 的行从「静默宽匹配」变「可见 HELD 异常」，
   是行为变更（有意、已注记）；品类规则真实现（选项③）仍留 owner 未来设计门。
 - wave-1 后剩 356 站点/35 文件（含 5 个参数化 builder 例外文件）；`retry:2` 保留至基线清零。
@@ -148,3 +149,13 @@
 1. #4460/#4461/#4463 审合（其中 #4460 的单调版本纪律是新的 422 面，值得单独看一眼）；
 2. #4462 合并时机（stacked，等 #4454 先合后 retarget）；
 3. wave-2+（剩 356 站点，例外模式清单已备）按同 recipe 继续的节奏。
+
+
+## 11. Round-3 复审与合并序（owner 裁决执行记录）
+
+- **#4460 HOLD→R3 修复 `4ffd329d8`**：单调守卫改为项目全批次有界最大版本扫描（`readProjectMaxBatchVersion`，
+  fail-closed `history_unprovable`）；crash 序列测试（V1→V3 崩→V2 拒→V4 通）+ mutation RED。等 owner 复审。
+- **#4461 HOLD→R3 修复 `0c7d178c4`**：current/base/run 恰好一行否则 409 `ambiguous`（闭词表
+  {incomplete, ambiguous}）；双端点重复身份测试 + mutation RED。等 owner 复审。
+- **#4463 GO @`5db599796`**、**#4454 GO 先合**、**#4462 条件 GO**（#4454 合后 retarget→main + 全量
+  required CI）、**#4456 最后合**——按裁决执行，结果见合并记录。
