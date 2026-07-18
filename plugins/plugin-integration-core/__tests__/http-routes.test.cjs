@@ -8368,6 +8368,7 @@ async function main() {
   await testSampleLimitCap()
   await testListOffsetCap()
   await testStockPreparationWritesRefuseWithoutAuditStore()
+  await testStockPreparationMappingWritesRejectUnimplementedVersionPolicy()
   await testStockPreparationTenantScopedWriteSteeringHasNoEffect()
   await testStockPreparationStructureWriteSteeringHasNoEffect()
   await testStockPreparationWriteRejectsExplicitBaseId()
@@ -8417,6 +8418,61 @@ async function testStockPreparationWritesRefuseWithoutAuditStore() {
   const { routes: routesWithStore } = mountRoutes(services)
   const res2 = await invoke(routesWithStore, 'POST', '/api/integration/stock-preparation/material-mappings/retire', { user: admin, body: { projectId: 'proj_1', mappingId: 'm1' } })
   assert.notEqual(res2.body && res2.body.error && res2.body.error.code, 'AUDIT_STORE_UNAVAILABLE', 'with the store present the gate opens')
+}
+
+// OD2 round-1 hardening: the mapping candidate-sync and confirm routes surface the module's
+// fail-closed version-policy gate — an UNIMPLEMENTED value (the reserved category_rule and junk
+// alike; the guard is allowlist-shaped) => 422 STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED with
+// ONLY the field NAME in details (values-free). Positive control: the SAME sync call with an
+// implemented policy proceeds PAST the policy gate and fails on a different dependency (the empty
+// batch fixture), proving the 422 comes from the policy gate specifically.
+async function testStockPreparationMappingWritesRejectUnimplementedVersionPolicy() {
+  const admin = { id: 'admin_1', tenantId: 'tenant_1', permissions: ['integration:admin'] }
+  const setup = () => {
+    const { services } = createMockServices()
+    services.stockPreparationAuditStore = { async append() {}, async list() { return { rowCount: 0, entries: [] } } }
+    const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+    const records = createTableActionRecordsApi()
+    const { routes } = mountRoutes(services, { provisioningApi: provisioning.api, recordsApi: records.recordsApi })
+    return { routes, records }
+  }
+  for (const unimplementedPolicy of ['category_rule', 'totally_bogus']) {
+    // Candidate-sync: body defaultVersionPolicy (OD2: required per request, no server default).
+    const sync = setup()
+    const syncRes = await invoke(sync.routes, 'POST', '/api/integration/stock-preparation/material-mappings/candidates/sync', {
+      user: admin,
+      body: { projectId: 'proj_1', defaultVersionPolicy: unimplementedPolicy },
+    })
+    assert.equal(syncRes.statusCode, 422, `candidate-sync refuses the unimplemented policy`)
+    assert.equal(syncRes.body.error.code, 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED')
+    assert.deepEqual({ ...syncRes.body.error.details }, { field: 'defaultVersionPolicy' }, 'details carry ONLY the field name')
+    assert.equal(String(syncRes.body.error.message).includes(unimplementedPolicy), false, 'message is values-free')
+    assert.equal(sync.records.calls.filter(([name]) => name === 'createRecord').length, 0, 'refusal happens before any write')
+
+    // Confirm create-mode: mapping.versionPolicy.
+    const confirm = setup()
+    const confirmRes = await invoke(confirm.routes, 'POST', '/api/integration/stock-preparation/material-mappings/confirm', {
+      user: admin,
+      body: { projectId: 'proj_1', mapping: { plmDrawingNo: 'D', erpMaterialCode: 'C', erpMaterialInternalId: 'I', versionPolicy: unimplementedPolicy } },
+    })
+    assert.equal(confirmRes.statusCode, 422, `confirm create-mode refuses the unimplemented policy`)
+    assert.equal(confirmRes.body.error.code, 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED')
+    assert.deepEqual({ ...confirmRes.body.error.details }, { field: 'versionPolicy' }, 'details carry ONLY the field name')
+    assert.equal(String(confirmRes.body.error.message).includes(unimplementedPolicy), false, 'message is values-free')
+    assert.equal(confirm.records.calls.filter(([name]) => name === 'createRecord').length, 0, 'refusal happens before any write')
+  }
+  // Positive control: an implemented policy passes the policy gate (it then fails on the EMPTY
+  // batch fixture — a DIFFERENT, non-policy error — never on the policy gate).
+  const control = setup()
+  const controlRes = await invoke(control.routes, 'POST', '/api/integration/stock-preparation/material-mappings/candidates/sync', {
+    user: admin,
+    body: { projectId: 'proj_1', defaultVersionPolicy: 'drawing_only' },
+  })
+  assert.notEqual(
+    controlRes.body.error && controlRes.body.error.code,
+    'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED',
+    'implemented policy passes the policy gate',
+  )
 }
 
 // GHSA (private) step 1: a tenant-scoped WRITE route must derive its write target from the AUTHENTICATED

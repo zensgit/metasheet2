@@ -40,7 +40,7 @@ const {
   __internals: { mappingIdFor },
 } = require('./stock-preparation-material-match.cjs')
 const { generateUnitConversionRuleCandidates, RULE_OUTCOMES } = require('./stock-preparation-unit-rule-match.cjs')
-const { VERSION_POLICIES } = require('./stock-preparation-mvp-generation.cjs')
+const { VERSION_POLICIES, IMPLEMENTED_VERSION_POLICIES } = require('./stock-preparation-mvp-generation.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
@@ -51,7 +51,11 @@ const READ_MAX_PAGES = 50
 
 // Closed vocabularies THIS module validates before any write. The select option-sets on the frozen
 // templates are admin-supplied at option-sync time, so the fail-closed contract lives here.
-const VERSION_POLICY_SET = new Set(Object.values(VERSION_POLICIES))
+// OD2 round-1 hardening: version policies are validated against the IMPLEMENTED set, not the full
+// vocabulary — category_rule stays a reserved enum name with NO matcher branch, so accepting it
+// would plant rows that silently degrade to the tail heuristic. Any value outside the implemented
+// set (reserved OR junk — the guard is allowlist-shaped) is refused 422 with the field NAME only.
+const IMPLEMENTED_VERSION_POLICY_SET = IMPLEMENTED_VERSION_POLICIES
 const ROUNDING_RULES = Object.freeze(['none', 'ceil', 'floor', 'nearest', 'pack_size'])
 const ROUNDING_RULE_SET = new Set(ROUNDING_RULES)
 const SCOPE_TYPES = Object.freeze(['material', 'category', 'generic'])
@@ -328,9 +332,14 @@ async function syncMaterialMappingCandidates(input = {}) {
   const projectId = requiredString(input.projectId, 'projectId')
   const snapshotBatchId = optionalString(input.snapshotBatchId)
   const defaultVersionPolicy = optionalString(input.defaultVersionPolicy)
-  // OD2: there is NO server default — absence (or a non-vocabulary value) is an error, per request.
-  if (!defaultVersionPolicy || !VERSION_POLICY_SET.has(defaultVersionPolicy)) {
-    throw new StockPreparationConfirmWriteError(400, 'CONFIRM_VERSION_POLICY_INVALID', 'defaultVersionPolicy must be one of the version-policy vocabulary', { field: 'defaultVersionPolicy' })
+  // OD2: there is NO server default — absence is an error, per request.
+  if (!defaultVersionPolicy) {
+    throw new StockPreparationConfirmWriteError(400, 'CONFIRM_VERSION_POLICY_INVALID', 'defaultVersionPolicy is required', { field: 'defaultVersionPolicy' })
+  }
+  // OD2 round-1 hardening: only IMPLEMENTED policies are accepted (allowlist-shaped — reserved
+  // vocabulary values without a matcher branch and junk values are refused identically).
+  if (!IMPLEMENTED_VERSION_POLICY_SET.has(defaultVersionPolicy)) {
+    throw new StockPreparationConfirmWriteError(422, 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED', 'defaultVersionPolicy is not an implemented version policy', { field: 'defaultVersionPolicy' })
   }
 
   const batchContext = await resolveCompleteBatchLines(api, prov, targetProjectId, projectId, snapshotBatchId)
@@ -417,6 +426,14 @@ async function confirmMaterialMapping(input = {}) {
     if (data.isActive === false) {
       throw new StockPreparationConfirmWriteError(409, 'CONFIRM_MAPPING_INACTIVE', 'material mapping is retired; re-create it to confirm', { mappingId })
     }
+    // OD2 round-2 hardening: a STORED candidate carrying an unimplemented versionPolicy (the
+    // reserved category_rule or junk — absence folds to manual and stays confirmable) must not be
+    // stamped matched: the match engines will never select it, so confirming it would plant exactly
+    // the 'dead confirmed row' class this function refuses elsewhere. Retire/re-create instead.
+    const storedVersionPolicy = optionalString(data.versionPolicy)
+    if (storedVersionPolicy && !IMPLEMENTED_VERSION_POLICY_SET.has(storedVersionPolicy)) {
+      throw new StockPreparationConfirmWriteError(422, 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED', 'material mapping carries an unimplemented version policy; retire and re-create it', { field: 'versionPolicy' })
+    }
     if (data.matchStatus === MATCH_STATUSES.MATCHED && isStamped(data)) {
       return { persisted: false, mode: 'skipped_already_confirmed', mappingId, evidence: buildConfirmEvidence('mapping', 'skipped_already_confirmed') }
     }
@@ -458,8 +475,13 @@ async function confirmMaterialMapping(input = {}) {
   if (!erpMaterialInternalId) {
     throw new StockPreparationConfirmWriteError(400, 'CONFIRM_MAPPING_FIELDS_INVALID', 'erpMaterialInternalId is required', { field: 'erpMaterialInternalId' })
   }
-  if (!versionPolicy || !VERSION_POLICY_SET.has(versionPolicy)) {
-    throw new StockPreparationConfirmWriteError(400, 'CONFIRM_MAPPING_FIELDS_INVALID', 'versionPolicy must be one of the version-policy vocabulary', { field: 'versionPolicy' })
+  if (!versionPolicy) {
+    throw new StockPreparationConfirmWriteError(400, 'CONFIRM_MAPPING_FIELDS_INVALID', 'versionPolicy is required', { field: 'versionPolicy' })
+  }
+  // OD2 round-1 hardening: only IMPLEMENTED policies are accepted (allowlist-shaped — reserved
+  // vocabulary values without a matcher branch and junk values are refused identically).
+  if (!IMPLEMENTED_VERSION_POLICY_SET.has(versionPolicy)) {
+    throw new StockPreparationConfirmWriteError(422, 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED', 'versionPolicy is not an implemented version policy', { field: 'versionPolicy' })
   }
   // Under drawing_and_version a version-less row could NEVER match a line (the matcher requires a
   // version on both sides) — reject rather than create a dead confirmed row.

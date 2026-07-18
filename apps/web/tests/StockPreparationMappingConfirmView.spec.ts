@@ -33,6 +33,7 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import StockPreparationMappingConfirmView from '../src/components/integration/stockPreparation/StockPreparationMappingConfirmView.vue'
+import { STOCK_PREPARATION_VERSION_POLICIES } from '../src/services/integration/stockPreparation/materialMapping'
 
 // Planted business values — the view must render NONE of them (fixed-whitelist rendering).
 const PLANTED_DRAWING_NO = 'DWG-88472-A'
@@ -378,6 +379,22 @@ describe('StockPreparationMappingConfirmView (view 3: confirm reads + human conf
     expect(note.textContent).toContain('created')
     expect(note.textContent).toContain('3')
     await waitForCondition(() => urlsMatching('/material-mappings/summary').length === 2)
+  })
+
+  it('offers ONLY the three implemented version policies (OD2 round-1: category_rule removed fail-closed)', async () => {
+    // Whitelist pin: the reserved-but-unimplemented category_rule is no longer selectable anywhere —
+    // the server refuses it 422 STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED, so the FE must not
+    // offer it (both the sync policy select and the create-form policy select feed this list).
+    expect(STOCK_PREPARATION_VERSION_POLICIES).toEqual(['drawing_and_version', 'drawing_only', 'manual'])
+    mockRoutes()
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-overview"]')
+    for (const testid of ['stock-prep-mapping-sync-policy', 'stock-prep-mapping-form-policy']) {
+      const select = root.querySelector(`[data-testid="${testid}"]`) as HTMLSelectElement
+      const values = [...select.querySelectorAll('option')].map((option) => option.value)
+      expect(values.filter((value) => value !== '')).toEqual(['drawing_and_version', 'drawing_only', 'manual'])
+      expect(values).not.toContain('category_rule')
+    }
   })
 
   it('mirrors the server create-mode rules client-side ({field} errors, NO premature POST)', async () => {
