@@ -110,8 +110,10 @@ describe('buildDurableConsumerHandlers — durable consumer_key → real product
     const { services, calls } = spyServices()
     const handlers = buildDurableConsumerHandlers(services)
     const payload = { some: 'record-event' }
-    await handlers['webhook-event-bridge'](claimed({ consumerKey: 'webhook-event-bridge', eventType: 'multitable.record.updated', payload }))
-    expect(calls).toEqual([{ method: 'deliverEvent', args: ['record.updated', payload] }])
+    await handlers['webhook-event-bridge'](claimed({ consumerKey: 'webhook-event-bridge', eventType: 'multitable.record.updated', payload, eventId: 'evt_whk_id' }))
+    // The outbox eventId is threaded as the 3rd arg (closure item 3 — per-(webhook, event) dedup); a mutant
+    // that drops it reds here.
+    expect(calls).toEqual([{ method: 'deliverEvent', args: ['record.updated', payload, 'evt_whk_id'] }])
   })
 
   test('webhook-event-bridge THROWS on an unmapped event type (retryable adapter_error, never a silent drop)', async () => {

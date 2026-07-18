@@ -5,7 +5,7 @@
  */
 
 import { createHmac, randomBytes } from 'crypto'
-import type { Kysely } from 'kysely'
+import { sql, type Kysely } from 'kysely'
 import { Logger } from '../core/logger'
 import type { Database } from '../db/types'
 import { nowTimestamp, toJsonValue } from '../db/type-helpers'
@@ -317,6 +317,12 @@ export class WebhookService {
   async deliverEvent(
     event: WebhookEventType,
     payload: unknown,
+    // P2 durable-delivery closure item 3: the DURABLE consumer passes the outbox `eventId` so the per-webhook
+    // delivery row becomes an idempotent CLAIM keyed by (webhook_id, event_id). An at-least-once redelivery
+    // (crash between send and the consumer-row done-CAS, or a `busy` retry) then re-enters here with the SAME
+    // eventId → the claim finds the row already present → NO second row, NO second send. LEGACY callers (the
+    // bus bridge, the retry tick) pass nothing → NULL event_id → byte-identical fan-out (no dedup, unchanged).
+    eventId?: string,
   ): Promise<WebhookDelivery[]> {
     const rows = await this.db
       .selectFrom('multitable_webhooks')
@@ -330,7 +336,11 @@ export class WebhookService {
 
     const deliveries: WebhookDelivery[] = []
     for (const wh of matching) {
-      const delivery = await this.createDeliveryRecord(wh.id, event, payload)
+      const delivery = await this.createDeliveryRecord(wh.id, event, payload, eventId)
+      // A null claim (durable path only) = this (webhook, event) was already delivered/claimed by a prior
+      // attempt → skip the HTTP send entirely (the redelivery is terminally handled; the caller/adapter maps
+      // an error-free return to success). Never reachable on the legacy path (eventId undefined → always a row).
+      if (!delivery) continue
       deliveries.push(delivery)
       // Fire-and-forget — do not await per delivery to avoid blocking the caller
       this.executeDelivery(delivery).catch((err) => {
@@ -533,26 +543,46 @@ export class WebhookService {
 
   // ─── Helpers ─────────────────────────────────────────────────────────
 
+  /**
+   * Create the pending delivery row. When `eventId` is supplied (durable path) this is an idempotent CLAIM on
+   * the partial-unique `(webhook_id, event_id)` index: `ON CONFLICT DO NOTHING RETURNING id` returns 0 rows
+   * when a prior attempt already claimed this (webhook, event) → returns `null`, and the caller skips the
+   * send. When `eventId` is absent (legacy path) it is an unconditional INSERT with NULL event_id, exactly as
+   * before — the partial index does not constrain NULL, so legacy fan-out is byte-identical.
+   */
   private async createDeliveryRecord(
     webhookId: string,
     event: WebhookEventType,
     payload: unknown,
-  ): Promise<WebhookDelivery> {
+    eventId?: string,
+  ): Promise<WebhookDelivery | null> {
     const id = generateId()
     const now = new Date().toISOString()
 
-    await this.db
-      .insertInto('multitable_webhook_deliveries')
-      .values({
-        id,
-        webhook_id: webhookId,
-        event,
-        payload: toJsonValue(payload),
-        status: 'pending',
-        attempt_count: 0,
-        created_at: now,
-      })
-      .execute()
+    if (typeof eventId === 'string' && eventId.length > 0) {
+      // Durable claim — raw SQL so the ON CONFLICT targets the partial index precisely. Zero rows ⇒ a prior
+      // attempt owns this (webhook, event) ⇒ null (skip the send; the redelivery is terminally handled).
+      const claimed = await sql<{ id: string }>`
+        INSERT INTO multitable_webhook_deliveries (id, webhook_id, event, payload, status, attempt_count, created_at, event_id)
+        VALUES (${id}, ${webhookId}, ${event}, ${toJsonValue(payload)}, 'pending', 0, ${now}, ${eventId})
+        ON CONFLICT (webhook_id, event_id) WHERE event_id IS NOT NULL DO NOTHING
+        RETURNING id
+      `.execute(this.db)
+      if (claimed.rows.length === 0) return null
+    } else {
+      await this.db
+        .insertInto('multitable_webhook_deliveries')
+        .values({
+          id,
+          webhook_id: webhookId,
+          event,
+          payload: toJsonValue(payload),
+          status: 'pending',
+          attempt_count: 0,
+          created_at: now,
+        })
+        .execute()
+    }
 
     return {
       id,

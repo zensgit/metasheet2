@@ -54,7 +54,9 @@ export interface DurableDeliveryServices {
     reconcile(instanceId: string): Promise<unknown>
   }
   webhookService: {
-    deliverEvent(event: WebhookEventType, payload: unknown): Promise<unknown>
+    // The durable leg passes the outbox `eventId` (3rd arg) so redelivery is idempotent per (webhook, event);
+    // the legacy bus bridge omits it. Optional so a spy/legacy caller need not supply it.
+    deliverEvent(event: WebhookEventType, payload: unknown, eventId?: string): Promise<unknown>
   }
 }
 
@@ -101,7 +103,9 @@ export function buildDurableConsumerHandlers(services: DurableDeliveryServices):
         // silent drop): an operator sees it via the dead-letter ceiling rather than losing the delivery.
         throw new Error(`webhook-event-bridge: no webhook mapping for event type "${event.eventType}"`)
       }
-      await webhookService.deliverEvent(webhookEvent, event.payload)
+      // Thread the outbox row's authoritative `eventId` so a redelivery of THIS durable row is idempotent per
+      // (webhook, event) — no duplicate delivery row, no duplicate send. (The legacy bus bridge omits it.)
+      await webhookService.deliverEvent(webhookEvent, event.payload, event.eventId)
     },
   }
 }
