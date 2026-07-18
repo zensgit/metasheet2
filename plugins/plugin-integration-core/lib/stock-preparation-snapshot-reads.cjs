@@ -339,12 +339,25 @@ async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projec
 // false (exactly the list path's semantics).
 // The details shape is CLOSED and values-free: ONLY { target: 'current'|'base', reason: 'incomplete' }
 // — no counts, no ids; the message is a fixed values-free string.
+function diffBatchAmbiguous(target) {
+  // Round-3: duplicate business identities (no substrate unique index; concurrent writers can
+  // produce them — P4 lock §0.3) mean "pick rows[0]" would silently answer from an arbitrary twin.
+  throw new StockPreparationTargetProvisioningError(
+    409,
+    'SNAPSHOT_DIFF_BATCH_INCOMPLETE',
+    'snapshot diff refuses an ambiguous snapshot batch identity',
+    { target, reason: 'ambiguous' },
+  )
+}
+
 async function assertDiffBatchComplete({ lineSheet, runSheet, batchRow, snapshotBatchId, target }) {
   const lineRows = lineSheet ? await queryAllRecords(lineSheet, { snapshotBatchId }) : []
   const syncRunId = optionalString(readCell(batchRow, 'syncRunId'))
   let runPresent = false
   if (runSheet && syncRunId) {
     const runRows = await queryAllRecords(runSheet, { runId: syncRunId })
+    // Exactly-one run identity: duplicates are as unanswerable as absence (round-3).
+    if (runRows.length > 1) diffBatchAmbiguous(target)
     runPresent = runRows.length > 0
   }
   if (isBatchIncomplete(lineRows.length, runPresent)) {
@@ -399,6 +412,7 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
   let currentVersion = null
   if (batchSheet) {
     const currentRows = await queryAllRecords(batchSheet, { snapshotBatchId: currentSnapshotBatchId })
+    if (currentRows.length > 1) diffBatchAmbiguous('current')
     currentBatchRow = currentRows[0] || null
     if (currentBatchRow) {
       projectId = optionalString(readCell(currentBatchRow, 'projectId')) || projectId
@@ -430,6 +444,7 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
   }
   if (baseSnapshotBatchId) {
     const baseRows = batchSheet ? await queryAllRecords(batchSheet, { snapshotBatchId: baseSnapshotBatchId }) : []
+    if (baseRows.length > 1) diffBatchAmbiguous('base')
     await assertDiffBatchComplete({
       lineSheet,
       runSheet,
@@ -551,6 +566,7 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
   let currentBatchRow = null
   if (batchSheet) {
     const currentRows = await queryAllRecords(batchSheet, { snapshotBatchId: currentSnapshotBatchId })
+    if (currentRows.length > 1) diffBatchAmbiguous('current')
     currentBatchRow = currentRows[0] || null
     if (currentBatchRow) {
       projectId = optionalString(readCell(currentBatchRow, 'projectId')) || projectId
@@ -580,6 +596,7 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
   }
   if (baseSnapshotBatchId) {
     const baseRows = batchSheet ? await queryAllRecords(batchSheet, { snapshotBatchId: baseSnapshotBatchId }) : []
+    if (baseRows.length > 1) diffBatchAmbiguous('base')
     await assertDiffBatchComplete({
       lineSheet,
       runSheet,

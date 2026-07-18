@@ -749,6 +749,79 @@ async function main() {
     assert.equal(emptyGhost.baseSnapshotBatchId, null)
   })
 
+  await run('R3: duplicate batch identity (same snapshotBatchId, different projects) => 409 ambiguous on BOTH endpoints, never an arbitrary twin', async () => {
+    // Two batch rows share one snapshotBatchId (substrate has no unique index; concurrent writers can
+    // produce this — P4 lock §0.3). Both twins are individually COMPLETE so the completeness gate
+    // alone would pass; the exactly-one identity check must refuse instead of answering from rows[0].
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'dup1', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'dr1', createdAt: 'x' },
+        { snapshotBatchId: 'dup1', projectId: 'proj_other', snapshotVersion: 5, snapshotStatus: 'draft', syncRunId: 'dr2', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'dl1', snapshotBatchId: 'dup1', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'dr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'dr2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caught = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(rows),
+        snapshotBatchId: 'dup1',
+      })
+      assert.deepEqual(caught.details, { target: 'current', reason: 'ambiguous' })
+    }
+  })
+
+  await run('R3: duplicate BASE identity and duplicate RUN identity => 409 ambiguous {target: base/current}', async () => {
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'cur1', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'cr1', createdAt: 'x' },
+        { snapshotBatchId: 'baseX', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br1', createdAt: 'x' },
+        { snapshotBatchId: 'baseX', projectId: 'proj_other', snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br2', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'cl1', snapshotBatchId: 'cur1', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+        { snapshotLineId: 'bl1', snapshotBatchId: 'baseX', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'cr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'br1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'br2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
+    }
+    // Explicit-base path: base identity is duplicated -> ambiguous {target: 'base'}.
+    const caughtBase = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: 'cur1',
+      baseSnapshotBatchId: 'baseX',
+    })
+    assert.deepEqual(caughtBase.details, { target: 'base', reason: 'ambiguous' })
+
+    // Duplicate RUN identity for the current batch -> ambiguous {target: 'current'} (both endpoints).
+    const runDupRows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'cur2', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'rr1', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'rl1', snapshotBatchId: 'cur2', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'rr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'rr1', runType: 'plm_sync', status: 'failed', startedAt: 'y' },
+      ],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caught = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(runDupRows),
+        snapshotBatchId: 'cur2',
+      })
+      assert.deepEqual(caught.details, { target: 'current', reason: 'ambiguous' })
+    }
+  })
+
   await run('H-1 gate: 409 error is values-free — details carry ONLY {target, reason}, no ids or counts', async () => {
     // Plant the secret into the HANDLES the gate touches (batch id / run id): none of them may appear
     // anywhere in the thrown 409 (closed details shape + fixed values-free message).
