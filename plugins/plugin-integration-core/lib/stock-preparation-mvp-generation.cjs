@@ -39,6 +39,17 @@ const VERSION_POLICIES = Object.freeze({
   MANUAL: 'manual',
 })
 
+// OD2 round-1 hardening: only these three vocabulary values have an implementation branch in the
+// matchers below. CATEGORY_RULE stays RESERVED in the vocabulary (the enum name does not move) but
+// acceptance and matching are closed: a stored row carrying it — or any unknown junk string — must
+// NEVER auto-match and never fall into the tail heuristic (fail-closed; #4391 doctrine: legacy
+// approved rows are not trusted either).
+const IMPLEMENTED_VERSION_POLICIES = Object.freeze(new Set([
+  VERSION_POLICIES.DRAWING_AND_VERSION,
+  VERSION_POLICIES.DRAWING_ONLY,
+  VERSION_POLICIES.MANUAL,
+]))
+
 const UNIT_SCOPE_PRIORITIES = Object.freeze({
   material: 1,
   category: 2,
@@ -133,6 +144,9 @@ function sameText(left, right) {
 function mappingMatchesLine(mapping, line) {
   if (!sameText(mapping.plmDrawingNo, line.childDrawingNo)) return false
   const policy = optionalString(mapping.versionPolicy) || VERSION_POLICIES.MANUAL
+  // OD2 fail-closed match guard: an UNIMPLEMENTED policy value (category_rule or any junk string)
+  // never auto-matches — the line degrades to a visible missing_mapping exception (HELD) instead.
+  if (!IMPLEMENTED_VERSION_POLICIES.has(policy)) return false
   if (policy === VERSION_POLICIES.DRAWING_ONLY) return true
   const mappingVersion = optionalString(mapping.plmVersion)
   const lineVersion = optionalString(line.childVersion)
@@ -147,6 +161,9 @@ function mappingHasVersionConflict(mapping, line) {
   if (!sameText(mapping.plmDrawingNo, line.childDrawingNo)) return false
   if (mapping.matchStatus === MATERIAL_MATCH_STATUSES.VERSION_CONFLICT) return true
   const policy = optionalString(mapping.versionPolicy) || VERSION_POLICIES.MANUAL
+  // OD2 fail-closed: an unimplemented policy is never REPORTED as a version conflict either — the
+  // row simply never participates (missing_mapping is the visible exception, not version_conflict).
+  if (!IMPLEMENTED_VERSION_POLICIES.has(policy)) return false
   if (policy !== VERSION_POLICIES.DRAWING_AND_VERSION) return false
   const mappingVersion = optionalString(mapping.plmVersion)
   const lineVersion = optionalString(line.childVersion)
@@ -465,6 +482,7 @@ module.exports = {
   UNIT_STATUSES,
   MATERIAL_MATCH_STATUSES,
   VERSION_POLICIES,
+  IMPLEMENTED_VERSION_POLICIES,
   StockPreparationMvpGenerationError,
   generateStockPreparationMvp,
   __internals: {

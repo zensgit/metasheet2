@@ -126,6 +126,54 @@ function main() {
   })
   assert.equal(duplicateLines.mappingRows.length, 1, 'same drawing/version is matched once')
 
+  // OD2 round-1 fail-closed (#4391 doctrine: stored approved rows are not trusted): a stored
+  // confirmed row carrying an UNIMPLEMENTED versionPolicy — the reserved category_rule and junk
+  // alike, the guard is allowlist-shaped — NEVER auto-matches. The OLD tail heuristic matched it
+  // on drawing alone whenever a version was absent; now the line degrades to the visible
+  // not_found/missing path, and a version mismatch is NOT reported as version_conflict either.
+  for (const unimplementedPolicy of ['category_rule', 'totally_bogus']) {
+    const storedRow = {
+      mappingId: 'confirmed_mapping_unimplemented',
+      plmDrawingNo: 'DRAW-001',
+      erpMaterialCode: 'ERP-CODE-HIST',
+      erpMaterialInternalId: 'ERP-INTERNAL-HIST',
+      versionPolicy: unimplementedPolicy,
+      matchStatus: MATCH_STATUSES.MATCHED,
+      isActive: true,
+    }
+    const failClosed = result({
+      plmBomLines: [line({ childVersion: undefined })],
+      erpMaterials: [],
+      confirmedMappings: [storedRow],
+    })
+    assert.equal(failClosed.mappingRows[0].matchStatus, MATCH_STATUSES.NOT_FOUND, `${unimplementedPolicy} never auto-matches even with versions absent`)
+    assert.notEqual(failClosed.mappingRows[0].mappingId, 'confirmed_mapping_unimplemented', `${unimplementedPolicy} stored row is never re-emitted as matched`)
+    const mismatch = result({
+      erpMaterials: [],
+      confirmedMappings: [{ ...storedRow, plmVersion: 'B' }],
+    })
+    assert.equal(mismatch.mappingRows[0].matchStatus, MATCH_STATUSES.NOT_FOUND, `${unimplementedPolicy} version mismatch is not reported as version_conflict`)
+  }
+
+  // OD2 input boundary (engine backstop; the confirm-writes validator rejects first with 422): a
+  // SUPPLIED defaultVersionPolicy outside the implemented set throws with the field NAME only.
+  for (const unimplementedPolicy of ['category_rule', 'totally_bogus']) {
+    assert.throws(
+      () => generateMaterialMappingCandidates({ plmBomLines: [line()], erpMaterials: [material()], defaultVersionPolicy: unimplementedPolicy }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationMaterialMatchError)
+        assert.deepEqual(error.details, { field: 'defaultVersionPolicy' }, 'details carry ONLY the field name')
+        assert.equal(error.message.includes(unimplementedPolicy), false, 'error message is values-free')
+        return true
+      },
+      `unimplemented defaultVersionPolicy ${unimplementedPolicy} is refused`,
+    )
+  }
+  for (const implementedPolicy of Object.values(VERSION_POLICIES)) {
+    const accepted = result({ defaultVersionPolicy: implementedPolicy })
+    assert.equal(accepted.mappingRows[0].versionPolicy, implementedPolicy, `implemented policy ${implementedPolicy} still passes`)
+  }
+
   const evidenceText = JSON.stringify(exact.evidence)
   for (const rawValue of ['DRAW-001', 'ERP-INTERNAL-001', 'name_alpha', 'spec_alpha']) {
     assert.equal(evidenceText.includes(rawValue), false, `evidence omits row value ${rawValue}`)

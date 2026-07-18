@@ -8,7 +8,8 @@
 //        human_preserved trio (confirmedBy / confirmedAt / notes) is STRUCTURALLY absent;
 //   (c)  R5 create-only idempotency — replay creates nothing, patches nothing;
 //   (d)  R5 never creates a CONFIRMED row (drift guard via an id-less confirmed mapping fixture);
-//   (e)  R5 OD2 — defaultVersionPolicy absent / non-vocabulary => 400; both policies round-trip;
+//   (e)  R5 OD2 — defaultVersionPolicy absent => 400; UNIMPLEMENTED (reserved category_rule / junk,
+//        allowlist-shaped) => 422 UNSUPPORTED with the field NAME only; implemented policies round-trip;
 //   (f)  R5 batch gates — unknown / other-project => 404; run-less or line-less => 409 INCOMPLETE;
 //        latest-complete auto-pick SKIPS an orphaned newer batch;
 //   (g)  staging/business split — business projectId as locator => 409 NOT_PROVISIONED, zero writes;
@@ -341,7 +342,7 @@ async function main() {
   })
 
   // ---- (e) OD2 ----
-  await run('R5 rejects an absent or non-vocabulary defaultVersionPolicy and accepts both shipped policies', async () => {
+  await run('R5 rejects absent (400) and UNIMPLEMENTED (422, field name only) defaultVersionPolicy; implemented policies pass', async () => {
     const api = makeRecordsApi()
     const provisioning = makeProvisioning()
     seedCompleteBatch(api)
@@ -350,19 +351,28 @@ async function main() {
       syncMaterialMappingCandidates(baseSyncInput(api, provisioning, { defaultVersionPolicy: undefined })),
       { status: 400, code: 'CONFIRM_VERSION_POLICY_INVALID' },
     )
-    await expectError(
-      syncMaterialMappingCandidates(baseSyncInput(api, provisioning, { defaultVersionPolicy: 'bogus_policy' })),
-      { status: 400, code: 'CONFIRM_VERSION_POLICY_INVALID' },
-    )
+    // OD2 round-1 hardening: the reserved-but-unimplemented category_rule and a junk value are
+    // refused IDENTICALLY (allowlist-shaped guard), 422 with ONLY the field name in details.
+    for (const unimplementedPolicy of ['category_rule', 'totally_bogus']) {
+      const unsupported = await expectError(
+        syncMaterialMappingCandidates(baseSyncInput(api, provisioning, { defaultVersionPolicy: unimplementedPolicy })),
+        { status: 422, code: 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED' },
+      )
+      assert.deepEqual(unsupported.details, { field: 'defaultVersionPolicy' }, 'details carry ONLY the field name')
+      assert.equal(unsupported.message.includes(unimplementedPolicy), false, 'error message is values-free')
+    }
+    assert.equal(api.createCalls.length, 0, 'rejected policies never reach a write')
     const withVersion = await syncMaterialMappingCandidates(baseSyncInput(api, provisioning, { defaultVersionPolicy: 'drawing_and_version' }))
     assert.ok(api.createCalls.filter((call) => call.sheetId === SHEET.mapping).every((call) => call.data.versionPolicy === 'drawing_and_version'))
     assert.equal(withVersion.persisted, true)
-    // drawing_only run on a fresh store round-trips the policy too.
-    const api2 = makeRecordsApi()
-    seedCompleteBatch(api2)
-    seedMaterials(api2)
-    await syncMaterialMappingCandidates(baseSyncInput(api2, makeProvisioning(), { defaultVersionPolicy: 'drawing_only' }))
-    assert.ok(api2.createCalls.filter((call) => call.sheetId === SHEET.mapping).every((call) => call.data.versionPolicy === 'drawing_only'))
+    // The other two implemented policies round-trip on fresh stores too.
+    for (const implementedPolicy of ['drawing_only', 'manual']) {
+      const apiN = makeRecordsApi()
+      seedCompleteBatch(apiN)
+      seedMaterials(apiN)
+      await syncMaterialMappingCandidates(baseSyncInput(apiN, makeProvisioning(), { defaultVersionPolicy: implementedPolicy }))
+      assert.ok(apiN.createCalls.filter((call) => call.sheetId === SHEET.mapping).every((call) => call.data.versionPolicy === implementedPolicy))
+    }
   })
 
   // ---- (f) batch gates ----
@@ -486,7 +496,18 @@ async function main() {
     await expectError(create(api, { erpMaterialCode: 'C', erpMaterialInternalId: 'I', versionPolicy: 'drawing_only' }), { status: 400, code: 'CONFIRM_MAPPING_FIELDS_INVALID' })
     await expectError(create(api, { plmDrawingNo: 'D', erpMaterialInternalId: 'I', versionPolicy: 'drawing_only' }), { status: 400, code: 'CONFIRM_MAPPING_FIELDS_INVALID' })
     await expectError(create(api, { plmDrawingNo: 'D', erpMaterialCode: 'C', versionPolicy: 'drawing_only' }), { status: 400, code: 'CONFIRM_MAPPING_FIELDS_INVALID' })
-    await expectError(create(api, { plmDrawingNo: 'D', erpMaterialCode: 'C', erpMaterialInternalId: 'I', versionPolicy: 'bogus' }), { status: 400, code: 'CONFIRM_MAPPING_FIELDS_INVALID' })
+    // Absent versionPolicy stays a 400 required-field error.
+    await expectError(create(api, { plmDrawingNo: 'D', erpMaterialCode: 'C', erpMaterialInternalId: 'I' }), { status: 400, code: 'CONFIRM_MAPPING_FIELDS_INVALID' })
+    // OD2 round-1 hardening: UNIMPLEMENTED policies (reserved category_rule / junk alike —
+    // allowlist-shaped) => 422 UNSUPPORTED with ONLY the field name in details.
+    for (const unimplementedPolicy of ['category_rule', 'totally_bogus']) {
+      const unsupported = await expectError(
+        create(api, { plmDrawingNo: 'D', erpMaterialCode: 'C', erpMaterialInternalId: 'I', versionPolicy: unimplementedPolicy }),
+        { status: 422, code: 'STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED' },
+      )
+      assert.deepEqual(unsupported.details, { field: 'versionPolicy' }, 'details carry ONLY the field name')
+      assert.equal(unsupported.message.includes(unimplementedPolicy), false, 'error message is values-free')
+    }
     await expectError(create(api, { plmDrawingNo: 'D', erpMaterialCode: 'C', erpMaterialInternalId: 'I', versionPolicy: 'drawing_and_version' }), { status: 400, code: 'CONFIRM_MAPPING_FIELDS_INVALID' })
     assert.equal(api.createCalls.length, 0)
   })
