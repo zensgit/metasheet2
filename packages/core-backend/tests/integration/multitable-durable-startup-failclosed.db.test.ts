@@ -205,12 +205,16 @@ describeIfDatabase('durable-delivery startup fail-closed (REAL MetaSheetServer.s
   test('S2-init flag ON + AutomationService init() throws (object constructed) → REJECTS (publish-last, fail-closed)', async () => {
     process.env[DURABLE_FLAG] = 'true'
     fault.automationInitThrows = true
+    // NOTE: an EARLIER failing lifecycle (S1) legitimately published its fully-inited service before its
+    // scheduler assert aborted, and failure lifecycles never run stop() — so the singleton observable is
+    // "THIS lifecycle published nothing NEW", not "the singleton is null".
+    const publishedBefore = getAutomationServiceInstance()
     const { server, error } = await startServer()
     // Round-2 P1: the object EXISTS (constructor succeeded) — readiness, not existence, must gate the boot.
     expect(error).toBeTruthy()
     expect(String(error)).toMatch(/fail-closed.*AutomationService/)
     expect(automationReadyBit(server)).toBe(false)
-    expect(getAutomationServiceInstance()).toBeNull()
+    expect(getAutomationServiceInstance()).toBe(publishedBefore)
     expect(durableLoopHandle(server)).toBeNull()
     expect(getSharedWebhookRetryScheduler()).toBeNull()
   })
@@ -218,11 +222,12 @@ describeIfDatabase('durable-delivery startup fail-closed (REAL MetaSheetServer.s
   test('S2-load flag ON + loadAndRegisterAllScheduled rejects (ctor+init succeeded) → REJECTS; loop null; zero DB ticks past one interval', async () => {
     process.env[DURABLE_FLAG] = 'true'
     fault.automationLoadThrows = true
+    const publishedBefore = getAutomationServiceInstance()
     const { server, error } = await startServer()
     expect(error).toBeTruthy()
     expect(String(error)).toMatch(/fail-closed.*AutomationService/)
     expect(automationReadyBit(server)).toBe(false)
-    expect(getAutomationServiceInstance()).toBeNull()
+    expect(getAutomationServiceInstance()).toBe(publishedBefore)
     expect(durableLoopHandle(server)).toBeNull()
     expect(getSharedWebhookRetryScheduler()).toBeNull()
     const before = dispatcherProbe.dbCalls
