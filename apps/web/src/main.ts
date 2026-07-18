@@ -154,7 +154,11 @@ router.beforeEach(async (to, _from, next) => {
 
     if (typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused()) {
       const path = String(to.path || '')
-      const allowedPrefixes = ['/plm', '/workflows', '/approvals', '/integrations']
+      // '/stock-prep': the stock-preparation operator shell is the natural companion of the PLM
+      // workbench audience; it was missing from this allowlist so plm-workbench-focused users were
+      // redirected away from it (generalization proposal round-1, owner-confirmed gap). The route
+      // keeps its own integration:write permission gate — this only restores reachability.
+      const allowedPrefixes = ['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep']
       const allowed = allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
       if (!allowed) {
         return next('/plm')
