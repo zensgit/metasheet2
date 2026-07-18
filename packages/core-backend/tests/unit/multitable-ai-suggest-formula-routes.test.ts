@@ -17,6 +17,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET_ID = 'sheet_ai_suggest'
 const FLD_PRICE = 'fld_price'
@@ -124,6 +125,8 @@ const savedEnv = new Map<string, string | undefined>()
 const suggestUrl = `/api/multitable/sheets/${SHEET_ID}/ai/suggest-formula`
 
 describe('M4 suggest-formula routes (mock pool)', () => {
+  const pinned = usePinnedServer()
+
   beforeEach(async () => {
     for (const key of AI_ENV_KEYS) {
       savedEnv.set(key, process.env[key])
@@ -141,6 +144,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
     metaRecordsQueried = false
     fetchSpy = vi.fn(async () => anthropicSuccess())
     app = await buildApp()
+    pinned.setApp(app)
   })
 
   afterEach(() => {
@@ -155,7 +159,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
   it('M4-T1: readiness ≠ ready → blocked, zero outbound, zero-token suggest ledger row (record/field NULL)', async () => {
     delete process.env.MULTITABLE_AI_API_KEY // breaks readiness → blocked
 
-    const res = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const res = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(res.status).toBe(503)
     expect(res.body.status).toBe('blocked')
 
@@ -174,7 +178,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
   it('M4-T1: E-12 unset → blocked, zero outbound', async () => {
     delete process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS
 
-    const res = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const res = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(res.status).toBe(503)
     expect(res.body.status).toBe('blocked')
     expect(fetchSpy).not.toHaveBeenCalled()
@@ -182,11 +186,11 @@ describe('M4 suggest-formula routes (mock pool)', () => {
 
   it('M4-T2: no canManageFields → 403; unauthenticated → 401; zero outbound', async () => {
     currentUser = { id: 'u_ai_reader', roles: ['member'], perms: ['multitable:read'] }
-    const reader = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const reader = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(reader.status).toBe(403)
 
     currentUser = undefined
-    const anon = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const anon = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(anon.status).toBe(401)
 
     expect(fetchSpy).not.toHaveBeenCalled()
@@ -194,7 +198,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
   })
 
   it('M4-T3: success path — returns candidate + usage; settled suggest row tokens>0; no record read', async () => {
-    const res = await request(app).post(suggestUrl).send({ instruction: 'unit price times one plus tax' })
+    const res = await request(pinned.url()).post(suggestUrl).send({ instruction: 'unit price times one plus tax' })
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     expect(res.body.data.status).toBe('succeeded')
@@ -215,7 +219,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
   })
 
   it('M4-T7: leak sentinel — prompt carries field names+types, NEVER record values', async () => {
-    const res = await request(app).post(suggestUrl).send({ instruction: 'compute the grand total' })
+    const res = await request(pinned.url()).post(suggestUrl).send({ instruction: 'compute the grand total' })
     expect(res.status).toBe(200)
 
     expect(fetchSpy).toHaveBeenCalledTimes(1)
@@ -233,7 +237,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
   })
 
   it('M4-T6: unsafe_input — secret-shaped instruction → 422, refused before any outbound call', async () => {
-    const res = await request(app).post(suggestUrl).send({ instruction: UNSAFE_INSTRUCTION })
+    const res = await request(pinned.url()).post(suggestUrl).send({ instruction: UNSAFE_INSTRUCTION })
     expect(res.status).toBe(422)
     expect(res.body.status).toBe('unsafe_input')
     expect(fetchSpy).not.toHaveBeenCalled()
@@ -246,12 +250,13 @@ describe('M4 suggest-formula routes (mock pool)', () => {
   it('M4-T5: burst rate limit → 429 rate_limited and NO ledger row', async () => {
     process.env.MULTITABLE_AI_TENANT_BURST_RPM = '1'
     app = await buildApp() // limiter caps resolve at router construction
+    pinned.setApp(app)
 
-    const first = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const first = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(first.status).toBe(200)
     const ledgerAfterFirst = ledgerInserts.length
 
-    const second = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const second = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(second.status).toBe(429)
     expect(second.body.status).toBe('rate_limited')
     expect(ledgerInserts.length).toBe(ledgerAfterFirst) // rate_limited never inserts
@@ -278,7 +283,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
     })
     vi.spyOn(poolManager, 'get').mockReturnValue(pool as any)
 
-    const res = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const res = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(res.status).toBe(429)
     expect(res.body.status).toBe('quota_exhausted')
     expect(fetchSpy).not.toHaveBeenCalled()
@@ -310,31 +315,31 @@ describe('M4 suggest-formula routes (mock pool)', () => {
     })
     vi.spyOn(poolManager, 'get').mockReturnValue(pool as any)
 
-    const res = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const res = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(res.status).toBe(429)
     expect(res.body.status).toBe('quota_exhausted')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('M4-T6: validation — empty instruction → 400; over-cap instruction → 400; no outbound', async () => {
-    const empty = await request(app).post(suggestUrl).send({ instruction: '   ' })
+    const empty = await request(pinned.url()).post(suggestUrl).send({ instruction: '   ' })
     expect(empty.status).toBe(400)
 
-    const tooLong = await request(app).post(suggestUrl).send({ instruction: 'x'.repeat(501) })
+    const tooLong = await request(pinned.url()).post(suggestUrl).send({ instruction: 'x'.repeat(501) })
     expect(tooLong.status).toBe(400)
 
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('M4-T10: the API key never appears in any response or ledger params', async () => {
-    const ok = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const ok = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(ok.status).toBe(200)
     expect(JSON.stringify(ok.body)).not.toContain(API_KEY_SENTINEL)
 
     fetchSpy.mockImplementation(async () => {
       throw new Error(`socket reset, key was ${API_KEY_SENTINEL}`)
     })
-    const failed = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    const failed = await request(pinned.url()).post(suggestUrl).send({ instruction: 'price times tax' })
     expect(failed.status).toBe(502)
     expect(JSON.stringify(failed.body)).not.toContain(API_KEY_SENTINEL)
     expect(JSON.stringify(ledgerInserts)).not.toContain(API_KEY_SENTINEL)

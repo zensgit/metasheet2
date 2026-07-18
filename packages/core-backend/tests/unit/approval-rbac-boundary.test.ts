@@ -10,6 +10,7 @@
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // ---------------------------------------------------------------------------
 // Hoisted state – shared across all mocks
@@ -114,6 +115,7 @@ const formulaDryRunBody = {
 // ---------------------------------------------------------------------------
 describe('Approval RBAC boundary verification', () => {
   let app: Express
+  const pinned = usePinnedServer()
 
   beforeEach(async () => {
     vi.resetModules()
@@ -134,6 +136,7 @@ describe('Approval RBAC boundary verification', () => {
     app = express()
     app.use(express.json())
     app.use(approvalsRouter())
+    pinned.setApp(app)
   })
 
   // =========================================================================
@@ -141,50 +144,50 @@ describe('Approval RBAC boundary verification', () => {
   // =========================================================================
   describe('BL1: No token → 401', () => {
     it('GET /api/approval-templates without auth → 401', async () => {
-      const res = await request(app).get('/api/approval-templates')
+      const res = await request(pinned.url()).get('/api/approval-templates')
       expect(res.status).toBe(401)
     })
 
     it('POST /api/approval-templates without auth → 401', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates')
         .send({ name: 'test', key: 'test-key' })
       expect(res.status).toBe(401)
     })
 
     it('POST /api/approval-templates/formula-condition/dry-run without auth → 401', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send(formulaDryRunBody)
       expect(res.status).toBe(401)
     })
 
     it('GET /api/approvals without auth → 401', async () => {
-      const res = await request(app).get('/api/approvals')
+      const res = await request(pinned.url()).get('/api/approvals')
       expect(res.status).toBe(401)
     })
 
     it('GET /api/approvals/:id without auth → 401', async () => {
-      const res = await request(app).get('/api/approvals/apr-1')
+      const res = await request(pinned.url()).get('/api/approvals/apr-1')
       expect(res.status).toBe(401)
     })
 
     it('POST /api/approvals without auth → 401', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals')
         .send({ templateId: 'tpl-1', formData: {} })
       expect(res.status).toBe(401)
     })
 
     it('POST /api/approvals/:id/actions without auth → 401', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals/apr-1/actions')
         .send({ action: 'approve', version: 0 })
       expect(res.status).toBe(401)
     })
 
     it('POST /api/approvals/:id/jump without auth → 401', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals/apr-1/jump')
         .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
       expect(res.status).toBe(401)
@@ -200,28 +203,28 @@ describe('Approval RBAC boundary verification', () => {
     })
 
     it('POST /api/approval-templates with only approvals:read → 403', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates')
         .send({ name: 'test', key: 'test-key' })
       expect(res.status).toBe(403)
     })
 
     it('PATCH /api/approval-templates/:id with only approvals:read → 403', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .patch('/api/approval-templates/tpl-1')
         .send({ name: 'updated' })
       expect(res.status).toBe(403)
     })
 
     it('POST /api/approval-templates/:id/publish with only approvals:read → 403', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/tpl-1/publish')
         .send({})
       expect(res.status).toBe(403)
     })
 
     it('POST /api/approval-templates/formula-condition/dry-run with only approvals:read → 403', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send(formulaDryRunBody)
       expect(res.status).toBe(403)
@@ -229,13 +232,13 @@ describe('Approval RBAC boundary verification', () => {
 
     it('GET /api/approval-templates with approval-templates:manage → 200', async () => {
       authState.user = templateManager()
-      const res = await request(app).get('/api/approval-templates')
+      const res = await request(pinned.url()).get('/api/approval-templates')
       expect(res.status).toBe(200)
     })
 
     it('POST /api/approval-templates/formula-condition/dry-run with approval-templates:manage → 200 success', async () => {
       authState.user = templateManager()
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send(formulaDryRunBody)
 
@@ -245,7 +248,7 @@ describe('Approval RBAC boundary verification', () => {
 
     it('POST /api/approval-templates/formula-condition/dry-run returns diagnostics for runtime formula errors', async () => {
       authState.user = templateManager()
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send({
           ...formulaDryRunBody,
@@ -260,7 +263,7 @@ describe('Approval RBAC boundary verification', () => {
 
     it('POST .../dry-run previews a requester.department condition when a sample requester is supplied (RA-1a)', async () => {
       authState.user = templateManager()
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send({
           expression: 'requester.department == "财务"',
@@ -275,7 +278,7 @@ describe('Approval RBAC boundary verification', () => {
 
     it('POST .../dry-run previews a requester.title condition when a sample requester is supplied (title slice)', async () => {
       authState.user = templateManager()
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send({
           expression: 'requester.title == "经理"',
@@ -293,7 +296,7 @@ describe('Approval RBAC boundary verification', () => {
       // RA-1b: dry-run runs the SAME curated gate as publish — the curated set (roles.approval_usable=true)
       // must include the literal for the preview to proceed.
       pgState.pool.query.mockResolvedValue({ rows: [{ id: 'finance_approver' }], rowCount: 1 })
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send({
           expression: 'requester.role in ["finance_approver"]',
@@ -311,7 +314,7 @@ describe('Approval RBAC boundary verification', () => {
       // curated set = ONLY finance_approver; "admin" is NOT approval_usable → must be rejected, fail-closed,
       // so preview cannot greenlight a route that publish would reject.
       pgState.pool.query.mockResolvedValue({ rows: [{ id: 'finance_approver' }], rowCount: 1 })
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send({
           expression: 'requester.role in ["admin"]',
@@ -328,7 +331,7 @@ describe('Approval RBAC boundary verification', () => {
 
     it('POST .../dry-run: a requester.* condition without a sample requester is unpreviewable (success:false, not a phantom true)', async () => {
       authState.user = templateManager()
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approval-templates/formula-condition/dry-run')
         .send({
           expression: 'requester.department == "财务"',
@@ -351,19 +354,19 @@ describe('Approval RBAC boundary verification', () => {
     })
 
     it('POST /api/approvals with only approvals:read → 403', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals')
         .send({ templateId: 'tpl-1', formData: {} })
       expect(res.status).toBe(403)
     })
 
     it('GET /api/approvals with approvals:read → 200', async () => {
-      const res = await request(app).get('/api/approvals')
+      const res = await request(pinned.url()).get('/api/approvals')
       expect(res.status).toBe(200)
     })
 
     it('GET /api/approvals/:id with approvals:read reaches the handler', async () => {
-      const res = await request(app).get('/api/approvals/apr-1')
+      const res = await request(pinned.url()).get('/api/approvals/apr-1')
       expect(res.status).toBe(404)
     })
 
@@ -426,7 +429,7 @@ describe('Approval RBAC boundary verification', () => {
         return { rows: [], rowCount: 0 }
       })
 
-      const res = await request(app).get('/api/approvals/apr-1')
+      const res = await request(pinned.url()).get('/api/approvals/apr-1')
 
       expect(res.status).toBe(200)
       expect(res.body).toMatchObject({
@@ -451,7 +454,7 @@ describe('Approval RBAC boundary verification', () => {
     })
 
     it('POST /api/approvals/:id/actions with only approvals:read → 403', async () => {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals/apr-1/actions')
         .send({ action: 'approve', version: 0 })
       expect(res.status).toBe(403)
@@ -465,7 +468,7 @@ describe('Approval RBAC boundary verification', () => {
     it('POST /api/approvals/:id/jump with approvals:act but no approvals:admin → 403', async () => {
       authState.user = actorUser()
 
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals/apr-1/jump')
         .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
 
@@ -475,7 +478,7 @@ describe('Approval RBAC boundary verification', () => {
     it('POST /api/approvals/:id/jump with template manage but no approvals:admin → 403', async () => {
       authState.user = templateManager()
 
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals/apr-1/jump')
         .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
 
@@ -485,7 +488,7 @@ describe('Approval RBAC boundary verification', () => {
     it('POST /api/approvals/:id/jump with approvals:admin reaches the handler', async () => {
       authState.user = approvalAdminUser()
 
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/approvals/apr-1/jump')
         .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
 
@@ -502,13 +505,13 @@ describe('Approval RBAC boundary verification', () => {
       authState.user = noPermsUser()
 
       const results = await Promise.all([
-        request(app).get('/api/approval-templates'),
-        request(app).post('/api/approval-templates').send({ name: 'x', key: 'x' }),
-        request(app).get('/api/approvals'),
-        request(app).get('/api/approvals/a'),
-        request(app).post('/api/approvals').send({ templateId: 't', formData: {} }),
-        request(app).post('/api/approvals/a/actions').send({ action: 'approve', version: 0 }),
-        request(app).post('/api/approvals/a/jump').send({ version: 0, targetNodeKey: 'n2', reason: 'ops recovery' }),
+        request(pinned.url()).get('/api/approval-templates'),
+        request(pinned.url()).post('/api/approval-templates').send({ name: 'x', key: 'x' }),
+        request(pinned.url()).get('/api/approvals'),
+        request(pinned.url()).get('/api/approvals/a'),
+        request(pinned.url()).post('/api/approvals').send({ templateId: 't', formData: {} }),
+        request(pinned.url()).post('/api/approvals/a/actions').send({ action: 'approve', version: 0 }),
+        request(pinned.url()).post('/api/approvals/a/jump').send({ version: 0, targetNodeKey: 'n2', reason: 'ops recovery' }),
       ])
 
       for (const res of results) {
@@ -519,13 +522,13 @@ describe('Approval RBAC boundary verification', () => {
     it('user with approvals:read can GET list but not POST', async () => {
       authState.user = readOnlyUser()
 
-      const getRes = await request(app).get('/api/approvals')
+      const getRes = await request(pinned.url()).get('/api/approvals')
       expect(getRes.status).toBe(200)
 
-      const detailRes = await request(app).get('/api/approvals/apr-1')
+      const detailRes = await request(pinned.url()).get('/api/approvals/apr-1')
       expect(detailRes.status).toBe(404)
 
-      const postRes = await request(app)
+      const postRes = await request(pinned.url())
         .post('/api/approvals')
         .send({ templateId: 'tpl-1', formData: {} })
       expect(postRes.status).toBe(403)
@@ -535,11 +538,11 @@ describe('Approval RBAC boundary verification', () => {
       authState.user = writerUser()
 
       // Can read
-      const getRes = await request(app).get('/api/approvals')
+      const getRes = await request(pinned.url()).get('/api/approvals')
       expect(getRes.status).toBe(200)
 
       // Can create (will hit handler logic, not blocked by RBAC)
-      const postRes = await request(app)
+      const postRes = await request(pinned.url())
         .post('/api/approvals')
         .send({ templateId: 'tpl-1', formData: {} })
       // The handler may return 4xx/5xx due to missing template data,
@@ -548,7 +551,7 @@ describe('Approval RBAC boundary verification', () => {
       expect(postRes.status).not.toBe(401)
 
       // Cannot act
-      const actRes = await request(app)
+      const actRes = await request(pinned.url())
         .post('/api/approvals/apr-1/actions')
         .send({ action: 'approve', version: 0 })
       expect(actRes.status).toBe(403)
@@ -558,17 +561,17 @@ describe('Approval RBAC boundary verification', () => {
       authState.user = actorUser()
 
       // Can read
-      const getRes = await request(app).get('/api/approvals')
+      const getRes = await request(pinned.url()).get('/api/approvals')
       expect(getRes.status).toBe(200)
 
       // Cannot create
-      const postRes = await request(app)
+      const postRes = await request(pinned.url())
         .post('/api/approvals')
         .send({ templateId: 'tpl-1', formData: {} })
       expect(postRes.status).toBe(403)
 
       // Can act (will hit handler logic, not blocked by RBAC)
-      const actRes = await request(app)
+      const actRes = await request(pinned.url())
         .post('/api/approvals/apr-1/actions')
         .send({ action: 'approve', version: 0 })
       // The handler may return 4xx/5xx due to missing data,
@@ -581,9 +584,9 @@ describe('Approval RBAC boundary verification', () => {
       authState.user = adminUser()
 
       const results = await Promise.all([
-        request(app).get('/api/approval-templates'),
-        request(app).get('/api/approvals'),
-        request(app).get('/api/approvals/pending'),
+        request(pinned.url()).get('/api/approval-templates'),
+        request(pinned.url()).get('/api/approvals'),
+        request(pinned.url()).get('/api/approvals/pending'),
       ])
 
       for (const res of results) {
