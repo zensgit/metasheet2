@@ -75,7 +75,11 @@ const READ_MAX_PAGES = 50
 // precondition TODAY): a plan larger than the bounded replay read could be CREATED but never exactly
 // replayed — every retry would 409 PERSIST_EXISTING_BATCH_READ_UNPROVABLE forever. Reject loudly
 // before any provisioning / records access instead of persisting an unprovable batch.
-const PERSIST_MAX_PLAN_LINES = READ_PAGE_LIMIT * READ_MAX_PAGES
+// The bound is READ_PAGE_LIMIT×READ_MAX_PAGES − 1, NOT the product itself: completeness is only
+// provable by a SHORT page, so 50 full 500-row pages (exactly 25,000 rows) fall out of the read loop
+// unprovable (adversarial round-2 finding — a 25,000-line batch persisted fine and then every replay
+// 409'd forever).
+const PERSIST_MAX_PLAN_LINES = READ_PAGE_LIMIT * READ_MAX_PAGES - 1
 
 // #4163 T1: the PROJECT table template — grounds the project-row upsert the SAME way BATCH/LINE/RUN are
 // grounded above (frozen template, never an invented field name).
@@ -236,6 +240,38 @@ function projectPointerStale(reason) {
   )
 }
 
+// H-2 precondition (adversarial round-2): the stale-pointer discriminator compares snapshotVersion,
+// which is caller-supplied and DEFAULTS to 1 — without enforcement, two default-version syncs make
+// CW4-existing invisible again (equal versions never compare as stale). So the CREATE path enforces
+// strictly-monotonic per-project versions: a genuinely-new batch for an EXISTING project must carry a
+// snapshotVersion strictly above the version of the batch the live pointer names. This also matches
+// what the read side already assumes (predecessor picking / latest-complete resolution order by
+// version). reason ∈ {not_monotonic, pointer_unresolvable}.
+function versionNotMonotonic(reason) {
+  throw new StockPreparationSyncRunPersistError(
+    422,
+    'PERSIST_VERSION_NOT_MONOTONIC',
+    'snapshot version must strictly increase per project',
+    { field: 'snapshotVersion', reason },
+  )
+}
+
+// Resolve the batch row named by the project live pointer (same business project; limit 2). Returns
+// its numeric snapshotVersion, or null when the pointer/batch/version cannot be resolved.
+async function resolvePointerBatchVersion({ batchScoped, plan, pointerRunId }) {
+  const pointerBatches = await batchScoped.queryRecords({
+    filters: { projectId: optionalString(plan.snapshotBatch.projectId), syncRunId: pointerRunId },
+    limit: 2,
+    offset: 0,
+  })
+  if (!Array.isArray(pointerBatches)) {
+    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+  }
+  if (pointerBatches.length !== 1) return null
+  const pointerVersion = Number(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
+  return Number.isFinite(pointerVersion) ? pointerVersion : null
+}
+
 function assertPlanIdentityKeys(plan, snapshotLines) {
   if (!optionalString(plan && plan.snapshotBatch && plan.snapshotBatch[BATCH_KEY_FIELD])) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshot batch key is required', { field: BATCH_KEY_FIELD })
@@ -360,19 +396,14 @@ async function assertExactReplay({
   const currentRunId = optionalString(plan.syncRun[RUN_KEY_FIELD])
   if (pointerRunId !== currentRunId) {
     if (!pointerRunId) projectPointerStale('pointer_unresolvable')
-    const pointerBatches = await batchScoped.queryRecords({
-      filters: { projectId: optionalString(plan.snapshotBatch.projectId), syncRunId: pointerRunId },
-      limit: 2,
-      offset: 0,
-    })
-    if (!Array.isArray(pointerBatches)) {
-      throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
-    }
-    if (pointerBatches.length !== 1) projectPointerStale('pointer_unresolvable')
-    const pointerVersion = Number(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
+    const pointerVersion = await resolvePointerBatchVersion({ batchScoped, plan, pointerRunId })
     const currentVersion = Number(plan.snapshotBatch.snapshotVersion)
-    if (!Number.isFinite(pointerVersion) || !Number.isFinite(currentVersion)) projectPointerStale('pointer_unresolvable')
+    if (pointerVersion === null || !Number.isFinite(currentVersion)) projectPointerStale('pointer_unresolvable')
     if (pointerVersion < currentVersion) projectPointerStale('stale_pointer')
+    // EQUAL version on a DIFFERENT run cannot prove the pointer advanced (adversarial round-2: with
+    // versions enforced monotonic at create, this state is only reachable on legacy/degenerate data)
+    // — fail closed rather than silently blessing it.
+    if (pointerVersion === currentVersion) projectPointerStale('pointer_unresolvable')
   }
 }
 
@@ -542,6 +573,20 @@ async function persistStockPreparationSyncRun(input = {}) {
       project: { mode: 'skipped' },
       evidence: buildEvidence({ persisted: false, mode: 'skipped_existing', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: true, projectSync: null }),
     }
+  }
+
+  // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write): a genuinely-new
+  // batch for an EXISTING project must carry a snapshotVersion strictly above the pointer batch's
+  // version. This is what makes the replay-side stale/advanced inference sound (see
+  // versionNotMonotonic above); a repeat sync that omits snapshotVersion (default 1) now fails loudly
+  // here instead of silently disabling CW4-existing detection.
+  if (projectRows.length === 1) {
+    const createPointerRunId = optionalString(projectRows[0] && projectRows[0].data && projectRows[0].data.lastSyncRunId)
+    if (!createPointerRunId) versionNotMonotonic('pointer_unresolvable')
+    const pointerVersion = await resolvePointerBatchVersion({ batchScoped: batchTarget.scoped, plan, pointerRunId: createPointerRunId })
+    const currentVersion = Number(plan.snapshotBatch.snapshotVersion)
+    if (pointerVersion === null || !Number.isFinite(currentVersion)) versionNotMonotonic('pointer_unresolvable')
+    if (currentVersion <= pointerVersion) versionNotMonotonic('not_monotonic')
   }
 
   // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
