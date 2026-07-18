@@ -72,7 +72,22 @@ owner 指出「只剩 family-1」只适用于 producer 分组，不等于 #4337 
    OFF=log-and-continue 字节等价。
 **验证 head `5afe30f26`**（fresh DB 全迁移含新 webhook 迁移）：durable+webhook 电池 **104/104（15 文件）**+
 全量单测 **6782/0**+tsc 0；两处 ratified 字面量修改（form.submitted 事件名 + comment.created 移除）均显著标注
-请 owner 复核。**这才是真正的 activation-闭合主张**，非「基本完成」。收口 MD（本文）随 #4457 更新。
+请 owner 复核。收口 MD（本文）随 #4457 更新。
+
+### 1.5 启动可靠性第二轮（owner 对 5afe30f26 REQUEST-CHANGES 2P1+1P2，head `1d3854c7a`）
+owner 精确指出 disposition 只覆盖 boot 块内异常、整链仍可绕过：①AutomationService 早期 init 失败被吞 →
+`if (this.automationService)` 静默跳过 durable boot（flag ON 无 dispatcher 无异常=静默滞留）；②retry
+scheduler 可被 env 关闭/init 失败被吞，但 durable webhook 腿的崩溃恢复正是它；③types.ts 缺 `event_id`
+（raw SQL 绕过类型层所以 tsc 不报）。**修复**：`assertDurableRuntimeDependency`（单测矩阵 5/5）在 skip 前
+与 scheduler 启动后断言，flag ON 缺失即 throw→disposition 中止启动，flag OFF 字节等价降级；types 补列。
+**真实启动级回归**（owner 明确要求非纯函数测试）：`multitable-durable-startup-failclosed.db.test.ts` 驱动
+真 `MetaSheetServer.start()` 生命周期 ×5——S1 flag ON+scheduler 禁用→启动拒绝；S2 flag ON+AutomationService
+构造失败（模块 mock 向真 init 路径注入构造异常，其余全真）→启动拒绝；S3/S4 flag OFF 同故障→照旧降级启动；
+S5 flag ON 健康→正常启动（不过度触发）。5/5；**变异证**：同时移除两处 assert（=修复前形态）恰好 S1+S2 红、
+S3-S5 绿。harness 约束（stop() 会 end 共享 pool）已在 spec 头注文档化。
+**验证 head `1d3854c7a`**：durable+webhook+startup 电池 **109/109（16 文件）**+全量单测 **6785/0**+tsc 0；
+push 后回读远端 SHA=1d3854c7a 确认。**状态=工程侧修复交付、待 owner 复审**（在复审通过前 #4337 不可合，
+不再主张「全为 owner 门」）。
 
 ## 2. #4342 附件 runtime — 闭合审计（review-ready，owner 门）
 - opus 审计对 head 23e090807：**REVIEW-READY**。两 P1（G7 下载字节路径隐藏字段红线 / G15 reconciler 误删
