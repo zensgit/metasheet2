@@ -204,6 +204,12 @@ jobs:
       - name: B7 round-2 CI wiring contract
         run: node --test scripts/ops/b7-round2-ci-wiring.test.mjs
 
+      # T1 CI two-point wiring contract (no DB): the provider-org-transfer suite must stay wired
+      # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
+      # Dropping either point silently disables the transfer state-machine + FK-backstop proof.
+      - name: T1 org-transfer CI wiring contract
+        run: node --test scripts/ops/t1-org-transfer-ci-wiring.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -685,6 +691,7 @@ jobs:
             tests/integration/org-directory-routing-policy-routes.db.test.ts \
             tests/integration/directory-binding-reconciliation.db.test.ts \
             tests/integration/directory-binding-admin-routes.db.test.ts \
+            tests/integration/provider-org-transfer-t1.api.test.ts \
             tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \

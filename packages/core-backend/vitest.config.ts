@@ -179,6 +179,13 @@ export default defineConfig({
       // index-anchored by b7-round2-ci-wiring.test.mjs so a same-step drift or multitable move reds.
       'tests/integration/directory-binding-admin-routes.db.test.ts',
       'tests/integration/directory-binding-sync-hook.db.test.ts',
+      // Transfer MVP T1 (sequencing plan §2 row T1): provider_org_transfers lifecycle state machine,
+      // the schema-level FK backstops (cross-org / provider-mismatch transfers FK-impossible), the
+      // §12.3 dry-run-required guard, and the no-op apply's untouched-directory fingerprint — HTTP
+      // against real Postgres. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green
+      // it, and wired as a WHOLE FILE into the directory real-DB step in plugin-tests.yml (both
+      // points asserted by t1-org-transfer-ci-wiring.test.mjs).
+      'tests/integration/provider-org-transfer-t1.api.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
