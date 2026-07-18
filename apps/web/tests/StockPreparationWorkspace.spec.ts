@@ -379,9 +379,28 @@ describe('Stock Preparation route registration (source drift pin)', () => {
             ts.isCallExpression(d.initializer.arguments[0]) &&
             ts.isIdentifier((d.initializer.arguments[0] as import('typescript').CallExpression).expression) &&
             ((d.initializer.arguments[0] as import('typescript').CallExpression).expression as import('typescript').Identifier).text === 'buildRouteGuardInput' &&
+            // Round-15 (M22): the input adapter must receive EXACTLY the identifier `to` — a
+            // synthesized object ({ path: to.path, meta: {} }) is not an accepted argument.
+            (d.initializer.arguments[0] as import('typescript').CallExpression).arguments.length === 1 &&
+            ts.isIdentifier((d.initializer.arguments[0] as import('typescript').CallExpression).arguments[0]) &&
+            ((d.initializer.arguments[0] as import('typescript').CallExpression).arguments[0] as import('typescript').Identifier).text === 'to' &&
             ts.isCallExpression(d.initializer.arguments[1]) &&
             ts.isIdentifier((d.initializer.arguments[1] as import('typescript').CallExpression).expression) &&
-            ((d.initializer.arguments[1] as import('typescript').CallExpression).expression as import('typescript').Identifier).text === 'buildRouteGuardContext',
+            ((d.initializer.arguments[1] as import('typescript').CallExpression).expression as import('typescript').Identifier).text === 'buildRouteGuardContext' &&
+            // Round-15 (M23): the ctx adapter must receive EXACTLY { auth, flags } — two shorthand
+            // properties, no spread, no extras, no substitute expressions (where an overriding
+            // flags object with hasFeature: () => true could hide).
+            (() => {
+              const ctxArgs = (d.initializer!.arguments[1] as import('typescript').CallExpression).arguments
+              if (ctxArgs.length !== 1 || !ts.isObjectLiteralExpression(ctxArgs[0])) return false
+              const props = (ctxArgs[0] as import('typescript').ObjectLiteralExpression).properties
+              return (
+                props.length === 2 &&
+                props.every((pr) => ts.isShorthandPropertyAssignment(pr)) &&
+                (props[0] as import('typescript').ShorthandPropertyAssignment).name.text === 'auth' &&
+                (props[1] as import('typescript').ShorthandPropertyAssignment).name.text === 'flags'
+              )
+            })(),
         ),
     )
     expect(declIdx, 'const decision = resolveRouteGuardDecision(...) must be a DIRECT try-block statement').toBeGreaterThan(-1)
