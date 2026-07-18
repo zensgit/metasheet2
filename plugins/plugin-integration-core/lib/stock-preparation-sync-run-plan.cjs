@@ -251,7 +251,18 @@ function planBomSnapshotSyncRun(input = {}) {
   const snapshotBatchId = requiredString(input.snapshotBatchId, 'snapshotBatchId')
   const sourceSystem = optionalString(input.sourceSystem) // passthrough only — never invent a source
   const snapshotVersionProvided = input.snapshotVersion !== undefined && input.snapshotVersion !== null
-  const snapshotVersion = snapshotVersionProvided ? input.snapshotVersion : DEFAULT_SNAPSHOT_VERSION
+  let snapshotVersion = DEFAULT_SNAPSHOT_VERSION
+  if (snapshotVersionProvided) {
+    snapshotVersion = parseStrictVersion(input.snapshotVersion)
+    if (snapshotVersion === null) {
+      throw new StockPreparationSyncRunPlanError(
+        422,
+        'SYNC_RUN_PLAN_CONFIG_INVALID',
+        'snapshotVersion must be a positive safe integer (canonical decimal form)',
+        { field: 'snapshotVersion' },
+      )
+    }
+  }
   const defaultDesignUnit = optionalString(input.defaultDesignUnit) || undefined
   const readPlan = isPlainObject(input.readPlan) ? input.readPlan : undefined
   const previousSnapshotBatchId = optionalString(input.previousSnapshotBatchId)
@@ -336,6 +347,21 @@ function planBomSnapshotSyncRun(input = {}) {
   return { snapshotBatch, snapshotLines, syncRun, diff, flags, evidence }
 }
 
+// Round-5: STRICT snapshot-version parser, shared by plan (preview) and persist (commit + history
+// scan) so a version can never preview-succeed and only commit-reject. Positive SAFE integers only;
+// string forms are restricted to canonical decimal ^[1-9]\d*$ — "01" / "+1" / "1e2" / "0x10" and
+// unsafe-range values are all rejected (Number() alone accepts every one of those).
+function parseStrictVersion(value) {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? value : null
+  }
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) {
+    const numeric = Number(value)
+    return Number.isSafeInteger(numeric) ? numeric : null
+  }
+  return null
+}
+
 module.exports = {
   REQUIRED_PERMISSION,
   SNAPSHOT_STATUS_DRAFT,
@@ -345,6 +371,7 @@ module.exports = {
   DEFAULT_SNAPSHOT_VERSION,
   StockPreparationSyncRunPlanError,
   planBomSnapshotSyncRun,
+  parseStrictVersion,
   __internals: {
     assertAdminPermission,
     computeFlags,
