@@ -1,6 +1,6 @@
 import express from 'express'
 import request from 'supertest'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const routeMocks = vi.hoisted(() => {
@@ -123,7 +123,9 @@ describe('plm-workbench routes', () => {
   const app = express()
   app.use(express.json())
   app.use(plmWorkbenchRouter)
-  pinned.setApp(app)
+  beforeAll(() => {
+    pinned.setApp(app)
+  })
 
   beforeEach(() => {
     routeMocks.state.authUser = {
