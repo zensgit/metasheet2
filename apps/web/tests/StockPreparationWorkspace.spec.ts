@@ -212,19 +212,14 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       ts.isIdentifier(n.expression.arguments[0].expression.expression) &&
       n.expression.arguments[0].expression.expression.text === 'flags' &&
       (n.expression.arguments[0] as import('typescript').CallExpression).arguments.length === 0
-    const containsDirectDenyReturn = (node: TsNode): boolean => {
-      let found = false
-      const walk = (n: TsNode): void => {
-        if (found) return
-        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n)) return
-        if (isDenyReturn(n)) {
-          found = true
-          return
-        }
-        ts.forEachChild(n, walk)
+    // Round-10: no "exists somewhere" search at all — the deny branch must consist of EXACTLY ONE
+    // top-level statement, and that statement must be the deny return. Hiding the redirect inside
+    // if (false) while actually falling through to next() cannot satisfy this.
+    const denyBranchIsExactly = (thenStatement: TsNode): boolean => {
+      if (ts.isBlock(thenStatement)) {
+        return thenStatement.statements.length === 1 && isDenyReturn(thenStatement.statements[0])
       }
-      walk(node)
-      return found
+      return isDenyReturn(thenStatement)
     }
     // Round-9: the permission call's ARGUMENTS are pinned too — first must be to.meta, second must
     // be a callback whose body really calls auth.hasPermission(<its own parameter>) (a constant
@@ -239,29 +234,23 @@ describe('Stock Preparation route registration (source drift pin)', () => {
         arg0.expression.text === 'to'
       if (!arg0Ok) return false
       const cb = call.arguments[1]
-      if (!(ts.isArrowFunction(cb) || ts.isFunctionExpression(cb))) return false
+      // Round-10: the callback must be an EXPRESSION-BODIED arrow whose body IS the permission call
+      // — "the call appears somewhere in a block" allowed { auth.hasPermission(p); return true }.
+      if (!ts.isArrowFunction(cb)) return false
       if (cb.parameters.length !== 1 || !ts.isIdentifier(cb.parameters[0].name)) return false
       const paramName = cb.parameters[0].name.text
-      let callsHasPermission = false
-      const findPerm = (n: TsNode): void => {
-        if (callsHasPermission) return
-        if (
-          ts.isCallExpression(n) &&
-          ts.isPropertyAccessExpression(n.expression) &&
-          n.expression.name.text === 'hasPermission' &&
-          ts.isIdentifier(n.expression.expression) &&
-          n.expression.expression.text === 'auth' &&
-          n.arguments.length === 1 &&
-          ts.isIdentifier(n.arguments[0]) &&
-          n.arguments[0].text === paramName
-        ) {
-          callsHasPermission = true
-          return
-        }
-        ts.forEachChild(n, findPerm)
-      }
-      findPerm(cb)
-      return callsHasPermission
+      const body = cb.body
+      return (
+        !ts.isBlock(body) &&
+        ts.isCallExpression(body) &&
+        ts.isPropertyAccessExpression(body.expression) &&
+        body.expression.name.text === 'hasPermission' &&
+        ts.isIdentifier(body.expression.expression) &&
+        body.expression.expression.text === 'auth' &&
+        body.arguments.length === 1 &&
+        ts.isIdentifier(body.arguments[0]) &&
+        body.arguments[0].text === paramName
+      )
     }
 
     // 2-5. scoped scan of the guard body only.
@@ -279,7 +268,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
           ts.isIdentifier(cond.operand.expression) &&
           cond.operand.expression.text === 'isRoutePermitted' &&
           isEnforcingPermittedCall(cond.operand) &&
-          containsDirectDenyReturn(node.thenStatement)
+          denyBranchIsExactly(node.thenStatement)
         ) {
           enforcingIfPos = node.getStart(source)
         }
