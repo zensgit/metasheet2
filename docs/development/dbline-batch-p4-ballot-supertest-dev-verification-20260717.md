@@ -186,7 +186,7 @@
 - 两 PR body 已统一至终版数字与 head；裁决维持 HOLD→修复+判别测试+fresh-green 后短复审 GO。
 
 
-## 14. 终版合并台账（round-6 GO 执行；pre-rebase commit 对应表）
+## 14. 终版合并台账（round-6 至 round-15 执行；pre-rebase commit 对应表）
 
 | PR | 最终 merge SHA | 历轮引用的 pre-rebase head（内容同一，纯 rebase 链） |
 |---|---|---|
@@ -197,10 +197,16 @@
 | #4467 | `a3c4642ff` | `e110a2606` → `7d815991b` → `bf31100d8` |
 | #4460 | **`38f9f1250`** | `4ffd329d8`(R3) → `9c94e4ec5`(R4) → `8cb1b7c41`(R5) → `bddc1e9dc` → `24d2417ba` |
 | #4461 | **`60e9ecbec`** | `0c7d178c4`(R3) → `a2bebf3dc`(R4) → `f747c7693`(R5) → `ee4d3f8f7` → `5be2576da` → `7a450c147` |
+| #4469 | **`2f73d0dee`** | `e59349645`(R8) → `25ae22938`(R9) → `4dd3d397a`(R12) → `2b64281d8`(R13) → `6bd4b4f79`(R14) → `fe70b81c7`(R15) |
 
 历轮文本中的 commit id 均为当时的 exact head（pre-rebase），与本表对应；正文不作回溯改写。
 
-补记：#4468 合并后 owner rounds 7-9 复审逐层收紧其回归钉（indexOf 命中 import 非真实调用；AST 版
-只证调用存在不证 enforcement；containsReturnNext 不验拒绝目标与权限回调语义）——运行时代码经
-复审保持正确，承重测试由 follow-up **PR #4469 承担、截至本文本仍未闭合（HOLD 复审中）**。
-本台账按 owner round-9 裁决改为 **#4469 合入之后最后合**，届时补记其终态。
+补记：#4468 合并后 owner rounds 7-15 复审逐层收紧其回归钉（indexOf 命中 import 非真实调用；AST 版
+只证调用存在不证 enforcement；containsReturnNext 不验拒绝目标与权限回调语义；adapter 调用名存在
+不代表真实 `to` / `{ auth, flags }` 实参已绑定）。运行时代码保持行为等价，follow-up **PR #4469** 最终
+抽出可执行 input/context adapter 与纯 policy，行为钉覆盖四阶段优先级、五项 context 字段及 meta/path
+透传，薄结构钉只绑定真实委托接缝。M1-M23 判别 mutation 全红；终版 head `fe70b81c7` 的目标套件
+31/31、`vue-tsc` 0，fresh CI 全绿后 squash 合入 **`2f73d0dee`**。
+
+因此 owner round-9 规定的「#4469 合入之后，本台账最后合」前置已满足；本 PR 是本批次合并列车的
+最后一项。
