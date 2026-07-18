@@ -18,6 +18,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET_ID = 'sheet_ai_routes'
 const REC_ID = 'rec_ai_routes'
@@ -178,6 +179,8 @@ const previewUrl = `/api/multitable/sheets/${SHEET_ID}/ai/shortcut/preview`
 const runUrl = `/api/multitable/sheets/${SHEET_ID}/ai/shortcut/run`
 
 describe('A2 shortcut routes (mock pool)', () => {
+  const pinned = usePinnedServer()
+
   beforeEach(async () => {
     for (const key of AI_ENV_KEYS) {
       savedEnv.set(key, process.env[key])
@@ -199,6 +202,7 @@ describe('A2 shortcut routes (mock pool)', () => {
     ledgerSettles = []
     fetchSpy = vi.fn(async () => anthropicSuccess())
     app = await buildApp()
+    pinned.setApp(app)
   })
 
   afterEach(() => {
@@ -213,11 +217,11 @@ describe('A2 shortcut routes (mock pool)', () => {
   it('A2-T1: readiness ≠ ready → preview AND run blocked, zero outbound, zero-token ledger row', async () => {
     delete process.env.MULTITABLE_AI_API_KEY // breaks readiness → blocked
 
-    const preview = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const preview = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(preview.status).toBe(503)
     expect(preview.body.status).toBe('blocked')
 
-    const run = await request(app).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const run = await request(pinned.url()).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(run.status).toBe(503)
     expect(run.body.status).toBe('blocked')
 
@@ -233,20 +237,20 @@ describe('A2 shortcut routes (mock pool)', () => {
   it('A2-T1: E-12 unset → blocked, zero outbound', async () => {
     delete process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS
 
-    const run = await request(app).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const run = await request(pinned.url()).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(run.status).toBe(503)
     expect(run.body.status).toBe('blocked')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('A2-T2: recordId not on :sheetId → 404; sheet not readable → 403; zero calls, zero ledger', async () => {
-    const missing = await request(app).post(previewUrl).send({ recordId: 'rec_ghost', fieldId: FLD_TARGET })
+    const missing = await request(pinned.url()).post(previewUrl).send({ recordId: 'rec_ghost', fieldId: FLD_TARGET })
     expect(missing.status).toBe(404)
 
     // Non-empty token perms keep access resolution off the DB-backed RBAC path
     // while still granting NO multitable capability → sheet not readable.
     currentUser = { id: 'u_ai_norights', roles: ['member'], perms: ['comments:read'] }
-    const invisible = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const invisible = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(invisible.status).toBe(403)
 
     expect(fetchSpy).not.toHaveBeenCalled()
@@ -255,7 +259,7 @@ describe('A2 shortcut routes (mock pool)', () => {
 
   it('A2-T2: unauthenticated → 401', async () => {
     currentUser = undefined
-    const res = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const res = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(res.status).toBe(401)
   })
 
@@ -263,17 +267,17 @@ describe('A2 shortcut routes (mock pool)', () => {
     currentUser = { id: 'u_ai_reader', roles: ['member'], perms: ['multitable:read'] }
     fieldPermissionRows = []
 
-    const preview = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const preview = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(preview.status).toBe(200)
     expect(preview.body.data.output).toBe('AI OUTPUT')
 
-    const run = await request(app).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const run = await request(pinned.url()).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(run.status).toBe(403)
     expect(fetchSpy).toHaveBeenCalledTimes(1) // only the preview reached the provider
   })
 
   it('A2-T4: a layer-3-denied source field never enters the prompt (spy on request body)', async () => {
-    const res = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const res = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(res.status).toBe(200)
 
     expect(fetchSpy).toHaveBeenCalledTimes(1)
@@ -284,17 +288,17 @@ describe('A2 shortcut routes (mock pool)', () => {
   })
 
   it('A2-T4: run target readonly (layer-3) → 403; type ≠ string|longText → 400; no provider call', async () => {
-    const readonly = await request(app).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET_RO })
+    const readonly = await request(pinned.url()).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET_RO })
     expect(readonly.status).toBe(403)
 
-    const numeric = await request(app).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET_NUM })
+    const numeric = await request(pinned.url()).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET_NUM })
     expect(numeric.status).toBe(400)
 
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('A2-T11: run rejects inline config (only persisted field.property.aiShortcut executes)', async () => {
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post(runUrl)
       .send({ recordId: REC_ID, fieldId: FLD_TARGET, config: { kind: 'summarize', sourceFieldIds: [FLD_SRC] } })
     expect(res.status).toBe(400)
@@ -302,18 +306,18 @@ describe('A2 shortcut routes (mock pool)', () => {
   })
 
   it('A2-T11: run on a field without persisted config → 4xx', async () => {
-    const res = await request(app).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET_NOCONF })
+    const res = await request(pinned.url()).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET_NOCONF })
     expect(res.status).toBe(400)
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('A2-T11: field write path rejects an invalid aiShortcut (bad kind / over-cap params / computed source)', async () => {
-    const badKind = await request(app)
+    const badKind = await request(pinned.url())
       .post('/api/multitable/fields')
       .send({ sheetId: SHEET_ID, name: 'AI col', type: 'string', property: { aiShortcut: { kind: 'imagine', sourceFieldIds: [FLD_SRC] } } })
     expect(badKind.status).toBe(400)
 
-    const overCap = await request(app)
+    const overCap = await request(pinned.url())
       .post('/api/multitable/fields')
       .send({
         sheetId: SHEET_ID,
@@ -323,7 +327,7 @@ describe('A2 shortcut routes (mock pool)', () => {
       })
     expect(overCap.status).toBe(400)
 
-    const ghostSource = await request(app)
+    const ghostSource = await request(pinned.url())
       .patch(`/api/multitable/fields/${FLD_TARGET}`)
       .send({ property: { aiShortcut: { kind: 'summarize', sourceFieldIds: ['fld_ghost'] } } })
     expect(ghostSource.status).toBe(400)
@@ -332,13 +336,14 @@ describe('A2 shortcut routes (mock pool)', () => {
   it('A2-T7: burst rate limit → 429 rate_limited and NO ledger row (no reservation, no settle)', async () => {
     process.env.MULTITABLE_AI_TENANT_BURST_RPM = '1'
     app = await buildApp() // limiter caps resolve at router construction
+    pinned.setApp(app)
 
-    const first = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const first = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(first.status).toBe(200)
     const ledgerAfterFirst = ledgerInserts.length
     const settlesAfterFirst = ledgerSettles.length
 
-    const second = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const second = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(second.status).toBe(429)
     expect(second.body.status).toBe('rate_limited')
     expect(ledgerInserts.length).toBe(ledgerAfterFirst) // rate_limited never inserts (429 fires BEFORE the reserve)
@@ -354,7 +359,7 @@ describe('A2 shortcut routes (mock pool)', () => {
       ),
     )
 
-    const res = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const res = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(res.status).toBe(502)
     expect(res.body.status).toBe('provider_error')
 
@@ -373,7 +378,7 @@ describe('A2 shortcut routes (mock pool)', () => {
   it('A2-T9: secret-shaped SOURCE value → unsafe_input, refused before any outbound call', async () => {
     recordData = { [FLD_SRC]: UNSAFE_VALUE, [FLD_SECRET]: 'x' }
 
-    const res = await request(app).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const res = await request(pinned.url()).post(runUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(res.status).toBe(422)
     expect(res.body.status).toBe('unsafe_input')
     expect(fetchSpy).not.toHaveBeenCalled()
@@ -384,7 +389,7 @@ describe('A2 shortcut routes (mock pool)', () => {
   })
 
   it('A2-T9: secret-shaped PARAMS (inline preview instruction) → unsafe_input, zero outbound', async () => {
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post(previewUrl)
       .send({
         recordId: REC_ID,
@@ -396,14 +401,14 @@ describe('A2 shortcut routes (mock pool)', () => {
   })
 
   it('A2-T10: the API key never appears in any response or ledger params', async () => {
-    const ok = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const ok = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(ok.status).toBe(200)
     expect(JSON.stringify(ok.body)).not.toContain(API_KEY_SENTINEL)
 
     fetchSpy.mockImplementation(async () => {
       throw new Error(`socket reset, key was ${API_KEY_SENTINEL}`)
     })
-    const failed = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const failed = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(failed.status).toBe(502)
     expect(JSON.stringify(failed.body)).not.toContain(API_KEY_SENTINEL)
     expect(JSON.stringify(ledgerInserts)).not.toContain(API_KEY_SENTINEL)
@@ -417,7 +422,7 @@ describe('A2 shortcut routes (mock pool)', () => {
       throw new Error(`getaddrinfo ENOTFOUND for ${String(url)}`)
     })
 
-    const res = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const res = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(res.status).toBe(502)
     expect(res.body.status).toBe('provider_error')
     expect(JSON.stringify(res.body)).not.toContain(URL_SECRET)
@@ -430,7 +435,7 @@ describe('A2 shortcut routes (mock pool)', () => {
       { field_id: FLD_TARGET, visible: false, read_only: false },
     ]
 
-    const res = await request(app).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
+    const res = await request(pinned.url()).post(previewUrl).send({ recordId: REC_ID, fieldId: FLD_TARGET })
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
     expect(fetchSpy).not.toHaveBeenCalled()
@@ -438,14 +443,14 @@ describe('A2 shortcut routes (mock pool)', () => {
   })
 
   it('preview accepts inline config (M3 config-time preview) and validates it', async () => {
-    const ok = await request(app)
+    const ok = await request(pinned.url())
       .post(previewUrl)
       .send({ recordId: REC_ID, config: { kind: 'summarize', sourceFieldIds: [FLD_SRC] } })
     expect(ok.status).toBe(200)
     expect(ok.body.data.output).toBe('AI OUTPUT')
     expect(ok.body.data.usage).toEqual({ promptTokens: 9, completionTokens: 4 })
 
-    const bad = await request(app)
+    const bad = await request(pinned.url())
       .post(previewUrl)
       .send({ recordId: REC_ID, config: { kind: 'summarize', sourceFieldIds: ['fld_ghost'] } })
     expect(bad.status).toBe(400)

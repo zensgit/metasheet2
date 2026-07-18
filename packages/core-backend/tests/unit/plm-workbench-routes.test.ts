@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const routeMocks = vi.hoisted(() => {
   const createBuilder = () => {
@@ -116,10 +117,13 @@ vi.mock('../../src/types/validator', () => ({
 
 import plmWorkbenchRouter from '../../src/routes/plm-workbench'
 
+const pinned = usePinnedServer()
+
 describe('plm-workbench routes', () => {
   const app = express()
   app.use(express.json())
   app.use(plmWorkbenchRouter)
+  pinned.setApp(app)
 
   beforeEach(() => {
     routeMocks.state.authUser = {
@@ -170,7 +174,7 @@ describe('plm-workbench routes', () => {
       ],
     })
 
-    const response = await request(app).get('/api/plm-workbench/views/team?kind=documents')
+    const response = await request(pinned.url()).get('/api/plm-workbench/views/team?kind=documents')
 
     expect(response.status).toBe(200)
     expect(response.body.data[0]).toMatchObject({
@@ -201,7 +205,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-09T00:12:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team')
       .send({
         kind: 'documents',
@@ -240,7 +244,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-09T00:12:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team')
       .send({
         kind: 'workbench',
@@ -295,7 +299,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-09T00:12:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team')
       .send({
         kind: 'audit',
@@ -365,7 +369,7 @@ describe('plm-workbench routes', () => {
       },
     ])
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/filter-presets/team/batch')
       .send({
         action: 'archive',
@@ -420,7 +424,7 @@ describe('plm-workbench routes', () => {
       },
     ])
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team/batch')
       .send({
         action: 'archive',
@@ -480,7 +484,7 @@ describe('plm-workbench routes', () => {
       ],
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .patch('/api/plm-workbench/views/team/view-rename')
       .send({ name: '新工作台视图' })
 
@@ -510,7 +514,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-09T00:20:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .patch('/api/plm-workbench/views/team/view-archived-rename')
       .send({ name: '不应该成功' })
 
@@ -569,7 +573,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-09T00:15:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team/view-source/duplicate')
       .send({})
 
@@ -636,7 +640,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-10T09:00:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team/view-transfer/transfer')
       .send({ ownerUserId: 'owner-2' })
 
@@ -679,7 +683,7 @@ describe('plm-workbench routes', () => {
       })
       .mockResolvedValueOnce(undefined)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team/view-transfer/transfer')
       .send({ ownerUserId: 'missing-user' })
 
@@ -720,7 +724,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-10T08:00:00.000Z',
     })
 
-    const response = await request(app).post('/api/plm-workbench/views/team/view-archive/archive')
+    const response = await request(pinned.url()).post('/api/plm-workbench/views/team/view-archive/archive')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -771,7 +775,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-10T08:05:00.000Z',
     })
 
-    const response = await request(app).post('/api/plm-workbench/views/team/view-restore/restore')
+    const response = await request(pinned.url()).post('/api/plm-workbench/views/team/view-restore/restore')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -807,7 +811,7 @@ describe('plm-workbench routes', () => {
     })
     routeMocks.state.builder.execute.mockResolvedValueOnce(undefined)
 
-    const response = await request(app).delete('/api/plm-workbench/views/team/view-delete')
+    const response = await request(pinned.url()).delete('/api/plm-workbench/views/team/view-delete')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toEqual({
@@ -873,7 +877,7 @@ describe('plm-workbench routes', () => {
       },
     ])
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team/batch')
       .send({
         action: 'archive',
@@ -935,7 +939,7 @@ describe('plm-workbench routes', () => {
     ])
     routeMocks.state.builder.execute.mockResolvedValueOnce(undefined)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team/batch')
       .send({
         action: 'delete',
@@ -1002,7 +1006,7 @@ describe('plm-workbench routes', () => {
       ],
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .patch('/api/plm-workbench/filter-presets/team/preset-rename')
       .send({ name: '新团队预设' })
 
@@ -1064,7 +1068,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-09T00:15:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/filter-presets/team/preset-source/duplicate')
       .send({})
 
@@ -1121,7 +1125,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-10T08:10:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/filter-presets/team/preset-transfer/transfer')
       .send({ ownerUserId: 'target-user' })
 
@@ -1152,7 +1156,7 @@ describe('plm-workbench routes', () => {
       })
       .mockResolvedValueOnce(undefined)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/filter-presets/team/preset-transfer/transfer')
       .send({ ownerUserId: 'missing-user' })
 
@@ -1176,7 +1180,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-11T01:00:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/filter-presets/team/preset-archived-transfer/transfer')
       .send({ ownerUserId: 'owner-2' })
 
@@ -1200,7 +1204,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-11T01:00:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .delete('/api/plm-workbench/filter-presets/team/preset-archived-default/default')
 
     expect(response.status).toBe(409)
@@ -1242,7 +1246,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-10T08:00:00.000Z',
     })
 
-    const response = await request(app).post('/api/plm-workbench/filter-presets/team/preset-archive/archive')
+    const response = await request(pinned.url()).post('/api/plm-workbench/filter-presets/team/preset-archive/archive')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -1293,7 +1297,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-10T08:05:00.000Z',
     })
 
-    const response = await request(app).post('/api/plm-workbench/filter-presets/team/preset-restore/restore')
+    const response = await request(pinned.url()).post('/api/plm-workbench/filter-presets/team/preset-restore/restore')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -1329,7 +1333,7 @@ describe('plm-workbench routes', () => {
     })
     routeMocks.state.builder.execute.mockResolvedValueOnce(undefined)
 
-    const response = await request(app).delete('/api/plm-workbench/filter-presets/team/preset-delete')
+    const response = await request(pinned.url()).delete('/api/plm-workbench/filter-presets/team/preset-delete')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toEqual({
@@ -1421,7 +1425,7 @@ describe('plm-workbench routes', () => {
       ],
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/filter-presets/team/batch')
       .send({
         action: 'archive',
@@ -1485,7 +1489,7 @@ describe('plm-workbench routes', () => {
       ])
       .mockResolvedValueOnce(undefined)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/filter-presets/team/batch')
       .send({
         action: 'delete',
@@ -1548,7 +1552,7 @@ describe('plm-workbench routes', () => {
         ],
       })
 
-    const response = await request(app).post('/api/plm-workbench/filter-presets/team/preset-default/default')
+    const response = await request(pinned.url()).post('/api/plm-workbench/filter-presets/team/preset-default/default')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -1595,7 +1599,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-11T01:00:00.000Z',
     })
 
-    const response = await request(app).post('/api/plm-workbench/filter-presets/team/preset-archived-default/default')
+    const response = await request(pinned.url()).post('/api/plm-workbench/filter-presets/team/preset-archived-default/default')
 
     expect(response.status).toBe(409)
     expect(response.body.error).toContain('Archived PLM team presets cannot be set as default')
@@ -1642,7 +1646,7 @@ describe('plm-workbench routes', () => {
         ],
       })
 
-    const response = await request(app).delete('/api/plm-workbench/filter-presets/team/preset-default/default')
+    const response = await request(pinned.url()).delete('/api/plm-workbench/filter-presets/team/preset-default/default')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -1707,7 +1711,7 @@ describe('plm-workbench routes', () => {
         ],
       })
 
-    const response = await request(app).post('/api/plm-workbench/views/team/view-1/default')
+    const response = await request(pinned.url()).post('/api/plm-workbench/views/team/view-1/default')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -1750,7 +1754,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-09T00:20:00.000Z',
     })
 
-    const response = await request(app).post('/api/plm-workbench/views/team/view-2/default')
+    const response = await request(pinned.url()).post('/api/plm-workbench/views/team/view-2/default')
 
     expect(response.status).toBe(403)
     expect(response.body.error).toContain('Only the view owner')
@@ -1794,7 +1798,7 @@ describe('plm-workbench routes', () => {
         ],
       })
 
-    const response = await request(app).delete('/api/plm-workbench/views/team/view-1/default')
+    const response = await request(pinned.url()).delete('/api/plm-workbench/views/team/view-1/default')
 
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
@@ -1836,7 +1840,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-11T01:00:00.000Z',
     })
 
-    const response = await request(app).delete('/api/plm-workbench/views/team/view-archived-default/default')
+    const response = await request(pinned.url()).delete('/api/plm-workbench/views/team/view-archived-default/default')
 
     expect(response.status).toBe(409)
     expect(response.body.error).toContain('Archived PLM team views cannot clear the default')
@@ -1869,7 +1873,7 @@ describe('plm-workbench routes', () => {
         ],
       })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team')
       .send({
         kind: 'workbench',
@@ -1920,7 +1924,7 @@ describe('plm-workbench routes', () => {
       updated_at: '2026-03-11T01:00:00.000Z',
     })
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/plm-workbench/views/team/view-archived-transfer/transfer')
       .send({ ownerUserId: 'owner-2' })
 

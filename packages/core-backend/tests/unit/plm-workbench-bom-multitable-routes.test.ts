@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // Controllable DataSourceManager.getDataSource mock (configured per test).
 const dsMocks = vi.hoisted(() => ({
@@ -70,6 +71,8 @@ const manifest = (
 const URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/context'
 const WRITE_URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/lines/R1'
 
+const pinned = usePinnedServer()
+
 describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
   const app = express()
   app.use(express.json())
@@ -77,13 +80,14 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
 
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
+    pinned.setApp(app)
   })
 
   it('returns 404 when the data source does not exist', async () => {
     dsMocks.getDataSource.mockImplementation(() => {
       throw new Error('Data source not found: nope')
     })
-    const res = await request(app).get('/api/plm-workbench/data-sources/nope/bom-multitable/P1/context')
+    const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/nope/bom-multitable/P1/context')
     expect(res.status).toBe(404)
     expect(res.body.data_source_id).toBe('nope')
   })
@@ -92,7 +96,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     // has the capability handshake but NOT getBomMultitableContext -> guard requires both.
     const getIntegrationCapabilities = vi.fn()
     dsMocks.getDataSource.mockReturnValue({ getIntegrationCapabilities })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: false, reason: 'unsupported-mode' })
     expect(getIntegrationCapabilities).not.toHaveBeenCalled()
@@ -104,7 +108,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getIntegrationCapabilities: vi.fn().mockRejectedValue(new Error('boom')),
       getBomMultitableContext,
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: false, reason: 'unavailable' })
     expect(getBomMultitableContext).not.toHaveBeenCalled()
@@ -116,7 +120,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getIntegrationCapabilities: vi.fn().mockResolvedValue({ available: true, manifest: manifest(undefined) }),
       getBomMultitableContext,
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: false, reason: 'unsupported' })
     expect(getBomMultitableContext).not.toHaveBeenCalled()
@@ -131,7 +135,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       }),
       getBomMultitableContext,
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: false, context: null })
     // the resource is NEVER queried when the advisory manifest says unentitled
@@ -149,7 +153,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       }),
       getBomMultitableContext,
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: CONTEXT })
     expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
@@ -171,7 +175,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       }),
       getBomMultitableContext,
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: CONTEXT })
     expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
@@ -190,7 +194,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       }),
       getBomMultitableContext,
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: false, context: null })
     expect(getBomMultitableContext).not.toHaveBeenCalled()
@@ -207,7 +211,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       }),
       getBomMultitableContext,
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: false, context: null })
   })
@@ -220,7 +224,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       }),
       getBomMultitableContext: vi.fn().mockRejectedValue(new Error('boom')),
     })
-    const res = await request(app).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: null, reason: 'unavailable' })
   })
@@ -230,7 +234,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getIntegrationCapabilities: vi.fn(),
       getBomMultitableContext: vi.fn(),
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
@@ -251,7 +255,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine,
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
@@ -276,7 +280,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine,
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
@@ -297,7 +301,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine,
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .send({ quantity: 5 })
     expect(res.status).toBe(400)
@@ -320,7 +324,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine,
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5, refdes: null, applied: true })
@@ -347,7 +351,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: conflict }),
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
@@ -383,7 +387,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: locked }),
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
@@ -414,7 +418,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: burned }),
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
@@ -440,7 +444,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: future }),
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
@@ -461,7 +465,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine,
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .set('If-Match', '"bom-line:etag-x"')
@@ -488,7 +492,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       getBomMultitableContext: vi.fn(),
       updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: stale }),
     })
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .set('If-Match', '"bom-line:stale"')
@@ -531,18 +535,19 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
 
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
+    pinned.setApp(app)
   })
 
   it('404 when the data source does not exist', async () => {
     dsMocks.getDataSource.mockImplementation(() => { throw new Error('nope') })
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(404)
   })
 
   it('404 for an adapter lacking requestBomEcoRevisionIntent (duck-type, no capability call)', async () => {
     const getIntegrationCapabilities = vi.fn()
     dsMocks.getDataSource.mockReturnValue({ getIntegrationCapabilities, getBomMultitableContext: vi.fn() })
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(404)
     expect(getIntegrationCapabilities).not.toHaveBeenCalled()
   })
@@ -553,7 +558,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
       getIntegrationCapabilities: vi.fn().mockRejectedValue(new Error('boom')),
       requestBomEcoRevisionIntent,
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(503)
     expect(res.body.reason).toBe('unavailable')
     expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
@@ -565,7 +570,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
       getIntegrationCapabilities: vi.fn().mockResolvedValue({ available: true, manifest: manifest(BOM_ENTITLED) }),
       requestBomEcoRevisionIntent,
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(404)
     expect(res.body.reason).toBe('unsupported')
     expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
@@ -580,7 +585,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
       }),
       requestBomEcoRevisionIntent,
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(403)
     expect(res.body.reason).toBe('not-entitled')
     expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
@@ -601,7 +606,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
       }),
       requestBomEcoRevisionIntent,
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(200)
     expect(requestBomEcoRevisionIntent).toHaveBeenCalledTimes(1)
   })
@@ -615,7 +620,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
       }),
       requestBomEcoRevisionIntent,
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(404)
     expect(res.body.reason).toBe('unsupported')
     expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
@@ -624,7 +629,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
   it('relays the provider success envelope (eco_id/state/attached) verbatim', async () => {
     const adapter = intentAdapter()
     dsMocks.getDataSource.mockReturnValue(adapter)
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
       eco_id: 'ECO-1', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2',
@@ -639,7 +644,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     dsMocks.getDataSource.mockReturnValue(intentAdapter({
       requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: notLocked }),
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(409)
     expect(res.body.reason).toBe('not_locked')
   })
@@ -651,7 +656,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     dsMocks.getDataSource.mockReturnValue(intentAdapter({
       requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: rejected }),
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(409)
     expect(res.body.reason).toBe('eco_intent_rejected')
   })
@@ -663,7 +668,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     dsMocks.getDataSource.mockReturnValue(intentAdapter({
       requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: weird }),
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(409)
     expect(res.body.reason).toBe('provider-rejected')
   })
@@ -673,7 +678,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     dsMocks.getDataSource.mockReturnValue(intentAdapter({
       requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: forbidden }),
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(403)
     expect(res.body.reason).toBe('provider-rejected')
   })
@@ -682,7 +687,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     dsMocks.getDataSource.mockReturnValue(intentAdapter({
       requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: new Error('ECONNREFUSED') }),
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(502)
     expect(res.body.reason).toBe('provider-unavailable')
   })
@@ -691,7 +696,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     dsMocks.getDataSource.mockReturnValue(intentAdapter({
       requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [{ eco_id: 'ECO-1' }] }),
     }))
-    const res = await request(app).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL)
     expect(res.status).toBe(502)
     expect(res.body.reason).toBe('malformed-response')
   })
