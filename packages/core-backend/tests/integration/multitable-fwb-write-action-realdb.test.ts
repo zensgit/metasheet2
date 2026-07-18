@@ -58,7 +58,7 @@ const input = (over: Partial<FwbWriteActionInput> = {}): FwbWriteActionInput => 
 
 async function counts(eventId: string) {
   const rec = await db().query(`SELECT count(*)::int AS c FROM ${SCRATCH}`)
-  const led = await db().query('SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE instance_id=$1', [`apr_${RUN}`])
+  const led = await db().query('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE instance_id=$1', [`apr_${RUN}`])
   const obx = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE event_id=$1', [eventId])
   return { rec: Number(rec.rows[0].c), led: Number(led.rows[0].c), obx: Number(obx.rows[0].c) }
 }
@@ -69,7 +69,7 @@ describeIfDatabase('FWB-1 slice ③ — same-transaction write action (real DB)'
   })
   afterAll(async () => {
     await db().query(`DROP TABLE IF EXISTS ${SCRATCH}`).catch(() => {})
-    await db().query('DELETE FROM meta_automation_action_applied WHERE instance_id=$1', [`apr_${RUN}`]).catch(() => {})
+    await db().query('DELETE FROM meta_fwb_action_applied WHERE instance_id=$1', [`apr_${RUN}`]).catch(() => {})
     await db().query(`DELETE FROM meta_automation_outbox WHERE event_id LIKE $1`, [`evt_${RUN}%`]).catch(() => {})
   })
 
@@ -110,7 +110,7 @@ describeIfDatabase('FWB-1 slice ③ — same-transaction write action (real DB)'
     const iMap = input({ actionKey: `ak_${RUN}_m`, formValues: { f1: { bad: true } } })
     const r2 = await executeWriteApprovalFormValues(db(), iMap, gatesAll(), seam)
     expect(r2).toMatchObject({ status: 'rejected', reason: 'mapping' })
-    const led = await db().query('SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE action_key = ANY($1)', [[`ak_${RUN}_g`, `ak_${RUN}_m`]])
+    const led = await db().query('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key = ANY($1)', [[`ak_${RUN}_g`, `ak_${RUN}_m`]])
     expect(Number(led.rows[0].c)).toBe(0)
   })
 
@@ -126,7 +126,7 @@ describeIfDatabase('FWB-1 slice ③ — same-transaction write action (real DB)'
     } finally {
       c.release()
     }
-    const led = await db().query('SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE action_key=$1', [`ak_${RUN}_atomic`])
+    const led = await db().query('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1', [`ak_${RUN}_atomic`])
     expect(Number(led.rows[0].c)).toBe(0)
     expect((await counts(`evt_${RUN}_atomic`)).obx).toBe(0)
   })
