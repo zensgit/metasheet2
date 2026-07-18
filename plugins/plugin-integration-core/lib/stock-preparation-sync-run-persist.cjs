@@ -240,13 +240,13 @@ function projectPointerStale(reason) {
   )
 }
 
-// H-2 precondition (adversarial round-2): the stale-pointer discriminator compares snapshotVersion,
-// which is caller-supplied and DEFAULTS to 1 — without enforcement, two default-version syncs make
-// CW4-existing invisible again (equal versions never compare as stale). So the CREATE path enforces
-// strictly-monotonic per-project versions: a genuinely-new batch for an EXISTING project must carry a
-// snapshotVersion strictly above the version of the batch the live pointer names. This also matches
-// what the read side already assumes (predecessor picking / latest-complete resolution order by
-// version). reason ∈ {not_monotonic, pointer_unresolvable}.
+// H-2 precondition (rounds 2-4): the stale-pointer discriminator compares snapshotVersion, which is
+// caller-supplied and DEFAULTS to 1 — without enforcement, two default-version syncs make
+// CW4-existing invisible again. The CREATE path therefore enforces strictly-monotonic per-project
+// versions against the WHOLE batch history of the business project (not the pointer batch — orphan
+// complete batches are part of the history; and not gated on the project row existing — a first-sync
+// crash leaves history with no project row). Matches what the read side already assumes (predecessor
+// picking / latest-complete resolution order by version). reason ∈ {not_monotonic, history_unprovable}.
 function versionNotMonotonic(reason) {
   throw new StockPreparationSyncRunPersistError(
     422,
@@ -268,8 +268,21 @@ async function resolvePointerBatchVersion({ batchScoped, plan, pointerRunId }) {
     throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
   }
   if (pointerBatches.length !== 1) return null
-  const pointerVersion = Number(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
-  return Number.isFinite(pointerVersion) ? pointerVersion : null
+  return parseStrictVersion(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
+}
+
+// Round-4: STRICT version parser — Number() coerces null/''/booleans to finite numbers, which let
+// a null-version history row slip past the "non-numeric fails closed" intent. Versions must be
+// positive integers (or their non-empty string serializations); everything else is null → callers
+// fail closed. Used by ALL THREE consumers: the history max-scan, the pointer-batch resolution, and
+// the plan's own current version.
+function parseStrictVersion(value) {
+  let numeric = null
+  if (typeof value === 'number') numeric = value
+  else if (typeof value === 'string' && value.trim() !== '') numeric = Number(value)
+  else return null
+  if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric <= 0) return null
+  return numeric
 }
 
 // Round-3: bounded, numeric MAX-version scan over ALL batch rows of a business project (orphan
@@ -286,8 +299,8 @@ async function readProjectMaxBatchVersion(batchScoped, projectId) {
     })
     if (!Array.isArray(pageRows) || pageRows.length > READ_PAGE_LIMIT) return null
     for (const row of pageRows) {
-      const version = Number(row && row.data && row.data.snapshotVersion)
-      if (!Number.isFinite(version)) return null
+      const version = parseStrictVersion(row && row.data && row.data.snapshotVersion)
+      if (version === null) return null
       if (version > maxVersion) maxVersion = version
     }
     if (pageRows.length < READ_PAGE_LIMIT) return maxVersion
@@ -420,8 +433,8 @@ async function assertExactReplay({
   if (pointerRunId !== currentRunId) {
     if (!pointerRunId) projectPointerStale('pointer_unresolvable')
     const pointerVersion = await resolvePointerBatchVersion({ batchScoped, plan, pointerRunId })
-    const currentVersion = Number(plan.snapshotBatch.snapshotVersion)
-    if (pointerVersion === null || !Number.isFinite(currentVersion)) projectPointerStale('pointer_unresolvable')
+    const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+    if (pointerVersion === null || currentVersion === null) projectPointerStale('pointer_unresolvable')
     if (pointerVersion < currentVersion) projectPointerStale('stale_pointer')
     // EQUAL version on a DIFFERENT run cannot prove the pointer advanced (adversarial round-2: with
     // versions enforced monotonic at create, this state is only reachable on legacy/degenerate data)
@@ -598,16 +611,16 @@ async function persistStockPreparationSyncRun(input = {}) {
     }
   }
 
-  // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write): a genuinely-new
-  // batch for an EXISTING project must carry a snapshotVersion strictly above EVERY existing batch of
-  // that project — not merely above the batch the live pointer names (round-3 finding: V1 commit →
-  // V3 crash before the project patch leaves a COMPLETE orphan V3 with the pointer still on V1; a
-  // pointer-only compare then wrongly accepted V2). The scan is bounded and numeric: paged read of
-  // the project's batch rows; an unprovable history (page bound exceeded / non-numeric version)
+  // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write, for EVERY new
+  // batch): the new snapshotVersion must be strictly above EVERY existing batch of the business
+  // project. The scan runs UNCONDITIONALLY — round-4: a FIRST-sync crash at the project create
+  // (CW4-first) leaves orphan batch history with NO project row, so gating the scan on the project
+  // row's existence let the next lower-version sync through. Empty history scans to max 0 (any
+  // positive version passes); unprovable history (page bound exceeded / non-strict version values)
   // fails closed. This is what makes the replay-side stale/advanced inference sound.
-  if (projectRows.length === 1) {
-    const currentVersion = Number(plan.snapshotBatch.snapshotVersion)
-    if (!Number.isFinite(currentVersion)) versionNotMonotonic('history_unprovable')
+  {
+    const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+    if (currentVersion === null) versionNotMonotonic('history_unprovable')
     const maxVersion = await readProjectMaxBatchVersion(batchTarget.scoped, optionalString(planInputs.projectId))
     if (maxVersion === null) versionNotMonotonic('history_unprovable')
     if (currentVersion <= maxVersion) versionNotMonotonic('not_monotonic')

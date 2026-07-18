@@ -928,10 +928,11 @@ async function main() {
     const provisioning = makeProvisioning()
     await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
     const writesAfterFirst = recordsApi.createCalls.length
-    for (const overrides of [
-      { syncRunId: 'run_2', snapshotBatchId: 'batch_2' }, // omitted -> defaults to 1 == pointer version
-      { syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 1 },
-      { syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 0 },
+    for (const [overrides, reason] of [
+      [{ syncRunId: 'run_2', snapshotBatchId: 'batch_2' }, 'not_monotonic'], // omitted -> defaults to 1 == history max
+      [{ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 1 }, 'not_monotonic'],
+      // 0 is not a strict version at all (R4 parser: positive integers only) -> unprovable, not merely non-increasing.
+      [{ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 0 }, 'history_unprovable'],
     ]) {
       await assert.rejects(
         () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs(overrides) }),
@@ -940,7 +941,7 @@ async function main() {
           error.status === 422 &&
           error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
           error.details.field === 'snapshotVersion' &&
-          error.details.reason === 'not_monotonic',
+          error.details.reason === reason,
       )
     }
     assert.equal(recordsApi.createCalls.length, writesAfterFirst, 'rejected before any write')
@@ -992,6 +993,94 @@ async function main() {
       ...basePlanInputs({ syncRunId: 'run_4', snapshotBatchId: 'batch_4', snapshotVersion: 4 }),
     })
     assert.equal(next.mode, 'created')
+  })
+
+  await run('R4: FIRST-sync crash at project create (CW4-first) leaves orphan history with NO project row — the scan still runs: V2 rejected, V4 proceeds', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // Empty project: V3 crashes at the PROJECT createRecord (batch/lines/run all landed; no project row).
+    const crashingApi = Object.create(recordsApi)
+    crashingApi.createRecord = async (input = {}) => {
+      if (input.sheetId === PROJECT_SHEET_ID) throw new Error('injected crash at project create')
+      return recordsApi.createRecord(input)
+    }
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi: crashingApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
+      }),
+      /injected crash at project create/,
+    )
+    // Round-4 finding: gating the scan on projectRows.length === 1 skipped it here (no project row),
+    // so V2 slipped past the complete orphan V3. The scan must run for EVERY new batch.
+    const writesBefore = recordsApi.createCalls.length
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'not_monotonic',
+    )
+    assert.equal(recordsApi.createCalls.length, writesBefore, 'rejected before any write')
+    const next = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_4', snapshotBatchId: 'batch_4', snapshotVersion: 4 }),
+    })
+    assert.equal(next.mode, 'created')
+  })
+
+  await run('R4: strict version parsing — a null-version history row fails closed (history_unprovable), never coerced to 0', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    // Corrupt V1's stored version to null (raw physical patch — legacy/degenerate data shape).
+    const batchRows = await recordsApi.queryRecords({
+      sheetId: BATCH_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotBatchId')]: 'batch_1' },
+    })
+    await recordsApi.patchRecord({
+      sheetId: BATCH_SHEET_ID,
+      recordId: batchRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')]: null },
+    })
+    // Round-4 finding: Number(null) === 0 let this slip through as "max 0". Strict parsing must
+    // fail closed instead of silently writing V2 over unprovable history.
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'history_unprovable',
+    )
+    // Positive control: a numeric-STRING stored version is accepted by the strict parser.
+    await recordsApi.patchRecord({
+      sheetId: BATCH_SHEET_ID,
+      recordId: batchRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')]: '1' },
+    })
+    const ok = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    assert.equal(ok.mode, 'created')
   })
 
   await run('H-2: equal-version pointer on a DIFFERENT run (legacy/degenerate data) -> 409 pointer_unresolvable, never a silent 200', async () => {
