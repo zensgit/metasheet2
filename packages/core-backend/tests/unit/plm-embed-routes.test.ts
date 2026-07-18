@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // Controllable DataSourceManager mock.
 const dsMocks = vi.hoisted(() => ({ getDataSource: vi.fn() }))
@@ -85,6 +86,8 @@ function buildApp() {
 const URL = '/api/plm-embed/bom-review/context'
 
 describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
+  const pinned = usePinnedServer()
+
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
     jtiMocks.consume.mockReset()
@@ -94,6 +97,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     process.env.PLM_EMBED_AUDIENCE = AUD
     process.env.PLM_EMBED_ALLOWED_ORIGINS = ORIGIN
     process.env.PLM_EMBED_DATA_SOURCE_ID = DS_ID
+    pinned.setApp(buildApp())
   })
   afterEach(() => {
     for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
@@ -108,7 +112,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   it('REAL CHAIN: an embed-token-only request (no session Bearer) reaches the route -> 200', async () => {
     const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(200)
     expect(res.body.data.entitled).toBe(true)
     expect(res.body.data.context).toEqual(CONTEXT)
@@ -127,79 +131,79 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
 
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({}, 'embed-new'))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({}, 'embed-new'))
 
     expect(res.status).toBe(200)
     expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
   })
 
   it('a non-whitelisted /api/* path with no session is 401 (proves the stand-in gate is real)', async () => {
-    const res = await request(buildApp()).get('/api/other/thing')
+    const res = await request(pinned.url()).get('/api/other/thing')
     expect(res.status).toBe(401)
   })
 
   it('no embed token -> 401', async () => {
-    const res = await request(buildApp()).get(URL)
+    const res = await request(pinned.url()).get(URL)
     expect(res.status).toBe(401)
   })
 
   it('invalid embed token -> 401', async () => {
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', 'not.a.valid.jwt')
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', 'not.a.valid.jwt')
     expect(res.status).toBe(401)
   })
 
   it('no Yuantus public key configured -> 503 fail-closed (not 401)', async () => {
     delete process.env.YUANTUS_EMBED_PUBLIC_KEY
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
   })
 
   it('malformed YUANTUS_EMBED_PUBLIC_KEYS -> 503 fail-closed (not a server error)', async () => {
     process.env.YUANTUS_EMBED_PUBLIC_KEYS = '{not-json'
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
   })
 
   it('embed_origin not in the allowlist -> 403', async () => {
     dsMocks.getDataSource.mockReturnValue({ getBomMultitableContext: vi.fn() })
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example.com' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example.com' }))
     expect(res.status).toBe(403)
   })
 
   it('a token scoped to a DIFFERENT feature -> 403 (must be bom_multitable)', async () => {
     const getBomMultitableContext = vi.fn()
     dsMocks.getDataSource.mockReturnValue({ getBomMultitableContext })
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ feature_key: 'approval_automation' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ feature_key: 'approval_automation' }))
     expect(res.status).toBe(403)
     expect(getBomMultitableContext).not.toHaveBeenCalled()
   })
 
   it('a token with NO exp -> 401 (exp is required; never mint a non-expiring token)', async () => {
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ exp: undefined }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ exp: undefined }))
     expect(res.status).toBe(401)
   })
 
   it('a token with a non-numeric exp -> 401', async () => {
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ exp: 'soon' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ exp: 'soon' }))
     expect(res.status).toBe(401)
   })
 
   it('data source not configured -> 503', async () => {
     delete process.env.PLM_EMBED_DATA_SOURCE_ID
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
   })
 
   it('provider throws -> degrades (context:null), never 500', async () => {
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext: vi.fn().mockRejectedValue(new Error('boom')) }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(200)
     expect(res.body.data.context).toBeNull()
     expect(res.body.data.reason).toBe('unavailable')
   })
 
   it('/config serves the single-source allowlist + frame-ancestors (public, no token)', async () => {
-    const res = await request(buildApp()).get('/api/plm-embed/config')
+    const res = await request(pinned.url()).get('/api/plm-embed/config')
     expect(res.status).toBe(200)
     expect(res.body.data.allowed_origins).toEqual([ORIGIN])
     expect(res.body.data.frame_ancestors).toBe(`frame-ancestors ${ORIGIN}`)
@@ -207,14 +211,14 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
 
   it('/config frame-ancestors fails CLOSED to none when unconfigured', async () => {
     delete process.env.PLM_EMBED_ALLOWED_ORIGINS
-    const res = await request(buildApp()).get('/api/plm-embed/config')
+    const res = await request(pinned.url()).get('/api/plm-embed/config')
     expect(res.body.data.allowed_origins).toEqual([])
     expect(res.body.data.frame_ancestors).toBe("frame-ancestors 'none'")
   })
 
   it('a literal * in the allowlist is dropped (never allow-all)', async () => {
     process.env.PLM_EMBED_ALLOWED_ORIGINS = '*'
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(403) // origin no longer matches an empty allowlist
   })
 
@@ -223,7 +227,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   it('token tenant matches the served (effective) tenant -> 200', async () => {
     const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, tenant: 'tenant-b' }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-b' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-b' }))
     expect(res.status).toBe(200)
     expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
   })
@@ -231,7 +235,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   it('FALSE-CLOSURE GUARD: served tenant B (e.g. global wins over options A) but token tenant A -> 403, BOM never queried', async () => {
     const getBomMultitableContext = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, tenant: 'tenant-b' }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' }))
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
     expect(getBomMultitableContext).not.toHaveBeenCalled()
@@ -240,7 +244,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   it('absent served tenant -> 403 fail-closed, BOM never queried', async () => {
     const getBomMultitableContext = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, tenant: undefined }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
     expect(getBomMultitableContext).not.toHaveBeenCalled()
@@ -249,14 +253,14 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   it('an unconnected adapter is connected before its tenant is read', async () => {
     const connect = vi.fn().mockResolvedValue(undefined)
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ connected: false, connect }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(connect).toHaveBeenCalled()
     expect(res.status).toBe(200)
   })
 
   it('an adapter missing the tenant/connect surface -> 503 (stricter duck-type)', async () => {
     dsMocks.getDataSource.mockReturnValue({ getBomMultitableContext: vi.fn() })
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
   })
 
@@ -272,7 +276,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     const spy = vi.spyOn(adapter, 'getBomMultitableContext')
     dsMocks.getDataSource.mockReturnValue(adapter)
     // a token for tenant-b must NOT be able to read tenant-a's served data
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-b' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-b' }))
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
     expect(spy).not.toHaveBeenCalled()
@@ -285,7 +289,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   it('first use: consumes the (scoped) jti and serves -> 200', async () => {
     const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ jti: 'j-abc' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ jti: 'j-abc' }))
     expect(res.status).toBe(200)
     expect(jtiMocks.consume).toHaveBeenCalledWith('plm-embed:jti:j-abc', expect.any(Number))
     expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
@@ -295,7 +299,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     jtiMocks.consume.mockResolvedValue(false)
     const getBomMultitableContext = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('EMBED_TOKEN_REPLAYED')
     expect(getBomMultitableContext).not.toHaveBeenCalled()
@@ -305,7 +309,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     jtiMocks.consume.mockRejectedValue(new Error('redis down'))
     const getBomMultitableContext = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
     expect(getBomMultitableContext).not.toHaveBeenCalled()
   })
@@ -313,7 +317,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   it('a token with no jti -> 401 (cannot be tracked for single-use)', async () => {
     const getBomMultitableContext = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
-    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ jti: undefined }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ jti: undefined }))
     expect(res.status).toBe(401)
     expect(jtiMocks.consume).not.toHaveBeenCalled()
     expect(getBomMultitableContext).not.toHaveBeenCalled()
