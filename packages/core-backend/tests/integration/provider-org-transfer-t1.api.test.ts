@@ -390,6 +390,28 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(await auditRowFor('apply', transferId)).toBe(1)
   })
 
+  it("recovery edges (gate P3): 'failed' is NON-absorbing (failed→scan recovers) and 'applying' is cancellable", async () => {
+    // No T1 producer reaches 'failed' or leaves 'applying' observable (the no-op apply commits
+    // scanned→applied in one txn) — both are future real-adapter states, seeded directly so the
+    // recovery claims in the service header are load-bearing NOW: dropping 'failed' from
+    // SCANNABLE_STATUSES or 'applying' from NON_TERMINAL_STATUSES reds this test.
+    const { source, target } = await seedPair('recover')
+    const transferId = await createTransfer(source, target)
+
+    await query(`UPDATE provider_org_transfers SET status = 'failed', last_error = 'seeded', updated_at = now() WHERE id = $1`, [
+      transferId,
+    ])
+    const rescued = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`)
+    expect(rescued.status).toBe(200)
+    expect(rescued.body.data.transfer.status).toBe('scanned')
+    expect(rescued.body.data.transfer.lastError).toBeNull() // scan clears the failure
+
+    await query(`UPDATE provider_org_transfers SET status = 'applying', updated_at = now() WHERE id = $1`, [transferId])
+    const cancelled = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
+    expect(cancelled.status).toBe(200)
+    expect(cancelled.body.data.transfer.status).toBe('cancelled')
+  })
+
   it('rejects a dryRun query value other than exactly "true" instead of coercing it into a REAL apply', async () => {
     const { source, target } = await seedPair('dryrun-strict')
     const transferId = await createTransfer(source, target)
