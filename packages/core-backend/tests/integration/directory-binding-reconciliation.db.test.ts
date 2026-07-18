@@ -220,6 +220,20 @@ describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real D
     await query(`UPDATE directory_integrations SET status = 'active' WHERE id = $1`, [dt])
     expect(await sweepStaleDepartmentBindings(org)).toEqual({ staled: 1, healed: 0 })
     expect(await bindingStatus(binding)).toBe('stale')
+
+    // Gate P2 (restack round): the HEAL direction must honor the same freeze — 'nor heal until
+    // live again'. Revive the remote dept (heal would now fire), then disable the integration:
+    // the stale binding must NOT heal off a frozen snapshot. Neutering the healed-UPDATE's
+    // ri.status='active' predicate turns exactly this leg red.
+    await query(`UPDATE directory_departments SET is_active = true WHERE id = $1`, [rDept])
+    await query(`UPDATE directory_integrations SET status = 'disabled' WHERE id = $1`, [dt])
+    expect(await sweepStaleDepartmentBindings(org)).toEqual({ staled: 0, healed: 0 }) // frozen: no heal either
+    expect(await bindingStatus(binding)).toBe('stale')
+
+    // positive control: re-enable → the SAME sweep heals it back to active
+    await query(`UPDATE directory_integrations SET status = 'active' WHERE id = $1`, [dt])
+    expect(await sweepStaleDepartmentBindings(org)).toEqual({ staled: 0, healed: 1 })
+    expect(await bindingStatus(binding)).toBe('active')
   })
 
   it('H. Q6 narrowing: a sweep narrowed to integration X leaves integration Y bindings untouched in the SAME org', async () => {

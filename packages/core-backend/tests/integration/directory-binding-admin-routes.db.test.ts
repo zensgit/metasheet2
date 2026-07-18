@@ -155,6 +155,19 @@ describeIfDatabase('B7 — department-binding admin routes (real DB, HTTP)', () 
     const res2 = await request(adminApp).post(`${BASE}/sweep`).send({})
     expect((res2.body.data ?? res2.body).staled).toBe(1)
     expect(await sweepAuditCount()).toBe(2)
+
+    // Gate P3 (restack round): pin the VALUES-FREE property, not just the count — the serialized
+    // sweep audit rows must carry ids/counters only, never department names (a regression adding
+    // names/urls to meta would otherwise stay green).
+    const serialized = await query<{ body: string | null }>(
+      `SELECT string_agg(to_jsonb(a)::text, '|') AS body
+         FROM audit_logs a WHERE a.action = 'directory.department_binding.sweep'`
+    )
+    const auditBody = serialized.rows[0].body ?? ''
+    expect(auditBody.length).toBeGreaterThan(0)
+    for (const leaked of [x.lDeptName, y.lDeptName, 'B7R swx', 'B7R swy']) {
+      expect(auditBody).not.toContain(leaked)
+    }
   })
 
   it('D. POST /sweep validations reject without sweeping or auditing: unlisted field / non-UUID / cross-org', async () => {

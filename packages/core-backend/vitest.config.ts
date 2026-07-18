@@ -169,13 +169,13 @@ export default defineConfig({
       // Canonical Org MVP B7 (§9): suggest-only reconciliation — remote disappearance stales the
       // BINDING only (local dept row byte-identical), heal/idempotent sweep, ambiguous names never
       // auto-matched, suggest read-only. DATABASE_URL-gated; wired as a WHOLE FILE into the
-      // directory real-DB step (both points asserted by b7-reconciliation-ci-wiring.test.mjs).
+      // approval real-DB step (both points asserted by b7-reconciliation-ci-wiring.test.mjs).
       'tests/integration/directory-binding-reconciliation.db.test.ts',
       // B7 owner round (#4436): the binding ADMIN routes (list/suggestions/sweep+audit) and the
       // Q6 POST-SYNC auto-sweep hook (end-to-end through the REAL sync with a mocked provider
       // pull; narrowing + failure isolation). DATABASE_URL-gated; wired as WHOLE FILES into the
-      // directory (routes) and approval (sync-hook) real-DB steps; both points asserted by
-      // b7-round2-ci-wiring.test.mjs.
+      // approval real-DB step (gate P3 label fix: all three B7 suites run in that one step);
+      // both points asserted by b7-round2-ci-wiring.test.mjs.
       'tests/integration/directory-binding-admin-routes.db.test.ts',
       'tests/integration/directory-binding-sync-hook.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager

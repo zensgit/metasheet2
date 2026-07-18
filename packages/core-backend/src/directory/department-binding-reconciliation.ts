@@ -24,10 +24,11 @@ import { query } from '../db/pg'
  *     writes — applying a suggestion is a separate, explicit admin action (future
  *     `PATCH /department-bindings` surface, §7).
  *
- * Neither function is wired into the sync loop yet: WHERE the sweep runs (a post-sync hook vs an
- * admin-triggered action) is an owner decision — wiring it into the hardened sync core without a
- * ruling would be scope creep. Both functions are deterministic and idempotent, so either wiring
- * is safe later.
+ * Wiring (owner Q6 ruling, round 2): the sweep runs from BOTH entry points — automatically after a
+ * successful sync commit (`syncDirectoryIntegration`'s post-commit hook, narrowed to the just-synced
+ * integration, strictly best-effort: a sweep failure never fails the sync) AND on demand via the
+ * admin surface (`POST /api/admin/directory/department-bindings/sweep`, the Q6 admin retry). Both
+ * callers rely on these functions staying deterministic and idempotent.
  */
 
 export interface StaleSweepResult {
