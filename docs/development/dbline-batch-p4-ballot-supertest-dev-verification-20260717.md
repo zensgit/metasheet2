@@ -159,3 +159,16 @@
   {incomplete, ambiguous}）；双端点重复身份测试 + mutation RED。等 owner 复审。
 - **#4463 GO @`5db599796`**、**#4454 GO 先合**、**#4462 条件 GO**（#4454 合后 retarget→main + 全量
   required CI）、**#4456 最后合**——按裁决执行，结果见合并记录。
+
+## 12. Round-4 复审与当前合并状态
+
+- **合并完成**：#4454 `f72057844` → #4463 `fbce9d617`（符合原 GO，纯 rebase 内容等价）→
+  #4462 `fbb92eec4`（retarget→main + 全量 required CI 后合入）。
+- **#4460 HOLD → R4 修复 `9c94e4ec5`**：①历史扫描**无条件**执行（此前 `projectRows.length===1`
+  门让首同步崩溃留下的无 project 行孤儿历史绕过扫描，owner 复现）②`parseStrictVersion` 严格
+  解析器（`Number()` 把 null/空串/布尔强转为有限数的洞，owner 复现）统一用于 max-scan/pointer/
+  current 三处；`snapshotVersion:0` 改判 `history_unprovable`。40/40 + 守卫整体禁用 mutation 4 红。
+- **#4461 HOLD → R4 修复 `a2bebf3dc`**：`resolveDiffBase` 的歧义检查前置于任何 `[0]` 读取
+  （此前重复 base 身份的判决依赖数据库返回序，反序即从 ambiguous 变 PROJECT_MISMATCH，owner
+  复现）；双端点反序测试 + mutation 红。22/22。
+- 两 PR body 均已重写至终版语义（#4461 补 22/22 与 ambiguity 契约；#4460 补 R4 节，指针注释清除）。
