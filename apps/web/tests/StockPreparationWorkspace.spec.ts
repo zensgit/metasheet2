@@ -253,66 +253,87 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       )
     }
 
-    // 2-5. scoped scan of the guard body only.
-    let enforcingIfPos = -1
-    let plmFocusIfPos = -1
-    let allowlist: string[] | null = null
-    const scan = (node: TsNode): void => {
-      if (ts.isIfStatement(node)) {
-        const cond = node.expression
+    // Round-11: the OUTER structure is also exact — no descendant searches. The focus IfStatement
+    // must be UNIQUE in the whole guard (a dead-branch decoy copy breaks uniqueness), the enforcing
+    // permission guard must be a DIRECT SIBLING statement in the focus statement's parent block
+    // (exactly one, positioned before it), and allowedPrefixes must be the UNIQUE DIRECT variable
+    // declaration of the focus block. Condition subtrees are inspected only to IDENTIFY the focus
+    // condition (the typeof-guarded call), never to satisfy structural requirements.
+    const conditionHasPlmFocusCall = (cond: TsNode): boolean => {
+      let found = false
+      const inspect = (n: TsNode): void => {
+        if (found) return
         if (
-          enforcingIfPos === -1 &&
-          ts.isPrefixUnaryExpression(cond) &&
-          cond.operator === ts.SyntaxKind.ExclamationToken &&
-          ts.isCallExpression(cond.operand) &&
-          ts.isIdentifier(cond.operand.expression) &&
-          cond.operand.expression.text === 'isRoutePermitted' &&
-          isEnforcingPermittedCall(cond.operand) &&
-          denyBranchIsExactly(node.thenStatement)
+          ts.isCallExpression(n) &&
+          ts.isPropertyAccessExpression(n.expression) &&
+          n.expression.name.text === 'isPlmWorkbenchFocused' &&
+          ts.isIdentifier(n.expression.expression) &&
+          n.expression.expression.text === 'flags'
         ) {
-          enforcingIfPos = node.getStart(source)
+          found = true
+          return
         }
-        let mentionsPlmFocusCall = false
-        const inspectCond = (n: TsNode): void => {
-          if (
-            ts.isCallExpression(n) &&
-            ts.isPropertyAccessExpression(n.expression) &&
-            n.expression.name.text === 'isPlmWorkbenchFocused'
-          ) {
-            mentionsPlmFocusCall = true
-          }
-          ts.forEachChild(n, inspectCond)
-        }
-        inspectCond(cond)
-        if (mentionsPlmFocusCall && plmFocusIfPos === -1) {
-          plmFocusIfPos = node.getStart(source)
-          // 5. allowedPrefixes must live INSIDE this focus block.
-          const findAllowlist = (n: TsNode): void => {
-            if (
-              ts.isVariableDeclaration(n) &&
-              ts.isIdentifier(n.name) &&
-              n.name.text === 'allowedPrefixes' &&
-              n.initializer &&
-              ts.isArrayLiteralExpression(n.initializer)
-            ) {
-              allowlist = n.initializer.elements
-                .filter((el): el is import('typescript').StringLiteral => ts.isStringLiteral(el))
-                .map((el) => el.text)
-            }
-            ts.forEachChild(n, findAllowlist)
-          }
-          findAllowlist(node.thenStatement)
+        ts.forEachChild(n, inspect)
+      }
+      inspect(cond)
+      return found
+    }
+
+    // Collect ALL focus-if candidates anywhere in the guard — for a UNIQUENESS assertion only.
+    const focusCandidates: import('typescript').IfStatement[] = []
+    const collect = (n: TsNode): void => {
+      if (ts.isIfStatement(n) && conditionHasPlmFocusCall(n.expression)) focusCandidates.push(n)
+      ts.forEachChild(n, collect)
+    }
+    collect(guardBody!)
+    expect(focusCandidates.length, 'exactly ONE plm-workbench focus if-statement may exist in the guard (dead-branch copies break this)').toBe(1)
+    const focusIf = focusCandidates[0]
+
+    const isEnforcingGuardIf = (st: TsNode): boolean =>
+      ts.isIfStatement(st) &&
+      ts.isPrefixUnaryExpression(st.expression) &&
+      st.expression.operator === ts.SyntaxKind.ExclamationToken &&
+      ts.isCallExpression(st.expression.operand) &&
+      ts.isIdentifier(st.expression.operand.expression) &&
+      st.expression.operand.expression.text === 'isRoutePermitted' &&
+      isEnforcingPermittedCall(st.expression.operand) &&
+      denyBranchIsExactly(st.thenStatement)
+
+    // DIRECT-SIBLING discipline: the focus statement's parent must be a block; the enforcing guard
+    // must appear among that block's direct statements, exactly once, before the focus statement.
+    const parent = focusIf.parent
+    expect(ts.isBlock(parent), 'the focus if-statement must sit directly in a statement block').toBe(true)
+    const siblings = (parent as import('typescript').Block).statements
+    const focusIdx = siblings.findIndex((st) => st === focusIf)
+    const guardIdxs = siblings
+      .map((st, i) => (isEnforcingGuardIf(st) ? i : -1))
+      .filter((i) => i !== -1)
+    expect(guardIdxs.length, 'exactly ONE direct enforcing isRoutePermitted guard must exist beside the focus block (nested/dead-branch copies do not count)').toBe(1)
+    expect(guardIdxs[0], 'the enforcing permission guard must precede the plm-workbench focus block').toBeLessThan(focusIdx)
+
+    // allowedPrefixes: the UNIQUE DIRECT declaration of the focus block — no recursive search.
+    expect(ts.isBlock(focusIf.thenStatement), 'the focus branch must be a block').toBe(true)
+    const focusStatements = (focusIf.thenStatement as import('typescript').Block).statements
+    const allowlistDecls: string[][] = []
+    for (const st of focusStatements) {
+      if (!ts.isVariableStatement(st)) continue
+      for (const decl of st.declarationList.declarations) {
+        if (
+          ts.isIdentifier(decl.name) &&
+          decl.name.text === 'allowedPrefixes' &&
+          decl.initializer &&
+          ts.isArrayLiteralExpression(decl.initializer)
+        ) {
+          allowlistDecls.push(
+            decl.initializer.elements
+              .filter((el): el is import('typescript').StringLiteral => ts.isStringLiteral(el))
+              .map((el) => el.text),
+          )
         }
       }
-      ts.forEachChild(node, scan)
     }
-    scan(guardBody!)
-
-    expect(enforcingIfPos, 'the guard must contain if (!isRoutePermitted(to.meta, cb-calling-auth.hasPermission)) { return next(flags.resolveHomePath()) } — bare calls, constant callbacks, bare next() and nested decoy returns do not enforce').toBeGreaterThan(-1)
-    expect(plmFocusIfPos, 'the plm-workbench focus if-block must exist inside the guard').toBeGreaterThan(-1)
-    expect(enforcingIfPos, 'the enforcing permission check must precede the plm-workbench focus block').toBeLessThan(plmFocusIfPos)
-    expect(allowlist, 'allowedPrefixes must be declared INSIDE the plm-workbench focus block').not.toBeNull()
-    expect(allowlist).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
+    expect(allowlistDecls.length, 'allowedPrefixes must be declared exactly once as a DIRECT statement of the focus block').toBe(1)
+    expect(allowlistDecls[0]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
   })
 })
 
