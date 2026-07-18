@@ -71,6 +71,11 @@ const LINE_KEY_FIELD = LINE_TEMPLATE.keyFields[0]
 const RUN_KEY_FIELD = RUN_TEMPLATE.keyFields[0]
 const READ_PAGE_LIMIT = 500
 const READ_MAX_PAGES = 50
+// H-3 (P4 lock round-1: prerequisite for the Option-A long transaction, and a replay-provability
+// precondition TODAY): a plan larger than the bounded replay read could be CREATED but never exactly
+// replayed — every retry would 409 PERSIST_EXISTING_BATCH_READ_UNPROVABLE forever. Reject loudly
+// before any provisioning / records access instead of persisting an unprovable batch.
+const PERSIST_MAX_PLAN_LINES = READ_PAGE_LIMIT * READ_MAX_PAGES
 
 // #4163 T1: the PROJECT table template — grounds the project-row upsert the SAME way BATCH/LINE/RUN are
 // grounded above (frozen template, never an invented field name).
@@ -221,6 +226,16 @@ function existingBatchIncomplete(target, reason) {
   )
 }
 
+// H-2 (P4 lock round-1: mandatory-first hardening). reason ∈ {stale_pointer, pointer_unresolvable}.
+function projectPointerStale(reason) {
+  throw new StockPreparationSyncRunPersistError(
+    409,
+    'PERSIST_PROJECT_POINTER_STALE',
+    'existing project live pointer does not cover this batch',
+    { target: 'project', reason },
+  )
+}
+
 function assertPlanIdentityKeys(plan, snapshotLines) {
   if (!optionalString(plan && plan.snapshotBatch && plan.snapshotBatch[BATCH_KEY_FIELD])) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshot batch key is required', { field: BATCH_KEY_FIELD })
@@ -295,6 +310,7 @@ async function assertExactReplay({
   snapshotLines,
   lineScoped,
   runScoped,
+  batchScoped,
   projectRows,
 }) {
   if (!projectionsEqual(BATCH_TEMPLATE, plan.snapshotBatch, existingBatch)) {
@@ -330,6 +346,34 @@ async function assertExactReplay({
   }
 
   if (projectRows.length === 0) existingBatchIncomplete('project', 'missing')
+
+  // H-2 (P4 lock round-1: mandatory-first): project-row EXISTENCE is not enough. A crash between the
+  // run create and the project upsert on a repeat sync (CW4-existing) used to replay as a silent 200
+  // with the live pointer still on an OLDER run — the only crash window with no observable at all.
+  // Discriminator (run rows carry no timestamps by design): batch rows carry `syncRunId`, so resolve
+  // the batch the pointer's run belongs to (same business project) and compare `snapshotVersion`:
+  //   pointer at this run                    -> covered, 200 path continues;
+  //   pointer batch at a HIGHER/EQUAL version -> a later sync legitimately advanced the pointer, 200;
+  //   pointer batch at a LOWER version        -> stale pointer (CW4-existing), 409;
+  //   pointer/pointer-batch not resolvable    -> not provable either way, fail closed 409.
+  const pointerRunId = optionalString(projectRows[0] && projectRows[0].data && projectRows[0].data.lastSyncRunId)
+  const currentRunId = optionalString(plan.syncRun[RUN_KEY_FIELD])
+  if (pointerRunId !== currentRunId) {
+    if (!pointerRunId) projectPointerStale('pointer_unresolvable')
+    const pointerBatches = await batchScoped.queryRecords({
+      filters: { projectId: optionalString(plan.snapshotBatch.projectId), syncRunId: pointerRunId },
+      limit: 2,
+      offset: 0,
+    })
+    if (!Array.isArray(pointerBatches)) {
+      throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+    }
+    if (pointerBatches.length !== 1) projectPointerStale('pointer_unresolvable')
+    const pointerVersion = Number(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
+    const currentVersion = Number(plan.snapshotBatch.snapshotVersion)
+    if (!Number.isFinite(pointerVersion) || !Number.isFinite(currentVersion)) projectPointerStale('pointer_unresolvable')
+    if (pointerVersion < currentVersion) projectPointerStale('stale_pointer')
+  }
 }
 
 // #4163 T1 — upsert the PROJECT row: query by the key field first (never trust "it must be new"), then
@@ -433,6 +477,18 @@ async function persistStockPreparationSyncRun(input = {}) {
   const snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
   assertPlanIdentityKeys(plan, snapshotLines)
 
+  // H-3: explicit plan-size bound — fail before ANY provisioning / records access. See
+  // PERSIST_MAX_PLAN_LINES above; counts are values-free by doctrine, the details carry only the
+  // design-constant bound and the field name, never row content.
+  if (snapshotLines.length > PERSIST_MAX_PLAN_LINES) {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_PLAN_TOO_LARGE',
+      'planned snapshot line count exceeds the provable persist bound',
+      { field: 'snapshotLines', maxLines: PERSIST_MAX_PLAN_LINES },
+    )
+  }
+
   // The MVP tables are provisioned under an INTERNAL STAGING project (readiness/ensure route
   // resolveIntegrationStagingProjectId -> `<tenant>:integration-core`), NOT the business projectId. So
   // sheet resolution MUST use the caller-derived targetProjectId (staging); the plan rows keep the
@@ -475,6 +531,7 @@ async function persistStockPreparationSyncRun(input = {}) {
       snapshotLines,
       lineScoped: lineTarget.scoped,
       runScoped: runTarget.scoped,
+      batchScoped: batchTarget.scoped,
       projectRows,
     })
     const created = { batch: 0, lines: 0, run: 0 }
@@ -551,5 +608,6 @@ module.exports = {
     PROJECT_FIELD_IDS,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
+    PERSIST_MAX_PLAN_LINES,
   },
 }

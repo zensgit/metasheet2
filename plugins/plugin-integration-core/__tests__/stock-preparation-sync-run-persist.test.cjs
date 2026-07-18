@@ -31,7 +31,7 @@ const {
   RUN_OBJECT_ID,
   PROJECT_OBJECT_ID,
   PROJECT_KEY_FIELD,
-  __internals: { MVP_OBJECT_ID_SET, READ_PAGE_LIMIT, READ_MAX_PAGES, readExistingSnapshotLines },
+  __internals: { MVP_OBJECT_ID_SET, READ_PAGE_LIMIT, READ_MAX_PAGES, PERSIST_MAX_PLAN_LINES, readExistingSnapshotLines },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-persist.cjs'))
 const {
   __internals: { LINE_FIELD_IDS },
@@ -811,6 +811,129 @@ async function main() {
     )
     assert.equal(provisioning.findObjectSheetCalls, 0, 'fails before any sheet resolution')
     assert.equal(recordsApi.createCalls.length, 0)
+  })
+
+  // ── H-2 (P4 lock round-1): replay verifies the project LIVE POINTER, not just row existence ──────
+
+  await run('H-2: CW4-existing crash (run created, project patch lost) -> replay 409 stale_pointer, not silent 200', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // Sync 1 commits fully: project pointer -> run_1 (batch_1, version 1).
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    // Sync 2 (batch_2, version 2) crashes at the CW4-existing window: every batch/line/run write lands,
+    // the project PATCH is lost. Injected by failing patchRecord on the PROJECT sheet only.
+    const crashingApi = Object.create(recordsApi)
+    crashingApi.patchRecord = async (input = {}) => {
+      if (input.sheetId === PROJECT_SHEET_ID) throw new Error('injected crash before project patch')
+      return recordsApi.patchRecord(input)
+    }
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi: crashingApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      /injected crash before project patch/,
+    )
+    // Retry of sync 2 replays batch/lines/run exactly — but the pointer still names run_1 whose batch
+    // sits at a LOWER version. Pre-H-2 this returned 200 skipped_existing (the silent window).
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 409 &&
+        error.code === 'PERSIST_PROJECT_POINTER_STALE' &&
+        error.details.target === 'project' &&
+        error.details.reason === 'stale_pointer',
+    )
+  })
+
+  await run('H-2: pointer advanced by a LATER sync -> replaying the older batch still returns 200 skipped_existing', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    // Pointer now names run_2 (version 2). Replaying sync 1 must remain a legal exact replay.
+    const replay = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(replay.mode, 'skipped_existing')
+    assert.equal(replay.persisted, false)
+  })
+
+  await run('H-2: pointer naming a run with no batch row -> 409 pointer_unresolvable (fail closed)', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    // Corrupt the pointer to a run id no batch row carries (raw physical patch, as a poisoned/legacy
+    // row would look).
+    const projectRows = await recordsApi.queryRecords({
+      sheetId: PROJECT_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, PROJECT_KEY_FIELD)]: 'proj_1' },
+    })
+    assert.equal(projectRows.length, 1)
+    await recordsApi.patchRecord({
+      sheetId: PROJECT_SHEET_ID,
+      recordId: projectRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'lastSyncRunId')]: 'run_ghost' },
+    })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 409 &&
+        error.code === 'PERSIST_PROJECT_POINTER_STALE' &&
+        error.details.target === 'project' &&
+        error.details.reason === 'pointer_unresolvable',
+    )
+  })
+
+  // ── H-3 (P4 lock round-1: Option-A prerequisite): explicit plan-size bound ──────────────────────
+
+  await run('H-3: plan larger than PERSIST_MAX_PLAN_LINES -> 422 PERSIST_PLAN_TOO_LARGE before ANY provisioning/records access', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ expansionResult: manyExpansionRows(PERSIST_MAX_PLAN_LINES + 1) }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_PLAN_TOO_LARGE' &&
+        error.details.field === 'snapshotLines' &&
+        error.details.maxLines === PERSIST_MAX_PLAN_LINES,
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0, 'rejected before sheet resolution')
+    assert.equal(recordsApi.createCalls.length, 0, 'rejected before any write')
+  })
+
+  await run('H-3: plan at EXACTLY the bound passes the cap (fails later on unprovisioned target, proving the cap did not fire)', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning({ missing: new Set([BATCH_OBJECT_ID]) })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ expansionResult: manyExpansionRows(PERSIST_MAX_PLAN_LINES) }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.code === 'PERSIST_TARGET_NOT_PROVISIONED',
+    )
   })
 
   console.log(`\nstock-preparation-sync-run-persist.test.cjs: ${passed} passed, ${failed} failed`)
