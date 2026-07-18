@@ -2325,11 +2325,16 @@ export class MetaSheetServer {
     // families' producers enqueue same-txn and SUPPRESS their legacy emit, the P1#2 REPLACE contract), and
     // with the flag OFF they are the delivery path exactly as before. stop() is registered in this.stop().
     try {
-      const { bootDurableDelivery } = await import('./multitable/automation-durable-activation')
+      const { bootDurableDelivery, assertDurableRuntimeDependency } = await import('./multitable/automation-durable-activation')
       const { buildDurableConsumerHandlers } = await import('./multitable/automation-durable-consumer-handlers')
       const { getApprovalRecordProjectionService } = await import('./multitable/approval-record-projection-service')
       const { WebhookService } = await import('./multitable/webhook-service')
       const { db: kyselyDbDurable } = await import('./db/db')
+      // Owner P1 (head 5afe30f26): an earlier degraded AutomationService init must not silently SKIP durable
+      // boot — with the flag ON, skipping is the same outage as a boot crash (no dispatcher, outbox stranded)
+      // but with no exception to catch. The assert throws flag-ON (→ the disposition catch below aborts
+      // startup) and no-ops flag-OFF (the `if` skip below keeps the legacy degrade behavior).
+      assertDurableRuntimeDependency('AutomationService (durable consumer handlers delegate)', Boolean(this.automationService))
       if (this.automationService) {
         const handlers = buildDurableConsumerHandlers({
           automationService: this.automationService,
@@ -2374,7 +2379,18 @@ export class MetaSheetServer {
           ? 'Webhook retry scheduler initialized'
           : 'Webhook retry scheduler disabled (WEBHOOK_RETRY_SCHEDULER_DISABLED=1)',
       )
+      // Owner P1 (head 5afe30f26): with durable delivery ON the retry scheduler is LOAD-BEARING — the durable
+      // webhook leg persists a pending row and fire-and-forgets the send; crash recovery (incl. the
+      // first-attempt stray-grace leg) IS this scheduler. Disabled (env) ⇒ throw here; init failure ⇒ the
+      // catch below. Both abort startup flag-ON; flag-OFF keeps the legacy degrade-and-continue.
+      const { assertDurableRuntimeDependency } = await import('./multitable/automation-durable-activation')
+      assertDurableRuntimeDependency('webhook retry scheduler (durable webhook crash recovery)', webhookRetryScheduler != null)
     } catch (e) {
+      const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
+      if (durableBootFailureDisposition() === 'fail-closed') {
+        this.logger.error('Webhook retry scheduler unavailable with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — aborting startup (fail-closed: the durable webhook leg depends on it for crash recovery)', e as Error)
+        throw e
+      }
       this.logger.error('Webhook retry scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 

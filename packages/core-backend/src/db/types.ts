@@ -1507,6 +1507,9 @@ export interface MultitableWebhookDeliveriesTable {
   created_at: CreatedAt
   delivered_at: NullableTimestamp
   next_retry_at: NullableTimestamp
+  /** Outbox event identity for the DURABLE delivery leg's per-(webhook, event) idempotent claim
+   *  (partial-unique `uq_webhook_delivery_event_claim`). NULL on every legacy path. */
+  event_id: string | null
 }
 
 export interface DingTalkGroupDestinationsTable {

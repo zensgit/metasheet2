@@ -119,6 +119,32 @@ export function durableBootFailureDisposition(env: NodeJS.ProcessEnv = process.e
 }
 
 /**
+ * Owner REQUEST-CHANGES (head 5afe30f26) P1s: fail-closed must cover the whole durable DEPENDENCY CHAIN,
+ * not only an exception raised inside the boot block. Two runtime dependencies are load-bearing flag-ON:
+ *   - **AutomationService** — the durable consumer handlers delegate to it. Its own init runs earlier under
+ *     a swallow-and-degrade catch, so it can be absent (or half-initialized) here; the boot site's
+ *     `if (automationService)` would then silently SKIP durable boot entirely — flag ON + skip = no
+ *     dispatcher = every outbox row stranded, with no exception for the disposition catch to see.
+ *   - **the webhook retry scheduler** — the durable webhook leg persists a `pending` delivery row and
+ *     fire-and-forgets the HTTP attempt; its crash recovery (including the first-attempt stray-grace leg)
+ *     IS the retry scheduler. `WEBHOOK_RETRY_SCHEDULER_DISABLED=1` returns null and an init exception was
+ *     swallowed — either one silently loses crashed webhook deliveries with the flag ON.
+ * Throws when the flag is ON and the named dependency is unavailable (the boot site's disposition catch
+ * rethrows → startup aborts). No-op flag-OFF: the legacy degrade-and-continue behavior is preserved
+ * byte-identically (nothing durable depends on these then).
+ */
+export function assertDurableRuntimeDependency(
+  dependency: string,
+  available: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (!isDurableDeliveryEnabled(env) || available) return
+  throw new Error(
+    `durable-delivery fail-closed: required runtime dependency unavailable with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — ${dependency}`,
+  )
+}
+
+/**
  * Startup entry: flag OFF → null (byte-for-byte no-op); flag ON → registry + BIDIRECTIONAL manifest
  * completeness assertion (a boot misconfiguration fails loudly before any claim) + dispatch loop.
  *
