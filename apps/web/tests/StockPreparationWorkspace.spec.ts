@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h as vh, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import { readFileSync } from 'node:fs'
+import {
+  ATTENDANCE_FOCUS_ALLOWED_PATHS,
+  PLM_WORKBENCH_ALLOWED_PREFIXES,
+  resolveRouteGuardDecision,
+} from '../src/router/guardPolicy'
 import { join } from 'node:path'
 
 // Stock Preparation MVP (#3751 — docs/development/stock-preparation-mvp-design-20260707.md).
@@ -157,26 +162,76 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     expect(TYPES).toContain("INTEGRATION_STOCK_PREPARATION: 'integration-stock-preparation'")
   })
 
-  // Regression pin for the plm-workbench focus allowlist fix (round-8 hardening). History: the
-  // round-6 indexOf pin matched the IMPORT, not the call; the round-7 AST pin proved the call exists
-  // and where — but not that its RETURN VALUE controls the deny branch (a bare isRoutePermitted(...)
-  // statement still passed), and it walked the whole file (a same-named call in an uncalled helper
-  // could fake it). This version locates STRUCTURE, scoped to the router.beforeEach callback:
-  //   1. the beforeEach callback itself;
-  //   2. inside it, the IfStatement whose condition is EXACTLY !isRoutePermitted(...);
-  //   3. that branch must contain return next(...) — the call ENFORCES, not merely runs;
-  //   4. the flags.isPlmWorkbenchFocused() condition block in the SAME callback, positioned AFTER 2;
-  //   5. allowedPrefixes must live INSIDE that focus block, compared EXACTLY.
-  // Mutations (all verified RED): delete the call; keep the call but strip the enforcing if; move the
-  // enforcing if after the focus block; relocate it to a helper outside the callback; drop '/stock-prep'.
-  it('router.beforeEach: !isRoutePermitted(...) ENFORCES (return next) before the plm-workbench focus block, whose allowlist is exactly the workbench prefixes + /stock-prep (AST)', async () => {
+  // Round-12 terminal state (owner-prescribed): guard decision logic is a PURE, directly
+  // executable function (src/router/guardPolicy.ts) pinned by BEHAVIOR — permission ordering,
+  // focus semantics and redirect targets are exercised, not pattern-matched. main.ts keeps only a
+  // thin delegation, pinned structurally below (direct statements of the guard's try block).
+  describe('route guard policy (behavior)', () => {
+    const ctx = (over: Partial<import('../src/router/guardPolicy').RouteGuardPolicyContext> = {}) => ({
+      hasFeature: () => true,
+      hasPermission: () => true,
+      attendanceFocused: false,
+      plmWorkbenchFocused: false,
+      resolveHomePath: () => '/HOME',
+      ...over,
+    })
+    const decide = (path: string, meta: unknown, over: Parameters<typeof ctx>[0] = {}) =>
+      resolveRouteGuardDecision({ path, meta }, ctx(over))
+
+    it('permission denial redirects home and WINS over a focus-mode allowlist match (ordering)', () => {
+      expect(decide('/stock-prep', { permissions: ['integration:write'] }, { hasPermission: () => false, plmWorkbenchFocused: true }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      expect(decide('/stock-prep', { permissions: ['integration:write'] }, { plmWorkbenchFocused: true }))
+        .toEqual({ action: 'allow' })
+    })
+
+    it('plm-workbench focus: every allowlisted prefix (exact and subpath) is reachable — /stock-prep included', () => {
+      for (const prefix of PLM_WORKBENCH_ALLOWED_PREFIXES) {
+        expect(decide(prefix, {}, { plmWorkbenchFocused: true })).toEqual({ action: 'allow' })
+        expect(decide(`${prefix}/deep/link`, {}, { plmWorkbenchFocused: true })).toEqual({ action: 'allow' })
+      }
+    })
+
+    it('plm-workbench focus: anything else redirects to /plm (an empty/loose prefix would break this)', () => {
+      for (const path of ['/multitable', '/apps', '/stock-preparation', '/x', '']) {
+        expect(decide(path, {}, { plmWorkbenchFocused: true })).toEqual({ action: 'redirect', target: '/plm' })
+      }
+    })
+
+    it('attendance focus: exact paths only — subpaths redirect to /attendance', () => {
+      for (const path of ATTENDANCE_FOCUS_ALLOWED_PATHS) {
+        expect(decide(path, {}, { attendanceFocused: true })).toEqual({ action: 'allow' })
+      }
+      expect(decide('/attendance/sub', {}, { attendanceFocused: true })).toEqual({ action: 'redirect', target: '/attendance' })
+      expect(decide('/multitable', {}, { attendanceFocused: true })).toEqual({ action: 'redirect', target: '/attendance' })
+    })
+
+    it('required-feature gate redirects home before focus handling; unknown feature strings are ignored', () => {
+      expect(decide('/plm', { requiredFeature: 'plm' }, { hasFeature: () => false, plmWorkbenchFocused: true }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      expect(decide('/plm', { requiredFeature: 'nonsense' }, { hasFeature: () => false })).toEqual({ action: 'allow' })
+    })
+
+    it('the plm allowlist is exactly the five workbench prefixes — all non-empty absolute strings', () => {
+      expect([...PLM_WORKBENCH_ALLOWED_PREFIXES]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
+      expect(PLM_WORKBENCH_ALLOWED_PREFIXES.every((p) => typeof p === 'string' && p.startsWith('/') && p.length > 1)).toBe(true)
+    })
+  })
+
+  // Thin delegation pin: main.ts must DELEGATE to the policy as DIRECT statements of the guard's
+  // try block — `const decision = resolveRouteGuardDecision(...)` followed by the redirect
+  // if-statement whose branch is exactly `return next(decision.target)`. Decision logic must not be
+  // re-inlined (negative token pins). Dead-branch wrapping breaks the direct-statement requirement.
+  it('main.ts delegates guard decisions to guardPolicy (direct statements; no inlined decision logic)', async () => {
     const ts = (await import('typescript')).default
     type TsNode = import('typescript').Node
     const MAIN = readFileSync(join(__dirname, '../src/main.ts'), 'utf8')
-    const source = ts.createSourceFile('main.ts', MAIN, ts.ScriptTarget.ES2022, true)
+    expect(MAIN).not.toContain('allowedPrefixes')
+    expect(MAIN).not.toContain('isRoutePermitted(')
+    expect(MAIN).toContain("import { resolveRouteGuardDecision } from './router/guardPolicy'")
 
-    // 1. locate the router.beforeEach(...) callback.
-    let guardBody: TsNode | null = null
+    const source = ts.createSourceFile('main.ts', MAIN, ts.ScriptTarget.ES2022, true)
+    let guardBody: import('typescript').Block | null = null
     const findGuard = (node: TsNode): void => {
       if (
         guardBody === null &&
@@ -186,155 +241,65 @@ describe('Stock Preparation route registration (source drift pin)', () => {
         ts.isIdentifier(node.expression.expression) &&
         node.expression.expression.text === 'router' &&
         node.arguments.length >= 1 &&
-        (ts.isArrowFunction(node.arguments[0]) || ts.isFunctionExpression(node.arguments[0]))
+        ts.isArrowFunction(node.arguments[0]) &&
+        ts.isBlock((node.arguments[0] as import('typescript').ArrowFunction).body)
       ) {
-        guardBody = (node.arguments[0] as import('typescript').ArrowFunction).body
+        guardBody = (node.arguments[0] as import('typescript').ArrowFunction).body as import('typescript').Block
         return
       }
       ts.forEachChild(node, findGuard)
     }
     findGuard(source)
-    expect(guardBody, 'router.beforeEach(callback) must exist').not.toBeNull()
+    expect(guardBody, 'router.beforeEach(arrow with block body) must exist').not.toBeNull()
 
-    // Round-9: the deny branch must DIRECTLY return next(flags.resolveHomePath()) — a bare
-    // next() is an allow-through, and a decoy return inside a nested function must not count,
-    // so the walk refuses to descend into function-like nodes.
-    const isDenyReturn = (n: TsNode): boolean =>
-      ts.isReturnStatement(n) &&
-      !!n.expression &&
-      ts.isCallExpression(n.expression) &&
-      ts.isIdentifier(n.expression.expression) &&
-      n.expression.expression.text === 'next' &&
-      n.expression.arguments.length === 1 &&
-      ts.isCallExpression(n.expression.arguments[0]) &&
-      ts.isPropertyAccessExpression(n.expression.arguments[0].expression) &&
-      n.expression.arguments[0].expression.name.text === 'resolveHomePath' &&
-      ts.isIdentifier(n.expression.arguments[0].expression.expression) &&
-      n.expression.arguments[0].expression.expression.text === 'flags' &&
-      (n.expression.arguments[0] as import('typescript').CallExpression).arguments.length === 0
-    // Round-10: no "exists somewhere" search at all — the deny branch must consist of EXACTLY ONE
-    // top-level statement, and that statement must be the deny return. Hiding the redirect inside
-    // if (false) while actually falling through to next() cannot satisfy this.
-    const denyBranchIsExactly = (thenStatement: TsNode): boolean => {
-      if (ts.isBlock(thenStatement)) {
-        return thenStatement.statements.length === 1 && isDenyReturn(thenStatement.statements[0])
-      }
-      return isDenyReturn(thenStatement)
-    }
-    // Round-9: the permission call's ARGUMENTS are pinned too — first must be to.meta, second must
-    // be a callback whose body really calls auth.hasPermission(<its own parameter>) (a constant
-    // () => true callback is not an enforcing shape).
-    const isEnforcingPermittedCall = (call: import('typescript').CallExpression): boolean => {
-      if (call.arguments.length !== 2) return false
-      const arg0 = call.arguments[0]
-      const arg0Ok =
-        ts.isPropertyAccessExpression(arg0) &&
-        arg0.name.text === 'meta' &&
-        ts.isIdentifier(arg0.expression) &&
-        arg0.expression.text === 'to'
-      if (!arg0Ok) return false
-      const cb = call.arguments[1]
-      // Round-10: the callback must be an EXPRESSION-BODIED arrow whose body IS the permission call
-      // — "the call appears somewhere in a block" allowed { auth.hasPermission(p); return true }.
-      if (!ts.isArrowFunction(cb)) return false
-      if (cb.parameters.length !== 1 || !ts.isIdentifier(cb.parameters[0].name)) return false
-      const paramName = cb.parameters[0].name.text
-      const body = cb.body
+    // The try statement is a DIRECT statement of the guard body; the delegation pair must be DIRECT
+    // statements of its try block.
+    const tryStmt = guardBody!.statements.find((st) => ts.isTryStatement(st)) as
+      | import('typescript').TryStatement
+      | undefined
+    expect(tryStmt, 'the guard must contain its try/catch as a direct statement').toBeTruthy()
+    const stmts = tryStmt!.tryBlock.statements
+
+    const declIdx = stmts.findIndex(
+      (st) =>
+        ts.isVariableStatement(st) &&
+        st.declarationList.declarations.some(
+          (d) =>
+            ts.isIdentifier(d.name) &&
+            d.name.text === 'decision' &&
+            !!d.initializer &&
+            ts.isCallExpression(d.initializer) &&
+            ts.isIdentifier(d.initializer.expression) &&
+            d.initializer.expression.text === 'resolveRouteGuardDecision',
+        ),
+    )
+    expect(declIdx, 'const decision = resolveRouteGuardDecision(...) must be a DIRECT try-block statement').toBeGreaterThan(-1)
+
+    const redirectIdx = stmts.findIndex((st) => {
+      if (!ts.isIfStatement(st)) return false
+      const thenSt = st.thenStatement
+      const single = ts.isBlock(thenSt)
+        ? thenSt.statements.length === 1
+          ? thenSt.statements[0]
+          : null
+        : thenSt
       return (
-        !ts.isBlock(body) &&
-        ts.isCallExpression(body) &&
-        ts.isPropertyAccessExpression(body.expression) &&
-        body.expression.name.text === 'hasPermission' &&
-        ts.isIdentifier(body.expression.expression) &&
-        body.expression.expression.text === 'auth' &&
-        body.arguments.length === 1 &&
-        ts.isIdentifier(body.arguments[0]) &&
-        body.arguments[0].text === paramName
+        !!single &&
+        ts.isReturnStatement(single) &&
+        !!single.expression &&
+        ts.isCallExpression(single.expression) &&
+        ts.isIdentifier(single.expression.expression) &&
+        single.expression.expression.text === 'next' &&
+        single.expression.arguments.length === 1 &&
+        ts.isPropertyAccessExpression(single.expression.arguments[0]) &&
+        single.expression.arguments[0].name.text === 'target' &&
+        ts.isIdentifier(single.expression.arguments[0].expression) &&
+        single.expression.arguments[0].expression.text === 'decision'
       )
-    }
-
-    // Round-11: the OUTER structure is also exact — no descendant searches. The focus IfStatement
-    // must be UNIQUE in the whole guard (a dead-branch decoy copy breaks uniqueness), the enforcing
-    // permission guard must be a DIRECT SIBLING statement in the focus statement's parent block
-    // (exactly one, positioned before it), and allowedPrefixes must be the UNIQUE DIRECT variable
-    // declaration of the focus block. Condition subtrees are inspected only to IDENTIFY the focus
-    // condition (the typeof-guarded call), never to satisfy structural requirements.
-    const conditionHasPlmFocusCall = (cond: TsNode): boolean => {
-      let found = false
-      const inspect = (n: TsNode): void => {
-        if (found) return
-        if (
-          ts.isCallExpression(n) &&
-          ts.isPropertyAccessExpression(n.expression) &&
-          n.expression.name.text === 'isPlmWorkbenchFocused' &&
-          ts.isIdentifier(n.expression.expression) &&
-          n.expression.expression.text === 'flags'
-        ) {
-          found = true
-          return
-        }
-        ts.forEachChild(n, inspect)
-      }
-      inspect(cond)
-      return found
-    }
-
-    // Collect ALL focus-if candidates anywhere in the guard — for a UNIQUENESS assertion only.
-    const focusCandidates: import('typescript').IfStatement[] = []
-    const collect = (n: TsNode): void => {
-      if (ts.isIfStatement(n) && conditionHasPlmFocusCall(n.expression)) focusCandidates.push(n)
-      ts.forEachChild(n, collect)
-    }
-    collect(guardBody!)
-    expect(focusCandidates.length, 'exactly ONE plm-workbench focus if-statement may exist in the guard (dead-branch copies break this)').toBe(1)
-    const focusIf = focusCandidates[0]
-
-    const isEnforcingGuardIf = (st: TsNode): boolean =>
-      ts.isIfStatement(st) &&
-      ts.isPrefixUnaryExpression(st.expression) &&
-      st.expression.operator === ts.SyntaxKind.ExclamationToken &&
-      ts.isCallExpression(st.expression.operand) &&
-      ts.isIdentifier(st.expression.operand.expression) &&
-      st.expression.operand.expression.text === 'isRoutePermitted' &&
-      isEnforcingPermittedCall(st.expression.operand) &&
-      denyBranchIsExactly(st.thenStatement)
-
-    // DIRECT-SIBLING discipline: the focus statement's parent must be a block; the enforcing guard
-    // must appear among that block's direct statements, exactly once, before the focus statement.
-    const parent = focusIf.parent
-    expect(ts.isBlock(parent), 'the focus if-statement must sit directly in a statement block').toBe(true)
-    const siblings = (parent as import('typescript').Block).statements
-    const focusIdx = siblings.findIndex((st) => st === focusIf)
-    const guardIdxs = siblings
-      .map((st, i) => (isEnforcingGuardIf(st) ? i : -1))
-      .filter((i) => i !== -1)
-    expect(guardIdxs.length, 'exactly ONE direct enforcing isRoutePermitted guard must exist beside the focus block (nested/dead-branch copies do not count)').toBe(1)
-    expect(guardIdxs[0], 'the enforcing permission guard must precede the plm-workbench focus block').toBeLessThan(focusIdx)
-
-    // allowedPrefixes: the UNIQUE DIRECT declaration of the focus block — no recursive search.
-    expect(ts.isBlock(focusIf.thenStatement), 'the focus branch must be a block').toBe(true)
-    const focusStatements = (focusIf.thenStatement as import('typescript').Block).statements
-    const allowlistDecls: string[][] = []
-    for (const st of focusStatements) {
-      if (!ts.isVariableStatement(st)) continue
-      for (const decl of st.declarationList.declarations) {
-        if (
-          ts.isIdentifier(decl.name) &&
-          decl.name.text === 'allowedPrefixes' &&
-          decl.initializer &&
-          ts.isArrayLiteralExpression(decl.initializer)
-        ) {
-          allowlistDecls.push(
-            decl.initializer.elements
-              .filter((el): el is import('typescript').StringLiteral => ts.isStringLiteral(el))
-              .map((el) => el.text),
-          )
-        }
-      }
-    }
-    expect(allowlistDecls.length, 'allowedPrefixes must be declared exactly once as a DIRECT statement of the focus block').toBe(1)
-    expect(allowlistDecls[0]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
+    })
+    expect(redirectIdx, 'if (…) { return next(decision.target) } must be a DIRECT try-block statement').toBeGreaterThan(declIdx)
   })
+
 })
 
 describe('StockPreparationWorkspace shell', () => {

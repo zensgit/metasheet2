@@ -22,7 +22,7 @@ import App from './App.vue'
 import { useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
-import { isRoutePermitted } from './router/routeAccess'
+import { resolveRouteGuardDecision } from './router/guardPolicy'
 import { ROUTE_PATHS } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
@@ -122,47 +122,21 @@ router.beforeEach(async (to, _from, next) => {
     }
     await flags.loadProductFeatures()
 
-    const required = to.meta?.requiredFeature
-    const requiredFeature =
-      required === 'attendance'
-      || required === 'workflow'
-      || required === 'attendanceAdmin'
-      || required === 'attendanceImport'
-      || required === 'plm'
-        ? required
-        : null
-
-    if (requiredFeature && !flags.hasFeature(requiredFeature)) {
-      return next(flags.resolveHomePath())
-    }
-
-    if (!isRoutePermitted(to.meta, (permission) => auth.hasPermission(permission))) {
-      return next(flags.resolveHomePath())
-    }
-
-    if (flags.isAttendanceFocused()) {
-      const allowed = new Set<string>([
-        '/attendance',
-        '/p/plugin-attendance/attendance',
-        '/settings',
-      ])
-      const path = String(to.path || '')
-      if (!allowed.has(path)) {
-        return next('/attendance')
-      }
-    }
-
-    if (typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused()) {
-      const path = String(to.path || '')
-      // '/stock-prep': the stock-preparation operator shell is the natural companion of the PLM
-      // workbench audience; it was missing from this allowlist so plm-workbench-focused users were
-      // redirected away from it (generalization proposal round-1, owner-confirmed gap). The route
-      // keeps its own integration:write permission gate — this only restores reachability.
-      const allowedPrefixes = ['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep']
-      const allowed = allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
-      if (!allowed) {
-        return next('/plm')
-      }
+    // Feature / permission / focus-mode decisions live in the PURE policy module (round-12: pinned
+    // by behavior tests + a thin structural delegation pin; do not re-inline decision logic here).
+    const decision = resolveRouteGuardDecision(
+      { path: String(to.path || ''), meta: to.meta },
+      {
+        hasFeature: (feature) => flags.hasFeature(feature),
+        hasPermission: (permission) => auth.hasPermission(permission),
+        attendanceFocused: flags.isAttendanceFocused(),
+        plmWorkbenchFocused:
+          typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused(),
+        resolveHomePath: () => flags.resolveHomePath(),
+      },
+    )
+    if (decision.action === 'redirect') {
+      return next(decision.target)
     }
   } catch {
     // If guard fails (network/offline), don't block navigation.
