@@ -99,3 +99,52 @@
 | #4456 | HOLD，最后合并 | 本 v2：§3 过强结论更正（结构性免疫→统计+机制；删站点增长推断）+ 本节判决台账 |
 
 四分支均已 rebase 追平 main 等 fresh-green；仍全部未 arm。
+
+---
+
+# 批次 2（同日）：round-1 判决解锁的 runtime hardening + wave-1 · 开发及验证
+
+> 授权：owner round-1 判决（H-1/H-2 先行必修、H-3 为 A 前置、category_rule 不能静默接受、
+> #4454 批量迁移有条件 GO）+ owner /goal「完成所有开发」。全部 PR 未 arm。
+> 模型分派：H-2/H-3 主循环（Fable）；H-1/OD2 实现代理（Fable 档，详规格）；wave-1 三个 Sonnet
+> 机械迁移；对抗校验 3×xhigh + 1×high 独立代理（可跑测试、独立复验 mutation）。
+
+## 7. 交付物台账（批次 2）
+
+| PR | 内容 | 关键证据 |
+|---|---|---|
+| **#4460** | H-2 stale project 指针 409 + H-3 显式行数上限（persist hardening） | 37/37；CW4-existing 以 crash-injection 复现（未修代码=静默 200）；3 处 mutation 逐字 RED（指针块/上限/单调守卫）；相邻 5 套件绿 |
+| **#4461** | H-1 diff 服务端完整性门 | 20/20；双端点双侧 gated；auto-base 不静默跳过；FE 409 呈现核验；双 mutation 逐字 RED |
+| **#4463** | OD2 category_rule fail-closed（4 执行点 + FE 摘除） | 全插件链绿 + vue-tsc 0；两引擎守卫 + 输入边界 422 + confirm-existing 422；mutation 逐字 RED；「唯一映射为 category_rule 的行从静默匹配退化为可见 HELD」= 有意 fail-closed 方向 |
+| **#4462** | wave-1 批量迁移（stacked on #4454）：10 suites / 280 站点 | 基线 636→356（drain-only tripwire 锁定）；全量 lane 5658/5658 @ retry=0；对抗采样审 APPROVE |
+
+## 8. 对抗校验轮（refute-first，两个 P2 被验证者端到端复现后修复）
+
+- **#4460 R2-P2-1（真界 24,999）**：完整性只能靠短页证明——25,000 行恰好 50 满页，建得进去但
+  **永远无法 exact replay**（验证者实跑复现）。修：`PERSIST_MAX_PLAN_LINES = 500×50−1` + 界上
+  create-then-replay 测试（分页 fake）。
+- **#4460 R2-P2-2（默认版本空转）**：snapshotVersion 处处默认 1，等版本对比永不判 stale——
+  CW4-existing 在默认路径上仍静默。修：**create 路径单调版本守卫**（重复 sync 版本 ≤ 指针批版本
+  → 422 `PERSIST_VERSION_NOT_MONOTONIC`，写前拒绝）+ replay 等版本异 run（仅存量退化数据可达）
+  → 409 `pointer_unresolvable`。行为注记：省略版本的重复 sync 从此响亮失败（读侧本就假设单调）。
+- **#4461 P3**：ghost current + 孤儿 line 行的残缝已闭（幻造 all-added diff → 409；空 ghost 保持
+  #4002 graceful 锁形状）。
+- **#4463 R2-P2×2**：stored-status 短路先于守卫（legacy version_conflict 行仍参与）→ 守卫前置，
+  两引擎同步 + mutation RED；confirm-existing 分支漏验存量行（可制造死确认行）→ 422。
+  P3：FE 读侧类型加回 'category_rule'（读词表 ≠ 写白名单）；junk 值 400→422 变化已注记。
+- **#4462**：APPROVE（4 个最险文件全 diff 审 = 纯传输；1 NIT setApp 收进 beforeAll 已修）。
+
+## 9. 诚实边界（批次 2）
+
+- H-2 的判别器在**版本单调纪律下**成立——该纪律现由 create 守卫强制；存量乱序版本数据的 replay
+  会 fail-closed（409），不静默、不修复。
+- OD2 选择了 fail-closed 方向：唯一映射是 category_rule 的行从「静默宽匹配」变「可见 HELD 异常」，
+  是行为变更（有意、已注记）；品类规则真实现（选项③）仍留 owner 未来设计门。
+- wave-1 后剩 356 站点/35 文件（含 5 个参数化 builder 例外文件）；`retry:2` 保留至基线清零。
+- 四个 PR 全部未 arm；与 RC-A（#4437）零交集（纯等待实体机）。
+
+## 10. Owner 待决清单（批次 2 增量）
+
+1. #4460/#4461/#4463 审合（其中 #4460 的单调版本纪律是新的 422 面，值得单独看一眼）；
+2. #4462 合并时机（stacked，等 #4454 先合后 retarget）；
+3. wave-2+（剩 356 站点，例外模式清单已备）按同 recipe 继续的节奏。
