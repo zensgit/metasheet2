@@ -38,7 +38,7 @@
 
 | # | 内核 | 现状证据 | 注入点（域参数） |
 |---|---|---|---|
-| K1 | **快照对账骨架**（round-1 收窄：**骨架可抽，不是现成内核**）：事务/分页重放/快照判等骨架（immutable keyed batch commit + exact replay + 结构完整性）可抽取 | sync-run-plan/persist 自身无 BOM 数学（域只经模板字段名与 run_type 词表进入；groundedRow 对模板外字段 THROW）。但 snapshot-diff **不止 comparator/change-type 是域的**：pathKey 主键、`childDrawingNo|childVersion` 身份回退、重复键 HELD 策略、missing_child_bom、数量合法性、阻断分类、输出投影全部代码化（snapshot-diff.cjs:124,148-152,196-215；sync-run-plan.cjs:129） | **身份策略、分类器、阻断规则、投影、比较器全部由 preset 注入**；模板集、key picker、change-type/blocking 词表 |
+| K1 | **快照对账骨架**（rounds 1-2 收窄：**骨架可抽，不是现成内核，事务边界待 P4**）：persist 的**分页重放、冻结投影判等、写入编排**可抽；**事务骨架当前不存在**——P4 方案 A（受限 unit-of-work）落地后才形成可抽的事务边界 | sync-run-plan **并非无域数学**：computeFlags（sync-run-plan.cjs:129）计算 missingChildBom、设计数量/单位、duplicatePathKey 与阻断状态——**mapper、flag aggregator、run-status 分类全部属 preset 注入面**；snapshot-diff 同样：pathKey 主键、`childDrawingNo\|childVersion` 身份回退、重复键 HELD 策略、数量合法性、阻断分类、输出投影全部代码化（snapshot-diff.cjs:124,148-152,196-215） | **身份策略、mapper、flag/run-status 分类器、阻断规则、投影、比较器全部由 preset 注入**；模板集、key picker、change-type/blocking 词表 |
 | K2 | **确认流内核**：系统产候选→人工确认（server 戳身份、XOR 确认模式、create-only、human_preserved 结构性剥离）+ 异常队列（severity + 闭词表 resolution） | confirm-writes/generation-runtime/confirm-reads 的机制层全部同型复用；域只在 XOR/tri-XOR 语义与 8 异常类型词表 | 候选方法词表、确认模式、异常类型/决议词表 |
 | K3 | **场景表模板 manifest 原语** | 仓内**四套**并行 manifest 机制共用同一 idiom（normalize-fail-closed、FORBIDDEN_CONTENT_KEYS、secret-shape 拒绝、values-free）：S3-1 integration-templates、S3-3 reference catalog、DF-T3a reference-mapping、备料 9 冻结模板——统一为一个平台 manifest 原语是**最强的单点通用化** | 模板清单、字段所有权（plm_system/human_preserved）、optionSource 契约键 |
 | K4 | **values-free 审计原语** | audit-store 的结构闸完全通用（enum-shaped ≤80 字符、一层计数嵌套、append-only）；场景绑定只有 8-action 词表 + 表名 `integration_stock_prep_audit`（066 迁移） | {action 词表, 表名} |
@@ -83,9 +83,12 @@ issueQty 数学、8 异常类型、tri-XOR 语义、备料六视图业务语义�
     字段词表（自己的 frozen templates + 自己的 intake 别名表）和契约测试**——不能只是给备料
     缓存换名字（`erp_material_master` 留在备料场景内不动，结构上排除该退化）；
   - **V3（第二场景上线时抽 K1）**：最小场景注册 + 快照/diff MVP 同步拉动最少骨架抽取，按实际
-    需要再抽确认流；**验收判据 = 通用内核不再 import 任何 stock-prep 模板或域分类器**——
-    建议以 import-graph tripwire 测试机械化（内核模块 require 清单禁含 `stock-preparation-*`，
-    drain-only，照 supertest AST tripwire 模式）；
+    需要再抽确认流；**验收判据 = 通用内核不再依赖任何 stock-prep 模板或域分类器**——以
+    import-graph tripwire 测试机械化，且判据是**依赖闭包不是直接依赖**（round-6 修正：直接
+    require 清单检查可被一个中间模块绕过）：从通用内核**入口模块**出发遍历**完整静态依赖闭包**
+    （带循环保护），任意**传递**依赖命中 stock-prep 模板/mapper/分类器即红；**动态
+    require/import() 无法静态证明时同样 fail-closed**（或进显式 allowlist 并逐条说明），
+    drain-only，照 supertest AST tripwire 模式；
   - **V4（最后做场景目录）**：新增 `stock-prep:read/operate/admin` 独立权限（顺带解决现状
     「操作员须持 integration:write」的权限过宽），从统一 registry 派生 App Center 与首页场景
     入口；模板中心继续只承载单表模板。
@@ -127,7 +130,9 @@ after-sales 同构，因此天然不突兀：
   ②manifest 支持 requiredPermissions；③feature/readiness 状态声明；④**服务端与前端双重
   权限过滤**。之后场景包格式（引用冻结模板集 + navigation + permissions + read-source 依赖
   声明）装载复用 after-sales 的 install ledger + instance registry；模板目录长出「场景」类目。
-  这一步与 §4 V3 的最小场景注册是同一枚硬币的前后两面（后端自注册 / 前端包声明）。
+  **编号关系（round-6 澄清）**：V0-V4 是唯一的执行序；P0/P1/P2 只是呈现面工作在该序中的落位
+  标签——P0=V0，P1 的四个 App Center 前置与场景包格式**就是 V3「最小场景注册」的前端半边**
+  （后端自注册 / 前端包声明，同一枚硬币），P2=V4 之后的收尾。不存在两条并行时间线。
 - **P2（专注模式数据化）**：focus-mode allowlist 从 manifest navigation 派生（attendance 先例
   改造随行）——「备料专注模式」成为 manifest 产物而非 featureFlags.ts 代码分支。
 
@@ -152,6 +157,6 @@ after-sales 同构，因此天然不突兀：
 2. ~~第二场景选型~~ **已裁：PLM ↔ ERP 物料主数据对账**，独立 manifest/路由/权限/词表/契约测试
    为硬性要求（V2 charter 文本届时单独过门）；
 3. ~~P0 范围~~ **已裁：只修 focus allowlist**；App Center 卡等 P1 四前置齐备后再做；
-4. **仍开放**：V0 allowlist 一行修是否现在就开（本文建议开，独立小 PR）；
+4. ~~V0 是否开工~~ **已实现、待审：PR #4468**（allowlist 一行 + required-gate 回归钉）；
 5. **仍开放**：`stock-prep:read/operate/admin` 权限词表命名与迁移口径（V4 前置，影响现存
    integration:write 持有者的过渡方案）。
