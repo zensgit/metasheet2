@@ -113,8 +113,8 @@
 
 | PR | 内容 | 关键证据 |
 |---|---|---|
-| **#4460** | H-2 stale 指针 409 + H-3 显式行数上限（persist hardening）——**round-3 后 HOLD 复审中，非闭合** | 38/38；CW4-existing crash-injection 复现；4 处 mutation 逐字 RED；R3 修复=单调守卫扫**项目全批次历史**（完整孤儿批次绕过已堵，owner 复现的 V1→V3崩→V2 序列现 422 零写） |
-| **#4461** | H-1 diff 服务端完整性门——**round-3 后 HOLD 复审中，非闭合** | 22/22；双端点双侧 gated；R3 修复=current/base/run 恰好一行（重复业务身份 twin 绕过已堵，409 `{reason:'ambiguous'}`） |
+| **#4460** | H-2 stale 指针 409 + H-3 显式行数上限（persist hardening）——**HOLD 复审中（R5 后 head `8cb1b7c41`）** | **42/42**；五轮修复累计：全历史无条件扫描 / 严格版本解析器（正安全整数+`^[1-9]\d*$`，plan+persist 共享，preview=commit 同拒）/ crash 序列判别 / 6 处 mutation 逐字 RED |
+| **#4461** | H-1 diff 服务端完整性门——**HOLD 复审中（R5 后 head `f747c7693`）** | **23/23**；五轮修复累计：双端点双侧 gate / ghost+孤儿行 / 恰好一行（twin 绕过）/ 计数前置于 `[0]` 读 / **auto-base 同版本平局 409 ambiguous**（正反序×双端点） |
 | **#4463** | OD2 category_rule fail-closed（4 执行点 + FE 摘除） | 全插件链绿 + vue-tsc 0；两引擎守卫 + 输入边界 422 + confirm-existing 422；mutation 逐字 RED；「唯一映射为 category_rule 的行从静默匹配退化为可见 HELD」= 有意 fail-closed 方向 |
 | **#4462** | wave-1 批量迁移（stacked on #4454）：10 suites / 280 站点 | 基线 636→356（drain-only tripwire 锁定）；全量 lane 5658/5658 @ retry=0；对抗采样审 APPROVE |
 
@@ -172,3 +172,15 @@
   （此前重复 base 身份的判决依赖数据库返回序，反序即从 ambiguous 变 PROJECT_MISMATCH，owner
   复现）；双端点反序测试 + mutation 红。22/22。
 - 两 PR body 均已重写至终版语义（#4461 补 22/22 与 ambiguity 契约；#4460 补 R4 节，指针注释清除）。
+
+
+## 13. Round-5 复审记录
+
+- **#4460 `8cb1b7c41`**：`Number()` 语法宽容洞（'01'/'+1'/'1e2'/'0x10'）+ isSafeInteger 缺失
+  （owner exact-head 实测）→ 解析器收紧为正安全整数 + 规范十进制字符串，**上移 sync-run-plan
+  共享**（preview 与 commit 同拒，避免「预览过、提交拒」）；persist 对历史行保留严格解析为纵深。
+  两组判别测试（当前输入/历史行）+ 放宽正则 mutation 双红。42/42。
+- **#4461 `f747c7693`**：pickPredecessor 平局（两个不同 batchId 同最高前序版本）判决依赖返回序
+  （owner 探针 {ab/ba} 复现）→ 跨 id 平局统一 409 `{target:'base', reason:'ambiguous'}`；显式
+  base 保留现规则（正控锁定）。正反序×双端点测试 + mutation 红。23/23。
+- 两 PR body 已统一至终版数字与 head；裁决维持 HOLD→修复+判别测试+fresh-green 后短复审 GO。
