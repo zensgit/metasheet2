@@ -53,6 +53,27 @@
   （19 commit 全景+诚实 out-of-scope）→ owner checkpoint 三门逐条回复（②exact-head 数据绑 SHA）。
   **CI 于 head 8c95bec48 全部 checks 通过（0 失败）**，零自合等 owner 审。
 
+### 1.4 activation 收口（owner 复审「producer 基本完成≠activation 闭合」四项，head `5afe30f26`）
+owner 指出「只剩 family-1」只适用于 producer 分组，不等于 #4337 只剩一项，列四项必须先关否则 checkpoint 应
+诚实写「基本完成，仍 REQUEST CHANGES」，不能报 activation 闭合。**四项已全关**：
+1. **family-1 同源事务证据缺口**：completion×6 经 `approvalTxnHandle(client)` 在事务回调内、task_created×9
+   经 `enqueueApprovalTaskCreatedEventsInTxn(client,…)` 紧邻 COMMIT——全部词法核实在源 BEGIN..COMMIT 内。
+   上轮只有 completion 原子性（F1-G5），补 **F1-G6**（注入 task_created outbox 失败→instance/assignments/
+   enqueue 三者同滚零残留，clean retry 三者同 commit；变异=挪到 COMMIT 后即红）。
+2. **`multitable.comment.created` 从 v1 manifest 移除**（自纠：上轮回复把它记为「惰性无害」不当）：全仓普查零
+   发射方，连 legacy bridge 订阅从上线即死；路由无 producer=死配置伪装覆盖。真 producer=family-6 + manifest
+   v2（否则是 flag-OFF 行为变更）。第二处标注的 ratified 字面量修改。
+3. **webhook durable handler 丢 eventId**（自纠：上轮把重复投递记为「教义接受」——对 send↔done-CAS 崩溃窗成立，
+   但 handler **整个丢弃** outbox eventId ⇒ 连普通 busy-retry 都重建行+重发=非受迫重复，非 at-least-once 下限）：
+   迁移加 `event_id`+partial-unique `(webhook_id,event_id)`；durable 腿穿 eventId→claim（ON CONFLICT DO
+   NOTHING，0 行→跳过发送）；legacy 无 eventId→NULL→字节等价。G1-G4 goldens+2 变异。
+4. **flag-ON boot fail-closed**：boot 失败原「continuing in degraded mode」吞异常——flag ON 下 legacy emit 已
+   被抑制、无 loop 即静默全量断投（比崩溃更糟）。改 disposition 策略（单测钉死）：ON=rethrow 中止启动，
+   OFF=log-and-continue 字节等价。
+**验证 head `5afe30f26`**（fresh DB 全迁移含新 webhook 迁移）：durable+webhook 电池 **104/104（15 文件）**+
+全量单测 **6782/0**+tsc 0；两处 ratified 字面量修改（form.submitted 事件名 + comment.created 移除）均显著标注
+请 owner 复核。**这才是真正的 activation-闭合主张**，非「基本完成」。收口 MD（本文）随 #4457 更新。
+
 ## 2. #4342 附件 runtime — 闭合审计（review-ready，owner 门）
 - opus 审计对 head 23e090807：**REVIEW-READY**。两 P1（G7 下载字节路径隐藏字段红线 / G15 reconciler 误删
   活 blob）在真码上变异证明 CLOSED（中和守卫→指定测试 RED，正控 12+4 绿）；17 个可识别 findings 全闭；
