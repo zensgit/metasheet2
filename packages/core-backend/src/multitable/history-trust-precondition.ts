@@ -8,11 +8,13 @@ import { hasActiveTrustCheckpoint } from './history-trust-checkpoint'
  *   (a) an ACTIVE trust checkpoint exists for the sheet, AND
  *   (b) reconstruction causality is satisfied.
  *
- * Condition (b) is NOT yet satisfiable: the reconstructor still selects by `created_at <= T` (non-causal)
- * until Lane L6 lands the exact event-anchor resolver. So this precondition CURRENTLY FAILS CLOSED for every
- * sheet — which is the CORRECT behavior (design lock §3: "migration/backfill presence alone never enables
- * recovery"; §9.7: ratification authorizes default-off slices only, not strict-mode enablement). This guard
- * MUST stay fail-closed until L6; it must not be weakened to pass.
+ * Condition (b)'s MECHANISM landed with Lane L6-b — the recovery-authority reconstructor is CAUSAL
+ * (`reconstructRecordsAtSeq`, seq-anchored on the shared `meta_record_chain_seq` domain; `created_at <= T`
+ * stays for read-only display only) — but the constant below is DELIBERATELY HELD `false` (owner ruling
+ * 2026-07-17): it flips to `true` ONLY in the same PR that actually wires the legacy Revert/Reset routes
+ * onto the L8 exact-anchor apply. Until that wiring PR, this precondition refuses EVERY sheet regardless of
+ * checkpoints or the flag — the last fail-closed backstop stays in place. Removing a backstop and adding the
+ * consumers that depend on its guarantees must be ONE reviewable change, not two.
  *
  * WIRED (L5 P2): {@link checkStrictEnablementPrecondition} is called by the authoritative strict-mode entry
  * point `precheckSheetHistoryIntegrity` (history-integrity-precheck.ts) — the function the Revert/Reset
@@ -22,25 +24,33 @@ import { hasActiveTrustCheckpoint } from './history-trust-checkpoint'
  * on without provisioning a checkpoint) kept exercising the comparator via HTTP — that was a production
  * bypass protecting test convenience (owner P2, 2026-07-16) and let every checkpoint-less sheet into the
  * strict comparator the moment an operator flipped the flag. Removed: tests that need the comparator call
- * `precheckSheetHistoryIntegrityStrict` directly (or provision a real checkpoint once L6 satisfies (b));
- * the production path stays uniformly fail-closed until then.
+ * `precheckSheetHistoryIntegrityStrict` directly (or, now that L6-b satisfies (b), provision a real active
+ * checkpoint); the production path stays fail-closed for any sheet WITHOUT an active checkpoint, and — even
+ * with one — nothing runs unless the operator flips the default-OFF flag.
  * The pure {@link evaluateStrictEnablementPrecondition} proves the two-condition logic (including the positive
  * control where both hold); the real-DB behavioral golden in
- * `multitable-history-trust-checkpoint-realdb.test.ts` proves strict-on is refused by this WIRED path.
+ * `multitable-history-trust-checkpoint-realdb.test.ts` proves strict-on is refused for a checkpoint-less sheet
+ * AND that a checkpoint-bearing sheet is STILL refused (`reconstruction_non_causal`) while the seam constant
+ * is held `false` — the backstop pin, via this WIRED path.
  */
 
 /**
- * The single L6 seam. Reconstruction is still non-causal (selects by `created_at <= T`) until L6 lands the
- * exact event-anchor resolver; L6 flips this constant to `true`. Until then the strict-enablement precondition
- * fails closed no matter what (see the module doc comment). Kept as a runtime const (not an env flag) so it
- * cannot be turned on by operator misconfiguration — only a code change in L6 may flip it.
+ * The L6 seam — DELIBERATELY HELD `false` (owner ruling 2026-07-17). The causal recovery-authority
+ * reconstructor (`reconstructRecordsAtSeq`, seq-anchored under the L4 all-writer fence + L5 trusted-since
+ * checkpoint) DID land with Lane L6-b, so the mechanism for condition (b) exists — but this constant is the
+ * LAST fail-closed backstop for strict enablement, and the owner ruled it flips to `true` only in the same
+ * PR that wires the legacy Revert/Reset routes onto the L8 exact-anchor apply (backstop removal and the
+ * consumers that rely on it = one reviewable change). It stays a runtime const (NOT an env flag) so the
+ * posture is a code fact pinned by goldens: while `false`, strict-on refuses EVERY sheet
+ * (`reconstruction_non_causal`) even with an active checkpoint — flipping this prematurely reds the seam
+ * golden in `multitable-history-trust-checkpoint.test.ts`.
  */
 export const RECONSTRUCTION_CAUSALITY_LANDED = false
 
 export type StrictEnablementUnmet = 'no_active_checkpoint' | 'reconstruction_non_causal'
 
 export interface StrictEnablementPreconditionResult {
-  /** true iff EVERY precondition is satisfied (currently impossible pre-L6) */
+  /** true iff EVERY precondition is satisfied (while the seam constant is held false: NEVER in production) */
   canEnable: boolean
   /** the specific unmet conditions — the guard distinguishes exactly what it claims to distinguish */
   unmet: StrictEnablementUnmet[]
@@ -63,8 +73,10 @@ export function evaluateStrictEnablementPrecondition(input: {
 
 /**
  * Real-DB precondition check for a sheet: reads (a) from `meta_history_trust_checkpoints` and (b) from the L6
- * seam constant. Currently ALWAYS returns `canEnable: false` (b is never satisfied pre-L6); the `unmet` array
- * still reflects (a) precisely, so callers/tests can see the checkpoint half evaluated independently.
+ * seam constant. While the seam is HELD `false` (owner ruling — until the Revert/Reset wiring PR), this NEVER
+ * returns `canEnable: true`: a checkpoint-bearing sheet still lists `reconstruction_non_causal`, a
+ * checkpoint-less one lists both. The `unmet` array reflects each half precisely, so callers/tests can see
+ * the checkpoint half evaluated independently of the held-back seam.
  */
 export async function checkStrictEnablementPrecondition(
   query: QueryFn,

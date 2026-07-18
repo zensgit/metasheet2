@@ -411,18 +411,22 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     expect(ck?.system_kind).toBe('approval_projection')
   })
 
-  // ── P3-2 ENABLEMENT PRECONDITION (real-DB checkpoint half) ───────────────────────────────────────────
-  test('checkStrictEnablementPrecondition detects the active-checkpoint half against a real DB, and stays fail-closed until L6', async () => {
+  // ── P3-2 ENABLEMENT PRECONDITION (real-DB checkpoint half) — the HELD-FALSE BACKSTOP PIN ─────────────
+  test('checkStrictEnablementPrecondition: checkpoint-less sheet lists BOTH unmet; a checkpoint-bearing sheet is STILL refused (seam held false until the Revert/Reset wiring PR)', async () => {
     const S = await mkSheet()
-    // No checkpoint yet: both conditions unmet.
+    // No checkpoint yet AND the seam is held false ⇒ BOTH conditions listed (the guard distinguishes them).
     const before = await checkStrictEnablementPrecondition(q, S)
     expect(before.canEnable).toBe(false)
     expect([...before.unmet].sort()).toEqual(['no_active_checkpoint', 'reconstruction_non_causal'])
 
     await activate(S)
-    // Checkpoint half now satisfied — ONLY reconstruction remains unmet (still fail-closed: L6 not landed).
+    // Checkpoint half satisfied — the refusal narrows to EXACTLY the held-back seam. This is the end-to-end
+    // backstop pin (owner ruling 2026-07-17): a trustworthy, checkpoint-bearing sheet is STILL categorically
+    // refused until the PR that wires legacy Revert/Reset onto the L8 apply flips the seam. It also proves the
+    // checkpoint half is evaluated independently on the WIRED path (not a count-only guard): activating the
+    // checkpoint changed the unmet SET, not just its size.
     const after = await checkStrictEnablementPrecondition(q, S)
-    expect(after.canEnable).toBe(false) // GUARD stays fail-closed until L6 — must not pass
+    expect(after.canEnable).toBe(false)
     expect(after.unmet).toEqual(['reconstruction_non_causal'])
   })
 })

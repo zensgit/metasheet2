@@ -46,6 +46,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { precheckSheetHistoryIntegrity, precheckSheetHistoryIntegrityStrict } from '../../src/multitable/history-integrity-precheck'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
+import { checkStrictEnablementPrecondition } from '../../src/multitable/history-trust-precondition'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -106,7 +107,8 @@ async function sheetWriteState(sheet: string) {
 }
 
 /**
- * Owner P2 (2026-07-16): under the flipped strict-enablement gate, EVERY strict-flag-on production request
+ * Owner P2 (2026-07-16): under the wired strict-enablement gate (seam held false — owner ruling 2026-07-17),
+ * EVERY strict-flag-on production request
  * refuses `strict_enablement_unmet` before the comparator runs — so the HTTP 409 alone would be a VACUOUS
  * proof of the chain-level verdict. This helper therefore asserts BOTH layers: the comparator itself (called
  * directly — the pure strict function, per the owner's prescription) returns the expected chain-level reason,
@@ -354,7 +356,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
   })
 
   // ── POSITIVE CONTROL ─────────────────────────────────────────────────────────────────────────────────────
-  test('POSITIVE CONTROL: strict comparator passes the healthy chain; the full revert executes end-to-end (flag off — strict-on HTTP is gate-refused pre-L6)', async () => {
+  test('POSITIVE CONTROL: strict comparator passes the healthy chain; the full revert executes end-to-end (flag off — strict-on HTTP is gate-refused for this checkpoint-less sheet)', async () => {
     const pool = poolManager.get()
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
@@ -368,28 +370,38 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     expect(h?.version).toBe(3)
   })
 
-  // ── STRICT-ENABLEMENT GATE (owner P2, 2026-07-16 — the no-checkpoint refusal golden) ────────────────────
-  test('ENABLEMENT-GATE: with the strict flag ON the production path refuses fail-closed with zero writes — for a NO-checkpoint sheet AND for a checkpoint-bearing sheet (causality unlanded) — via the same values-free envelope', async () => {
-    // The shared fixture record is HEALTHY (the strict comparator passes it) — the refusal below is therefore
-    // attributable ONLY to the enablement gate, not to any chain verdict.
+  // ── STRICT-ENABLEMENT GATE (owner P2, 2026-07-16; seam HELD false, owner ruling 2026-07-17) ─────────────
+  test('ENABLEMENT-GATE: strict ON — a NO-checkpoint sheet refuses fail-closed with zero writes; a checkpoint-bearing HEALTHY sheet is STILL refused (seam held false until the Revert/Reset wiring PR)', async () => {
+    // The shared fixture record is HEALTHY (the strict comparator passes it), so any gate verdict below is
+    // attributable ONLY to the enablement precondition, not to a chain verdict.
     const pool = poolManager.get()
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
 
-    // (a) NO active checkpoint: refuse, zero writes, unified values-free envelope (no oracle — D-1c rule 1).
-    const before = await sheetWriteState(SHEET)
+    // (a) NO active checkpoint: BOTH halves unmet (the seam is held false too). The WIRED entry returns
+    // `strict_enablement_unmet`, and the production HTTP surface refuses with the unified values-free
+    // envelope + zero writes (no oracle — D-1c).
+    const beforeState = await sheetWriteState(SHEET)
+    const preNoCkpt = await checkStrictEnablementPrecondition(pool.query.bind(pool), SHEET)
+    expect(preNoCkpt.canEnable).toBe(false)
+    expect([...preNoCkpt.unmet].sort()).toEqual(['no_active_checkpoint', 'reconstruction_non_causal'])
+    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'strict_enablement_unmet' })
     const pv1 = await revertPreview(SHEET)
     expect(pv1.status).toBe(409)
     expect(pv1.body).toEqual(HISTORY_INCOMPLETE_BODY)
-    expect(await sheetWriteState(SHEET)).toEqual(before)
+    expect(await sheetWriteState(SHEET)).toEqual(beforeState)
 
-    // (b) checkpoint-BEARING sheet: STILL refused (condition (b) reconstruction causality is unlanded pre-L6)
-    // — proving the refusal is unconditional on !canEnable, not scoped to the no-checkpoint case (the exact
-    // production bypass the owner rejected).
+    // (b) checkpoint-BEARING sheet: the refusal narrows to EXACTLY the held-back seam — and the WIRED entry
+    // STILL refuses. This is the backstop pin at the wired layer (owner ruling 2026-07-17): even a healthy,
+    // checkpoint-bearing sheet stays categorically refused until the PR that wires legacy Revert/Reset onto
+    // the L8 exact-anchor apply flips `RECONSTRUCTION_CAUSALITY_LANDED`. The unmet SET changing (not just its
+    // size) proves the checkpoint half is evaluated independently on this path.
     await pool.transaction(async ({ query }) => activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }))
-    const pv2 = await revertPreview(SHEET)
-    expect(pv2.status).toBe(409)
-    expect(pv2.body).toEqual(HISTORY_INCOMPLETE_BODY)
-    expect(await sheetWriteState(SHEET)).toEqual(before)
+    const preCkpt = await checkStrictEnablementPrecondition(pool.query.bind(pool), SHEET)
+    expect(preCkpt).toEqual({ canEnable: false, unmet: ['reconstruction_non_causal'] })
+    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'strict_enablement_unmet' })
+    // The comparator itself still PASSES the healthy chain when called directly — the refusal above is the
+    // gate, not a chain verdict (keeps this golden non-vacuous about WHAT refused).
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     // cleanup: remove the checkpoint rows so sibling tests see a checkpoint-free sheet.
     await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET]).catch(() => {})
