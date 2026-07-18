@@ -269,6 +269,13 @@ export class MetaSheetServer {
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
   private automationService?: AutomationService
+  // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
+  // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
+  // succeeded — `Boolean(this.automationService)` alone was bypassable, because the field used to be
+  // assigned right after construction and never cleared when init()/load threw. The init block below is
+  // publish-last (field + this bit + singleton set only on full success), so the two can never disagree;
+  // the durable boot asserts THIS bit.
+  private automationServiceReady = false
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
   private yjsSyncMetricsSource?: { getMetrics(): { activeDocCount: number; docIds: string[] } }
@@ -1889,6 +1896,7 @@ export class MetaSheetServer {
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
         this.automationService?.shutdown()
+        this.automationServiceReady = false
         setAutomationServiceInstance(null)
       } catch (err) {
         this.logger.warn(`AutomationService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
@@ -2169,7 +2177,15 @@ export class MetaSheetServer {
       )
     }
 
-    // Initialize AutomationService
+    // Initialize AutomationService — PUBLISH-LAST (owner P1, head 1d3854c7a). The field, the readiness
+    // bit, and the module singleton are set ONLY after the FULL init chain (constructor + init() +
+    // loadAndRegisterAllScheduled()) has succeeded. Previously `this.automationService` was assigned right
+    // after construction and never cleared on failure, so an init()/load throw left a half-initialized
+    // service that `Boolean(this.automationService)` happily accepted — bypassing the durable fail-closed
+    // assert. Now a mid-chain failure rolls the instance back (best-effort shutdown: unsubscribe bus
+    // handlers, destroy scheduler timers) and publishes NOTHING: flag-OFF this is the legacy
+    // degrade-and-continue, flag-ON the durable boot below fail-closes on automationServiceReady=false.
+    let pendingAutomationService: AutomationService | undefined
     try {
       const pool = poolManager.get()
       const { db: kyselyDb } = await import('./db/db')
@@ -2180,7 +2196,7 @@ export class MetaSheetServer {
       // behaviour) when the flag is off or Redis is unavailable, so this
       // call is safe in every deployment.
       const schedulerLeaderOptions = await resolveAutomationSchedulerLeaderOptions()
-      this.automationService = new AutomationService(
+      pendingAutomationService = new AutomationService(
         eventBus,
         kyselyDb,
         pool.query.bind(pool),
@@ -2189,11 +2205,23 @@ export class MetaSheetServer {
         { leaderStateGauge: promMetrics.automationSchedulerLeaderGauge },
         notificationService,
       )
-      this.automationService.init()
-      setAutomationServiceInstance(this.automationService)
-      await this.automationService.loadAndRegisterAllScheduled()
+      pendingAutomationService.init()
+      await pendingAutomationService.loadAndRegisterAllScheduled()
+      // Full chain succeeded — publish atomically (nothing downstream can ever observe a partial init).
+      this.automationService = pendingAutomationService
+      this.automationServiceReady = true
+      setAutomationServiceInstance(pendingAutomationService)
       this.logger.info('AutomationService initialized')
     } catch (e) {
+      // Roll back the half-built instance. It was never published (no field, no singleton, routes see
+      // undefined), so this only reaps whatever the partial init managed to start.
+      try {
+        pendingAutomationService?.shutdown()
+      } catch {
+        // best-effort rollback — the instance is unpublished either way
+      }
+      this.automationService = undefined
+      this.automationServiceReady = false
       this.logger.error('AutomationService initialization failed; continuing in degraded mode', e as Error)
     }
 
@@ -2315,6 +2343,44 @@ export class MetaSheetServer {
       this.logger.error('Webhook event bridge initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // Webhook retry scheduler — started BEFORE the durable dispatch loop ON PURPOSE (owner P2, head
+    // 1d3854c7a): flag-ON it is a load-bearing durable runtime dependency (the durable webhook leg persists
+    // a `pending` row and fire-and-forgets the send; crash recovery — incl. the first-attempt stray-grace
+    // leg — IS this scheduler), and the activation sequence must validate EVERY dependency before the loop
+    // starts, so a fail-closed abort can never leave a live loop handle ticking the pool. Flag-OFF the order
+    // swap is behavior-neutral: the two blocks are independent (the scheduler is webhook_deliveries
+    // row-driven and never reads the loop), only the log-line order changes.
+    try {
+      const webhookRetryLeaderOptions = await resolveWebhookRetrySchedulerLeaderOptions()
+      const webhookRetryScheduler = startWebhookRetryScheduler({
+        leaderOptions: webhookRetryLeaderOptions,
+        intervalMs: resolveWebhookRetrySchedulerIntervalMs(),
+      })
+      this.logger.info(
+        webhookRetryScheduler
+          ? 'Webhook retry scheduler initialized'
+          : 'Webhook retry scheduler disabled (WEBHOOK_RETRY_SCHEDULER_DISABLED=1)',
+      )
+      // Owner P1 (head 5afe30f26): with durable delivery ON the retry scheduler is LOAD-BEARING (see the
+      // ordering note above). Disabled (env) ⇒ throw here; init failure ⇒ the catch below. Both abort
+      // startup flag-ON; flag-OFF keeps the legacy degrade-and-continue.
+      const { assertDurableRuntimeDependency } = await import('./multitable/automation-durable-activation')
+      assertDurableRuntimeDependency('webhook retry scheduler (durable webhook crash recovery)', webhookRetryScheduler != null)
+    } catch (e) {
+      const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
+      if (durableBootFailureDisposition() === 'fail-closed') {
+        // Roll back anything this block managed to start — an aborted startup must leave no ticking DB timer.
+        try {
+          stopWebhookRetryScheduler()
+        } catch {
+          // best-effort rollback; the abort below is the authoritative outcome
+        }
+        this.logger.error('Webhook retry scheduler unavailable with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — aborting startup (fail-closed: the durable webhook leg depends on it for crash recovery)', e as Error)
+        throw e
+      }
+      this.logger.error('Webhook retry scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
     // P2 durable-delivery S5: start the transactional-outbox dispatch loop. Gated by
     // AUTOMATION_DURABLE_DELIVERY_ENABLED — bootDurableDelivery returns null when the flag is OFF, so this
     // block registers no loop, opens no poll, and reads no rows (byte-identical startup). When ON, it builds
@@ -2324,6 +2390,12 @@ export class MetaSheetServer {
     // bus subscriptions above stay wired — with the flag ON they serve only UN-routed event types (routed
     // families' producers enqueue same-txn and SUPPRESS their legacy emit, the P1#2 REPLACE contract), and
     // with the flag OFF they are the delivery path exactly as before. stop() is registered in this.stop().
+    //
+    // ACTIVATION IS A ROLLBACK-ABLE SEQUENCE (owner P2, head 1d3854c7a): every durable dependency is
+    // validated BEFORE the loop starts — the retry scheduler in the block above, AutomationService readiness
+    // and manifest completeness below — and the loop start is the LAST fallible step, so a fail-closed abort
+    // structurally cannot leave a live loop. The catch still stops+nulls any started handle (defense in
+    // depth) and tears down the retry scheduler on abort.
     try {
       const { bootDurableDelivery, assertDurableRuntimeDependency } = await import('./multitable/automation-durable-activation')
       const { buildDurableConsumerHandlers } = await import('./multitable/automation-durable-consumer-handlers')
@@ -2334,8 +2406,14 @@ export class MetaSheetServer {
       // boot — with the flag ON, skipping is the same outage as a boot crash (no dispatcher, outbox stranded)
       // but with no exception to catch. The assert throws flag-ON (→ the disposition catch below aborts
       // startup) and no-ops flag-OFF (the `if` skip below keeps the legacy degrade behavior).
-      assertDurableRuntimeDependency('AutomationService (durable consumer handlers delegate)', Boolean(this.automationService))
-      if (this.automationService) {
+      // Owner P1 (head 1d3854c7a): the assert consumes the explicit READINESS bit, not the object's mere
+      // existence — publish-last (above) guarantees the bit is true only after constructor+init()+load ALL
+      // succeeded, so a half-initialized service can no longer slip past `Boolean(this.automationService)`.
+      assertDurableRuntimeDependency(
+        'AutomationService (durable consumer handlers delegate; requires the FULL init chain: constructor + init() + loadAndRegisterAllScheduled())',
+        this.automationServiceReady && Boolean(this.automationService),
+      )
+      if (this.automationServiceReady && this.automationService) {
         const handlers = buildDurableConsumerHandlers({
           automationService: this.automationService,
           projectionService: getApprovalRecordProjectionService(),
@@ -2360,38 +2438,30 @@ export class MetaSheetServer {
       // Owner closure item 4 — startup fail-closed. With the flag ON the producer families suppress their
       // legacy emits, so continuing without a dispatch loop is not "degraded": it silently strands every
       // outbox row (total delivery outage). The disposition helper (unit-tested) decides per flag.
+      //
+      // ROLLBACK FIRST (owner P2, head 1d3854c7a): if a loop handle was started before the throw, stop it
+      // and null the field NOW — the prior shape left the S1 rejection with a live loop whose next tick hit
+      // "Cannot use a pool after calling end on the pool" in the green Node20 CI log. With the reordered
+      // sequence above nothing fallible remains after the loop starts, so this is defense in depth.
+      if (this.durableDeliveryLoop) {
+        const startedLoop = this.durableDeliveryLoop
+        this.durableDeliveryLoop = null
+        await startedLoop.stop().catch((stopErr: unknown) => {
+          this.logger.warn(`Durable delivery dispatch loop rollback stop error: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`)
+        })
+      }
       const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
       if (durableBootFailureDisposition() === 'fail-closed') {
+        // The retry scheduler (started in the block above) must not outlive the aborted startup either.
+        try {
+          stopWebhookRetryScheduler()
+        } catch {
+          // best-effort rollback; the abort below is the authoritative outcome
+        }
         this.logger.error('Durable delivery boot FAILED with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — aborting startup (fail-closed: legacy emits are suppressed, a loop-less process would strand all outbox rows)', e as Error)
         throw e
       }
       this.logger.error('Durable delivery dispatch loop initialization failed (flag OFF — nothing suppressed, legacy path delivers); continuing', e as Error)
-    }
-
-    try {
-      const webhookRetryLeaderOptions = await resolveWebhookRetrySchedulerLeaderOptions()
-      const webhookRetryScheduler = startWebhookRetryScheduler({
-        leaderOptions: webhookRetryLeaderOptions,
-        intervalMs: resolveWebhookRetrySchedulerIntervalMs(),
-      })
-      this.logger.info(
-        webhookRetryScheduler
-          ? 'Webhook retry scheduler initialized'
-          : 'Webhook retry scheduler disabled (WEBHOOK_RETRY_SCHEDULER_DISABLED=1)',
-      )
-      // Owner P1 (head 5afe30f26): with durable delivery ON the retry scheduler is LOAD-BEARING — the durable
-      // webhook leg persists a pending row and fire-and-forgets the send; crash recovery (incl. the
-      // first-attempt stray-grace leg) IS this scheduler. Disabled (env) ⇒ throw here; init failure ⇒ the
-      // catch below. Both abort startup flag-ON; flag-OFF keeps the legacy degrade-and-continue.
-      const { assertDurableRuntimeDependency } = await import('./multitable/automation-durable-activation')
-      assertDurableRuntimeDependency('webhook retry scheduler (durable webhook crash recovery)', webhookRetryScheduler != null)
-    } catch (e) {
-      const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
-      if (durableBootFailureDisposition() === 'fail-closed') {
-        this.logger.error('Webhook retry scheduler unavailable with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — aborting startup (fail-closed: the durable webhook leg depends on it for crash recovery)', e as Error)
-        throw e
-      }
-      this.logger.error('Webhook retry scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // AI usage ledger retention sweep (ladder #9): a periodic bounded DELETE of
