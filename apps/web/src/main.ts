@@ -22,7 +22,7 @@ import App from './App.vue'
 import { useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
-import { resolveRouteGuardDecision } from './router/guardPolicy'
+import { buildRouteGuardContext, resolveRouteGuardDecision } from './router/guardPolicy'
 import { ROUTE_PATHS } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
@@ -126,14 +126,7 @@ router.beforeEach(async (to, _from, next) => {
     // by behavior tests + a thin structural delegation pin; do not re-inline decision logic here).
     const decision = resolveRouteGuardDecision(
       { path: String(to.path || ''), meta: to.meta },
-      {
-        hasFeature: (feature) => flags.hasFeature(feature),
-        hasPermission: (permission) => auth.hasPermission(permission),
-        attendanceFocused: flags.isAttendanceFocused(),
-        plmWorkbenchFocused:
-          typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused(),
-        resolveHomePath: () => flags.resolveHomePath(),
-      },
+      buildRouteGuardContext({ auth, flags }),
     )
     if (decision.action === 'redirect') {
       return next(decision.target)

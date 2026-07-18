@@ -52,6 +52,35 @@ export interface RouteGuardPolicyContext {
   resolveHomePath: () => string
 }
 
+
+/**
+ * Executable runtime adapter (round-13): builds the policy context from the live auth/flags stores.
+ * Extracted so its wiring is BEHAVIOR-testable with injected fakes — hasPermission must delegate to
+ * auth.hasPermission (a constant () => true here would disable real route permissions, which the
+ * adapter tests pin), and the plm-focus typeof tolerance lives here, not inline in main.ts.
+ */
+export interface RouteGuardRuntimeDeps {
+  auth: { hasPermission: (permission: string) => boolean }
+  flags: {
+    hasFeature: (feature: KnownRequiredFeature) => boolean
+    isAttendanceFocused: () => boolean
+    isPlmWorkbenchFocused?: unknown
+    resolveHomePath: () => string
+  }
+}
+
+export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardPolicyContext {
+  return {
+    hasFeature: (feature) => deps.flags.hasFeature(feature),
+    hasPermission: (permission) => deps.auth.hasPermission(permission),
+    attendanceFocused: deps.flags.isAttendanceFocused(),
+    plmWorkbenchFocused:
+      typeof deps.flags.isPlmWorkbenchFocused === 'function' &&
+      (deps.flags.isPlmWorkbenchFocused as () => boolean)(),
+    resolveHomePath: () => deps.flags.resolveHomePath(),
+  }
+}
+
 export function resolveRouteGuardDecision(
   input: { path: string; meta: unknown },
   ctx: RouteGuardPolicyContext,
