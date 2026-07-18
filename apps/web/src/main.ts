@@ -22,7 +22,7 @@ import App from './App.vue'
 import { useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
-import { buildRouteGuardContext, resolveRouteGuardDecision } from './router/guardPolicy'
+import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from './router/guardPolicy'
 import { ROUTE_PATHS } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
@@ -125,7 +125,7 @@ router.beforeEach(async (to, _from, next) => {
     // Feature / permission / focus-mode decisions live in the PURE policy module (round-12: pinned
     // by behavior tests + a thin structural delegation pin; do not re-inline decision logic here).
     const decision = resolveRouteGuardDecision(
-      { path: String(to.path || ''), meta: to.meta },
+      buildRouteGuardInput(to),
       buildRouteGuardContext({ auth, flags }),
     )
     if (decision.action === 'redirect') {

@@ -5,6 +5,7 @@ import {
   ATTENDANCE_FOCUS_ALLOWED_PATHS,
   PLM_WORKBENCH_ALLOWED_PREFIXES,
   buildRouteGuardContext,
+  buildRouteGuardInput,
   resolveRouteGuardDecision,
 } from '../src/router/guardPolicy'
 import { join } from 'node:path'
@@ -267,6 +268,55 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       expect(resolveRouteGuardDecision({ path: '/stock-prep', meta: { permissions: ['integration:write'] } }, buildRouteGuardContext(denyDeps)))
         .toEqual({ action: 'redirect', target: '/HOME' })
     })
+
+    // Round-14: the INPUT adapter is behavior-pinned too — meta must pass through IDENTICALLY
+    // (an inline meta: {} bypassed every route's requiredFeature/permissions, M20).
+    it('buildRouteGuardInput passes meta through identically and folds path to a string', () => {
+      const meta = { permissions: ['integration:write'], requiredFeature: 'plm' }
+      const input = buildRouteGuardInput({ path: '/stock-prep', meta })
+      expect(input.meta).toBe(meta)
+      expect(input.path).toBe('/stock-prep')
+      expect(buildRouteGuardInput({ path: undefined, meta }).path).toBe('')
+      expect(buildRouteGuardInput({ path: 123 as unknown as string, meta }).path).toBe('123')
+      // end-to-end: real route meta flows through input adapter + ctx adapter into the policy.
+      const deps = {
+        auth: { hasPermission: () => false },
+        flags: {
+          hasFeature: () => true,
+          isAttendanceFocused: () => false,
+          isPlmWorkbenchFocused: () => false,
+          resolveHomePath: () => '/HOME',
+        },
+      }
+      expect(resolveRouteGuardDecision(buildRouteGuardInput({ path: '/stock-prep', meta }), buildRouteGuardContext(deps)))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+    })
+
+    // Round-14: adapter fields item-by-item (M21 proved hasFeature was unpinned; attendanceFocused
+    // and resolveHomePath get the same treatment).
+    it('buildRouteGuardContext delegates hasFeature / attendanceFocused / resolveHomePath faithfully', () => {
+      const featureSeen: string[] = []
+      const deps = {
+        auth: { hasPermission: () => true },
+        flags: {
+          hasFeature: (f: string) => { featureSeen.push(f); return f === 'plm' },
+          isAttendanceFocused: () => true,
+          isPlmWorkbenchFocused: () => false,
+          resolveHomePath: () => '/HOME-LAZY',
+        },
+      }
+      const built = buildRouteGuardContext(deps)
+      expect(built.hasFeature('plm' as never)).toBe(true)
+      expect(built.hasFeature('workflow' as never)).toBe(false)
+      expect(featureSeen).toEqual(['plm', 'workflow'])
+      expect(built.attendanceFocused).toBe(true)
+      expect(built.resolveHomePath()).toBe('/HOME-LAZY')
+      // adapter+policy feature-deny discriminating leg: a real feature denial through the ADAPTER
+      // must redirect home (an adapter hasFeature: () => true erases this).
+      const denyFeature = { ...deps, flags: { ...deps.flags, hasFeature: () => false, isAttendanceFocused: () => false } }
+      expect(resolveRouteGuardDecision({ path: '/plm', meta: { requiredFeature: 'plm' } }, buildRouteGuardContext(denyFeature)))
+        .toEqual({ action: 'redirect', target: '/HOME-LAZY' })
+    })
   })
 
   // Thin delegation pin: main.ts must DELEGATE to the policy as DIRECT statements of the guard's
@@ -280,7 +330,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     expect(MAIN).not.toContain('allowedPrefixes')
     expect(MAIN).not.toContain('isRoutePermitted(')
     expect(MAIN).not.toContain('hasPermission:')
-    expect(MAIN).toContain("import { buildRouteGuardContext, resolveRouteGuardDecision } from './router/guardPolicy'")
+    expect(MAIN).toContain("import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from './router/guardPolicy'")
 
     const source = ts.createSourceFile('main.ts', MAIN, ts.ScriptTarget.ES2022, true)
     let guardBody: import('typescript').Block | null = null
@@ -323,9 +373,12 @@ describe('Stock Preparation route registration (source drift pin)', () => {
             ts.isCallExpression(d.initializer) &&
             ts.isIdentifier(d.initializer.expression) &&
             d.initializer.expression.text === 'resolveRouteGuardDecision' &&
-            // Round-13: the SECOND argument must be the executable adapter call — an inline object
-            // (where hasPermission: () => true could hide) is not an accepted shape.
+            // Round-13/14: BOTH arguments must be executable adapter calls — inline objects (where
+            // hasPermission: () => true or meta: {} could hide) are not accepted shapes.
             d.initializer.arguments.length === 2 &&
+            ts.isCallExpression(d.initializer.arguments[0]) &&
+            ts.isIdentifier((d.initializer.arguments[0] as import('typescript').CallExpression).expression) &&
+            ((d.initializer.arguments[0] as import('typescript').CallExpression).expression as import('typescript').Identifier).text === 'buildRouteGuardInput' &&
             ts.isCallExpression(d.initializer.arguments[1]) &&
             ts.isIdentifier((d.initializer.arguments[1] as import('typescript').CallExpression).expression) &&
             ((d.initializer.arguments[1] as import('typescript').CallExpression).expression as import('typescript').Identifier).text === 'buildRouteGuardContext',

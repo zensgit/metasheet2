@@ -69,6 +69,16 @@ export interface RouteGuardRuntimeDeps {
   }
 }
 
+
+/**
+ * Executable input adapter (round-14): path/meta passthrough from the live route object. Extracted
+ * so the wiring is behavior-testable — meta must be passed through IDENTICALLY (an inline `meta: {}`
+ * would bypass every route's requiredFeature and permissions), and path folds to a string.
+ */
+export function buildRouteGuardInput(to: { path?: unknown; meta?: unknown }): { path: string; meta: unknown } {
+  return { path: String((to && to.path) || ''), meta: to ? to.meta : undefined }
+}
+
 export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardPolicyContext {
   return {
     hasFeature: (feature) => deps.flags.hasFeature(feature),
