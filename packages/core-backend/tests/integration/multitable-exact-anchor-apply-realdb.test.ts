@@ -68,6 +68,7 @@ const live = (id: string, data: Record<string, unknown>, version = 1) =>
 const liveRow = async (id: string) =>
   (await q('SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2', [id, SHEET])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
 const burnCount = async () => Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
+const trashCount = async (recordId: string) => Number(((await q('SELECT count(*)::int c FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2', [recordId, SHEET])).rows[0] as { c: number }).c)
 
 /** Seal one synthetic operation (endpoint = exact MAX of its tagged event seqs) to serve as the anchor. */
 async function sealAnchorOp(recordId: string, eventSeqs: Array<{ seq: string; version: number; action?: 'create' | 'update' | 'delete'; snap?: Record<string, unknown> }>): Promise<string> {
@@ -430,12 +431,52 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)',
       [R_G2, SHEET, JSON.stringify({ [F_STR]: 'g2-terminal' }), 2],
     )
+    // A live foreign target so the outbound-link rebuild has something to point at is unnecessary here (no
+    // link field on this fixture); this golden pins the trash-lifecycle invariant.
+    const trashBefore = await trashCount(R_G2)
+    expect(trashBefore).toBe(1) // precondition: the record IS in the recycle bin
     const pv = await preview(anchorOp, 'revert')
     const out = await applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(out.ok).toBe(true)
     // Resurrected from the REVISION CHAIN's at-anchor state — the trash row's terminal vintage is never read.
     expect((await liveRow(R_G2))?.data).toEqual({ [F_STR]: 'g2-at-anchor' })
     expect((await liveRow(R_G2))?.version).toBe(1) // new generation
+    // OWNER P1 (2026-07-17): live/trash MUTUAL EXCLUSION — the resurrect must have removed the trash row.
+    // Without the trash cleanup the record is live AND still in the recycle bin (future restore 23505,
+    // mis-pinned tombstone/retention). Mutation: drop the `DELETE FROM meta_records_trash` ⇒ this reds.
+    expect(await trashCount(R_G2)).toBe(0)
+  })
+
+  test('G2b RESURRECT-TRASH-ROLLBACK: an injected failure AFTER the resurrect rolls the live row, its revision AND the trash deletion back together (all-or-nothing)', async () => {
+    const { anchorOp } = await seedWorld()
+    const R_G2B = `rec_g2b_${TS}`
+    await revSeq(R_G2B, 1, 'create', { [F_STR]: 'g2b-at-anchor' }, '9000850')
+    await revSeq(R_G2B, 1, 'delete', { [F_STR]: 'g2b-at-anchor' }, '9002250') // deleted after the anchor
+    await q(
+      'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)',
+      [R_G2B, SHEET, JSON.stringify({ [F_STR]: 'g2b-at-anchor' }), 1],
+    )
+    expect(await trashCount(R_G2B)).toBe(1)
+    const pv = await preview(anchorOp, 'revert')
+    // Inject a failure at the SEAL step (after every resurrect write incl. the trash deletion). A synthetic
+    // trigger that raises on INSERT into meta_record_history_operations forces the seal to throw ⇒ the whole
+    // outer txn rolls back. If the trash deletion did NOT participate in this txn, the row would stay gone.
+    const fn = `eaa_g2b_seal_fail_${TS}`
+    const trg = `trg_eaa_g2b_seal_fail_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected seal failure (G2b)'; END $$ LANGUAGE plpgsql`)
+    await q(`CREATE TRIGGER ${trg} BEFORE INSERT ON meta_record_history_operations FOR EACH ROW WHEN (NEW.sheet_id = '${SHEET}') EXECUTE FUNCTION ${fn}()`)
+    try {
+      await expect(applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })).rejects.toThrow()
+      // EVERYTHING rolled back together: no live row, the trash row SURVIVES, no create revision, no burn.
+      expect(await liveRow(R_G2B)).toBeUndefined()
+      expect(await trashCount(R_G2B)).toBe(1) // the trash deletion rolled back with the failed apply
+      const revs = Number(((await q("SELECT count(*)::int c FROM meta_record_revisions WHERE record_id = $1 AND action = 'create' AND source = 'restore'", [R_G2B])).rows[0] as { c: number }).c)
+      expect(revs).toBe(0)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${trg} ON meta_record_history_operations`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+    }
   })
 
   // ── G3 (pre-wiring gate list): DOUBLE-TOKEN constructed race ─────────────────────────────────────────────

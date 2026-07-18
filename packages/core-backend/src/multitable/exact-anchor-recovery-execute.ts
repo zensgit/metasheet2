@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import type { QueryFn } from './permission-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
@@ -7,6 +7,8 @@ import { reconstructRecordsAtSeq } from './record-reconstructor'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
 import { ensureRecordNotLocked } from './record-lock'
+import { loadFieldsForSheet } from './loaders'
+import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
   hashAnchorRecoveryScope,
   hashRecoveryAuthorizationScope,
@@ -15,6 +17,13 @@ import {
 } from './restore-preview-identity'
 import { composeBaselineOverlay, type EvaluateRecoveryFullReadAccess } from './exact-anchor-recovery'
 import { classifyExactAnchorRecoveryPlan, type ExactAnchorRecoveryPlan } from './exact-anchor-recovery-plan'
+
+/** Normalize a link-field cell (array | single | null) to a string[] of foreign record ids (local copy of the
+ *  record-service private helper — the resurrect outbound-link rebuild needs exactly the same shape). */
+function normalizeLinkIds(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string' && v.length > 0)
+  return typeof value === 'string' && value.length > 0 ? [value] : []
+}
 
 /**
  * W0-1 v3.7 Lane L8 — the exact-anchor DESTRUCTIVE APPLY: one transaction, all-or-nothing.
@@ -53,8 +62,11 @@ import { classifyExactAnchorRecoveryPlan, type ExactAnchorRecoveryPlan } from '.
  *      becomes a sealed operation — a future exact anchor):
  *        reverts    → UPDATE to the FULL at-anchor data (version+1, optimistic version guard) +
  *                     revision(action:'update', source:'restore', snapshot = at-anchor data).
- *        resurrects → INSERT (new generation, version resets to 1 — the MULTI-GEN convention) +
- *                     revision(action:'create', source:'restore').
+ *        resurrects → lock the trash vintage FOR UPDATE → INSERT (new generation, version resets to 1 —
+ *                     the MULTI-GEN convention) → rebuild WRITABLE outbound meta_links from the snapshot →
+ *                     revision(action:'create', source:'restore') → DELETE the `meta_records_trash` row
+ *                     (live/trash mutual exclusion; mirrors `restoreRecord`; owner P1 2026-07-17). All in
+ *                     THIS txn, so an injected failure rolls the resurrect + its trash deletion back together.
  *        TOKEN mode 'reset' ONLY: DELETE `deletedAtAnchorLiveNow` + `createdAfterAnchor` rows +
  *                     revision(action:'delete', snapshot = pre-delete data). mode 'revert' KEEPS both
  *                     (non-destructive). P1-1: the mode is read from the VERIFIED CLAIMS — the caller has
@@ -62,10 +74,12 @@ import { classifyExactAnchorRecoveryPlan, type ExactAnchorRecoveryPlan } from '.
  *   9. SEAL the operation LAST (endpoint after its events — the deferred-FK discipline).
  *
  * LAYERING CONTRACT (P1-2 narrowed it — the SECURITY adjudication is KERNEL-OWNED): full-read
- * authorization, mode authority, schema-drift whole-rejection, anti-replay, checkpoint/scope freshness all
- * live HERE. What remains the route wiring's obligation: presentation masking of RETURNED data, size
- * ceilings (SHEET_REVERT_MAX_RECORDS-class), link-field side-effects (mirror guards, foreign-existence
- * checks), realtime fan-out, HTTP mapping. NOT wired to any route in this lane; the legacy Revert/Reset
+ * authorization, mode authority, schema-drift whole-rejection, anti-replay, checkpoint/scope freshness, AND
+ * the recovery DATA-INTEGRITY invariants (resurrect ⇒ trash-row cleanup + outbound-link rebuild = live/trash
+ * mutual exclusion, owner P1 2026-07-17) all live HERE. What remains the route wiring's obligation:
+ * presentation masking of RETURNED data, size ceilings (SHEET_REVERT_MAX_RECORDS-class), the BROADER
+ * link-field side-effects (mirror guards, foreign-existence checks, inbound-tombstone replay), realtime
+ * fan-out, HTTP mapping. NOT wired to any route in this lane; the legacy Revert/Reset
  * routes' switch onto this module is the OWNER's wiring decision behind their existing default-OFF flags
  * (`MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET`). Default-off by construction: nothing
  * reaches this module today.
@@ -248,7 +262,26 @@ export async function applyExactAnchorRecovery(
         })
       }
 
+      // Resurrect trash-lifecycle side effects (owner P1, 2026-07-17): a resurrect candidate was deleted
+      // AFTER the anchor, so its post-anchor delete left a `meta_records_trash` row. Bringing it back to
+      // live WITHOUT removing that row breaks the live/trash mutual-exclusion invariant — the recycle bin
+      // still shows the (now-live) record, a later restore of it 23505-conflicts on the id, and its lingering
+      // `delete_revision_id` mis-pins tombstone/retention. So the resurrect MUST mirror `restoreRecord`'s
+      // trash discipline: lock the vintage FOR UPDATE, rebuild the WRITABLE outbound links from the at-anchor
+      // snapshot (so link reads aren't silently empty; mirror side skipped — the spine invariant is
+      // structural), then DELETE the trash row — ALL inside this same all-or-nothing txn, so an injected
+      // later failure rolls back the INSERT, the revision, the link rebuild AND the trash deletion together.
+      const resurrectLinkFieldIds: string[] = plan.resurrects.length > 0
+        ? (await loadFieldsForSheet(query, input.sheetId))
+            .filter((f) => f.type === 'link' && !isFieldAlwaysReadOnly(f))
+            .map((f) => f.id)
+        : []
       for (const s of plan.resurrects) {
+        // Lock this record's trash vintage(s) FIRST (4c-3 C4 discipline): a concurrent restore/resurrect of
+        // the same id serializes here; the loser sees the rows gone and the whole apply aborts, never racing
+        // to a duplicate insert. A resurrect whose post-anchor delete was a hard delete (no trash row) locks
+        // zero rows — harmless.
+        await query('SELECT id FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2 FOR UPDATE', [s.recordId, input.sheetId])
         // New generation: version resets to 1 (the MULTI-GEN delete→recreate convention). No lock can exist
         // on a row being created; the snapshot is previously-persisted at-anchor data (no new user payload).
         // revision-emitted: L8 resurrect apply — recordRecordRevision below, same txn (source 'restore').
@@ -256,6 +289,17 @@ export async function applyExactAnchorRecovery(
           'INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)',
           [s.recordId, input.sheetId, JSON.stringify(s.snapshot), input.actorId],
         )
+        // Rebuild outbound meta_links from the at-anchor snapshot (writable/forward links only) — same insert
+        // shape as create/patch/restoreRecord; `loadLinkValuesByRecord` reads meta_links, not `data`.
+        for (const fieldId of resurrectLinkFieldIds) {
+          for (const foreignId of normalizeLinkIds((s.snapshot as Record<string, unknown>)[fieldId])) {
+            await query(
+              `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+               VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+              [`lnk_${randomUUID()}`.slice(0, 50), fieldId, s.recordId, foreignId],
+            )
+          }
+        }
         // revision-emitted: L8 resurrect apply — action:'create', source:'restore', at-anchor snapshot.
         await recordRecordRevision(query, {
           sheetId: input.sheetId,
@@ -269,6 +313,12 @@ export async function applyExactAnchorRecovery(
           snapshot: s.snapshot,
           ledger: op,
         })
+        // Trash cleanup — the live/trash mutual-exclusion invariant. Removing the trash row(s) for this id
+        // also drops the `delete_revision_id` anchor that was mis-pinning tombstone/retention. (Inbound-edge
+        // REPLAY from those terminal-vintage tombstones is deliberately NOT done here: this apply reconstructs
+        // the AT-ANCHOR state, a different vintage than the terminal delete the tombstones belong to — a naive
+        // replay would restore edges from the wrong vintage. That is a route-wiring / future-mode concern.)
+        await query('DELETE FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2', [s.recordId, input.sheetId])
       }
 
       let deletes = 0
