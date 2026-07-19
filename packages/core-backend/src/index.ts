@@ -72,7 +72,12 @@ import {
   claimPluginObjectScope,
   createPluginScopedMultitableApi,
   MultitableObjectScopeError,
+  MultitableSheetScopeError,
 } from './multitable/plugin-scope'
+import {
+  acquireStockPreparationPersistUnitOfWorkLocks,
+  validateStockPreparationPersistUnitOfWorkInput,
+} from './multitable/stock-preparation-persist-unit-of-work'
 import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { APIGateway } from './gateway/APIGateway'
 import { getPoolStats } from './db/pg'
@@ -1676,6 +1681,55 @@ export class MetaSheetServer {
               await assertPluginOwnsSheet(txQuery, {
                 pluginName,
                 sheetId,
+              })
+            },
+            runStockPreparationPersistUnitOfWork: async (
+              { pluginName, ...rawInput },
+              operation,
+            ) => {
+              const input = validateStockPreparationPersistUnitOfWorkInput(rawInput)
+              return poolManager.get().transaction(async ({ query }) => {
+                const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+                  const result = await query(sql, params)
+                  return {
+                    rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                      ? (result as { rows: unknown[] }).rows
+                      : [],
+                    rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                      ? (result as { rowCount: number }).rowCount
+                      : undefined,
+                  }
+                }
+
+                for (const sheetId of input.sheetIds) {
+                  const ownsSheet = await assertPluginOwnsSheet(txQuery, { pluginName, sheetId })
+                  if (!ownsSheet) {
+                    throw new MultitableSheetScopeError(pluginName, sheetId, 'unclaimed')
+                  }
+                }
+                await acquireStockPreparationPersistUnitOfWorkLocks(txQuery, input)
+
+                return operation({
+                  queryRecords: ({ sheetId, filters, search, orderBy, limit, offset }) =>
+                    queryMultitableRecords({
+                      query: txQuery,
+                      sheetId,
+                      filters,
+                      search,
+                      orderBy,
+                      limit,
+                      offset,
+                    }),
+                  createRecord: ({ sheetId, data }) =>
+                    createMultitableRecord({ query: txQuery, sheetId, data }),
+                  patchRecord: ({ sheetId, recordId, changes }) =>
+                    patchMultitableRecord({
+                      query: txQuery,
+                      sheetId,
+                      recordId,
+                      changes,
+                    }),
+                })
               })
             },
           }),

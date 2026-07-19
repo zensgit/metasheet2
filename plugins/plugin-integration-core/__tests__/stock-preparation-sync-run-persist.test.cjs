@@ -58,6 +58,7 @@ const LEAKY_DRAWING_NO = `DRW_${SECRET}`
 // The MVP tables live under the INTERNAL staging project; the business projectId ('proj_1') is a DIFFERENT
 // value. Sheet resolution must use the staging targetProjectId — a lookup with the business project misses.
 const STAGING_PROJECT_ID = 'tenant_x:integration-core'
+const LOCK_TENANT_ID = 'tenant_x'
 
 let passed = 0
 let failed = 0
@@ -166,6 +167,7 @@ function basePlanInputs(overrides = {}) {
   return {
     projectId: 'proj_1',
     targetProjectId: STAGING_PROJECT_ID,
+    lockTenantId: LOCK_TENANT_ID,
     syncRunId: 'run_1',
     snapshotBatchId: 'batch_1',
     sourceProjectNo: 'PN-1',
@@ -195,6 +197,14 @@ async function main() {
     assert.equal(result.persisted, true)
     assert.equal(result.mode, 'created')
     assert.deepEqual(result.created, { batch: 1, lines: 2, run: 1 })
+    assert.equal(recordsApi.unitOfWorkCalls.length, 1, 'persist enters exactly one host-owned unit-of-work')
+    assert.deepEqual(recordsApi.unitOfWorkCalls[0], {
+      tenantId: LOCK_TENANT_ID,
+      sheetIds: [BATCH_SHEET_ID, LINE_SHEET_ID, RUN_SHEET_ID, PROJECT_SHEET_ID],
+      project: { sheetId: PROJECT_SHEET_ID, projectId: 'proj_1' },
+      batch: { sheetId: BATCH_SHEET_ID, snapshotBatchId: 'batch_1' },
+    })
+    assert.equal(recordsApi.recordsCallsOutsideUnitOfWork, 0, 'all idempotency reads and writes stay inside the unit-of-work')
 
     // 5 creates: 1 batch, 2 lines, 1 run, THEN the project row (upserted last) — in that order.
     assert.equal(recordsApi.createCalls.length, 5)
@@ -259,6 +269,22 @@ async function main() {
     )
     assert.equal(provisioning.findObjectSheetCalls, 0, 'no sheet resolved')
     assert.equal(recordsApi.createCalls.length, 0, 'no write')
+  })
+
+  await run('P4 hard cut: missing atomic unit-of-work capability fails before provisioning or records I/O', async () => {
+    const recordsApi = makeRecordsApi()
+    recordsApi.runStockPreparationPersistUnitOfWork = undefined
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning, ...basePlanInputs(),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 503 && error.code === 'PERSIST_UNIT_OF_WORK_UNAVAILABLE',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(recordsApi.createCalls.length, 0)
+    assert.equal(recordsApi.queryCalls.length, 0)
   })
 
   await run('resolving sheets with the BUSINESS projectId misses — proves the split is load-bearing', async () => {
@@ -818,18 +844,17 @@ async function main() {
 
   // ── H-2 (P4 lock round-1): replay verifies the project LIVE POINTER, not just row existence ──────
 
-  await run('H-2: CW4-existing crash (run created, project patch lost) -> replay 409 stale_pointer, not silent 200', async () => {
+  await run('P4: a project-patch crash rolls back batch/lines/run/project together, then the same request retries cleanly', async () => {
     const recordsApi = makeRecordsApi()
     const provisioning = makeProvisioning()
-    // Sync 1 commits fully: project pointer -> run_1 (batch_1, version 1).
-    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
-    // Sync 2 (batch_2, version 2) crashes at the CW4-existing window: every batch/line/run write lands,
-    // the project PATCH is lost. Injected by failing patchRecord on the PROJECT sheet only.
     const crashingApi = Object.create(recordsApi)
     crashingApi.patchRecord = async (input = {}) => {
       if (input.sheetId === PROJECT_SHEET_ID) throw new Error('injected crash before project patch')
       return recordsApi.patchRecord(input)
     }
+    // Establish an existing project so the next sync exercises the patch branch.
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    const callsBeforeCrash = recordsApi.createCalls.length
     await assert.rejects(
       () => persistStockPreparationSyncRun({
         permission: 'admin',
@@ -839,21 +864,42 @@ async function main() {
       }),
       /injected crash before project patch/,
     )
-    // Retry of sync 2 replays batch/lines/run exactly — but the pointer still names run_1 whose batch
-    // sits at a LOWER version. Pre-H-2 this returned 200 skipped_existing (the silent window).
+    assert.equal(recordsApi.createCalls.length, callsBeforeCrash, 'failed unit-of-work leaves zero new creates')
+    const retry = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    assert.equal(retry.mode, 'created')
+  })
+
+  await run('H-2: a legacy complete batch whose project pointer stayed older still fails closed on replay', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    const projectRows = await recordsApi.queryRecords({
+      sheetId: PROJECT_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, PROJECT_KEY_FIELD)]: 'proj_1' },
+    })
+    await recordsApi.patchRecord({
+      sheetId: PROJECT_SHEET_ID,
+      recordId: projectRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'lastSyncRunId')]: 'run_1' },
+    })
     await assert.rejects(
       () => persistStockPreparationSyncRun({
-        permission: 'admin',
-        recordsApi,
-        provisioning,
+        permission: 'admin', recordsApi, provisioning,
         ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
       }),
-      (error) =>
-        error instanceof StockPreparationSyncRunPersistError &&
-        error.status === 409 &&
-        error.code === 'PERSIST_PROJECT_POINTER_STALE' &&
-        error.details.target === 'project' &&
-        error.details.reason === 'stale_pointer',
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.code === 'PERSIST_PROJECT_POINTER_STALE' && error.details.reason === 'stale_pointer',
     )
   })
 
@@ -954,27 +1000,25 @@ async function main() {
     assert.equal(recordsApi.createCalls.length, writesAfterFirst, 'rejected before any write')
   })
 
-  await run('R3: a COMPLETE orphan batch (crash before project patch) still counts — intermediate version -> 422, next version proceeds', async () => {
+  await run('R3: a legacy COMPLETE orphan batch still counts — intermediate version -> 422, next version proceeds', async () => {
     const recordsApi = makeRecordsApi()
     const provisioning = makeProvisioning()
     // V1 commits fully (pointer -> run_1).
     await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
-    // V3 crashes at CW4-existing: batch/lines/run all land, the project patch is lost — a COMPLETE
-    // orphan V3 exists while the pointer still names V1.
-    const crashingApi = Object.create(recordsApi)
-    crashingApi.patchRecord = async (input = {}) => {
-      if (input.sheetId === PROJECT_SHEET_ID) throw new Error('injected crash before project patch')
-      return recordsApi.patchRecord(input)
-    }
-    await assert.rejects(
-      () => persistStockPreparationSyncRun({
-        permission: 'admin',
-        recordsApi: crashingApi,
-        provisioning,
-        ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
-      }),
-      /injected crash before project patch/,
-    )
+    // Construct the pre-P4 legacy shape: V3 is complete while the live pointer remains on V1.
+    await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
+    })
+    const projectRows = await recordsApi.queryRecords({
+      sheetId: PROJECT_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, PROJECT_KEY_FIELD)]: 'proj_1' },
+    })
+    await recordsApi.patchRecord({
+      sheetId: PROJECT_SHEET_ID,
+      recordId: projectRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'lastSyncRunId')]: 'run_1' },
+    })
     // Round-3 finding: a pointer-only compare accepted V2 here (V2 > pointer V1) despite the complete
     // V3 — the guard must scan the project's WHOLE batch history.
     const writesBefore = recordsApi.createCalls.length
@@ -1002,24 +1046,15 @@ async function main() {
     assert.equal(next.mode, 'created')
   })
 
-  await run('R4: FIRST-sync crash at project create (CW4-first) leaves orphan history with NO project row — the scan still runs: V2 rejected, V4 proceeds', async () => {
+  await run('R4: legacy complete history with NO project row still blocks a lower version: V2 rejected, V4 proceeds', async () => {
     const recordsApi = makeRecordsApi()
     const provisioning = makeProvisioning()
-    // Empty project: V3 crashes at the PROJECT createRecord (batch/lines/run all landed; no project row).
-    const crashingApi = Object.create(recordsApi)
-    crashingApi.createRecord = async (input = {}) => {
-      if (input.sheetId === PROJECT_SHEET_ID) throw new Error('injected crash at project create')
-      return recordsApi.createRecord(input)
-    }
-    await assert.rejects(
-      () => persistStockPreparationSyncRun({
-        permission: 'admin',
-        recordsApi: crashingApi,
-        provisioning,
-        ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
-      }),
-      /injected crash at project create/,
-    )
+    // Construct the pre-P4 legacy shape: V3 batch/lines/run are complete but the project row is absent.
+    await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
+    })
+    recordsApi.store.set(PROJECT_SHEET_ID, [])
     // Round-4 finding: gating the scan on projectRows.length === 1 skipped it here (no project row),
     // so V2 slipped past the complete orphan V3. The scan must run for EVERY new batch.
     const writesBefore = recordsApi.createCalls.length

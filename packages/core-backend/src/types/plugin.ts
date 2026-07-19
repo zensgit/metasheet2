@@ -496,7 +496,33 @@ export interface MultitableRecordsAPI {
     sheetId: string
     version: number
   }>
+  /**
+   * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
+   * receives only the records methods needed by the existing persist algorithm.
+   */
+  runStockPreparationPersistUnitOfWork?<T>(
+    input: StockPreparationPersistUnitOfWorkInput,
+    operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
+  ): Promise<T>
 }
+
+export interface StockPreparationPersistUnitOfWorkInput {
+  tenantId: string
+  sheetIds: string[]
+  project: {
+    sheetId: string
+    projectId: string
+  }
+  batch: {
+    sheetId: string
+    snapshotBatchId: string
+  }
+}
+
+export type MultitableRecordsWriteUnitOfWorkAPI = Pick<
+  MultitableRecordsAPI,
+  'queryRecords' | 'createRecord' | 'patchRecord'
+>
 
 export interface MultitableAPI {
   provisioning: MultitableProvisioningAPI

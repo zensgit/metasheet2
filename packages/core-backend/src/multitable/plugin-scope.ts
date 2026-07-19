@@ -1,4 +1,9 @@
-import type { MultitableAPI } from '../types/plugin'
+import type {
+  MultitableAPI,
+  MultitableRecordsWriteUnitOfWorkAPI,
+  StockPreparationPersistUnitOfWorkInput,
+} from '../types/plugin'
+import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
 
 export type MultitableScopeQueryFn = (
   sql: string,
@@ -30,6 +35,28 @@ export type MultitableScopeHooks = {
   assertObjectScope?: (input: AssertPluginObjectScopeInput) => Promise<void>
   claimObjectScope?: (input: ClaimPluginObjectScopeInput) => Promise<void>
   assertSheetScope?: (input: AssertPluginSheetScopeInput) => Promise<void>
+  runStockPreparationPersistUnitOfWork?: <T>(
+    input: StockPreparationPersistUnitOfWorkInput & { pluginName: string },
+    operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
+  ) => Promise<T>
+}
+
+export class MultitableUnitOfWorkUnavailableError extends Error {
+  code = 'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE'
+
+  constructor() {
+    super('Required multitable unit-of-work capability is unavailable')
+    this.name = 'MultitableUnitOfWorkUnavailableError'
+  }
+}
+
+export class MultitableUnitOfWorkScopeError extends Error {
+  code = 'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN'
+
+  constructor() {
+    super('Multitable unit-of-work attempted to access an undeclared sheet')
+    this.name = 'MultitableUnitOfWorkScopeError'
+  }
 }
 
 export class MultitableProjectNamespaceError extends Error {
@@ -260,6 +287,45 @@ export function createPluginScopedMultitableApi(
       deleteRecord: async (input) => {
         await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
         return multitable.records.deleteRecord(input)
+      },
+      runStockPreparationPersistUnitOfWork: async (input, operation) => {
+        if (!hooks.runStockPreparationPersistUnitOfWork) {
+          throw new MultitableUnitOfWorkUnavailableError()
+        }
+        if (typeof operation !== 'function') {
+          throw new TypeError('operation must be a function')
+        }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+          throw new TypeError('input must be an object')
+        }
+        // Fail closed on the same validated/trimmed shape the host locks and owns. Building the
+        // callback allowlist from raw input.sheetIds would permit a whitespace variant the host
+        // never locked (and would refuse the trimmed id the host did lock).
+        const normalized = validateStockPreparationPersistUnitOfWorkInput(input)
+        const allowedSheetIds = new Set(normalized.sheetIds)
+        return hooks.runStockPreparationPersistUnitOfWork(
+          { ...normalized, pluginName },
+          async (records) => {
+            const assertAllowed = (sheetId: string) => {
+              if (!allowedSheetIds.has(sheetId)) throw new MultitableUnitOfWorkScopeError()
+            }
+            const scopedRecords: MultitableRecordsWriteUnitOfWorkAPI = {
+              queryRecords: async (recordInput) => {
+                assertAllowed(recordInput.sheetId)
+                return records.queryRecords(recordInput)
+              },
+              createRecord: async (recordInput) => {
+                assertAllowed(recordInput.sheetId)
+                return records.createRecord(recordInput)
+              },
+              patchRecord: async (recordInput) => {
+                assertAllowed(recordInput.sheetId)
+                return records.patchRecord(recordInput)
+              },
+            }
+            return operation(scopedRecords)
+          },
+        )
       },
     },
   }

@@ -4,6 +4,8 @@ import {
   MultitableObjectScopeError,
   MultitableProjectNamespaceError,
   MultitableSheetScopeError,
+  MultitableUnitOfWorkScopeError,
+  MultitableUnitOfWorkUnavailableError,
   assertProjectIdAllowedForPlugin,
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
@@ -295,5 +297,137 @@ describe('multitable plugin scope helper', () => {
         objectId: 'serviceTicket',
       }),
     ).rejects.toThrow(MultitableObjectScopeError)
+  })
+
+  it('binds the stock-preparation unit-of-work to the plugin and declared four-sheet scope', async () => {
+    const transactionRecords = {
+      queryRecords: vi.fn(async () => []),
+      createRecord: vi.fn(async (input) => ({ id: 'rec_1', version: 1, data: input.data, ...input })),
+      patchRecord: vi.fn(async (input) => ({ id: input.recordId, version: 2, data: input.changes, ...input })),
+    }
+    const hook = vi.fn(async (_input, operation) => operation(transactionRecords as any))
+    const multitable = {
+      provisioning: {},
+      records: {
+        listRecords: vi.fn(), queryRecords: vi.fn(), createRecord: vi.fn(),
+        getRecord: vi.fn(), patchRecord: vi.fn(), deleteRecord: vi.fn(),
+      },
+    }
+    const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-integration-core', {
+      runStockPreparationPersistUnitOfWork: hook,
+    })
+    const uowInput = {
+      tenantId: 'tenant_1',
+      sheetIds: ['sheet_project', 'sheet_batch', 'sheet_line', 'sheet_run'],
+      project: { sheetId: 'sheet_project', projectId: 'business_project' },
+      batch: { sheetId: 'sheet_batch', snapshotBatchId: 'batch_1' },
+    }
+
+    const result = await scoped.records.runStockPreparationPersistUnitOfWork?.(
+      uowInput,
+      async (records) => records.queryRecords({ sheetId: 'sheet_batch' }),
+    )
+    expect(result).toEqual([])
+    expect(hook.mock.calls[0]?.[0]).toEqual({ ...uowInput, pluginName: 'plugin-integration-core' })
+    expect(transactionRecords.queryRecords).toHaveBeenCalledWith({ sheetId: 'sheet_batch' })
+
+    await expect(scoped.records.runStockPreparationPersistUnitOfWork?.(
+      uowInput,
+      async (records) => records.queryRecords({ sheetId: 'sheet_foreign' }),
+    )).rejects.toThrow(MultitableUnitOfWorkScopeError)
+
+    const runUnitOfWork = scoped.records.runStockPreparationPersistUnitOfWork as unknown as (
+      input: unknown,
+      operation: unknown,
+    ) => Promise<unknown>
+    const hookCallsBeforeInvalidInput = hook.mock.calls.length
+    await expect(runUnitOfWork(uowInput, null)).rejects.toThrow('operation must be a function')
+    await expect(runUnitOfWork(null, async () => null)).rejects.toThrow('input must be an object')
+    expect(hook).toHaveBeenCalledTimes(hookCallsBeforeInvalidInput)
+  })
+
+  it('fails closed when the host does not provide the required unit-of-work hook', async () => {
+    const multitable = {
+      provisioning: {},
+      records: {
+        listRecords: vi.fn(), queryRecords: vi.fn(), createRecord: vi.fn(),
+        getRecord: vi.fn(), patchRecord: vi.fn(), deleteRecord: vi.fn(),
+      },
+    }
+    const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-integration-core')
+    await expect(scoped.records.runStockPreparationPersistUnitOfWork?.(
+      {
+        tenantId: 'tenant_1',
+        sheetIds: ['sheet_project', 'sheet_batch', 'sheet_line', 'sheet_run'],
+        project: { sheetId: 'sheet_project', projectId: 'project_1' },
+        batch: { sheetId: 'sheet_batch', snapshotBatchId: 'batch_1' },
+      },
+      async () => null,
+    )).rejects.toThrow(MultitableUnitOfWorkUnavailableError)
+  })
+
+  it('normalizes UOW sheet ids before allowlist and host handoff; whitespace variants stay out of scope', async () => {
+    const transactionRecords = {
+      queryRecords: vi.fn(async (input: { sheetId: string }) => [{ sheetId: input.sheetId }]),
+      createRecord: vi.fn(async (input: { sheetId: string }) => ({ id: 'rec_1', version: 1, sheetId: input.sheetId })),
+      patchRecord: vi.fn(async (input: { sheetId: string; recordId: string }) => ({
+        id: input.recordId,
+        version: 2,
+        sheetId: input.sheetId,
+      })),
+    }
+    const hook = vi.fn(async (_input, operation) => operation(transactionRecords as any))
+    const multitable = {
+      provisioning: {},
+      records: {
+        listRecords: vi.fn(), queryRecords: vi.fn(), createRecord: vi.fn(),
+        getRecord: vi.fn(), patchRecord: vi.fn(), deleteRecord: vi.fn(),
+      },
+    }
+    const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-integration-core', {
+      runStockPreparationPersistUnitOfWork: hook,
+    })
+
+    const paddedProjectSheetId = ' sheet_project '
+    const rawInput = {
+      tenantId: ' tenant_1 ',
+      sheetIds: [paddedProjectSheetId, ' sheet_batch ', 'sheet_line', 'sheet_run'],
+      project: { sheetId: paddedProjectSheetId, projectId: ' project_1 ' },
+      batch: { sheetId: ' sheet_batch ', snapshotBatchId: ' batch_1 ' },
+    }
+    const normalized = {
+      tenantId: 'tenant_1',
+      sheetIds: ['sheet_project', 'sheet_batch', 'sheet_line', 'sheet_run'],
+      project: { sheetId: 'sheet_project', projectId: 'project_1' },
+      batch: { sheetId: 'sheet_batch', snapshotBatchId: 'batch_1' },
+    }
+
+    const result = await scoped.records.runStockPreparationPersistUnitOfWork?.(
+      rawInput,
+      async (records) => {
+        // Declared (trimmed) id is in scope and reaches the host records API.
+        const rows = await records.queryRecords({ sheetId: 'sheet_project' })
+        // Negative leg / mutation proof: the raw padded string was on the pre-normalization
+        // sheetIds array. If the allowlist were still built from raw input.sheetIds, this call
+        // would succeed and the assertion below would fail. Fail closed requires the throw.
+        await expect(
+          records.queryRecords({ sheetId: paddedProjectSheetId }),
+        ).rejects.toThrow(MultitableUnitOfWorkScopeError)
+        await expect(
+          records.createRecord({ sheetId: paddedProjectSheetId, data: { k: 1 } }),
+        ).rejects.toThrow(MultitableUnitOfWorkScopeError)
+        await expect(
+          records.patchRecord({ sheetId: paddedProjectSheetId, recordId: 'rec_x', changes: { k: 2 } }),
+        ).rejects.toThrow(MultitableUnitOfWorkScopeError)
+        return rows
+      },
+    )
+
+    expect(result).toEqual([{ sheetId: 'sheet_project' }])
+    expect(hook.mock.calls[0]?.[0]).toEqual({ ...normalized, pluginName: 'plugin-integration-core' })
+    expect(transactionRecords.queryRecords).toHaveBeenCalledWith({ sheetId: 'sheet_project' })
+    expect(transactionRecords.queryRecords).not.toHaveBeenCalledWith({ sheetId: paddedProjectSheetId })
+    expect(transactionRecords.createRecord).not.toHaveBeenCalled()
+    expect(transactionRecords.patchRecord).not.toHaveBeenCalled()
   })
 })

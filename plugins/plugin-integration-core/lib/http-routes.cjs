@@ -3898,6 +3898,7 @@ function createHandlers(services, options = {}) {
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
         targetProjectId,
+        lockTenantId: tenantId,
         projectId: input.projectId,
         syncRunId: input.syncRunId,
         snapshotBatchId: input.snapshotBatchId,
@@ -3985,6 +3986,7 @@ function createHandlers(services, options = {}) {
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
         targetProjectId,
+        lockTenantId: tenantId,
         ...persistInput,
       })
       // OD-5: created overrides the read-only projector's fixed mode:'dry_run' / internalWriteExecuted:

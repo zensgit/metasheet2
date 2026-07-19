@@ -7562,6 +7562,9 @@ function createInMemoryMvpPersistStore() {
       writes.push({ op: 'patch', sheetId, data: { ...changes } })
       return { id: recordId, sheetId, data: { ...data } }
     },
+    async runStockPreparationPersistUnitOfWork(_input, operation) {
+      return operation(recordsApi)
+    },
   }
   const provisioningApi = {
     async findObjectSheet({ projectId, objectId } = {}) {

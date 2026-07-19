@@ -526,6 +526,7 @@ async function main() {
       provisioning,
       projectId: 'proj_1',
       targetProjectId: STAGING_PROJECT_ID,
+      lockTenantId: 'tenant_x',
       syncRunId: 'bom_run_1',
       snapshotBatchId: 'batch_1',
       sourceProjectNo: 'PN-1',

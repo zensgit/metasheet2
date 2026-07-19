@@ -52,7 +52,10 @@ const {
   },
   parseStrictVersion,
 } = require('./stock-preparation-sync-run-plan.cjs')
-const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
+const {
+  createTargetScopedRecordsApi,
+  resolveTargetFieldIds,
+} = require('./stock-preparation-table-actions.cjs')
 const {
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
@@ -130,6 +133,18 @@ function ensureProvisioning(provisioning) {
   return provisioning
 }
 
+function ensurePersistUnitOfWork(recordsApi) {
+  if (!recordsApi || typeof recordsApi.runStockPreparationPersistUnitOfWork !== 'function') {
+    throw new StockPreparationSyncRunPersistError(
+      503,
+      'PERSIST_UNIT_OF_WORK_UNAVAILABLE',
+      'stock-preparation sync-run persist requires the atomic records unit-of-work',
+      { requiredMethod: 'runStockPreparationPersistUnitOfWork' },
+    )
+  }
+  return recordsApi
+}
+
 // Resolve ONE MVP objectId to a scoped, sheet-bound records API. objectId MUST be a frozen MVP member
 // (fail closed otherwise); the sheet MUST already exist (fail closed — NEVER create a sheet here). The
 // returned scoped API forces every call onto sheet.id, so a write can never leave the resolved sheet,
@@ -157,8 +172,14 @@ async function resolveScopedTarget(recordsApi, provisioning, projectId, objectId
       { objectId },
     )
   }
-  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }, { provisioning, projectId })
-  return { objectId, sheetId, scoped }
+  const fieldIds = await resolveTargetFieldIds(provisioning, projectId, objectId)
+  const bindRecordsApi = (api) => createTargetScopedRecordsApi(
+    api,
+    { sheetId, objectId },
+    { resolvedFieldIds: fieldIds },
+  )
+  const scoped = await bindRecordsApi(recordsApi)
+  return { objectId, sheetId, scoped, bindRecordsApi }
 }
 
 // Ground a mapped snapshot line to ONLY the frozen line-template field ids (dropping null / undefined
@@ -502,7 +523,15 @@ async function persistStockPreparationSyncRun(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'input must be an object')
   }
-  const { context, permission, recordsApi, provisioning: provisioningInput, targetProjectId: targetProjectIdInput, ...planInputs } = input
+  const {
+    context,
+    permission,
+    recordsApi: recordsApiInput,
+    provisioning: provisioningInput,
+    targetProjectId: targetProjectIdInput,
+    lockTenantId: lockTenantIdInput,
+    ...planInputs
+  } = input
 
   // 1. admin gate FIRST — fail-closed before ANY provisioning / records access.
   assertAdminPermission(permission)
@@ -546,6 +575,20 @@ async function persistStockPreparationSyncRun(input = {}) {
     )
   }
 
+  // P4 hard cut: there is no sequential per-record transaction fallback. Capability validation happens
+  // before provisioning or records I/O so a host that has not rolled out the atomic primitive cannot
+  // recreate the historical partial-commit window.
+  const recordsApi = ensurePersistUnitOfWork(recordsApiInput)
+  const lockTenantId = optionalString(lockTenantIdInput)
+  if (!lockTenantId) {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_CONFIG_INVALID',
+      'lockTenantId is required for the atomic persist lock scope',
+      { field: 'lockTenantId' },
+    )
+  }
+
   // The MVP tables are provisioned under an INTERNAL STAGING project (readiness/ensure route
   // resolveIntegrationStagingProjectId -> `<tenant>:integration-core`), NOT the business projectId. So
   // sheet resolution MUST use the caller-derived targetProjectId (staging); the plan rows keep the
@@ -564,91 +607,111 @@ async function persistStockPreparationSyncRun(input = {}) {
   const runTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, RUN_OBJECT_ID)
   const projectTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, PROJECT_OBJECT_ID)
 
-  // 4. Idempotency + immutability. A batch-key hit is only a successful replay after every immutable
-  //    batch/line/run projection and the project-row existence check match exactly. Partial commits and
-  //    same-key/different-content requests fail closed; this module never repairs or patches snapshots.
-  const existingBatch = await batchTarget.scoped.queryRecords({
-    filters: { [BATCH_KEY_FIELD]: snapshotBatchId },
-    limit: 2,
-    offset: 0,
-  })
-  if (!Array.isArray(existingBatch)) {
-    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
-  }
-  if (existingBatch.length > 1) idempotencyConflict('snapshot_batch', 'duplicate_key')
+  // 4. The host takes all four canonical sheet fences, then the project key and batch key, and invokes
+  //    this callback on one transaction-scoped records API. Every idempotency decision, replay read,
+  //    create/patch, and revision write below therefore shares the same transaction and lock lifetime.
+  return recordsApi.runStockPreparationPersistUnitOfWork({
+    tenantId: lockTenantId,
+    sheetIds: [
+      batchTarget.sheetId,
+      lineTarget.sheetId,
+      runTarget.sheetId,
+      projectTarget.sheetId,
+    ],
+    project: { sheetId: projectTarget.sheetId, projectId },
+    batch: { sheetId: batchTarget.sheetId, snapshotBatchId },
+  }, async (transactionRecordsApi) => {
+    const batchScoped = await batchTarget.bindRecordsApi(transactionRecordsApi)
+    const lineScoped = await lineTarget.bindRecordsApi(transactionRecordsApi)
+    const runScoped = await runTarget.bindRecordsApi(transactionRecordsApi)
+    const projectScoped = await projectTarget.bindRecordsApi(transactionRecordsApi)
 
-  // The project preflight occurs before the first write. It both rejects duplicate project keys and
-  // supplies the exact row (if any) that the final live-pointer upsert may patch.
-  const projectRows = await queryProjectRows(projectTarget.scoped, projectId)
-
-  if (existingBatch.length === 1) {
-    await assertExactReplay({
-      existingBatch: existingBatch[0],
-      plan,
-      snapshotLines,
-      lineScoped: lineTarget.scoped,
-      runScoped: runTarget.scoped,
-      batchScoped: batchTarget.scoped,
-      projectRows,
+    // Idempotency + immutability. A batch-key hit is only a successful replay after every immutable
+    // batch/line/run projection and the project-row existence check match exactly. Partial or conflicting
+    // replays fail closed; this module never repairs or patches snapshots.
+    const existingBatch = await batchScoped.queryRecords({
+      filters: { [BATCH_KEY_FIELD]: snapshotBatchId },
+      limit: 2,
+      offset: 0,
     })
-    const created = { batch: 0, lines: 0, run: 0 }
-    return {
-      persisted: false,
-      mode: 'skipped_existing',
-      created,
-      project: { mode: 'skipped' },
-      evidence: buildEvidence({ persisted: false, mode: 'skipped_existing', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: true, projectSync: null }),
+    if (!Array.isArray(existingBatch)) {
+      throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
-  }
+    if (existingBatch.length > 1) idempotencyConflict('snapshot_batch', 'duplicate_key')
 
-  // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write, for EVERY new
-  // batch): the new snapshotVersion must be strictly above EVERY existing batch of the business
-  // project. The scan runs UNCONDITIONALLY — round-4: a FIRST-sync crash at the project create
-  // (CW4-first) leaves orphan batch history with NO project row, so gating the scan on the project
-  // row's existence let the next lower-version sync through. Empty history scans to max 0 (any
-  // positive version passes); unprovable history (page bound exceeded / non-strict version values)
-  // fails closed. This is what makes the replay-side stale/advanced inference sound.
-  {
-    const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
-    if (currentVersion === null) versionNotMonotonic('history_unprovable')
-    const maxVersion = await readProjectMaxBatchVersion(batchTarget.scoped, optionalString(planInputs.projectId))
-    if (maxVersion === null) versionNotMonotonic('history_unprovable')
-    if (currentVersion <= maxVersion) versionNotMonotonic('not_monotonic')
-  }
+    // The project preflight occurs before the first write. It both rejects duplicate project keys and
+    // supplies the exact row (if any) that the final live-pointer upsert may patch.
+    const projectRows = await queryProjectRows(projectScoped, projectId)
 
-  // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
-  //    existing row is ever mutated. Batch-first plants the idempotency key before lines/run; a crash
-  //    mid-commit is therefore visible on retry as an incomplete 409, never a duplicate or silent skip.
-  await batchTarget.scoped.createRecord({ data: plan.snapshotBatch })
-  let linesCreated = 0
-  for (const line of snapshotLines) {
-    await lineTarget.scoped.createRecord({ data: groundLineRow(line) })
-    linesCreated += 1
-  }
-  await runTarget.scoped.createRecord({ data: plan.syncRun })
+    if (existingBatch.length === 1) {
+      await assertExactReplay({
+        existingBatch: existingBatch[0],
+        plan,
+        snapshotLines,
+        lineScoped,
+        runScoped,
+        batchScoped,
+        projectRows,
+      })
+      const created = { batch: 0, lines: 0, run: 0 }
+      return {
+        persisted: false,
+        mode: 'skipped_existing',
+        created,
+        project: { mode: 'skipped' },
+        evidence: buildEvidence({ persisted: false, mode: 'skipped_existing', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: true, projectSync: null }),
+      }
+    }
 
-  // #4163 T1: upsert the project row LAST — the run just genuinely completed, so `lastSyncRunId` /
-  // `lastSyncedAt` on the project row point at a run that actually finished (not one that merely
-  // started). Idempotent by projectId: a SECOND, genuinely-new batch for the same project patches this
-  // same row rather than creating a duplicate — the multi-sync-run case the populator exists for.
-  const projectSync = await upsertStockPreparationProject({
-    scoped: projectTarget.scoped,
-    existing: projectRows,
-    projectId,
-    sourceProjectNo,
-    projectName,
-    sourceSystem: projectSourceSystem,
-    syncRunId: plan.syncRun.runId,
+    // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write, for EVERY new
+    // batch): the new snapshotVersion must be strictly above EVERY existing batch of the business
+    // project. The scan runs UNCONDITIONALLY — round-4: a FIRST-sync crash at the project create
+    // (CW4-first) leaves orphan batch history with NO project row, so gating the scan on the project
+    // row's existence let the next lower-version sync through. Empty history scans to max 0 (any
+    // positive version passes); unprovable history (page bound exceeded / non-strict version values)
+    // fails closed. This is what makes the replay-side stale/advanced inference sound.
+    {
+      const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+      if (currentVersion === null) versionNotMonotonic('history_unprovable')
+      const maxVersion = await readProjectMaxBatchVersion(batchScoped, optionalString(planInputs.projectId))
+      if (maxVersion === null) versionNotMonotonic('history_unprovable')
+      if (currentVersion <= maxVersion) versionNotMonotonic('not_monotonic')
+    }
+
+    // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
+    // existing row is ever mutated. The surrounding unit-of-work is the only commit point: a failure
+    // anywhere below rolls back every row and revision rather than exposing a partial batch.
+    await batchScoped.createRecord({ data: plan.snapshotBatch })
+    let linesCreated = 0
+    for (const line of snapshotLines) {
+      await lineScoped.createRecord({ data: groundLineRow(line) })
+      linesCreated += 1
+    }
+    await runScoped.createRecord({ data: plan.syncRun })
+
+    // #4163 T1: upsert the project row LAST — the run just genuinely completed, so `lastSyncRunId` /
+    // `lastSyncedAt` on the project row point at a run that actually finished (not one that merely
+    // started). Idempotent by projectId: a SECOND, genuinely-new batch for the same project patches this
+    // same row rather than creating a duplicate — the multi-sync-run case the populator exists for.
+    const projectSync = await upsertStockPreparationProject({
+      scoped: projectScoped,
+      existing: projectRows,
+      projectId,
+      sourceProjectNo,
+      projectName,
+      sourceSystem: projectSourceSystem,
+      syncRunId: plan.syncRun.runId,
+    })
+
+    const created = { batch: 1, lines: linesCreated, run: 1 }
+    return {
+      persisted: true,
+      mode: 'created',
+      created,
+      project: projectSync,
+      evidence: buildEvidence({ persisted: true, mode: 'created', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: false, projectSync }),
+    }
   })
-
-  const created = { batch: 1, lines: linesCreated, run: 1 }
-  return {
-    persisted: true,
-    mode: 'created',
-    created,
-    project: projectSync,
-    evidence: buildEvidence({ persisted: true, mode: 'created', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: false, projectSync }),
-  }
 }
 
 module.exports = {
