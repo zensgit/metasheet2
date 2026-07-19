@@ -1482,6 +1482,7 @@ import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import {
+  type FwbMappingDraft,
   isFwbV1SourceFieldType,
   isFwbV1TargetFieldType,
   normalizeFwbTargetFieldType,
@@ -1613,6 +1614,12 @@ type DraftActionConfig = Record<string, unknown> & {
   parallelBranches?: ParallelBranchDraft[]
   parallelBranchUnsupportedReason?: string | null
   parallelBranchOriginal?: Record<string, unknown> | null
+  mode?: 'create' | 'update' | 'decision'
+  recordLinkFieldId?: string
+  decisionNodeKey?: string
+  confirmationId?: string
+  fwbConfirmStatus?: 'none' | 'confirmed' | 'failed'
+  fwbMappings?: FwbMappingDraft[]
 }
 
 interface DraftAction {
