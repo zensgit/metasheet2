@@ -1178,6 +1178,30 @@ function validateNodeFieldPermissionsAgainstFormSchema(
 }
 
 /**
+ * FWB-3: every decisionFieldIds entry must exist on the version's formSchema.
+ * Decision values are form fields the approver re-confirms / overrides at approve time.
+ */
+function validateDecisionFieldIdsAgainstFormSchema(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const fieldIds = new Set(formSchema.fields.map((field) => field.id))
+  approvalGraph.nodes.forEach((node) => {
+    if (node.type !== 'approval') return
+    const config = node.config as { decisionFieldIds?: string[] }
+    for (const fieldId of config.decisionFieldIds ?? []) {
+      if (!fieldIds.has(fieldId)) {
+        failValidation(
+          context,
+          `approvalGraph node ${node.key} decisionFieldIds references unknown field ${fieldId}`,
+        )
+      }
+    }
+  })
+}
+
+/**
  * T1-1: every node key that lives INSIDE a parallel region — i.e. is reachable from a `parallel`
  * node's branch edge target before the region's join node. Computed from the stored graph structure
  * (not runtime instance state), mirroring `collectParallelBranchNodeKeys`. Used to reject node-level
@@ -2963,6 +2987,7 @@ export class ApprovalProductService {
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateDecisionFieldIdsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
 
@@ -3119,6 +3144,7 @@ export class ApprovalProductService {
         const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateDecisionFieldIdsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
 
@@ -3221,6 +3247,7 @@ export class ApprovalProductService {
       const approvalGraph = asApprovalGraph(version.approval_graph)
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      validateDecisionFieldIdsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // RA-1b CURATED-VOCABULARY — THE HARD GATE. Only when the graph actually routes on requester.role do
       // we fetch the curated set (one read, on this transaction client) and reject any uncurated literal at
       // publish. Independent of any picker, so an author can never publish a route on an admin/system role.
@@ -5630,6 +5657,33 @@ export class ApprovalProductService {
         : undefined
       const declaredDecisionFields = (nodeForDecision?.config as { decisionFieldIds?: string[] } | undefined)?.decisionFieldIds
       const pendingDecisionData = isRecord(request.decisionData) ? request.decisionData : {}
+      // Schema hints from the instance's frozen template version form_schema (D7/D8 normalize).
+      const decisionFieldHints: Record<string, { type?: string; numberPrecision?: number }> = {}
+      if (Array.isArray(declaredDecisionFields) && declaredDecisionFields.length > 0) {
+        const verSchema = await client.query(
+          `SELECT v.form_schema
+             FROM approval_instances i
+             JOIN approval_template_versions v ON v.id = i.template_version_id
+            WHERE i.id = $1`,
+          [id],
+        )
+        const fs = (verSchema.rows[0] as { form_schema?: unknown } | undefined)?.form_schema
+        const fieldsList =
+          fs && typeof fs === 'object' && !Array.isArray(fs) && Array.isArray((fs as { fields?: unknown }).fields)
+            ? (fs as { fields: Array<{ id?: string; type?: string; props?: Record<string, unknown> }> }).fields
+            : []
+        for (const f of fieldsList) {
+          if (!f || typeof f.id !== 'string' || !declaredDecisionFields.includes(f.id)) continue
+          const hint: { type?: string; numberPrecision?: number } = {}
+          if (typeof f.type === 'string') hint.type = f.type
+          if (f.type === 'number') {
+            const props = f.props && typeof f.props === 'object' ? f.props : {}
+            const d = (props as { decimals?: unknown }).decimals
+            if (typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 20) hint.numberPrecision = d
+          }
+          decisionFieldHints[f.id] = hint
+        }
+      }
       const freezeDecisionIfNodeResolves = async (): Promise<void> => {
         if (!currentNodeKey || currentNodeEpoch === null || currentNodeEpoch < 1) return
         if (!Array.isArray(declaredDecisionFields) || declaredDecisionFields.length === 0) return
@@ -5638,6 +5692,8 @@ export class ApprovalProductService {
           currentNodeEpoch,
           declaredDecisionFields,
           pendingDecisionData,
+          () => new Date(),
+          decisionFieldHints,
         )
         if ((freezeRaw as { ok: boolean }).ok !== true) {
           throw new ServiceError(

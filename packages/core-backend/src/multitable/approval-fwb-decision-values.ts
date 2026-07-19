@@ -5,14 +5,12 @@
  *   - `freezeDecisionValues` captures the approver's decision-field values AT DECISION TIME into an
  *     immutable snapshot keyed (node_key, entry_epoch). It is called INSIDE the dispatchAction lock
  *     transaction — the same lock that serializes the node's decision — so the frozen snapshot can never
- *     race the decision it snapshots. Unknown fields (not declared for the node) are REJECTED fail-closed
- *     (an approver cannot smuggle arbitrary fields into the writeback), and a re-entered node (new
- *     entry_epoch) freezes a NEW snapshot — an old epoch's values are NEVER reused (§6).
+ *     race the decision it snapshots. Require every declared field exactly once; reject absent/extra/
+ *     blank/invalid values fail-closed; normalize D7 (exact decimal string) / D8 (ISO date) before
+ *     persist. A re-entered node (new entry_epoch) freezes a NEW snapshot — old epochs are NEVER reused.
  *   - `executeWriteDecisionValues` writes a frozen snapshot to the bound record with the FWB-3 idempotency
  *     key (instance, rule, action, node_key, entry_epoch) — the ledger's real node-scope columns — reusing
  *     the FWB-2 bound-record recheck + same-transaction UPDATE + outbox composition.
- *
- * Injected seams as in FWB-1/2; no production caller until the FWB activation slice.
  */
 import type { Queryable } from './automation-durable-dispatcher'
 import type { TransactionalQueryable } from './pg-transaction-guard'
@@ -20,6 +18,7 @@ import { claimActionApplied } from './automation-action-idempotency'
 import { mapApprovalFormValues, type FwbFieldMapping } from './approval-form-value-mapping'
 import { recheckFwbPermissionGates, type FwbGateChecks, type FwbGateId, type FwbGateSubject } from './approval-fwb-permission-gates'
 import { recheckBoundRecordAtExecute, type FwbUpdateSeam, type RecordLinkChecks, type RecordLinkRejectCode } from './approval-fwb-record-link'
+import { coerceExactDecimal } from './approval-fwb-target-fields'
 
 export interface FrozenDecisionSnapshot {
   nodeKey: string
@@ -31,11 +30,69 @@ export interface FrozenDecisionSnapshot {
 
 export type FreezeResult =
   | { ok: true; snapshot: FrozenDecisionSnapshot }
-  | { ok: false; code: 'node_key_blank' | 'entry_epoch_invalid' | 'undeclared_field' | 'no_declared_fields' }
+  | {
+      ok: false
+      code:
+        | 'node_key_blank'
+        | 'entry_epoch_invalid'
+        | 'undeclared_field'
+        | 'missing_field'
+        | 'blank_value'
+        | 'invalid_value'
+        | 'no_declared_fields'
+    }
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/
+
+export type DecisionFieldSchemaHint = {
+  /** form field type from the template schema (authoritative when present). */
+  type?: string
+  /** number field precision for D7/Q5 when type is number. */
+  numberPrecision?: number
+}
 
 /**
- * Freeze the decision values. `declaredFieldIds` is the node's CLOSED field set; any submitted field
- * outside it rejects the whole freeze (fail-closed). Call inside the dispatchAction lock transaction.
+ * Normalize one decision value (D7 number → exact decimal string; D8 date → ISO date string).
+ * Returns null when blank/invalid.
+ */
+export function normalizeDecisionFieldValue(
+  raw: unknown,
+  hint?: DecisionFieldSchemaHint,
+): { ok: true; value: unknown } | { ok: false; code: 'blank_value' | 'invalid_value' } {
+  if (raw === undefined || raw === null) return { ok: false, code: 'blank_value' }
+  if (typeof raw === 'string' && raw.trim() === '') return { ok: false, code: 'blank_value' }
+
+  const type = hint?.type
+  if (type === 'number') {
+    const r = coerceExactDecimal(raw, hint?.numberPrecision)
+    if (!r.ok) return { ok: false, code: 'invalid_value' }
+    return { ok: true, value: r.v }
+  }
+  if (type === 'date') {
+    if (typeof raw !== 'string' || !ISO_DATE.test(raw.trim())) return { ok: false, code: 'invalid_value' }
+    const t = Date.parse(`${raw.trim()}T00:00:00Z`)
+    if (!Number.isFinite(t)) return { ok: false, code: 'invalid_value' }
+    return { ok: true, value: raw.trim() }
+  }
+  if (type === 'datetime') {
+    if (typeof raw !== 'string' || !ISO_DATETIME.test(raw.trim())) return { ok: false, code: 'invalid_value' }
+    const t = Date.parse(raw.trim())
+    if (!Number.isFinite(t)) return { ok: false, code: 'invalid_value' }
+    return { ok: true, value: raw.trim() }
+  }
+  // text / select / untyped: reject blank string (already handled); pass through finite scalars.
+  if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+    if (typeof raw === 'number' && !Number.isFinite(raw)) return { ok: false, code: 'invalid_value' }
+    return { ok: true, value: raw }
+  }
+  return { ok: false, code: 'invalid_value' }
+}
+
+/**
+ * Freeze the decision values. `declaredFieldIds` is the node's CLOSED field set — every declared
+ * field must appear exactly once; extra keys, absent keys, blank/invalid values all reject.
+ * Call inside the dispatchAction lock transaction.
  */
 export function freezeDecisionValues(
   nodeKey: string,
@@ -43,16 +100,42 @@ export function freezeDecisionValues(
   declaredFieldIds: readonly string[],
   decisionData: Readonly<Record<string, unknown>>,
   now: () => Date = () => new Date(),
+  fieldHints?: Readonly<Record<string, DecisionFieldSchemaHint>>,
 ): FreezeResult {
   if (typeof nodeKey !== 'string' || !/[!-~]/.test(nodeKey)) return { ok: false, code: 'node_key_blank' }
-  if (!Number.isSafeInteger(entryEpoch) || entryEpoch < 1) return { ok: false, code: 'entry_epoch_invalid' } // real node scope starts at 1
+  if (!Number.isSafeInteger(entryEpoch) || entryEpoch < 1) return { ok: false, code: 'entry_epoch_invalid' }
   if (!declaredFieldIds || declaredFieldIds.length === 0) return { ok: false, code: 'no_declared_fields' }
+
   const declared = new Set(declaredFieldIds)
+  if (declared.size !== declaredFieldIds.length) {
+    // Duplicate declarations in the node config — treat as invalid closed set.
+    return { ok: false, code: 'no_declared_fields' }
+  }
+
+  // Reject extra (undeclared) keys first.
   for (const k of Object.keys(decisionData)) {
     if (!declared.has(k)) return { ok: false, code: 'undeclared_field' }
   }
-  const values = Object.freeze({ ...decisionData })
-  return { ok: true, snapshot: Object.freeze({ nodeKey, entryEpoch, values, frozenAt: now().toISOString() }) }
+
+  const values: Record<string, unknown> = {}
+  for (const fieldId of declaredFieldIds) {
+    if (!(fieldId in decisionData)) return { ok: false, code: 'missing_field' }
+    const normalized = normalizeDecisionFieldValue(decisionData[fieldId], fieldHints?.[fieldId])
+    if (normalized.ok === false) {
+      return { ok: false, code: normalized.code }
+    }
+    values[fieldId] = normalized.value
+  }
+
+  return {
+    ok: true,
+    snapshot: Object.freeze({
+      nodeKey,
+      entryEpoch,
+      values: Object.freeze(values),
+      frozenAt: now().toISOString(),
+    }),
+  }
 }
 
 export interface FwbDecisionWriteInput {
