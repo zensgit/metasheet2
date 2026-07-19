@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  __resetRecoveryWriterStateColumnProbe,
+  SheetWriterBlockedError,
+} from "../../src/multitable/canonical-sheet-fence";
+import {
   STOCK_PREPARATION_BATCH_LOCK_NS,
   STOCK_PREPARATION_PROJECT_LOCK_NS,
   StockPreparationPersistUnitOfWorkError,
@@ -82,6 +86,41 @@ describe("stock-preparation persist unit-of-work locks", () => {
     expect(stockPreparationBatchLockKey(left)).not.toBe(
       stockPreparationBatchLockKey(right),
     );
+  });
+
+  it("refuses an active durable recovery block before taking project or batch locks", async () => {
+    const originalFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE;
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = "true";
+    __resetRecoveryWriterStateColumnProbe();
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params });
+      if (sql.includes("information_schema.columns")) return { rows: [{}] };
+      if (sql.includes("SELECT recovery_writer_state")) {
+        return {
+          rows: [{
+            recovery_writer_state: params[0] === "sheet_batch" ? "applying" : null,
+          }],
+        };
+      }
+      return { rows: [] };
+    });
+
+    try {
+      await expect(
+        acquireStockPreparationPersistUnitOfWorkLocks(query, input),
+      ).rejects.toBeInstanceOf(SheetWriterBlockedError);
+      expect(
+        calls.some(({ sql }) => sql.includes("pg_advisory_xact_lock($1::int")),
+      ).toBe(false);
+    } finally {
+      if (originalFlag === undefined) {
+        delete process.env.MULTITABLE_ENABLE_WRITER_FENCE;
+      } else {
+        process.env.MULTITABLE_ENABLE_WRITER_FENCE = originalFlag;
+      }
+      __resetRecoveryWriterStateColumnProbe();
+    }
   });
 
   it("rejects a non-four-sheet or out-of-scope key before taking any lock", async () => {

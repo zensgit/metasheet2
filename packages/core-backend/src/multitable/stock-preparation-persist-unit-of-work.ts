@@ -1,5 +1,7 @@
 import {
   acquireCanonicalSheetFencesInOrder,
+  assertNoActiveWriterBlock,
+  isWriterFenceEnabled,
   type FenceQuery,
 } from "./canonical-sheet-fence";
 import type { StockPreparationPersistUnitOfWorkInput } from "../types/plugin";
@@ -76,7 +78,12 @@ export async function acquireStockPreparationPersistUnitOfWorkLocks(
   rawInput: StockPreparationPersistUnitOfWorkInput,
 ): Promise<StockPreparationPersistUnitOfWorkInput> {
   const input = validateStockPreparationPersistUnitOfWorkInput(rawInput);
-  await acquireCanonicalSheetFencesInOrder(query, input.sheetIds);
+  const orderedSheetIds = await acquireCanonicalSheetFencesInOrder(query, input.sheetIds);
+  if (isWriterFenceEnabled()) {
+    for (const sheetId of orderedSheetIds) {
+      await assertNoActiveWriterBlock(query, sheetId);
+    }
+  }
   await query("SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)", [
     STOCK_PREPARATION_PROJECT_LOCK_NS,
     stockPreparationProjectLockKey(input),
