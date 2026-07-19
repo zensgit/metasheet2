@@ -995,7 +995,8 @@ describe('approval template routes', () => {
       template.latest_version_id = v2.id
 
       const app = createApp()
-      const response = await request(app)
+      pinned.setApp(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
         .send({ expectedLatestVersionId: v2.id })
 
@@ -1037,7 +1038,8 @@ describe('approval template routes', () => {
       }
 
       const app = createApp()
-      const response = await request(app)
+      pinned.setApp(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
         .send({ expectedLatestVersionId: v2.id })
 
@@ -1056,7 +1058,8 @@ describe('approval template routes', () => {
       const beforeCount = routeState.state.versions.size
 
       const app = createApp()
-      const response = await request(app)
+      pinned.setApp(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/versions/${foreignVersion.id}/restore`)
         .send({ expectedLatestVersionId: latest.id })
 
@@ -1074,7 +1077,8 @@ describe('approval template routes', () => {
       const beforeCount = routeState.state.versions.size
 
       const app = createApp()
-      const response = await request(app)
+      pinned.setApp(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
         .send({ expectedLatestVersionId: v1.id })
 
@@ -1092,10 +1096,11 @@ describe('approval template routes', () => {
       const beforeCount = routeState.state.versions.size
 
       const app = createApp()
-      const missing = await request(app)
+      pinned.setApp(app)
+      const missing = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
         .send({})
-      const blank = await request(app)
+      const blank = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
         .send({ expectedLatestVersionId: '   ' })
 
@@ -1113,7 +1118,8 @@ describe('approval template routes', () => {
       template.latest_version_id = latest.id
 
       const app = createApp()
-      const response = await request(app)
+      pinned.setApp(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/versions/${latest.id}/restore`)
         .send({ expectedLatestVersionId: latest.id })
 
