@@ -49,7 +49,6 @@ import {
   validateApprovalNodeEdits,
   type ApprovalNodeEdits,
 } from './approvalNodeEdit'
-import { isApprovalAttachmentsEnabled } from './attachmentUpload'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
@@ -69,15 +68,15 @@ export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
 export { placeholderRoleNodeKeys } from './approvalNodeEdit'
 
-/**
- * Authorable field types. When the attachment feature flag is OFF (default), `attachment` is
- * excluded (B2-28 honest-disable / lock rung 4 not yet flipped). When ON, attachment becomes
- * authorable so authors can declare attachment fields for the working uploader pipeline.
- * `detail` is top-level-only — its sub-fields never include `detail` (one nesting level).
- */
-export type AuthorableFieldType = FormFieldType
+// Top-level authorable field types: the 8 leaf scalar types plus `detail` (repeatable
+// line-items group). `attachment` is intentionally excluded until lock §7 rung 4
+// (authorability + strip-retirement) is owner-ratified AFTER the feature flag is ON —
+// that ratification has not happened; B2-28 honest-disable stays until then.
+// `detail` is top-level-only — its sub-fields are restricted to the leaf set
+// (`DETAIL_LEAF_FIELD_TYPES`) and may never themselves be `detail` (one nesting level).
+export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 
-const AUTHORABLE_FIELD_TYPES_BASE: ReadonlyArray<Exclude<FormFieldType, 'attachment'>> = [
+export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'text',
   'textarea',
   'number',
@@ -88,18 +87,6 @@ const AUTHORABLE_FIELD_TYPES_BASE: ReadonlyArray<Exclude<FormFieldType, 'attachm
   'user',
   'detail',
 ]
-
-/** Flag-aware authorable set — default OFF excludes attachment. */
-export function getAuthorableFieldTypes(
-  attachmentsEnabled: boolean = isApprovalAttachmentsEnabled(),
-): AuthorableFieldType[] {
-  return attachmentsEnabled
-    ? [...AUTHORABLE_FIELD_TYPES_BASE, 'attachment']
-    : [...AUTHORABLE_FIELD_TYPES_BASE]
-}
-
-/** @deprecated Prefer getAuthorableFieldTypes() — static snapshot at module load (flag default OFF). */
-export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = getAuthorableFieldTypes(false)
 
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
 
@@ -372,7 +359,7 @@ function formatIds(ids?: string[]): string {
 }
 
 function isAuthorableFieldType(value: FormFieldType): value is AuthorableFieldType {
-  return getAuthorableFieldTypes().includes(value)
+  return AUTHORABLE_FIELD_TYPES.includes(value as AuthorableFieldType)
 }
 
 function isNodeFieldAccess(value: unknown): value is NodeFieldAccess {

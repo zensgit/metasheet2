@@ -254,22 +254,11 @@ describe('G-1 unsupportedTemplateAuthoringReason — complex graphs are save-abl
     expect(unsupportedTemplateAuthoringReason(buildTemplate(CC_GRAPH))).toBeNull()
   })
 
-  it('flag OFF: attachment field remains unauthorable (honest-disable); flag ON is tested via getAuthorableFieldTypes', async () => {
-    const { getAuthorableFieldTypes, unsupportedTemplateAuthoringReason } = await import(
-      '../src/approvals/templateAuthoring'
-    )
-    // Static OFF path: getAuthorableFieldTypes(false) excludes attachment → unsupported reason.
-    expect(getAuthorableFieldTypes(false)).not.toContain('attachment')
-    // Default runtime (flag unset) still blocks attachment authoring.
+  it('still returns a reason for an unauthorable attachment field type (rung 4 not ratified)', () => {
+    // Lock §7 rung 4 is owner-gated; until flag is ratified ON, attachment remains unauthorable.
     const template = buildTemplate(LINEAR_GRAPH)
     template.formSchema = { fields: [{ id: 'file', type: 'attachment', label: '附件' }] }
-    if (!getAuthorableFieldTypes().includes('attachment')) {
-      expect(unsupportedTemplateAuthoringReason(template)).toContain('暂不支持编辑的字段类型')
-    } else {
-      expect(unsupportedTemplateAuthoringReason(template)).toBeNull()
-    }
-    // ON pin
-    expect(getAuthorableFieldTypes(true)).toContain('attachment')
+    expect(unsupportedTemplateAuthoringReason(template)).toContain('暂不支持编辑的字段类型')
   })
 
   it('still returns a reason for an unknown node type (not in the recognised set)', () => {
