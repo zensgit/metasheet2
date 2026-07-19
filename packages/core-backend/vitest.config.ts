@@ -166,6 +166,19 @@ export default defineConfig({
       // DATABASE_URL-gated; wired as a WHOLE FILE into the APPROVAL real-DB step (server-based,
       // like approval-direct-manager) — both points asserted by b6-equivalence-ci-wiring.test.mjs.
       'tests/integration/approval-routing-policy-equivalence.db.test.ts',
+      // Canonical Org MVP B7 (§9): suggest-only reconciliation — remote disappearance stales the
+      // BINDING only (local dept row byte-identical), heal/idempotent sweep, ambiguous names never
+      // auto-matched, suggest read-only zero-write. DATABASE_URL-gated; wired as a WHOLE FILE into
+      // the directory real-DB placement of the `Run approval real-DB integration` step (both
+      // points asserted by b7-reconciliation-ci-wiring.test.mjs — named-step anchored).
+      'tests/integration/directory-binding-reconciliation.db.test.ts',
+      // B7 owner round (#4436): binding ADMIN routes (list/suggestions/sweep+audit) → directory
+      // real-DB placement (immediately after reconciliation); Q6 POST-SYNC auto-sweep hook →
+      // approval real-DB placement (immediately after approval-routing equivalence). Both live in
+      // the same named step `Run approval real-DB integration` but are step-block + exact-adjacency
+      // index-anchored by b7-round2-ci-wiring.test.mjs so a same-step drift or multitable move reds.
+      'tests/integration/directory-binding-admin-routes.db.test.ts',
+      'tests/integration/directory-binding-sync-hook.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive

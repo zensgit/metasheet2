@@ -196,6 +196,14 @@ jobs:
       - name: B6 equivalence CI wiring contract
         run: node --test scripts/ops/b6-equivalence-ci-wiring.test.mjs
 
+      # B7 CI two-point wiring contract (no DB).
+      - name: B7 reconciliation CI wiring contract
+        run: node --test scripts/ops/b7-reconciliation-ci-wiring.test.mjs
+
+      # B7 owner-round CI two-point wiring contract (no DB): admin routes + Q6 sync-hook suites.
+      - name: B7 round-2 CI wiring contract
+        run: node --test scripts/ops/b7-round2-ci-wiring.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -631,6 +639,7 @@ jobs:
             tests/integration/approval-direct-manager.api.test.ts \
             tests/integration/approval-routing-policy-failclose.api.test.ts \
             tests/integration/approval-routing-policy-equivalence.db.test.ts \
+            tests/integration/directory-binding-sync-hook.db.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
@@ -674,6 +683,8 @@ jobs:
             tests/integration/org-directory-routing-policy-schema.db.test.ts \
             tests/integration/org-directory-routing-policy-resolver.db.test.ts \
             tests/integration/org-directory-routing-policy-routes.db.test.ts \
+            tests/integration/directory-binding-reconciliation.db.test.ts \
+            tests/integration/directory-binding-admin-routes.db.test.ts \
             tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \

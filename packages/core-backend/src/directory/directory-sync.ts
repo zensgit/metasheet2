@@ -6,6 +6,7 @@ import { issueInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
+import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
   fetchDingTalkAppAccessToken,
   getDingTalkDepartmentDetail,
@@ -3867,6 +3868,30 @@ export async function syncDirectoryIntegration(
 
     if (!updatedIntegration || !updatedRun.rows[0]) {
       throw new Error('Directory sync completed but summary reload failed')
+    }
+
+    // B7 Q6 (owner ruling): after a SUCCESSFUL sync commit, reflect remote-department liveness
+    // onto this integration's bindings — NARROWED to the integration that just synced. Strictly
+    // best-effort BY RULING: the sync above already succeeded and committed, so a sweep failure
+    // must never fail (or fail-mark) it — it logs VALUES-FREE BY CONSTRUCTION and the admin sweep
+    // endpoint (`POST /api/admin/directory/department-bindings/sweep`) is the retry path.
+    try {
+      const sweep = await sweepStaleDepartmentBindings(updatedIntegration.org_id, {
+        remoteIntegrationId: integrationId,
+      })
+      if (sweep.staled > 0 || sweep.healed > 0) {
+        logger.info(`Department-binding sweep after sync: staled=${sweep.staled} healed=${sweep.healed}`, {
+          integrationId,
+        })
+      }
+    } catch (_error) {
+      // Values-free BY CONSTRUCTION: fixed message + closed meta only. Never log error.message,
+      // error.name, code, stack, relation, SQL, or any adapter-derived text — those are mutable /
+      // attacker-or-adapter-controlled and can carry values. Admin sweep endpoint is the retry path.
+      logger.warn(
+        'Department-binding sweep after successful sync failed (sync unaffected; retry via admin sweep endpoint)',
+        { integrationId, reason: 'sweep_failed' },
+      )
     }
 
     return {
