@@ -205,28 +205,27 @@ export interface ParallelBranchConfig {
 /**
  * Config shape for `write_approval_form_values` (FWB-0 D11 / FWB-1/2/3).
  *
- * Values NEVER live in this config — only the explicit field mapping + target
- * addressing + Q6 confirmation hash. Form / decision values are loaded server-
- * side at execute time from the immutable form_snapshot / frozen decision rows.
+ * Values NEVER live in this config — only identifier mappings + target addressing +
+ * a server-issued Q6 confirmation id. Form / decision values load server-side at
+ * execute from form_snapshot / frozen decision rows. meta_fields is the sole type
+ * authority (config must NOT carry targetType/selectOptions as authority).
  */
 export interface WriteApprovalFormValuesConfig {
   /** FWB-1 create · FWB-2 update bound record · FWB-3 write frozen decision values. */
   mode: 'create' | 'update' | 'decision'
   /**
    * Explicit formFieldId → targetFieldId mappings (export whitelist). Unmapped
-   * snapshot fields are never read or written.
+   * snapshot fields are never read or written. Types/options come from meta_fields.
    */
   mappings: Array<{
     formFieldId: string
     targetFieldId: string
-    targetType: 'text' | 'number' | 'date' | 'select'
-    selectOptions?: string[]
   }>
   /**
-   * Q6 confirmation hash of the normalized {template, target sheet/base, mappings}.
-   * Execute re-computes the hash and REJECTS on mismatch (stale confirmation).
+   * Q6: id of a server-persisted confirmed challenge (meta_fwb_confirmations).
+   * Save/execute re-verify fingerprint against current normalized subject.
    */
-  confirmationHash: string
+  confirmationId: string
   /**
    * FWB-2 / FWB-3: form field id of the record-link that binds the target record.
    * Required when mode is `update` or `decision`.

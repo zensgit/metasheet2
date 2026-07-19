@@ -1,29 +1,23 @@
 /**
- * FWB-1 slice ① — approval form values → multitable field values (pure mapping, fail-closed).
+ * FWB-1 mapping core — form/decision values → multitable field values (pure, fail-closed).
  *
- * The `write_approval_form_values` action maps a SAVED mapping config (template form field → target sheet
- * field) over a submitted form's values to produce the record payload. Ratified scope (#4203): first slice
- * supports **text / number / date / select** only. Everything else fails CLOSED:
- *   - an unmapped/unknown target field type → the WHOLE action is rejected (never a silent partial write);
- *   - a value that cannot be coerced to the target type → per-mapping error, action rejected (a form value
- *     is business data — writing a mangled coercion would fabricate audit-adjacent data);
- *   - select values must be in the target field's option set (closed vocabulary — no invention);
- *   - date accepts ISO `YYYY-MM-DD` or epoch-ms number, normalized to ISO; number accepts finite numbers or
- *     numeric strings (trimmed); text is stringified from string/number/boolean ONLY (objects rejected).
+ * targetType / selectOptions / numberPrecision MUST come from server-resolved meta_fields
+ * (see approval-fwb-target-fields). Config-supplied types are never authority.
  *
- * Pure and synchronous — permission rechecks, the same-transaction claim+record+revision+outbox composition,
- * and the config UI are the later FWB-1 slices. No callers yet.
+ * D7/Q5: number values use exact fixed-decimal string validation (no Number() float loss,
+ * never round — over-precision REJECT).
  */
+import { coerceExactDecimal } from './approval-fwb-target-fields'
+
 export type FwbTargetFieldType = 'text' | 'number' | 'date' | 'select'
 
 export interface FwbFieldMapping {
-  /** template form field id to read from. */
   formFieldId: string
-  /** target sheet field id to write. */
   targetFieldId: string
   targetType: FwbTargetFieldType
-  /** required for targetType 'select': the CLOSED set of allowed option values. */
   selectOptions?: readonly string[]
+  /** Server-derived fractional digit cap for number fields (Q5). */
+  numberPrecision?: number
 }
 
 export type FwbMappingResult =
@@ -38,6 +32,7 @@ export type FwbMappingErrorCode =
   | 'not_text'
   | 'select_value_not_in_options'
   | 'select_options_missing'
+  | 'number_precision_exceeded'
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -45,23 +40,21 @@ function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string |
   switch (mapping.targetType) {
     case 'text': {
       if (typeof raw === 'string') return { ok: true, v: raw }
-      if (typeof raw === 'number' && Number.isFinite(raw)) return { ok: true, v: String(raw) }
       if (typeof raw === 'boolean') return { ok: true, v: raw ? 'true' : 'false' }
+      // integers only as text (no float toString drift)
+      if (typeof raw === 'number' && Number.isSafeInteger(raw)) return { ok: true, v: String(raw) }
       return { ok: false, code: 'not_text' }
     }
     case 'number': {
-      if (typeof raw === 'number' && Number.isFinite(raw)) return { ok: true, v: raw }
-      if (typeof raw === 'string' && raw.trim() !== '' && Number.isFinite(Number(raw.trim()))) return { ok: true, v: Number(raw.trim()) }
-      return { ok: false, code: 'not_a_number' }
+      const r = coerceExactDecimal(raw, mapping.numberPrecision)
+      if (!r.ok) return r
+      // Store as decimal string (D7 fixed-point). Callers write into jsonb as-is.
+      return { ok: true, v: r.v }
     }
     case 'date': {
       if (typeof raw === 'string' && ISO_DATE.test(raw.trim())) {
         const t = Date.parse(raw.trim() + 'T00:00:00Z')
         if (Number.isFinite(t)) return { ok: true, v: raw.trim() }
-      }
-      if (typeof raw === 'number' && Number.isFinite(raw)) {
-        const d = new Date(raw)
-        if (Number.isFinite(d.getTime())) return { ok: true, v: d.toISOString().slice(0, 10) }
       }
       return { ok: false, code: 'not_a_date' }
     }
@@ -75,11 +68,6 @@ function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string |
   }
 }
 
-/**
- * Map form values through the saved config. ALL-OR-NOTHING: any mapping error rejects the whole action
- * (fail-closed — never a silent partial record). Missing form values are errors (`missing_required_value`)
- * unless the mapping is absent entirely; optionality policy is a config-UI concern in a later slice.
- */
 export function mapApprovalFormValues(
   mappings: readonly FwbFieldMapping[],
   formValues: Readonly<Record<string, unknown>>,

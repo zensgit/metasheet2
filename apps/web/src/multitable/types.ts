@@ -1099,6 +1099,8 @@ export type AutomationActionType =
   | 'wait_for_callback'
   | 'condition_branch'
   | 'parallel_branch'
+  /** FWB: write approval form values into multitable (requires APPROVAL_FWB_RUNTIME_ENABLED). */
+  | 'write_approval_form_values'
   // Legacy aliases
   | 'notify'
   | 'update_field'

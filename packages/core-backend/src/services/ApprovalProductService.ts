@@ -5622,30 +5622,39 @@ export class ApprovalProductService {
         ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         : null
 
-      // FWB-3: freeze decisionData INSIDE this instance-lock transaction (same FOR UPDATE as the
-      // state transition). transfer/jump/timeout paths above never reach here — they leave no freeze
-      // rows and FWB-3 writeback fails closed. Unknown keys reject the whole approve.
-      if (currentNodeKey && currentNodeEpoch !== null && currentNodeEpoch >= 1) {
-        const node = runtimeGraph.nodes.find((n) => n.key === currentNodeKey)
-        const declared = (node?.config as { decisionFieldIds?: string[] } | undefined)?.decisionFieldIds
-        if (Array.isArray(declared) && declared.length > 0) {
-          const decisionData = isRecord(request.decisionData) ? request.decisionData : {}
-          const freezeRaw = freezeDecisionValues(currentNodeKey, currentNodeEpoch, declared, decisionData)
-          if ((freezeRaw as { ok: boolean }).ok !== true) {
-            throw new ServiceError(
-              `decisionData freeze rejected: ${(freezeRaw as { code?: string }).code ?? 'unknown'}`,
-              400,
-              'VALIDATION_ERROR',
-            )
-          }
-          const assignmentId = actorAssignments[0]?.id ?? null
-          await persistFrozenDecisionValues(client, {
-            instanceId: id,
-            assignmentId,
-            actorId: actor.userId,
-            snapshot: (freezeRaw as { snapshot: import('../multitable/approval-fwb-decision-values').FrozenDecisionSnapshot }).snapshot,
-          })
+      // FWB-3: decision freeze is prepared here but applied ONLY when this approve RESOLVES the
+      // node (not intermediate all-mode votes). transfer/jump/timeout never reach this path.
+      // Concurrent double-freeze collides on UNIQUE (no silent ON CONFLICT DO NOTHING).
+      const nodeForDecision = currentNodeKey
+        ? runtimeGraph.nodes.find((n) => n.key === currentNodeKey)
+        : undefined
+      const declaredDecisionFields = (nodeForDecision?.config as { decisionFieldIds?: string[] } | undefined)?.decisionFieldIds
+      const pendingDecisionData = isRecord(request.decisionData) ? request.decisionData : {}
+      const freezeDecisionIfNodeResolves = async (): Promise<void> => {
+        if (!currentNodeKey || currentNodeEpoch === null || currentNodeEpoch < 1) return
+        if (!Array.isArray(declaredDecisionFields) || declaredDecisionFields.length === 0) return
+        const freezeRaw = freezeDecisionValues(
+          currentNodeKey,
+          currentNodeEpoch,
+          declaredDecisionFields,
+          pendingDecisionData,
+        )
+        if ((freezeRaw as { ok: boolean }).ok !== true) {
+          throw new ServiceError(
+            `decisionData freeze rejected: ${(freezeRaw as { code?: string }).code ?? 'unknown'}`,
+            400,
+            'VALIDATION_ERROR',
+          )
         }
+        const assignmentId = actorAssignments[0]?.id ?? null
+        await persistFrozenDecisionValues(client, {
+          instanceId: id,
+          assignmentId,
+          actorId: actor.userId,
+          snapshot: (freezeRaw as {
+            snapshot: import('../multitable/approval-fwb-decision-values').FrozenDecisionSnapshot
+          }).snapshot,
+        })
       }
 
       // Approval aggregation semantics:
@@ -5659,6 +5668,7 @@ export class ApprovalProductService {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
         if (remainingAssignments > 0) {
+          // Intermediate vote — no freeze (only the resolving approve freezes).
           await client.query(
             `UPDATE approval_instances
              SET version = $2,
@@ -5688,7 +5698,11 @@ export class ApprovalProductService {
           await client.query('COMMIT')
           return (await this.getApproval(id))!
         }
+        // Last approve in all-mode — freeze now (node resolves).
+        await freezeDecisionIfNodeResolves()
       } else if (approvalMode === 'any') {
+        // First-wins — this approve resolves the node; freeze decision values now.
+        await freezeDecisionIfNodeResolves()
         // Deactivate actor's own assignment first.
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         // Identify siblings (still-active, non-actor) whose assignments the first-wins aggregation cancels.
@@ -5834,8 +5848,8 @@ export class ApprovalProductService {
           await client.query('COMMIT')
           return (await this.getApproval(id))!
         }
-        // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
-        // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
+        // Threshold reached on THIS approval (first-N-wins) — freeze once, then cancel remaining.
+        await freezeDecisionIfNodeResolves()
         const siblingAssignments = currentNodeAssignments.filter((assignment) =>
           !assignmentMatchesActor(assignment, actor.userId, actorRoles))
         aggregateCancelledAssigneeIds = Array.from(
@@ -5859,10 +5873,10 @@ export class ApprovalProductService {
           )
         }
       } else {
-        // Single-approver mode. In parallel state the blanket
-        // `deactivateAllActiveAssignments` would cancel sibling branches'
-        // pending assignments as well, so scope the deactivation to the
-        // actor's own branch node. Linear state keeps the legacy behavior.
+        // Single-approver mode — this approve resolves the node.
+        await freezeDecisionIfNodeResolves()
+        // In parallel state the blanket `deactivateAllActiveAssignments` would cancel sibling
+        // branches' pending assignments as well, so scope deactivation to the actor's branch node.
         if (isInParallelRegion) {
           await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         } else {

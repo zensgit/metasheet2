@@ -11,18 +11,17 @@ const M = (over: Partial<FwbFieldMapping>): FwbFieldMapping => ({
 })
 
 describe('FWB-1 form-value mapping (pure, fail-closed)', () => {
-  test('happy path: text/number/date/select all map; number strings + epoch dates normalize', () => {
+  test('happy path: text/number/date/select; numbers as exact decimal strings (D7)', () => {
     const r = mapApprovalFormValues(
       [
         M({ formFieldId: 'a', targetFieldId: 'ta', targetType: 'text' }),
         M({ formFieldId: 'b', targetFieldId: 'tb', targetType: 'number' }),
         M({ formFieldId: 'c', targetFieldId: 'tc', targetType: 'date' }),
-        M({ formFieldId: 'd', targetFieldId: 'td', targetType: 'date' }),
         M({ formFieldId: 'e', targetFieldId: 'te', targetType: 'select', selectOptions: ['低', '中', '高'] }),
       ],
-      { a: 42, b: ' 3.5 ', c: '2026-07-15', d: Date.UTC(2026, 6, 15), e: '高' },
+      { a: 42, b: '3.5', c: '2026-07-15', e: '高' },
     )
-    expect(r).toEqual({ ok: true, values: { ta: '42', tb: 3.5, tc: '2026-07-15', td: '2026-07-15', te: '高' } })
+    expect(r).toEqual({ ok: true, values: { ta: '42', tb: '3.5', tc: '2026-07-15', te: '高' } })
   })
 
   test('ALL-OR-NOTHING: one bad mapping rejects the whole action with per-mapping codes', () => {
