@@ -243,11 +243,57 @@ export function closeoutManifestPinnedFiles(): string[] {
 function hasExactQuotedExcludeEntry(vitestConfigSource: string, file: string): boolean {
   const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const exactEntry = new RegExp(`^\\s*['"]${escaped}['"]\\s*,?\\s*$`)
-  // Remove block comments first, then line comments. A path copied into prose must not
-  // satisfy the no-DB exclusion contract.
-  const withoutBlockComments = vitestConfigSource.replace(/\/\*[\s\S]*?\*\//g, '')
-  for (const rawLine of withoutBlockComments.split('\n')) {
-    const code = rawLine.replace(/\/\/.*$/, '')
+  // Preserve comment-like text inside quoted glob entries (`**/dist/**`) while removing
+  // actual TypeScript comments. A simple block-comment regex corrupts those glob strings.
+  let codeOnly = ''
+  let quote: "'" | '"' | '`' | undefined
+  let escapedChar = false
+  let inLineComment = false
+  let inBlockComment = false
+  for (let i = 0; i < vitestConfigSource.length; i += 1) {
+    const ch = vitestConfigSource[i]
+    const next = vitestConfigSource[i + 1]
+    if (inLineComment) {
+      if (ch === '\n') {
+        inLineComment = false
+        codeOnly += ch
+      }
+      continue
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false
+        i += 1
+      } else if (ch === '\n') {
+        codeOnly += ch
+      }
+      continue
+    }
+    if (quote) {
+      codeOnly += ch
+      if (escapedChar) {
+        escapedChar = false
+      } else if (ch === '\\') {
+        escapedChar = true
+      } else if (ch === quote) {
+        quote = undefined
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch
+      codeOnly += ch
+    } else if (ch === '/' && next === '/') {
+      inLineComment = true
+      i += 1
+    } else if (ch === '/' && next === '*') {
+      inBlockComment = true
+      i += 1
+    } else {
+      codeOnly += ch
+    }
+  }
+  for (const code of codeOnly.split('\n')) {
     if (exactEntry.test(code)) return true
   }
   return false
