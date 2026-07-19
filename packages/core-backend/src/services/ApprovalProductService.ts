@@ -3613,15 +3613,18 @@ export class ApprovalProductService {
 
     // Org-relation plumbing — freeze the requester's org relations (direct manager
     // / dept head / management chain, as LOCAL user ids) from the directory `raw`
-    // payload. READ-ONLY (directory_* SELECTs only) and best-effort: a directory
-    // read failure must never block create, so an unresolved lookup just omits the
-    // fields. direct_manager / dept_head read managerId / deptHeadId; the chain is
-    // walked only when the published graph uses a management-chain source
+    // payload. READ-ONLY (directory_* SELECTs only). A SUCCESSFUL read that finds no
+    // manager/dept/title simply omits those fields and emptyAssigneePolicy applies.
+    // A FAILED read (transient throw OR a misconfigured routing policy) is NOT
+    // best-effort when the graph consumes org data: the wedge guards below fail-close
+    // create AND the shared preview substrate (B3-05/B3-06) so a broken policy cannot
+    // silently auto-approve. direct_manager / dept_head read managerId / deptHeadId;
+    // the chain is walked only when the published graph uses a management-chain source
     // (continuous_managers or manager_at_level) — so the extra per-hop queries stay
-    // off every approval. Absence falls through to the node's emptyAssigneePolicy.
-    // Draft dry-run (B3-06) compiles the authoring graph with the SAME compiler the publish path
-    // uses; the default path reads the frozen published runtime graph (create + B3-05, unchanged).
-    // The `!` on the published branch is sound: the non-draft gate above already threw if absent.
+    // off every approval. Draft dry-run (B3-06) compiles the authoring graph with the
+    // SAME compiler the publish path uses; the default path reads the frozen published
+    // runtime graph (create + B3-05, unchanged). The `!` on the published branch is
+    // sound: the non-draft gate above already threw if absent.
     const runtimeGraph = previewFromDraft
       ? buildRuntimeGraph(asApprovalGraph(bundle.version.approval_graph), { allowRevoke: false })
       : asRuntimeGraph(bundle.publishedDefinition!.runtime_graph)

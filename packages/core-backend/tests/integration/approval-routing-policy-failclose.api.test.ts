@@ -1,8 +1,9 @@
 import net from 'net'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi, type MockInstance } from 'vitest'
+import type { Pool } from 'pg'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { query } from '../../src/db/pg'
+import { pool, query } from '../../src/db/pg'
 import { getOrCreateLocalIntegration, setLocalMembershipManager } from '../../src/directory/directory-sync'
 import {
   addLocalMembership,
@@ -12,7 +13,8 @@ import {
 } from '../../src/directory/local-directory-org'
 
 /**
- * B5-b owner P1 — the routing-policy FAIL-CLOSE at approval create, real server + real DB.
+ * B5-b owner P1 — the routing-policy FAIL-CLOSE at approval create + shared preview substrate,
+ * real server + real DB.
  *
  * The hazard being closed (owner review): a misconfigured `approval_routing` policy makes the org
  * resolver throw; the create path caught it and proceeded with EMPTY orgRelations; every org-derived
@@ -24,8 +26,10 @@ import {
  *   A. BROKEN POLICY (canonical target disabled) → create rejected **422
  *      APPROVAL_ROUTING_POLICY_MISCONFIGURED**, and — the load-bearing half — **ZERO
  *      approval_instances and ZERO approval_assignments** exist for the template.
- *   B. TRANSIENT org-read failure (policy table renamed away → probe throws a non-policy error)
- *      → create rejected **503 APPROVAL_REQUESTER_ORG_UNRESOLVED**, zero instances/assignments.
+ *   B. TRANSIENT org-read failure (test-local vi.spyOn on Pool.query: Reflect.apply-delegates
+ *      every overload arg; throws only the routing-policy probe while a scoped boolean is enabled —
+ *      no shared-schema DDL, no production hook) → create rejected **503
+ *      APPROVAL_REQUESTER_ORG_UNRESOLVED**, zero instances/assignments.
  *   C. POSITIVE CONTROLS (the guard must not over-block):
  *      C1. healthy policy→local + requester HAS a manager → direct_manager creates a genuine
  *          PENDING instance WITH an assignment (the resolvable case works end-to-end);
@@ -33,8 +37,18 @@ import {
  *          absence keeps the pre-existing emptyAssigneePolicy semantic — fail-close is only for
  *          "could not find out", never for "found out: none").
  *
+ * Permanent HTTP pins for the SHARED assembleCreationContext substrate — each endpoint is its
+ * OWN load-bearing case (so a guard mutation reds B3-05 and B3-06 independently, not only the
+ * first sequential assertion):
+ *   D1/D2. BROKEN policy → 422 APPROVAL_ROUTING_POLICY_MISCONFIGURED on
+ *          POST /api/approvals/preview and POST /api/approval-templates/:id/route-preview
+ *          (own fixture each, zero approval instances/assignments).
+ *   E1/E2. TRANSIENT org-read failure → 503 APPROVAL_REQUESTER_ORG_UNRESOLVED on the same two
+ *          surfaces (own fixture each, zero approval instances/assignments).
+ *
  * Load-bearing mutation (out-of-band, recorded in the PR): deleting the create-time
- * `runtimeGraphUsesOrgAssigneeSource` guard turns leg A back into a 2xx auto-approval → A reds.
+ * `runtimeGraphUsesOrgAssigneeSource` guard turns leg A back into a 2xx auto-approval → A reds;
+ * each of D1/D2/E1/E2 also reds independently (they share the same guard).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -88,6 +102,37 @@ async function setPolicy(org: string, canonical: string): Promise<void> {
   )
 }
 
+/** B5-b policy-probe SELECT shape (ApprovalDirectoryOrg step 0). */
+function isRoutingPolicyProbeSql(text: unknown): text is string {
+  return (
+    typeof text === 'string' &&
+    text.includes('org_directory_routing_policy') &&
+    text.includes('approval_routing')
+  )
+}
+
+type PreviewEndpoint = {
+  id: string
+  label: string
+  path: (tid: string) => string
+  body: (tid: string) => Record<string, unknown>
+}
+
+const PREVIEW_ENDPOINTS: PreviewEndpoint[] = [
+  {
+    id: 'b305',
+    label: 'POST /api/approvals/preview (B3-05)',
+    path: () => '/api/approvals/preview',
+    body: (tid) => ({ templateId: tid, formData: { reason: 'r' } }),
+  },
+  {
+    id: 'b306',
+    label: 'POST /api/approval-templates/:id/route-preview (B3-06)',
+    path: (tid) => `/api/approval-templates/${tid}/route-preview`,
+    body: () => ({ sampleFormData: { reason: 'r' }, sampleRequesterId: REQ }),
+  },
+]
+
 describeIfDatabase('B5-b owner P1 — routing-policy fail-close at approval create (real server, real DB)', () => {
   let server: MetaSheetServer | undefined
   let base = ''
@@ -98,8 +143,40 @@ describeIfDatabase('B5-b owner P1 — routing-policy fail-close at approval crea
   const cleanupUserIds: string[] = []
   const cleanupAccountIds: string[] = []
 
+  /**
+   * Test-local vi.spyOn on the SAME pg Pool.query ApprovalProductService binds into
+   * `resolveApprovalRequesterOrgRelations` (`import { pool } from '../db/pg'` →
+   * poolManager.getInternalPool()). Reflect.apply-forwards every overload argument to the
+   * original method; the routing-policy probe throws ONLY while `orgPolicyProbeFaultEnabled`
+   * is true. No shared-schema DDL, no production hook. Spy installed in beforeAll; boolean
+   * cleared in afterEach; mockRestore in afterAll.
+   */
+  let orgPolicyProbeFaultEnabled = false
+  let orgPolicyProbeFaultFired = 0
+  let querySpy: MockInstance | null = null
+  const servicePool = pool as Pool | null
+
+  function enableOrgPolicyProbeFault(): void {
+    orgPolicyProbeFaultEnabled = true
+    orgPolicyProbeFaultFired = 0
+  }
+  function disableOrgPolicyProbeFault(): void {
+    orgPolicyProbeFaultEnabled = false
+  }
+
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
+    expect(servicePool, 'ApprovalProductService pool must be available for fault injection').toBeTruthy()
+    const originalQuery = servicePool!.query
+    querySpy = vi.spyOn(servicePool!, 'query').mockImplementation(function (this: Pool, ...args: unknown[]) {
+      const text = args[0]
+      if (orgPolicyProbeFaultEnabled && isRoutingPolicyProbeSql(text)) {
+        orgPolicyProbeFaultFired += 1
+        return Promise.reject(new Error('simulated transient org routing-policy read failure'))
+      }
+      return Reflect.apply(originalQuery, this, args)
+    })
+
     const { ensureApprovalSchemaReady } = await import('../helpers/approval-schema-bootstrap')
     await ensureApprovalSchemaReady()
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
@@ -140,22 +217,31 @@ describeIfDatabase('B5-b owner P1 — routing-policy fail-close at approval crea
     dtIntId = dt.rows[0].id
   })
 
+  afterEach(() => {
+    // Safety net: a test must never leave the scoped fault boolean armed.
+    disableOrgPolicyProbeFault()
+  })
+
   afterAll(async () => {
+    disableOrgPolicyProbeFault()
+    // Restore the real Pool.query — the spy must not outlive this suite.
+    querySpy?.mockRestore()
+    querySpy = null
     try {
       await query(`DELETE FROM org_directory_routing_policy WHERE org_id = 'default'`)
-      const pool = poolManager.get()
-      const tids = (await pool.query(`SELECT id FROM approval_templates WHERE key LIKE $1`, [`%-${TS}`])).rows.map((r) => r.id as string)
+      const poolClient = poolManager.get()
+      const tids = (await poolClient.query(`SELECT id FROM approval_templates WHERE key LIKE $1`, [`%-${TS}`])).rows.map((r) => r.id as string)
       if (tids.length > 0) {
-        const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = ANY($1)`, [tids])).rows.map(
+        const iids = (await poolClient.query(`SELECT id FROM approval_instances WHERE template_id = ANY($1)`, [tids])).rows.map(
           (r) => r.id as string,
         )
         if (iids.length > 0) {
-          await pool.query(`DELETE FROM approval_records WHERE instance_id = ANY($1)`, [iids])
-          await pool.query(`DELETE FROM approval_assignments WHERE instance_id = ANY($1)`, [iids])
-          await pool.query(`DELETE FROM approval_instances WHERE id = ANY($1)`, [iids])
+          await poolClient.query(`DELETE FROM approval_records WHERE instance_id = ANY($1)`, [iids])
+          await poolClient.query(`DELETE FROM approval_assignments WHERE instance_id = ANY($1)`, [iids])
+          await poolClient.query(`DELETE FROM approval_instances WHERE id = ANY($1)`, [iids])
         }
-        await pool.query(`DELETE FROM approval_published_definitions WHERE template_id = ANY($1)`, [tids])
-        await pool.query(`DELETE FROM approval_templates WHERE id = ANY($1)`, [tids])
+        await poolClient.query(`DELETE FROM approval_published_definitions WHERE template_id = ANY($1)`, [tids])
+        await poolClient.query(`DELETE FROM approval_templates WHERE id = ANY($1)`, [tids])
       }
       for (const id of cleanupAccountIds.splice(0)) await query(`DELETE FROM directory_accounts WHERE id = $1`, [id])
       await query(`DELETE FROM directory_integrations WHERE id = $1`, [dtIntId])
@@ -211,21 +297,29 @@ describeIfDatabase('B5-b owner P1 — routing-policy fail-close at approval crea
   })
 
   it('B. TRANSIENT org-read failure → 503 APPROVAL_REQUESTER_ORG_UNRESOLVED for all four sources, zero instances, zero assignments', async () => {
-    // healthy policy in place; then break the READ transiently (rename the policy table so the
-    // probe throws a non-policy error — the transient-infra shape, not a config error)
+    // healthy policy in place; arm the scoped Pool.query spy only for the create calls
+    // (non-policy Error shape — not a config error). Publish stays on the healthy path.
     await setPolicy('default', localIntId)
-    await query(`ALTER TABLE org_directory_routing_policy RENAME TO org_directory_routing_policy_hidden_${TS}`)
     try {
+      const tids: Array<{ kind: OrgSourceKind; tid: string }> = []
       for (const kind of KINDS) {
-        const tid = await publish(`fc-transient-${kind}-${TS}`, kind)
-        const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
-        const text = await started.clone().text()
-        expect(started.status, `${kind}: ${text}`).toBe(503)
-        expect(text).toContain('APPROVAL_REQUESTER_ORG_UNRESOLVED')
-        await zeroRows(tid)
+        tids.push({ kind, tid: await publish(`fc-transient-${kind}-${TS}`, kind) })
+      }
+      enableOrgPolicyProbeFault()
+      try {
+        for (const { kind, tid } of tids) {
+          const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+          const text = await started.clone().text()
+          expect(started.status, `${kind}: ${text}`).toBe(503)
+          expect(text).toContain('APPROVAL_REQUESTER_ORG_UNRESOLVED')
+          await zeroRows(tid)
+        }
+        // spy must have matched the real probe (guards against silent SQL-shape drift)
+        expect(orgPolicyProbeFaultFired).toBeGreaterThan(0)
+      } finally {
+        disableOrgPolicyProbeFault()
       }
     } finally {
-      await query(`ALTER TABLE org_directory_routing_policy_hidden_${TS} RENAME TO org_directory_routing_policy`)
       await query(`DELETE FROM org_directory_routing_policy WHERE org_id = 'default'`)
     }
   })
@@ -264,4 +358,54 @@ describeIfDatabase('B5-b owner P1 — routing-policy fail-close at approval crea
       await query(`DELETE FROM org_directory_routing_policy WHERE org_id = 'default'`)
     }
   })
+
+  // Independently load-bearing: each preview endpoint is its own case so a guard mutation reds
+  // B3-05 and B3-06 separately (a sequential dual-assert in one test would stop at the first fail).
+  it.each(PREVIEW_ENDPOINTS)(
+    'D. BROKEN policy → 422 APPROVAL_ROUTING_POLICY_MISCONFIGURED on $label, zero approval instances/assignments',
+    async (endpoint) => {
+      await setPolicy('default', dtIntId)
+      await query(`UPDATE directory_integrations SET status = 'disabled' WHERE id = $1`, [dtIntId])
+      try {
+        const tid = await publish(`fc-prev-broken-${endpoint.id}-${TS}`, 'direct_manager')
+        const res = await req(base, endpoint.path(tid), reqTok, {
+          method: 'POST',
+          body: endpoint.body(tid),
+        })
+        const text = await res.clone().text()
+        expect(res.status, `${endpoint.label}: ${text}`).toBe(422)
+        expect(text).toContain('APPROVAL_ROUTING_POLICY_MISCONFIGURED')
+        await zeroRows(tid)
+      } finally {
+        await query(`UPDATE directory_integrations SET status = 'active' WHERE id = $1`, [dtIntId])
+        await query(`DELETE FROM org_directory_routing_policy WHERE org_id = 'default'`)
+      }
+    },
+  )
+
+  it.each(PREVIEW_ENDPOINTS)(
+    'E. TRANSIENT org-read failure → 503 APPROVAL_REQUESTER_ORG_UNRESOLVED on $label, zero approval instances/assignments',
+    async (endpoint) => {
+      await setPolicy('default', localIntId)
+      try {
+        const tid = await publish(`fc-prev-transient-${endpoint.id}-${TS}`, 'direct_manager')
+        enableOrgPolicyProbeFault()
+        try {
+          const res = await req(base, endpoint.path(tid), reqTok, {
+            method: 'POST',
+            body: endpoint.body(tid),
+          })
+          const text = await res.clone().text()
+          expect(res.status, `${endpoint.label}: ${text}`).toBe(503)
+          expect(text).toContain('APPROVAL_REQUESTER_ORG_UNRESOLVED')
+          await zeroRows(tid)
+          expect(orgPolicyProbeFaultFired).toBeGreaterThan(0)
+        } finally {
+          disableOrgPolicyProbeFault()
+        }
+      } finally {
+        await query(`DELETE FROM org_directory_routing_policy WHERE org_id = 'default'`)
+      }
+    },
+  )
 })
