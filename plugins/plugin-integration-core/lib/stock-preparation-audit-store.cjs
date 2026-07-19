@@ -1,9 +1,10 @@
 'use strict'
 
 // #3751 stock-prep MVP — W5b (#3890): VALUES-FREE audit trail for the stock-preparation DECISION
-// surface — confirms / retires / candidate sync / generation runs / exception resolution (8 actions).
+// surface — confirms / retires / candidate sync / generation runs / exception resolution plus the
+// bounded P4 one-shot repair operation (9 actions).
 // Provisioning/ensure/option-sync/plan/persist keep their own run records and are deliberately NOT
-// routed through this trail. Stored in plugin SQL (integration_stock_prep_audit, migration 066).
+// routed through this trail. Stored in plugin SQL (integration_stock_prep_audit, migrations 066/067).
 // The structural gate below is a BACKSTOP on top of call-site discipline: enum-shaped short strings
 // pass by shape, so call sites still only put counts/enums/booleans in detail (handles go in the
 // dedicated subject_id column).
@@ -13,7 +14,7 @@
 //     guard — scalars (finite numbers / booleans / enum-shaped strings) and ONE nested level of
 //     numeric count maps. A drawing number with spaces, an exception message, a URL, or any long /
 //     unshaped string is REJECTED fail-closed before it can reach the table.
-//   - closed action vocabulary (8 actions) — an unknown action is refused, never stored.
+//   - closed action vocabulary (9 actions) — an unknown action is refused, never stored.
 //   - subject_id / actor are internal handles (content-hash ids / user id) — never business values.
 //   - append-only: the store exposes no update or delete surface.
 // (Forbidden-value tokens above appear ONLY in this prose header — never as code.)
@@ -31,6 +32,7 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   'generation_run',
   'exception_resolve',
   'exception_bulk_resolve',
+  'persist_repair_once',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

@@ -729,6 +729,7 @@ module.exports = {
   __internals: {
     assertAdminPermission,
     ensureProvisioning,
+    ensurePersistUnitOfWork,
     resolveScopedTarget,
     groundLineRow,
     upsertStockPreparationProject,
@@ -744,5 +745,11 @@ module.exports = {
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
     PERSIST_MAX_PLAN_LINES,
+    BATCH_TEMPLATE,
+    LINE_TEMPLATE,
+    RUN_TEMPLATE,
+    PROJECT_TEMPLATE,
+    LINE_KEY_FIELD,
+    RUN_KEY_FIELD,
   },
 }

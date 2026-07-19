@@ -1,6 +1,7 @@
 'use strict'
 
-// W5b (#3751/#3890) — text assertions on the 066 audit migration (style of the 062/065 migration
+// W5b (#3751/#3890) + P4 Option C — text assertions on the 066 base audit migration and the 067
+// closed-vocabulary extension (style of the 062/065 migration
 // tests; migration-sql.test.cjs is left untouched). Locks:
 //   - the CHECK action vocabulary is SET-EQUAL to the store's STOCK_PREP_AUDIT_ACTIONS (a drift
 //     between the two would make a valid store action violate the DB CHECK — op-then-500);
@@ -16,14 +17,21 @@ const { STOCK_PREP_AUDIT_ACTIONS, AUDIT_TABLE } = require(path.join(__dirname, '
 const repoRoot = path.resolve(__dirname, '..', '..', '..')
 const migrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '066_create_integration_stock_prep_audit.sql')
 const rawSql = fs.readFileSync(migrationPath, 'utf8')
+const vocabularyMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '067_extend_stock_prep_audit_repair_action.sql')
+const rawVocabularySql = fs.readFileSync(vocabularyMigrationPath, 'utf8')
 // Strip full-line SQL comments BEFORE matching so an assertion can never be satisfied by
 // commented-out DDL.
 const sql = rawSql
   .split('\n')
   .filter((line) => !line.trim().startsWith('--'))
   .join('\n')
+const vocabularySql = rawVocabularySql
+  .split('\n')
+  .filter((line) => !line.trim().startsWith('--'))
+  .join('\n')
 
 assert.doesNotMatch(sql, /\bDROP\s+TABLE\b/i, 'forward migration must not drop tables')
+assert.doesNotMatch(vocabularySql, /\bDROP\s+TABLE\b/i, 'vocabulary migration must not drop tables')
 assert.ok(AUDIT_TABLE.startsWith('integration_'), 'audit table keeps the integration_ prefix')
 
 const blockMatch = sql.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${AUDIT_TABLE} \\(([\\s\\S]*?)\\n\\);`, 'm'))
@@ -36,9 +44,14 @@ for (const column of ['id', 'tenant_id', 'workspace_id', 'project_id', 'action',
 assert.match(block, /tenant_id\s+TEXT NOT NULL/, 'tenant_id is required')
 assert.match(block, /detail\s+JSONB NOT NULL DEFAULT '\{\}'::jsonb/, 'detail is values-free JSONB with an empty default')
 
-// CHECK vocabulary is SET-EQUAL to the store constant.
-const checkMatch = block.match(/action\s+TEXT NOT NULL CHECK \(action IN \(([\s\S]*?)\)\)/)
-assert.ok(checkMatch, 'action carries a closed CHECK vocabulary')
+// The effective CHECK vocabulary after 067 is SET-EQUAL to the store constant.
+assert.match(
+  vocabularySql,
+  /DROP CONSTRAINT IF EXISTS integration_stock_prep_audit_action_check/,
+  '067 replaces the original inline action check',
+)
+const checkMatch = vocabularySql.match(/ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(([\s\S]*?)\)\)/)
+assert.ok(checkMatch, '067 installs the expanded closed CHECK vocabulary')
 const checkActions = [...checkMatch[1].matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]).sort()
 assert.deepEqual(checkActions, [...STOCK_PREP_AUDIT_ACTIONS].sort(), 'CHECK vocabulary must stay set-equal to STOCK_PREP_AUDIT_ACTIONS')
 
