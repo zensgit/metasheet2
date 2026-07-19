@@ -129,10 +129,13 @@ async function syncOneOutboundLinkField(
  *      temporary kernel boundary, not route-deferred replay).
  *   8. Canonical restorable PROJECTION only (projectRestorableOntoLive) — derived-only ⇒ no-op. Builds the
  *      exact write delta WITHOUT scalar/link validation (no-oracle: value/existence must not leak before auth).
- *   9. REQUIRED `evaluatePlanAuthorization` over that delta (person membership + foreign-target read/edit
+ *   9. §5 step 7 ROW LOCKS: SELECT … FOR UPDATE the exact affected live ids (revertWrites ∪ reset deletes)
+ *      in deterministic id order; recheck each still exists at the bound live version ⇒ else preview-drift;
+ *      refresh liveById from locked rows (later ensureRecordNotLocked / writes use in-lock truth).
+ *  10. REQUIRED `evaluatePlanAuthorization` over that delta (person membership + foreign-target read/edit
  *      authority belong here in the route adapter). Deny ⇒ uniform `forbidden` before any sensitive validator.
- *  10. AFTER planAuth=true: scalar/whole-record CURRENT validation, foreign-target existence, hierarchy cycle.
- *  11. APPLY: restorable reverts (data + meta_links) + RESET canonical delete parity; seal last.
+ *  11. AFTER planAuth=true: scalar/whole-record CURRENT validation, foreign-target existence, hierarchy cycle.
+ *  12. APPLY: restorable reverts (data + meta_links) + RESET canonical delete parity; seal last.
  *
  * KERNEL-OWNED: security adjudication, restorable projection, link integrity, both-direction reset cleanup,
  * tombstone/trash, anti-replay, trust substrate. Route-owned: presentation masking, size ceilings, realtime,
@@ -410,6 +413,77 @@ export async function applyExactAnchorRecovery(
           projectedData: projection.data,
           linkUpdates: projection.linkUpdates,
         })
+      }
+
+      // §5 step 7 — lock affected live rows BEFORE planAuth / sensitive validation / writes.
+      // Sheet advisory fence is necessary but not sufficient: an unfenced concurrent writer can still
+      // UPDATE/DELETE between liveSetHash and apply (especially RESET deletes, which have no version CAS).
+      // Deterministic id order avoids multi-row deadlock with other writers.
+      {
+        const affectedIdSet = new Set<string>()
+        for (const rw of revertWrites) affectedIdSet.add(rw.recordId)
+        for (const id of deleteRecordIds) {
+          if (liveById.has(id)) affectedIdSet.add(id)
+        }
+        const affectedIds = [...affectedIdSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+        if (affectedIds.length > 0) {
+          const expectedVersionById = new Map<string, number>()
+          for (const id of affectedIds) {
+            const live = liveById.get(id)
+            if (!live) throw new ApplyRefusalError('preview-drift')
+            expectedVersionById.set(id, live.version)
+          }
+          const lockedRes = await query(
+            `SELECT id, data, version, locked, locked_by, created_by, created_at, updated_at
+             FROM meta_records
+             WHERE sheet_id = $1 AND id = ANY($2::text[])
+             ORDER BY id
+             FOR UPDATE`,
+            [input.sheetId, affectedIds],
+          )
+          const lockedById = new Map<string, {
+            data: Record<string, unknown>
+            version: number
+            locked?: unknown
+            locked_by?: unknown
+            created_by?: unknown
+            created_at?: unknown
+            updated_at?: unknown
+          }>()
+          for (const r of lockedRes.rows as Array<{
+            id: unknown
+            data: unknown
+            version: unknown
+            locked?: unknown
+            locked_by?: unknown
+            created_by?: unknown
+            created_at?: unknown
+            updated_at?: unknown
+          }>) {
+            lockedById.set(String(r.id), {
+              data: asRec(r.data),
+              version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0,
+              locked: r.locked,
+              locked_by: r.locked_by,
+              created_by: r.created_by,
+              created_at: r.created_at,
+              updated_at: r.updated_at,
+            })
+          }
+          for (const id of affectedIds) {
+            const locked = lockedById.get(id)
+            if (!locked) throw new ApplyRefusalError('preview-drift') // deleted under us
+            if (locked.version !== expectedVersionById.get(id)) {
+              throw new ApplyRefusalError('preview-drift') // concurrent version bump
+            }
+            liveById.set(id, locked) // in-lock truth for ensureRecordNotLocked + later apply
+          }
+          // Keep revert write intents aligned with the locked versions (must already match; re-pin).
+          for (const rw of revertWrites) {
+            const live = liveById.get(rw.recordId)
+            if (!live || live.version !== rw.liveVersion) throw new ApplyRefusalError('preview-drift')
+          }
+        }
       }
 
       // REQUIRED in-fence WRITE authorization over the true restorable delta (BEFORE scalar/link validation).

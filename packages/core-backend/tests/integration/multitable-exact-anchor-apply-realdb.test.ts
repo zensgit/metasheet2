@@ -430,6 +430,67 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     }
   })
 
+  test('ROW-LOCK-RACE (constructed): external FOR UPDATE on affected row parks L8; unfenced concurrent version bump ⇒ preview-drift, zero burn/writes; undo ⇒ same token applies', async () => {
+    // v3.7 §5 step 7: sheet advisory fence alone is not enough — an unfenced writer can still UPDATE the
+    // target row between liveSetHash and apply. Targeted SELECT … FOR UPDATE + version recheck must catch it.
+    //
+    // Construction: hold the target row FOR UPDATE (no sheet fence) → launch L8 → prove L8 is still in-flight
+    // after a budget that is long enough for an unblocked apply to finish (so missing FOR UPDATE fails here)
+    // → concurrent version bump + COMMIT → L8 wakes and refuses preview-drift.
+    const { R_REV, anchorOp, seqs } = await seedWorld()
+    const pv = await preview(anchorOp, 'revert')
+    expect(pool).toBeTruthy()
+    const holder = await pool!.connect()
+    try {
+      await holder.query('BEGIN')
+      await holder.query(
+        'SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+        [R_REV, SHEET],
+      )
+      let applySettled = false
+      const applying = applyExactAnchorRecovery(txn, applyArgs(pv.token)).finally(() => {
+        applySettled = true
+      })
+      // Budget >> unblocked L8 latency in this suite (~1–2s worst) so a missing row lock fails this assert
+      // (apply would finish ok:true). With FOR UPDATE, L8 must still be in-flight behind our row hold.
+      await new Promise((r) => setTimeout(r, 2500))
+      expect(applySettled).toBe(false)
+      // Concurrent unfenced write while L8 is parked on the old lock.
+      const sBump = String(BigInt(seqs.sNew) + 2000n)
+      await holder.query(
+        `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq)
+         VALUES (gen_random_uuid(), $1, $2, 3, 'update', 'rest', ARRAY[]::text[], '{}'::jsonb, $3::jsonb, $4::bigint)`,
+        [SHEET, R_REV, JSON.stringify({ [F_STR]: 'concurrent' }), sBump],
+      )
+      await holder.query(
+        `UPDATE meta_records SET data = $1::jsonb, version = 3 WHERE id = $2 AND sheet_id = $3`,
+        [JSON.stringify({ [F_STR]: 'concurrent' }), R_REV, SHEET],
+      )
+      await holder.query('COMMIT') // release ⇒ L8 wakes, rechecks version, refuses preview-drift
+      const out = await applying
+      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
+      expect((await liveRow(R_REV))?.version).toBe(3)
+      expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'concurrent' })
+      expect(await burnCount()).toBe(0)
+      expect(Number(((await q(
+        `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+        [SHEET],
+      )).rows[0] as { c: number }).c)).toBe(0)
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* may already be committed */ }
+      holder.release()
+    }
+    // POSITIVE control: undo concurrent bump so token liveSetHash matches again; same unburned token applies.
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2 AND version = 3', [SHEET, R_REV])
+    await q(
+      `UPDATE meta_records SET data = $1::jsonb, version = 2 WHERE id = $2 AND sheet_id = $3`,
+      [JSON.stringify({ [F_STR]: 'rev-now' }), R_REV, SHEET],
+    )
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+    expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-at-anchor' })
+    expect(await burnCount()).toBe(1)
+  })
+
   // ── P1-1 MODE-BIND: a revert-preview token can NEVER drive a reset ───────────────────────────────────────
   test('MODE-BIND (P1-1): a token minted at revert-preview performs ZERO deletes even with a live reset-delete candidate — the mode rides in the token, the apply has no mode input', async () => {
     const { R_NEW, anchorOp } = await seedWorld() // R_NEW = created-after-anchor ⇒ the reset-delete candidate
