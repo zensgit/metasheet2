@@ -12,6 +12,7 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-persist.cjs'))
 const {
   repairStockPreparationSyncRunOnce,
+  __internals: { refusalAuditDetail },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-repair-once.cjs'))
 const {
   __internals: { MVP_OBJECT_ID_SET },
@@ -340,6 +341,21 @@ async function main() {
     assert.equal(result.evidence.valuesFree, true)
     assert.equal(result.evidence.externalWrite, false)
     assert.equal(JSON.stringify(result).includes(secret), false)
+  })
+
+  await run('refusal audit target and reason are closed enums, not enum-shaped passthrough strings', async () => {
+    const secret = 'MAT_SECRET_123'
+    assert.deepEqual(refusalAuditDetail({
+      code: 'PERSIST_REPAIR_REFUSED',
+      details: { target: secret, reason: secret },
+    }, true), {
+      persisted: false,
+      applied: true,
+      result: 'refused',
+      failureCode: 'PERSIST_REPAIR_REFUSED',
+      target: 'unknown',
+      reason: 'unknown',
+    })
   })
 
   await run('apply must be an explicit boolean and fails before provisioning or records access', async () => {

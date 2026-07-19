@@ -40,6 +40,17 @@ const {
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 
 const REPAIR_AUDIT_ACTION = 'persist_repair_once'
+const REPAIR_REFUSAL_TARGETS = new Set(['snapshot_batch', 'snapshot_line', 'run', 'project'])
+const REPAIR_REFUSAL_REASONS = new Set([
+  'missing_prefix',
+  'ambiguous',
+  'content_mismatch',
+  'unexpected_key',
+  'non_suffix_gap',
+  'pointer_without_run',
+  'pointer_unresolvable',
+  'pointer_ambiguous',
+])
 
 function repairRefused(target, reason) {
   throw new StockPreparationSyncRunPersistError(
@@ -108,8 +119,10 @@ function refusalAuditDetail(error, apply) {
     failureCode: optionalString(error && error.code) || 'PERSIST_REPAIR_FAILED',
   }
   if (error && error.code === 'PERSIST_REPAIR_REFUSED') {
-    detail.target = optionalString(error.details && error.details.target) || 'unknown'
-    detail.reason = optionalString(error.details && error.details.reason) || 'unknown'
+    const target = optionalString(error.details && error.details.target)
+    const reason = optionalString(error.details && error.details.reason)
+    detail.target = REPAIR_REFUSAL_TARGETS.has(target) ? target : 'unknown'
+    detail.reason = REPAIR_REFUSAL_REASONS.has(reason) ? reason : 'unknown'
   }
   return detail
 }

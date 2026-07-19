@@ -25,6 +25,42 @@ const {
 
 export const APPLY_CONFIRMATION = 'APPLY_STOCK_PREPARATION_REPAIR_ONCE'
 
+const VALUES_FREE_FAILURE_CODES = new Set([
+  'REPAIR_ARGUMENT_INVALID',
+  'REPAIR_INPUT_PATH_REQUIRED',
+  'REPAIR_CONFIRMATION_REQUIRED',
+  'REPAIR_CONFIRMATION_INVALID',
+  'REPAIR_CONFIRMATION_WITHOUT_APPLY',
+  'REPAIR_MANIFEST_INVALID',
+  'REPAIR_MANIFEST_FORBIDDEN_KEY',
+  'REPAIR_TENANT_REQUIRED',
+  'REPAIR_ACTOR_REQUIRED',
+  'REPAIR_INPUT_READ_FAILED',
+  'REPAIR_MANIFEST_JSON_INVALID',
+  'REPAIR_MULTITABLE_API_UNAVAILABLE',
+  'PERSIST_CONFIG_INVALID',
+  'PERSIST_EXISTING_BATCH_INCOMPLETE',
+  'PERSIST_EXISTING_BATCH_READ_UNPROVABLE',
+  'PERSIST_IDEMPOTENCY_CONFLICT',
+  'PERSIST_PERMISSION_DENIED',
+  'PERSIST_PLAN_LINE_KEY_AMBIGUOUS',
+  'PERSIST_PLAN_TOO_LARGE',
+  'PERSIST_PROJECT_POINTER_STALE',
+  'PERSIST_PROVISIONING_API_UNAVAILABLE',
+  'PERSIST_RECORDS_API_INVALID',
+  'PERSIST_REPAIR_AUDIT_UNAVAILABLE',
+  'PERSIST_REPAIR_CONFIG_INVALID',
+  'PERSIST_REPAIR_REFUSED',
+  'PERSIST_TARGET_NOT_PROVISIONED',
+  'PERSIST_TARGET_OBJECT_ID_INVALID',
+  'PERSIST_UNIT_OF_WORK_UNAVAILABLE',
+  'PERSIST_VERSION_NOT_MONOTONIC',
+  'SYNC_RUN_PLAN_CONFIG_INVALID',
+  'SYNC_RUN_PLAN_FIELD_NOT_GROUNDED',
+  'SYNC_RUN_PLAN_PERMISSION_DENIED',
+  'SYNC_RUN_PLAN_TEMPLATE_MISSING',
+])
+
 const FORBIDDEN_MANIFEST_KEYS = new Set([
   'apply',
   'auditStore',
@@ -163,9 +199,12 @@ export function buildValuesFreeCliSummary(mode: RepairMode, result: RepairResult
 
 export function buildValuesFreeCliFailure(mode: RepairMode, error: unknown) {
   const candidate = isPlainObject(error) ? error : {}
-  const code = typeof candidate.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(candidate.code)
+  const candidateCode = typeof candidate.code === 'string'
     ? candidate.code
-    : (error instanceof Error && /^[A-Z0-9_]{1,80}$/.test(error.message) ? error.message : 'REPAIR_FAILED')
+    : (error instanceof Error ? error.message : null)
+  const code = candidateCode && VALUES_FREE_FAILURE_CODES.has(candidateCode)
+    ? candidateCode
+    : 'REPAIR_FAILED'
   const status = Number.isInteger(candidate.status) ? candidate.status : 1
   return {
     status: 'FAIL',

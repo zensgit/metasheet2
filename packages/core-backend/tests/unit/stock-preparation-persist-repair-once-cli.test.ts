@@ -55,6 +55,7 @@ describe('stock-preparation one-shot repair CLI contract', () => {
 
   test('success and failure stdout projections are values-free closed shapes', () => {
     const secret = 'MAT-001-SECRET'
+    const enumShapedSecret = 'MAT_SECRET_123'
     const result = {
       persisted: false,
       mode: 'dry_run' as const,
@@ -90,6 +91,12 @@ describe('stock-preparation one-shot repair CLI contract', () => {
       failureStatus: 409,
       externalWrite: false,
       valuesFree: true,
+    })
+    expect(buildValuesFreeCliFailure('apply', { code: enumShapedSecret, status: 409 })).toMatchObject({
+      code: 'REPAIR_FAILED',
+    })
+    expect(buildValuesFreeCliFailure('apply', new Error(enumShapedSecret))).toMatchObject({
+      code: 'REPAIR_FAILED',
     })
   })
 })
