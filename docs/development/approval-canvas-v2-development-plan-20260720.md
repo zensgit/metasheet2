@@ -1,9 +1,9 @@
 # Approval Canvas V2 Development Plan (2026-07-20)
 
-**Status:** PROPOSED - owner ratification required before D3 runtime/UI foundation work starts  
+**Status:** PROPOSED - owner ratification required before D3 canvas foundation work starts
 **Baseline:** `origin/main@a98996ee2e0269b22801a6b87d2b8d5b5f076025`  
 **Scope:** approval form authoring, approval-flow canvas, template versions, form/decision-value writeback, and attachment integration  
-**Flags:** all new canvas behavior defaults OFF until G5 passes  
+**Flags:** Canvas V2 defaults OFF until G5-C plus owner UAT; FWB and attachments retain separate default-OFF gates
 **Authoritative runtime model:** existing `ApprovalGraph` plus backend `normalizeApprovalGraph`
 
 This document is the execution baseline for the next approval-authoring phase. It is intentionally more
@@ -26,6 +26,17 @@ editing JSON, field IDs, edge keys, raw user IDs, or implementation terminology:
 The target is comparable core authoring capability, not a visual clone of another product. MetaSheet's
 differentiation remains the approval-to-multitable-to-automation loop.
 
+Item 4 is an as-built prerequisite, not a greenfield promise: the current mainline already provides the
+requester route preview and template-author dry-run through the RP-1..RP-3 path. Canvas work must surface and
+regression-test that capability; it must not rebuild a parallel preview service.
+
+This program has two separately shippable outcomes:
+
+- **Canvas delivery:** form builder, flow canvas, current shipped node/assignee semantics, route preview, and
+  version lifecycle. It may canary after G5-C without waiting for FWB, attachments, or greenfield node semantics.
+- **Approval-data closure:** FWB, approver-confirmed values, attachments, and any separately ratified runtime
+  capability. It passes G5-R independently and cannot borrow Canvas evidence.
+
 ## 2. Ratification delta from the 2026-06-24 canvas lock
 
 The existing `docs/design/approval-visual-authoring-canvas-design-lock-20260624.md` and its TODO described
@@ -35,15 +46,23 @@ structured list or JSON-like surfaces.
 
 Ratifying this plan therefore supersedes these earlier clauses:
 
-- The canvas becomes the primary and eventually sole ordinary-user flow-authoring surface.
+- The canvas becomes the primary ordinary-user flow-authoring surface. It becomes the sole ordinary-user
+  entry only after G6-C proves equivalent assistive-technology authoring; otherwise the accessible structured
+  alternative remains.
 - The structured editor may remain temporarily behind an internal support/debug gate during rollout, but
   it is not a normal workflow and cannot be required to configure a node.
 - Arbitrary node-position dragging is not a product feature. Dragging means a semantic move to a valid
   insertion point or branch. Layout coordinates do not enter the saved approval graph.
 - The prior bespoke fixed-box SVG/HTML canvas is a compatibility baseline, not the final rendering engine.
+- The 2026-06-24 D-0..D-6 identifiers and its "bespoke canvas is final" implementation assumption are retired;
+  work is tracked only by this plan's D-identifiers after ratification.
+- The prior v1 deferral of undo/redo and narrow-layout interaction is reopened by D0/D2-b/D5. This does not
+  silently reopen mobile runtime parity.
 
 No runtime graph semantics are superseded by this document. Existing templates and running instances keep
-their current graph/version meaning.
+their current graph/version meaning. A handler/processing node, within-node ordered approvers, new assignee
+sources, or readonly/editable runtime enforcement therefore requires its own design lock and owner ratification;
+placing it in the backlog below does not authorize implementation.
 
 ## 3. Non-negotiable invariants
 
@@ -82,13 +101,17 @@ started with. Restoring history creates a new draft and never mutates an old pub
 
 ### I7 - Permission and data handling
 
-Node configuration, version restore, record-link selection, writeback, and attachments retain their
-existing backend authorization. Client-side hiding is never the authorization boundary.
+Node configuration and version restore retain their existing backend authorization. Record-link selection,
+writeback, and attachments must preserve the authorization contracts in their ratified design locks when
+their runtime lands. Client-side hiding is never the authorization boundary.
 
 ### I8 - Dormant rollout
 
 The V2 canvas is introduced through the existing session-aware feature mechanism as an additive
-`approvalCanvasV2` capability, default false. The old surface remains the fallback until G5.
+`approvalCanvasV2` capability, default false. It must be added to `ProductFeatures`, accept the backend payload
+aliases `approvalCanvasV2` / `approval_canvas_v2`, use only the existing authorized development override, and
+must not infer enablement from admin role, plugin state, or product mode. The old surface remains the fallback
+until the G6-C fallback window closes.
 
 ### I9 - Exact-head evidence
 
@@ -122,6 +145,9 @@ flowchart LR
 - `approvalCanvasLayout.ts` - deterministic layered layout adapter.
 - `approvalCanvasValidation.ts` - high-value live diagnostics; backend remains final.
 - `ApprovalVersionCanvas.vue` - read-only current/history overlay and restore preview.
+- `ApprovalFormBuilder.vue` - field palette and semantic reorder over the existing form schema.
+- `approvalFormCommands.ts` - pure add/remove/reorder operations for existing field types; schema-changing
+  layout constructs require a separate contract.
 
 ### 4.2 Library decision
 
@@ -137,87 +163,137 @@ D3 evaluates `@vue-flow/core` for interaction/rendering and `elkjs` layered layo
 If the spike fails one of these gates, D3 stops for an owner-visible alternative decision. It must not
 silently fall back to extending the bespoke geometry.
 
+### 4.3 Release and flag boundaries
+
+- `approvalCanvasV2` gates only the new form/canvas/version authoring surface. It does not enable FWB,
+  attachments, or a new runtime node.
+- Attachment runtime remains governed by `APPROVAL_ATTACHMENTS_ENABLED` and
+  `docs/development/approval-attachment-pipeline-design-lock-20260709.md` (B3-07).
+- FWB remains governed by its independently reviewed runtime gates from
+  `docs/development/approval-form-writeback-fwb0-designlock-20260712.md` and its implementation slices; no
+  umbrella Canvas flag may turn those paths on.
+- A Canvas canary may start after G5-C. G5-R is required only before the corresponding FWB/attachment/runtime
+  flags can enter their own owner-controlled UAT.
+
 ## 5. Work breakdown and merge order
 
 Each row is one reviewable PR unless the gate explicitly authorizes a split. A PR must not combine a UI hot
 file migration with backend runtime semantics.
 
-| ID    | Work item                        | Main output                                                                                                 | Model                                    | Depends on               | Exit gate |
-| ----- | -------------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ------------------------ | --------- |
-| D0    | Interaction design lock          | Canvas IA, node anatomy, inspector schema, drag/drop states, version-diff states, desktop/narrow prototypes | Kimi K3, Codex finalization              | none                     | G0        |
-| D1    | User-facing hygiene              | Remove JSON preview, internal IDs/keys, manual-ID normal path, debug logging, misleading free-position copy | Grok                                     | none                     | H1-H4     |
-| D2    | Graph-command foundation         | Extract and harden pure add/remove/move/branch commands from #4433; no rendering rewrite                    | Grok                                     | none                     | C1-C5     |
-| D3    | Canvas engine spike              | Vue Flow/ELK adapters, feature capability default OFF, deterministic layout, no persistence change          | Grok                                     | D0, D2                   | G1        |
-| D4    | Canvas shell                     | Custom start/approval/cc/condition/parallel/end nodes, edges, insertion controls, pan/zoom/fit              | Grok                                     | D3                       | G2-a      |
-| D5    | Inspector and command UX         | Right inspector, save validation, node summaries, undo/redo, keyboard selection                             | Grok                                     | D4                       | G2-b      |
-| D6    | Condition and parallel authoring | Rule priority/default branch, parallel all/any, semantic branch reorder, readable labels                    | Grok                                     | D5                       | G2-c      |
-| D7-a  | Handler node                     | Authoring/runtime contract for a handler/processing node                                                    | Grok, Codex contract review              | D6                       | G3-a      |
-| D7-b  | Sequential approval              | Within-node ordered approvers, transfer/return interaction, and frozen execution order                      | Grok, Codex concurrency review           | D6                       | G3-b      |
-| D7-c  | Assignee completeness            | Empty-assignee designated/admin fallback, user group, form department, requester-selected approver          | Grok                                     | D6                       | G3-c      |
-| D7-d  | Field access enforcement         | Make hidden/readonly/editable behavior effective at submission and approval, not decorative UI              | Grok, Codex security review              | D5                       | G3-d      |
-| D8-a  | Safe version service             | Rebase/split #4439 backend diff/restore contract; restore creates a new draft                               | Grok                                     | none                     | V1-V4     |
-| D8-b  | Canvas version UX                | Current-vs-history overlay, before/after inspector, restore preview                                         | Kimi K3 visual pass, Grok implementation | D5, D8-a                 | G4        |
-| D9-a  | New-record writeback             | Review/restack #4341 and its ledger dependency                                                              | Grok, Codex runtime review               | landed durable substrate | W1-W4     |
-| D9-b  | Existing-record writeback        | Review/restack #4343 record-link authorization and update path                                              | Grok, Codex security review              | D9-a                     | W5-W8     |
-| D9-c  | Approver decision values         | Review/restack #4344 value freeze and node-round identity                                                   | Grok, Codex concurrency review           | D9-b                     | W9-W12    |
-| D9-d1 | Attachment contract              | Validation, size/count limits, permanent content-type rejects, schema mapping                               | Grok, Codex security review              | none                     | A1-A3     |
-| D9-d2 | Attachment storage/routes        | Production storage policy, upload/download authorization, values-free errors                                | Grok, Codex security review              | D9-d1                    | A4-A5     |
-| D9-d3 | Attachment lifecycle             | Bind/GC race, purge/reconcile leases, idempotent object deletion                                            | Grok, Codex concurrency review           | D9-d2                    | A6-A7     |
-| D9-d4 | Attachment authoring/writeback   | Form control, draft restore, approval snapshot, FWB shaping                                                 | Grok, Kimi K3 visual pass                | D5, D9-d3                | A8        |
-| D10   | Full-chain acceptance            | Product scenarios, real-DB, browser E2E, visual/a11y, compatibility, flag-off proof                         | Codex gate                               | D6-D9                    | G5        |
-| D11   | Default switch and closeout      | Canary rollout, fallback window, remove ordinary-user list/JSON entry, closeout MD                          | Codex                                    | D10, owner UAT           | G6        |
+| ID    | Work item                           | Main output                                                                                                 | Model                                    | Depends on                         | Exit gate       |
+| ----- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ---------------------------------- | --------------- |
+| D0    | Interaction design lock             | Canvas/form IA, node anatomy, inspector states, touch/keyboard alternatives, version-diff states            | Kimi K3, Codex finalization              | none                               | G0              |
+| D1    | User-facing hygiene                 | Remove JSON preview, internal IDs/keys, manual-ID normal path, debug logging, misleading free-position copy | Grok                                     | none                               | H1-H4           |
+| D2-a  | Existing graph-command hardening    | Extract/harden #4433 add/remove/branch commands and tests; no renderer or backend-runtime merge             | Grok                                     | none                               | C1-C3,C5        |
+| D2-b  | Move and undo command algebra       | New semantic move/reorder commands, explicit inverses, selection restore, invalid-drop rollback             | Grok, Codex contract review              | D2-a                               | C4-C5           |
+| D2-c  | Backend empty-rule compatibility    | Isolate and review #4433 empty condition/branch capture without any authoring UI or renderer                | Grok, Codex runtime review               | none                               | C6              |
+| D3    | Canvas engine spike                 | Vue Flow/ELK adapters, exact feature capability contract, deterministic layout, no persistence change       | Grok                                     | D0, D1, D2-b                       | G1              |
+| D4    | Canvas shell                        | Custom start/approval/cc/condition/parallel/end nodes, edges, insertion controls, pan/zoom/fit              | Grok                                     | D3                                 | G2-a            |
+| D5    | Inspector and command UX            | Right inspector, save validation, node summaries, undo/redo, keyboard selection                             | Grok                                     | D4                                 | G2-b            |
+| D6    | Condition and parallel authoring    | Rule priority/default branch, parallel all/any, semantic branch reorder, readable labels                    | Grok                                     | D5                                 | G2-c            |
+| D6-f1 | Form-command foundation             | Pure add/remove/reorder for all existing field kinds; save-without-edit and dependency-rewrite tests        | Grok                                     | none                               | F1-F3           |
+| D6-f2 | Form builder                        | Field palette, drag/keyboard reorder, field inspector, narrow-layout alternative; no JSON/ID entry          | Kimi K3 visual pass, Grok implementation | D0, D6-f1                          | G2-f            |
+| D7-a  | Handler-node design lock (optional) | Define product need, graph schema, timeout/jump/return behavior; PROPOSED docs only                         | Codex                                    | Canvas delivery not required       | separate ratify |
+| D7-b1 | Existing sequential-chain UX        | Author multi-node ordered chains using shipped `manager_at_level`; no within-node runtime semantics         | Grok                                     | D6                                 | G3-b1           |
+| D7-b2 | Within-node ordered approvers       | Explicitly deferred; requires a new lock reconciling the static-graph decision                              | Codex                                    | owner opt-in after D7-b1           | separate ratify |
+| D7-c1 | Shipped assignee parity             | Canvas config and summaries for current core sources, including manager/dept/level and empty-policy states  | Grok                                     | D6                                 | G3-c1           |
+| D7-c2 | New assignee sources (optional)     | Design/runtime for group, form department, requester-selected approver, or new fallback policy              | Codex, Grok after ratify                 | Canvas delivery not required       | separate ratify |
+| D7-d1 | Hidden-field preservation           | Preserve current server-side hidden-field behavior through Canvas, preview, snapshots, and history          | Grok, Codex security review              | D5                                 | G3-d1           |
+| D7-d2 | Readonly/editable enforcement       | New submission/decision/writeback contract; no claim of as-built enforcement                                | Codex, Grok after ratify                 | owner opt-in                       | separate ratify |
+| D8-a  | Safe version service                | Rebase/split #4439 backend diff/restore contract; restore creates a new draft                               | Grok                                     | none                               | V1-V4           |
+| D8-b  | Canvas version UX                   | Side-by-side synchronized canvases, ghost add/remove nodes, before/after inspector, restore preview         | Kimi K3 visual pass, Grok implementation | D5, D8-a                           | G4              |
+| D9-a  | New-record writeback                | Review/restack #4341 against ratified FWB-0 and its ledger dependency                                       | Grok, Codex runtime review               | landed durable substrate           | W1-W4           |
+| D9-b  | Existing-record writeback           | Review/restack #4343 record-link authorization and update path                                              | Grok, Codex security review              | D9-a                               | W5-W8           |
+| D9-c  | Approver decision values            | Review/restack #4344 value freeze and node-round identity                                                   | Grok, Codex concurrency review           | D9-b                               | W9-W12          |
+| D9-d1 | Attachment contract                 | B3-07 validation, size/count limits, permanent content-type rejects, schema mapping                         | Grok, Codex security review              | none                               | A1-A3           |
+| D9-d2 | Attachment storage/routes           | Production storage policy, upload/download authorization, values-free errors                                | Grok, Codex security review              | D9-d1                              | A4-A5           |
+| D9-d3 | Attachment lifecycle                | Bind/GC race, purge/reconcile leases, idempotent object deletion                                            | Grok, Codex concurrency review           | D9-d2                              | A6-A7           |
+| D9-d4 | Attachment authoring/writeback      | Form control, draft restore, approval snapshot, FWB shaping                                                 | Grok, Kimi K3 visual pass                | D6-f2, D9-d3                       | A8              |
+| D10-C | Canvas acceptance                   | Canvas/form/version/preview scenarios, browser visual/a11y, compatibility, flag-off proof                   | Codex gate                               | D2-c, D6, D6-f2, D7-b1/c1/d1, D8-b | G5-C            |
+| D10-R | Approval-data acceptance            | Real-DB FWB/attachment and separately ratified runtime scenarios                                            | Codex gate                               | applicable D7 optional, D9         | G5-R            |
+| D11-C | Canvas switch and fallback close    | Canary, owner UAT, accessible fallback window, ordinary-user legacy-entry decision                          | Codex, owner merge/enablement            | D10-C                              | G6-C            |
+| D11-R | Approval-data closeout              | Independent flag ladders, runtime UAT, full-line as-built MD                                                | Codex, owner enablement                  | D10-R                              | G6-R            |
 
 ### 5.1 Dependency graph
 
 ```mermaid
 flowchart TD
+  D2A["D2-a"] --> D2B["D2-b"]
+  D2C["D2-c"] --> D10C["D10-C"]
   D0 --> D3
-  D2 --> D3
   D1 --> D3
+  D2B --> D3
   D3 --> D4 --> D5 --> D6
-  D6 --> D7A["D7-a"]
-  D6 --> D7B["D7-b"]
-  D6 --> D7C["D7-c"]
-  D5 --> D7D["D7-d"]
+  D6F1["D6-f1"] --> D6F2["D6-f2"]
+  D0 --> D6F2
+  D6 --> D7B1["D7-b1"]
+  D6 --> D7C1["D7-c1"]
+  D5 --> D7D1["D7-d1"]
   D8A["D8-a"] --> D8B["D8-b"]
   D5 --> D8B
   D9A["D9-a"] --> D9B["D9-b"] --> D9C["D9-c"]
   D9D1["D9-d1"] --> D9D2["D9-d2"] --> D9D3["D9-d3"] --> D9D4["D9-d4"]
-  D5 --> D9D4
-  D7A --> D10
-  D7B --> D10
-  D7C --> D10
-  D7D --> D10
-  D8B --> D10
-  D9C --> D10
-  D9D4 --> D10
-  D10 --> D11
+  D6F2 --> D9D4
+  D6 --> D10C
+  D6F2 --> D10C
+  D7B1 --> D10C
+  D7C1 --> D10C
+  D7D1 --> D10C
+  D8B --> D10C
+  D9C --> D10R["D10-R"]
+  D9D4 --> D10R
+  D10C --> D11C["D11-C"]
+  D10R --> D11R["D11-R"]
 ```
 
 ### 5.2 Safe parallel lanes
 
-- Wave 0: D0, D1, D2, and D8-a may run in parallel in separate worktrees.
-- Wave 1: D3 is serial and owns the initial canvas adapter/dependency surface.
+- Wave 0: D0, D1, D2-a, D2-c, D6-f1, and D8-a may run in parallel in separate worktrees.
+- Wave 0.5: D2-b follows D2-a; D6-f2 follows D0 plus D6-f1.
+- Wave 1: D3 is serial and owns the initial canvas adapter/dependency surface. D3 and D6-f2 serialize if both
+  need `TemplateAuthoringView.vue`; the coordinator assigns the first owner before either starts.
 - Wave 2: D4 then D5 are serial because both establish shared canvas component APIs.
-- Wave 3: D6, D7-d, D8-b, and D9 runtime work may fan out only after their dependency is on main.
-- Wave 4: D7-a/D7-b/D7-c and D9-d1..d4 may run in parallel if they do not share `ApprovalProductService` or the
-  same authoring component. File ownership wins over the diagram when a conflict appears.
-- Wave 5: D10 and D11 are serial.
+- Wave 3: D6, D7-d1, D8-b, and D9 runtime work may fan out only after their dependency is on main.
+- Wave 4: D7-b1/D7-c1 and D9-d1..d4 may run in parallel only when the hot-file rules below permit it.
+- Wave 5-C: D10-C then D11-C are serial; they do not wait for D9 or optional D7 runtime locks.
+- Wave 5-R: D10-R then D11-R are serial and independently gated.
+
+### 5.3 Hot-file ownership
+
+- `TemplateAuthoringView.vue` has one owner at a time. D1, D3-D6, D6-f2, D7-b1/c1/d1, and D8-b serialize
+  whenever they touch it; delegation does not override ownership.
+- `ApprovalProductService.ts` and `ApprovalGraphExecutor.ts` have one runtime lane at a time. Optional D7,
+  D8-a, FWB, and attachments cannot overlap edits there.
+- Shared approval types, feature payloads, and migrations are coordinator-owned integration surfaces.
+- #4433 must be mined as two concerns: its frontend graph commands/tests feed D2-a/D6, while its backend
+  empty-rule/runtime changes feed D2-c. They cannot land as one Canvas PR.
 
 ## 6. Existing PR disposition
 
 This section is a 2026-07-20 snapshot, not a substitute for live `gh pr view` and checks.
 
-| PR    | Current role                                          | Required disposition                                                                                                                                                   |
-| ----- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| #4433 | Restored branch authoring and vertical bespoke canvas | Mine D2/D6 behavior and tests. Do not treat the fixed-size renderer or transient coordinate sidecar as V2. Split or supersede rather than blindly merging visual code. |
-| #4439 | Template version diff and safe restore                | Split D8-a backend safety from D8-b transitional text UI where practical. Rebase before review.                                                                        |
-| #4482 | 125-file composite integration draft                  | Freeze as rehearsal/reference only. Never use it as the final merge vehicle. Transfer only reviewed slices.                                                            |
-| #4341 | FWB-1 mapping                                         | D9-a source; rebase and review exact head.                                                                                                                             |
-| #4343 | FWB-2 record-link/update                              | D9-b source; resolve stack/base state only after D9-a lands.                                                                                                           |
-| #4344 | FWB-3 decision values                                 | D9-c source; retarget after D9-b.                                                                                                                                      |
-| #4342 | Attachment full stack                                 | D9-d1..d4 source; diagnose stale failing checks and split because one review cannot prove all four security/concurrency scopes.                                        |
-| #4457 | Previous approval-line closeout doc                   | Historical evidence only; it does not close Canvas V2.                                                                                                                 |
+| PR    | Current role                                          | Required disposition                                                                                                                                                 |
+| ----- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #4433 | Restored branch authoring and vertical bespoke canvas | Mine frontend command/branch behavior into D2-a/D6 and backend empty-rule behavior into D2-c. Do not merge its renderer, sidecar, FE, and backend as one V2 vehicle. |
+| #4439 | Template version diff and safe restore                | Split D8-a backend safety from D8-b transitional text UI where practical. Rebase before review.                                                                      |
+| #4482 | 125-file composite integration draft                  | Freeze as rehearsal/reference only. Never use it as the final merge vehicle. Transfer only reviewed slices.                                                          |
+| #4341 | FWB-1 mapping                                         | D9-a source; rebase and review exact head.                                                                                                                           |
+| #4343 | FWB-2 record-link/update                              | D9-b source; resolve stack/base state only after D9-a lands.                                                                                                         |
+| #4344 | FWB-3 decision values                                 | D9-c source; retarget after D9-b.                                                                                                                                    |
+| #4342 | Attachment full stack                                 | D9-d1..d4 source; diagnose stale failing checks and split because one review cannot prove all four security/concurrency scopes.                                      |
+| #4457 | Previous approval-line closeout doc                   | Historical evidence only; it does not close Canvas V2.                                                                                                               |
+
+### 6.1 As-built prerequisites to preserve, not rebuild
+
+- RP-1..RP-3 route preview is present on main in `ApprovalProductService`, `ApprovalNewView.vue`, and
+  `TemplateAuthoringView.vue`. Canvas integration must invoke the existing template-author dry-run and keep its
+  stale-result guard and wire contract.
+- Core approval already recognizes `direct_manager`, `dept_head`, `continuous_managers`, and
+  `manager_at_level`; D7-c1 is authoring parity and regression work, not a new attendance-only resolver port.
+- Current field access is asymmetric by design: `hidden` has server-side behavior; `readonly` and `editable` are
+  contract-stable but runtime-inert. D7-d1 preserves the first; D7-d2 cannot be claimed without new runtime work.
+- Current sequential escalation is a chain of approval nodes, commonly using `manager_at_level`. A single node
+  containing a mutable ordered approver pipeline is not as-built.
 
 ## 7. Named gates and acceptance evidence
 
@@ -240,6 +316,17 @@ This section is a 2026-07-20 snapshot, not a substitute for live `gh pr view` an
 - **C4:** Semantic move has an inverse command; move then undo restores the normalized graph and selection.
 - **C5:** Invalid cycle/orphan/fork-join operations are rejected without partial mutation, while representative
   legacy complex graphs round-trip unchanged.
+- **C6:** The isolated backend empty-rule behavior has a runtime-positive case and a RED-before regression; it
+  lands without any Canvas renderer or frontend hot-file change.
+
+### D6-f form-builder checks (F1-F3)
+
+- **F1:** Add/remove/reorder covers every currently supported field type and never exposes a field ID as normal
+  user input; keyboard controls and drag produce the same field order.
+- **F2:** Moving a field preserves or explicitly rejects its visibility, assignee-source, condition, permission,
+  detail-column, and mapping references; no reference is silently rewritten to a different field.
+- **F3:** A representative legacy form with detail fields, visibility dependencies, user fields, and attachments
+  opens and saves without semantic drift. Sections/columns are not invented unless a separate schema lock lands.
 
 ### D8-a version checks (V1-V4)
 
@@ -281,6 +368,8 @@ This section is a 2026-07-20 snapshot, not a substitute for live `gh pr view` an
 - Node summaries fit the longest supported labels.
 - Condition, parallel, validation, empty-state, loading, permission-denied, and conflict states are shown.
 - Desktop and narrow layouts are defined.
+- Touch placement has an explicit insertion-menu alternative; drag is never the only narrow-screen action.
+- Screen-reader authoring either reaches every Canvas command or retains an accessible structured alternative.
 - Old structured editor retirement and support-only fallback are decided.
 
 ### G1 - Model and layout compatibility
@@ -300,66 +389,82 @@ This section is a 2026-07-20 snapshot, not a substitute for live `gh pr view` an
   structured list; undo/redo restores both topology and selected-node context.
 - **G2-c:** Conditions show readable rules and priority, never edge keys; parallel branches show all/any
   semantics and branch summaries.
+- **G2-f:** The same ordinary-user authoring journey builds and reorders form fields without JSON, internal IDs,
+  or repeated up/down clicking; field inspector focus returns to the moved/created field.
 
 ### G3 - Runtime capability integrity
 
-- **G3-a:** Handler nodes serialize to a documented graph contract, execute once in the correct round, and
-  have explicit timeout/jump/return behavior.
-- **G3-b:** Sequential approval freezes the ordered approver list for the node round and preserves transfer,
-  add/reduce sign, return, revoke, and re-entry semantics.
-- **G3-c:** Every new assignee source has a positive resolution test and an empty/unresolved negative test;
-  designated/admin fallback does not broaden authorization.
-- **G3-d:** Hidden fields never enter unauthorized snapshots or mappings, and readonly/editable restrictions
-  are enforced server-side at submission/decision/writeback boundaries.
+- **G3-b1:** Existing multi-node sequential chains preserve node order and current transfer, add/reduce sign,
+  return, revoke, and re-entry behavior. The Canvas does not compress them into one node.
+- **G3-c1:** Every shipped assignee source has a positive summary/resolution test and an empty/unresolved negative
+  test; authoring cannot broaden fallback authorization.
+- **G3-d1:** Hidden fields remain excluded from unauthorized preview, snapshots, and history. The gate makes no
+  claim that readonly/editable is enforced.
+- **Optional-runtime rule:** D7-a, D7-b2, D7-c2, and D7-d2 receive their own design lock, RED-before runtime
+  tests, and owner ratification. None is part of G5-C.
 
 ### G4 - Version lifecycle
 
 - Editing a published template creates a new draft/version path.
 - Running instances remain pinned to their original version.
 - Diff distinguishes add/remove/change and shows property before/after values.
-- Restore preview compares the selected historical version with the current version on the same canvas.
+- Restore preview uses side-by-side synchronized canvases with stable node identity. Removed nodes remain as
+  read-only ghosts, added nodes are highlighted, and the property inspector shows explicit before/after values;
+  two independently relaid-out graphs are never ambiguously overlaid.
 - Restore creates a new draft and handles stale latest-version conflicts fail-closed.
 
-### G5 - Full-chain acceptance
+### G5-C - Canvas acceptance
 
 The following scenarios must run through real product entry points, not only pure helpers:
 
-| Scenario              | Required result                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------ |
-| S1 Linear             | requester -> approval -> cc/end publishes and executes                                           |
-| S2 Conditional        | two ordered conditions plus default select the expected branch                                   |
-| S3 Parallel all       | all branches must complete before join                                                           |
-| S4 Parallel any       | first valid branch completion advances without corrupting siblings                               |
-| S5 Dynamic assignee   | manager/role/form-driven resolution and empty fallback are visible and correct                   |
-| S6 Field access       | hidden/readonly/editable behavior holds through submit, approve, history, and writeback          |
-| S7 Version            | publish v1/v2, inspect diff, run v1 instance, restore v1 to a new draft                          |
-| S8 New-record FWB     | independent approval form creates exactly one multitable record                                  |
-| S9 Update FWB         | approver-confirmed values update the authorized selected record exactly once                     |
-| S10 Attachment        | accepted file binds, survives approval, and is written back; rejected type/size remains rejected |
-| S11 Legacy round-trip | representative pre-V2 complex graphs open and save without semantic drift                        |
-| S12 Scale             | 100-node mixed graph remains readable and operable with no edge/card overlap                     |
+| Scenario                 | Required result                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| S1 Form authoring        | create/reorder all existing field kinds by drag and keyboard without internal IDs                            |
+| S2 Linear                | requester -> approval -> cc/end publishes and executes                                                       |
+| S3 Conditional           | two ordered conditions plus default select the expected branch                                               |
+| S4 Parallel all          | all branches must complete before join                                                                       |
+| S5 Parallel any          | first valid branch completion advances without corrupting siblings                                           |
+| S6 Dynamic assignee      | shipped manager/role/form-driven resolution and empty fallback are visible and correct                       |
+| S7 Route preview         | representative form values invoke the existing dry-run and show the actual path without creating an instance |
+| S8 Hidden-field boundary | hidden behavior holds through submit, preview, snapshot, and history boundaries                              |
+| S9 Version               | publish v1/v2, inspect side-by-side diff, run v1 instance, restore v1 to a new draft                         |
+| S10 Legacy round-trip    | representative pre-V2 complex graphs and forms open/save without semantic drift                              |
+| S11 Scale                | 100-node mixed graph remains readable and operable with no edge/card overlap                                 |
+| S12 Accessible authoring | keyboard plus screen-reader path, or retained accessible alternative, completes linear and branch edits      |
 
-### G6 - Rollout
+### G5-R - Approval-data acceptance
 
-- Default remains OFF through internal and tenant canary.
+| Scenario                    | Required result                                                                                  |
+| --------------------------- | ------------------------------------------------------------------------------------------------ |
+| R1 New-record FWB           | independent approval form creates exactly one multitable record                                  |
+| R2 Update FWB               | approver-confirmed values update the authorized selected record exactly once                     |
+| R3 Attachment               | accepted file binds, survives approval, and is written back; rejected type/size remains rejected |
+| R4 Optional runtime feature | each separately ratified D7 feature passes its own real-entry scenario before its flag/UAT       |
+
+### G6-C / G6-R - Rollout
+
+- Canvas default remains OFF through internal and tenant canary; G5-C makes it eligible for owner UAT, not ON.
 - Canary telemetry covers load/save failure, backend validation failure, layout failure, and fallback use,
   without logging form values or identifiers not already approved for telemetry.
 - Owner UAT signs off before default ON.
-- The structured-list ordinary-user entry is removed only after the fallback window closes.
+- The structured-list ordinary-user entry is removed only after the fallback window closes **and** S12 proves
+  equivalent assistive-technology authoring. Otherwise an accessible structured alternative remains.
+- FWB, attachments, and optional D7 runtime flags follow their own G5-R evidence and owner UAT; Canvas rollout
+  cannot enable them transitively.
 
 ## 8. Verification matrix
 
-| Layer               | Required verification                                                                                        |
-| ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Pure graph commands | Unit matrices for add/move/remove/reorder, cycle/orphan/fork-join rejection, inverse commands                |
-| Adapter/layout      | Determinism, dynamic-height routing, 100-node fixture, no graph mutation                                     |
-| Vue components      | Mounted tests for node selection, inspector updates, insertion menu, keyboard access, undo/redo              |
-| Backend contract    | Existing `normalizeApprovalGraph` suites plus new node/mode/field-permission contracts                       |
-| Version/runtime     | Real-DB tests for version pinning, stale restore conflict, FWB transaction/idempotency, attachment bind/GC   |
-| Browser             | Playwright at 1440x900, 1280x800, 1024x768, and 390x844; no overlap or clipped controls                      |
-| Visual              | Baseline screenshots for S1-S7 and long-label/validation states; Kimi K3 performs a separate visual critique |
-| Accessibility       | Keyboard-only core authoring, visible focus, accessible names, contrast, and inspector focus return          |
-| Regression          | Required `web-tests`, approval web guard, backend targeted suites, typecheck, and build                      |
+| Layer               | Required verification                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Pure graph commands | Unit matrices for add/move/remove/reorder, cycle/orphan/fork-join rejection, inverse commands                                        |
+| Adapter/layout      | Determinism, dynamic-height routing, 100-node fixture, no graph mutation                                                             |
+| Vue components      | Mounted tests for node/field selection, inspector updates, insertion menu, touch alternative, keyboard access, undo/redo             |
+| Backend contract    | Existing graph/mode/hidden-field suites plus separately ratified optional-runtime contracts                                          |
+| Version/runtime     | Real-DB tests for version pinning, stale restore conflict, FWB transaction/idempotency, attachment bind/GC                           |
+| Browser             | Playwright at 1440x900, 1280x800, 1024x768, and 390x844; no overlap or clipped controls                                              |
+| Visual              | Baseline screenshots for Canvas scenarios and long-label/validation states; Kimi K3 performs a separate visual critique              |
+| Accessibility       | Keyboard-only and screen-reader core authoring, visible focus, accessible names, contrast, announcements, and inspector focus return |
+| Regression          | Required `web-tests`, approval web guard, backend targeted suites, typecheck, and build                                              |
 
 Every load-bearing guard requires a discriminating negative test or mutation. A source-text assertion alone
 does not prove graph behavior, authorization, transactionality, or layout correctness.
@@ -388,6 +493,14 @@ does not prove graph behavior, authorization, transactionality, or layout correc
 - Re-runs load-bearing tests independently and checks served PR diff/body, not only the agent report.
 - Stops a lane when it crosses authorization, data, security, concurrency, or hot-file boundaries.
 
+### Human merge authority
+
+- Subagent and Codex verdicts are review recommendations. They do not authorize a merge, ratify a design lock,
+  or enable a flag.
+- A named human owner/reviewer approves each PR after exact-head evidence. Only the owner or an explicitly
+  authorized merge operator may transition the ledger from `APPROVED` to `MERGED`.
+- D10-C/D10-R evidence may be prepared by Codex, but the corresponding UAT and enablement decisions remain human.
+
 ### Per-PR handoff packet
 
 Every delegated implementation starts with:
@@ -405,7 +518,7 @@ Every delegated implementation starts with:
 
 Each PR body must contain:
 
-- `Plan item` (one D-item only);
+- `Plan item` (one D-item only; optional design locks and runtime implementation are separate PRs);
 - exact base and dependency PRs;
 - allowed scope and explicit non-goals;
 - user-visible behavior;
@@ -424,9 +537,10 @@ as the live status ledger, with these states:
 - `CHANGES_REQUESTED`
 - `APPROVED`
 - `MERGED`
+- `OWNER_GATE` for an explicit owner-ratification boundary
 - `BLOCKED` with an explicit blocker
 
-This prevents every concurrent PR from conflicting on one shared checklist file. The final D11 closeout MD
+This prevents every concurrent PR from conflicting on one shared checklist file. The final D11-R closeout MD
 reconciles the plan with as-built commit SHAs and honest deviations.
 
 ## 11. Stop conditions (anti-drift tripwires)
@@ -440,51 +554,91 @@ Stop the current lane and return to review if any of the following occurs:
 - an implementation changes backend graph semantics without a separately approved contract slice;
 - one PR mixes authoring-hot-file migration with FWB/attachment runtime changes;
 - a model edits a file outside its allowed-path packet;
+- two active lanes claim `TemplateAuthoringView.vue`, `ApprovalProductService.ts`, `ApprovalGraphExecutor.ts`,
+  shared approval types, or the same migration range;
 - a security, permission, transaction, or concurrency claim is supported only by mocks or text scans;
 - visual evidence is from a different head than the reviewed code;
 - #4482 is proposed as one-shot merge rather than a source/rehearsal branch;
-- any canvas/FWB/attachment flag is enabled before G5 and owner UAT.
+- the Canvas flag is enabled before G5-C plus owner UAT, or any FWB/attachment/optional-runtime flag is enabled
+  before G5-R plus its own owner UAT.
 
 ## 12. Initial execution ledger
 
-| Item      | Initial state | First action                                                                         |
-| --------- | ------------- | ------------------------------------------------------------------------------------ |
-| D0        | NOT_STARTED   | Kimi K3 prepares three representative flow prototypes and an interaction state table |
-| D1        | READY         | Grok removes user-visible internals in a small frontend-only PR                      |
-| D2        | READY         | Re-review #4433 and extract pure command/branch tests without blessing its renderer  |
-| D3-D7     | BLOCKED       | Wait for D0 ratification and predecessor merge                                       |
-| D8-a      | READY         | Re-review/rebase #4439 and isolate safe restore backend contract                     |
-| D8-b      | BLOCKED       | Wait for D5 and D8-a                                                                 |
-| D9-a      | REVIEW        | Re-check #4341 against current main and landed durable substrate                     |
-| D9-b/D9-c | BLOCKED       | Land the FWB stack bottom-up                                                         |
-| D9-d1..d4 | REVIEW        | Diagnose #4342 exact-head CI, then split it along the four attachment scopes above   |
-| D10-D11   | BLOCKED       | Wait for all required implementation gates                                           |
+| Item        | Initial state | First action                                                                                     |
+| ----------- | ------------- | ------------------------------------------------------------------------------------------------ |
+| D0          | NOT_STARTED   | Kimi K3 prepares representative form/flow/version prototypes plus keyboard/touch/AT state tables |
+| D1          | READY         | Grok removes user-visible internals in a small frontend-only PR                                  |
+| D2-a        | READY         | Re-review #4433 frontend command files/tests without blessing its renderer or backend diff       |
+| D2-b        | BLOCKED       | Follow D2-a with separately tested semantic move/inverse algebra                                 |
+| D2-c        | READY         | Isolate #4433 backend empty-rule behavior into a runtime-only review/PR                          |
+| D3-D6       | BLOCKED       | Wait for D0 ratification and predecessor merge                                                   |
+| D6-f1       | READY         | Extract current pure field reorder/add/remove contracts and dependency-reference tests           |
+| D6-f2       | BLOCKED       | Wait for D0 and D6-f1                                                                            |
+| D7-b1/c1/d1 | BLOCKED       | Wait for Canvas inspector contracts; preserve only as-built runtime semantics                    |
+| Optional D7 | OWNER_GATE    | No runtime until a separate design lock is ratified                                              |
+| D8-a        | READY         | Re-review/rebase #4439 and isolate safe restore backend contract                                 |
+| D8-b        | BLOCKED       | Wait for D5 and D8-a                                                                             |
+| D9-a        | REVIEW        | Re-check #4341 against current main, FWB-0, and landed durable substrate                         |
+| D9-b/D9-c   | BLOCKED       | Land the FWB stack bottom-up                                                                     |
+| D9-d1..d4   | REVIEW        | Diagnose #4342 exact-head CI, then split it along the four B3-07 attachment scopes               |
+| D10-C/D11-C | BLOCKED       | Wait for Canvas/Form/Version gates; do not wait for D9 or optional D7                            |
+| D10-R/D11-R | BLOCKED       | Wait for the independently authorized approval-data runtime gates                                |
 
 ## 13. Owner ratification checklist
 
 Ratifying this plan confirms only the development order and product direction. It does not enable runtime
 flags or production rollout.
 
-- [ ] O1 - Canvas is the normal user's sole flow-authoring surface after G6.
-- [ ] O2 - The structured editor becomes temporary support-only fallback, then ordinary-user entry is removed.
+- [ ] O1 - Canvas is the normal user's primary flow-authoring surface after G6-C.
+- [ ] O2 - The structured editor becomes temporary support-only fallback; ordinary-user entry is removed only
+      if the accessible-authoring equivalence gate passes.
 - [ ] O3 - D3 may add Vue Flow/ELK dependencies if the spike satisfies section 4.2.
 - [ ] O4 - Dragging is semantic placement; arbitrary persisted positions are out of scope.
-- [ ] O5 - D7 capability additions require separate runtime-contract review where the current graph lacks them.
-- [ ] O6 - Version restore always creates a new draft and never rewrites published history.
-- [ ] O7 - FWB and attachments remain independent runtime lanes and converge only at D10.
-- [ ] O8 - Kimi K3 designs/critiques; Grok implements bounded slices; Codex independently gates each head.
-- [ ] O9 - No feature flag turns ON before G5, owner UAT, and a separate enablement decision.
+- [ ] O5 - Canvas delivery is D0-D6/D6-f/D7-b1-c1-d1/D8 and may canary without D9 or optional D7 runtime.
+- [ ] O6 - Handler nodes, within-node ordered approvers, new assignee sources, and readonly/editable enforcement
+      each require a separate design lock; this plan does not authorize their runtime.
+- [ ] O7 - Existing sequential approval remains a multi-node chain; an auto-expand convenience is a later lock.
+- [ ] O8 - Version restore always creates a new draft and never rewrites published history.
+- [ ] O9 - FWB and attachments remain independent runtime lanes and converge only at G5-R.
+- [ ] O10 - Kimi K3 designs/critiques; Grok implements bounded slices; Codex independently reviews; a human owner merges.
+- [ ] O11 - No Canvas flag turns ON before G5-C and owner UAT; no data/runtime flag turns ON before G5-R and its own UAT.
+- [ ] O12 - The structured editor is removed from ordinary users only after assistive-technology equivalence is proven;
+      otherwise an accessible alternative remains.
 
 ## 14. Definition of complete
 
-This development line is complete only when:
+**Canvas delivery is complete** when:
 
-1. D0-D11 are reconciled as MERGED or explicitly removed by an owner decision.
-2. G0-G6 have named exact-head evidence.
-3. S1-S12 pass through real product entry points.
-4. Ordinary users can author supported approval flows without JSON, internal IDs, or the structured list.
-5. Existing templates and running instances retain their semantics and version pinning.
-6. Form values, approver-confirmed values, record links, and supported attachments reach multitable through
+1. D0, D1, D2-a/b/c, D3-D6, D6-f1/f2, D7-b1/c1/d1, D8-a/b, D10-C, and D11-C are MERGED or explicitly
+   removed by owner decision.
+2. G0-G5-C and S1-S12 have named exact-head evidence; owner UAT controls G6-C.
+3. Ordinary users can build a form and supported flow without JSON, internal IDs, or repeated structured-list work.
+4. Existing templates and running instances retain their semantics and version pinning.
+5. Route preview reuses the as-built RP path and creates no approval instance.
+6. Removing the legacy ordinary-user entry does not remove an accessible authoring path.
+
+**Approval-data closure is complete** only when:
+
+1. D9 plus any owner-selected optional D7 lock/runtime are reconciled independently.
+2. G5-R passes through real product entry points and each runtime flag completes its own G6-R/UAT ladder.
+3. Form values, approver-confirmed values, record links, and supported attachments reach multitable through
    authorized, idempotent paths.
-7. The closeout MD records as-built SHAs, test evidence, screenshots, flags, residual gaps, and owner-only
-   rollout actions without declaring unbuilt code complete.
+4. The final closeout MD records as-built SHAs, tests, screenshots, flags, residual gaps, and owner-only actions
+   without using Canvas delivery to declare unbuilt runtime complete.
+
+## 15. Independent review disposition
+
+The initial commit `2338eb928` received two read-only independent reviews before ratification:
+
+- **Grok engineering review:** `NEEDS_CHANGES`. Accepted findings drove the Canvas/runtime gate split, D2-a/b/c
+  decomposition, static sequential semantics, field-access honesty, flag contract, hot-file ownership, and
+  explicit supersession of the 2026-06-24 identifiers.
+- **Kimi K3 product/UX review:** `NEEDS_CHANGES`. Accepted findings added the missing form-builder lane,
+  assistive-technology retirement gate, narrow-screen non-drag alternative, deterministic version comparison,
+  and human merge authority.
+- **Refuted after code verification:** route preview is not missing; RP-1..RP-3 already exist and now have S7
+  regression ownership. Manager/dept/level assignee sources are not attendance-only; they are present in the
+  core approval types and product service and now have D7-c1 parity ownership.
+
+Subagent findings are inputs, not proof. This revision was reconciled against the repository by Codex; the plan
+remains PROPOSED until the owner checks section 13.
