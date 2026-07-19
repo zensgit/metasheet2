@@ -57,6 +57,8 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_PROJECT_NAMESPACE_FORBIDDEN',
   'MULTITABLE_SHARE_PERMISSIONS', // share permission registry
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
+  'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
+  'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
 ])
 
 function globalHistoryFlagsInSource() {
