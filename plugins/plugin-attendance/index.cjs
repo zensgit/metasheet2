@@ -152,8 +152,8 @@ function getApprovalStepKind(step) {
 // Static (kind-less) steps return early: their legacy tolerance (unmodeled keys stripped by zod, A1
 // round-trip) is deliberately unchanged. The level UPPER bound uses the HOST-resolved MAX
 // (context.services.approvalAssigneeResolver.maxManagerChainLevels), never a plugin-parsed env — one
-// source, two surfaces, no drift. S7-2/S7-3 populate `direct_manager` + `dept_head`;
-// other well-formed dynamic kinds still land on (5) until S7-4 wires them.
+// source, two surfaces, no drift. S7-2/S7-3/S7-4 populate all three recognized kinds;
+// continuous_managers remains OUT-of-v1 (OD-S7-2) and lands on (2) KIND_INVALID.
 function assertApprovalStepsContract(steps, context) {
   if (!Array.isArray(steps)) return
   const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
@@ -238,8 +238,8 @@ function assertApprovalStepsContract(steps, context) {
 // S7-1 §4.1 RUNTIME fail-closed gate. Given NORMALIZED flow steps (post-normalizeApprovalSteps, which
 // preserves a dynamic step's `kind`), throw HttpError(422) if a dynamic step is encountered while the
 // trigger set holds: flag OFF, OR the context.services resolver port is absent, OR the kind is not
-// resolver-implemented (S7-2/S7-3: `direct_manager` + `dept_head`). A flow with NO dynamic step is a
-// no-op (byte-identical legacy).
+// resolver-implemented (S7-2/S7-3/S7-4: `direct_manager` + `dept_head` + `manager_at_level`). A flow
+// with NO dynamic step is a no-op (byte-identical legacy).
 //   • request-create: pass no `onlyStepIndex` → WHOLE-flow scan, so a later dynamic step cannot start a
 //     flow and then strand mid-flight.
 //   • step-advance:   pass `onlyStepIndex = nextStepIndex` → check just the step about to become active.
@@ -20732,6 +20732,13 @@ function flowStepsNeedDeptHeadFreeze(flowSteps) {
   return steps.some((step) => getApprovalStepKind(step) === 'dept_head')
 }
 
+// S7-4: does the (normalized) flow carry a manager_at_level step? Used to decide whether to call the
+// org-scoped resolver port once at request-create to freeze managerChainIds (§3.4).
+function flowStepsNeedManagerChainFreeze(flowSteps) {
+  const steps = normalizeApprovalSteps(flowSteps)
+  return steps.some((step) => getApprovalStepKind(step) === ATTENDANCE_MANAGER_AT_LEVEL_KIND)
+}
+
 // Shared create-time port resolve for one dynamic kind. Port missing / unimplemented / throw map to
 // APPROVAL_STEP_KIND_UNAVAILABLE (§4.1); unresolved / empty / self map to
 // APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED (§4). Never called at step-advance.
@@ -20826,12 +20833,102 @@ async function resolveAttendanceDeptHeadFreeze({ orgId, userId, flowSteps, conte
   return { deptHeadId }
 }
 
-// S7-2 + S7-3: freeze every dynamic org relation the flow requires. A flow with both
-// direct_manager and dept_head freezes BOTH; either unresolved kind fails closed with zero persistence.
+// S7-4 §3.4 CREATE-TIME freeze: call the host-injected org-scoped port ONCE for a flow that contains
+// `manager_at_level`, freeze the FULL dense managerChainIds, and validate EVERY manager_at_level
+// step's positional level is resolvable (whole-flow; never empty freeze + later strand).
+// Never called at step-advance. Port missing / unimplemented / throw → APPROVAL_STEP_KIND_UNAVAILABLE;
+// empty / short / self chain → APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED. NEVER legacy admin fallback.
+async function resolveAttendanceManagerChainFreeze({ orgId, userId, flowSteps, context }) {
+  if (!flowStepsNeedManagerChainFreeze(flowSteps)) return {}
+
+  const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
+  if (!port || typeof port.resolve !== 'function') {
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      `动态审批人类型 "${ATTENDANCE_MANAGER_AT_LEVEL_KIND}" 无法解析(resolver 端口缺失)——请求已阻断(fail-closed)`
+    )
+  }
+
+  let result
+  try {
+    // No level: host returns the FULL dense chain as ordered assignees (S7-4 freeze contract).
+    result = await port.resolve(String(orgId ?? ''), {
+      kind: ATTENDANCE_MANAGER_AT_LEVEL_KIND,
+      requesterUserId: String(userId ?? ''),
+    })
+  } catch (err) {
+    if (err instanceof HttpError) throw err
+    const detail = err && typeof err.message === 'string' ? err.message : String(err)
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      `动态审批人类型 "${ATTENDANCE_MANAGER_AT_LEVEL_KIND}" 无法解析(resolver 调用失败: ${detail})——请求已阻断(fail-closed)`
+    )
+  }
+  if (result && result.status === 'unimplemented') {
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      `动态审批人类型 "${ATTENDANCE_MANAGER_AT_LEVEL_KIND}" 当前不可用(能力未启用或无对应 resolver)`
+    )
+  }
+
+  const requesterId = String(userId ?? '').trim()
+  const chain = []
+  if (result && result.status === 'resolved' && Array.isArray(result.assignees)) {
+    const seen = new Set()
+    for (const a of result.assignees) {
+      if (!a || a.assignmentType !== 'user' || typeof a.assigneeId !== 'string') continue
+      const id = a.assigneeId.trim()
+      // Defense-in-depth self-exclusion + dense-order dedup (host already excludes self).
+      if (!id || id === requesterId || seen.has(id)) continue
+      seen.add(id)
+      chain.push(id)
+    }
+  }
+
+  // Whole-flow: every manager_at_level step must resolve a positional manager from this frozen chain.
+  const steps = normalizeApprovalSteps(flowSteps)
+  for (let i = 0; i < steps.length; i += 1) {
+    const step = steps[i]
+    if (getApprovalStepKind(step) !== ATTENDANCE_MANAGER_AT_LEVEL_KIND) continue
+    const level = step.level
+    if (typeof level !== 'number' || !Number.isInteger(level) || level < 1) {
+      throw new HttpError(
+        422,
+        'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
+        `动态审批人类型 "manager_at_level" 无法解析(level 非法)——请求已阻断(fail-closed)，不得回退到管理员兜底队列`
+      )
+    }
+    const managerId = chain[level - 1]
+    if (!managerId || managerId === requesterId) {
+      throw new HttpError(
+        422,
+        'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
+        `动态审批人类型 "manager_at_level" 无法解析(链路不足 level=${level}、上级未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列`
+      )
+    }
+  }
+
+  if (chain.length === 0) {
+    throw new HttpError(
+      422,
+      'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
+      '动态审批人类型 "manager_at_level" 无法解析(无管理链路、上级未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列'
+    )
+  }
+
+  return { managerChainIds: chain }
+}
+
+// S7-2 + S7-3 + S7-4: freeze every dynamic org relation the flow requires. A flow with multiple
+// dynamic kinds freezes all of them; any unresolved kind fails closed with zero persistence.
 async function resolveAttendanceOrgRelationsFreeze({ orgId, userId, flowSteps, context }) {
   const directManager = await resolveAttendanceDirectManagerFreeze({ orgId, userId, flowSteps, context })
   const deptHead = await resolveAttendanceDeptHeadFreeze({ orgId, userId, flowSteps, context })
-  return { ...directManager, ...deptHead }
+  const managerChain = await resolveAttendanceManagerChainFreeze({ orgId, userId, flowSteps, context })
+  return { ...directManager, ...deptHead, ...managerChain }
 }
 
 function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0, requesterSnapshot = null) {
@@ -20906,10 +21003,38 @@ function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0, requesterS
     )
   }
 
+  // S7-4: manager_at_level reads ONLY the creation-frozen requesterSnapshot.managerChainIds (§3.4)
+  // and picks EXACTLY one positional manager at level-1 (1 = direct). No continuous_managers, no
+  // auto-expansion, never a live directory re-query. Missing / short / self ⇒
+  // APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED; NEVER the legacy admin/source_queue fallback.
+  if (dynamicKind === ATTENDANCE_MANAGER_AT_LEVEL_KIND) {
+    const snap = requesterSnapshot && typeof requesterSnapshot === 'object' ? requesterSnapshot : null
+    const requesterId = snap && typeof snap.id === 'string' ? snap.id.trim() : ''
+    const rawChain = snap && Array.isArray(snap.managerChainIds) ? snap.managerChainIds : []
+    const level = currentStep && typeof currentStep.level === 'number' ? currentStep.level : null
+    const managerId =
+      level !== null && Number.isInteger(level) && level >= 1 && typeof rawChain[level - 1] === 'string'
+        ? String(rawChain[level - 1]).trim()
+        : ''
+    if (managerId && managerId !== requesterId) {
+      pushAssignment('user', managerId, {
+        source: 'attendance',
+        kind: ATTENDANCE_MANAGER_AT_LEVEL_KIND,
+        stepName: currentStep?.name ?? null,
+        resolvedFrom: { kind: ATTENDANCE_MANAGER_AT_LEVEL_KIND, level },
+      })
+      return assignments
+    }
+    throw new HttpError(
+      422,
+      'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
+      '动态审批人类型 "manager_at_level" 无法解析(链路不足、上级未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列'
+    )
+  }
+
   // S7-1 §4.1 defense-in-depth: any OTHER dynamic kind must NEVER fall through to the legacy
   // admin-queue fallback (that fallback is reserved for LEGACY static steps with empty approver
-  // arrays). S7-4 will replace this arm for manager_at_level; until then, fail closed with a
-  // distinct code.
+  // arrays). continuous_managers and unknown kinds stay fail-closed with a distinct code.
   if (dynamicKind) {
     throw new HttpError(
       422,
@@ -20964,7 +21089,7 @@ function buildAttendanceApprovalInstancePayload({
     minutes: draft?.metadata?.minutes ?? null,
   }
 
-  // S7-2/S7-3 §3.4: freeze create-time org relations (managerId + deptHeadId; managerChainIds in S7-4)
+  // S7-2/S7-3/S7-4 §3.4: freeze create-time org relations (managerId + deptHeadId + managerChainIds)
   // into the requester snapshot. Omitted fields stay omitted — never write null placeholders that would
   // change the legacy {id,name}-only snapshot shape for static-only flows.
   const frozenManagerId =
@@ -20975,6 +21100,19 @@ function buildAttendanceApprovalInstancePayload({
     orgRelations && typeof orgRelations.deptHeadId === 'string' && orgRelations.deptHeadId.trim()
       ? orgRelations.deptHeadId.trim()
       : null
+  let frozenManagerChainIds = null
+  if (orgRelations && Array.isArray(orgRelations.managerChainIds) && orgRelations.managerChainIds.length > 0) {
+    const seen = new Set()
+    const chain = []
+    for (const entry of orgRelations.managerChainIds) {
+      if (typeof entry !== 'string') continue
+      const id = entry.trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      chain.push(id)
+    }
+    if (chain.length > 0) frozenManagerChainIds = chain
+  }
 
   return {
     id: approvalId,
@@ -20989,6 +21127,7 @@ function buildAttendanceApprovalInstancePayload({
       name: requesterName || userId,
       ...(frozenManagerId ? { managerId: frozenManagerId } : {}),
       ...(frozenDeptHeadId ? { deptHeadId: frozenDeptHeadId } : {}),
+      ...(frozenManagerChainIds ? { managerChainIds: frozenManagerChainIds } : {}),
     },
     subjectSnapshot: {
       type: 'attendance_request',
@@ -21497,12 +21636,14 @@ module.exports = {
     ATTENDANCE_DYNAMIC_ASSIGNEE_FLAG_ENV,
     ATTENDANCE_DYNAMIC_ASSIGNEE_KINDS,
     ATTENDANCE_MANAGER_AT_LEVEL_KIND,
-    // S7-2/S7-3 create-time freeze seams (pure enough for unit tests with a faked port).
+    // S7-2/S7-3/S7-4 create-time freeze seams (pure enough for unit tests with a faked port).
     resolveAttendanceDirectManagerFreeze,
     resolveAttendanceDeptHeadFreeze,
+    resolveAttendanceManagerChainFreeze,
     resolveAttendanceOrgRelationsFreeze,
     flowStepsNeedDirectManagerFreeze,
     flowStepsNeedDeptHeadFreeze,
+    flowStepsNeedManagerChainFreeze,
   },
 
   async activate(context) {

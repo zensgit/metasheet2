@@ -369,6 +369,10 @@ export default defineConfig({
       // DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot skip-green it;
       // wired whole-file into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/attendance-approval-dept-head-s7-3.db.test.ts',
+      // S7-4 manager_at_level real-DB: freeze managerChainIds + positional assignment + org-anchor +
+      // authz + flag-off. DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot
+      // skip-green it; wired whole-file into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
