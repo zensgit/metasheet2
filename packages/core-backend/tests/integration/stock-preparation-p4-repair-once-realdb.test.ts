@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
+import { STDERR_DIAGNOSTIC_MARKER } from '../../scripts/stock-preparation-persist-repair-once'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
@@ -142,6 +143,7 @@ async function runRepairCli(manifestPath: string, extraArgs: string[] = []) {
   )
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean)
   expect(lines).toHaveLength(1)
+  expect(stderr).toContain(STDERR_DIAGNOSTIC_MARKER)
   expect(stderr).not.toContain(`MATERIAL-A-${TOKEN}`)
   expect(stderr).not.toContain(`MATERIAL-B-${TOKEN}`)
   return { summary: JSON.parse(lines[0]) as Record<string, unknown>, stdout, stderr }

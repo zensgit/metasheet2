@@ -28,6 +28,11 @@ Accept only one JSON line on stdout with all of the following:
 - `result.evidence.externalWrite: false`
 - `result.evidence.valuesFree: true`
 
+The CLI leaves stderr available for local diagnostics and emits the fixed
+`STOCK_PREPARATION_REPAIR_ONCE_STDERR_DIAGNOSTICS_ENABLED` marker. Stderr is not part of the
+values-free result: do not paste, upload, or retain it. Only the single stdout summary and the
+append-only audit rows may leave the controlled host.
+
 Any `FAIL`, malformed output, extra output, duplicate/ambiguous state, projection mismatch, or
 unprovable history stops the window. Do not edit database rows to make the tool pass.
 

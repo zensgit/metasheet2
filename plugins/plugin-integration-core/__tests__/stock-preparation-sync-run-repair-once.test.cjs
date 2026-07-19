@@ -257,6 +257,29 @@ async function main() {
     assert.equal(logicalProjectRow(recordsApi).lastSyncRunId, 'run_2')
   })
 
+  await run('a missing project row cannot be recreated for an older batch when newer history exists', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun(persistInput(recordsApi, provisioning))
+    await persistStockPreparationSyncRun(persistInput(recordsApi, provisioning, {
+      syncRunId: 'run_2',
+      snapshotBatchId: 'batch_2',
+      snapshotVersion: 2,
+    }))
+    recordsApi.store.set(PROJECT_SHEET_ID, [])
+    const createsBefore = recordsApi.createCalls.length
+    const patchesBefore = recordsApi.patchCalls.length
+
+    await assert.rejects(
+      () => repairStockPreparationSyncRunOnce(repairInput(recordsApi, provisioning, { apply: true })),
+      (error) => error.status === 409 && error.code === 'PERSIST_REPAIR_REFUSED' &&
+        error.details.target === 'project' && error.details.reason === 'advanced_history',
+    )
+    assert.equal(recordsApi.store.get(PROJECT_SHEET_ID).length, 0)
+    assert.equal(recordsApi.createCalls.length, createsBefore)
+    assert.equal(recordsApi.patchCalls.length, patchesBefore)
+  })
+
   await run('a duplicate batch identity fails closed before any repair write', async () => {
     const recordsApi = makeRecordsApi()
     const provisioning = makeProvisioning()

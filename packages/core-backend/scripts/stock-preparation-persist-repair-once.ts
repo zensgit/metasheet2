@@ -24,6 +24,7 @@ const {
 }
 
 export const APPLY_CONFIRMATION = 'APPLY_STOCK_PREPARATION_REPAIR_ONCE'
+export const STDERR_DIAGNOSTIC_MARKER = 'STOCK_PREPARATION_REPAIR_ONCE_STDERR_DIAGNOSTICS_ENABLED'
 
 const VALUES_FREE_FAILURE_CODES = new Set([
   'REPAIR_ARGUMENT_INVALID',
@@ -258,9 +259,8 @@ export async function runRepairCli(argv: string[]): Promise<number> {
   let summary: ReturnType<typeof buildValuesFreeCliSummary> | ReturnType<typeof buildValuesFreeCliFailure>
   const stdoutWrite = process.stdout.write.bind(process.stdout)
   const originalStdoutWrite = process.stdout.write
-  const originalStderrWrite = process.stderr.write
   process.stdout.write = (() => true) as typeof process.stdout.write
-  process.stderr.write = (() => true) as typeof process.stderr.write
+  process.stderr.write(`${STDERR_DIAGNOSTIC_MARKER}\n`)
   try {
     const options = parseRepairCliArgs(argv)
     mode = options.apply ? 'apply' : 'dry_run'
@@ -304,7 +304,6 @@ export async function runRepairCli(argv: string[]): Promise<number> {
       }
     }
     process.stdout.write = originalStdoutWrite
-    process.stderr.write = originalStderrWrite
   }
   await new Promise<void>((resolve) => {
     stdoutWrite(`${JSON.stringify(summary)}\n`, resolve)

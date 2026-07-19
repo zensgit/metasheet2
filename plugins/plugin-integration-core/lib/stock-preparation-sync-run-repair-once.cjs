@@ -29,6 +29,8 @@ const {
     projectionsEqual,
     assertPlanIdentityKeys,
     readExistingSnapshotLines,
+    READ_PAGE_LIMIT,
+    READ_MAX_PAGES,
     PERSIST_MAX_PLAN_LINES,
     BATCH_TEMPLATE,
     LINE_TEMPLATE,
@@ -50,6 +52,9 @@ const REPAIR_REFUSAL_REASONS = new Set([
   'pointer_without_run',
   'pointer_unresolvable',
   'pointer_ambiguous',
+  'history_unprovable',
+  'advanced_history',
+  'ambiguous_history',
 ])
 
 function repairRefused(target, reason) {
@@ -150,6 +155,37 @@ async function resolvePointerBatchVersion({ batchScoped, projectId, pointerRunId
   return parseStrictVersion(rows[0] && rows[0].data && rows[0].data.snapshotVersion)
 }
 
+async function readProjectBatchVersionSummary(batchScoped, projectId) {
+  let maxVersion = 0
+  const latestBatchIds = new Set()
+  const seenBatchIds = new Set()
+  for (let page = 0; page < READ_MAX_PAGES; page += 1) {
+    const rows = await batchScoped.queryRecords({
+      filters: { projectId },
+      limit: READ_PAGE_LIMIT,
+      offset: page * READ_PAGE_LIMIT,
+    })
+    if (!Array.isArray(rows) || rows.length > READ_PAGE_LIMIT) return null
+    for (const row of rows) {
+      const batchId = optionalString(row && row.data && row.data[BATCH_KEY_FIELD])
+      const version = parseStrictVersion(row && row.data && row.data.snapshotVersion)
+      if (!batchId || version === null || seenBatchIds.has(batchId)) return null
+      seenBatchIds.add(batchId)
+      if (version > maxVersion) {
+        maxVersion = version
+        latestBatchIds.clear()
+        latestBatchIds.add(batchId)
+      } else if (version === maxVersion) {
+        latestBatchIds.add(batchId)
+      }
+    }
+    if (rows.length < READ_PAGE_LIMIT) {
+      return { maxVersion, latestBatchIds, seenBatchIds }
+    }
+  }
+  return null
+}
+
 function valuesFreeResult({ apply, analysis, created, projectMode }) {
   const changed = created.lines > 0 || created.run > 0 || created.project > 0 || projectMode === 'patched'
   return {
@@ -237,6 +273,8 @@ async function analyzeRepairState({
   const projectId = plan.snapshotBatch.projectId
   const projectRows = await readProjectRows(projectScoped, projectId)
   const projectMissing = projectRows.length === 0
+  const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+  if (currentVersion === null) repairRefused('project', 'history_unprovable')
   let projectPointerAction = projectMissing ? 'create' : 'none'
   if (!projectMissing) {
     const pointerRunId = optionalString(projectRows[0] && projectRows[0].data && projectRows[0].data.lastSyncRunId)
@@ -246,11 +284,24 @@ async function analyzeRepairState({
       repairRefused('project', 'pointer_unresolvable')
     } else {
       const pointerVersion = await resolvePointerBatchVersion({ batchScoped, projectId, pointerRunId })
-      const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
-      if (pointerVersion === null || currentVersion === null) repairRefused('project', 'pointer_unresolvable')
+      if (pointerVersion === null) repairRefused('project', 'pointer_unresolvable')
       if (pointerVersion < currentVersion) projectPointerAction = 'patch'
       else if (pointerVersion === currentVersion) repairRefused('project', 'pointer_ambiguous')
       else projectPointerAction = 'preserve_advanced'
+    }
+  }
+
+  if (projectPointerAction === 'create' || projectPointerAction === 'patch') {
+    const history = await readProjectBatchVersionSummary(batchScoped, projectId)
+    if (!history || !history.seenBatchIds.has(snapshotBatchId)) {
+      repairRefused('project', 'history_unprovable')
+    }
+    if (history.maxVersion > currentVersion) repairRefused('project', 'advanced_history')
+    if (
+      history.maxVersion === currentVersion
+      && (history.latestBatchIds.size !== 1 || !history.latestBatchIds.has(snapshotBatchId))
+    ) {
+      repairRefused('project', 'ambiguous_history')
     }
   }
 
