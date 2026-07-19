@@ -160,9 +160,45 @@
               <span class="approval-new__field-hint">{{ field.placeholder }}</span>
             </template>
 
+            <!-- FWB-2 record-link: single-record picker scoped to server-pinned sheet (no raw record id). -->
+            <div
+              v-if="field.type === 'record-link'"
+              class="approval-new__record-link"
+              data-testid="approval-record-link-field"
+              :data-field-id="field.id"
+            >
+              <div class="approval-new__record-link-row">
+                <el-input
+                  :model-value="recordLinkDisplay(field.id)"
+                  readonly
+                  :placeholder="field.placeholder || `请选择${field.label}`"
+                  data-testid="approval-record-link-display"
+                />
+                <el-button
+                  type="primary"
+                  plain
+                  data-testid="approval-record-link-pick"
+                  @click="openRecordLinkPicker(field)"
+                >
+                  选择记录
+                </el-button>
+                <el-button
+                  v-if="formData[field.id]"
+                  plain
+                  data-testid="approval-record-link-clear"
+                  @click="clearRecordLink(field.id)"
+                >
+                  清除
+                </el-button>
+              </div>
+              <div class="approval-new__field-hint">
+                仅可选择模板钉死 sheet 内的一条记录；提交时服务端按读权限校验。
+              </div>
+            </div>
+
             <!-- text -->
             <el-input
-              v-if="field.type === 'text'"
+              v-else-if="field.type === 'text'"
               v-model="formData[field.id]"
               :placeholder="field.placeholder || `请输入${field.label}`"
             />
@@ -426,6 +462,16 @@
 
       <el-empty v-else-if="!templateStore.loading" description="未找到审批模板" />
     </div>
+
+    <!-- FWB-2: single-record picker scoped to the field's server-pinned sheet. -->
+    <MetaLinkPicker
+      v-if="recordLinkPickerField"
+      :visible="recordLinkPickerVisible"
+      :field="recordLinkPickerMetaField"
+      :current-value="recordLinkPickerCurrentIds"
+      @close="recordLinkPickerVisible = false"
+      @confirm="onRecordLinkPicked"
+    />
   </PageShell>
 </template>
 
@@ -462,6 +508,8 @@ import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
 import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
+import MetaLinkPicker from '../../multitable/components/MetaLinkPicker.vue'
+import type { MetaField } from '../../multitable/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -471,6 +519,10 @@ const { canWrite } = useApprovalPermissions()
 
 const formRef = ref<FormInstance>()
 const formData = reactive<Record<string, unknown>>({})
+// FWB-2 record-link picker state (single-record; value shape { recordId }).
+const recordLinkPickerVisible = ref(false)
+const recordLinkPickerField = ref<FormField | null>(null)
+const recordLinkLabels = reactive<Record<string, string>>({})
 // UX B2-13 (再次提交): true once a `?fromInstance=` prefill actually applied at least one field —
 // see `applyResubmitPrefill` below. Drives the "已从上一次申请预填" notice.
 const prefillNoticeVisible = ref(false)
@@ -772,6 +824,68 @@ async function applyResubmitPrefill(): Promise<void> {
   } finally {
     prefillLoading.value = false
   }
+}
+
+function recordLinkDisplay(fieldId: string): string {
+  const raw = formData[fieldId]
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && typeof (raw as { recordId?: unknown }).recordId === 'string') {
+    const id = String((raw as { recordId: string }).recordId)
+    return recordLinkLabels[id] || id
+  }
+  return ''
+}
+
+function clearRecordLink(fieldId: string): void {
+  formData[fieldId] = undefined
+}
+
+function openRecordLinkPicker(field: FormField): void {
+  recordLinkPickerField.value = field
+  recordLinkPickerVisible.value = true
+}
+
+/** Shape MetaLinkPicker expects: a link-like meta field with foreignSheetId from server-pinned props. */
+const recordLinkPickerMetaField = computed<MetaField | null>(() => {
+  const field = recordLinkPickerField.value
+  if (!field || field.type !== 'record-link') return null
+  const props = field.props && typeof field.props === 'object' ? field.props : {}
+  const sheetId = typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
+  if (!sheetId) return null
+  return {
+    id: field.id,
+    name: field.label,
+    type: 'link',
+    property: {
+      foreignSheetId: sheetId,
+      limitSingleRecord: true,
+    },
+  } as MetaField
+})
+
+const recordLinkPickerCurrentIds = computed<string[]>(() => {
+  const field = recordLinkPickerField.value
+  if (!field) return []
+  const raw = formData[field.id]
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && typeof (raw as { recordId?: unknown }).recordId === 'string') {
+    return [String((raw as { recordId: string }).recordId)]
+  }
+  return []
+})
+
+function onRecordLinkPicked(payload: { recordIds: string[]; summaries: Array<{ id: string; display?: string }> }): void {
+  const field = recordLinkPickerField.value
+  if (!field) return
+  const recordId = payload.recordIds[0]
+  if (!recordId) {
+    formData[field.id] = undefined
+  } else {
+    // Strict product shape: only { recordId } — server rejects extra keys.
+    formData[field.id] = { recordId }
+    const summary = payload.summaries.find((s) => s.id === recordId)
+    if (summary?.display) recordLinkLabels[recordId] = summary.display
+  }
+  recordLinkPickerVisible.value = false
+  recordLinkPickerField.value = null
 }
 
 onMounted(async () => {

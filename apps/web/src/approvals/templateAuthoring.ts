@@ -85,6 +85,8 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'multi-select',
   'user',
   'detail',
+  // FWB-2 Layer 2: server-pinned baseId/sheetId record binding (single-record product field).
+  'record-link',
 ]
 
 /**
@@ -112,6 +114,12 @@ export interface FieldAuthoringDraft {
   detailColumns: DetailColumnDraft[]
   minRowsText: string
   maxRowsText: string
+  /**
+   * FWB-2 record-link: server-pinned multitable binding. Meaningful only when `type === 'record-link'`.
+   * Both must be non-empty for save; the form fill UI scopes the single-record picker to this sheet.
+   */
+  recordLinkBaseId: string
+  recordLinkSheetId: string
   original?: FormField
 }
 
@@ -148,6 +156,11 @@ export interface ApprovalStepDraft {
   // runtime (server echo-redaction, shipped #2799); `readonly` round-trips but is runtime-inert
   // (enforcement deferred to T1-4b).
   fieldPermissions: NodeFieldPermission[]
+  /**
+   * FWB-3: closed set of form field ids the approver must submit via decisionData on approve.
+   * Empty ⇒ no decision freeze for this node. Ids must exist on the form schema (server re-checks).
+   */
+  decisionFieldIds: string[]
 }
 
 export interface TemplateAuthoringDraft {
@@ -224,6 +237,8 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     detailColumns: [],
     minRowsText: '',
     maxRowsText: '',
+    recordLinkBaseId: '',
+    recordLinkSheetId: '',
   }
 }
 
@@ -271,6 +286,7 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
     fieldPermissions: [],
+    decisionFieldIds: [],
   }
 }
 
@@ -394,6 +410,7 @@ export function setStepFieldPermission(
 
 function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
   if (!isAuthorableFieldType(field.type)) return null
+  const props = field.props && typeof field.props === 'object' ? field.props as Record<string, unknown> : {}
   return {
     localId: nextLocalId('field'),
     id: field.id,
@@ -406,6 +423,8 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     detailColumns: field.type === 'detail' ? detailColumnDraftsFromField(field) : [],
     minRowsText: field.type === 'detail' && field.minRows != null ? String(field.minRows) : '',
     maxRowsText: field.type === 'detail' && field.maxRows != null ? String(field.maxRows) : '',
+    recordLinkBaseId: field.type === 'record-link' && typeof props.baseId === 'string' ? props.baseId : '',
+    recordLinkSheetId: field.type === 'record-link' && typeof props.sheetId === 'string' ? props.sheetId : '',
     original: field,
   }
 }
@@ -472,6 +491,12 @@ function stepDraftFromApprovalNode(
         .map((entry) => ({ fieldId: entry.fieldId, access: entry.access }))
     : []
 
+  const decisionFieldIds = Array.isArray(config.decisionFieldIds)
+    ? config.decisionFieldIds
+        .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+    : []
+
   return {
     localId: nextLocalId('step'),
     name: node.name ?? `审批人 ${index}`,
@@ -485,6 +510,7 @@ function stepDraftFromApprovalNode(
     mergeWithRequester,
     ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
     fieldPermissions,
+    decisionFieldIds,
   }
 }
 
@@ -577,6 +603,8 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'emptyAssigneePolicy',
   'autoApprovalPolicy',
   'fieldPermissions',
+  // FWB-3: closed decision field set frozen at approve time (backend re-emits).
+  'decisionFieldIds',
 ]
 // The backend ALSO rebuilds the NESTED shapes from fixed fields, silently dropping any other — so the
 // allowlist must be shape-level, not just top-level:
@@ -870,6 +898,22 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       // editor, or delete all three so a field changed away from `detail` does not carry stale
       // detail keys resurrected from the `original` spread (mirrors the options omit discipline;
       // the backend rejects detail-only keys on a non-detail field).
+      if (field.type === 'record-link') {
+        const baseId = field.recordLinkBaseId.trim()
+        const sheetId = field.recordLinkSheetId.trim()
+        next.props = {
+          ...(next.props && typeof next.props === 'object' ? next.props : {}),
+          baseId,
+          sheetId,
+        }
+      } else if (field.type !== 'detail' && next.props && typeof next.props === 'object') {
+        // Drop stale record-link pins when the type changes away from record-link.
+        const props = { ...next.props } as Record<string, unknown>
+        delete props.baseId
+        delete props.sheetId
+        if (Object.keys(props).length === 0) delete next.props
+        else next.props = props
+      }
       if (field.type === 'detail') {
         next.columns = buildDetailColumns(field.detailColumns)
         const minRows = field.minRowsText.trim()
@@ -953,12 +997,24 @@ function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>): Approv
   const fieldPermissions = step.fieldPermissions
     .filter((permission) => permission.access !== 'editable' && fieldIds.has(permission.fieldId))
     .map((permission) => ({ fieldId: permission.fieldId, access: permission.access }))
+  // FWB-3: emit only field ids that still exist on the form (server also cross-validates).
+  const decisionFieldIds = (step.decisionFieldIds ?? [])
+    .map((id) => id.trim())
+    .filter((id) => id && fieldIds.has(id))
+  // Deduplicate while preserving order.
+  const seenDecision = new Set<string>()
+  const uniqueDecisionFieldIds = decisionFieldIds.filter((id) => {
+    if (seenDecision.has(id)) return false
+    seenDecision.add(id)
+    return true
+  })
   return {
     assigneeSources: [sourceFromStep(step)],
     approvalMode: step.approvalMode,
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
+    ...(uniqueDecisionFieldIds.length > 0 ? { decisionFieldIds: uniqueDecisionFieldIds } : {}),
   }
 }
 
@@ -1094,6 +1150,12 @@ export function validateTemplateFormFields(
           field.maxRowsText,
         ),
       )
+    }
+    // FWB-2 record-link: server-pinned baseId + sheetId required.
+    if (field.type === 'record-link') {
+      if (!field.recordLinkBaseId.trim() || !field.recordLinkSheetId.trim()) {
+        errors.push(`字段 ${field.label.trim() || field.id}（record-link）需要配置目标 baseId 与 sheetId`)
+      }
     }
   })
   // Mirror the server visibility-rule reject-set (normalizeFormFieldVisibilityRule +
