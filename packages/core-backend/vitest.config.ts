@@ -154,6 +154,12 @@ export default defineConfig({
       // real MetaSheetServer + real createApproval. DATABASE_URL-gated; wired as a WHOLE FILE into
       // the APPROVAL real-DB step (both points asserted by b5b-failclose-ci-wiring.test.mjs).
       'tests/integration/approval-routing-policy-failclose.api.test.ts',
+      // Canonical Org MVP B5-c (design lock Lock 3 + §7): the routing-policy admin ROUTES —
+      // platform-admin gating, PATCH write-point validations + values-free audit, clear path, and
+      // the READ-ONLY preview (real resolver both legs). HTTP against real Postgres.
+      // DATABASE_URL-gated; wired as a WHOLE FILE into the directory real-DB step (both points
+      // asserted by b5c-routing-routes-ci-wiring.test.mjs).
+      'tests/integration/org-directory-routing-policy-routes.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
