@@ -45,6 +45,9 @@ export default defineConfig({
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
       'tests/integration/approval-template-authoring-uat.api.test.ts',
+      // Approval/automation closeout acceptance (A1–A8 pins + composed A1/A2 real-DB). Two-point
+      // wiring: exclude here so no-DB cannot skip-green; whole-file in plugin-tests real-DB step.
+      'tests/integration/approval-automation-closeout-acceptance.realdb.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job

@@ -679,6 +679,7 @@ jobs:
             tests/integration/directory-binding-sync-hook.db.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
             tests/integration/approval-template-authoring-uat.api.test.ts \
+            tests/integration/approval-automation-closeout-acceptance.realdb.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
