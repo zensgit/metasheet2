@@ -335,6 +335,15 @@ describe('multitable plugin scope helper', () => {
       uowInput,
       async (records) => records.queryRecords({ sheetId: 'sheet_foreign' }),
     )).rejects.toThrow(MultitableUnitOfWorkScopeError)
+
+    const runUnitOfWork = scoped.records.runStockPreparationPersistUnitOfWork as unknown as (
+      input: unknown,
+      operation: unknown,
+    ) => Promise<unknown>
+    const hookCallsBeforeInvalidInput = hook.mock.calls.length
+    await expect(runUnitOfWork(uowInput, null)).rejects.toThrow('operation must be a function')
+    await expect(runUnitOfWork(null, async () => null)).rejects.toThrow('input must be an object')
+    expect(hook).toHaveBeenCalledTimes(hookCallsBeforeInvalidInput)
   })
 
   it('fails closed when the host does not provide the required unit-of-work hook', async () => {

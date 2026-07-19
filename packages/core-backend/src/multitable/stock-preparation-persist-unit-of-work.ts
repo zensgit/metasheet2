@@ -54,13 +54,21 @@ export function validateStockPreparationPersistUnitOfWorkInput(
 export function stockPreparationProjectLockKey(
   input: StockPreparationPersistUnitOfWorkInput,
 ): string {
-  return `${input.tenantId}|${input.project.sheetId}|${input.project.projectId}`;
+  return JSON.stringify([
+    input.tenantId,
+    input.project.sheetId,
+    input.project.projectId,
+  ]);
 }
 
 export function stockPreparationBatchLockKey(
   input: StockPreparationPersistUnitOfWorkInput,
 ): string {
-  return `${input.tenantId}|${input.batch.sheetId}|${input.batch.snapshotBatchId}`;
+  return JSON.stringify([
+    input.tenantId,
+    input.batch.sheetId,
+    input.batch.snapshotBatchId,
+  ]);
 }
 
 export async function acquireStockPreparationPersistUnitOfWorkLocks(

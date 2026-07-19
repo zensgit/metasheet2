@@ -5,6 +5,8 @@ import {
   STOCK_PREPARATION_PROJECT_LOCK_NS,
   StockPreparationPersistUnitOfWorkError,
   acquireStockPreparationPersistUnitOfWorkLocks,
+  stockPreparationBatchLockKey,
+  stockPreparationProjectLockKey,
 } from "../../src/multitable/stock-preparation-persist-unit-of-work";
 
 const input = {
@@ -47,17 +49,39 @@ describe("stock-preparation persist unit-of-work locks", () => {
         sql: "SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)",
         params: [
           STOCK_PREPARATION_PROJECT_LOCK_NS,
-          "tenant_1|sheet_project|project_1",
+          '["tenant_1","sheet_project","project_1"]',
         ],
       },
       {
         sql: "SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)",
         params: [
           STOCK_PREPARATION_BATCH_LOCK_NS,
-          "tenant_1|sheet_batch|batch_1",
+          '["tenant_1","sheet_batch","batch_1"]',
         ],
       },
     ]);
+  });
+
+  it("frames lock-key components without delimiter collisions", () => {
+    const left = {
+      ...input,
+      tenantId: "tenant|one",
+      project: { ...input.project, sheetId: "sheet_project" },
+      batch: { ...input.batch, sheetId: "sheet_batch" },
+    };
+    const right = {
+      ...input,
+      tenantId: "tenant",
+      project: { ...input.project, sheetId: "one|sheet_project" },
+      batch: { ...input.batch, sheetId: "one|sheet_batch" },
+    };
+
+    expect(stockPreparationProjectLockKey(left)).not.toBe(
+      stockPreparationProjectLockKey(right),
+    );
+    expect(stockPreparationBatchLockKey(left)).not.toBe(
+      stockPreparationBatchLockKey(right),
+    );
   });
 
   it("rejects a non-four-sheet or out-of-scope key before taking any lock", async () => {

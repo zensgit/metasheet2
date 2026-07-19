@@ -292,7 +292,10 @@ export function createPluginScopedMultitableApi(
           throw new MultitableUnitOfWorkUnavailableError()
         }
         if (typeof operation !== 'function') {
-          throw new MultitableUnitOfWorkUnavailableError()
+          throw new TypeError('operation must be a function')
+        }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+          throw new TypeError('input must be an object')
         }
         const allowedSheetIds = new Set(Array.isArray(input.sheetIds) ? input.sheetIds : [])
         return hooks.runStockPreparationPersistUnitOfWork(
