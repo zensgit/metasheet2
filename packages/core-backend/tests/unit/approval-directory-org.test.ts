@@ -58,10 +58,10 @@ function makeQuery(db: FakeDbWithTrace) {
     // which is why every pre-B5 fixture below keeps its expectations unchanged (same convention as
     // the B3 normalized-manager default-empty note further down). Policy scenarios set db.policies.
     //
-    // LOAD-BEARING MIRROR of production tenant boundary: when the probe SQL includes
-    // `p.org_id = $2`, only that org's policy rows are visible. Removing the production
-    // predicate (so this fragment is absent) makes the fake return ALL policies — and the
-    // foreign-policy discrimination tests below go red for the right reason.
+    // When production SQL includes `p.org_id = $2`, filter fixture rows to that org so the unit
+    // boundary cases below stay meaningful. This is NOT the load-bearing proof of the tenant
+    // boundary — that lives in org-directory-routing-policy-resolver.db.test.ts case F (real
+    // Postgres). Do not add permanent tests that assert vulnerable B-steering via a mutated fake.
     if (text.includes('FROM directory_account_links l') && text.includes('org_directory_routing_policy')) {
       db.lastPolicySql = text
       let rows = db.policies ?? []
@@ -584,70 +584,5 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     expect(db.lastPolicySql).toBeTruthy()
     expect(db.lastPolicySql).not.toContain('p.org_id = $2')
     expect(db.lastPolicyOrgIdParam).toBeNull()
-  })
-
-  it('mutation demo: without p.org_id = $2 the foreign-policy case steers wrong (predicate is load-bearing)', async () => {
-    // Same fixture as the foreign-policy tenant-boundary test, but the probe deliberately
-    // omits the tenant predicate — simulating a production mutation that drops only
-    // `AND p.org_id = $2`. The foreign org-B policy becomes visible, steers the pick to
-    // B's canonical integration, and yields local-B-mgr instead of local-A-mgr.
-    // same-org / no-orgId controls remain independently meaningful elsewhere in this file.
-    const db: FakeDbWithTrace = {
-      requester: {
-        integration_id: 'int-B-canonical',
-        account_id: 'acc-B',
-        external_user_id: 'ext-B',
-        raw: {},
-        primary_external_department_id: 'D-B',
-        primary_department_raw: {},
-      },
-      policyScopedRequester: {
-        integration_id: 'int-B-canonical',
-        account_id: 'acc-B-policy',
-        external_user_id: 'ext-B-policy',
-        raw: {},
-        primary_external_department_id: 'D-B',
-        primary_department_raw: {},
-      },
-      orgAnchoredRequester: {
-        integration_id: 'int-A',
-        account_id: 'acc-A',
-        external_user_id: 'ext-A',
-        raw: {},
-        primary_external_department_id: 'D-A',
-        primary_department_raw: {},
-      },
-      policies: [
-        {
-          org_id: 'org-B',
-          canonical_integration_id: 'int-B-canonical',
-          canonical_status: 'active',
-        },
-      ],
-      // B manager only — when foreign policy steers, this is the linked manager for the B account.
-      // With the production predicate the same fixture yields A (org-anchor; see sibling test).
-      normalizedDeptManagers: [{ account_id: 'acc-B-mgr', external_user_id: 'ext-B-mgr' }],
-      localByAccountId: { 'acc-B-mgr': 'local-B-mgr' },
-    }
-
-    // Broken probe: always return ALL policies (as if production dropped p.org_id = $2).
-    // Requester / manager branches still use the real makeQuery shapes.
-    const realQuery = makeQuery(db)
-    const mutatedQuery: typeof realQuery = async <Row>(text: string, params?: unknown[]) => {
-      if (text.includes('FROM directory_account_links l') && text.includes('org_directory_routing_policy')) {
-        db.lastPolicySql = text
-        // MUTATION: ignore any org predicate; expose every policy row.
-        db.lastPolicyOrgIdParam = null
-        return { rows: (db.policies ?? []) as Row[] }
-      }
-      return realQuery<Row>(text, params)
-    }
-
-    const result = await resolveApprovalRequesterOrgRelations('local-req', mutatedQuery, { orgId: 'org-A' })
-    // Production WITH the predicate: foreign policy filtered → org-anchor A (sibling test).
-    // Without it: foreign policy steers → policy-scoped B → canonical int-B-canonical.
-    // That lastPolicyCanonicalParam flip is the load-bearing red reason.
-    expect(db.lastPolicyCanonicalParam).toBe('int-B-canonical')
-    expect(result.managerId).toBe('local-B-mgr')
   })
 })

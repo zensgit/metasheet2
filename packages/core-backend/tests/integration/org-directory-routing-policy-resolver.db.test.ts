@@ -21,16 +21,30 @@ import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from
  *   C. FAIL-CLOSED on a broken target: policy → non-active integration ⇒ typed
  *      `ApprovalRoutingPolicyError` (CONFIG error — silent fallback to guessing would defeat the
  *      policy); positive control: reactivate ⇒ resolves.
- *   D. MULTI-ORG POLICY AMBIGUITY (Q4): user linked in TWO orgs that BOTH have policies ⇒ typed
- *      error; delete one policy ⇒ resolves via the remaining one (a policy-less second org does
- *      not re-ambiguate — deterministic, not a guess).
+ *   D. MULTI-ORG POLICY AMBIGUITY (Q4, unscoped / no orgId): user linked in TWO orgs that BOTH
+ *      have policies ⇒ typed error; delete one policy ⇒ resolves via the remaining one (a
+ *      policy-less second org does not re-ambiguate — deterministic, not a guess). This remains
+ *      the kernel-path contract; F proves the orgId-scoped exception.
  *   E. DATA ABSENCE ≠ CONFIG ERROR: policy → local, but the requester has NO account in the local
  *      integration ⇒ `{}` (same semantics as "no linked directory account"), NOT an error.
+ *   F. TENANT BOUNDARY (options.orgId scopes the policy probe — real Postgres, not a SQL-text
+ *      fake): one user linked into org A and org B.
+ *        Stage 1: policy exists ONLY in B; call with orgId=A → A's org-anchored account/title is
+ *          selected; B's policy neither steers the pick nor multi-org-fails.
+ *        Stage 2: add an A policy while B's remains; call with orgId=A → A's CANONICAL wins
+ *          (not multi-org fail-close, not B's title). Unscoped Q4 stays covered by D.
  *
- * Load-bearing mutations (out-of-band, each reds this file):
+ * Load-bearing mutations (out-of-band, each reds this file for the stated reason):
  *   - remove `AND a.integration_id = $2::uuid` from the policy-scoped requester query → B reds
  *     (policy→local still resolves the newer dingtalk account — guessing came back).
  *   - remove the `canonical_status !== 'active'` fail-closed check → C reds (no throw).
+ *   - remove ONLY the production policy-probe predicate `AND p.org_id = $2` (orgId-scoped arm)
+ *     → F reds for the RIGHT wrong-org / ambiguity reason:
+ *       Stage 1 (policy only in B + orgId=A) steers to B's title instead of A's org-anchored
+ *       title (foreign policy becomes visible and authoritative).
+ *       Stage 2 (policies in A and B + orgId=A) throws multi-org ambiguity instead of selecting
+ *       A's canonical (the tenant boundary no longer filters B out before Q4).
+ *     Unit fakes that mirror SQL text are NOT sufficient evidence for this boundary — F is.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -176,5 +190,52 @@ describeIfDatabase('Canonical Org MVP — B5-b routing-policy resolver (real DB)
 
     const rel = await resolveApprovalRequesterOrgRelations(user, q)
     expect(rel).toEqual({}) // absent from the canonical directory — not an error, same as unlinked
+  })
+
+  it('F. tenant boundary: orgId scopes the policy probe (foreign B policy cannot steer A; same-org A policy wins without multi-org fail-close)', async () => {
+    // One user linked into org A (local + dingtalk, dingtalk newer) AND org B (dingtalk).
+    // Titles are the discrimination channel — real Postgres rows, not a SQL-text fake.
+    const orgA = orgId('tb-A')
+    const orgB = orgId('tb-B')
+    seededOrgIds.push(orgA, orgB)
+    const user = newUserId('tb')
+    seededUserIds.push(user)
+    await seedUser(user)
+
+    const localA = await getOrCreateLocalIntegration(orgA)
+    const dtA = await dingtalkIntegration(orgA, 'tb-A')
+    await linkedAccount(localA.id, 'local', user, 'OrgA Local Title')
+    const dtAAcc = await linkedAccount(dtA, 'dingtalk', user, 'OrgA DingTalk Title')
+    await bumpUpdatedAt(dtAAcc) // within A, legacy/org-anchor without policy picks dingtalk
+
+    const dtB = await dingtalkIntegration(orgB, 'tb-B')
+    const dtBAcc = await linkedAccount(dtB, 'dingtalk', user, 'OrgB Policy Title')
+    await bumpUpdatedAt(dtBAcc) // B account is also very new — unscoped guessing would notice it
+
+    // Stage 1: policy exists ONLY in B. Call with orgId=A → tenant-scoped probe sees ZERO same-org
+    // policies → S7 org-anchored pick inside A (newer dingtalk) — NOT B's title, NOT multi-org throw.
+    await setPolicy(orgB, dtB)
+    const stage1 = await resolveApprovalRequesterOrgRelations(user, q, { orgId: orgA })
+    expect(stage1.primaryTitle).toBe('OrgA DingTalk Title')
+    expect(stage1.primaryTitle).not.toBe('OrgB Policy Title')
+    expect(stage1.primaryTitle).not.toBe('OrgA Local Title')
+
+    // Positive control on the same fixture: unscoped (no orgId) with only B's policy follows B
+    // (one governed org → authoritative). Proves the fixture's foreign policy is real and would
+    // steer if the tenant predicate were absent.
+    const unscopedOnlyB = await resolveApprovalRequesterOrgRelations(user, q)
+    expect(unscopedOnlyB.primaryTitle).toBe('OrgB Policy Title')
+
+    // Stage 2: add an A policy (→ local) while B's policy remains. orgId=A must NOT multi-org
+    // fail-close; A's CANONICAL (local) wins over A's newer dingtalk and over B entirely.
+    await setPolicy(orgA, localA.id)
+    const stage2 = await resolveApprovalRequesterOrgRelations(user, q, { orgId: orgA })
+    expect(stage2.primaryTitle).toBe('OrgA Local Title')
+    expect(stage2.primaryTitle).not.toBe('OrgA DingTalk Title')
+    expect(stage2.primaryTitle).not.toBe('OrgB Policy Title')
+
+    // Unscoped Q4 still fails closed with both policies present (D's contract; re-asserted here
+    // so F's tenant path cannot regress into "silently pick one" without D noticing either).
+    await expect(resolveApprovalRequesterOrgRelations(user, q)).rejects.toBeInstanceOf(ApprovalRoutingPolicyError)
   })
 })
