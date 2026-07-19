@@ -73,7 +73,7 @@ describe('S7-2 flowStepsNeedDirectManagerFreeze', () => {
     ).toBe(true)
   })
 
-  it('is false for other dynamic kinds (dept_head is S7-3 — no freeze yet)', () => {
+  it('is false for other dynamic kinds (dept_head freezes via its own S7-3 seam)', () => {
     expect(flowStepsNeedDirectManagerFreeze([{ kind: 'dept_head' }])).toBe(false)
   })
 })
