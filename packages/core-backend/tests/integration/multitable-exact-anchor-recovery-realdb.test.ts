@@ -35,7 +35,10 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { reconstructRecordsAtSeq, reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
 import { resolveExactAnchor, executeExactAnchorRecovery } from '../../src/multitable/exact-anchor-recovery'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
-import { hashRecoveryAuthorizationScope, mintExactAnchorRecoveryIdentity } from '../../src/multitable/restore-preview-identity'
+import {
+  hashRecoveryAuthorizationScope,
+  mintExactAnchorRecoveryIdentity,
+} from '../../src/multitable/restore-preview-identity'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -300,6 +303,7 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
       sheetId: SHEET, anchorOperationId: opId, anchorSeq: '7003', checkpointId: (res as { checkpointId: string }).checkpointId,
       scopeHash: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
       liveSetHash: 'c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0000', // shape-valid; the read-half checks scopeHash only
+      schemaHash: 'b'.repeat(64), // shape-valid; L6-b read-half does not re-check schema (L8 apply does)
       actorId: ACTOR,
       mode: 'revert', authorizedScopeHash: hashRecoveryAuthorizationScope({ sheetId: SHEET, actorId: ACTOR }),
     })
@@ -347,6 +351,7 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
     const wrongAuth = mintExactAnchorRecoveryIdentity({
       sheetId: SHEET, anchorOperationId: opId, anchorSeq: res.anchorSeq, checkpointId: res.checkpointId,
       scopeHash: res.scopeHash, liveSetHash: 'f'.repeat(64), // shape-valid; the read-half checks scopeHash only
+      schemaHash: 'b'.repeat(64), // shape-valid contract field
       actorId: ACTOR, mode: 'revert', authorizedScopeHash: 'e'.repeat(64),
     })
     expect(await executeExactAnchorRecovery(q, { token: wrongAuth, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ }))

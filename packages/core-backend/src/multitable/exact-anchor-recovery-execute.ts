@@ -11,6 +11,7 @@ import { loadFieldsForSheet } from './loaders'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
   hashAnchorRecoveryScope,
+  hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   verifyExactAnchorRecoveryIdentity,
   type ExactAnchorRecoveryMode,
@@ -138,7 +139,7 @@ export type ExactAnchorApplyRefusal =
   | 'no-covering-checkpoint' // no active/retained checkpoint covers the anchor any more (fail-closed)
   | 'checkpoint-changed' // a checkpoint covers it, but NOT the one the preview was minted under
   | 'preview-drift' // the live reconstruction diverged from the signed scope (409-class; re-preview)
-  | 'schema-drift' // plan.driftCount > 0 ⇒ WHOLE apply refused, zero writes
+  | 'schema-drift' // schemaHash mismatch (retype/property/field set) OR plan.driftCount > 0 ⇒ WHOLE apply refused, zero writes
   | 'inbound-unprovable' // plan.resurrects.length > 0 — at-anchor inbound relations cannot be proven (D1c)
   | 'link-integrity' // missing/ambiguous foreign sheet, missing/wrong-sheet target, same-op delete target, or mirror
   | 'value-invalid' // current-schema scalar exactness OR whole-record validateRecord fails
@@ -229,7 +230,7 @@ export async function applyExactAnchorRecovery(
   // Identity verification is pure (no DB) — fail fast before opening a transaction.
   const verified = verifyExactAnchorRecoveryIdentity(input.token, { sheetId: input.sheetId, actorId: input.actorId })
   if (!verified.valid || !verified.claims) return { ok: false, reason: 'identity-invalid' }
-  const { anchorSeq, checkpointId, scopeHash, liveSetHash, mode, authorizedScopeHash } = verified.claims
+  const { anchorSeq, checkpointId, scopeHash, liveSetHash, schemaHash, mode, authorizedScopeHash } = verified.claims
 
   try {
     return await transaction(async (query) => {
@@ -312,11 +313,19 @@ export async function applyExactAnchorRecovery(
       )
       if (liveHash !== liveSetHash) throw new ApplyRefusalError('preview-drift')
 
+      // 6b. G-SCHEMA-BEFORE-FENCE — CURRENT field surface must match the token-bound schemaHash.
+      // Catches retype (string→longText) and property-only edits that leave record ids/versions unchanged
+      // and may still leave historical values "valid" under the new type (scope/live hashes cannot see this).
+      const schemaRes = await query('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [input.sheetId])
+      const schemaRows = schemaRes.rows as Array<{ id: unknown; type: unknown; property: unknown }>
+      const liveSchemaHash = hashExactAnchorSchema(
+        schemaRows.map((r) => ({ id: String(r.id), type: String(r.type ?? ''), property: r.property })),
+      )
+      if (liveSchemaHash !== schemaHash) throw new ApplyRefusalError('schema-drift')
+
       // 7. Plan (L7).
-      const fieldRes = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [input.sheetId])
-      const fieldRows = fieldRes.rows as Array<{ id: unknown; type: unknown }>
-      const fieldIds = new Set(fieldRows.map((r) => String(r.id)))
-      const rawTypeById = new Map(fieldRows.map((r) => [String(r.id), String(r.type ?? '')]))
+      const fieldIds = new Set(schemaRows.map((r) => String(r.id)))
+      const rawTypeById = new Map(schemaRows.map((r) => [String(r.id), String(r.type ?? '')]))
       const plan: ExactAnchorRecoveryPlan = classifyExactAnchorRecoveryPlan(composed, liveById, fieldIds)
 
       if (plan.driftCount > 0) throw new ApplyRefusalError('schema-drift')

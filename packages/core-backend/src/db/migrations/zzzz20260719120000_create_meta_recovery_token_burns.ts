@@ -32,13 +32,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       burned_at    timestamptz NOT NULL DEFAULT now()
     )
   `.execute(db)
+  // Sheet-scoped audit listing (sheet_id leading).
   await sql`
     CREATE INDEX IF NOT EXISTS idx_meta_recovery_token_burns_sheet
     ON meta_recovery_token_burns(sheet_id, burned_at)
   `.execute(db)
+  // G1 prune path: `DELETE … WHERE burned_at < …` — burned_at MUST lead the usable index.
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_meta_recovery_token_burns_burned_at
+    ON meta_recovery_token_burns(burned_at)
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`DROP INDEX IF EXISTS idx_meta_recovery_token_burns_burned_at`.execute(db)
   await sql`DROP INDEX IF EXISTS idx_meta_recovery_token_burns_sheet`.execute(db)
   await sql`DROP TABLE IF EXISTS meta_recovery_token_burns`.execute(db)
 }

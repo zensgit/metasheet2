@@ -582,6 +582,59 @@ export function hashRecoveryAuthorizationScope(basis: { sheetId: string; actorId
     .digest('hex')
 }
 
+/**
+ * Deep-sort object keys (recursively) so property JSON is order-invariant. Arrays keep element order
+ * (option lists / validation rule lists are position-significant); object keys sort lexicographically.
+ */
+function deepSortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(deepSortKeys)
+  if (value && typeof value === 'object') {
+    const src = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(src).sort()) out[k] = deepSortKeys(src[k])
+    return out
+  }
+  return value
+}
+
+/** Normalize a meta_fields.property blob to a plain object (jsonb row, JSON string, or empty). */
+function normalizeFieldProperty(property: unknown): Record<string, unknown> {
+  if (property && typeof property === 'object' && !Array.isArray(property)) {
+    return property as Record<string, unknown>
+  }
+  if (typeof property === 'string' && property.trim()) {
+    try {
+      const parsed = JSON.parse(property) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+    } catch { /* ignore */ }
+  }
+  return {}
+}
+
+/**
+ * G-SCHEMA-BEFORE-FENCE (v3.7 §5) — SERVER-KEYED HMAC over the CURRENT field surface
+ * `{id, type, property}` for a sheet. Rows sorted by id; property keys deep-sorted. Bound into the
+ * preview identity so a post-preview retype (string→longText) or property-only edit refuses
+ * `schema-drift` at execute even when every historical scalar remains "valid" under the new type.
+ * HMAC (not plain sha256) keeps the client-decodable JWT from leaking the field map (same discipline
+ * as `hashAnchorRecoveryScope` / `hashRecoveryAuthorizationScope`).
+ */
+export function hashExactAnchorSchema(
+  fields: Array<{ id: string; type: string; property?: unknown }>,
+): string {
+  const canon = [...fields]
+    .map((f) => ({
+      id: String(f.id),
+      type: String(f.type ?? ''),
+      property: deepSortKeys(normalizeFieldProperty(f.property)),
+    }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((f) => JSON.stringify([f.id, f.type, f.property]))
+  return createHmac('sha256', getSecret())
+    .update(JSON.stringify(['exact-anchor-schema-v1', canon]))
+    .digest('hex')
+}
+
 export interface ExactAnchorRecoveryIdentityClaims {
   sheetId: string
   /** the OPAQUE recovery anchor: the sealed operation endpoint id (`meta_record_history_operations.operation_id`).
@@ -604,6 +657,12 @@ export interface ExactAnchorRecoveryIdentityClaims {
    *  execute changes it, and the destructive apply refuses `preview-drift` (409-class) in-fence — the
    *  actor always applies exactly the world they previewed. */
   liveSetHash: string
+  /**
+   * G-SCHEMA-BEFORE-FENCE: SERVER-KEYED HMAC over CURRENT `{id,type,property}` field surface at preview
+   * (`hashExactAnchorSchema`). Recomputed under the apply fence; mismatch ⇒ `schema-drift` before writes.
+   * Required (hard cutover: missing ⇒ `pre_contract_token` — module is unwired).
+   */
+  schemaHash: string
   /** the actor the preview was minted for — a preview minted for A is unusable by B (no cross-actor replay). */
   actorId: string
   /** the recovery mode this preview authorizes — the apply obeys THIS, never a request-supplied mode (P1-1). */
@@ -621,8 +680,9 @@ export interface ExactAnchorRecoveryVerifyResult {
   valid: boolean
   /**
    * Failure taxonomy (NIT-1 precision):
-   * - `pre_contract_token` — missing/out-of-vocabulary `mode` or missing/empty `authorizedScopeHash`
-   *   (P1 hard cutover; deliberate — module is unwired so no live token predates the contract).
+   * - `pre_contract_token` — missing/out-of-vocabulary `mode`, missing/empty `authorizedScopeHash`,
+   *   or missing/empty `schemaHash` (P1 / G-SCHEMA hard cutover; deliberate — module is unwired so no
+   *   live token predates the contract).
    * - `malformed_anchorSeq` — `anchorSeq` is not a decimal bigint string (must never reach `::bigint`).
    * - `malformed_claims` — other required token-authority fields absent/empty (checkpointId /
    *   anchorOperationId / scopeHash / liveSetHash).
@@ -636,14 +696,14 @@ export interface ExactAnchorRecoveryVerifyResult {
 
 /**
  * Verify an exact-anchor recovery identity. JWT verification covers signature (any tampered claim — anchorSeq,
- * checkpointId, scopeHash, anchorOperationId, mode, authorizedScopeHash — breaks it → `invalid`) + expiry. The
- * per-claim checks bind the REPLAY axes computed FRESH at execute time: `sheetId` and `actorId` (a token for
- * sheet A / actor A can never drive a recovery on sheet B / actor B). The token-authority fields (`anchorSeq`,
- * `checkpointId`, `anchorOperationId`, `scopeHash`, `mode`, `authorizedScopeHash`) are returned in `claims`
- * for the caller to use UNDER THE FENCE — the execute
- * reconstructs at `claims.anchorSeq` and re-checks `claims.scopeHash` against the live reconstruction; it does
- * NOT recompute the anchor. `anchorSeq` is shape-validated as a decimal bigint string (fail-closed, never
- * coerced) so a signed-but-garbage anchor cannot reach the `::bigint` bind.
+ * checkpointId, scopeHash, schemaHash, anchorOperationId, mode, authorizedScopeHash — breaks it → `invalid`) +
+ * expiry. The per-claim checks bind the REPLAY axes computed FRESH at execute time: `sheetId` and `actorId`
+ * (a token for sheet A / actor A can never drive a recovery on sheet B / actor B). The token-authority fields
+ * (`anchorSeq`, `checkpointId`, `anchorOperationId`, `scopeHash`, `schemaHash`, `mode`, `authorizedScopeHash`)
+ * are returned in `claims` for the caller to use UNDER THE FENCE — the execute reconstructs at
+ * `claims.anchorSeq` and re-checks `claims.scopeHash` / `claims.schemaHash` against the live reconstruction;
+ * it does NOT recompute the anchor. `anchorSeq` is shape-validated as a decimal bigint string (fail-closed,
+ * never coerced) so a signed-but-garbage anchor cannot reach the `::bigint` bind.
  */
 export function verifyExactAnchorRecoveryIdentity(
   token: string,
@@ -658,12 +718,15 @@ export function verifyExactAnchorRecoveryIdentity(
   if (payload.type !== 'exact-anchor-recovery-preview') return { valid: false, reason: 'wrong_type' }
   if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
-  // P1 token contract (hard cutover): `mode` + `authorizedScopeHash` REQUIRED. Classified as
-  // `pre_contract_token` (not `malformed_anchorSeq`) so the fail-closed label matches the actual defect.
+  // P1 + G-SCHEMA token contract (hard cutover): `mode` + `authorizedScopeHash` + `schemaHash` REQUIRED.
+  // Classified as `pre_contract_token` (not `malformed_anchorSeq`) so the fail-closed label matches the defect.
   if (payload.mode !== 'revert' && payload.mode !== 'reset') {
     return { valid: false, reason: 'pre_contract_token' }
   }
   if (typeof payload.authorizedScopeHash !== 'string' || !payload.authorizedScopeHash) {
+    return { valid: false, reason: 'pre_contract_token' }
+  }
+  if (typeof payload.schemaHash !== 'string' || !payload.schemaHash) {
     return { valid: false, reason: 'pre_contract_token' }
   }
   // Shape fail-closed: `anchorSeq` must be a decimal bigint string before any `::bigint` bind.
@@ -688,6 +751,7 @@ export function verifyExactAnchorRecoveryIdentity(
       checkpointId: payload.checkpointId,
       scopeHash: payload.scopeHash,
       liveSetHash: payload.liveSetHash,
+      schemaHash: payload.schemaHash,
       actorId: payload.actorId as string,
       mode: payload.mode,
       authorizedScopeHash: payload.authorizedScopeHash,

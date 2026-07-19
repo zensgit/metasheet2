@@ -3,6 +3,7 @@ import { assertSeqString, selectCheckpointByAnchorSeq } from './history-trust-ch
 import { reconstructRecordsAtSeq, type RecordStateAtT } from './record-reconstructor'
 import {
   hashAnchorRecoveryScope,
+  hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   mintExactAnchorRecoveryIdentity,
   verifyExactAnchorRecoveryIdentity,
@@ -245,6 +246,16 @@ export async function resolveExactAnchor(
       version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0,
     })),
   )
+  // G-SCHEMA-BEFORE-FENCE: bind CURRENT semantic field surface (id/type/property) into the identity.
+  // Apply recomputes under the fence and refuses schema-drift on retype / property drift / field add-drop.
+  const schemaRes = await query('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [sheetId])
+  const schemaHash = hashExactAnchorSchema(
+    (schemaRes.rows as Array<{ id: unknown; type: unknown; property: unknown }>).map((r) => ({
+      id: String(r.id),
+      type: String(r.type ?? ''),
+      property: r.property,
+    })),
+  )
   const token = mintExactAnchorRecoveryIdentity({
     sheetId,
     anchorOperationId,
@@ -252,6 +263,7 @@ export async function resolveExactAnchor(
     checkpointId: checkpoint.id,
     scopeHash,
     liveSetHash,
+    schemaHash,
     actorId,
     mode,
     // P1-2: the authorization CONTRACT is signed in. The apply recomputes this from its OWN in-fence

@@ -7,8 +7,8 @@
  *                     depend on resurrection.
  *   MODE-MATRIX       reset deletes createdAfterAnchor (trash + delete revision); revert keeps them.
  *   REPLAY / LIVE-DRIFT / AUTH / PLAN-AUTH / DRIFT-REJECT / link+reset parity / trust substrate.
- *   RESTORABLE-PROJECTION  formula preserved; derived-only ⇒ no revision/version/link/endpoint (token still
- *                          burns on successful consume).
+ *   RESTORABLE-PROJECTION  formula preserved; derived-only ⇒ no revision/version/link/endpoint BUT token burns.
+ *   SCHEMA-HASH-DRIFT      post-preview retype / property-only change ⇒ schema-drift; missing field still covered.
  *   VALUE-INVALID     unsafe rich longText / select-option drift refuse with zero writes.
  *   LINK-INTEGRITY    missing target, wrong sheet, alias ambiguity, same-op delete target.
  *   RESET two-phase   cross-linked delete candidates both get inbound tombstones.
@@ -26,7 +26,12 @@ import { pool } from '../../src/db/pg'
 import { resolveExactAnchor } from '../../src/multitable/exact-anchor-recovery'
 import { applyExactAnchorRecovery, pruneExpiredRecoveryTokenBurns, type ExactAnchorApplyMode } from '../../src/multitable/exact-anchor-recovery-execute'
 import { countInboundLinkCaptureRows, isTombstoneCaptureEnabled } from '../../src/multitable/tombstone-capture'
-import { hashAnchorRecoveryScope, hashRecoveryAuthorizationScope, mintExactAnchorRecoveryIdentity } from '../../src/multitable/restore-preview-identity'
+import {
+  hashAnchorRecoveryScope,
+  hashExactAnchorSchema,
+  hashRecoveryAuthorizationScope,
+  mintExactAnchorRecoveryIdentity,
+} from '../../src/multitable/restore-preview-identity'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
 import { __resetRecoveryWriterStateColumnProbe } from '../../src/multitable/canonical-sheet-fence'
 import { __resetOperationLedgerColumnProbe } from '../../src/multitable/operation-ledger'
@@ -454,18 +459,17 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     const { R_REV, anchorOp } = await seedWorld()
     const pv = await preview(anchorOp, 'revert')
     const before = await liveRow(R_REV)
-    // Same REAL scopeHash/liveSetHash/checkpoint — only the signed authorization basis is wrong.
+    // Same REAL scopeHash/liveSetHash/schemaHash/checkpoint — only the signed authorization basis is wrong.
+    const liveRows = (await q('SELECT id, version FROM meta_records WHERE sheet_id = $1', [SHEET])).rows as Array<{ id: string; version: number }>
+    const fieldRows = (await q('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [SHEET])).rows as Array<{ id: string; type: string; property: unknown }>
+    const schemaHash = hashExactAnchorSchema(fieldRows.map((r) => ({ id: String(r.id), type: String(r.type), property: r.property })))
+    const liveSetHash = hashAnchorRecoveryScope(liveRows.map((r) => ({ recordId: String(r.id), exists: true, version: Number(r.version) })))
     const claims = {
       sheetId: SHEET, anchorOperationId: anchorOp, anchorSeq: pv.anchorSeq, checkpointId: pv.checkpointId,
-      scopeHash: pv.scopeHash, actorId: ACTOR, mode: 'revert' as const, authorizedScopeHash: 'e'.repeat(64),
+      scopeHash: pv.scopeHash, liveSetHash, schemaHash, actorId: ACTOR, mode: 'revert' as const,
+      authorizedScopeHash: 'e'.repeat(64),
     }
-    // liveSetHash must be the REAL one so this golden isolates the authorization axis: recompute it the
-    // way the preview does (same primitive over the live {id, version} set).
-    const liveRows = (await q('SELECT id, version FROM meta_records WHERE sheet_id = $1', [SHEET])).rows as Array<{ id: string; version: number }>
-    const wrongBasis = mintExactAnchorRecoveryIdentity({
-      ...claims,
-      liveSetHash: hashAnchorRecoveryScope(liveRows.map((r) => ({ recordId: String(r.id), exists: true, version: Number(r.version) }))),
-    })
+    const wrongBasis = mintExactAnchorRecoveryIdentity(claims)
     expect(await applyExactAnchorRecovery(txn, applyArgs(wrongBasis)))
       .toEqual({ ok: false, reason: 'forbidden' })
     expect(await liveRow(R_REV)).toEqual(before)
@@ -474,18 +478,17 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     const rightBasis = mintExactAnchorRecoveryIdentity({
       ...claims,
       authorizedScopeHash: hashRecoveryAuthorizationScope({ sheetId: SHEET, actorId: ACTOR }),
-      liveSetHash: hashAnchorRecoveryScope(liveRows.map((r) => ({ recordId: String(r.id), exists: true, version: Number(r.version) }))),
     })
     expect((await applyExactAnchorRecovery(txn, applyArgs(rightBasis))).ok).toBe(true)
   })
 
-  // ── P1-2 SCHEMA-DRIFT WHOLE-REJECT ──────────────────────────────────────────────────────────────────────
-  test('DRIFT-REJECT (P1-2): driftCount > 0 ⇒ the WHOLE apply refuses schema-drift with zero writes incl. the burn — no partial-set apply through drift exclusion', async () => {
+  // ── P1-2 / G-SCHEMA SCHEMA-DRIFT WHOLE-REJECT ───────────────────────────────────────────────────────────
+  test('DRIFT-REJECT (P1-2): driftCount > 0 / missing field after preview ⇒ the WHOLE apply refuses schema-drift with zero writes incl. the burn — no partial-set apply through drift exclusion', async () => {
     const { R_REV, R_NEW, anchorOp } = await seedWorld()
     const pv = await preview(anchorOp, 'revert')
     const beforeRev = await liveRow(R_REV)
-    // Drop the field AFTER preview: every at-anchor snapshot now carries a stale field id ⇒ plan.driftCount>0.
-    // (The scope/live hashes cover records, not schema — this reaches the PLAN, which is exactly the point.)
+    // Drop the field AFTER preview: schemaHash diverges (G-SCHEMA) AND at-anchor snapshots carry a stale
+    // field id (plan.driftCount>0). Either path is schema-drift; both roll the burn back.
     await q('DELETE FROM meta_fields WHERE id = $1 AND sheet_id = $2', [F_STR, SHEET])
     try {
       expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
@@ -498,6 +501,47 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     }
     // POSITIVE CONTROL (anti-vacuous, gate NIT-2): with the schema restored, the SAME token — unburned by
     // the refusal above — now applies cleanly. Proves the refusal was attributable to the drift alone.
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+  })
+
+  test('SCHEMA-HASH-DRIFT retype: string→longText after preview (value still valid) ⇒ schema-drift, zero writes/burn; restoring type lets the same unburned token apply', async () => {
+    const { R_REV, anchorOp } = await seedWorld()
+    const pv = await preview(anchorOp, 'revert')
+    const before = await liveRow(R_REV)
+    // Compatible retype: historical string values remain valid as longText — scalar/live hashes cannot see it.
+    await q('UPDATE meta_fields SET type = $1 WHERE id = $2 AND sheet_id = $3', ['longText', F_STR, SHEET])
+    try {
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
+        .toEqual({ ok: false, reason: 'schema-drift' })
+      expect(await liveRow(R_REV)).toEqual(before)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('UPDATE meta_fields SET type = $1 WHERE id = $2 AND sheet_id = $3', ['string', F_STR, SHEET])
+    }
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+  })
+
+  test('SCHEMA-HASH-DRIFT property-only: property.validation change after preview ⇒ schema-drift, zero writes/burn; restoring property lets the same unburned token apply', async () => {
+    const { R_REV, anchorOp } = await seedWorld()
+    const pv = await preview(anchorOp, 'revert')
+    const before = await liveRow(R_REV)
+    const originalProp = ((await q('SELECT property FROM meta_fields WHERE id = $1', [F_STR])).rows[0] as { property: unknown }).property
+    await q(
+      'UPDATE meta_fields SET property = $1::jsonb WHERE id = $2 AND sheet_id = $3',
+      [JSON.stringify({ validation: [{ type: 'required' }] }), F_STR, SHEET],
+    )
+    try {
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
+        .toEqual({ ok: false, reason: 'schema-drift' })
+      expect(await liveRow(R_REV)).toEqual(before)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2 AND sheet_id = $3', [
+        JSON.stringify(originalProp ?? {}),
+        F_STR,
+        SHEET,
+      ])
+    }
     expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
   })
 
@@ -688,7 +732,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
   })
 
   // ── A: restorable projection (derived preservation / no-op) ────────────────────────────────────────────
-  test('RESTORABLE-PROJECTION: formula materialization is preserved; derived-only difference is a no-op (no version/revision/burn)', async () => {
+  test('RESTORABLE-PROJECTION: formula materialization is preserved; derived-only difference is a no-op (no version/revision/link/endpoint BUT token burns)', async () => {
     const F_FORM = `fld_eaa_formula_${TS}`
     await q(
       'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
@@ -729,6 +773,11 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
         { seq: s2, version: 1, action: 'create', snap: { [F_STR]: 'same', [F_FORM]: 'f-at' } },
       ])
       await live(R2, { [F_STR]: 'same', [F_FORM]: 'f-live' }, 1)
+      const opsBefore = Number(((await q('SELECT count(*)::int c FROM meta_record_history_operations WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
+      const linksBefore = Number(((await q(
+        `SELECT count(*)::int c FROM meta_links WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)`,
+        [SHEET],
+      )).rows[0] as { c: number }).c)
       const pv2 = await preview(op2, 'revert')
       const out2 = await applyExactAnchorRecovery(txn, applyArgs(pv2.token))
       expect(out2.ok).toBe(true)
@@ -736,8 +785,13 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       expect(out2.applied.reverts).toBe(0) // no restorable write
       expect((await liveRow(R2))?.version).toBe(1) // no version bump
       expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
-      // No restore-sourced revision and no version bump (zero restorable writes).
-      // Successful token consume still burns (anti-replay) even when restorable writes are empty.
+      // No restore-sourced revision, no version bump, no link mutation, and NO new sealed operation endpoint
+      // (sealOperation skips eventCount===0). Successful token consume still burns (anti-replay).
+      expect(Number(((await q('SELECT count(*)::int c FROM meta_record_history_operations WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)).toBe(opsBefore)
+      expect(Number(((await q(
+        `SELECT count(*)::int c FROM meta_links WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)`,
+        [SHEET],
+      )).rows[0] as { c: number }).c)).toBe(linksBefore)
       expect(await burnCount()).toBe(1)
     } finally {
       await q('DELETE FROM meta_fields WHERE id = $1', [F_FORM]).catch(() => {})
@@ -1107,5 +1161,22 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(shas.has(`deadold${TS}`.padEnd(64, '0'))).toBe(false) // pruned
     expect(shas.has(`deadmid${TS}`.padEnd(64, '1'))).toBe(true) // floor-protected
     expect(remaining.length).toBe(2) // 12m row + the real fresh burn
+  })
+
+  test('G1 BURN-INDEX: pg_indexes pins a burned_at-leading index usable by pruneExpiredRecoveryTokenBurns', async () => {
+    const idxs = (await q(
+      `SELECT indexname, indexdef FROM pg_indexes
+       WHERE tablename = 'meta_recovery_token_burns' AND schemaname = current_schema()`,
+    )).rows as Array<{ indexname: string; indexdef: string }>
+    expect(idxs.length).toBeGreaterThan(0)
+    // Usable for `WHERE burned_at < …`: leading key of the btree index expression is burned_at
+    // (not merely present as a trailing column of (sheet_id, burned_at)).
+    const burnedAtLeading = idxs.filter((r) =>
+      /\(.*burned_at/i.test(r.indexdef) && !/\([^)]*sheet_id[^)]*burned_at/i.test(r.indexdef),
+    )
+    expect(
+      burnedAtLeading.map((r) => r.indexname),
+      `expected a burned_at-leading index on meta_recovery_token_burns; got:\n${idxs.map((r) => `  ${r.indexname}: ${r.indexdef}`).join('\n')}`,
+    ).not.toEqual([])
   })
 })

@@ -9,6 +9,7 @@ import { describe, expect, test } from 'vitest'
 
 import {
   hashAnchorRecoveryScope,
+  hashExactAnchorSchema,
   mintExactAnchorRecoveryIdentity,
   verifyExactAnchorRecoveryIdentity,
   mintPitRevertPreviewIdentity,
@@ -22,6 +23,7 @@ const CLAIMS: ExactAnchorRecoveryIdentityClaims = {
   checkpointId: 'ckpt_ear_unit',
   scopeHash: 'a'.repeat(64),
   liveSetHash: 'd'.repeat(64),
+  schemaHash: 'c'.repeat(64),
   actorId: 'user_ear_unit',
   mode: 'revert',
   authorizedScopeHash: 'd'.repeat(64),
@@ -91,11 +93,20 @@ describe('L6-b exact-anchor recovery identity — mint/verify', () => {
     expect(verifyExactAnchorRecoveryIdentity(empty, expected)).toMatchObject({ valid: false, reason: 'pre_contract_token' })
   })
 
-  test('round-trip carries mode + authorizedScopeHash EXACTLY (execute obeys the token, never the request)', () => {
+  test('G-SCHEMA token contract — schemaHash is REQUIRED: a pre-contract token (no schemaHash) fails closed as pre_contract_token', () => {
+    const { schemaHash: _s, ...noSchema } = CLAIMS
+    const preContract = mintExactAnchorRecoveryIdentity(noSchema as unknown as ExactAnchorRecoveryIdentityClaims)
+    expect(verifyExactAnchorRecoveryIdentity(preContract, expected)).toMatchObject({ valid: false, reason: 'pre_contract_token' })
+    const empty = mintExactAnchorRecoveryIdentity({ ...CLAIMS, schemaHash: '' })
+    expect(verifyExactAnchorRecoveryIdentity(empty, expected)).toMatchObject({ valid: false, reason: 'pre_contract_token' })
+  })
+
+  test('round-trip carries mode + authorizedScopeHash + schemaHash EXACTLY (execute obeys the token, never the request)', () => {
     const reset = verifyExactAnchorRecoveryIdentity(mintExactAnchorRecoveryIdentity({ ...CLAIMS, mode: 'reset' }), expected)
     expect(reset.valid).toBe(true)
     expect(reset.claims?.mode).toBe('reset')
     expect(reset.claims?.authorizedScopeHash).toBe(CLAIMS.authorizedScopeHash)
+    expect(reset.claims?.schemaHash).toBe(CLAIMS.schemaHash)
   })
 
   test('an expired token is refused (expired), not silently accepted', () => {
@@ -130,5 +141,24 @@ describe('L6-b hashAnchorRecoveryScope — order-invariant, drift-sensitive', ()
     // exists:false with any stored version must hash the same as exists:false with null — a delete has no version.
     expect(hashAnchorRecoveryScope([{ recordId: 'r', exists: false, version: 9 }]))
       .toBe(hashAnchorRecoveryScope([{ recordId: 'r', exists: false, version: null }]))
+  })
+})
+
+describe('L6-b hashExactAnchorSchema — id-sorted, property-key-deep-sorted, drift-sensitive', () => {
+  test('order-invariant: field row order and property key order do not change the hash', () => {
+    const a = { id: 'f-a', type: 'string', property: { b: 1, a: 2 } }
+    const b = { id: 'f-b', type: 'longText', property: { rich: true } }
+    expect(hashExactAnchorSchema([a, b])).toBe(hashExactAnchorSchema([b, a]))
+    expect(hashExactAnchorSchema([{ ...a, property: { a: 2, b: 1 } }, b])).toBe(hashExactAnchorSchema([a, b]))
+  })
+
+  test('drift-sensitive: retype, property-only edit, and field add/remove each change the hash', () => {
+    const base = hashExactAnchorSchema([{ id: 'f', type: 'string', property: {} }])
+    expect(hashExactAnchorSchema([{ id: 'f', type: 'longText', property: {} }])).not.toBe(base) // retype
+    expect(hashExactAnchorSchema([{ id: 'f', type: 'string', property: { validation: [{ type: 'required' }] } }])).not.toBe(base)
+    expect(hashExactAnchorSchema([
+      { id: 'f', type: 'string', property: {} },
+      { id: 'g', type: 'string', property: {} },
+    ])).not.toBe(base)
   })
 })
