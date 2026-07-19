@@ -1467,10 +1467,10 @@ function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph):
  *
  * Deliberately NOT inside `normalizeApprovalGraph`: `asApprovalGraph` re-normalizes STORED rows on
  * plain reads, and a retroactive reject there could brick reads of existing templates. Instead this
- * raises its own code directly (status 400) at the create / update / publish choke points, exactly
- * like `validateNodeTimeoutConfigs`, so all three surface the same error while stored-graph READS
- * stay unaffected (the runtime additionally fails closed on legacy graphs: an empty rules-mode
- * branch never matches).
+ * raises its own code directly (status 400) via `validateAuthoringDefinition` (create / update /
+ * restore / publish shared path), exactly like `validateNodeTimeoutConfigs`, so all draft-writing
+ * and publish surfaces raise the same error while stored-graph READS stay unaffected (the runtime
+ * additionally fails closed on legacy graphs: an empty rules-mode branch never matches).
  */
 function validateConditionBranchRules(approvalGraph: ApprovalGraph): void {
   for (const node of approvalGraph.nodes) {
@@ -1491,6 +1491,30 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph): void {
       }
     })
   }
+}
+
+/**
+ * Shared authoring-definition validation for create / update / restore (and the non-publish-only
+ * portion of publish). Single choke so the three draft-writing paths cannot drift on today's
+ * authoring contract — including empty-rules condition branches and decisionFieldIds schema
+ * membership. Publish-only gates (`assertNoUnconfiguredPlaceholderRoles`,
+ * `assertNoParallelDynamicAssigneeConflicts`) stay OUTSIDE this helper.
+ *
+ * `curatedRoleIds` is publish-only (RA-1b hard gate); create/update/restore pass the default
+ * `null` so draft authoring does not require the curated role set.
+ */
+function validateAuthoringDefinition(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+  curatedRoleIds: ReadonlySet<string> | null = null,
+): void {
+  validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, context)
+  validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, context)
+  validateDecisionFieldIdsAgainstFormSchema(approvalGraph, formSchema, context)
+  validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, context, curatedRoleIds)
+  validateNodeTimeoutConfigs(approvalGraph)
+  validateConditionBranchRules(approvalGraph)
 }
 
 function normalizeApprovalGraph(
@@ -3168,13 +3192,12 @@ export class ApprovalProductService {
       }
 
       // Revalidate the historical snapshot against today's authoring contract before copying it.
-      // The new row is always a draft; publishing remains a separate, explicit operation.
+      // Same shared gate as create/update so restore cannot drift (empty-rules + decisionFieldIds
+      // included). The new row is always a draft; publishing remains a separate, explicit operation
+      // (publish-only gates like parallel dynamic-assignee conflicts stay out of this path).
       const formSchema = assertFormSchema(source.form_schema)
       const approvalGraph = assertApprovalGraph(source.approval_graph)
-      validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-      validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-      validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-      validateNodeTimeoutConfigs(approvalGraph)
+      validateAuthoringDefinition(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
 
       const maxVersionResult = await client.query<{ max_version: string }>(
         `SELECT COALESCE(MAX(version), 0)::text AS max_version
@@ -3235,12 +3258,7 @@ export class ApprovalProductService {
     const slaHours = slaHoursNormalized === undefined ? null : slaHoursNormalized
     const formSchema = assertFormSchema(request.formSchema)
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
-    validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-    validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-    validateDecisionFieldIdsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-    validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-    validateNodeTimeoutConfigs(approvalGraph)
-    validateConditionBranchRules(approvalGraph)
+    validateAuthoringDefinition(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -3393,12 +3411,7 @@ export class ApprovalProductService {
 
         const nextFormSchema = formSchema ?? asFormSchema(latestVersion.form_schema)
         const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
-        validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
-        validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
-        validateDecisionFieldIdsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
-        validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
-        validateNodeTimeoutConfigs(nextApprovalGraph)
-        validateConditionBranchRules(nextApprovalGraph)
+        validateAuthoringDefinition(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -3497,18 +3510,14 @@ export class ApprovalProductService {
 
       const formSchema = asFormSchema(version.form_schema)
       const approvalGraph = asApprovalGraph(version.approval_graph)
-      validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
-      validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
-      validateDecisionFieldIdsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // RA-1b CURATED-VOCABULARY — THE HARD GATE. Only when the graph actually routes on requester.role do
       // we fetch the curated set (one read, on this transaction client) and reject any uncurated literal at
       // publish. Independent of any picker, so an author can never publish a route on an admin/system role.
       const curatedRoleIds = runtimeGraphUsesRequesterAttribute(approvalGraph, 'role')
         ? await fetchCuratedApprovalRoleIds(client.query.bind(client))
         : null
-      validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
-      validateNodeTimeoutConfigs(approvalGraph)
-      validateConditionBranchRules(approvalGraph)
+      // Shared authoring contract (same helper as create/update/restore) — then publish-only gates.
+      validateAuthoringDefinition(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
@@ -3517,6 +3526,7 @@ export class ApprovalProductService {
       // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
       // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
       // allowParallelDuplicateAssignees exemption the static duplicate check gets in asRuntimeGraph).
+      // PUBLISH-ONLY — deliberately not part of validateAuthoringDefinition / restore.
       if (policy.autoApproval?.mergeAdjacentApprover !== true) {
         assertNoParallelDynamicAssigneeConflicts(approvalGraph)
       }

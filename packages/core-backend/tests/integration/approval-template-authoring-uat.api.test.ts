@@ -371,6 +371,270 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     expect(templateRow.rows[0].latest_version_id).toBe(v1Id)
   })
 
+  // Composite closeout follow-up: restore must share today's authoring-definition gate with
+  // create/update. SQL-INSERT a drifted historical row (create/update APIs refuse these shapes)
+  // and prove restore fail-fasts with zero version / latest-pointer mutation.
+
+  /** Condition graph whose rules-mode branch has empty `rules: []` — vacuous TRUE at runtime. */
+  function emptyRulesConditionGraph() {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: 'Start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          name: 'Route',
+          config: { branches: [{ edgeKey: 'edge-high', rules: [] }], defaultEdgeKey: 'edge-low' },
+        },
+        {
+          key: 'high',
+          type: 'approval',
+          name: 'High',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'low',
+          type: 'approval',
+          name: 'Low',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', name: 'End', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-high', source: 'route', target: 'high' },
+        { key: 'edge-low', source: 'route', target: 'low' },
+        { key: 'edge-high-end', source: 'high', target: 'end' },
+        { key: 'edge-low-end', source: 'low', target: 'end' },
+      ],
+    }
+  }
+
+  async function seedTemplateWithInvalidHistoricalVersion(opts: {
+    keyPrefix: string
+    name: string
+    invalidGraph: ReturnType<typeof authoringApprovalGraph> | ReturnType<typeof emptyRulesConditionGraph>
+    formSchema?: ReturnType<typeof authoringFormSchema>
+  }): Promise<{ id: string; latestVersionId: string; invalidVersionId: string }> {
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `${opts.keyPrefix}-${Date.now()}`,
+        name: opts.name,
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: authoringFormSchema(),
+        approvalGraph: authoringApprovalGraph(),
+      },
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+
+    const pool = poolManager.get()
+    const insertedResult = await pool.query<{ id: string }>(
+      `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+       VALUES ($1, 2, 'draft', $2, $3)
+       RETURNING id`,
+      [
+        created.id,
+        JSON.stringify(opts.formSchema ?? authoringFormSchema()),
+        JSON.stringify(opts.invalidGraph),
+      ],
+    )
+    return {
+      id: created.id,
+      latestVersionId: created.latestVersionId,
+      invalidVersionId: insertedResult.rows[0].id,
+    }
+  }
+
+  async function assertRestoreRejectedNoWrite(opts: {
+    templateId: string
+    versionId: string
+    expectedLatestVersionId: string
+    expectedErrorCode: string
+  }): Promise<void> {
+    const pool = poolManager.get()
+    const beforeVersions = await pool.query<{ version: number }>(
+      `SELECT version FROM approval_template_versions WHERE template_id = $1 ORDER BY version`,
+      [opts.templateId],
+    )
+    const beforeLatest = await pool.query<{ latest_version_id: string }>(
+      `SELECT latest_version_id FROM approval_templates WHERE id = $1`,
+      [opts.templateId],
+    )
+
+    const restoreResp = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${opts.templateId}/versions/${opts.versionId}/restore`,
+      adminToken,
+      { method: 'POST', body: { expectedLatestVersionId: opts.expectedLatestVersionId } },
+    )
+    expect(restoreResp.status).toBe(400)
+    const payload = await restoreResp.json() as { error: { code: string; message: string } }
+    expect(payload.error.code).toBe(opts.expectedErrorCode)
+    expect(Object.keys(payload)).toEqual(['error'])
+
+    const afterVersions = await pool.query<{ version: number }>(
+      `SELECT version FROM approval_template_versions WHERE template_id = $1 ORDER BY version`,
+      [opts.templateId],
+    )
+    expect(afterVersions.rows.map((row) => row.version)).toEqual(
+      beforeVersions.rows.map((row) => row.version),
+    )
+    const afterLatest = await pool.query<{ latest_version_id: string }>(
+      `SELECT latest_version_id FROM approval_templates WHERE id = $1`,
+      [opts.templateId],
+    )
+    expect(afterLatest.rows[0].latest_version_id).toBe(beforeLatest.rows[0].latest_version_id)
+    expect(afterLatest.rows[0].latest_version_id).toBe(opts.expectedLatestVersionId)
+  }
+
+  it('rejects restoring a historical empty-rules condition branch (400, no write)', async () => {
+    const seeded = await seedTemplateWithInvalidHistoricalVersion({
+      keyPrefix: 'uat-restore-empty-rules',
+      name: 'UAT Restore Empty Rules',
+      invalidGraph: emptyRulesConditionGraph(),
+    })
+    await assertRestoreRejectedNoWrite({
+      templateId: seeded.id,
+      versionId: seeded.invalidVersionId,
+      expectedLatestVersionId: seeded.latestVersionId,
+      expectedErrorCode: 'APPROVAL_CONDITION_BRANCH_RULES_EMPTY',
+    })
+  })
+
+  it('rejects restoring a historical invalid decisionFieldId (400, no write)', async () => {
+    const invalidGraph = authoringApprovalGraph()
+    invalidGraph.nodes[1] = {
+      key: 'approval_1',
+      type: 'approval',
+      name: 'Reviewer',
+      config: {
+        assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+        // amount exists on the schema; ghost_decision does not — decisionFieldIds must resolve.
+        decisionFieldIds: ['ghost_decision'],
+      },
+    }
+    const seeded = await seedTemplateWithInvalidHistoricalVersion({
+      keyPrefix: 'uat-restore-decision-field',
+      name: 'UAT Restore Invalid decisionFieldId',
+      invalidGraph,
+    })
+    await assertRestoreRejectedNoWrite({
+      templateId: seeded.id,
+      versionId: seeded.invalidVersionId,
+      expectedLatestVersionId: seeded.latestVersionId,
+      // failValidation under REQUEST_VALIDATION_CONTEXT → VALIDATION_ERROR (same as create/update).
+      expectedErrorCode: 'VALIDATION_ERROR',
+    })
+  })
+
+  it('restores a valid historical snapshot as a new draft without changing the active version (positive control)', async () => {
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `uat-restore-valid-${Date.now()}`,
+        name: 'UAT Restore Valid Positive',
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: authoringFormSchema(),
+        approvalGraph: authoringApprovalGraph(),
+      },
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+    const v1Id = created.latestVersionId
+
+    const publishResp = await jsonRequest(baseUrl, `/api/approval-templates/${created.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResp.status).toBe(200)
+
+    const changedGraph = authoringApprovalGraph()
+    // Valid decisionFieldIds on a form field of an allowed decision type (number).
+    changedGraph.nodes[1] = {
+      key: 'approval_1',
+      type: 'approval',
+      name: 'Reviewer with decision',
+      config: {
+        assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+        decisionFieldIds: ['amount'],
+      },
+    }
+    const updateResp = await jsonRequest(baseUrl, `/api/approval-templates/${created.id}`, adminToken, {
+      method: 'PATCH',
+      body: { approvalGraph: changedGraph },
+    })
+    expect(updateResp.status).toBe(200)
+    const updated = await updateResp.json() as { latestVersionId: string }
+    const v2Id = updated.latestVersionId
+    expect(v2Id).not.toBe(v1Id)
+
+    const restoreResp = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/versions/${v1Id}/restore`,
+      adminToken,
+      { method: 'POST', body: { expectedLatestVersionId: v2Id } },
+    )
+    expect(restoreResp.status).toBe(201)
+    const restored = await restoreResp.json() as {
+      id: string
+      version: number
+      status: string
+      restoredFromVersionId: string
+      approvalGraph: ReturnType<typeof authoringApprovalGraph>
+    }
+    expect(restored).toMatchObject({
+      version: 3,
+      status: 'draft',
+      restoredFromVersionId: v1Id,
+      approvalGraph: authoringApprovalGraph(),
+    })
+
+    const pool = poolManager.get()
+    const templateRow = await pool.query<{
+      active_version_id: string
+      latest_version_id: string
+      status: string
+    }>(
+      `SELECT active_version_id, latest_version_id, status
+       FROM approval_templates
+       WHERE id = $1`,
+      [created.id],
+    )
+    expect(templateRow.rows[0]).toEqual({
+      active_version_id: v1Id,
+      latest_version_id: restored.id,
+      status: 'published',
+    })
+    const versions = await pool.query<{ version: number; restored_from_version_id: string | null }>(
+      `SELECT version, restored_from_version_id
+       FROM approval_template_versions
+       WHERE template_id = $1
+       ORDER BY version`,
+      [created.id],
+    )
+    expect(versions.rows.map((row) => row.version)).toEqual([1, 2, 3])
+    expect(versions.rows[2]).toMatchObject({
+      version: 3,
+      restored_from_version_id: v1Id,
+    })
+  })
+
   // P3-2 (review 20260717c): the belongs-to-template (IDOR) guard was only discriminated in the
   // mocked unit lane; this is the real-DB negative — a version id that exists but belongs to a
   // DIFFERENT template must 404 without writing anything.

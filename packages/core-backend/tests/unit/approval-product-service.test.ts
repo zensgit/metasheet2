@@ -2082,10 +2082,11 @@ describe('ApprovalProductService', () => {
   describe('empty condition-branch rules gate (author / publish validation)', () => {
     // A rules-mode branch with `rules: []` evaluates as `[].every(...)` === TRUE at runtime — it
     // would silently capture ALL traffic (first-match-wins) and dead-code the default edge. The
-    // gate raises its own code at create / update / publish (like validateNodeTimeoutConfigs),
-    // NEVER inside normalizeApprovalGraph's stored-graph path (plain reads must not brick).
-    // Negative control for the formula exemption: the FC-1 describe above proves createTemplate
-    // ACCEPTS formula branches carrying `rules: []` — dropping the exemption REDs those tests.
+    // gate raises its own code via validateAuthoringDefinition at create / update / restore /
+    // publish (like validateNodeTimeoutConfigs), NEVER inside normalizeApprovalGraph's stored-graph
+    // path (plain reads must not brick). Negative control for the formula exemption: the FC-1
+    // describe above proves createTemplate ACCEPTS formula branches carrying `rules: []` — dropping
+    // the exemption REDs those tests.
     function emptyBranchGraph() {
       return {
         nodes: [
