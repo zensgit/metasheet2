@@ -15,6 +15,7 @@
 | **PB4-2** | #4392 | `a993e8b84` | archive → 全只读，**write-point 强制**（每写函数同事务 `SELECT…FOR UPDATE`→分类→写）；主切换全只读 + 跨作用域越界整体 409 / 目标越界 404；manager writer 账号先于部门锁；404-vs-409 纪律；覆盖 route/service/B3 writer | ~5（TOCTOU→write-point 重写；P1b 越界 demotion；404-vs-409；provider-target route 测；gate 记录措辞）|
 | **PB4-3** | #4397 | `80f4aceae` | 部门环检测：事务内递归祖先 walk（child 命中新父祖先链→409、`path[]` 终止守卫）+ 每-integration `pg_advisory_xact_lock` 串行 reparent（防 disjoint cross-mount 4-环）+ 钉 READ COMMITTED | opus gate APPROVE（P3 = RC 钉线机制证已补）+ owner 审后落地 |
 | **PB4-4** | #4401 | `987bdc5e0` | 本地 integration 重激活：`getOrCreateLocalIntegration` 条件 UPDATE 就地复活同一稳定锚（`name=$2 AND status<>'active'` 竞态安全闩 → 同 id、子表存活、单 `directory.local_integration.reactivate` 审计）| 1（**owner 抓 P2**：并发 mutation 假绿 → 改 `pg_blocking_pids()` 确定性 barrier，删 latch 稳定多审计）|
+| **B4** | #4419 | `b94dcd644` | `directory_department_bindings` buildable FK chain：单 `org_id` 列 + 双 integration `(id, org_id)` 复合 FK → **跨 org binding FK-impossible**；全 FK 列 NOT NULL（封 MATCH SIMPLE NULL 绕过）；provider-role 冗余 FK+CHECK 无 trigger；**部门 FK 三列 `(dept_id, integration_id, provider)`**（owner P2：钉住部门行自身 provider，拒 provider-mislabeled 部门占位）；`status active\|stale` 供 B7；迁移 replay 幂等 + down/up 往返 | 1（**owner 抓 P2**：dept FK 无 provider leg，两种 mislabeled binding 可插入 → 三列 FK + I/J 测试 + 双腿 mutation）|
 
 ## 2. 遗留限制（诚实清单，按归属批次）
 
@@ -30,15 +31,17 @@
   停用后仍参与解析（写侧门已在 B3 关闭；读侧为既有设计属性，B3 未宣称覆盖）。
 - 主管**链**（chain hop）与**部门负责人**（dept head）仍走 legacy 源（B3 只泛化 direct-manager 步）。
 
-## 3. 未开发（顺序 owner 已裁：串行）
+## 3. B5–B7：已开发并完成返工/gate（栈内 OPEN，未合并）
 
-> **B4 门控（owner 2026-07-17）**：pre-B4 hardening 四票（PB4-1..4）已全部落地（§1 真实 merge SHA），
-> 但 **B4 在本台账「完成并审定」前继续冻结**。B5/B6 为 routing-core，建议 owner 先出/确认 §6 设计锁。
+> **B5/B6 门控（owner 2026-07-17，B4 落地时重申）**：B4 已落地（§1 `b94dcd644`）。routing-core 的
+> design lock 已完成 owner Q1–Q6 裁决（`canonical-org-b5-b6-routing-core-design-lock-20260717.md`，
+> 状态=已裁决—锁定）；B5-a..B7 **代码已在 stacked PR 栈上开发完毕**（#4429→#4430→#4431→#4434→
+> #4436，全 OPEN/unarmed），owner CHANGES 已修闭且 fresh gate 无 P1/P2；等待按「逐张 retarget/rebase→
+> 重放承重 mutation→全套 required CI→串行落地」协议合并。
 
-- **B4** department binding 表（双侧 composite FK、provider-role 约束）→ **B5** 显式 `(org, purpose)`
-  routing policy + 只读切换预览 → **B6** local/DingTalk 审批路由真库等价证明（首个真实消费者）→
-  **B7** 外部部门 suggest-only 对账（消失只标 `stale`，不得停用本地部门）。B5/B6 同碰 routing core，
-  **不并行**。
+- **B5** 显式 `(org, purpose)` routing policy + 只读切换预览 → **B6** local/DingTalk 审批路由真库
+  等价证明（首个真实消费者）→ **B7** 外部部门 suggest-only 对账（消失只标 `stale`，不得停用本地
+  部门）。B5/B6 同碰 routing core，开发期**未并行**；落地亦串行。
 - Canonical Org **单独收官门**：真库 done-gate、迁移 replay、mutation 表、真实 merge SHA 全入库后，
   才解锁 Transfer。
 - **Transfer**：T1 → T2 → T2-Gate → **条件式 T2.5** → T3 → T4 → T5。**T2.5 为显式决策分支**（owner
