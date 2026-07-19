@@ -82,6 +82,7 @@ import type {
   SendDingTalkGroupMessageConfig,
   SendDingTalkPersonMessageConfig,
 } from './automation-actions'
+import { runWriteApprovalFormValues } from './approval-fwb-runtime'
 import type { ConditionGroup } from './automation-conditions'
 import { evaluateConditions } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
@@ -1828,6 +1829,12 @@ export class AutomationExecutor {
           // SAME dispatch as every other action (no parallel path).
           result = { actionType: 'record_click', status: 'success' }
           break
+        case 'write_approval_form_values':
+          // FWB production path — dedicated action (D11). Reads form_snapshot /
+          // frozen decision values server-side; claim+record+revision+outbox share
+          // one transaction. Rule creator is the write identity (§2.2).
+          result = await this.executeWriteApprovalFormValues(action.config, context, identity)
+          break
         default:
           result = {
             actionType: action.type,
@@ -2804,6 +2811,68 @@ export class AutomationExecutor {
       return { actionType: 'create_record', status: 'success', output: { recordId, sheetId: targetSheetId } }
     } catch (err) {
       return { actionType: 'create_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * FWB production path for `write_approval_form_values`. Delegates to the runtime module so the
+   * pure FWB helpers (gates → mapping → claim → record+revision+outbox) run with real ACL /
+   * form_snapshot / freeze-table seams. Requires a real transaction seam (same posture as Class-A
+   * claim): without `deps.transaction` the write is fail-closed (atomicity cannot hold).
+   */
+  private async executeWriteApprovalFormValues(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity?: ClassAActionIdentity,
+  ): Promise<AutomationStepResult> {
+    if (!this.deps.transaction) {
+      return {
+        actionType: 'write_approval_form_values',
+        status: 'failed',
+        error: 'write_approval_form_values requires a real transaction seam (fail-closed)',
+      }
+    }
+    // structuralPath: prefer Class-A identity when present (rule-driven); else a stable single-step key.
+    const structuralPath = identity?.structuralPath ?? 'actions[0]'
+    try {
+      const outcome = await runWriteApprovalFormValues(
+        {
+          queryFn: this.deps.queryFn,
+          transaction: this.deps.transaction,
+          eventBus: this.deps.eventBus,
+          evaluateCrossBaseWriteGate: (actorId, triggerSheetId, targetSheetId, declaredTargetBaseId) =>
+            this.evaluateCrossBaseWriteGate(
+              this.deps.queryFn,
+              actorId,
+              triggerSheetId,
+              targetSheetId,
+              declaredTargetBaseId,
+            ),
+        },
+        context,
+        config,
+        structuralPath,
+      )
+      if (outcome.status === 'success') {
+        if (outcome.alreadyApplied) return this.alreadyAppliedResult('write_approval_form_values')
+        return {
+          actionType: 'write_approval_form_values',
+          status: 'success',
+          output: outcome.output,
+        }
+      }
+      return {
+        actionType: 'write_approval_form_values',
+        status: 'failed',
+        error: outcome.error,
+        output: outcome.output,
+      }
+    } catch (err) {
+      return {
+        actionType: 'write_approval_form_values',
+        status: 'failed',
+        error: err instanceof Error ? err.message : String(err),
+      }
     }
   }
 

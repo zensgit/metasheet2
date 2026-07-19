@@ -53,6 +53,12 @@ import {
 } from './automation-conditions'
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult } from './automation-executor'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
+import {
+  computeFwbConfirmationHash,
+  parseWriteApprovalFormValuesConfig,
+} from './approval-fwb-runtime'
+import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
+import { isAdmin as isAdminUser } from '../rbac/service'
 import type { AutomationTrigger } from './automation-triggers'
 import {
   AutomationScheduler,
@@ -124,6 +130,9 @@ const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = new Set([
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
+  // FWB D11: the ONLY record-writing action permitted on approval.completed. Generic
+  // create_record / update_record / start_approval remain save-rejected (loop boundary).
+  'write_approval_form_values',
 ])
 const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
   'approval.approved',
@@ -1025,13 +1034,16 @@ export class AutomationService {
     if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
 
     // T1-3: approval.completed rules validate templateId/outcomes/actions/conditions + creator permission.
+    // FWB: also validates write_approval_form_values config + D1 outcomes lock + Q6 save-time gates.
     const approvalCompletedError = await this.validateApprovalCompletedRuleAtSave(
       input.triggerType,
       (input.triggerConfig ?? null) as Record<string, unknown> | null,
       input.actionType,
+      actionConfig,
       actionsForValidation,
       input.conditions ?? null,
       input.createdBy ?? null,
+      sheetId,
     )
     if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
 
@@ -1331,9 +1343,11 @@ export class AutomationService {
           nextTriggerType,
           nextTriggerConfig,
           nextActionType,
+          nextActionConfig,
           approvalActions,
           nextConditions,
           existingForApproval.created_by,
+          sheetId,
         )
         if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
         const approvalTaskCreatedError = await this.validateApprovalTaskCreatedRuleAtSave(
@@ -1860,16 +1874,20 @@ export class AutomationService {
    * T1-3 save-time validation for `approval.completed` rules. Returns an error string or null.
    * Ballot decisions: Q1 templateId REQUIRED + must reference an existing approval template (null-template
    * completions are v1 out-of-contract); Q2 the creator must hold `approvals:read` (re-checked at fire time);
-   * Q3 record-less v1 — every action (top-level AND nested) must be a non-record-targeting side effect;
-   * Q6 optional outcomes filter; Q8 conditions evaluate record data this trigger lacks — reject non-empty.
+   * Q3 record-less v1 — every action (top-level AND nested) must be a non-record-targeting side effect,
+   * with the controlled FWB exception for `write_approval_form_values` (D11);
+   * Q6 optional outcomes filter (FWB D1 locks outcomes to approved-only when any FWB action is present);
+   * Q8 conditions evaluate record data this trigger lacks — reject non-empty.
    */
   private async validateApprovalCompletedRuleAtSave(
     triggerType: string,
     triggerConfig: Record<string, unknown> | null,
     actionType: string,
+    actionConfig: Record<string, unknown>,
     nestedActions: AutomationAction[],
     conditions: ConditionGroup | null | undefined,
     createdBy: string | null,
+    sheetId: string,
   ): Promise<string | null> {
     if (triggerType !== APPROVAL_COMPLETED_TRIGGER) return null
     const config = triggerConfig ?? {}
@@ -1913,7 +1931,120 @@ export class AutomationService {
     if (!(await this.approvalTemplateVisibleToCreator(templateId, createdBy))) {
       return 'trigger_config.templateId must reference an approval template visible to the rule creator'
     }
+
+    // FWB D11/D1/Q6: validate every write_approval_form_values action (top-level + nested).
+    const fwbActions: Array<{ config: Record<string, unknown> }> = []
+    if (actionType === 'write_approval_form_values') fwbActions.push({ config: actionConfig })
+    for (const action of nestedActions) {
+      if (action.type === 'write_approval_form_values') fwbActions.push({ config: action.config })
+    }
+    if (fwbActions.length > 0) {
+      // D1: FWB rules lock outcomes to approved-only (explicit or default).
+      const outcomes = outcomesRaw === undefined
+        ? ['approved']
+        : (outcomesRaw as unknown[]).map(String)
+      if (outcomes.length !== 1 || outcomes[0] !== 'approved') {
+        return 'write_approval_form_values requires trigger_config.outcomes to be exactly ["approved"] (FWB D1)'
+      }
+      for (const fwb of fwbActions) {
+        const fwbErr = await this.validateFwbActionConfigAtSave(fwb.config, templateId, sheetId, createdBy)
+        if (fwbErr) return fwbErr
+      }
+    }
     return null
+  }
+
+  /**
+   * FWB save-time config + Q6 gates. confirmationHash must equal the server-computed hash of the
+   * normalized {template, target sheet/base, mappings}; configurer must be admin OR hold
+   * canManageSheetAccess on the target sheet, and must be able to write the target sheet.
+   */
+  private async validateFwbActionConfigAtSave(
+    rawConfig: Record<string, unknown>,
+    templateId: string,
+    ruleSheetId: string,
+    createdBy: string,
+  ): Promise<string | null> {
+    const parsed = parseWriteApprovalFormValuesConfig(rawConfig)
+    if (!parsed.ok) return (parsed as { ok: false; error: string }).error
+    const cfg = parsed.config
+    // FWB-1 target = rule sheet (D2). FWB-2/3 target sheet is pinned on the record-link field props.
+    let targetSheetId = ruleSheetId
+    let targetBaseId: string | null | undefined = cfg.targetBaseId ?? null
+    if (cfg.mode === 'create') {
+      if (cfg.targetBaseId) {
+        return 'write_approval_form_values mode=create does not allow targetBaseId (FWB-1 same-sheet only)'
+      }
+      targetSheetId = ruleSheetId
+    } else {
+      const linkResolved = await this.resolveRecordLinkFieldBinding(templateId, cfg.recordLinkFieldId!)
+      if ('error' in linkResolved) return linkResolved.error
+      targetSheetId = linkResolved.sheetId
+      if (targetBaseId == null && linkResolved.baseId) targetBaseId = linkResolved.baseId
+    }
+    const expected = computeFwbConfirmationHash({
+      sourceTemplateId: templateId,
+      targetSheetId,
+      targetBaseId: targetBaseId ?? null,
+      mappings: cfg.mappings,
+    })
+    if (cfg.confirmationHash !== expected) {
+      return 'write_approval_form_values.confirmationHash does not match the normalized config (Q6)'
+    }
+    // Q6 G1: admin OR canManageSheetAccess on target sheet.
+    const admin = await isAdminUser(createdBy)
+    if (!admin) {
+      const { capabilities } = await resolveSheetCapabilitiesForUser(this.queryFn, targetSheetId, createdBy)
+      if (!capabilities.canManageSheetAccess) {
+        return 'write_approval_form_values requires admin or canManageSheetAccess on the target sheet (Q6)'
+      }
+      if (!capabilities.canEditRecord && !capabilities.canCreateRecord) {
+        return 'write_approval_form_values requires the creator to be able to write the target sheet (Q6)'
+      }
+    }
+    return null
+  }
+
+  /** Resolve server-pinned sheet/base from a template's record-link form field (latest version). */
+  private async resolveRecordLinkFieldBinding(
+    templateId: string,
+    recordLinkFieldId: string,
+  ): Promise<{ sheetId: string; baseId: string | null } | { error: string }> {
+    const res = await this.queryFn(
+      `SELECT v.form_schema
+         FROM approval_templates t
+         JOIN approval_template_versions v ON v.template_id = t.id
+        WHERE t.id = $1
+        ORDER BY v.version DESC NULLS LAST, v.created_at DESC
+        LIMIT 1`,
+      [templateId],
+    )
+    const formSchema = (res.rows[0] as { form_schema?: unknown } | undefined)?.form_schema
+    if (!formSchema || typeof formSchema !== 'object' || Array.isArray(formSchema)) {
+      return { error: 'template form_schema not found for record-link binding' }
+    }
+    const fields = Array.isArray((formSchema as { fields?: unknown }).fields)
+      ? (formSchema as { fields: unknown[] }).fields
+      : []
+    const field = fields.find(
+      (f) => typeof f === 'object' && f !== null && (f as { id?: string }).id === recordLinkFieldId
+        && (f as { type?: string }).type === 'record-link',
+    )
+    if (!field || typeof field !== 'object') {
+      return { error: `record-link field ${recordLinkFieldId} not found on template` }
+    }
+    const props = (field as { props?: unknown }).props
+    if (!props || typeof props !== 'object' || Array.isArray(props)) {
+      return { error: `record-link field ${recordLinkFieldId} missing props.baseId/sheetId` }
+    }
+    const sheetId = typeof (props as { sheetId?: unknown }).sheetId === 'string'
+      ? String((props as { sheetId: string }).sheetId).trim()
+      : ''
+    const baseId = typeof (props as { baseId?: unknown }).baseId === 'string'
+      ? String((props as { baseId: string }).baseId).trim()
+      : null
+    if (!sheetId) return { error: `record-link field ${recordLinkFieldId} missing props.sheetId` }
+    return { sheetId, baseId }
   }
 
   /**

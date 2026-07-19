@@ -75,6 +75,13 @@ import {
   type ApprovalCompletionEventV1,
   type ApprovalCompletionTransitionSnapshot,
 } from './ApprovalCompletionEvent'
+import { freezeDecisionValues } from '../multitable/approval-fwb-decision-values'
+import {
+  assertRecordLinksReadableAtSubmit,
+  parseRecordLinkValue,
+  persistFrozenDecisionValues,
+} from '../multitable/approval-fwb-runtime'
+import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
 import {
   buildApprovalTaskCreatedEvent,
   collectLiveApprovalTaskCreatedEvents,
@@ -350,13 +357,16 @@ const FORM_FIELD_TYPES = new Set([
   'user',
   'attachment',
   'detail',
+  // FWB-2 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
+  'record-link',
 ])
 
 // Leaf sub-field types allowed inside a `detail` group's columns (everything except `detail`
 // itself — one nesting level only). `attachment` is permitted at the type/contract layer;
-// the authoring UI (C-3) governs which are offered.
+// the authoring UI (C-3) governs which are offered. `record-link` is v1-excluded from detail
+// (FWB-0 Layer 2: nested link semantics not defined).
 const DETAIL_LEAF_FIELD_TYPES = new Set(
-  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
+  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail' && type !== 'record-link'),
 )
 
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
@@ -716,6 +726,19 @@ function normalizeFormField(
     failValidation(context, `formSchema.fields[${index}].props must be an object`)
   }
 
+  // FWB-2 Layer 2: record-link requires server-pinned baseId + sheetId (non-empty strings).
+  if (value.type === 'record-link') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] record-link cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const baseId = props && typeof props.baseId === 'string' ? props.baseId.trim() : ''
+    const sheetId = props && typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
+    if (!baseId || !sheetId) {
+      failValidation(context, `formSchema.fields[${index}] record-link requires props.baseId and props.sheetId`)
+    }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -976,6 +999,34 @@ function validateFormFieldVisibilityRules(
  * unchanged (hot-file collision discipline) while still failing closed on a
  * dangling `fieldId`.
  */
+/**
+ * FWB-3: normalize a node's closed `decisionFieldIds` set (shape only — non-empty unique strings).
+ * Absent/empty ⇒ undefined (node carries no decision freeze).
+ */
+function normalizeDecisionFieldIds(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    failValidation(context, `${path} must be an array`)
+  }
+  if (value.length === 0) return undefined
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const [i, entry] of value.entries()) {
+    if (!isNonEmptyString(entry)) {
+      failValidation(context, `${path}[${i}] must be a non-empty string`)
+    }
+    const id = entry.trim()
+    if (seen.has(id)) failValidation(context, `${path}[${i}] is duplicated`)
+    seen.add(id)
+    normalized.push(id)
+  }
+  return normalized
+}
+
 function normalizeNodeFieldPermissions(
   value: unknown,
   context: ValidationContext,
@@ -1375,6 +1426,11 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.fieldPermissions`,
           )
+          const decisionFieldIds = normalizeDecisionFieldIds(
+            node.config.decisionFieldIds,
+            context,
+            `approvalGraph.nodes[${index}].config.decisionFieldIds`,
+          )
           const timeout = normalizeNodeTimeout(
             node.config.timeout,
             context,
@@ -1398,6 +1454,7 @@ function normalizeApprovalGraph(
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
+            ...(decisionFieldIds ? { decisionFieldIds } : {}),
             ...(timeout ? { timeout } : {}),
             ...(signaturePolicy ? { signaturePolicy } : {}),
           }
@@ -3513,6 +3570,45 @@ export class ApprovalProductService {
    * wedge guards, org/role/delegation snapshot freezing and resolver wiring — one source).
    * Persistence never happens here; the caller decides whether to write (create) or walk (preview).
    */
+  /**
+   * FWB-2 Layer 2 submit-time authz: every record-link value must be readable by the filler.
+   * Missing and unreadable share one error string (no existence oracle).
+   */
+  private async assertRecordLinksReadableAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    fillerUserId: string,
+  ): Promise<string | null> {
+    if (!pool) return 'Database not available'
+    const links: Array<{ sheetId: string; recordId: string }> = []
+    for (const field of formSchema.fields ?? []) {
+      if (field.type !== 'record-link') continue
+      const raw = formData[field.id]
+      if (raw === undefined || raw === null) continue
+      const parsed = parseRecordLinkValue(raw)
+      if (!parsed.ok) return `form field ${field.id} must be exactly { recordId }`
+      const sheetId = typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : ''
+      if (!sheetId) return `form field ${field.id} is missing server-pinned sheetId`
+      links.push({ sheetId, recordId: parsed.recordId })
+    }
+    if (links.length === 0) return null
+    const queryFn = (sqlText: string, params?: unknown[]) => pool!.query(sqlText, params)
+    const checks = {
+      async fillerCanReadRecord(userId: string, sheetId: string, recordId: string): Promise<boolean> {
+        const rec = await queryFn(
+          `SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2`,
+          [recordId, sheetId],
+        )
+        if (rec.rows.length === 0) return false
+        const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(queryFn, sheetId, userId)
+        if (isAdminRole) return true
+        return capabilities.canRead === true
+      },
+    }
+    const result = await assertRecordLinksReadableAtSubmit(checks, fillerUserId, links)
+    return result.ok ? null : 'linked record is not readable'
+  }
+
   private async assembleCreationContext(
     request: { templateId: string; formData: Record<string, unknown> },
     actor: CreateApprovalActor,
@@ -3597,6 +3693,17 @@ export class ApprovalProductService {
         'VALIDATION_ERROR',
         { errors: validationErrors },
       )
+    }
+
+    // FWB-2 Layer 2: submit-time record-link authz (confused-deputy close). Filler must be able to
+    // READ every linked record; missing and unreadable share one fail-closed shape (no existence oracle).
+    const recordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+      formSchema,
+      normalizedFormData,
+      actor.userId,
+    )
+    if (recordLinkAuthzError) {
+      throw new ServiceError(recordLinkAuthzError, 400, 'VALIDATION_ERROR')
     }
 
     // Server-side amount total-check (design-lock #3161): if the template declares an
@@ -5514,6 +5621,33 @@ export class ApprovalProductService {
       const currentNodeEpoch = currentNodeKey
         ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         : null
+
+      // FWB-3: freeze decisionData INSIDE this instance-lock transaction (same FOR UPDATE as the
+      // state transition). transfer/jump/timeout paths above never reach here — they leave no freeze
+      // rows and FWB-3 writeback fails closed. Unknown keys reject the whole approve.
+      if (currentNodeKey && currentNodeEpoch !== null && currentNodeEpoch >= 1) {
+        const node = runtimeGraph.nodes.find((n) => n.key === currentNodeKey)
+        const declared = (node?.config as { decisionFieldIds?: string[] } | undefined)?.decisionFieldIds
+        if (Array.isArray(declared) && declared.length > 0) {
+          const decisionData = isRecord(request.decisionData) ? request.decisionData : {}
+          const freezeRaw = freezeDecisionValues(currentNodeKey, currentNodeEpoch, declared, decisionData)
+          if ((freezeRaw as { ok: boolean }).ok !== true) {
+            throw new ServiceError(
+              `decisionData freeze rejected: ${(freezeRaw as { code?: string }).code ?? 'unknown'}`,
+              400,
+              'VALIDATION_ERROR',
+            )
+          }
+          const assignmentId = actorAssignments[0]?.id ?? null
+          await persistFrozenDecisionValues(client, {
+            instanceId: id,
+            assignmentId,
+            actorId: actor.userId,
+            snapshot: (freezeRaw as { snapshot: import('../multitable/approval-fwb-decision-values').FrozenDecisionSnapshot }).snapshot,
+          })
+        }
+      }
+
       // Approval aggregation semantics:
       //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
       //   'any'    (或签): first approver wins — deactivate siblings with an audit trail
