@@ -10,14 +10,17 @@ import { dirname, join } from 'node:path'
 //
 // Placement (within the shared "Run approval real-DB integration" step block that hosts both
 // directory and approval real-DB suites):
-//   - admin-routes  → directory real-DB placement (next to reconciliation / org-directory-*)
-//   - sync-hook     → approval real-DB placement (next to approval-routing / direct-manager)
-// The guard parses the named step block so a path that only appears in a comment or in another
-// step (e.g. multitable) does not pass.
+//   - admin-routes  → immediately after directory-binding-reconciliation (directory cluster)
+//   - sync-hook     → immediately after approval-routing-policy-equivalence (approval cluster)
+// Guards parse the named step's whole-file vitest argument list and assert EXACT adjacency by
+// index — not merely "somewhere later" via [\s\S]* ordering. A path only in a comment, in the
+// multitable step, or non-adjacent within the same named step does not pass.
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const ADMIN_FILE = 'tests/integration/directory-binding-admin-routes.db.test.ts'
 const SYNC_HOOK_FILE = 'tests/integration/directory-binding-sync-hook.db.test.ts'
+const EQUIVALENCE_FILE = 'tests/integration/approval-routing-policy-equivalence.db.test.ts'
+const RECONCILIATION_FILE = 'tests/integration/directory-binding-reconciliation.db.test.ts'
 
 // Same named step hosts both families; anchors still fail if a suite is moved out of it.
 const REAL_DB_STEP = 'Run approval real-DB integration'
@@ -48,8 +51,36 @@ function namedStepBody(wf, nameNeedle) {
   return body.join('\n')
 }
 
+/**
+ * Ordered list of whole-file vitest arguments in a step body.
+ * Matches lines like: `            tests/integration/foo.db.test.ts \`
+ * (path + trailing backslash continuation; last file may omit the backslash).
+ */
+function wholeFileVitestArgs(stepBody) {
+  const files = []
+  for (const line of stepBody.split('\n')) {
+    const m = line.match(/^\s+(tests\/integration\/\S+\.(?:test|spec)\.[tj]sx?)\s*(?:\\)?\s*$/)
+    if (m) files.push(m[1])
+  }
+  return files
+}
+
 function wholeFileRunRe(file) {
   return new RegExp(`\\n\\s*${file.replace(/[.]/g, '\\.')} \\\\`)
+}
+
+function assertImmediatelyFollows(files, predecessor, successor, label) {
+  const iPred = files.indexOf(predecessor)
+  const iSucc = files.indexOf(successor)
+  assert.ok(iPred >= 0, `${label}: predecessor ${predecessor} missing from step vitest arg list`)
+  assert.ok(iSucc >= 0, `${label}: successor ${successor} missing from step vitest arg list`)
+  assert.equal(
+    iSucc,
+    iPred + 1,
+    `${label}: ${successor} must immediately follow ${predecessor} ` +
+      `(indices pred=${iPred} succ=${iSucc}; found[${iPred}..${iPred + 1}]=` +
+      `${JSON.stringify(files.slice(iPred, iPred + 2))})`,
+  )
 }
 
 test('vitest.config.ts excludes both B7 round-2 suites from the no-DB job', () => {
@@ -67,18 +98,12 @@ test('plugin-tests.yml runs the B7 admin-routes suite as a whole file in the dir
     wholeFileRunRe(ADMIN_FILE),
     `plugin-tests.yml directory real-DB step (${REAL_DB_STEP}) must run ${ADMIN_FILE} as a whole file`,
   )
-  // Clustering pin: admin routes sit AFTER reconciliation in the directory suite region
-  // (not only "somewhere" in the shared step).
-  assert.match(
-    step,
-    /directory-binding-reconciliation\.db\.test\.ts \\[\s\S]*directory-binding-admin-routes\.db\.test\.ts \\/,
-    `${ADMIN_FILE} must be clustered after the directory reconciliation suite in the real-DB step`,
-  )
-  // Must not be parked only in the approval cluster (before reconciliation).
-  assert.doesNotMatch(
-    step,
-    /directory-binding-admin-routes\.db\.test\.ts \\[\s\S]*directory-binding-reconciliation\.db\.test\.ts \\/,
-    `${ADMIN_FILE} must not precede reconciliation (wrong cluster)`,
+  const files = wholeFileVitestArgs(step)
+  assertImmediatelyFollows(
+    files,
+    RECONCILIATION_FILE,
+    ADMIN_FILE,
+    'directory cluster adjacency',
   )
   const multi = namedStepBody(wf, 'Run multitable real-DB integration')
   assert.doesNotMatch(multi, wholeFileRunRe(ADMIN_FILE), `${ADMIN_FILE} must not be in multitable real-DB`)
@@ -92,12 +117,12 @@ test('plugin-tests.yml runs the B7 sync-hook suite as a whole file in the approv
     wholeFileRunRe(SYNC_HOOK_FILE),
     `plugin-tests.yml approval real-DB step (${REAL_DB_STEP}) must run ${SYNC_HOOK_FILE} as a whole file`,
   )
-  // Clustering pin: Q6 sync-hook sits in the approval region — AFTER equivalence and BEFORE
-  // the directory reconciliation suite. Moving it into the directory cluster reds this order.
-  assert.match(
-    step,
-    /approval-routing-policy-equivalence\.db\.test\.ts \\[\s\S]*directory-binding-sync-hook\.db\.test\.ts \\[\s\S]*directory-binding-reconciliation\.db\.test\.ts \\/,
-    `${SYNC_HOOK_FILE} must sit between approval equivalence and directory reconciliation in the real-DB step`,
+  const files = wholeFileVitestArgs(step)
+  assertImmediatelyFollows(
+    files,
+    EQUIVALENCE_FILE,
+    SYNC_HOOK_FILE,
+    'approval cluster adjacency',
   )
   const multi = namedStepBody(wf, 'Run multitable real-DB integration')
   assert.doesNotMatch(multi, wholeFileRunRe(SYNC_HOOK_FILE), `${SYNC_HOOK_FILE} must not be in multitable real-DB`)

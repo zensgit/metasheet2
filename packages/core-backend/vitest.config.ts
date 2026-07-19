@@ -173,10 +173,10 @@ export default defineConfig({
       // points asserted by b7-reconciliation-ci-wiring.test.mjs — named-step anchored).
       'tests/integration/directory-binding-reconciliation.db.test.ts',
       // B7 owner round (#4436): binding ADMIN routes (list/suggestions/sweep+audit) → directory
-      // real-DB placement (clustered with reconciliation); Q6 POST-SYNC auto-sweep hook → approval
-      // real-DB placement (clustered with approval-routing equivalence). Both live in the same
-      // named step `Run approval real-DB integration` but are step-block + cluster-anchored by
-      // b7-round2-ci-wiring.test.mjs so a move to multitable/elsewhere reds.
+      // real-DB placement (immediately after reconciliation); Q6 POST-SYNC auto-sweep hook →
+      // approval real-DB placement (immediately after approval-routing equivalence). Both live in
+      // the same named step `Run approval real-DB integration` but are step-block + exact-adjacency
+      // index-anchored by b7-round2-ci-wiring.test.mjs so a same-step drift or multitable move reds.
       'tests/integration/directory-binding-admin-routes.db.test.ts',
       'tests/integration/directory-binding-sync-hook.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
