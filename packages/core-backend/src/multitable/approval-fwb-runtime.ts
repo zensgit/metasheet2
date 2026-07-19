@@ -41,12 +41,13 @@ import {
   type FrozenDecisionSnapshot,
 } from './approval-fwb-decision-values'
 import type { FwbGateChecks, FwbGateSubject } from './approval-fwb-permission-gates'
-import { isFwbRuntimeEnabled } from './approval-fwb-flags'
+import { isFwbRuntimeEnabled, requireFwbActivationForEnabledRule } from './approval-fwb-flags'
 import {
   computeFwbConfigFingerprint,
   verifyFwbConfirmation,
   type FwbConfirmationSubject,
 } from './approval-fwb-confirmation'
+import { isApprovalTemplateVisibleToUser } from './approval-template-visibility'
 import {
   buildAuthoritativeMappings,
   loadTargetFieldsFromMeta,
@@ -319,9 +320,8 @@ function buildProductionGateChecks(
       return capabilities.canManageSheetAccess === true
     },
     async canReadTemplate(userId, templateId) {
-      const res = await queryFn('SELECT id FROM approval_templates WHERE id = $1', [templateId])
-      void userId
-      return res.rows.length > 0
+      // Same trusted-actor visibility predicate as AutomationService (not a mere existence check).
+      return isApprovalTemplateVisibleToUser(queryFn, templateId, userId)
     },
     async canWriteSheet(userId, sheetId) {
       const { capabilities } = await resolveSheetCapabilitiesForUser(queryFn, sheetId, userId)
@@ -477,17 +477,16 @@ async function enqueueFwbOutboxRequired(
 }
 
 /**
- * Activation gate: FWB flag ON + durable delivery ON. Call at save and execute.
+ * Activation gate: FWB flag ON + durable delivery ON.
+ * Use for runtime execution and for enabling (enabled=true) a FWB rule.
+ * Do NOT use for disabled draft saves — use requireFwbActivationForEnabledRule(false) which is a no-op.
  */
 export function assertFwbRuntimeActivatable(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (!isFwbRuntimeEnabled(env)) {
-    return 'write_approval_form_values is disabled (APPROVAL_FWB_RUNTIME_ENABLED is not true)'
-  }
-  if (!isDurableDeliveryEnabled(env)) {
-    return 'write_approval_form_values requires AUTOMATION_DURABLE_DELIVERY_ENABLED=true (D9 same-transaction outbox)'
-  }
-  return null
+  // Same policy as enabled-save; reuses the staging-aware helper with enabled=true.
+  return requireFwbActivationForEnabledRule(true, env)
 }
+
+export { requireFwbActivationForEnabledRule }
 
 export async function runWriteApprovalFormValues(
   deps: FwbRuntimeDeps,
