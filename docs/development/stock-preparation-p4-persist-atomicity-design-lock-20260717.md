@@ -1,19 +1,25 @@
-# 备料 persist 原子性（P4）— 设计锁（PROPOSED — owner ratification required）— 2026-07-17
+# 备料 persist 原子性（P4）— 设计锁（RATIFIED：A + 有界一次性 C）— 2026-07-17
 
-> **状态：PROPOSED。本文是四类方案的比较与验证设计，不是裁决。**
+> **状态：RATIFIED（2026-07-19）。** owner 采用方案 A：host 侧受限组合事务，配合
+> 类型隔离、租户作用域化、确定顺序的事务级咨询锁；采用有界的一次性方案 C 工具处理存量，
+> 但工具默认只扫描，且只允许补齐冻结投影逐字段一致、缺失后缀可确定证明的孤儿或 stale pointer。
+> 它不得自动删除、去重或改写既有快照；duplicate/ambiguous 毒化只输出 values-free 分类并留给
+> owner 人工裁定。工具完成一次受控迁移后退役，不形成常驻修复面。
 > 依 T3b 锁 OD-4（`stock-preparation-t3b-plm-source-autopersist-design-lock-20260716.md:248-249`）：
 > autopersist 生产常开保持 barred，直到独立 P4 完成**事务 / 两阶段状态 / repair protocol**
-> 之一并有 crash-injection 证据，或 **owner 另行书面接受该有界风险**。本文逐一展开这四类方案，
-> 给出对比矩阵与最低验证门；**推荐仅为倾向，最终选型留 owner ratify。**
+> 之一并有 crash-injection 证据，或 **owner 另行书面接受该有界风险**。本文保留四类方案的
+> 对比与最低验证门，供实现复核；**ratify 只解锁 A/C 实现，不等于生产常开授权。**
 > 本文不改任何运行时代码，不影响 RC-A（#4437）的 exact 包 SHA（`d87e086fd1…`）。
-> 全部代码事实以 origin/main `9048c27e2` 为锚（file:line 均指该 ref）。
+> 原始代码事实以 origin/main `9048c27e2` 为锚（file:line 均指该 ref）；先行硬化的最终状态
+> 另以合并 SHA 记录在 §9。
 >
 > **owner review round-1（2026-07-17，REQUEST_CHANGES，暂不 ratify）——本版已吸收**：
 > ①方案 A 必须是**受限 unit-of-work**（key lock、锁内存在性复检、replay 判定、混合 create/patch、
 > revision 发射全在同一事务内）——泛化 bulk-create API **不构成事务闭包**（§3 已重写）；
 > ②**H-1/H-2 是现存静默正确性缺口，先行必修，不随选型等待；H-3 是方案 A 的前置**（§9 已重分类）；
 > ③方向条件接受 **A + 一次性 C 工具**、落地姿态=**硬切换**、**T3a 原子性另审**（§10 已按此更新）。
-> 正式 ratify 待 owner 复核本版。
+> **owner final（2026-07-19）**：按上述 A + 有界一次性 C 正式 ratify；硬切换、先行硬化与
+> T3a 分离裁决不变。实现仍须逐项通过 §8，失败不解锁生产常开。
 
 ## 0. 问题域：现状事实（均已对代码核实）
 
@@ -148,8 +154,12 @@ TOCTOU 原样存在。故 A = host 侧新增**一个受限 unit-of-work 组合�
 或 records 侧通用 unit-of-work——形状由实现 PR 定），单个 plugin 调用，在**同一个**
 `poolManager.get().transaction` 内按序完成全部五步：
 
-1. 按 `acquireCanonicalSheetFencesInOrder` 的既有次序取 4 张 sheet 的 fence，再取 key 级
-   `pg_advisory_xact_lock`（`hash(sheetId|snapshotBatchId)`、`hash(sheetId|projectId)`）；
+1. 按 `acquireCanonicalSheetFencesInOrder` 的既有次序取 4 张 sheet 的 fence，再取两个 key 级
+   `pg_advisory_xact_lock(int4 namespace, int4 keyHash)`。batch 与 project 使用不同的固定
+   namespace 常量；keyHash 分别覆盖 `tenantId|batchSheetId|snapshotBatchId` 与
+   `tenantId|projectSheetId|projectId`。所有调用方固定按 **project key → batch key** 获取，
+   不得由接口自行换序。这样双参数锁空间与现有单参数 canonical fence 隔离，batch/project
+   也彼此隔离；同 namespace 内的 32 位碰撞最多造成保守的额外串行，不影响正确性；
 2. **锁内复检**：batch 存在性（limit 2）、project 存在性/唯一性、命中已有 batch 时的**完整
    replay 判等**——即 create / skip / 409 的**判定本身发生在锁内**，不是锁外判定锁内执行；
 3. 判定为 create → batch/lines/run 逐行 create + project 的 **create-or-patch 分支**同事务执行；
@@ -157,8 +167,8 @@ TOCTOU 原样存在。故 A = host 侧新增**一个受限 unit-of-work 组合�
 5. 单 COMMIT；任何一步失败 = 整体回滚，零残留。
 
 改动面：`types/plugin.ts`、`index.ts`、`plugin-scope.ts`（逐 sheetId scope 断言）+ persist 模块
-把「预检-判定-写入」整段迁入原语。**H-3（显式行数上限）是本方案的前置**：引入长事务前必须先落地
-显式 422 上界，不能只靠 25,000 行的 replay 读界隐含约束（§9）。
+把「预检-判定-写入」整段迁入原语。**H-3（显式行数上限）是本方案的前置且已经完成**：
+#4460 已在引入长事务前落地 24,999 行的显式 422 上界（§9）。
 
 **先例**（同架构形状已在仓内）：
 - `provisioning.ensureObjectInScope`：单个 plugin 调用背后的 host 侧一事务多写组合
@@ -168,8 +178,8 @@ TOCTOU 原样存在。故 A = host 侧新增**一个受限 unit-of-work 组合�
 
 **并发闭合即步骤 1-2 的锁内复检**（单靠事务**不**闭合 §0.3 的重复窗口——`meta_records` 无逻辑键
 唯一索引）：key 级 xact 锁随 COMMIT 释放，「复检-判定-写入」整段在锁内 ⇒ 同 batch 双写与 project
-首写竞态收敛为「一胜一 skip/409」。锁次序统一为「sheet fence（sheet-id 排序）→ key 锁（同样确定性
-排序）」，全仓一个约定。（替代方案：`(sheet_id, data->>'snapshotBatchId')` 部分唯一表达式索引——
+首写竞态收敛为「一胜一 skip/409」。锁次序统一为「sheet fence（sheet-id 排序）→ project key →
+batch key」，全仓一个约定。（替代方案：`(sheet_id, data->>'snapshotBatchId')` 部分唯一表达式索引——
 影响面跨所有含该字段名的 sheet，治理成本更高，仅作备选记录。）
 
 **代价（真实成本，须写进验收）**：
@@ -177,10 +187,8 @@ TOCTOU 原样存在。故 A = host 侧新增**一个受限 unit-of-work 组合�
   per-create fence）——**锁获取次序必须固定**；kernel 已有现成纪律与 helper：
   `acquireCanonicalSheetFencesInOrder`（`canonical-sheet-fence.ts:91`，去重 + **sheet-id 排序**，
   注释明言为未来多 sheet 写者预留）——组合原语应复用该次序，不另立约定；
-- 行数上界：replay 读路径的可证界为 500×50 = 25,000 行（`persist.cjs:72-73`，超界
-  409 `PERSIST_EXISTING_BATCH_READ_UNPROVABLE`）；**create 循环自身无强制上界**（与 §9 H-3 一致，
-  「现仅由读界隐含」）→ 单长事务风险按该隐含界评估；须裁量显式上限或分段策略（分段则回到部分
-  可见，须显式取舍——建议 v1 直接沿用现有 plan 规模上限并压测）；
+- 行数上界：#4460 已把 create 与可证 replay 的共同上界固定为 24,999 行；A 的长事务按该显式
+  上界压测，不采用会重新产生部分可见状态的分段提交；
 - flag-gated `assertNoActiveWriterBlock` 每 create 跑一次（:612-614），事务内语义不变但持锁时长增加；
 - kernel API 面新增 = 跨插件契约，需 W0 canonical fence 相容性审（组合内逐行 revision 发射同事务，
   初判相容，须在验证里证明）。
@@ -283,7 +291,7 @@ dashboard 阻断提示。**评估**：D 在 1/5 上站得住；2-4 让「有界�
    - 方案 A：每窗口断言**零行残留**（回滚证明）+ retry 全新提交成功；
    - 方案 B：断言标记状态与结构状态的每种组合的读侧观测；
    - 方案 C：每窗口断言修复后结构完整 + 修复幂等（二次修复 no-op）+ 前缀不一致时修复拒绝；
-2. **并发构造测**（[[TOCTOU 必须构造并发]]——顺序论证不接受）：barrier 同步双写者，
+2. **并发构造测**（**TOCTOU 必须构造并发**——顺序论证不接受）：barrier 同步双写者，
    同 batchId 与同 project 异 batch 两种竞态，断言终态唯一（A）或按方案语义收敛；
 3. **mutation 载荷**（逐字验证 RED）：A 删 in-tx 锁 → 重复行出现；A 拆事务 → CW2 残留；
    C 删前缀判等 → 不一致仍修复；B 删读端过滤 → staged 泄漏；
@@ -292,33 +300,33 @@ dashboard 阻断提示。**评估**：D 在 1/5 上站得住；2-4 让「有界�
 5. **values-free 扫描**：新增错误/审计/修复面全字段过 leak-scan；
 6. **W6/T4 smoke**：幂等对与 teardown doctrine 断言在方案落地后逐字重验。
 
-## 9. 硬化项分级（round-1 重分类：不再是「可选微硬化」）
+## 9. 先行硬化（已完成，不再阻塞 A）
 
-- **H-1 diff 服务端完整性门 = 先行必修**（不随选型等待）：现状允许不完整 batch 进入 diff
-  current/base（§0.4），是**现存静默正确性缺口**——current/base 任一不完整 → 409。独立小 PR 先行。
-- **H-2 replay 校验 project 指针 = 先行必修**（不随选型等待）：现状让 CW4-existing 的 stale
-  project pointer 返回 200 skipped_existing，同为**现存静默正确性缺口**——`assertExactReplay`
-  加指针内容校验，stale → 409 `{project, stale_pointer}`。独立小 PR 先行（选 A 后该窗口在新写面
-  自动消失，但存量行为与 A 落地前的窗口仍需此门）。
-- **H-3 行数上界显式化 = 方案 A 的前置**：persist 对 plan 行数设显式 422 上界（现仅由 replay
-  读界隐含 25,000）——**必须在引入长事务之前落地**，作为 A 实现 PR 的 gate 序里的第一件。
+- **H-1 diff 服务端完整性门**：#4461 已以 `60e9ecbec` 合入；current/base 的 batch、run、line
+  完整性与歧义统一 fail-closed 409。
+- **H-2 replay project 指针与全历史单调版本守卫**：#4460 已以 `38f9f1250` 合入；stale pointer
+  不再静默 skip，崩溃留下的高版本历史也不能被低版本绕过。
+- **H-3 显式行数上界**：同 #4460 已合入，真实可重放上界固定为 24,999 行，界上 create/replay
+  均有判别测试。A 的长事务不再依赖隐含的 25,000 行读界。
 
-## 10. 推荐（倾向，非裁决）
+## 10. Ratified 决策
 
-**倾向：A（host 侧组合事务 + in-tx key 锁）为主，C 的一次性工具形态为辅**（清理存量孤儿/统计
-毒化行，跑一次即退役；不建常驻修复面）。理由：
+**采用 A（host 侧组合事务 + in-tx key 锁）为主，C 的一次性工具形态为辅**。C 默认 dry-run，
+只补齐可证明一致的缺失后缀或 stale pointer；不自动删除、去重或改写既有快照，duplicate/ambiguous
+毒化保留为审计证据并转 owner 人工处置；受控运行一次后退役。理由：
 - 底座**已经**事务就绪（存储函数 tx 不可知 + 两个同形先例），A 的改动面（3 文件 + 采用）小于
   其名声；A 是唯一同时闭合全部五个窗口 + 两类毒化的方案；
 - B 的真实改动面（判等器弱化 + 全读端 + 契约 + 词表 + smoke）大于 A，且仍内含再入补标逻辑、
   不闭合毒化——**历史上「两阶段修归 P4」的预期（#3995 时代）在本次事实核查后不再是最优路径**；
   两阶段的核心收益（显式可判）已被 #4002 结构徽标大部分交付；
-- D 因 §6.2-4 三条新发现而弱于其在 #3995 时代的成立度；（H-1/H-2 现为无条件先行必修，不再作为 D 的配套选项，§9。）
+- D 因 §6.2-4 三条新发现而弱于其在 #3995 时代的成立度；H-1/H-2 已作为无条件先行项合入，
+  不再是 D 的可选配套（§9）。
 
-**决策点状态（round-1 后）**：
-1. 选型：owner round-1 **方向条件接受 A + 一次性 C 工具**——正式 ratify 待本版复核；
+**决策点终态（2026-07-19）**：
+1. **已裁：A + 有界一次性 C 工具，正式 ratify**；
 2. ~~落地姿态~~ **已裁：硬切换 + OD-4 式独立 PR 纪律**（§3 落地段）；
-3. ~~H-1/H-2/H-3 是否解耦先行~~ **已裁：H-1/H-2 先行必修，H-3 为 A 前置**（§9）；
-4. **仍开放**：存量孤儿/毒化行的处置口径（工具清理 vs 保留为审计残留）；
+3. ~~H-1/H-2/H-3 是否解耦先行~~ **已完成：#4460/#4461 已合入**（§9）；
+4. **已裁：安全可证明的缺失后缀/stale pointer 允许工具补齐；任何删除、去重、歧义毒化自动修复均禁止，保留审计残留并人工裁定**；
 5. ~~T3a 是否纳入~~ **已裁：T3a 原子性另审**，不入本门。
 
 ## 11. 非目标
@@ -326,5 +334,5 @@ dashboard 阻断提示。**评估**：D 在 1/5 上站得住；2-4 让「有界�
 - 不改 RC-A 包与 #4437 流程；不动 `/mvp/sync/persist` 现有 replay 语义（#4382 已裁，本文仅引用）；
 - 不推翻 batch-first 写序（:490-492 的设计意图保留）；
 - 不引入外部写；不放宽 values-free；不在本锁内实现任何运行时代码；
-- T3a `stock-preparation-erp-material-sync-persist.cjs` 的原子性面留待 §10 决策点 5 owner 裁决后
-  另行处理。
+- T3a `stock-preparation-erp-material-sync-persist.cjs` 的原子性面按 §10 决策点 5 **另审**，
+  不随本锁解锁。
