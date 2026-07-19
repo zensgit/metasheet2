@@ -243,6 +243,31 @@ No other conflicts. No silent deletion of main or A/C wiring.
 
 Integrated-reference map (provenance only; same patch content for the nine A+C commits): `504668c2c→f78334591` … `333f297ce→a57b145c1`, plus `baf5ae95d` (P2) and `a5e5db320` (this document's prior integrated tip).
 
+### Terminal replay after #4470 merge
+
+Option A passed a fresh required-check run at rebased head `c6b09ae82510b23ed0e71e6fa872892d815feafe`
+and was squash-merged as `3a329dabdba29beca7c6b4314558fdbde6af679d`. The first fresh-green
+run was not used because `main` advanced while checks ran and strict branch protection reported
+`BEHIND`; all six A commits were replayed again onto `00402ab39cd3022d3c253f505471d01c0facbb69`.
+`git range-diff` reported all six patches as `=`, the focused A suite passed 18/18, backend
+type-check passed, and the second fresh required-check run completed green before merge.
+
+After that merge, only the four C runtime commits and the two verification-document commits were
+replayed onto the actual Option A squash merge. `git range-diff` reported all six patches as `=`:
+
+| Pre-terminal-replay | Final C candidate | Subject |
+|---|---|---|
+| `b337bd6ec` | `d787969db` | feat(stock-prep): add bounded one-shot persist repair |
+| `a0ed98755` | `7c2ecbe7f` | fix(stock-prep): close repair failure vocabularies |
+| `4dd9972fc` | `03cb30dfe` | fix(stock-prep): refuse stale repair pointers |
+| `f03ff1637` | `c4b07c205` | test(stock-prep): pin latest repair history |
+| `e54229533` | `2241ad83e` | docs(stock-prep): P4 closeout design and verification record |
+| `3a3bbad08` | `8fcf0f69b` | docs(stock-prep): record exact P4 candidate re-review |
+
+Final C runtime tip before the two document commits:
+`c4b07c205df2b288872eb1ac1107f08b11c56d48`. Final candidate tip before this terminal note:
+`8fcf0f69bbaa530bbc91bf226780c958fc9ba643`.
+
 ## 8. Design-lock review findings
 
 Reviewed the full A+C tree against the ratified lock after rebase onto hot main. Surfaces checked:
@@ -365,6 +390,23 @@ Codex independently reviewed the local A head `9a0aee721` and the C candidate at
   **3 files / 13 skipped**. That run was explicitly rejected as skip-green evidence. The corrected
   command with explicit `DATABASE_URL` and `METASHEET_REAL_DB_TEST_STEP=1` then executed and passed
   **3 files / 13 tests**, 0 failed, 0 skipped.
+
+### Terminal C replay verification
+
+The C candidate replayed onto the actual Option A squash merge was verified again before remote
+push:
+
+- focused Vitest: **4 files / 22 passed**;
+- backend type-check: **passed**;
+- plugin contracts: persist **44**, repair **16**, audit store **5**, audit migration **passed**,
+  ERP material persist **17**;
+- CI wiring plus flag manifest: **26 passed**;
+- explicit real-DB run: replay **4**, repair **5**, PLM autopersist **4** = **3 files / 13 passed**,
+  0 failed, 0 skipped.
+
+As in the earlier review, an initial invocation without the two real-DB environment variables
+reported **13 skipped** and was rejected. Only the immediately repeated run with both variables
+explicitly set is counted above.
 
 **Honest statement:** dual-worktree real-DB suites ran with `DATABASE_URL` set and were not
 skip-green. W6/T4 full postdeploy smokes and live multi-tenant staging were **not** re-run in these
