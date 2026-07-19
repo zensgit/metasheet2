@@ -43,10 +43,12 @@ import { __resetOperationLedgerColumnProbe } from '../../src/multitable/operatio
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
+const CAPTURE_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED'
 const TS = Date.now()
 const BASE = `base_eaa_${TS}`
 const SHEET = `sheet_eaa_${TS}`
 const F_STR = `fld_eaa_note_${TS}`
+const F_LINK = `fld_eaa_link_${TS}`
 const ACTOR = `user_eaa_${TS}`
 
 const q = (sql: string, params: unknown[] = []) => poolManager.get().query(sql, params)
@@ -69,6 +71,16 @@ const liveRow = async (id: string) =>
   (await q('SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2', [id, SHEET])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
 const burnCount = async () => Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
 const trashCount = async (recordId: string) => Number(((await q('SELECT count(*)::int c FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2', [recordId, SHEET])).rows[0] as { c: number }).c)
+const linkTargets = async (fieldId: string, recordId: string) =>
+  ((await q('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2 ORDER BY foreign_record_id', [fieldId, recordId])).rows as Array<{ foreign_record_id: string }>)
+    .map((r) => r.foreign_record_id)
+const linkEdgeCount = async (recordId: string) =>
+  Number(((await q('SELECT count(*)::int c FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [recordId])).rows[0] as { c: number }).c)
+const insertLink = (fieldId: string, recordId: string, foreignId: string) =>
+  q(
+    `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)`,
+    [`lnk_${fieldId}_${recordId}_${foreignId}`.slice(0, 50), fieldId, recordId, foreignId],
+  )
 
 /** Seal one synthetic operation (endpoint = exact MAX of its tagged event seqs) to serve as the anchor. */
 async function sealAnchorOp(recordId: string, eventSeqs: Array<{ seq: string; version: number; action?: 'create' | 'update' | 'delete'; snap?: Record<string, unknown> }>): Promise<string> {
@@ -92,6 +104,13 @@ async function sealAnchorOp(recordId: string, eventSeqs: Array<{ seq: string; ve
 const activate = () => txn((query) => activateCheckpoint(query, { sheetId: SHEET }))
 
 async function wipe(): Promise<void> {
+  // meta_links has no sheet_id — clear via record ownership on this sheet; tombstones are sheet-scoped.
+  await q(
+    `DELETE FROM meta_links WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)
+       OR foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)`,
+    [SHEET],
+  ).catch(() => {})
+  await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [SHEET]).catch(() => {})
   for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records'])
     await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
   await q('DELETE FROM meta_record_history_operations WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -110,16 +129,26 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'EAA Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'EAA'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_STR, SHEET, 'Note', 'string', '{}', 1])
+    // Same-sheet forward link field (writable; not a mirror) for REVERT/RESET link-parity goldens.
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [F_LINK, SHEET, 'Rel', 'link', JSON.stringify({ foreignSheetId: SHEET }), 2],
+    )
   })
   beforeEach(async () => {
     await wipe()
     process.env[FLAG] = 'true' // this test process only — the apply is meaningful with the fence/ledger on
+    delete process.env[CAPTURE_FLAG] // default OFF; individual goldens enable when proving capture
     __resetRecoveryWriterStateColumnProbe()
     __resetOperationLedgerColumnProbe()
   })
-  afterEach(() => { delete process.env[FLAG] })
+  afterEach(() => {
+    delete process.env[FLAG]
+    delete process.env[CAPTURE_FLAG]
+  })
   afterAll(async () => {
     delete process.env[FLAG]
+    delete process.env[CAPTURE_FLAG]
     await wipe()
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
@@ -500,6 +529,140 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(refusals.length).toBe(1)
     expect(refusals[0].reason).toBe('preview-drift') // the loser saw the winner's committed world
     expect(await burnCount()).toBe(1) // the loser's burn rolled back with its refusal
+  })
+
+  // ── LINK / TRASH / TOMBSTONE parity (Codex review P1 — kernel data-integrity, same txn) ──────────────────
+  test('REVERT-LINK-SYNC: at-anchor A ← live B — both meta_records.data and meta_links end at A (writable forward only)', async () => {
+    const R_A = `rec_lnk_a_${TS}`
+    const R_B = `rec_lnk_b_${TS}`
+    const R_REV = `rec_lnk_rev_${TS}`
+    await activate()
+    // Foreign targets exist at/before the anchor so reconstruction is well-formed; R_REV at-anchor points to A.
+    await revSeq(R_A, 1, 'create', { [F_STR]: 'A' }, '9000500')
+    await revSeq(R_B, 1, 'create', { [F_STR]: 'B' }, '9000600')
+    const anchorOp = await sealAnchorOp(R_REV, [
+      { seq: '9001000', version: 1, action: 'create', snap: { [F_STR]: 'rev-at-anchor', [F_LINK]: [R_A] } },
+    ])
+    await revSeq(R_REV, 2, 'update', { [F_STR]: 'rev-now', [F_LINK]: [R_B] }, '9002000')
+    await live(R_A, { [F_STR]: 'A' }, 1)
+    await live(R_B, { [F_STR]: 'B' }, 1)
+    await live(R_REV, { [F_STR]: 'rev-now', [F_LINK]: [R_B] }, 2)
+    await insertLink(F_LINK, R_REV, R_B) // live relation projection = B (authoritative meta_links)
+    expect(await linkTargets(F_LINK, R_REV)).toEqual([R_B])
+
+    const pv = await preview(anchorOp, 'revert')
+    const out = await applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
+    expect(out.ok).toBe(true)
+    // POSITIVE: both stores land on A — data alone is not enough (link reads use meta_links).
+    expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-at-anchor', [F_LINK]: [R_A] })
+    expect(await linkTargets(F_LINK, R_REV)).toEqual([R_A])
+  })
+
+  test('RESET-DELETE-PARITY: both-direction meta_links gone, trash + delete_revision_id anchored, inbound tombstone when capture ON', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    const { R_NEW, anchorOp } = await seedWorld()
+    const R_PEER = `rec_peer_${TS}`
+    // R_PEER must EXIST at the anchor (revision ≤ anchor) so reset KEEPS it — it is the inbound linker
+    // whose foreign_record_id edge would dangle without the both-direction meta_links delete.
+    await revSeq(R_PEER, 1, 'create', { [F_STR]: 'peer' }, '9000700')
+    await live(R_PEER, { [F_STR]: 'peer' }, 1)
+    // Outbound edge R_NEW → R_PEER and inbound edge R_PEER → R_NEW (foreign_record_id has no FK).
+    await q('UPDATE meta_records SET data = $1::jsonb WHERE id = $2 AND sheet_id = $3', [
+      JSON.stringify({ [F_STR]: 'newbie', [F_LINK]: [R_PEER] }),
+      R_NEW,
+      SHEET,
+    ])
+    await insertLink(F_LINK, R_NEW, R_PEER)
+    await insertLink(F_LINK, R_PEER, R_NEW)
+    expect(await linkEdgeCount(R_NEW)).toBe(2)
+
+    const pv = await preview(anchorOp, 'reset')
+    const out = await applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.applied.deletes).toBeGreaterThanOrEqual(1)
+    expect(await liveRow(R_NEW)).toBeUndefined()
+    // Both directions gone — outbound would CASCADE with the row, but inbound would dangle without explicit delete.
+    expect(await linkEdgeCount(R_NEW)).toBe(0)
+    expect(await linkTargets(F_LINK, R_PEER)).toEqual([]) // inbound edge removed
+
+    const trash = (await q(
+      `SELECT data, original_version, delete_revision_id, base_id FROM meta_records_trash
+       WHERE record_id = $1 AND sheet_id = $2`,
+      [R_NEW, SHEET],
+    )).rows[0] as { data: Record<string, unknown>; original_version: number; delete_revision_id: string | null; base_id: string | null } | undefined
+    expect(trash).toBeDefined()
+    expect(trash!.data).toEqual({ [F_STR]: 'newbie', [F_LINK]: [R_PEER] })
+    expect(trash!.original_version).toBe(1)
+    expect(trash!.base_id).toBe(BASE)
+    expect(typeof trash!.delete_revision_id).toBe('string')
+    expect(trash!.delete_revision_id).toBeTruthy()
+
+    // The delete revision shares the pre-generated id anchored on trash + tombstones.
+    const delRev = (await q(
+      `SELECT id::text AS id FROM meta_record_revisions
+       WHERE sheet_id = $1 AND record_id = $2 AND action = 'delete' AND source = 'restore'`,
+      [SHEET, R_NEW],
+    )).rows[0] as { id: string } | undefined
+    expect(delRev?.id).toBe(trash!.delete_revision_id)
+
+    // Capture ON: inbound edge R_PEER→R_NEW was tombstoned under that revision before the links DELETE.
+    const tombs = (await q(
+      `SELECT record_id, foreign_record_id, reason FROM meta_link_tombstones
+       WHERE sheet_id = $1 AND source_revision_id = $2::uuid AND reason = 'record_delete'`,
+      [SHEET, trash!.delete_revision_id],
+    )).rows as Array<{ record_id: string; foreign_record_id: string; reason: string }>
+    expect(tombs).toEqual([{ record_id: R_PEER, foreign_record_id: R_NEW, reason: 'record_delete' }])
+  })
+
+  test('LINK-TRASH-TOMBSTONE-ROLLBACK: injected seal failure rolls back link sync, both-direction link delete, trash, tombstones, revisions, burn together', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    const R_A = `rec_roll_a_${TS}`
+    const R_B = `rec_roll_b_${TS}`
+    const R_REV = `rec_roll_rev_${TS}`
+    const R_NEW = `rec_roll_new_${TS}`
+    const R_PEER = `rec_roll_peer_${TS}`
+    await activate()
+    await revSeq(R_A, 1, 'create', { [F_STR]: 'A' }, '9000500')
+    await revSeq(R_B, 1, 'create', { [F_STR]: 'B' }, '9000600')
+    const anchorOp = await sealAnchorOp(R_REV, [
+      { seq: '9001000', version: 1, action: 'create', snap: { [F_STR]: 'rev-at-anchor', [F_LINK]: [R_A] } },
+    ])
+    await revSeq(R_PEER, 1, 'create', { [F_STR]: 'peer' }, '9000700') // exists at-anchor so reset keeps peer
+    await revSeq(R_REV, 2, 'update', { [F_STR]: 'rev-now', [F_LINK]: [R_B] }, '9002000')
+    await revSeq(R_NEW, 1, 'create', { [F_STR]: 'newbie', [F_LINK]: [R_PEER] }, '9002200')
+    await live(R_A, { [F_STR]: 'A' }, 1)
+    await live(R_B, { [F_STR]: 'B' }, 1)
+    await live(R_PEER, { [F_STR]: 'peer' }, 1)
+    await live(R_REV, { [F_STR]: 'rev-now', [F_LINK]: [R_B] }, 2)
+    await live(R_NEW, { [F_STR]: 'newbie', [F_LINK]: [R_PEER] }, 1)
+    await insertLink(F_LINK, R_REV, R_B)
+    await insertLink(F_LINK, R_NEW, R_PEER)
+    await insertLink(F_LINK, R_PEER, R_NEW)
+
+    const pv = await preview(anchorOp, 'reset') // reset drives REVERT of R_REV + DELETE of R_NEW
+    const fn = `eaa_link_seal_fail_${TS}`
+    const trg = `trg_eaa_link_seal_fail_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected seal failure (link/trash rollback)'; END $$ LANGUAGE plpgsql`)
+    await q(`CREATE TRIGGER ${trg} BEFORE INSERT ON meta_record_history_operations FOR EACH ROW WHEN (NEW.sheet_id = '${SHEET}') EXECUTE FUNCTION ${fn}()`)
+    try {
+      await expect(
+        applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ }),
+      ).rejects.toThrow()
+      // REVERT link sync rolled back — still B in both stores.
+      expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-now', [F_LINK]: [R_B] })
+      expect(await linkTargets(F_LINK, R_REV)).toEqual([R_B])
+      // RESET delete side effects rolled back — live row, both edge directions, no trash, no tombstone, no burn.
+      expect(await liveRow(R_NEW)).toBeDefined()
+      expect(await linkEdgeCount(R_NEW)).toBe(2)
+      expect(await trashCount(R_NEW)).toBe(0)
+      expect(Number(((await q('SELECT count(*)::int c FROM meta_link_tombstones WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+      expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${trg} ON meta_record_history_operations`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+    }
   })
 
   // ── G1 (pre-wiring gate list): burn-retention sweep ─────────────────────────────────────────────────────

@@ -17,20 +17,70 @@ import {
 } from './restore-preview-identity'
 import { composeBaselineOverlay, type EvaluateRecoveryFullReadAccess } from './exact-anchor-recovery'
 import { classifyExactAnchorRecoveryPlan, type ExactAnchorRecoveryPlan } from './exact-anchor-recovery-plan'
+import {
+  assertWithinCaptureCap,
+  countInboundLinkCaptureRows,
+  insertInboundLinkTombstones,
+  isTombstoneCaptureEnabled,
+} from './tombstone-capture'
 
 /** Normalize a link-field cell (array | single | null) to a string[] of foreign record ids (local copy of the
- *  record-service private helper — the resurrect outbound-link rebuild needs exactly the same shape). */
+ *  record-service private helper — outbound-link sync needs exactly the same shape). */
 function normalizeLinkIds(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string' && v.length > 0)
   return typeof value === 'string' && value.length > 0 ? [value] : []
 }
 
 /**
+ * Synchronize one record's WRITABLE forward-link `meta_links` rows to exactly the ids carried by `snapshot`
+ * for each field in `writableLinkFieldIds`. Mirror-side fields are never in that list (spine invariant:
+ * mirrors never own a meta_links row). Same-txn only — never opens a nested transaction. Used by REVERT
+ * (diff-sync) and RESURRECT (insert-from-empty) so data and relation projection cannot diverge: link reads
+ * go through `meta_links`, not `meta_records.data`.
+ */
+async function syncOutboundWritableLinks(
+  query: QueryFn,
+  recordId: string,
+  snapshot: Record<string, unknown>,
+  writableLinkFieldIds: readonly string[],
+): Promise<void> {
+  for (const fieldId of writableLinkFieldIds) {
+    const ids = normalizeLinkIds(snapshot[fieldId])
+    const current = await query(
+      'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
+      [fieldId, recordId],
+    )
+    const existingIds = (current.rows as Array<{ foreign_record_id: unknown }>).map((r) => String(r.foreign_record_id))
+    const existing = new Set(existingIds)
+    const next = new Set(ids)
+    const toDelete = existingIds.filter((id) => !next.has(id))
+    const toInsert = ids.filter((id) => !existing.has(id))
+    if (toDelete.length > 0) {
+      await query(
+        'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
+        [fieldId, recordId, toDelete],
+      )
+    }
+    for (const foreignId of toInsert) {
+      await query(
+        `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
+      )
+    }
+    if (ids.length === 0) {
+      await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
+    }
+  }
+}
+
+/**
  * W0-1 v3.7 Lane L8 — the exact-anchor DESTRUCTIVE APPLY: one transaction, all-or-nothing.
  *
  * Design authority: v3.7 lock (#4331) §5 (execute = full target/schema/set recomputation UNDER THE FENCE,
- * preview verification in-fence) + §2 (canonical fence) + the L6-b gate's pinned L8 deferrals (2026-07-16):
- * (1) in-fence checkpoint re-resolution, (2) L5 baseline composition, (3) anti-replay single-use burn.
+ * preview verification in-fence; all writes + revisions/tombstones in one txn) + §2 (canonical fence) +
+ * the L6-b gate's pinned L8 deferrals (2026-07-16): (1) in-fence checkpoint re-resolution, (2) L5 baseline
+ * composition, (3) anti-replay single-use burn.
  *
  * THE SHAPE — one outer transaction, every step inside it, COMMIT once, any failure ⇒ FULL ROLLBACK with
  * zero writes (including the token burn — a refused execute leaves the world byte-identical):
@@ -61,26 +111,35 @@ function normalizeLinkIds(value: unknown): string[] {
  *   8. APPLY all-or-nothing, every write revision-emitted + ledger-tagged (L6-a; the recovery itself
  *      becomes a sealed operation — a future exact anchor):
  *        reverts    → UPDATE to the FULL at-anchor data (version+1, optimistic version guard) +
+ *                     synchronize WRITABLE forward `meta_links` to the at-anchor snapshot (link reads use
+ *                     meta_links, not data — parity with RecordWriteService / PIT reset) +
  *                     revision(action:'update', source:'restore', snapshot = at-anchor data).
+ *                     Mirror-side rows are never created (spine invariant).
  *        resurrects → lock the trash vintage FOR UPDATE → INSERT (new generation, version resets to 1 —
  *                     the MULTI-GEN convention) → rebuild WRITABLE outbound meta_links from the snapshot →
  *                     revision(action:'create', source:'restore') → DELETE the `meta_records_trash` row
  *                     (live/trash mutual exclusion; mirrors `restoreRecord`; owner P1 2026-07-17). All in
  *                     THIS txn, so an injected failure rolls the resurrect + its trash deletion back together.
- *        TOKEN mode 'reset' ONLY: DELETE `deletedAtAnchorLiveNow` + `createdAfterAnchor` rows +
- *                     revision(action:'delete', snapshot = pre-delete data). mode 'revert' KEEPS both
- *                     (non-destructive). P1-1: the mode is read from the VERIFIED CLAIMS — the caller has
- *                     no mode input; a revert-preview token can never drive a reset.
+ *        TOKEN mode 'reset' ONLY: canonical delete parity (deleteRecord / PIT-reset): pre-generate revision
+ *                     id → optional inbound-tombstone capture (flag-gated, cap-checked) → DELETE meta_links
+ *                     both directions (record_id OR foreign_record_id; foreign_record_id has no FK so inbound
+ *                     edges would otherwise dangle) → revision(action:'delete', id=pre-gen) → INSERT
+ *                     meta_records_trash (snapshot/version/timestamps/base_id/delete_revision_id) → DELETE
+ *                     live row. mode 'revert' KEEPS both non-anchor-present classes (non-destructive).
+ *                     P1-1: the mode is read from the VERIFIED CLAIMS — the caller has no mode input; a
+ *                     revert-preview token can never drive a reset.
  *   9. SEAL the operation LAST (endpoint after its events — the deferred-FK discipline).
  *
- * LAYERING CONTRACT (P1-2 narrowed it — the SECURITY adjudication is KERNEL-OWNED): full-read
- * authorization, mode authority, schema-drift whole-rejection, anti-replay, checkpoint/scope freshness, AND
- * the recovery DATA-INTEGRITY invariants (resurrect ⇒ trash-row cleanup + outbound-link rebuild = live/trash
- * mutual exclusion, owner P1 2026-07-17) all live HERE. What remains the route wiring's obligation:
- * presentation masking of RETURNED data, size ceilings (SHEET_REVERT_MAX_RECORDS-class), the BROADER
- * link-field side-effects (mirror guards, foreign-existence checks, inbound-tombstone replay), realtime
- * fan-out, HTTP mapping. NOT wired to any route in this lane; the legacy Revert/Reset
- * routes' switch onto this module is the OWNER's wiring decision behind their existing default-OFF flags
+ * LAYERING CONTRACT — KERNEL-OWNED (security + data integrity live HERE, same txn):
+ *   full-read authorization, mode authority, schema-drift whole-rejection, anti-replay, checkpoint/scope
+ *   freshness; REVERT outbound link sync; RESURRECT trash cleanup + outbound link rebuild; RESET both-
+ *   direction link delete + optional inbound tombstone capture + trash insert + delete revision anchoring.
+ * What remains the route wiring's obligation (NOT deferred integrity):
+ *   presentation masking of RETURNED data, size ceilings (SHEET_REVERT_MAX_RECORDS-class), foreign-existence
+ *   preflight / mirror-diff route guards, realtime fan-out, HTTP mapping, and AT-ANCHOR-vs-terminal inbound
+ *   tombstone REPLAY for resurrect (a different vintage than the post-anchor terminal delete — future mode).
+ * NOT wired to any route in this lane; the legacy Revert/Reset routes' switch onto this module is the
+ * OWNER's wiring decision behind their existing default-OFF flags
  * (`MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET`). Default-off by construction: nothing
  * reaches this module today.
  */
@@ -197,14 +256,36 @@ export async function applyExactAnchorRecovery(
       //        version-bumping write / create / delete since the preview changes it — the actor must apply
       //        exactly the world they previewed (the T-path's changesHash discipline, set-level). Read the
       //        live rows HERE (they double as the plan input below — one read, checked and planned).
-      const liveById = new Map<string, { data: Record<string, unknown>; version: number; locked?: unknown; locked_by?: unknown; created_by?: unknown }>()
-      for (const r of (await query('SELECT id, data, version, locked, locked_by, created_by FROM meta_records WHERE sheet_id = $1', [input.sheetId])).rows as Array<{ id: unknown; data: unknown; version: unknown; locked?: unknown; locked_by?: unknown; created_by?: unknown }>) {
+      const liveById = new Map<string, {
+        data: Record<string, unknown>
+        version: number
+        locked?: unknown
+        locked_by?: unknown
+        created_by?: unknown
+        created_at?: unknown
+        updated_at?: unknown
+      }>()
+      for (const r of (await query(
+        'SELECT id, data, version, locked, locked_by, created_by, created_at, updated_at FROM meta_records WHERE sheet_id = $1',
+        [input.sheetId],
+      )).rows as Array<{
+        id: unknown
+        data: unknown
+        version: unknown
+        locked?: unknown
+        locked_by?: unknown
+        created_by?: unknown
+        created_at?: unknown
+        updated_at?: unknown
+      }>) {
         liveById.set(String(r.id), {
           data: asRec(r.data),
           version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0,
           locked: r.locked,
           locked_by: r.locked_by,
           created_by: r.created_by,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
         })
       }
       const liveHash = hashAnchorRecoveryScope(
@@ -230,6 +311,24 @@ export async function applyExactAnchorRecovery(
       // 7. Apply — every write revision-emitted + ledger-tagged; a single failure rolls EVERYTHING back.
       const op = await mintOperation(query, input.sheetId)
 
+      // Writable forward link fields once for the sheet (revert + resurrect share the same set).
+      // Mirror-side (`isFieldAlwaysReadOnly` via mirrorOf) is EXCLUDED — spine invariant.
+      const needLinkFields = plan.reverts.length > 0 || plan.resurrects.length > 0
+      const writableLinkFieldIds: string[] = needLinkFields
+        ? (await loadFieldsForSheet(query, input.sheetId))
+            .filter((f) => f.type === 'link' && !isFieldAlwaysReadOnly(f))
+            .map((f) => f.id)
+        : []
+
+      // RESET trash needs sheet base_id once (best-effort; mirrors deleteRecord).
+      let sheetBaseId: string | null = null
+      if (mode === 'reset' && (plan.deletedAtAnchorLiveNow.length > 0 || plan.createdAfterAnchor.length > 0)) {
+        const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [input.sheetId])).rows[0] as
+          | { base_id?: unknown }
+          | undefined
+        sheetBaseId = baseRow && typeof baseRow.base_id === 'string' ? baseRow.base_id : null
+      }
+
       for (const r of plan.reverts) {
         // Lock discipline (rank-8, mirrors the T-path recovery): a LOCKED record refuses the apply — and
         // because this apply is all-or-nothing, one locked record aborts the WHOLE recovery loudly (unlock
@@ -247,6 +346,9 @@ export async function applyExactAnchorRecovery(
         const row = upd.rows[0] as { version?: unknown } | undefined
         // In-fence, post-drift-check: a 0-row update here is an internal invariant break — abort everything.
         if (!row) throw new Error(`exact-anchor apply: optimistic version guard failed for ${r.recordId}`)
+        // KERNEL data-integrity: sync writable outbound meta_links to the at-anchor snapshot (same txn).
+        // Without this, data and relation projection diverge — loadLinkValuesByRecord reads meta_links.
+        await syncOutboundWritableLinks(query, r.recordId, r.targetData, writableLinkFieldIds)
         // revision-emitted: L8 revert apply — action:'update', source:'restore', full at-anchor snapshot.
         await recordRecordRevision(query, {
           sheetId: input.sheetId,
@@ -271,11 +373,6 @@ export async function applyExactAnchorRecovery(
       // snapshot (so link reads aren't silently empty; mirror side skipped — the spine invariant is
       // structural), then DELETE the trash row — ALL inside this same all-or-nothing txn, so an injected
       // later failure rolls back the INSERT, the revision, the link rebuild AND the trash deletion together.
-      const resurrectLinkFieldIds: string[] = plan.resurrects.length > 0
-        ? (await loadFieldsForSheet(query, input.sheetId))
-            .filter((f) => f.type === 'link' && !isFieldAlwaysReadOnly(f))
-            .map((f) => f.id)
-        : []
       for (const s of plan.resurrects) {
         // Lock this record's trash vintage(s) FIRST (4c-3 C4 discipline): a concurrent restore/resurrect of
         // the same id serializes here; the loser sees the rows gone and the whole apply aborts, never racing
@@ -289,17 +386,8 @@ export async function applyExactAnchorRecovery(
           'INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)',
           [s.recordId, input.sheetId, JSON.stringify(s.snapshot), input.actorId],
         )
-        // Rebuild outbound meta_links from the at-anchor snapshot (writable/forward links only) — same insert
-        // shape as create/patch/restoreRecord; `loadLinkValuesByRecord` reads meta_links, not `data`.
-        for (const fieldId of resurrectLinkFieldIds) {
-          for (const foreignId of normalizeLinkIds((s.snapshot as Record<string, unknown>)[fieldId])) {
-            await query(
-              `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-               VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-              [`lnk_${randomUUID()}`.slice(0, 50), fieldId, s.recordId, foreignId],
-            )
-          }
-        }
+        // Rebuild outbound meta_links from the at-anchor snapshot (writable/forward links only).
+        await syncOutboundWritableLinks(query, s.recordId, s.snapshot as Record<string, unknown>, writableLinkFieldIds)
         // revision-emitted: L8 resurrect apply — action:'create', source:'restore', at-anchor snapshot.
         await recordRecordRevision(query, {
           sheetId: input.sheetId,
@@ -317,7 +405,8 @@ export async function applyExactAnchorRecovery(
         // also drops the `delete_revision_id` anchor that was mis-pinning tombstone/retention. (Inbound-edge
         // REPLAY from those terminal-vintage tombstones is deliberately NOT done here: this apply reconstructs
         // the AT-ANCHOR state, a different vintage than the terminal delete the tombstones belong to — a naive
-        // replay would restore edges from the wrong vintage. That is a route-wiring / future-mode concern.)
+        // replay would restore edges from the wrong vintage. That is a route/future-mode concern, not a
+        // deferred integrity gap for the apply itself.)
         await query('DELETE FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2', [s.recordId, input.sheetId])
       }
 
@@ -329,14 +418,24 @@ export async function applyExactAnchorRecovery(
           if (!live) continue // defensive: classified live moments ago, under the fence it must still be
           // Lock discipline (rank-8): a LOCKED record aborts the whole all-or-nothing reset (unlock first).
           ensureRecordNotLocked(input.actorId, live, () => new Error(`exact-anchor apply refused: record ${recordId} is locked`))
-          // lock-guarded: L8 reset delete — ensureRecordNotLocked just above, same txn.
-          // revision-emitted: L8 reset delete — recordRecordRevision below, same txn (source 'restore').
-          const del = await query(
-            'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2 RETURNING version',
-            [recordId, input.sheetId],
-          )
-          if (!del.rows[0]) throw new Error(`exact-anchor apply: reset delete found no row for ${recordId}`)
-          // revision-emitted: L8 reset delete — action:'delete', pre-delete snapshot (LOCK-9 convention).
+          // Canonical delete parity (deleteRecord / PIT-reset ~10867-10922), same txn, ledger-tagged:
+          //   pre-gen revision id → optional inbound tombstone capture → both-direction meta_links delete
+          //   → delete revision with that id → trash (snapshot/version/timestamps/base_id/delete_revision_id)
+          //   → hard-delete live row.
+          // foreign_record_id has no FK: without the both-direction link delete, inbound edges dangle.
+          const resetDeleteRevisionId = randomUUID()
+          if (isTombstoneCaptureEnabled()) {
+            const totalToCapture = await countInboundLinkCaptureRows(query, recordId)
+            assertWithinCaptureCap(totalToCapture) // fail-closed — never a partial capture + completed destroy
+            await insertInboundLinkTombstones(query, {
+              sheetId: input.sheetId,
+              recordId,
+              sourceRevisionId: resetDeleteRevisionId,
+            })
+          }
+          await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [recordId])
+          // lock-guarded: L8 reset delete — ensureRecordNotLocked above, same txn.
+          // revision-emitted: L8 reset delete — pre-gen id so trash + tombstones share the causal anchor.
           await recordRecordRevision(query, {
             sheetId: input.sheetId,
             recordId,
@@ -347,8 +446,35 @@ export async function applyExactAnchorRecovery(
             changedFieldIds: [],
             patch: {},
             snapshot: live.data,
+            id: resetDeleteRevisionId,
             ledger: op,
           })
+          const createdBy = typeof live.created_by === 'string' ? live.created_by : null
+          await query(
+            `INSERT INTO meta_records_trash
+               (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by,
+                original_created_at, original_updated_at, delete_revision_id)
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+            [
+              recordId,
+              input.sheetId,
+              sheetBaseId,
+              JSON.stringify(live.data),
+              live.version,
+              createdBy,
+              input.actorId,
+              live.created_at ?? null,
+              live.updated_at ?? null,
+              resetDeleteRevisionId,
+            ],
+          )
+          // lock-guarded: L8 reset delete — ensureRecordNotLocked earlier in this loop body, same txn.
+          // revision-emitted: L8 reset delete — recordRecordRevision(action:'delete', id=pre-gen) above, same txn.
+          const del = await query(
+            'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2 RETURNING version',
+            [recordId, input.sheetId],
+          )
+          if (!del.rows[0]) throw new Error(`exact-anchor apply: reset delete found no row for ${recordId}`)
           deletes++
         }
       }
