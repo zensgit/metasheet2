@@ -791,6 +791,7 @@ jobs:
             tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts \
             tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts \
             tests/integration/attendance-approval-dept-head-s7-3.db.test.ts \
+            tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

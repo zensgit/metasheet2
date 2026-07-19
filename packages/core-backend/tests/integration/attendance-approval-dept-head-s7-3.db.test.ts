@@ -510,21 +510,21 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
     expect(steps).toEqual([{ name: undefined, kind: 'dept_head' }])
   })
 
-  it('AUTHORING: manager_at_level still UNAVAILABLE (S7-4 not shipped)', async () => {
+  it('AUTHORING: continuous_managers stays OUT-of-v1 (KIND_INVALID, not silent accept)', async () => {
     setFlag(true)
     const res = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
       method: 'POST',
       headers: authHeaders(adminToken),
       body: JSON.stringify({
-        name: `s7-3-mal-unavail-${runSuffix}`,
+        name: `s7-3-cm-out-${runSuffix}`,
         requestType: 'time_correction',
-        steps: [{ kind: 'manager_at_level', level: 1 }],
+        steps: [{ kind: 'continuous_managers', levels: 2 }],
         orgId: orgHome,
         isActive: true,
       }),
     })
     expect(res.status, res.raw).toBe(422)
-    expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
+    expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_INVALID')
   })
 
   // ── Linked resolution + freeze + assignment ──

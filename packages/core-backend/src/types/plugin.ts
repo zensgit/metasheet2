@@ -979,7 +979,7 @@ export interface PluginServices {
     }): (() => void)
   }
   /**
-   * S7-1/S7-2/S7-3 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic
+   * S7-1..S7-4 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic
    * approval-assignee kinds (直属上级 `direct_manager` / 部门主管 `dept_head` / 多级上级
    * `manager_at_level`), per the RATIFIED attendance-approval-s7 resolver design-lock, OD-S7-5 = (d).
    * It mirrors `workdayCalendar` above but runs the OPPOSITE direction: core-backend is the PROVIDER,
@@ -993,13 +993,15 @@ export interface PluginServices {
    *   The plugin validates `manager_at_level.level ∈ [1, maxManagerChainLevels]` against THIS value so it
    *   never re-parses the env var into a second constant — one source, two surfaces, no drift.
    * - `implementedKinds` is the set of dynamic kinds this host build can actually resolve at runtime.
-   *   S7-2/S7-3 populate `direct_manager` + `dept_head`; `manager_at_level` remains S7-4.
-   *   A kind absent from this list is unimplemented ⇒ the plugin fail-closes.
+   *   S7-2/S7-3/S7-4 populate `direct_manager` + `dept_head` + `manager_at_level` (NOT
+   *   `continuous_managers` — OD-S7-2 OUT-of-v1). A kind absent from this list is unimplemented ⇒
+   *   the plugin fail-closes.
    * - `resolve` is the org-scoped CREATE-TIME freeze seam (§3.3 / §3.4). For `direct_manager` /
-   *   `dept_head` it runs the kernel's `resolveApprovalRequesterOrgRelations` with the attendance
-   *   `orgId` anchor, returns the linked local manager / dept head (or `unresolved`), and NEVER writes.
-   *   Step-advance must NOT call this again — it reads only the frozen `requesterSnapshot.managerId` /
-   *   `deptHeadId`. Self-exclusion is enforced here (resolving to the requester is treated as unresolved).
+   *   `dept_head` it returns a single linked local assignee; for `manager_at_level` with no level it
+   *   returns the FULL dense chain as ordered assignees (plugin freezes `managerChainIds`); with an
+   *   integer level it returns the single positional pick. Step-advance must NOT call this again —
+   *   it reads only the frozen `requesterSnapshot.managerId` / `deptHeadId` / `managerChainIds`.
+   *   Self-exclusion is enforced here (resolving to the requester is treated as unresolved).
    */
   approvalAssigneeResolver?: {
     readonly maxManagerChainLevels: number

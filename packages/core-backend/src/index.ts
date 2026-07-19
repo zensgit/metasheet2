@@ -959,21 +959,21 @@ export class MetaSheetServer {
     return wrappedUnregister
   }
 
-  // S7-1/S7-2/S7-3 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host
+  // S7-1..S7-4 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host
   // binding for the narrow, org-scoped dynamic approval-assignee resolver port plugin-attendance
   // consumes. Exposes the SAME MAX_MANAGER_CHAIN_LEVELS constant the kernel uses (no plugin env
   // re-parse). S7-2 wires `direct_manager` (byte-identical to ApprovalDirectoryOrg §2.1); S7-3 adds
-  // `dept_head` (byte-identical to §2.2: first-linked dept_manager_userid_list entry, self-exclusion).
-  // `manager_at_level` stays unimplemented (S7-4). Directory data is READ-ONLY.
+  // `dept_head` (byte-identical to §2.2); S7-4 adds `manager_at_level` (dense chain positional pick,
+  // §2.3 B1 — includeManagerChain walk, self-exclusion, no continuous_managers). Directory READ-ONLY.
   private buildApprovalAssigneeResolverPort(): NonNullable<
     import('./types/plugin').PluginServices['approvalAssigneeResolver']
   > {
     return {
       maxManagerChainLevels: MAX_MANAGER_CHAIN_LEVELS,
-      implementedKinds: ['direct_manager', 'dept_head'],
+      implementedKinds: ['direct_manager', 'dept_head', 'manager_at_level'],
       resolve: async (orgId, request) => {
         const kind = typeof request?.kind === 'string' ? request.kind.trim() : ''
-        if (kind !== 'direct_manager' && kind !== 'dept_head') {
+        if (kind !== 'direct_manager' && kind !== 'dept_head' && kind !== 'manager_at_level') {
           return { status: 'unimplemented' as const }
         }
 
@@ -990,8 +990,10 @@ export class MetaSheetServer {
         const queryFn = <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> =>
           pgQuery(text, params).then((r) => ({ rows: r.rows as Row[] }))
 
+        // manager_at_level needs the dense manager chain (includeManagerChain); other kinds do not.
         const relations = await resolveApprovalRequesterOrgRelations(requesterUserId, queryFn, {
           orgId: normalizedOrgId,
+          includeManagerChain: kind === 'manager_at_level',
         })
 
         // S7-2 direct_manager — preserved byte-for-byte (reads only managerId).
@@ -1015,21 +1017,57 @@ export class MetaSheetServer {
         }
 
         // S7-3 dept_head — same org-anchored relations call; read ONLY deptHeadId (§2.2).
-        const deptHeadId =
-          typeof relations.deptHeadId === 'string' && relations.deptHeadId.trim().length > 0
-            ? relations.deptHeadId.trim()
-            : null
-        // Self-exclusion at the resolver (§2.2): a dept head that resolves to the requester is treated
-        // as unresolved — never written as a self-assignment.
-        if (!deptHeadId || deptHeadId === requesterUserId) {
-          return {
-            status: 'unresolved' as const,
-            reason: deptHeadId === requesterUserId ? 'self_dept_head' : 'no_dept_head_linked',
+        if (kind === 'dept_head') {
+          const deptHeadId =
+            typeof relations.deptHeadId === 'string' && relations.deptHeadId.trim().length > 0
+              ? relations.deptHeadId.trim()
+              : null
+          // Self-exclusion at the resolver (§2.2): a dept head that resolves to the requester is treated
+          // as unresolved — never written as a self-assignment.
+          if (!deptHeadId || deptHeadId === requesterUserId) {
+            return {
+              status: 'unresolved' as const,
+              reason: deptHeadId === requesterUserId ? 'self_dept_head' : 'no_dept_head_linked',
+            }
           }
+          return {
+            status: 'resolved' as const,
+            assignees: [{ assignmentType: 'user' as const, assigneeId: deptHeadId }],
+          }
+        }
+
+        // S7-4 manager_at_level — dense chain from includeManagerChain walk (§2.3 B1).
+        // CREATE-TIME freeze (no level): return the FULL dense chain as ordered assignees so the
+        // plugin freezes requesterSnapshot.managerChainIds once; step-advance never re-calls this.
+        // With integer level: single positional pick chain[level-1] (1 = direct manager).
+        // Self-exclusion / unlinked walk-through / cycle / maxLevels are owned by ApprovalDirectoryOrg.
+        const rawChain = Array.isArray(relations.managerChainIds) ? relations.managerChainIds : []
+        const chain = rawChain
+          .map((id) => (typeof id === 'string' ? id.trim() : ''))
+          .filter((id) => id.length > 0 && id !== requesterUserId)
+
+        const level = request?.level
+        if (typeof level === 'number' && Number.isInteger(level) && level >= 1) {
+          const managerId = chain[level - 1] ?? null
+          if (!managerId) {
+            return {
+              status: 'unresolved' as const,
+              reason: chain.length === 0 ? 'no_manager_chain' : 'chain_shorter_than_level',
+            }
+          }
+          return {
+            status: 'resolved' as const,
+            assignees: [{ assignmentType: 'user' as const, assigneeId: managerId }],
+          }
+        }
+
+        // Freeze path (no level): empty chain ⇒ unresolved; else ordered assignees = dense chain.
+        if (chain.length === 0) {
+          return { status: 'unresolved' as const, reason: 'no_manager_chain' }
         }
         return {
           status: 'resolved' as const,
-          assignees: [{ assignmentType: 'user' as const, assigneeId: deptHeadId }],
+          assignees: chain.map((assigneeId) => ({ assignmentType: 'user' as const, assigneeId })),
         }
       },
     }

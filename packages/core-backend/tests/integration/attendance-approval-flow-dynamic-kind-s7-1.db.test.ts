@@ -254,14 +254,27 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     })
   }
 
-  // S7-2/S7-3 implement direct_manager + dept_head: keep this leg as a fail-closed proof for an
-  // STILL-unimplemented kind (manager_at_level / S7-4) so the UNAVAILABLE gate remains mutation-provable.
-  it('CREATE rejects a shape-valid but unimplemented dynamic kind (manager_at_level) with flag ON → 422 APPROVAL_STEP_KIND_UNAVAILABLE', async () => {
+  // S7-2/S7-3/S7-4 implement all three recognized dynamic kinds. continuous_managers remains
+  // OUT-of-v1 (OD-S7-2) → KIND_INVALID (not silent accept / admin fallback). Flag-off still
+  // proves UNAVAILABLE for shape-valid kinds elsewhere in this suite.
+  it('CREATE rejects OUT-of-v1 continuous_managers with flag ON → 422 APPROVAL_STEP_KIND_INVALID', async () => {
     setFlag(true)
     try {
-      const res = await createFlow([{ kind: 'manager_at_level', level: 1 }], `s7-1-unavail-${runSuffix}`)
+      const res = await createFlow([{ kind: 'continuous_managers', levels: 2 }], `s7-1-cm-out-${runSuffix}`)
       expect(res.status, res.raw).toBe(422)
-      expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
+      expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_INVALID')
+    } finally {
+      setFlag(false)
+    }
+  })
+
+  it('CREATE accepts manager_at_level when flag ON (S7-4 implements the kind)', async () => {
+    setFlag(true)
+    try {
+      const res = await createFlow([{ kind: 'manager_at_level', level: 1 }], `s7-1-mal-ok-${runSuffix}`)
+      expect(res.status, res.raw).toBe(201)
+      const steps = (res.body as { data?: { steps?: unknown[] } }).data?.steps
+      expect(steps).toEqual([{ name: undefined, kind: 'manager_at_level', level: 1 }])
     } finally {
       setFlag(false)
     }
