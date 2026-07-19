@@ -10,7 +10,10 @@ import {
   resolveApprovalActorDepartmentIds,
   resolveCreateApprovalActorFromRequest,
 } from '../../src/routes/approvals'
+import { isCreateApprovalTemplateManager as isCreateApprovalTemplateManagerShared } from '../../src/services/approval-template-manager'
 import { authorizeUploadTarget } from '../../src/services/approval-attachment-runtime'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 function fakeReq(user: Record<string, unknown>): Request {
   return { user } as unknown as Request
@@ -58,6 +61,35 @@ describe('createApproval actor resolver parity (export from approvals route)', (
     expect(isCreateApprovalTemplateManager({ roles: [], permissions: ['approvals:admin-templates'] })).toBe(true)
     expect(isCreateApprovalTemplateManager({ roles: [], permissions: ['approvals:*'] })).toBe(true)
     expect(isCreateApprovalTemplateManager({ roles: [], permissions: ['*:*'] })).toBe(true)
+  })
+
+  test('SINGLE predicate: routes re-export === shared module; createApproval source imports the shared one', () => {
+    // Identity: the routes export IS the shared function (not a copy).
+    expect(isCreateApprovalTemplateManager).toBe(isCreateApprovalTemplateManagerShared)
+    // Both paths agree on a mutation-sensitive case
+    const cases: Array<{ roles: string[]; permissions: string[]; want: boolean }> = [
+      { roles: [], permissions: ['approvals:admin'], want: false },
+      { roles: ['admin'], permissions: [], want: true },
+      { roles: [], permissions: ['approval-templates:manage'], want: true },
+    ]
+    for (const c of cases) {
+      expect(isCreateApprovalTemplateManager(c)).toBe(c.want)
+      expect(isCreateApprovalTemplateManagerShared(c)).toBe(c.want)
+    }
+    // Source pin: assembleCreationContext must call the shared helper, not an inline OR-chain.
+    // Mutating one path to an inline formula while leaving the other would RED this check.
+    const productSrc = readFileSync(join(__dirname, '../../src/services/ApprovalProductService.ts'), 'utf8')
+    expect(productSrc).toMatch(/isCreateApprovalTemplateManager\s*\(/)
+    expect(productSrc).toMatch(/from\s+['"]\.\/approval-template-manager['"]/)
+    // Must not re-inline the OR-chain for isTemplateManager in assembleCreationContext
+    expect(productSrc).not.toMatch(
+      /isTemplateManager:\s*\(actor\.permissions[\s\S]{0,200}approval-templates:manage/,
+    )
+    const routesSrc = readFileSync(join(__dirname, '../../src/routes/approvals.ts'), 'utf8')
+    expect(routesSrc).toMatch(/from\s+['"]\.\.\/services\/approval-template-manager['"]/)
+    expect(routesSrc).not.toMatch(
+      /function isCreateApprovalTemplateManager/,
+    )
   })
 })
 

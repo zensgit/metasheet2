@@ -74,6 +74,15 @@ export const APPROVAL_ATTACHMENT_MAX_GET_BYTES = 20 * 1024 * 1024
 /**
  * Accumulate a GetObject body with a hard byte cap. Throws `storage_unavailable` (values-free)
  * if ContentLength or accumulated bytes exceed the ratified 20 MiB cap.
+ *
+ * **Iteration order is load-bearing for the memory guard:** whenever the body exposes
+ * `Symbol.asyncIterator`, prefer bounded async chunk accumulation so a hostile oversized
+ * object is rejected without buffering the whole payload first. Real AWS SDK v3 bodies
+ * expose BOTH `transformToByteArray` and async iteration — calling transform first would
+ * materialize the entire object and make the cap vacuous.
+ *
+ * `transformToByteArray` is used only when the body is NOT async-iterable (and ContentLength
+ * has already been checked as a precondition).
  */
 export async function streamToBufferCapped(
   body: unknown,
@@ -92,20 +101,27 @@ export async function streamToBufferCapped(
     if (body.byteLength > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
     return Buffer.from(body)
   }
+  // Prefer bounded async iteration when available (AWS SDK Readable bodies are async-iterable).
+  const asyncIterable = body as { [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array | string> }
+  if (typeof asyncIterable[Symbol.asyncIterator] === 'function') {
+    const chunks: Buffer[] = []
+    let total = 0
+    for await (const chunk of body as AsyncIterable<Uint8Array | string>) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      total += buf.length
+      if (total > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
+      chunks.push(buf)
+    }
+    return Buffer.concat(chunks)
+  }
+  // Non-iterable fallback: transformToByteArray only when ContentLength was already checked above
+  // (or is unknown — still reject if the fully-buffered result exceeds the cap).
   if (typeof (body as { transformToByteArray?: () => Promise<Uint8Array> }).transformToByteArray === 'function') {
     const bytes = await (body as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray()
     if (bytes.byteLength > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
     return Buffer.from(bytes)
   }
-  const chunks: Buffer[] = []
-  let total = 0
-  for await (const chunk of body as AsyncIterable<Uint8Array | string>) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    total += buf.length
-    if (total > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
-    chunks.push(buf)
-  }
-  return Buffer.concat(chunks)
+  throw new ApprovalAttachmentStorageError('storage_unavailable')
 }
 
 /**

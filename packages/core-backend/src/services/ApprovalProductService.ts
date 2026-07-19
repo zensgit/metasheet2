@@ -53,6 +53,7 @@ import {
   stripAttachmentFormData,
 } from './approval-attachment-runtime'
 import { bindAttachmentsOnSubmit } from './approval-attachment-reconciler'
+import { isCreateApprovalTemplateManager } from './approval-template-manager'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import {
@@ -3558,11 +3559,11 @@ export class ApprovalProductService {
       departmentIds: actor.departmentIds ?? (actor.department ? [actor.department] : []),
       roles: actor.roles ?? [],
       permissions: actor.permissions ?? [],
-      isTemplateManager: (actor.permissions ?? []).includes('approval-templates:manage')
-        || (actor.permissions ?? []).includes('approvals:admin-templates')
-        || (actor.permissions ?? []).includes('approvals:*')
-        || (actor.permissions ?? []).includes('*:*')
-        || (actor.roles ?? []).includes('admin'),
+      // Shared predicate with attachment upload actor (approval-template-manager.ts).
+      isTemplateManager: isCreateApprovalTemplateManager({
+        roles: actor.roles,
+        permissions: actor.permissions,
+      }),
     })
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')

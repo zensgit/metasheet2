@@ -236,4 +236,35 @@ describe('S3ApprovalAttachmentStore', () => {
     })
     await expect(oversized.get(KEY)).rejects.toMatchObject({ code: 'storage_unavailable' })
   })
+
+  test('streamToBufferCapped prefers asyncIterator over transformToByteArray (memory guard)', async () => {
+    const {
+      APPROVAL_ATTACHMENT_MAX_GET_BYTES,
+      streamToBufferCapped,
+    } = await import('../../src/services/approval-attachment-s3-store')
+
+    let transformCalled = false
+    let chunksRead = 0
+    // Body exposing BOTH methods: transform would buffer the whole hostile object if preferred.
+    const dualBody = {
+      transformToByteArray: async () => {
+        transformCalled = true
+        throw new Error('transform must not be called when asyncIterator exists')
+      },
+      async *[Symbol.asyncIterator]() {
+        chunksRead += 1
+        yield Buffer.alloc(APPROVAL_ATTACHMENT_MAX_GET_BYTES - 5)
+        chunksRead += 1
+        yield Buffer.alloc(20) // exceeds cap — must reject BEFORE a later chunk would be needed
+        chunksRead += 1
+        yield Buffer.alloc(1000) // must never be reached
+      },
+    }
+    await expect(streamToBufferCapped(dualBody, APPROVAL_ATTACHMENT_MAX_GET_BYTES)).rejects.toMatchObject({
+      code: 'storage_unavailable',
+    })
+    expect(transformCalled).toBe(false)
+    // Rejected after the second chunk; third chunk never yielded
+    expect(chunksRead).toBe(2)
+  })
 })

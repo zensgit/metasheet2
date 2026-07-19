@@ -43,7 +43,11 @@ import {
 } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
+import { isCreateApprovalTemplateManager } from '../services/approval-template-manager'
 import type { FormSchema } from '../types/approval-product'
+
+// Re-export for attachment upload actor parity tests (body in approval-template-manager.ts).
+export { isCreateApprovalTemplateManager }
 
 const logger = new Logger('ApprovalsRouter')
 const MAX_APPROVAL_PAGE_SIZE = 200
@@ -169,25 +173,6 @@ export function resolveApprovalTenantId(req: Request): string | undefined {
   if (typeof candidate !== 'string') return undefined
   const normalized = candidate.trim()
   return normalized.length > 0 ? normalized : undefined
-}
-
-/**
- * EXACT isTemplateManager predicate used by createApproval's assembleCreationContext
- * (ApprovalProductService). Does NOT treat `approvals:admin` alone as a visibility bypass —
- * that permission is operational admin, not template-manager. Keep this formula the single
- * source for upload authorizeUploadTarget parity.
- */
-export function isCreateApprovalTemplateManager(actor: {
-  roles?: readonly string[]
-  permissions?: readonly string[]
-}): boolean {
-  const permissions = actor.permissions ?? []
-  const roles = actor.roles ?? []
-  return permissions.includes('approval-templates:manage')
-    || permissions.includes('approvals:admin-templates')
-    || permissions.includes('approvals:*')
-    || permissions.includes('*:*')
-    || roles.includes('admin')
 }
 
 /**

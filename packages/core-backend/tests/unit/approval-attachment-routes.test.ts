@@ -249,4 +249,53 @@ describe('approval attachment routes', () => {
       ).status,
     ).toBe(503)
   })
+
+  test('download: store throws not_found after auth → values-free 503 (not 500 lifecycle oracle)', async () => {
+    // DB row authorizes, but blob is missing (or store classifies as not_found). Wire must be 503
+    // storage_unavailable — object missing is retryable/reconcilable, not a client 404/500 oracle.
+    const row = {
+      status: 'bound',
+      uploader_id: 'up1',
+      instance_id: 'i1',
+      field_id: 'fld1',
+      storage_key: 'missing-key',
+      file_name: 'a.pdf',
+      mime_type: 'application/pdf',
+      scan_state: 'clean',
+    }
+    const { app, blobs } = makeApp({ rows: [row], participant: true })
+    // Do not seed blob — store.get throws. Map missing → not_found via store that throws code.
+    const store = {
+      put: async () => {},
+      get: async () => {
+        throw Object.assign(new Error('not_found'), { code: 'not_found' })
+      },
+      delete: async () => false,
+    }
+    const router = createApprovalAttachmentRouter({
+      db: {
+        query: async () => ({ rows: [row], rowCount: 1 }),
+      },
+      store,
+      authorizeCreate: (_r, _s, n) => n(),
+      authChecks: {
+        isInstanceParticipant: async () => true,
+        isFieldHiddenAtActiveNode: async () => false,
+      },
+      viewerContext: () => ({ id: 'u1', roles: [], isAdmin: false }),
+      orgId: () => 'org1',
+      uploadActor: () => ({ userId: 'u1' }),
+      authorizeUploadTarget: async () => ({ ok: true }),
+      env: FLAG_ON,
+    })
+    const app2 = express()
+    if (router) app2.use(router)
+    pinned.setApp(app2)
+    const r = await request(pinned.url()).get('/api/approvals/attachments/att_1/download')
+    expect(r.status).toBe(503)
+    expect(r.body).toEqual({ error: 'storage_unavailable' })
+    expect(JSON.stringify(r.body)).not.toMatch(/missing-key|storage_key|not_found/)
+    void app
+    void blobs
+  })
 })

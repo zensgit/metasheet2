@@ -111,7 +111,15 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
       void fn(req, res).catch((err: unknown) => {
         if (!res.headersSent) {
           const code = (err as { code?: unknown } | null)?.code
-          if (code === 'storage_unavailable' || code === 'misconfigured' || code === 'local_in_production') {
+          // storage_unavailable + proven object-missing after DB auth → values-free 503.
+          // Object-missing is NOT a lifecycle/existence oracle once the row authorized: the
+          // attachment row is live but the blob is unavailable (retryable / reconcilable).
+          if (
+            code === 'storage_unavailable'
+            || code === 'misconfigured'
+            || code === 'local_in_production'
+            || code === 'not_found'
+          ) {
             res.status(503).json({ error: 'storage_unavailable' })
             return
           }
