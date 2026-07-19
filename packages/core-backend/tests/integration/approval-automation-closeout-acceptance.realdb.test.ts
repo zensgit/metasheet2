@@ -241,23 +241,36 @@ export function closeoutManifestPinnedFiles(): string[] {
  * Comment-only occurrences and bare substring matches do NOT count.
  */
 function hasExactQuotedExcludeEntry(vitestConfigSource: string, file: string): boolean {
-  const single = `'${file}'`
-  const double = `"${file}"`
-  for (const rawLine of vitestConfigSource.split('\n')) {
-    // Strip // line comments so a commented-out exclude cannot keep this green.
+  const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const exactEntry = new RegExp(`^\\s*['"]${escaped}['"]\\s*,?\\s*$`)
+  // Remove block comments first, then line comments. A path copied into prose must not
+  // satisfy the no-DB exclusion contract.
+  const withoutBlockComments = vitestConfigSource.replace(/\/\*[\s\S]*?\*\//g, '')
+  for (const rawLine of withoutBlockComments.split('\n')) {
     const code = rawLine.replace(/\/\/.*$/, '')
-    // Exact quoted token only — rejects longer paths that merely contain `file` as a prefix.
-    if (code.includes(single) || code.includes(double)) return true
+    if (exactEntry.test(code)) return true
   }
   return false
 }
 
 function hasExecutablePluginTestsRunListLine(pluginTestsYml: string, file: string): boolean {
-  // Executable run-list lines look like: `            tests/integration/foo.test.ts \`
-  // (optional trailing backslash). Reject: leading `#`, empty, or any extra tokens/substrings.
+  // Executable run-list lines live inside a YAML `run: |` scalar and look like:
+  // `            tests/integration/foo.test.ts \` (optional trailing backslash).
+  // Reject paths in comments, descriptions, or any other YAML scalar.
   const exactLine = new RegExp(`^\\s+${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s*\\\\)?\\s*$`)
+  let runBlockIndent: number | undefined
   for (const rawLine of pluginTestsYml.split('\n')) {
     const trimmed = rawLine.trim()
+    const indent = rawLine.length - rawLine.trimStart().length
+    if (/^run:\s*\|\s*(?:#.*)?$/.test(trimmed)) {
+      runBlockIndent = indent
+      continue
+    }
+    if (runBlockIndent === undefined) continue
+    if (trimmed.length > 0 && indent <= runBlockIndent) {
+      runBlockIndent = undefined
+      continue
+    }
     if (trimmed.length === 0 || trimmed.startsWith('#')) continue
     if (exactLine.test(rawLine)) return true
   }
