@@ -54,8 +54,8 @@ import {
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult } from './automation-executor'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import {
-  assertFwbRuntimeActivatable,
   parseWriteApprovalFormValuesConfig,
+  requireFwbActivationForEnabledRule,
 } from './approval-fwb-runtime'
 import { verifyFwbConfirmation } from './approval-fwb-confirmation'
 import { loadTargetFieldsFromMeta } from './approval-fwb-target-fields'
@@ -83,7 +83,7 @@ import {
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import type { ApprovalTaskCreatedEventV1 } from '../services/ApprovalTaskCreatedEvent'
-import { applyTemplateVisibilityFilter, type ApprovalTemplateVisibilityActor } from '../services/ApprovalProductService'
+import { isApprovalTemplateVisibleToUser } from './approval-template-visibility'
 import { metrics } from '../metrics/metrics'
 import {
   normalizeDingTalkAutomationActionInputs,
@@ -1037,6 +1037,7 @@ export class AutomationService {
 
     // T1-3: approval.completed rules validate templateId/outcomes/actions/conditions + creator permission.
     // FWB: also validates write_approval_form_values config + D1 outcomes lock + Q6 save-time gates.
+    // Activation flags are required only when the rule is ENABLED (disabled drafts may be staged while flags OFF).
     const approvalCompletedError = await this.validateApprovalCompletedRuleAtSave(
       input.triggerType,
       (input.triggerConfig ?? null) as Record<string, unknown> | null,
@@ -1046,6 +1047,7 @@ export class AutomationService {
       input.conditions ?? null,
       input.createdBy ?? null,
       sheetId,
+      input.enabled ?? true,
     )
     if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
 
@@ -1321,6 +1323,8 @@ export class AutomationService {
       || input.actions !== undefined
       || input.executionMode !== undefined
       || input.conditions !== undefined
+      // FWB: enabling (or re-saving while enabled) must re-check activation flags even if only `enabled` flips.
+      || input.enabled !== undefined
     ) {
       const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
@@ -1335,6 +1339,7 @@ export class AutomationService {
         ? normalizeExecutionMode(input.executionMode)
         : existingForApproval.execution_mode ?? null
       const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
+      const nextEnabled = input.enabled !== undefined ? input.enabled : existingForApproval.enabled
       const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
       // A-2b: placement gate runs for EVERY resulting shape (a card action smuggled onto a
       // non-task_created rule via a partial update must not survive either).
@@ -1350,6 +1355,7 @@ export class AutomationService {
           nextConditions,
           existingForApproval.created_by,
           sheetId,
+          nextEnabled,
         )
         if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
         const approvalTaskCreatedError = await this.validateApprovalTaskCreatedRuleAtSave(
@@ -1407,8 +1413,18 @@ export class AutomationService {
 
   /**
    * Enable or disable a rule.
+   * Enabling a rule that carries write_approval_form_values fails closed unless FWB + durable flags are ON
+   * (disabled drafts may be staged while flags are OFF).
    */
   async setRuleEnabled(ruleId: string, enabled: boolean): Promise<AutomationRule | null> {
+    if (enabled) {
+      const existing = await this.getRule(ruleId)
+      if (existing) {
+        const fwbGate = this.assertFwbEnabledActivatable(existing)
+        if (fwbGate) throw new AutomationRuleValidationError(fwbGate)
+      }
+    }
+
     const result = await this.db
       .updateTable('automation_rules')
       .set({ enabled, updated_at: new Date().toISOString() } as never)
@@ -1427,6 +1443,28 @@ export class AutomationService {
     }
 
     return rule
+  }
+
+  /**
+   * If the rule carries any write_approval_form_values action, require both FWB + durable flags ON.
+   * Returns an error string or null. Used when enabling (create/update enabled=true / setRuleEnabled).
+   */
+  private assertFwbEnabledActivatable(rule: {
+    action_type: string
+    action_config: Record<string, unknown> | null
+    actions?: AutomationAction[] | null
+    execution_mode?: string | null
+  }): string | null {
+    const nested = collectNestedAutomationActions(
+      rule.action_type,
+      rule.action_config ?? {},
+      rule.actions ?? null,
+      rule.execution_mode ?? null,
+    )
+    const hasFwb = rule.action_type === 'write_approval_form_values'
+      || nested.some((a) => a.type === 'write_approval_form_values')
+    if (!hasFwb) return null
+    return requireFwbActivationForEnabledRule(true)
   }
 
   // ── Schedule registration ───────────────────────────────────────────────
@@ -1890,6 +1928,8 @@ export class AutomationService {
     conditions: ConditionGroup | null | undefined,
     createdBy: string | null,
     sheetId: string,
+    /** When false, FWB/durable production flags are NOT required (operator staging of a disabled draft). */
+    enabled: boolean,
   ): Promise<string | null> {
     if (triggerType !== APPROVAL_COMPLETED_TRIGGER) return null
     const config = triggerConfig ?? {}
@@ -1941,8 +1981,8 @@ export class AutomationService {
       if (action.type === 'write_approval_form_values') fwbActions.push({ config: action.config })
     }
     if (fwbActions.length > 0) {
-      // Activation: FWB flag + durable delivery must both be ON to save/enable an FWB rule.
-      const activationErr = assertFwbRuntimeActivatable()
+      // Activation flags required only when enabling. Disabled drafts may be staged while flags are OFF.
+      const activationErr = requireFwbActivationForEnabledRule(enabled)
       if (activationErr) return activationErr
       // D1: FWB rules lock outcomes to approved-only (explicit or default).
       const outcomes = outcomesRaw === undefined
@@ -1994,15 +2034,10 @@ export class AutomationService {
       const fail = fieldRes as { ok: false; fieldId?: string }
       return `write_approval_form_values target field ${fail.fieldId ?? ''} is missing or unsupported`
     }
-    // Latest published/active template version for fingerprint binding.
-    const verRes = await this.queryFn(
-      `SELECT id::text AS id FROM approval_template_versions
-        WHERE template_id = $1
-        ORDER BY version DESC NULLS LAST, created_at DESC LIMIT 1`,
-      [templateId],
-    )
-    const templateVersionId = (verRes.rows[0] as { id?: string } | undefined)?.id
-    if (!templateVersionId) return 'write_approval_form_values: template version not found'
+    // Authoritative active published version for fingerprint binding (same as Q6 challenge).
+    const { resolveActiveTemplateVersionId } = await import('./approval-template-visibility')
+    const templateVersionId = await resolveActiveTemplateVersionId(this.queryFn, templateId)
+    if (!templateVersionId) return 'write_approval_form_values: active published template version not found'
     const conf = await verifyFwbConfirmation(this.queryFn, {
       confirmationId: cfg.confirmationId,
       configurerUserId: createdBy,
@@ -2034,24 +2069,17 @@ export class AutomationService {
     return null
   }
 
-  /** Resolve server-pinned sheet/base from a template's record-link form field (latest version). */
+  /** Resolve server-pinned sheet/base from a template's record-link form field (active version). */
   private async resolveRecordLinkFieldBinding(
     templateId: string,
     recordLinkFieldId: string,
   ): Promise<{ sheetId: string; baseId: string | null } | { error: string }> {
-    const res = await this.queryFn(
-      `SELECT v.form_schema
-         FROM approval_templates t
-         JOIN approval_template_versions v ON v.template_id = t.id
-        WHERE t.id = $1
-        ORDER BY v.version DESC NULLS LAST, v.created_at DESC
-        LIMIT 1`,
-      [templateId],
-    )
-    const formSchema = (res.rows[0] as { form_schema?: unknown } | undefined)?.form_schema
-    if (!formSchema || typeof formSchema !== 'object' || Array.isArray(formSchema)) {
+    const { loadActiveTemplateVersionBundle } = await import('./approval-template-visibility')
+    const bundle = await loadActiveTemplateVersionBundle(this.queryFn, templateId)
+    if (!bundle) {
       return { error: 'template form_schema not found for record-link binding' }
     }
+    const formSchema = bundle.formSchema
     const fields = Array.isArray((formSchema as { fields?: unknown }).fields)
       ? (formSchema as { fields: unknown[] }).fields
       : []
@@ -2137,56 +2165,11 @@ export class AutomationService {
   }
 
   /**
-   * T1-3 Q2 leg 2: the creator must SEE the template per approval_templates.visibility_scope — otherwise a
-   * user with automation + approvals:read could bind a hidden template's completions and exfiltrate outcome
-   * data via webhook/notification. Checked at save AND re-checked at fire. There is no request token at
-   * either point, so the visibility actor is REBUILT FROM TRUSTED DB STATE (users.role/department/is_admin
-   * + user_roles ids/names + RBAC permission codes) and evaluated through the SAME
-   * applyTemplateVisibilityFilter predicate the template list/detail routes enforce. Fail-closed on any
-   * lookup error and on a missing/inactive creator.
+   * T1-3 Q2 leg 2: the creator must SEE the template per approval_templates.visibility_scope.
+   * Delegates to the shared trusted-actor visibility helper (same predicate as FWB G2 / Q6 challenge).
    */
   private async approvalTemplateVisibleToCreator(templateId: string, createdBy: string | null): Promise<boolean> {
-    if (!createdBy) return false
-    try {
-      const userResult = await this.queryFn(
-        `SELECT role, department, is_admin FROM users WHERE id = $1 AND is_active = TRUE`,
-        [createdBy],
-      )
-      const user = userResult.rows[0] as { role?: string | null; department?: string | null; is_admin?: boolean | null } | undefined
-      if (!user) return false
-      const roleRows = await this.queryFn(
-        `SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`,
-        [createdBy],
-      )
-      const roles = new Set<string>()
-      if (typeof user.role === 'string' && user.role.trim()) roles.add(user.role.trim())
-      for (const row of roleRows.rows as Array<{ role_id?: string | null; name?: string | null }>) {
-        if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
-        if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
-      }
-      const codes = await listRbacPermissionCodes(createdBy)
-      const actor: ApprovalTemplateVisibilityActor = {
-        userId: createdBy,
-        departmentIds: typeof user.department === 'string' && user.department.trim() ? [user.department.trim()] : [],
-        roles: [...roles],
-        permissions: codes,
-        isTemplateManager:
-          hasPermissionCode(codes, 'approval-templates:manage')
-          || user.is_admin === true
-          || roles.has('admin'),
-      }
-      const conditions: string[] = ['id = $1']
-      const params: unknown[] = [templateId]
-      applyTemplateVisibilityFilter(conditions, params, 2, actor)
-      const visible = await this.queryFn(
-        `SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`,
-        params,
-      )
-      return visible.rows.length > 0
-    } catch (err) {
-      logger.warn('approval.completed template visibility check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
-      return false
-    }
+    return isApprovalTemplateVisibleToUser(this.queryFn, templateId, createdBy)
   }
 
   private rejectInboundWebhook(ruleId: string, reason: InboundWebhookRejectReason): InboundWebhookDispatchResult {
