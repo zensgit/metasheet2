@@ -979,25 +979,27 @@ export interface PluginServices {
     }): (() => void)
   }
   /**
-   * S7-1 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic approval-assignee
-   * kinds (直属上级 `direct_manager` / 部门主管 `dept_head` / 多级上级 `manager_at_level`), per the
-   * RATIFIED attendance-approval-s7 resolver design-lock, OD-S7-5 = (d). It mirrors `workdayCalendar`
-   * above but runs the OPPOSITE direction: core-backend is the PROVIDER, plugin-attendance is the
-   * CONSUMER (it checks `context?.services?.approvalAssigneeResolver?.<member>` before use). The plugin
-   * NEVER takes a runtime dependency on the whole core package and NEVER copies the kernel resolver
-   * logic; when this port is absent the plugin fail-closes (authoring 422 / runtime block), never the
-   * legacy admin fallback (§4.1).
+   * S7-1/S7-2 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic
+   * approval-assignee kinds (直属上级 `direct_manager` / 部门主管 `dept_head` / 多级上级
+   * `manager_at_level`), per the RATIFIED attendance-approval-s7 resolver design-lock, OD-S7-5 = (d).
+   * It mirrors `workdayCalendar` above but runs the OPPOSITE direction: core-backend is the PROVIDER,
+   * plugin-attendance is the CONSUMER (it checks `context?.services?.approvalAssigneeResolver?.<member>`
+   * before use). The plugin NEVER takes a runtime dependency on the whole core package and NEVER copies
+   * the kernel resolver logic; when this port is absent the plugin fail-closes (authoring 422 / runtime
+   * block), never the legacy admin fallback (§4.1).
    *
    * - `maxManagerChainLevels` is the host-resolved `MAX_MANAGER_CHAIN_LEVELS` constant
    *   (`ApprovalDirectoryOrg` — env `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`, default 10, hard ceiling 50).
    *   The plugin validates `manager_at_level.level ∈ [1, maxManagerChainLevels]` against THIS value so it
    *   never re-parses the env var into a second constant — one source, two surfaces, no drift.
    * - `implementedKinds` is the set of dynamic kinds this host build can actually resolve at runtime.
-   *   EMPTY at S7-1 (the seam is defined but no kind is wired yet — S7-2/S7-3/S7-4 populate it). A kind
-   *   absent from this list is unimplemented ⇒ the plugin fail-closes.
-   * - `resolve` is the org-scoped runtime resolution seam (the §3.4 freeze point). At S7-1 it returns
-   *   `{ status: 'unimplemented' }` for every kind; S7-2/S7-3/S7-4 implement per-kind resolution. It
-   *   reads only `directory_*` (never writes) and stays inside the core-backend process boundary.
+   *   S7-2 populates `direct_manager` only; `dept_head` / `manager_at_level` remain S7-3/S7-4.
+   *   A kind absent from this list is unimplemented ⇒ the plugin fail-closes.
+   * - `resolve` is the org-scoped CREATE-TIME freeze seam (§3.3 / §3.4). For `direct_manager` it runs the
+   *   kernel's `resolveApprovalRequesterOrgRelations` with the attendance `orgId` anchor, returns the
+   *   linked local manager (or `unresolved`), and NEVER writes. Step-advance must NOT call this again —
+   *   it reads only the frozen `requesterSnapshot.managerId`. Self-exclusion is enforced here (manager
+   *   resolving to the requester is treated as unresolved).
    */
   approvalAssigneeResolver?: {
     readonly maxManagerChainLevels: number

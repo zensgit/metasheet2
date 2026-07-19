@@ -254,10 +254,13 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     })
   }
 
-  it('CREATE rejects a shape-valid dynamic kind at S7-1 (flag ON, no resolver) → 422 APPROVAL_STEP_KIND_UNAVAILABLE', async () => {
+  // S7-2 implements direct_manager: a shape-valid direct_manager with flag ON is now AUTHORING-
+  // accepted. Keep this leg as a fail-closed proof for an STILL-unimplemented kind (dept_head /
+  // S7-3) so the UNAVAILABLE gate remains mutation-provable after S7-2 lands.
+  it('CREATE rejects a shape-valid but unimplemented dynamic kind (dept_head) with flag ON → 422 APPROVAL_STEP_KIND_UNAVAILABLE', async () => {
     setFlag(true)
     try {
-      const res = await createFlow([{ kind: 'direct_manager' }], `s7-1-unavail-${runSuffix}`)
+      const res = await createFlow([{ kind: 'dept_head' }], `s7-1-unavail-${runSuffix}`)
       expect(res.status, res.raw).toBe(422)
       expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
     } finally {

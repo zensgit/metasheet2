@@ -164,39 +164,80 @@ interface RequesterDirectoryRow {
  *
  * `query` is injected (defaults to the shared pool) so the unit path can drive it
  * against an in-memory fixture without a database.
+ *
+ * `options.orgId` (S7 §3.3, optional / backward compatible): when supplied, the
+ * requester-account pick is anchored to `directory_integrations.org_id` BEFORE the
+ * `ORDER BY ... LIMIT 1` tie-break, so a local user linked into two orgs cannot have
+ * the wrong org's account selected. Callers that omit `orgId` retain today's unscoped
+ * (most-recently-updated) pick — kernel `ApprovalProductService` callers included.
+ * Attendance-facing paths MUST pass `orgId`.
  */
 export async function resolveApprovalRequesterOrgRelations(
   localUserId: string,
   query: QueryFn,
-  options: { includeManagerChain?: boolean; maxLevels?: number } = {},
+  options: { includeManagerChain?: boolean; maxLevels?: number; orgId?: string } = {},
 ): Promise<ApprovalRequesterOrgRelations> {
   const userId = localUserId.trim()
   if (!userId) return {}
 
+  // Optional org anchor (S7 §3.3). Trim + non-empty only — an empty string must NOT
+  // accidentally join against `org_id = ''` and force every row out of scope.
+  const orgId =
+    typeof options.orgId === 'string' && options.orgId.trim().length > 0
+      ? options.orgId.trim()
+      : null
+
   // 1) Requester's linked directory account + its primary department's raw.
+  // When `orgId` is set, join `directory_integrations` so the ORDER BY/LIMIT 1 only
+  // ever competes among accounts already inside the calling org.
   const requesterRows = await query<RequesterDirectoryRow>(
-    `SELECT a.integration_id::text       AS integration_id,
-            a.id::text                   AS account_id,
-            a.external_user_id           AS external_user_id,
-            a.raw                        AS raw,
-            a.title                      AS title,
-            d.external_department_id     AS primary_external_department_id,
-            d.raw                        AS primary_department_raw,
-            d.name                       AS primary_department_name
-       FROM directory_account_links l
-       JOIN directory_accounts a
-         ON a.id = l.directory_account_id
-        AND a.is_active = true
-       LEFT JOIN directory_account_departments ad
-         ON ad.directory_account_id = a.id
-        AND ad.is_primary = true
-       LEFT JOIN directory_departments d
-         ON d.id = ad.directory_department_id
-      WHERE l.local_user_id = $1
-        AND l.link_status = 'linked'
-      ORDER BY a.updated_at DESC, a.id ASC
-      LIMIT 1`,
-    [userId],
+    orgId
+      ? `SELECT a.integration_id::text       AS integration_id,
+                a.id::text                   AS account_id,
+                a.external_user_id           AS external_user_id,
+                a.raw                        AS raw,
+                a.title                      AS title,
+                d.external_department_id     AS primary_external_department_id,
+                d.raw                        AS primary_department_raw,
+                d.name                       AS primary_department_name
+           FROM directory_account_links l
+           JOIN directory_accounts a
+             ON a.id = l.directory_account_id
+            AND a.is_active = true
+           JOIN directory_integrations di
+             ON di.id = a.integration_id
+            AND di.org_id = $2
+           LEFT JOIN directory_account_departments ad
+             ON ad.directory_account_id = a.id
+            AND ad.is_primary = true
+           LEFT JOIN directory_departments d
+             ON d.id = ad.directory_department_id
+          WHERE l.local_user_id = $1
+            AND l.link_status = 'linked'
+          ORDER BY a.updated_at DESC, a.id ASC
+          LIMIT 1`
+      : `SELECT a.integration_id::text       AS integration_id,
+                a.id::text                   AS account_id,
+                a.external_user_id           AS external_user_id,
+                a.raw                        AS raw,
+                a.title                      AS title,
+                d.external_department_id     AS primary_external_department_id,
+                d.raw                        AS primary_department_raw,
+                d.name                       AS primary_department_name
+           FROM directory_account_links l
+           JOIN directory_accounts a
+             ON a.id = l.directory_account_id
+            AND a.is_active = true
+           LEFT JOIN directory_account_departments ad
+             ON ad.directory_account_id = a.id
+            AND ad.is_primary = true
+           LEFT JOIN directory_departments d
+             ON d.id = ad.directory_department_id
+          WHERE l.local_user_id = $1
+            AND l.link_status = 'linked'
+          ORDER BY a.updated_at DESC, a.id ASC
+          LIMIT 1`,
+    orgId ? [userId, orgId] : [userId],
   )
   const requester = requesterRows.rows[0]
   if (!requester) return {}

@@ -31,9 +31,23 @@ interface FakeDb {
   localByExternalId?: Record<string, string | null>
 }
 
-function makeQuery(db: FakeDb) {
+function makeQuery(db: FakeDb & {
+  // When the org-anchored path is used, the fake can assert the orgId param and optionally return
+  // a different requester (or empty) so the two-org / one-local-user contract is unit-provable.
+  orgAnchoredRequester?: FakeDb['requester'] | null
+  lastOrgIdParam?: string | null
+  lastRequesterSql?: string
+}) {
   return async <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> => {
     if (text.includes('FROM directory_account_links l') && text.includes('LEFT JOIN directory_account_departments')) {
+      db.lastRequesterSql = text
+      // Org-anchored SELECT joins directory_integrations and binds org_id as $2.
+      if (text.includes('JOIN directory_integrations di') && text.includes('di.org_id = $2')) {
+        db.lastOrgIdParam = params?.[1] != null ? String(params[1]) : null
+        const row = db.orgAnchoredRequester !== undefined ? db.orgAnchoredRequester : db.requester
+        return { rows: (row ? [row] : []) as Row[] }
+      }
+      db.lastOrgIdParam = null
       return { rows: (db.requester ? [db.requester] : []) as Row[] }
     }
     // B3 normalized-manager gate query (`ad.is_manager = true`). Default-empty means the dept has
@@ -267,5 +281,93 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     }
     const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
     expect(result).toEqual({})
+  })
+
+  // ── S7 §3.3 org anchor (optional / backward compatible) ──
+  it('S7 §3.3: omitting orgId keeps the unscoped requester SELECT (no directory_integrations join)', async () => {
+    const db: FakeDb & { lastOrgIdParam?: string | null; lastRequesterSql?: string } = {
+      requester: {
+        integration_id: 'int-unscoped',
+        account_id: 'acc-req',
+        external_user_id: 'ext-req',
+        raw: {},
+        primary_external_department_id: 'D1',
+        primary_department_raw: {},
+      },
+      normalizedDeptManagers: [{ account_id: 'acc-mgr', external_user_id: 'ext-mgr' }],
+      localByAccountId: { 'acc-mgr': 'local-mgr' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
+    expect(result.managerId).toBe('local-mgr')
+    expect(db.lastOrgIdParam).toBeNull()
+    expect(db.lastRequesterSql).toBeTruthy()
+    expect(db.lastRequesterSql).not.toContain('directory_integrations')
+  })
+
+  it('S7 §3.3: orgId anchors the requester-account pick BEFORE ORDER BY/LIMIT (join + $2)', async () => {
+    const db: FakeDb & { lastOrgIdParam?: string | null; lastRequesterSql?: string; orgAnchoredRequester?: FakeDb['requester'] } = {
+      // Unscoped would pick this (more recent) foreign-org account...
+      requester: {
+        integration_id: 'int-foreign',
+        account_id: 'acc-foreign',
+        external_user_id: 'ext-foreign',
+        raw: {},
+        primary_external_department_id: 'D-foreign',
+        primary_department_raw: {},
+      },
+      // ...but with orgId the anchored path returns the calling-org account only.
+      orgAnchoredRequester: {
+        integration_id: 'int-home',
+        account_id: 'acc-home',
+        external_user_id: 'ext-home',
+        raw: {},
+        primary_external_department_id: 'D-home',
+        primary_department_raw: {},
+      },
+      normalizedDeptManagers: [{ account_id: 'acc-home-mgr', external_user_id: 'ext-home-mgr' }],
+      localByAccountId: { 'acc-home-mgr': 'local-home-mgr' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db), { orgId: 'org-home' })
+    expect(db.lastOrgIdParam).toBe('org-home')
+    expect(db.lastRequesterSql).toContain('directory_integrations')
+    expect(db.lastRequesterSql).toContain('di.org_id = $2')
+    expect(result.managerId).toBe('local-home-mgr')
+  })
+
+  it('S7 §3.3: orgId with no matching integration account returns {} (does not fall back to unscoped)', async () => {
+    const db: FakeDb & { orgAnchoredRequester?: null } = {
+      requester: {
+        integration_id: 'int-other',
+        account_id: 'acc-other',
+        external_user_id: 'ext-other',
+        raw: {},
+        primary_external_department_id: 'D1',
+        primary_department_raw: {},
+      },
+      orgAnchoredRequester: null, // anchored pick finds nothing
+      normalizedDeptManagers: [{ account_id: 'acc-mgr', external_user_id: 'ext-mgr' }],
+      localByAccountId: { 'acc-mgr': 'local-mgr' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db), { orgId: 'org-empty' })
+    expect(result).toEqual({}) // never the unscoped foreign manager
+  })
+
+  it('S7 §3.3: blank orgId is treated as omitted (backward-compatible unscoped path)', async () => {
+    const db: FakeDb & { lastOrgIdParam?: string | null; lastRequesterSql?: string } = {
+      requester: {
+        integration_id: 'int-1',
+        account_id: 'acc-req',
+        external_user_id: 'ext-req',
+        raw: {},
+        primary_external_department_id: 'D1',
+        primary_department_raw: {},
+      },
+      normalizedDeptManagers: [{ account_id: 'acc-mgr', external_user_id: 'ext-mgr' }],
+      localByAccountId: { 'acc-mgr': 'local-mgr' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db), { orgId: '   ' })
+    expect(result.managerId).toBe('local-mgr')
+    expect(db.lastOrgIdParam).toBeNull()
+    expect(db.lastRequesterSql).not.toContain('directory_integrations')
   })
 })

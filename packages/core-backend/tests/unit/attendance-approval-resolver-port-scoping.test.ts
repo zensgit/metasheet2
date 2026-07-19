@@ -21,7 +21,7 @@ function contextFor(name: string): PluginContext {
 }
 
 describe('S7-2 precursor — approvalAssigneeResolver port is scoped to plugin-attendance', () => {
-  it('plugin-attendance receives the port (positive control, host-resolved max present)', () => {
+  it('plugin-attendance receives the port (positive control, host-resolved max present, direct_manager implemented)', () => {
     const services = contextFor('plugin-attendance').services as {
       approvalAssigneeResolver?: { maxManagerChainLevels: number; implementedKinds: readonly string[] }
     }
@@ -29,6 +29,11 @@ describe('S7-2 precursor — approvalAssigneeResolver port is scoped to plugin-a
     expect(typeof services.approvalAssigneeResolver?.maxManagerChainLevels).toBe('number')
     expect(services.approvalAssigneeResolver?.maxManagerChainLevels).toBeGreaterThanOrEqual(1)
     expect(Array.isArray(services.approvalAssigneeResolver?.implementedKinds)).toBe(true)
+    // S7-2: direct_manager is the only implemented kind; dept_head / manager_at_level stay out.
+    expect(services.approvalAssigneeResolver?.implementedKinds).toContain('direct_manager')
+    expect(services.approvalAssigneeResolver?.implementedKinds).not.toContain('dept_head')
+    expect(services.approvalAssigneeResolver?.implementedKinds).not.toContain('manager_at_level')
+    expect(services.approvalAssigneeResolver?.implementedKinds).not.toContain('continuous_managers')
   })
 
   it('a non-attendance plugin does NOT receive the port', () => {
