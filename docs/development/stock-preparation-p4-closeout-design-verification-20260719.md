@@ -346,6 +346,26 @@ plugin CJS **60**, real-DB **3 files / 13**, type-check pass). Those results rem
 the design/review trail; the dual-worktree numbers above are the authoritative local re-run for
 this closeout packaging.
 
+### Codex exact-candidate re-review
+
+Codex independently reviewed the local A head `9a0aee721` and the C candidate at
+`e54229533` before this note. The result is **APPROVE, 0 P1 / 0 P2**:
+
+- A `range-diff` proves the five original Option A commits are patch-identical after rebase; the
+  sixth commit is only the reviewed normalized-sheet allowlist fix.
+- C `range-diff` proves all four Option C commits are patch-identical after rebase.
+- `git diff a5e5db320..e54229533` is empty outside this verification document, so the runtime tree
+  is byte-identical to the previously reviewed integrated reference.
+- Codex re-ran A and C focused Vitest suites, both backend type-checks, persist/repair/audit/ERP CJS
+  suites, CI wiring, and the manifest contract with the same green counts recorded above.
+- Codex temporarily reverted `allowedSheetIds` to raw `input.sheetIds`; the exact whitespace-scope
+  test reported **1 failed / 9 skipped**. Restoring the normalized input reported **1 passed / 9
+  skipped**, and the A worktree returned clean.
+- The first Codex real-DB invocation omitted the two required environment variables and reported
+  **3 files / 13 skipped**. That run was explicitly rejected as skip-green evidence. The corrected
+  command with explicit `DATABASE_URL` and `METASHEET_REAL_DB_TEST_STEP=1` then executed and passed
+  **3 files / 13 tests**, 0 failed, 0 skipped.
+
 **Honest statement:** dual-worktree real-DB suites ran with `DATABASE_URL` set and were not
 skip-green. W6/T4 full postdeploy smokes and live multi-tenant staging were **not** re-run in these
 worktrees.
