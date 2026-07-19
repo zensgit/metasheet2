@@ -411,6 +411,26 @@ async function resolveTargetFieldIds(provisioning, projectId, objectId) {
   return map
 }
 
+function validateResolvedTargetFieldIds(objectId, candidate) {
+  const template = MVP_TEMPLATE_BY_OBJECT_ID.get(objectId)
+  if (!template || !isPlainObject(candidate)) {
+    throw new StockPreparationTableActionError(500, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', 'pre-resolved target field ids are invalid', { objectId })
+  }
+  const expected = template.fields.map((field) => field.id)
+  if (Object.keys(candidate).length !== expected.length) {
+    throw new StockPreparationTableActionError(500, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', 'pre-resolved target field ids are incomplete', { objectId })
+  }
+  const out = {}
+  for (const fieldId of expected) {
+    const physical = optionalString(candidate[fieldId])
+    if (!physical) {
+      throw new StockPreparationTableActionError(500, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', 'pre-resolved target field ids are incomplete', { objectId })
+    }
+    out[fieldId] = physical
+  }
+  return out
+}
+
 function invertFieldIdMap(fieldIds) {
   const inverse = {}
   for (const [logical, physical] of Object.entries(fieldIds)) inverse[physical] = logical
@@ -461,7 +481,9 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   }
   const objectId = optionalString(target && target.objectId)
   const fieldIds = mode === 'logical'
-    ? await resolveTargetFieldIds(options.provisioning, options.projectId, objectId)
+    ? options.resolvedFieldIds
+      ? validateResolvedTargetFieldIds(objectId, options.resolvedFieldIds)
+      : await resolveTargetFieldIds(options.provisioning, options.projectId, objectId)
     : null
   const inverse = fieldIds ? invertFieldIdMap(fieldIds) : null
 
@@ -964,6 +986,7 @@ module.exports = {
   createStockPreparationTableActionRegistry,
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
+  resolveTargetFieldIds,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
   normalizeActionParameters,

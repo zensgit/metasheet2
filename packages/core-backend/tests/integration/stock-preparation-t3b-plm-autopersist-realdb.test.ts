@@ -27,6 +27,11 @@ import {
   queryRecords,
   type MultitableRecordsQueryFn,
 } from '../../src/multitable/records'
+import { acquireStockPreparationPersistUnitOfWorkLocks } from '../../src/multitable/stock-preparation-persist-unit-of-work'
+import type {
+  MultitableRecordsWriteUnitOfWorkAPI,
+  StockPreparationPersistUnitOfWorkInput,
+} from '../../src/types/plugin'
 
 const require = createRequire(import.meta.url)
 const { createHandlers } = require('../../../../plugins/plugin-integration-core/lib/http-routes.cjs') as {
@@ -146,6 +151,21 @@ function createRealMultitableFacade() {
       recordId: string
       changes: Record<string, unknown>
     }) => transaction((query) => patchRecord({ query, sheetId, recordId, changes })),
+    runStockPreparationPersistUnitOfWork: <T>(
+      input: StockPreparationPersistUnitOfWorkInput,
+      operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
+    ) => transaction(async (query) => {
+      await acquireStockPreparationPersistUnitOfWorkLocks(query, input)
+      const transactionRecords: MultitableRecordsWriteUnitOfWorkAPI = {
+        queryRecords: (recordInput) =>
+          queryRecords({ query, ...recordInput }),
+        createRecord: (recordInput) =>
+          createRecord({ query, ...recordInput }),
+        patchRecord: (recordInput) =>
+          patchRecord({ query, ...recordInput }),
+      }
+      return operation(transactionRecords)
+    }),
   }
   return { provisioning, records }
 }

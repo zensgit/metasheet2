@@ -101,7 +101,10 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
   const createCalls = []
   const queryCalls = []
   const patchCalls = []
+  const unitOfWorkCalls = []
   let seq = 0
+  let unitOfWorkDepth = 0
+  let recordsCallsOutsideUnitOfWork = 0
 
   function objectIdFor(sheetId) {
     const objectId = objectIdBySheetId[sheetId]
@@ -109,11 +112,18 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
     return objectId
   }
 
-  return {
+  const api = {
     store,
     createCalls,
     queryCalls,
     patchCalls,
+    unitOfWorkCalls,
+    get inUnitOfWork() {
+      return unitOfWorkDepth > 0
+    },
+    get recordsCallsOutsideUnitOfWork() {
+      return recordsCallsOutsideUnitOfWork
+    },
     get patchCallCount() {
       return patchCalls.length
     },
@@ -121,6 +131,7 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
       return (store.get(sheetId) || []).map((row) => ({ ...row, data: { ...row.data } }))
     },
     async createRecord(input = {}) {
+      if (unitOfWorkDepth === 0) recordsCallsOutsideUnitOfWork += 1
       const { sheetId, data = {} } = input
       assertKnownFieldIds(stagingProjectId, objectIdFor(sheetId), Object.keys(data))
       createCalls.push({ sheetId, data: { ...data } })
@@ -132,6 +143,7 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
       return { ...record, data: { ...record.data } }
     },
     async queryRecords(input = {}) {
+      if (unitOfWorkDepth === 0) recordsCallsOutsideUnitOfWork += 1
       const { sheetId, filters = {} } = input
       assertKnownFieldIds(stagingProjectId, objectIdFor(sheetId), Object.keys(filters))
       queryCalls.push({ sheetId, filters: { ...filters } })
@@ -141,6 +153,7 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
         .map((record) => ({ ...record, data: { ...record.data } }))
     },
     async patchRecord(input = {}) {
+      if (unitOfWorkDepth === 0) recordsCallsOutsideUnitOfWork += 1
       const { sheetId, recordId, changes = {} } = input
       assertKnownFieldIds(stagingProjectId, objectIdFor(sheetId), Object.keys(changes))
       patchCalls.push({ sheetId, recordId, changes: { ...changes } })
@@ -153,7 +166,37 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
       record.version = (record.version || 1) + 1
       return { ...record, data: { ...record.data } }
     },
+    async runStockPreparationPersistUnitOfWork(input, operation) {
+      unitOfWorkCalls.push(structuredClone(input))
+      const beforeStore = new Map(
+        [...store.entries()].map(([sheetId, rows]) => [
+          sheetId,
+          rows.map((row) => ({ ...row, data: { ...row.data } })),
+        ]),
+      )
+      const beforeSeq = seq
+      const beforeCalls = {
+        create: createCalls.length,
+        query: queryCalls.length,
+        patch: patchCalls.length,
+      }
+      unitOfWorkDepth += 1
+      try {
+        return await operation(this)
+      } catch (error) {
+        store.clear()
+        for (const [sheetId, rows] of beforeStore) store.set(sheetId, rows)
+        seq = beforeSeq
+        createCalls.length = beforeCalls.create
+        queryCalls.length = beforeCalls.query
+        patchCalls.length = beforeCalls.patch
+        throw error
+      } finally {
+        unitOfWorkDepth -= 1
+      }
+    },
   }
+  return api
 }
 
 // Seed helper: turn LOGICAL test rows into the PHYSICAL-keyed rows the substrate really stores.

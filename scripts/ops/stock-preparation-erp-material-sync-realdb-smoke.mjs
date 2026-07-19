@@ -62,7 +62,7 @@ function check(name, ok, detail = '') {
 }
 
 // ── the real host multitable API (replicates packages/core-backend/src/index.ts:455-665) ──────────
-function buildHostMultitableApi(poolManager, prov, recs) {
+function buildHostMultitableApi(poolManager, prov, recs, p4) {
   const readFn = async (sql, params) => {
     const r = await poolManager.get().query(sql, params)
     return {
@@ -92,6 +92,16 @@ function buildHostMultitableApi(poolManager, prov, recs) {
       poolManager.get().transaction(async ({ query }) => recs.createRecord({ query: txFnFrom(query), sheetId, data })),
     patchRecord: ({ sheetId, recordId, changes }) =>
       poolManager.get().transaction(async ({ query }) => recs.patchRecord({ query: txFnFrom(query), sheetId, recordId, changes })),
+    runStockPreparationPersistUnitOfWork: (input, operation) =>
+      poolManager.get().transaction(async ({ query }) => {
+        const txQuery = txFnFrom(query)
+        await p4.acquireStockPreparationPersistUnitOfWorkLocks(txQuery, input)
+        return operation({
+          queryRecords: (recordInput) => recs.queryRecords({ query: txQuery, ...recordInput }),
+          createRecord: (recordInput) => recs.createRecord({ query: txQuery, ...recordInput }),
+          patchRecord: (recordInput) => recs.patchRecord({ query: txQuery, ...recordInput }),
+        })
+      }),
   }
   return { provisioning, records }
 }
@@ -121,10 +131,12 @@ async function main() {
   const prov = await import(new URL('../../packages/core-backend/src/multitable/provisioning.ts', import.meta.url).href)
   stage('importing records')
   const recs = await import(new URL('../../packages/core-backend/src/multitable/records.ts', import.meta.url).href)
+  stage('importing stock-preparation P4 unit-of-work')
+  const p4 = await import(new URL('../../packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts', import.meta.url).href)
   stage('core imports done')
   const { poolManager } = cp
 
-  const { provisioning, records } = buildHostMultitableApi(poolManager, prov, recs)
+  const { provisioning, records } = buildHostMultitableApi(poolManager, prov, recs, p4)
   const context = { api: { multitable: { provisioning, records } } }
 
   const {
@@ -178,6 +190,7 @@ async function main() {
     const bomPersist = await persistStockPreparationSyncRun({
       permission: 'admin', recordsApi: records, provisioning,
       projectId: businessProjectId, targetProjectId: stagingProjectId,
+      lockTenantId: args.tenantId,
       syncRunId: bomSyncRunId, snapshotBatchId, snapshotVersion: 1, sourceSystem: 'rdb_smoke',
       sourceProjectNo, defaultDesignUnit: 'pcs',
       expansionResult: [{ componentSourceId: `OBJ_${salt}`, componentCode: drawingA, sourceVersion: 'V1', path: `/root/${drawingA}`, rawQuantity: 3 }],

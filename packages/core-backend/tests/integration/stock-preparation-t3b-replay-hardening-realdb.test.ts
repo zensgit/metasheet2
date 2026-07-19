@@ -9,21 +9,15 @@ import { createRequire } from 'module'
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
+import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import {
-  ensureObject,
-  findObjectSheet,
-  patchObjectFieldProperty,
-  resolveObjectFieldIds,
-  type MultitableProvisioningObjectDescriptor,
-  type MultitableProvisioningQueryFn,
-} from '../../src/multitable/provisioning'
-import {
-  createRecord,
-  patchRecord,
-  queryRecords,
-  type MultitableRecordsQueryFn,
-} from '../../src/multitable/records'
+import type { LoadedPlugin } from '../../src/core/plugin-loader'
+import type {
+  MultitableAPI,
+  MultitableRecordsWriteUnitOfWorkAPI,
+  PluginContext,
+  StockPreparationPersistUnitOfWorkInput,
+} from '../../src/types/plugin'
 
 const require = createRequire(import.meta.url)
 const {
@@ -62,63 +56,88 @@ const SOURCE_PROJECT_NO = `SOURCE-PROJECT-${TOKEN}`
 const SYNC_RUN_ID = `run_t3b_${TOKEN}`
 const SNAPSHOT_BATCH_ID = `batch_t3b_${TOKEN}`
 
-type QueryResult = { rows: unknown[]; rowCount?: number | null }
-
-function wrapQuery(
-  query: (sql: string, params?: unknown[]) => Promise<QueryResult>,
-): MultitableProvisioningQueryFn & MultitableRecordsQueryFn {
-  return async (sql, params) => {
-    const result = await query(sql, params)
-    return {
-      rows: Array.isArray(result.rows) ? result.rows : [],
-      rowCount: typeof result.rowCount === 'number' ? result.rowCount : undefined,
-    }
-  }
-}
-
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
-function transaction<T>(handler: (query: MultitableRecordsQueryFn) => Promise<T>): Promise<T> {
-  return poolManager.get().transaction(async ({ query }) => handler(wrapQuery(query)))
+function createProductionPluginContext(): PluginContext {
+  const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+  const loaded: LoadedPlugin = {
+    manifest: { name: 'plugin-integration-core', version: 'test' },
+    plugin: { activate: async () => {} },
+    path: 'realdb://plugin-integration-core',
+    loadedAt: new Date(),
+  }
+  return (server as unknown as {
+    createPluginContext: (plugin: LoadedPlugin) => PluginContext
+  }).createPluginContext(loaded)
 }
 
-function createRealMultitableFacade() {
-  const readQuery = wrapQuery(q)
-  const provisioning = {
-    findObjectSheet: ({ projectId, objectId }: { projectId: string; objectId: string }) =>
-      findObjectSheet(readQuery, projectId, objectId),
-    resolveFieldIds: ({ projectId, objectId, fieldIds }: { projectId: string; objectId: string; fieldIds: string[] }) =>
-      resolveObjectFieldIds(projectId, objectId, fieldIds),
-    ensureObject: ({ projectId, baseId, descriptor }: {
-      projectId: string
-      baseId?: string | null
-      descriptor: MultitableProvisioningObjectDescriptor
-    }) => transaction((query) => ensureObject({ query, projectId, baseId, descriptor })),
-    patchObjectFieldProperty: (input: {
-      projectId: string
-      objectId: string
-      fieldId: string
-      propertyPatch: Record<string, unknown>
-    }) => transaction((query) => patchObjectFieldProperty({ query, ...input })),
+function createRealMultitableFacade(multitable: MultitableAPI) {
+  const hostUnitOfWork = multitable.records.runStockPreparationPersistUnitOfWork
+  if (typeof hostUnitOfWork !== 'function') {
+    throw new Error('production plugin context is missing the P4 unit-of-work capability')
   }
+  let failAfterMutation: number | null = null
+  let unitOfWorkBarrier: {
+    expected: number
+    arrived: number
+    wait: Promise<void>
+    release: () => void
+  } | null = null
+  const provisioning = multitable.provisioning
   const records = {
-    queryRecords: (input: {
-      sheetId: string
-      filters?: Record<string, unknown>
-      search?: string
-      orderBy?: { fieldId?: string; direction?: 'asc' | 'desc' }
-      limit?: number
-      offset?: number
-    }) => queryRecords({ query: readQuery, ...input }),
-    createRecord: ({ sheetId, data }: { sheetId: string; data: Record<string, unknown> }) =>
-      transaction((query) => createRecord({ query, sheetId, data })),
-    patchRecord: ({ sheetId, recordId, changes }: {
-      sheetId: string
-      recordId: string
-      changes: Record<string, unknown>
-    }) => transaction((query) => patchRecord({ query, sheetId, recordId, changes })),
+    ...multitable.records,
+    runStockPreparationPersistUnitOfWork: <T>(
+      input: StockPreparationPersistUnitOfWorkInput,
+      operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
+    ) => {
+      const enterHostUnitOfWork = async (): Promise<T> => {
+        const barrier = unitOfWorkBarrier
+        if (barrier) {
+          barrier.arrived += 1
+          if (barrier.arrived === barrier.expected) {
+            unitOfWorkBarrier = null
+            barrier.release()
+          }
+          await barrier.wait
+        }
+        return hostUnitOfWork(input, async (transactionRecords) => {
+          let mutationCount = 0
+          const withInjectedCrash = async <R>(mutation: () => Promise<R>): Promise<R> => {
+            const result = await mutation()
+            mutationCount += 1
+            if (failAfterMutation === mutationCount) {
+              failAfterMutation = null
+              throw new Error('P4_INJECTED_TRANSACTION_CRASH')
+            }
+            return result
+          }
+          const crashInjectingRecords: MultitableRecordsWriteUnitOfWorkAPI = {
+            queryRecords: (recordInput) => transactionRecords.queryRecords(recordInput),
+            createRecord: (recordInput) =>
+              withInjectedCrash(() => transactionRecords.createRecord(recordInput)),
+            patchRecord: (recordInput) =>
+              withInjectedCrash(() => transactionRecords.patchRecord(recordInput)),
+          }
+          return operation(crashInjectingRecords)
+        })
+      }
+      return enterHostUnitOfWork()
+    },
   }
-  return { provisioning, records }
+  return {
+    provisioning,
+    records,
+    injectCrashAfterMutation(count: number) {
+      failAfterMutation = count
+    },
+    armUnitOfWorkBarrier(expected: number) {
+      let release = () => {}
+      const wait = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      unitOfWorkBarrier = { expected, arrived: 0, wait, release }
+    },
+  }
 }
 
 async function discoverPhysicalFields(sheetId: string, objectId: string): Promise<Record<string, string>> {
@@ -136,12 +155,16 @@ async function discoverPhysicalFields(sheetId: string, objectId: string): Promis
   }))
 }
 
-function persistInput(facade: ReturnType<typeof createRealMultitableFacade>): Record<string, unknown> {
+function persistInput(
+  facade: ReturnType<typeof createRealMultitableFacade>,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     permission: 'admin',
     recordsApi: facade.records,
     provisioning: facade.provisioning,
     targetProjectId: TARGET_PROJECT_ID,
+    lockTenantId: TENANT_ID,
     projectId: PROJECT_ID,
     sourceProjectNo: SOURCE_PROJECT_NO,
     sourceSystem: 'data-source:sql-readonly',
@@ -156,6 +179,7 @@ function persistInput(facade: ReturnType<typeof createRealMultitableFacade>): Re
       path: `/root/MATERIAL-${TOKEN}`,
       rawQuantity: 3,
     }],
+    ...overrides,
   }
 }
 
@@ -166,7 +190,10 @@ if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL
 }
 
 describeIfDatabase('stock-preparation T3b immutable replay hardening (real DB)', () => {
-  const facade = createRealMultitableFacade()
+  const pluginContext = createProductionPluginContext()
+  const multitable = pluginContext.api.multitable
+  if (!multitable) throw new Error('production plugin context is missing multitable APIs')
+  const facade = createRealMultitableFacade(multitable)
   const context = { api: { multitable: facade }, storage: {}, config: {} }
   const objectIds = [PROJECT_OBJECT_ID, BATCH_OBJECT_ID, LINE_OBJECT_ID, RUN_OBJECT_ID]
   const sheetIds = new Map<string, string>()
@@ -264,4 +291,150 @@ describeIfDatabase('stock-preparation T3b immutable replay hardening (real DB)',
     const afterConflict = await q('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, lineSheetId])
     expect(afterConflict.rows).toEqual(planted.rows)
   })
+
+  test('CW1-CW4 crash matrix rolls back all four tables and revisions before clean retries', async () => {
+    const ids = [...sheetIds.values()]
+    const counts = async () => ({
+      records: (await q(
+        'SELECT count(*)::int AS count FROM meta_records WHERE sheet_id = ANY($1::text[])',
+        [ids],
+      )).rows,
+      revisions: (await q(
+        'SELECT count(*)::int AS count FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])',
+        [ids],
+      )).rows,
+    })
+    const expansionResult = [
+      {
+        componentSourceId: `component_a_${TOKEN}`,
+        componentCode: `MATERIAL-A-${TOKEN}`,
+        sourceVersion: 'A',
+        path: `/root/MATERIAL-A-${TOKEN}`,
+        rawQuantity: 1,
+      },
+      {
+        componentSourceId: `component_b_${TOKEN}`,
+        componentCode: `MATERIAL-B-${TOKEN}`,
+        sourceVersion: 'A',
+        path: `/root/MATERIAL-B-${TOKEN}`,
+        rawQuantity: 2,
+      },
+    ]
+    const scenarios = [
+      { name: 'CW1', failAfter: 1, existingProject: false },
+      { name: 'CW2', failAfter: 2, existingProject: false },
+      { name: 'CW3', failAfter: 3, existingProject: false },
+      { name: 'CW4-first', failAfter: 4, existingProject: false },
+      { name: 'CW4-existing', failAfter: 4, existingProject: true },
+    ]
+
+    for (const scenario of scenarios) {
+      const projectId = `${PROJECT_ID}_${scenario.name}`
+      const common = {
+        projectId,
+        sourceProjectNo: `${SOURCE_PROJECT_NO}_${scenario.name}`,
+        expansionResult,
+      }
+      if (scenario.existingProject) {
+        await persistStockPreparationSyncRun(persistInput(facade, {
+          ...common,
+          syncRunId: `${SYNC_RUN_ID}_${scenario.name}_base`,
+          snapshotBatchId: `${SNAPSHOT_BATCH_ID}_${scenario.name}_base`,
+          snapshotVersion: 1,
+        }))
+      }
+      const input = persistInput(facade, {
+        ...common,
+        syncRunId: `${SYNC_RUN_ID}_${scenario.name}`,
+        snapshotBatchId: `${SNAPSHOT_BATCH_ID}_${scenario.name}`,
+        snapshotVersion: scenario.existingProject ? 2 : 1,
+      })
+      const before = await counts()
+      facade.injectCrashAfterMutation(scenario.failAfter)
+      await expect(persistStockPreparationSyncRun(input))
+        .rejects.toThrow('P4_INJECTED_TRANSACTION_CRASH')
+      expect(await counts()).toEqual(before)
+      await expect(persistStockPreparationSyncRun(input)).resolves.toMatchObject({
+        persisted: true,
+        mode: 'created',
+        created: { batch: 1, lines: 2, run: 1 },
+        project: { mode: scenario.existingProject ? 'patched' : 'created' },
+      })
+    }
+  }, 30_000)
+
+  test('concurrent same-batch writers converge to one create and one exact replay', async () => {
+    const projectId = `${PROJECT_ID}_same_batch`
+    const snapshotBatchId = `${SNAPSHOT_BATCH_ID}_same_batch`
+    const input = persistInput(facade, {
+      projectId,
+      sourceProjectNo: `${SOURCE_PROJECT_NO}_same_batch`,
+      syncRunId: `${SYNC_RUN_ID}_same_batch`,
+      snapshotBatchId,
+      snapshotVersion: 1,
+    })
+    facade.armUnitOfWorkBarrier(2)
+    const results = await Promise.all([
+      persistStockPreparationSyncRun(input),
+      persistStockPreparationSyncRun(input),
+    ])
+    expect(results.map((result) => result.mode).sort()).toEqual(['created', 'skipped_existing'])
+
+    const batchSheetId = sheetIds.get(BATCH_OBJECT_ID)
+    const projectSheetId = sheetIds.get(PROJECT_OBJECT_ID)
+    if (!batchSheetId || !projectSheetId) throw new Error('missing P4 concurrency sheet ids')
+    const batchFields = await discoverPhysicalFields(batchSheetId, BATCH_OBJECT_ID)
+    const projectFields = await discoverPhysicalFields(projectSheetId, PROJECT_OBJECT_ID)
+    const batchRows = await q(
+      'SELECT id FROM meta_records WHERE sheet_id = $1 AND data ->> $2 = $3',
+      [batchSheetId, batchFields.snapshotBatchId, snapshotBatchId],
+    )
+    const projectRows = await q(
+      'SELECT id FROM meta_records WHERE sheet_id = $1 AND data ->> $2 = $3',
+      [projectSheetId, projectFields.projectId, projectId],
+    )
+    expect(batchRows.rows).toHaveLength(1)
+    expect(projectRows.rows).toHaveLength(1)
+  }, 30_000)
+
+  test('concurrent different batches for one project never duplicate its live row', async () => {
+    const projectId = `${PROJECT_ID}_same_project`
+    const inputV1 = persistInput(facade, {
+      projectId,
+      sourceProjectNo: `${SOURCE_PROJECT_NO}_same_project`,
+      syncRunId: `${SYNC_RUN_ID}_same_project_v1`,
+      snapshotBatchId: `${SNAPSHOT_BATCH_ID}_same_project_v1`,
+      snapshotVersion: 1,
+    })
+    const inputV2 = persistInput(facade, {
+      projectId,
+      sourceProjectNo: `${SOURCE_PROJECT_NO}_same_project`,
+      syncRunId: `${SYNC_RUN_ID}_same_project_v2`,
+      snapshotBatchId: `${SNAPSHOT_BATCH_ID}_same_project_v2`,
+      snapshotVersion: 2,
+    })
+    facade.armUnitOfWorkBarrier(2)
+    const outcomes = await Promise.allSettled([
+      persistStockPreparationSyncRun(inputV1),
+      persistStockPreparationSyncRun(inputV2),
+    ])
+    const fulfilled = outcomes.filter((outcome) => outcome.status === 'fulfilled')
+    const rejected = outcomes.filter((outcome) => outcome.status === 'rejected')
+    expect(fulfilled.length).toBeGreaterThanOrEqual(1)
+    for (const outcome of rejected) {
+      expect(outcome.reason).toMatchObject({
+        status: 422,
+        code: 'PERSIST_VERSION_NOT_MONOTONIC',
+      })
+    }
+
+    const projectSheetId = sheetIds.get(PROJECT_OBJECT_ID)
+    if (!projectSheetId) throw new Error('missing P4 project sheet id')
+    const projectFields = await discoverPhysicalFields(projectSheetId, PROJECT_OBJECT_ID)
+    const projectRows = await q(
+      'SELECT id FROM meta_records WHERE sheet_id = $1 AND data ->> $2 = $3',
+      [projectSheetId, projectFields.projectId, projectId],
+    )
+    expect(projectRows.rows).toHaveLength(1)
+  }, 30_000)
 })
