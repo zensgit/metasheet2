@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 import type { ApprovalBridgePlmAdapter } from '../../src/services/approval-bridge-types'
 
@@ -686,6 +687,14 @@ function createApp(plmAdapter?: ApprovalBridgePlmAdapter) {
   return app
 }
 
+const pinned = usePinnedServer()
+
+/** Install app then return supertest agent against the pinned URL (for inline createApp call sites). */
+function hit(app: express.Express) {
+  pinned.setApp(app)
+  return request(pinned.url())
+}
+
 describe('approval bridge routes', () => {
   beforeEach(() => {
     routeState.reset()
@@ -694,8 +703,9 @@ describe('approval bridge routes', () => {
   it('syncs PLM approvals on unified list reads', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createApp(plmAdapter)
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .get('/api/approvals?sourceSystem=plm&status=pending')
       .expect(200)
 
@@ -744,7 +754,7 @@ describe('approval bridge routes', () => {
     })
 
     const plmAdapter = createPlmAdapterMock()
-    const response = await request(createApp(plmAdapter))
+    const response = await hit(createApp(plmAdapter))
       .get('/api/approvals?sourceSystem=plm&limit=1&offset=1')
       .expect(200)
 
@@ -776,7 +786,7 @@ describe('approval bridge routes', () => {
       updated_at: new Date('2026-04-04T08:00:00.000Z'),
     })
 
-    const response = await request(createApp())
+    const response = await hit(createApp())
       .get('/api/approvals?assignee=user-1')
       .expect(200)
 
@@ -787,8 +797,9 @@ describe('approval bridge routes', () => {
   it('clamps oversized unified list limits before syncing PLM approvals', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createApp(plmAdapter)
+    pinned.setApp(app)
 
-    await request(app)
+    await request(pinned.url())
       .get('/api/approvals?sourceSystem=plm&limit=999')
       .expect(200)
 
@@ -803,7 +814,7 @@ describe('approval bridge routes', () => {
 
   it('skips PLM sync work when the requested unified list limit is zero', async () => {
     const plmAdapter = createPlmAdapterMock()
-    const response = await request(createApp(plmAdapter))
+    const response = await hit(createApp(plmAdapter))
       .get('/api/approvals?sourceSystem=plm&limit=0')
       .expect(200)
 
@@ -814,8 +825,9 @@ describe('approval bridge routes', () => {
 
   it('rejects PLM assignee filtering in phase 1', async () => {
     const app = createApp(createPlmAdapterMock())
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .get('/api/approvals?sourceSystem=plm&assignee=me')
       .expect(400)
 
@@ -826,7 +838,7 @@ describe('approval bridge routes', () => {
     const plmAdapter = createPlmAdapterMock()
     plmAdapter.getApprovals.mockRejectedValueOnce(new Error('HTTP client not initialized'))
 
-    const response = await request(createApp(plmAdapter))
+    const response = await hit(createApp(plmAdapter))
       .get('/api/approvals?sourceSystem=plm')
       .expect(503)
 
@@ -834,7 +846,7 @@ describe('approval bridge routes', () => {
   })
 
   it('lists platform approvals without requiring a PLM adapter', async () => {
-    const response = await request(createApp())
+    const response = await hit(createApp())
       .get('/api/approvals')
       .expect(200)
 
@@ -879,7 +891,8 @@ describe('approval bridge routes', () => {
     })
 
     const app = createApp(createPlmAdapterMock())
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/approvals?assignee=user-2')
       .expect(200)
 
@@ -901,8 +914,9 @@ describe('approval bridge routes', () => {
   it('refreshes PLM details on demand', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createApp(plmAdapter)
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .get('/api/approvals/plm:eco-1')
       .expect(200)
 
@@ -917,8 +931,9 @@ describe('approval bridge routes', () => {
 
   it('maps PLM history to unified history DTOs', async () => {
     const app = createApp(createPlmAdapterMock())
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .get('/api/approvals/plm:eco-1/history?page=1&pageSize=1')
       .expect(200)
 
@@ -953,7 +968,7 @@ describe('approval bridge routes', () => {
       created_at: '2026-04-04T00:11:00.000Z',
     })
 
-    const response = await request(createApp(createPlmAdapterMock()))
+    const response = await hit(createApp(createPlmAdapterMock()))
       .get('/api/approvals/plm:eco-1/history?page=2&pageSize=1')
       .expect(200)
 
@@ -973,8 +988,9 @@ describe('approval bridge routes', () => {
     routeState.plmHistory[0].approved_at = null
     routeState.plmHistory[0].created_at = null
     const app = createApp(createPlmAdapterMock())
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .get('/api/approvals/plm:eco-1/history')
       .expect(200)
 
@@ -983,8 +999,9 @@ describe('approval bridge routes', () => {
 
   it('requires a reject comment on unified actions', async () => {
     const app = createApp(createPlmAdapterMock())
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/plm:eco-1/actions')
       .send({ action: 'reject' })
       .expect(400)
@@ -995,8 +1012,9 @@ describe('approval bridge routes', () => {
   it('dispatches PLM approve actions and writes local audit state', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createApp(plmAdapter)
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/plm:eco-1/actions')
       .send({ action: 'approve', comment: 'Ship it' })
       .expect(200)
@@ -1037,7 +1055,7 @@ describe('approval bridge routes', () => {
       error: new Error('refresh failed'),
     })
 
-    const response = await request(createApp(plmAdapter))
+    const response = await hit(createApp(plmAdapter))
       .post('/api/approvals/plm:legacy/actions')
       .send({ action: 'approve', comment: 'Ship it' })
       .expect(502)
@@ -1056,12 +1074,13 @@ describe('approval bridge routes', () => {
     routeState.plmHistory[0].created_at = 'still-not-a-date'
 
     const app = createApp(createPlmAdapterMock())
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .post('/api/approvals/plm:eco-1/actions')
       .send({ action: 'approve', comment: 'Ship it' })
       .expect(200)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .get('/api/approvals/plm:eco-1/history')
       .expect(200)
 
@@ -1075,13 +1094,14 @@ describe('approval bridge routes', () => {
 
   it('merges local audit records into PLM history responses', async () => {
     const app = createApp(createPlmAdapterMock())
+    pinned.setApp(app)
 
-    await request(app)
+    await request(pinned.url())
       .post('/api/approvals/plm:eco-1/actions')
       .send({ action: 'approve', comment: 'Ship it' })
       .expect(200)
 
-    const history = await request(app)
+    const history = await request(pinned.url())
       .get('/api/approvals/plm:eco-1/history')
       .expect(200)
 
@@ -1103,7 +1123,7 @@ describe('approval bridge routes', () => {
       error: new Error('upstream boom'),
     })
 
-    const response = await request(createApp(plmAdapter))
+    const response = await hit(createApp(plmAdapter))
       .get('/api/approvals/plm:eco-1/history')
       .expect(502)
 
@@ -1140,7 +1160,8 @@ describe('approval bridge routes', () => {
     })
 
     const app = createApp(createPlmAdapterMock())
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/approvals?assignee=user-assignee')
       .expect(200)
 
@@ -1150,7 +1171,8 @@ describe('approval bridge routes', () => {
 
   it('lets source-queue approvals match the actor permission set for the pending tab', async () => {
     const app = createApp(createPlmAdapterMock())
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .get('/api/approvals?tab=pending&sourceSystem=platform')
       .expect(200)
 
@@ -1174,7 +1196,8 @@ describe('approval bridge routes', () => {
     })
 
     const app = createApp(createPlmAdapterMock())
-    const response = await request(app).get('/api/approvals/pending').expect(200)
+    pinned.setApp(app)
+    const response = await request(pinned.url()).get('/api/approvals/pending').expect(200)
 
     expect(response.body.total).toBe(1)
     expect(response.body.data[0].id).toBe('local-1')
@@ -1258,7 +1281,8 @@ describe('approval bridge routes', () => {
     )
 
     const app = createApp(createPlmAdapterMock())
-    const response = await request(app).get('/api/approvals?tab=processed').expect(200)
+    pinned.setApp(app)
+    const response = await request(pinned.url()).get('/api/approvals?tab=processed').expect(200)
 
     expect(response.body.total).toBe(2)
     expect(response.body.data.map((row: { id: string }) => row.id).sort()).toEqual(['local-2', 'local-3'])
@@ -1267,7 +1291,7 @@ describe('approval bridge routes', () => {
     // request-supplied actorId/userId param must not re-target it to another user's history.
     // Same authenticated test-user, hostile params claiming someone-else: the result set is
     // byte-identical to the un-parameterized call above; someone-else's local-4 never leaks.
-    const overrideAttempt = await request(app)
+    const overrideAttempt = await request(pinned.url())
       .get('/api/approvals?tab=processed&actorId=someone-else&userId=someone-else')
       .expect(200)
     expect(overrideAttempt.body.total).toBe(2)
@@ -1315,13 +1339,14 @@ describe('approval bridge routes', () => {
     routeState.state.reads.add('someone-else local-2')
 
     const app = createApp(createPlmAdapterMock())
-    const pendingResponse = await request(app).get('/api/approvals?tab=pending').expect(200)
+    pinned.setApp(app)
+    const pendingResponse = await request(pinned.url()).get('/api/approvals?tab=pending').expect(200)
     const byId = new Map(pendingResponse.body.data.map((row: { id: string }) => [row.id, row]))
     expect((byId.get('local-1') as { isRead?: boolean } | undefined)?.isRead).toBe(true)
     expect((byId.get('local-2') as { isRead?: boolean } | undefined)?.isRead).toBe(false)
 
     // Scoping: a non-pending tab never sets isRead — undefined (omitted key), never a guessed value.
-    const mineResponse = await request(app).get('/api/approvals?tab=mine').expect(200)
+    const mineResponse = await request(pinned.url()).get('/api/approvals?tab=mine').expect(200)
     for (const row of mineResponse.body.data as Array<{ isRead?: boolean }>) {
       expect(row.isRead).toBeUndefined()
     }
@@ -1343,7 +1368,8 @@ describe('approval bridge routes', () => {
     })
 
     const app = createApp(createPlmAdapterMock())
-    const response = await request(app).get('/api/approvals?templateId=tpl-a').expect(200)
+    pinned.setApp(app)
+    const response = await request(pinned.url()).get('/api/approvals?templateId=tpl-a').expect(200)
 
     expect(response.body.total).toBe(1)
     expect(response.body.data[0].id).toBe('local-2')
@@ -1363,7 +1389,8 @@ describe('approval bridge routes', () => {
     })
 
     const app = createApp(createPlmAdapterMock())
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/approvals?createdFrom=2026-05-01T00:00:00Z&createdTo=2026-06-30T23:59:59Z')
       .expect(200)
 
@@ -1373,11 +1400,12 @@ describe('approval bridge routes', () => {
 
   it('B3-03: rejects a malformed createdFrom/createdTo with 400', async () => {
     const app = createApp(createPlmAdapterMock())
+    pinned.setApp(app)
 
-    const badFrom = await request(app).get('/api/approvals?createdFrom=not-a-date').expect(400)
+    const badFrom = await request(pinned.url()).get('/api/approvals?createdFrom=not-a-date').expect(400)
     expect(badFrom.body.error.code).toBe('APPROVAL_DATE_FILTER_INVALID')
 
-    const badTo = await request(app).get('/api/approvals?createdTo=also-not-a-date').expect(400)
+    const badTo = await request(pinned.url()).get('/api/approvals?createdTo=also-not-a-date').expect(400)
     expect(badTo.body.error.code).toBe('APPROVAL_DATE_FILTER_INVALID')
   })
 })

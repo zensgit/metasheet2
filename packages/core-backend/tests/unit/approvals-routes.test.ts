@@ -1,6 +1,7 @@
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const authState = vi.hoisted(() => ({
   user: {
@@ -42,6 +43,8 @@ vi.mock('../../src/rbac/rbac', () => ({
   rbacGuardAny: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
 }))
 
+const pinned = usePinnedServer()
+
 describe('approvals routes', () => {
   let app: Express
 
@@ -64,10 +67,11 @@ describe('approvals routes', () => {
     app = express()
     app.use(express.json())
     app.use(approvalsRouter())
+    pinned.setApp(app)
   })
 
   it('requires version for approval actions', async () => {
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/approve')
       .send({ comment: 'looks good' })
 
@@ -89,7 +93,7 @@ describe('approvals routes', () => {
       permissions: ['*:*'],
     }
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/approve')
       .send({ version: 0 })
 
@@ -110,7 +114,7 @@ describe('approvals routes', () => {
       permissions: ['*:*'],
     }
 
-    const response = await request(app).get('/api/approvals/pending')
+    const response = await request(pinned.url()).get('/api/approvals/pending')
 
     expect(response.status).toBe(401)
     expect(response.body).toEqual({
@@ -145,7 +149,7 @@ describe('approvals routes', () => {
         rows: [{ count: '1' }],
       })
 
-    const response = await request(app).get('/api/approvals/pending')
+    const response = await request(pinned.url()).get('/api/approvals/pending')
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({
@@ -178,7 +182,7 @@ describe('approvals routes', () => {
       })
       .mockResolvedValueOnce({})
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/approve')
       .send({ version: 2, comment: 'looks good' })
 
@@ -202,7 +206,7 @@ describe('approvals routes', () => {
       })
       .mockResolvedValueOnce({})
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-missing/approve')
       .send({ version: 0 })
 
@@ -221,7 +225,7 @@ describe('approvals routes', () => {
       rows: [],
     })
 
-    const response = await request(app).get('/api/approvals/apr-missing')
+    const response = await request(pinned.url()).get('/api/approvals/apr-missing')
 
     expect(response.status).toBe(404)
     expect(response.body).toEqual({
@@ -249,7 +253,7 @@ describe('approvals routes', () => {
       })
       .mockResolvedValueOnce({})
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/approve')
       .send({ version: 1 })
 
@@ -281,7 +285,7 @@ describe('approvals routes', () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/approve')
       .send({ version: 0, comment: 'looks good' })
 
@@ -318,7 +322,7 @@ describe('approvals routes', () => {
       })
       .mockResolvedValueOnce({})
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/reject')
       .send({ version: 4, reason: 'missing evidence' })
 
@@ -352,7 +356,7 @@ describe('approvals routes', () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/reject')
       .send({ version: 4, comment: 'needs changes' })
 
@@ -386,7 +390,7 @@ describe('approvals routes', () => {
   })
 
   it('returns a structured validation error when reject omits the reason', async () => {
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approvals/apr-1/reject')
       .send({ version: 4, comment: '   ' })
 

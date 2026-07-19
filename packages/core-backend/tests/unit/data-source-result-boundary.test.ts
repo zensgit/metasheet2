@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
 
@@ -112,12 +113,15 @@ describe('A5 adapter backstop on the wire (select is always bounded)', () => {
   })
 })
 
+const pinned = usePinnedServer()
+
 describe('A5 route layer (/select default + /query warning)', () => {
   let currentUser: { id: string; role?: string } | undefined
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => { req.user = currentUser as never; next() })
   app.use(dataSourcesRouter())
+  pinned.setApp(app)
   const admin = (id: string) => ({ id, role: 'admin' })
 
   beforeEach(() => {
@@ -127,8 +131,8 @@ describe('A5 route layer (/select default + /query warning)', () => {
 
   it('/select applies DEFAULT_LIMIT when the caller omits limit', async () => {
     const spy = vi.spyOn(DataSourceManager.prototype, 'select').mockResolvedValue({ data: [] })
-    await request(app).post('/api/data-sources').send(cfg('sel-default'))
-    const res = await request(app).post('/api/data-sources/sel-default/select').send({ table: 't' })
+    await request(pinned.url()).post('/api/data-sources').send(cfg('sel-default'))
+    const res = await request(pinned.url()).post('/api/data-sources/sel-default/select').send({ table: 't' })
     expect(res.status).toBe(200)
     expect(spy).toHaveBeenCalled()
     expect(spy.mock.calls[0][2]).toMatchObject({ limit: DATA_SOURCE_DEFAULT_LIMIT })
@@ -136,15 +140,15 @@ describe('A5 route layer (/select default + /query warning)', () => {
 
   it('/select passes an explicit in-range limit through unchanged', async () => {
     const spy = vi.spyOn(DataSourceManager.prototype, 'select').mockResolvedValue({ data: [] })
-    await request(app).post('/api/data-sources').send(cfg('sel-explicit'))
-    await request(app).post('/api/data-sources/sel-explicit/select').send({ table: 't', limit: 42 })
+    await request(pinned.url()).post('/api/data-sources').send(cfg('sel-explicit'))
+    await request(pinned.url()).post('/api/data-sources/sel-explicit/select').send({ table: 't', limit: 42 })
     expect(spy.mock.calls[0][2]).toMatchObject({ limit: 42 })
   })
 
   it('/select rejects an over-MAX limit with 400 (schema gate, never reaches the adapter)', async () => {
     const spy = vi.spyOn(DataSourceManager.prototype, 'select').mockResolvedValue({ data: [] })
-    await request(app).post('/api/data-sources').send(cfg('sel-over'))
-    const res = await request(app)
+    await request(pinned.url()).post('/api/data-sources').send(cfg('sel-over'))
+    const res = await request(pinned.url())
       .post('/api/data-sources/sel-over/select')
       .send({ table: 't', limit: DATA_SOURCE_MAX_ROWS + 1 })
     expect(res.status).toBe(400)
@@ -154,8 +158,8 @@ describe('A5 route layer (/select default + /query warning)', () => {
 
   it('/query warns (response + audit) when the raw SQL has no row-count limit', async () => {
     vi.spyOn(DataSourceManager.prototype, 'query').mockResolvedValue({ data: [] })
-    await request(app).post('/api/data-sources').send(cfg('q-warn'))
-    const res = await request(app).post('/api/data-sources/q-warn/query').send({ sql: 'SELECT * FROM big' })
+    await request(pinned.url()).post('/api/data-sources').send(cfg('q-warn'))
+    const res = await request(pinned.url()).post('/api/data-sources/q-warn/query').send({ sql: 'SELECT * FROM big' })
     expect(res.status).toBe(200)
     expect(res.body.warning).toMatch(/no row-count limit \(LIMIT\/TOP\/FETCH\)/)
   })
@@ -163,19 +167,19 @@ describe('A5 route layer (/select default + /query warning)', () => {
   it('/query STILL warns for a bare OFFSET — it skips rows but does not cap them', async () => {
     // P2: `SELECT * FROM big OFFSET 1000` returns the rest of a huge table; OFFSET is not a bound.
     vi.spyOn(DataSourceManager.prototype, 'query').mockResolvedValue({ data: [] })
-    await request(app).post('/api/data-sources').send(cfg('q-offset'))
-    const res = await request(app).post('/api/data-sources/q-offset/query').send({ sql: 'SELECT * FROM big OFFSET 1000 ROWS' })
+    await request(pinned.url()).post('/api/data-sources').send(cfg('q-offset'))
+    const res = await request(pinned.url()).post('/api/data-sources/q-offset/query').send({ sql: 'SELECT * FROM big OFFSET 1000 ROWS' })
     expect(res.status).toBe(200)
     expect(res.body.warning).toMatch(/no row-count limit/)
   })
 
   it('/query does NOT warn when the SQL actually caps rows (LIMIT, or OFFSET+FETCH)', async () => {
     vi.spyOn(DataSourceManager.prototype, 'query').mockResolvedValue({ data: [] })
-    await request(app).post('/api/data-sources').send(cfg('q-ok'))
-    const limited = await request(app).post('/api/data-sources/q-ok/query').send({ sql: 'SELECT * FROM big LIMIT 10' })
+    await request(pinned.url()).post('/api/data-sources').send(cfg('q-ok'))
+    const limited = await request(pinned.url()).post('/api/data-sources/q-ok/query').send({ sql: 'SELECT * FROM big LIMIT 10' })
     expect(limited.body.warning).toBeUndefined()
     // OFFSET + FETCH NEXT is a genuine bound (T-SQL pagination)
-    const fetched = await request(app)
+    const fetched = await request(pinned.url())
       .post('/api/data-sources/q-ok/query')
       .send({ sql: 'SELECT * FROM big ORDER BY id OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY' })
     expect(fetched.body.warning).toBeUndefined()
