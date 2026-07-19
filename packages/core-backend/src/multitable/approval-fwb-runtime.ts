@@ -54,7 +54,7 @@ import {
   resolvePinnedRecordLinkTarget,
 } from './approval-fwb-target-fields'
 import { recordRecordRevision } from './record-history-service'
-import { canEditWhileLocked, lockableFromRow } from './record-lock'
+import { canEditWhileLocked, ensureRecordNotLocked, lockableFromRow } from './record-lock'
 import { isRecordReadDeniedForUser } from './permission-service'
 import { resolveSheetCapabilitiesForUser, canWriteRecord } from './sheet-capabilities'
 import { sanitizeRichLongText } from './field-codecs'
@@ -429,10 +429,11 @@ async function updateBoundRecordUnderLock(
     locked_by?: unknown
     created_by?: unknown
   }
-  // Locked for automation write (actor = null semantics + ensureRecordNotLocked posture).
-  if (row.locked === true && !canEditWhileLocked(input.configurerUserId, lockableFromRow(row))) {
-    throw new Error(FWB_TARGET_UNAVAILABLE)
-  }
+  ensureRecordNotLocked(
+    input.configurerUserId,
+    row,
+    () => new Error(FWB_TARGET_UNAVAILABLE),
+  )
   const { capabilities, sheetScope, isAdminRole } = await resolveSheetCapabilitiesForUser(
     input.queryFn,
     input.sheetId,
@@ -447,6 +448,8 @@ async function updateBoundRecordUnderLock(
   }
   const nextData = { ...(isRecord(row.data) ? row.data : {}), ...input.values }
   const nextVersion = Number(row.version ?? 0) + 1
+  // lock-guarded: FWB update calls ensureRecordNotLocked for the effective rule-configurer actor.
+  // revision-emitted: FWB update records the new version below in this same transaction.
   await trx.query(
     `UPDATE meta_records SET data = $3::jsonb, version = $4, updated_at = now()
       WHERE id = $1 AND sheet_id = $2`,
@@ -714,6 +717,7 @@ export async function runWriteApprovalFormValues(
       const createSeam: FwbRecordWriteSeam = {
         async createRecordWithRevision(t, sheetId, values) {
           const recordId = `rec_${randomUUID()}`
+          // revision-emitted: FWB create records version 1 below in this same transaction.
           await t.query(
             `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
             [recordId, sheetId, JSON.stringify(values)],

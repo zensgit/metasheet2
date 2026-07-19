@@ -10,7 +10,11 @@ describe('delete_record automation action migration (Phase C2)', () => {
     // No longer the LATEST migration (record_click widened the constraint afterwards — see
     // record-click-automation-action-migration.test.ts for the live "latest in sync" guard). Every
     // app-level action type except the ones introduced by a strictly-later migration must be here.
-    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['record_click', 'send_dingtalk_approval_card'])
+    const ADDED_BY_LATER_MIGRATIONS = new Set<string>([
+      'record_click',
+      'send_dingtalk_approval_card',
+      'write_approval_form_values',
+    ])
     for (const actionType of ALL_ACTION_TYPES) {
       if (ADDED_BY_LATER_MIGRATIONS.has(actionType)) continue
       expect(AUTOMATION_ACTION_TYPES_WITH_DELETE_RECORD).toContain(actionType)
