@@ -24,6 +24,7 @@
  *            'applying' is never observable here)
  *            Missing adapter → 409 ORG_TRANSFER_ADAPTER_UNAVAILABLE; row unchanged
  *   cancel:  any non-terminal ('draft' | 'scanned' | 'applying' | 'failed') → 'cancelled'
+ *   source-sync-freeze (T2 admin override): non-terminal only; toggles freeze_source_sync
  *
  * Every transition runs in ONE transaction with `SELECT … FOR UPDATE` on the transfer row —
  * write-point enforcement, not check-then-write (the PB4-2 doctrine): a concurrent
@@ -461,6 +462,37 @@ export async function cancelOrgTransfer(transferId: string): Promise<OrgTransfer
         WHERE id = $1
         RETURNING ${TRANSFER_COLUMNS}`,
       [transferId]
+    )
+    return toSummary((updated.rows as OrgTransferRow[])[0])
+  })
+}
+
+/**
+ * T2 platform-admin override for §12.2 source-sync freeze.
+ *
+ * Locks the transfer row transactionally, allows only non-terminal statuses, and sets
+ * `freeze_source_sync`. Org identity is never a caller input — it is already on the transfer
+ * row (derived at create from the two integrations). Routes emit one values-free post-commit
+ * audit; rejected mutations write none.
+ */
+export async function setOrgTransferSourceSyncFreeze(
+  transferId: string,
+  freezeSourceSync: boolean
+): Promise<OrgTransferSummary> {
+  return transaction(async (client) => {
+    const row = await lockTransfer(client, transferId)
+    if (!NON_TERMINAL_STATUSES.includes(row.status)) {
+      throw new OrgTransferConflictError(
+        'ORG_TRANSFER_INVALID_STATE',
+        `source-sync freeze cannot be changed on terminal status ${row.status}`
+      )
+    }
+    const updated = await client.query(
+      `UPDATE provider_org_transfers
+          SET freeze_source_sync = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING ${TRANSFER_COLUMNS}`,
+      [transferId, freezeSourceSync]
     )
     return toSummary((updated.rows as OrgTransferRow[])[0])
   })

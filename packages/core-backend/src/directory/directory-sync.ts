@@ -3106,13 +3106,16 @@ export class DirectorySyncInProgressError extends Error {
  * tenant being emptied/migrated looks exactly like "everyone left", and the sweep would mark the
  * whole directory inactive. Thrown BEFORE the run lease is claimed, so a frozen trigger creates
  * no run row and leaves nothing to reclaim. The admin override (§12.2 "unless an explicit admin
- * override is supplied") is the transfer row's `freeze_source_sync` flag — flipping it to false
+ * override is supplied") is the transfer row's `freeze_source_sync` flag; the supported operator
+ * mutation surface is the platform-admin PATCH .../source-sync-freeze API — flipping it to false
  * un-freezes THIS transfer without cancelling it.
  *
  * Known window (documented, gate P3): the gate runs ONCE at sync entry, so a transfer created
- * while a sync is already mid-pull does not stop that in-flight run — its absence sweep can still
- * land. Exposure is bounded (T1 scan/apply are no-ops; the DT-OPS-01 mass-departure breaker caps
- * the local-user cascade) and the runbook orders the transfer record BEFORE any provider-side
+ * (or a freeze re-asserted / refreeze) while a sync is already past entry does not stop that
+ * in-flight run — its absence sweep can still finish. Exposure is bounded: T1/T2 themselves do
+ * not drain provider data; fail-closed unregistered-adapter behavior keeps scan/apply from
+ * silently no-op-succeeding in production; and the DT-OPS-01 mass-departure breaker caps the
+ * local-user cascade. The runbook still orders the transfer record BEFORE any provider-side
  * draining. If T3 needs the window closed, re-assert this freeze immediately before the sweep.
  */
 export class DirectorySyncFrozenByTransferError extends Error {

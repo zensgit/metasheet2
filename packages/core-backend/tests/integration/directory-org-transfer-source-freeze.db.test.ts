@@ -1,16 +1,20 @@
 import { randomUUID } from 'crypto'
 import express from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 // Transfer MVP — T2 (§12.2 source freeze), real DB + the REAL syncDirectoryIntegration with a
 // mocked DingTalk client (the R1-L4 orchestration-harness pattern): nothing between this suite
 // and the sync orchestration except the network client. The mocked tenant is EMPTY, so any sync
 // that is allowed to run performs the destructive absence sweep — which is exactly the write the
-// freeze exists to stop. That makes the positive control honest: with the freeze bypassed (the
-// transfer row's freeze_source_sync=false admin override), the very same sync deactivates the
-// seeded account, proving test A's frozen sync was blocked from a REAL destructive outcome, not
-// from a no-op.
+// freeze exists to stop. That makes the positive control honest: with the freeze bypassed via the
+// supported platform-admin PATCH .../source-sync-freeze API (freezeSourceSync=false), the very
+// same sync deactivates the seeded account, proving test A's frozen sync was blocked from a REAL
+// destructive outcome, not from a no-op. The override path also proves one values-free audit row.
+//
+// Also hosts the composed T1+T2 proof: an unavailable-adapter scan failure must leave the
+// transfer non-terminal and the source freeze intact (no sync run, no absence sweep). And the
+// freeze-API contract surface (auth, allowlist, terminal/missing, refreeze, no audit on reject).
 //
 // DATABASE_URL-gated (describeIfDatabase): excluded from the no-DB vitest job so it cannot
 // skip-green, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml
@@ -37,18 +41,31 @@ import {
   DirectorySyncFrozenByTransferError,
   syncDirectoryIntegration,
 } from '../../src/directory/directory-sync'
+import { unregisterOrgTransferAdapter } from '../../src/directory/org-transfer-service'
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
+import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directory-org-transfers'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 
+const FREEZE_ADMIN_ID = `t2-freeze-admin-${TS}`
+
 const adminApp = express()
 adminApp.use(express.json())
 adminApp.use((req, _res, next) => {
-  ;(req as express.Request & { user?: unknown }).user = { id: `t2-freeze-admin-${TS}`, role: 'admin' }
+  ;(req as express.Request & { user?: unknown }).user = { id: FREEZE_ADMIN_ID, role: 'admin' }
   next()
 })
 adminApp.use('/api/admin/directory', adminDirectoryRouter())
+adminApp.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())
+
+const nonAdminApp = express()
+nonAdminApp.use(express.json())
+nonAdminApp.use((req, _res, next) => {
+  ;(req as express.Request & { user?: unknown }).user = { id: `t2-freeze-nonadmin-${TS}` }
+  next()
+})
+nonAdminApp.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())
 
 describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active org transfer (real sync, mocked pull)', () => {
   const cleanupTransferIds: string[] = []
@@ -63,11 +80,33 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
     clientMocks.getDingTalkUserDetail.mockRejectedValue(new Error('empty tenant — no user details expected'))
   })
 
+  afterEach(() => {
+    // Composed T1+T2 case must not leave a leaked adapter registration for other suites.
+    unregisterOrgTransferAdapter('dingtalk')
+  })
+
   afterAll(async () => {
+    unregisterOrgTransferAdapter('dingtalk')
     for (const id of cleanupTransferIds.splice(0)) await query(`DELETE FROM provider_org_transfers WHERE id = $1`, [id])
     // integration delete cascades its departments/accounts/runs
     for (const id of cleanupIntegrationIds.splice(0)) await query(`DELETE FROM directory_integrations WHERE id = $1`, [id])
   })
+
+  async function freezeAuditCount(transferId: string): Promise<number> {
+    const result = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_logs
+        WHERE action = 'directory.org_transfer.source_sync_freeze' AND resource_id = $1`,
+      [transferId]
+    )
+    return Number(result.rows[0].n)
+  }
+
+  async function orgTransferFreezeAuditTotal(): Promise<number> {
+    const result = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_logs WHERE action = 'directory.org_transfer.source_sync_freeze'`
+    )
+    return Number(result.rows[0].n)
+  }
 
   async function seedIntegrationWithLiveAccount(tag: string): Promise<{ integrationId: string; accountId: string }> {
     const integration = await createDirectoryIntegration({
@@ -137,12 +176,17 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
     expect(await accountActive(source.accountId)).toBe(true)
   })
 
-  it('B. admin override (freeze_source_sync=false): the SAME sync runs and the absence sweep proves it was destructive', async () => {
+  it('B. admin override via PATCH source-sync-freeze=false: SAME sync runs, absence sweep is destructive, one freeze audit', async () => {
     const source = await seedIntegrationWithLiveAccount('b-src')
     const target = await seedIntegrationWithLiveAccount('b-dst')
     const transferId = await createTransferRow(source.integrationId, target.integrationId)
 
-    await query(`UPDATE provider_org_transfers SET freeze_source_sync = false WHERE id = $1`, [transferId])
+    const unfreeze = await request(adminApp)
+      .patch(`/api/admin/directory/org-transfers/${transferId}/source-sync-freeze`)
+      .send({ freezeSourceSync: false })
+    expect(unfreeze.status).toBe(200)
+    expect(unfreeze.body.data.transfer.freezeSourceSync).toBe(false)
+    expect(await freezeAuditCount(transferId)).toBe(1)
 
     const result = await syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)
     expect(result.run.status).toBe('completed')
@@ -209,5 +253,126 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
     // No transfer references it at all — a sweep of the OTHER fixtures' transfers must not leak.
     const result = await syncDirectoryIntegration(bystander.integrationId, `t2-admin-${TS}`)
     expect(result.run.status).toBe('completed')
+  })
+
+  it('composed T1+T2: unavailable-adapter scan leaves source frozen — no sync run, absence sweep never executes', async () => {
+    // Deliberately NO adapter registration: production default for unregistered providers.
+    // After the typed scan failure the transfer stays non-terminal, so T2 freeze must still hold.
+    const source = await seedIntegrationWithLiveAccount('t1t2-src')
+    const target = await seedIntegrationWithLiveAccount('t1t2-dst')
+    const create = await request(adminApp)
+      .post('/api/admin/directory/org-transfers')
+      .send({
+        provider: 'dingtalk',
+        sourceIntegrationId: source.integrationId,
+        targetIntegrationId: target.integrationId,
+      })
+    expect(create.status).toBe(200)
+    const transferId = create.body.data.transfer.id as string
+    cleanupTransferIds.push(transferId)
+
+    const scan = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`)
+    expect(scan.status).toBe(409)
+    expect(scan.body.error.code).toBe('ORG_TRANSFER_ADAPTER_UNAVAILABLE')
+
+    const row = await query<{ status: string; freeze_source_sync: boolean }>(
+      `SELECT status, freeze_source_sync FROM provider_org_transfers WHERE id = $1`,
+      [transferId]
+    )
+    expect(row.rows[0].status).toBe('draft') // still non-terminal
+    expect(row.rows[0].freeze_source_sync).toBe(true)
+
+    await expect(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)).rejects.toBeInstanceOf(
+      DirectorySyncFrozenByTransferError
+    )
+    expect(await runCount(source.integrationId)).toBe(0)
+    expect(await accountActive(source.accountId)).toBe(true)
+  })
+
+  it('source-sync-freeze API: platform-admin only; unknown fields / non-boolean type reject with no audit', async () => {
+    const source = await seedIntegrationWithLiveAccount('api-auth-src')
+    const target = await seedIntegrationWithLiveAccount('api-auth-dst')
+    const transferId = await createTransferRow(source.integrationId, target.integrationId)
+    const auditBefore = await orgTransferFreezeAuditTotal()
+
+    const denied = await request(nonAdminApp)
+      .patch(`/api/admin/directory/org-transfers/${transferId}/source-sync-freeze`)
+      .send({ freezeSourceSync: false })
+    expect(denied.status).toBeGreaterThanOrEqual(401)
+    expect(denied.status).toBeLessThanOrEqual(403)
+
+    const unknown = await request(adminApp)
+      .patch(`/api/admin/directory/org-transfers/${transferId}/source-sync-freeze`)
+      .send({ freezeSourceSync: false, orgId: 'evil' })
+    expect(unknown.status).toBe(400)
+    expect(unknown.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+
+    for (const bad of [null, 'true', 1, { nested: true }, undefined]) {
+      const body =
+        bad === undefined ? {} : ({ freezeSourceSync: bad } as Record<string, unknown>)
+      const res = await request(adminApp)
+        .patch(`/api/admin/directory/org-transfers/${transferId}/source-sync-freeze`)
+        .send(body)
+      expect(res.status, String(bad)).toBe(400)
+      expect(res.body.error.code).toBe('ORG_TRANSFER_INVALID_INPUT')
+    }
+
+    // Flag untouched; no freeze audit written for any rejected mutation.
+    const row = await query<{ freeze_source_sync: boolean }>(
+      `SELECT freeze_source_sync FROM provider_org_transfers WHERE id = $1`,
+      [transferId]
+    )
+    expect(row.rows[0].freeze_source_sync).toBe(true)
+    expect(await orgTransferFreezeAuditTotal()).toBe(auditBefore)
+    expect(await freezeAuditCount(transferId)).toBe(0)
+  })
+
+  it('source-sync-freeze API: missing 404, terminal 409, no audit; unfreeze + refreeze works with audits', async () => {
+    const auditBefore = await orgTransferFreezeAuditTotal()
+
+    const missing = await request(adminApp)
+      .patch(`/api/admin/directory/org-transfers/${randomUUID()}/source-sync-freeze`)
+      .send({ freezeSourceSync: false })
+    expect(missing.status).toBe(404)
+    expect(missing.body.error.code).toBe('ORG_TRANSFER_NOT_FOUND')
+
+    const source = await seedIntegrationWithLiveAccount('api-term-src')
+    const target = await seedIntegrationWithLiveAccount('api-term-dst')
+    const terminalId = await createTransferRow(source.integrationId, target.integrationId, 'cancelled')
+    const terminal = await request(adminApp)
+      .patch(`/api/admin/directory/org-transfers/${terminalId}/source-sync-freeze`)
+      .send({ freezeSourceSync: false })
+    expect(terminal.status).toBe(409)
+    expect(terminal.body.error.code).toBe('ORG_TRANSFER_INVALID_STATE')
+
+    expect(await orgTransferFreezeAuditTotal()).toBe(auditBefore)
+
+    // Happy path + refreeze (idempotent true after false).
+    const liveSource = await seedIntegrationWithLiveAccount('api-refreeze-src')
+    const liveTarget = await seedIntegrationWithLiveAccount('api-refreeze-dst')
+    const liveId = await createTransferRow(liveSource.integrationId, liveTarget.integrationId)
+
+    const unfreeze = await request(adminApp)
+      .patch(`/api/admin/directory/org-transfers/${liveId}/source-sync-freeze`)
+      .send({ freezeSourceSync: false })
+    expect(unfreeze.status).toBe(200)
+    expect(unfreeze.body.data.transfer.freezeSourceSync).toBe(false)
+    expect(await freezeAuditCount(liveId)).toBe(1)
+
+    // While unfrozen, sync is allowed (positive control for the flag).
+    const mid = await syncDirectoryIntegration(liveSource.integrationId, `t2-admin-${TS}`)
+    expect(mid.run.status).toBe('completed')
+
+    const refreeze = await request(adminApp)
+      .patch(`/api/admin/directory/org-transfers/${liveId}/source-sync-freeze`)
+      .send({ freezeSourceSync: true })
+    expect(refreeze.status).toBe(200)
+    expect(refreeze.body.data.transfer.freezeSourceSync).toBe(true)
+    expect(await freezeAuditCount(liveId)).toBe(2)
+
+    // After refreeze the source is frozen again.
+    await expect(syncDirectoryIntegration(liveSource.integrationId, `t2-admin-${TS}`)).rejects.toBeInstanceOf(
+      DirectorySyncFrozenByTransferError
+    )
   })
 })
