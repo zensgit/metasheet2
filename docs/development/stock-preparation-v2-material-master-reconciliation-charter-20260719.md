@@ -92,8 +92,14 @@ changed、unchanged、ambiguous 等闭词表结果。V1 不做模糊匹配、别
 
 - PLM / ERP adapter 只读；所有成功、失败和审计证据均声明 `externalWrite=false`；
 - 不调用 K3 Save / Submit / Audit，不调用 PLM write，不接 external-write apply pipeline；
-- V1 公共 API / UI 只返回不透明句柄、闭枚举、计数和有界摘要 hash。物料编码、名称、规格、
-  单位、源字段名、原始 path、原始错误和配置内容不得进入响应、日志或 values-free artifact；
+- V1 公共 API / UI、审计、用户可见日志和 values-free artifact 只允许不透明句柄、
+  闭枚举、计数和有界摘要 hash。物料编码、名称、规格、单位、源字段名、原始 path、
+  原始错误和配置内容不得进入上述任一表面；
+- 受控的内部诊断 telemetry 也必须 values-free：只可记录闭词表 family / reason / phase、
+  计数、非敏感关联句柄、经确定性脱敏的 error class 与 stack fingerprint。禁止记录 raw message / stack、
+  path、config、payload、source field 或业务值；该面必须有 leak-bait / redaction 测试承重，不得以
+  “仅内部可见”为由接入 raw Sentry / logger capture。实现锁必须冻结闭集 error-class
+  allowlist（未知类折叠为 `OTHER`）与单向、有界、path/message-free 的 fingerprint 输入规则；
 - 值面审阅默认 barred，不能因为用户持有 `integration:write` 自动解锁。
 
 ### 4.3 完整性、身份与歧义
@@ -159,6 +165,9 @@ missingChildBom、设计数量 / 单位规则、material mapping、issueQty 数�
 
 ## 7. 实施切片（ratify 后才可执行）
 
+任一切片首次新增或改动应用日志 / 内部诊断 telemetry 时，leak-bait 与 redaction mutation
+必须作为**同一切片**的退出条件；不得延后到 V3-b 或后续 UI 切片补证。
+
 | 切片 | 内容 | 建议执行 / 审阅 | 退出条件 |
 |---|---|---|---|
 | V2-a | 独立 manifest、frozen templates、闭词表、flag/permissions contract | Kimi K3 设计审计；Codex 定稿 | schema tests + forbidden-content tests；无 routes/runtime |
@@ -178,7 +187,9 @@ missingChildBom、设计数量 / 单位规则、material mapping、issueQty 数�
 2. 任一 adapter write spy 被调用或 `externalWrite` 变 true -> 红；
 3. request tenant/project/base steering 在 source I/O 前未拒绝 -> 调用计数红；
 4. 未批准、跨租户或执行中被撤销的 config 仍可提交 -> 红；
-5. 业务值植入每个允许字段后出现在响应、DOM、日志或 summary -> 红。
+5. 业务值植入每个允许字段或诊断字段后，出现在响应、DOM、审计 / 用户可见日志、
+   summary、values-free artifact 或受控内部诊断 telemetry -> 红；raw message / stack、path、
+   config、payload 或 source field 绕过脱敏 -> 红。
 
 ### 8.2 完整性与正确性
 
