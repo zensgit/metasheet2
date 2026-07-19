@@ -21,12 +21,16 @@ import {
  *      suggestion; a remote name matching TWO local departments yields an `ambiguous` entry that
  *      is deliberately NOT appliable (no localDepartmentId) — never auto-matched; a no-match
  *      remote is `unmatched`; an ALREADY-BOUND remote is excluded entirely.
- *   E. SUGGEST IS READ-ONLY: binding rows byte-identical before/after the call.
+ *   E. SUGGEST IS READ-ONLY (zero-write): org-scoped binding count + complete binding fingerprint
+ *      set are byte-identical before/after; the exact suggested local/remote pair has no binding
+ *      row either before or after (suggest never creates a binding for its own proposal).
  *
  * Load-bearing mutations (out-of-band, each reds this file):
  *   - drop the sweep's `rd.is_active = false` predicate → B reds (a healthy binding gets staled).
  *   - auto-pick the first candidate on ambiguity     → D reds (ambiguous becomes a suggestion).
  *   - make the sweep ALSO archive the local department (inject) → A reds (the headline pin).
+ *   - inject an INSERT of the suggested (local, remote) binding inside suggest → E reds
+ *     (count/fingerprint/pair-absence all fail — proves the zero-write pin is load-bearing).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -67,6 +71,31 @@ async function bindingStatus(id: string): Promise<string> {
 async function deptFingerprint(id: string): Promise<string> {
   const r = await query<{ fp: string }>(`SELECT to_jsonb(d)::text AS fp FROM directory_departments d WHERE d.id = $1`, [id])
   return r.rows[0].fp
+}
+
+/** Org-scoped binding write surface: count + ordered whole-row fingerprints (complete set). */
+async function orgBindingsSnapshot(org: string): Promise<{ count: number; fingerprints: string[] }> {
+  const r = await query<{ fp: string }>(
+    `SELECT to_jsonb(b)::text AS fp
+       FROM directory_department_bindings b
+      WHERE b.org_id = $1
+      ORDER BY b.id ASC`,
+    [org],
+  )
+  return { count: r.rows.length, fingerprints: r.rows.map((row) => row.fp) }
+}
+
+/** Whether a binding exists for the exact (local, remote) department pair. */
+async function bindingExistsForPair(org: string, localDeptId: string, remoteDeptId: string): Promise<boolean> {
+  const r = await query<{ n: number }>(
+    `SELECT count(*)::int AS n
+       FROM directory_department_bindings
+      WHERE org_id = $1
+        AND local_department_id = $2
+        AND remote_department_id = $3`,
+    [org, localDeptId, remoteDeptId],
+  )
+  return (r.rows[0]?.n ?? 0) > 0
 }
 
 describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real DB)', () => {
@@ -150,6 +179,11 @@ describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real D
     const rBound = await dtDept(dt, `sg-ops-${STAMP}`, 'Ops')
     await bind(org, local.id, lBound.id, dt, rBound) // already bound → excluded from proposals
 
+    // Zero-write baseline for the unique-name pair (proved load-bearing in E; asserted here so the
+    // suggestion fixture itself cannot silently apply the proposed binding).
+    expect(await bindingExistsForPair(org, lUnique.id, rFinance)).toBe(false)
+    const beforeSnap = await orgBindingsSnapshot(org)
+
     const res = await suggestDepartmentBindings(org)
     expect(res.suggestions).toEqual([
       {
@@ -169,6 +203,13 @@ describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real D
       { remoteIntegrationId: dt, remoteDepartmentId: rGhost, remoteDepartmentName: 'Warehouse' },
     ])
     expect([...res.suggestions, ...res.ambiguous, ...res.unmatched].map((e) => e.remoteDepartmentId)).not.toContain(rBound)
+
+    // Suggest never materializes the unique-name proposal: exact pair still unbound, and the full
+    // org binding surface (count + ordered whole-row fingerprints) is unchanged.
+    expect(await bindingExistsForPair(org, lUnique.id, rFinance)).toBe(false)
+    const afterSnap = await orgBindingsSnapshot(org)
+    expect(afterSnap.count).toBe(beforeSnap.count)
+    expect(afterSnap.fingerprints).toEqual(beforeSnap.fingerprints)
   })
 
   it('F. candidate guards (gate P3): an ARCHIVED local dept and a dept under an INACTIVE local integration never count as candidates', async () => {
@@ -255,11 +296,39 @@ describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real D
     expect(await bindingStatus(bY)).toBe('active') // narrowed out — the sync hook's exact scope
   })
 
-  it('E. suggest is READ-ONLY: binding rows byte-identical before and after', async () => {
-    const { org, binding } = await boundFixture('ro')
-    const before = await query<{ fp: string }>(`SELECT to_jsonb(b)::text AS fp FROM directory_department_bindings b WHERE id = $1`, [binding])
-    await suggestDepartmentBindings(org)
-    const after = await query<{ fp: string }>(`SELECT to_jsonb(b)::text AS fp FROM directory_department_bindings b WHERE id = $1`, [binding])
-    expect(after.rows[0].fp).toBe(before.rows[0].fp)
+  it('E. suggest is READ-ONLY zero-write: org binding count+fingerprint set unchanged; suggested pair never gains a row', async () => {
+    // Unique-name fixture only (no pre-bound row): the zero-write pin must cover the exact
+    // suggested local/remote pair, not merely leave an unrelated already-bound row untouched.
+    const org = orgId('ro-pair')
+    seededOrgIds.push(org)
+    const local = await getOrCreateLocalIntegration(org)
+    const dt = await dingtalkIntegration(org, 'ro')
+    const lDept = await createLocalDepartment({ orgId: org, name: `Treasury ${STAMP}` })
+    const rDept = await dtDept(dt, `ro-treas-${STAMP}`, `Treasury ${STAMP}`)
+
+    expect(await bindingExistsForPair(org, lDept.id, rDept)).toBe(false)
+    const before = await orgBindingsSnapshot(org)
+    expect(before.count).toBe(0)
+
+    const res = await suggestDepartmentBindings(org)
+    expect(res.suggestions).toEqual([
+      {
+        remoteIntegrationId: dt,
+        remoteDepartmentId: rDept,
+        remoteDepartmentName: `Treasury ${STAMP}`,
+        localDepartmentId: lDept.id,
+        matchStrategy: 'exact-name',
+      },
+    ])
+
+    // Complete surface: count, full ordered fingerprint set, and the exact pair row.
+    // Injecting an INSERT of (lDept, rDept) inside suggestDepartmentBindings reds all three.
+    expect(await bindingExistsForPair(org, lDept.id, rDept)).toBe(false)
+    const after = await orgBindingsSnapshot(org)
+    expect(after.count).toBe(0)
+    expect(after.count).toBe(before.count)
+    expect(after.fingerprints).toEqual(before.fingerprints)
+    // local integration id is live and unused by the write surface — silence unused-binding noise
+    expect(local.id).toBeTruthy()
   })
 })
