@@ -2,10 +2,13 @@
  * Transfer MVP — T1 (service), Canonical Org & Provider Transfer v1 sequencing plan §2 row T1;
  * API/data model per `provider-org-transfer-development-plan-20260709.md` §6.3 + §7.
  *
- * Lifecycle skeleton over `provider_org_transfers` / `provider_org_transfer_decisions` with a
- * NO-OP binding adapter: T1 proves the state machine, guards, and audit surface — it writes
- * NOTHING to any `directory_*` table (the T1 suite pins that with a fingerprint test). T3/T4
- * replace `noopOrgTransferAdapter` through the `OrgTransferBindingAdapter` seam.
+ * Lifecycle skeleton over `provider_org_transfers` / `provider_org_transfer_decisions`. Scan and
+ * apply are FAIL-CLOSED when no binding adapter is registered for the transfer's provider:
+ * production never falls back to a silent no-op. The exported `noopOrgTransferAdapter` exists
+ * only for explicit test registration (see `registerOrgTransferAdapter` /
+ * `unregisterOrgTransferAdapter`); T3/T4 register real adapters through the same seam. The T1
+ * suite registers the no-op for happy-path lifecycle proofs and pins that apply writes NOTHING
+ * to any `directory_*` table (fingerprint test).
  *
  * State machine (no stuck absorbing non-terminal state):
  *
@@ -13,11 +16,13 @@
  *   scan:    'draft' | 'scanned' | 'failed' → 'scanned'   (idempotent re-scan; 'failed' → scan
  *            is the recovery edge that keeps 'failed' non-absorbing; wipes + regenerates the
  *            decision set and INVALIDATES any prior dry-run: dry_run_at ← NULL)
+ *            Missing adapter → 409 ORG_TRANSFER_ADAPTER_UNAVAILABLE; row unchanged
  *   dry-run: 'scanned' → 'scanned'                        (pure read + stats write; sets dry_run_at)
  *   apply:   'scanned' + dry_run_at IS NOT NULL + zero undecided decisions → 'applied'
- *            ('applying' is in the status domain for T3+'s multi-transaction apply; T1's no-op
- *            apply commits 'scanned' → 'applied' in one transaction, so 'applying' is never
- *            observable here)
+ *            ('applying' is in the status domain for T3+'s multi-transaction apply; with the
+ *            test-registered no-op, apply commits 'scanned' → 'applied' in one transaction, so
+ *            'applying' is never observable here)
+ *            Missing adapter → 409 ORG_TRANSFER_ADAPTER_UNAVAILABLE; row unchanged
  *   cancel:  any non-terminal ('draft' | 'scanned' | 'applying' | 'failed') → 'cancelled'
  *
  * Every transition runs in ONE transaction with `SELECT … FOR UPDATE` on the transfer row —
@@ -61,6 +66,7 @@ export type OrgTransferConflictCode =
   | 'ORG_TRANSFER_INVALID_STATE'
   | 'ORG_TRANSFER_DRY_RUN_REQUIRED'
   | 'ORG_TRANSFER_DECISIONS_PENDING'
+  | 'ORG_TRANSFER_ADAPTER_UNAVAILABLE'
 
 export type OrgTransferStatus = 'draft' | 'scanned' | 'applying' | 'applied' | 'cancelled' | 'failed'
 
@@ -140,7 +146,7 @@ const TRANSFER_COLUMNS =
   'dry_run_stats, dry_run_at, created_by, created_at, updated_at, scanned_at, applied_at, cancelled_at, last_error'
 
 // ---------------------------------------------------------------------------------------------
-// Binding adapter seam (T3/T4 replace the no-op)
+// Binding adapter seam (T3/T4 register provider adapters)
 // ---------------------------------------------------------------------------------------------
 
 /** A provider binding surfaced by scan — becomes one decision row. */
@@ -156,13 +162,18 @@ export interface OrgTransferBindingAdapter {
   /** Enumerate the source integration's bindings that a transfer must decide on. */
   scanBindings(transfer: OrgTransferSummary): Promise<ScannedOrgTransferBinding[]>
   /**
-   * Apply decided decisions. T1's no-op adapter performs no writes; T3/T4 implementations
-   * receive the transfer and do their own per-decision transactional work.
+   * Apply decided decisions. The explicit test-registered no-op performs no writes; T3/T4
+   * implementations receive the transfer and do their own per-decision transactional work.
    */
   applyDecisions(transfer: OrgTransferSummary): Promise<{ applied: number }>
 }
 
-/** T1: the explicit no-op — scan finds nothing, apply touches nothing. */
+/**
+ * Explicit no-op — scan finds nothing, apply touches nothing.
+ * NOT a production fallback: only reachable via `registerOrgTransferAdapter` (tests / future
+ * deliberate wiring). Production scan/apply on an unregistered provider fails closed with
+ * `ORG_TRANSFER_ADAPTER_UNAVAILABLE`.
+ */
 export const noopOrgTransferAdapter: OrgTransferBindingAdapter = {
   async scanBindings(): Promise<ScannedOrgTransferBinding[]> {
     return []
@@ -174,13 +185,32 @@ export const noopOrgTransferAdapter: OrgTransferBindingAdapter = {
 
 const adapterRegistry = new Map<string, OrgTransferBindingAdapter>()
 
-/** T3/T4 register real adapters per provider; unknown providers fall back to the no-op. */
+/** T3/T4 (and tests) register adapters per provider. There is no silent no-op fallback. */
 export function registerOrgTransferAdapter(provider: string, adapter: OrgTransferBindingAdapter): void {
   adapterRegistry.set(provider, adapter)
 }
 
+/**
+ * Remove a previously registered adapter. Tests MUST call this in deterministic cleanup
+ * (afterEach / afterAll) so registry state cannot leak across suites.
+ */
+export function unregisterOrgTransferAdapter(provider: string): void {
+  adapterRegistry.delete(provider)
+}
+
+/**
+ * Resolve the binding adapter for a provider. Fail-closed: missing registration throws a typed
+ * conflict so scan/apply leave the transfer row, decisions, and success audits untouched.
+ */
 function adapterFor(provider: string): OrgTransferBindingAdapter {
-  return adapterRegistry.get(provider) ?? noopOrgTransferAdapter
+  const adapter = adapterRegistry.get(provider)
+  if (!adapter) {
+    throw new OrgTransferConflictError(
+      'ORG_TRANSFER_ADAPTER_UNAVAILABLE',
+      `no org-transfer binding adapter is registered for provider ${provider}`
+    )
+  }
+  return adapter
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -400,8 +430,9 @@ export async function applyOrgTransfer(transferId: string): Promise<OrgTransferS
       )
     }
 
-    // T1: the no-op adapter applies zero decisions and writes nothing; 'applying' never becomes
-    // observable because the flip to 'applied' commits in this same transaction (see header).
+    // With a registered no-op, apply commits zero decisions and writes nothing; 'applying' never
+    // becomes observable because the flip to 'applied' commits in this same transaction (see header).
+    // Missing adapter throws before this write — state stays scanned.
     await adapterFor(row.provider).applyDecisions(toSummary(row))
 
     const updated = await client.query(

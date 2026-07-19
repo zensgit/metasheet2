@@ -19,14 +19,17 @@ import { jsonError, jsonOk } from '../util/response'
 /**
  * Transfer MVP — T1 (routes), API per `provider-org-transfer-development-plan-20260709.md` §6.3:
  * create / read / scan / dry-run apply / apply / cancel. The decisions PATCH endpoint of §6.3 is
- * deliberately NOT here — T1's no-op adapter scans zero bindings, so the decision surface (and
- * its secret-handling rules) lands with the first real adapter (T3/T4).
+ * deliberately NOT here — without a registered adapter scan yields zero bindings only when tests
+ * explicitly register the no-op; production scan/apply fail closed with
+ * ORG_TRANSFER_ADAPTER_UNAVAILABLE. The decision surface (and its secret-handling rules) lands
+ * with the first real adapter (T3/T4).
  *
  * Platform-admin only (`ensurePlatformAdmin`, the single source in admin-directory.ts). Org
  * identity is never read from the request: the service derives `org_id` from the two integration
  * rows, and the schema's composite FKs make cross-org/provider-mismatched rows impossible.
- * Every lifecycle mutation writes ONE values-free audit row (ids/status/counters only — no
- * names, no tenant/corp keys, no URLs).
+ * Every successful lifecycle mutation writes ONE values-free audit row (ids/status/counters only —
+ * no names, no tenant/corp keys, no URLs). Rejected mutations (including adapter-unavailable)
+ * write no success audit.
  */
 
 const logger = new Logger('AdminDirectoryOrgTransferRoutes')
@@ -64,8 +67,10 @@ function readErrorMessage(error: unknown, fallback: string): string {
 }
 
 /**
- * Typed-error → HTTP mapping. All thrown messages are static developer-authored strings (the
- * only interpolation is a server-side status word), so surfacing them stays values-free.
+ * Typed-error → HTTP mapping. Thrown messages are developer-authored templates with only
+ * server-side tokens interpolated (status words; for adapter-unavailable, the transfer row's
+ * stored provider label). No request body / caller-supplied free text is echoed, so surfacing
+ * them stays values-free relative to operator input and directory payload content.
  */
 function handleOrgTransferError(res: Response, error: unknown, fallbackMessage: string): void {
   if (error instanceof OrgTransferValidationError) {

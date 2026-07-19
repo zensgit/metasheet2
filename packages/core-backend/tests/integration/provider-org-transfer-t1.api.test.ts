@@ -3,10 +3,15 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, it } from 'vitest'
 import { query } from '../../src/db/pg'
+import {
+  noopOrgTransferAdapter,
+  registerOrgTransferAdapter,
+  unregisterOrgTransferAdapter,
+} from '../../src/directory/org-transfer-service'
 import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directory-org-transfers'
 
 /**
- * Transfer MVP — T1 (schema + admin API skeleton, no-op adapter), real DB + HTTP route layer.
+ * Transfer MVP — T1 (schema + admin API skeleton), real DB + HTTP route layer.
  * Harness mirrors `local-directory-org-crud-route.db.test.ts` (trivial pass-through auth with
  * `role: 'admin'`; the non-admin app exercises the real RBAC query).
  *
@@ -17,13 +22,16 @@ import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directo
  *   - the SCHEMA backstops (not just service validation): cross-org and provider-mismatched
  *     transfers are FK-impossible to INSERT even bypassing the service; provider='local' is
  *     CHECK-impossible;
- *   - lifecycle draft → scan → dry-run → apply with one values-free audit row per mutation;
+ *   - lifecycle draft → scan → dry-run → apply with one values-free audit row per mutation
+ *     (happy path registers the no-op adapter explicitly — production has no silent fallback);
+ *   - production unregistered-provider scan/apply fail closed with ORG_TRANSFER_ADAPTER_UNAVAILABLE,
+ *     leave transfer state unchanged, and write no success audit (route + mutation proofs);
  *   - §12.3 dry-run-required guard, and its SCAN-RELATIVITY (a re-scan invalidates the dry-run);
- *   - the undecided-decisions apply guard (seeded directly — the no-op adapter scans zero);
+ *   - the undecided-decisions apply guard (seeded directly — the registered no-op scans zero);
  *   - at-most-one-ACTIVE-transfer-per-source (both halves: cap while active, free after cancel);
  *   - terminal states reject every further mutation;
  *   - apply/apply concurrency linearizes on the row lock (exactly one 200);
- *   - the T1 no-op apply writes NOTHING to any directory_* table (fingerprint equality).
+ *   - the registered no-op apply writes NOTHING to any directory_* table (fingerprint equality).
  *
  * DATABASE_URL-gated (describeIfDatabase): excluded from the no-DB vitest job so it cannot
  * skip-green, and wired as a WHOLE FILE into the directory real-DB step in plugin-tests.yml
@@ -104,11 +112,19 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
   const createdIntegrationIds: string[] = []
 
   afterEach(async () => {
+    // Deterministic registry cleanup: happy-path tests register the no-op for 'dingtalk';
+    // production-no-adapter tests leave it unregistered. Never leak either state across cases.
+    unregisterOrgTransferAdapter('dingtalk')
     const transfers = createdTransferIds.splice(0)
     for (const id of transfers) await query(`DELETE FROM provider_org_transfers WHERE id = $1`, [id]) // decisions cascade
     const integrations = createdIntegrationIds.splice(0)
     for (const id of integrations) await query(`DELETE FROM directory_integrations WHERE id = $1`, [id])
   })
+
+  /** Explicit test-only registration — production has no silent no-op fallback. */
+  function enableNoopAdapter(): void {
+    registerOrgTransferAdapter('dingtalk', noopOrgTransferAdapter)
+  }
 
   async function seedPair(tag: string, org = uniqueOrg(tag)): Promise<{ org: string; source: string; target: string }> {
     const source = await seedIntegration(org, 'dingtalk', `${tag}-src`)
@@ -125,6 +141,35 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     const id = res.body.data.transfer.id as string
     createdTransferIds.push(id)
     return id
+  }
+
+  async function transferRow(transferId: string): Promise<{
+    status: string
+    scanned_at: string | null
+    applied_at: string | null
+    dry_run_at: string | null
+    last_error: string | null
+  }> {
+    const result = await query<{
+      status: string
+      scanned_at: string | null
+      applied_at: string | null
+      dry_run_at: string | null
+      last_error: string | null
+    }>(
+      `SELECT status, scanned_at::text, applied_at::text, dry_run_at::text, last_error
+         FROM provider_org_transfers WHERE id = $1`,
+      [transferId]
+    )
+    return result.rows[0]
+  }
+
+  async function decisionCount(transferId: string): Promise<number> {
+    const result = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM provider_org_transfer_decisions WHERE transfer_id = $1`,
+      [transferId]
+    )
+    return Number(result.rows[0].n)
   }
 
   it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
@@ -254,7 +299,78 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     )
   })
 
+  it('production-no-adapter: unregistered provider scan/apply fail closed 409, state unchanged, no success audit', async () => {
+    // No enableNoopAdapter() — this is the production default for providers without a real adapter.
+    const { source, target } = await seedPair('no-adapter')
+    const transferId = await createTransfer(source, target)
+    const auditBefore = await orgTransferAuditCount()
+    const before = await transferRow(transferId)
+    expect(before.status).toBe('draft')
+
+    const scan = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`)
+    expect(scan.status).toBe(409)
+    expect(scan.body.error.code).toBe('ORG_TRANSFER_ADAPTER_UNAVAILABLE')
+
+    const afterScan = await transferRow(transferId)
+    expect(afterScan).toEqual(before)
+    expect(await decisionCount(transferId)).toBe(0)
+    expect(await auditRowFor('scan', transferId)).toBe(0)
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+
+    // Apply is also fail-closed (even from draft — adapter check is not the only guard, but
+    // production must never silently no-op-apply once scanned either; seed scanned + dry-run
+    // via SQL so the adapter leg is reachable without a successful scan).
+    await query(
+      `UPDATE provider_org_transfers
+          SET status = 'scanned', scanned_at = now(), dry_run_at = now(), dry_run_stats = '{"bindings":0}'::jsonb,
+              updated_at = now()
+        WHERE id = $1`,
+      [transferId]
+    )
+    const preApply = await transferRow(transferId)
+    const apply = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply`)
+    expect(apply.status).toBe(409)
+    expect(apply.body.error.code).toBe('ORG_TRANSFER_ADAPTER_UNAVAILABLE')
+    const afterApply = await transferRow(transferId)
+    expect(afterApply.status).toBe(preApply.status)
+    expect(afterApply.applied_at).toBeNull()
+    expect(await auditRowFor('apply', transferId)).toBe(0)
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+  })
+
+  it('load-bearing mutation proof: unavailable adapter rolls back — no status flip, no decisions, no success audit', async () => {
+    // Strengthens the route-level 409 above: pins the write-set that must not move.
+    const { source, target } = await seedPair('mutation-proof')
+    const transferId = await createTransfer(source, target)
+    // Seed a stale decision so a buggy scan that DELETE+INSERTs would still change counts/content.
+    await query(
+      `INSERT INTO provider_org_transfer_decisions (transfer_id, binding_kind, source_anchor_type, source_anchor_id)
+       VALUES ($1, 'user_identity', 'user', $2)`,
+      [transferId, `t1-stale-${STAMP}`]
+    )
+    expect(await decisionCount(transferId)).toBe(1)
+    const auditBefore = await orgTransferAuditCount()
+    const statusBefore = await transferRow(transferId)
+
+    const scan = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`)
+    expect(scan.status).toBe(409)
+    expect(scan.body.error.code).toBe('ORG_TRANSFER_ADAPTER_UNAVAILABLE')
+
+    // Status/timestamps unchanged (still draft; scanned_at stays null).
+    expect(await transferRow(transferId)).toEqual(statusBefore)
+    // The pre-existing decision row was NOT wiped — fail closed before decision regeneration.
+    expect(await decisionCount(transferId)).toBe(1)
+    const stillThere = await query<{ source_anchor_id: string }>(
+      `SELECT source_anchor_id FROM provider_org_transfer_decisions WHERE transfer_id = $1`,
+      [transferId]
+    )
+    expect(stillThere.rows[0].source_anchor_id).toBe(`t1-stale-${STAMP}`)
+    expect(await auditRowFor('scan', transferId)).toBe(0)
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+  })
+
   it('walks the happy lifecycle with one values-free audit row per mutation and an untouched directory fingerprint', async () => {
+    enableNoopAdapter()
     const { source, target } = await seedPair('happy')
     const transferId = await createTransfer(source, target)
     expect(await auditRowFor('create', transferId)).toBe(1)
@@ -293,7 +409,7 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(apply.body.data.transfer.appliedAt).not.toBeNull()
     expect(await auditRowFor('apply', transferId)).toBe(1)
 
-    // T1's apply is a no-op by contract: nothing in the directory substrate moved.
+    // Registered no-op apply is a no-op by contract: nothing in the directory substrate moved.
     expect(await directoryFingerprint()).toBe(fingerprintBefore)
 
     // Terminal: every further mutation is refused.
@@ -305,6 +421,7 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
   })
 
   it('re-scan invalidates a prior dry-run (the §12.3 guard is scan-relative)', async () => {
+    enableNoopAdapter()
     const { source, target } = await seedPair('rescan')
     const transferId = await createTransfer(source, target)
 
@@ -342,7 +459,8 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     await createTransfer(source, secondTarget)
   })
 
-  it('blocks apply while any scanned decision is undecided (guard seeded directly — the no-op adapter scans zero)', async () => {
+  it('blocks apply while any scanned decision is undecided (guard seeded directly — the registered no-op scans zero)', async () => {
+    enableNoopAdapter()
     const { source, target } = await seedPair('undecided')
     const transferId = await createTransfer(source, target)
     await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
@@ -366,6 +484,7 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
   })
 
   it('linearizes concurrent applies on the row lock — exactly one 200, one clean 409, one applied_at', async () => {
+    enableNoopAdapter()
     const { source, target } = await seedPair('race')
     const transferId = await createTransfer(source, target)
     await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
@@ -391,10 +510,11 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
   })
 
   it("recovery edges (gate P3): 'failed' is NON-absorbing (failed→scan recovers) and 'applying' is cancellable", async () => {
-    // No T1 producer reaches 'failed' or leaves 'applying' observable (the no-op apply commits
-    // scanned→applied in one txn) — both are future real-adapter states, seeded directly so the
-    // recovery claims in the service header are load-bearing NOW: dropping 'failed' from
+    // No T1 producer reaches 'failed' or leaves 'applying' observable (the registered no-op apply
+    // commits scanned→applied in one txn) — both are future real-adapter states, seeded directly
+    // so the recovery claims in the service header are load-bearing NOW: dropping 'failed' from
     // SCANNABLE_STATUSES or 'applying' from NON_TERMINAL_STATUSES reds this test.
+    enableNoopAdapter()
     const { source, target } = await seedPair('recover')
     const transferId = await createTransfer(source, target)
 
