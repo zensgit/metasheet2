@@ -65,6 +65,8 @@ export type FormFieldType =
   | 'user'
   | 'attachment'
   | 'detail'
+  /** FWB-2 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */
+  | 'record-link'
 
 export interface ApprovalNode {
   key: string
@@ -122,6 +124,11 @@ export interface ApprovalNodeConfig {
   // are inert (forward-stable contract only). Orthogonal to FormFieldVisibilityRule
   // (data-value-keyed); fieldPermissions is node-keyed.
   fieldPermissions?: NodeFieldPermission[]
+  /**
+   * FWB-3: closed set of decision field ids the approver may submit via `decisionData` on approve.
+   * Absent/empty ⇒ node carries no decision freeze. Unknown keys in decisionData fail-closed.
+   */
+  decisionFieldIds?: string[]
   // T1-1 node-level SLA: optional per-node timeout + effect (slice 1: remind only).
   timeout?: NodeTimeoutConfig
   // T3-3 node signature / compliance — slice 1: DECLARED-INERT. Persisted + round-tripped on the node
@@ -433,6 +440,12 @@ export interface ApprovalActionRequest {
   action: ApprovalActionType
   comment?: string
   /**
+   * FWB-3: approver-confirmed decision field values. Validated + frozen inside the dispatchAction
+   * instance-lock transaction against the current node's `decisionFieldIds`. NEVER reused after
+   * freeze — writeback reads only the frozen rows. transfer/jump/timeout do not carry this.
+   */
+  decisionData?: Record<string, unknown>
+  /**
    * A-4 (one-tap lock #3594 §4): INTERNAL-ONLY channel attribution injected by the card-delivery
    * wrapper — never accepted from HTTP bodies (the /actions route constructs its request from an
    * explicit field whitelist). Recorded onto the approve/reject approval_records metadata.
@@ -547,6 +560,14 @@ export interface PublishApprovalTemplateRequest {
   note?: string | null
 }
 
+export interface RestoreApprovalTemplateVersionRequest {
+  /**
+   * Optimistic-concurrency anchor captured when the history was loaded. A restore always creates a
+   * new draft from the selected snapshot; it never rewrites a historical row in place.
+   */
+  expectedLatestVersionId: string
+}
+
 export interface ApprovalTemplateVersionDetailDTO {
   id: string
   templateId: string
@@ -558,6 +579,8 @@ export interface ApprovalTemplateVersionDetailDTO {
   publishedDefinitionId: string | null
   /** B3-09 — see PublishApprovalTemplateRequest.note. */
   publishNote: string | null
+  /** Source snapshot when this draft was created by restore; null for ordinary edits/publishes. */
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -575,6 +598,7 @@ export interface ApprovalTemplateVersionSummaryDTO {
   status: ApprovalTemplateStatus
   publishNote: string | null
   publishedDefinitionId: string | null
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }

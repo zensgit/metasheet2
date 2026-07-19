@@ -41,6 +41,16 @@ export default defineConfig({
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
+      // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
+      // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
+      // approval real-DB workflow step.
+      'tests/integration/approval-template-authoring-uat.api.test.ts',
+      // Approval/automation closeout acceptance (A1–A8 pins + composed A1/A2 real-DB). Two-point
+      // wiring: exclude here so no-DB cannot skip-green; whole-file in plugin-tests real-DB step.
+      'tests/integration/approval-automation-closeout-acceptance.realdb.test.ts',
+      // Wave-2 WP1 parallel-gateway real HTTP/DB (join all/any + dynamic conflict). DATABASE_URL-
+      // gated; excluded here so the no-DB job cannot skip-green it; whole-file in approval real-DB.
+      'tests/integration/approval-wp1-parallel-gateway.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
@@ -478,6 +488,22 @@ export default defineConfig({
       // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
       // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
+      // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
+      'tests/integration/multitable-fwb-write-action-realdb.test.ts',
+      // FWB production E2E: approval.completed → write_approval_form_values create (real executor path).
+      'tests/integration/multitable-fwb-production-e2e-realdb.test.ts',
+      // FWB runtime modes (create/update/lock/missing/permission/decision re-entry) — real-DB.
+      'tests/integration/multitable-fwb-runtime-modes-realdb.test.ts',
+      // approval attachment GC worker (TTL sweep + purge-intent drain) — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-gc-realdb.test.ts',
+      // attachment bind (form-freeze) + bucket reconciler — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-bind-reconcile-realdb.test.ts',
+      // attachment download participation matrix (CC/roles/admin) — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-participant-realdb.test.ts',
+      // attachment DB invariants (UNIQUE storage_key, purge lease biconditional) — real-DB.
+      'tests/integration/approval-attachment-schema-invariants-realdb.test.ts',
+      // createApproval production-path bind golden (clean/infected/foreign) — real-DB.
+      'tests/integration/approval-attachment-create-bind-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

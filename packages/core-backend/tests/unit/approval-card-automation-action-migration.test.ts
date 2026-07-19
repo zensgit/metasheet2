@@ -7,9 +7,10 @@ import {
 
 describe('send_dingtalk_approval_card automation action migration (A-2b)', () => {
   it('keeps the latest database action constraint in sync with app-level action types', () => {
-    // This migration widens chk_automation_action_type to the CURRENT ALL_ACTION_TYPES — so a future
-    // action type added to the app without a DB migration trips this drift guard RED.
+    // FWB is added by a strictly later migration, whose own test carries the live latest-in-sync guard.
+    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['write_approval_form_values'])
     for (const actionType of ALL_ACTION_TYPES) {
+      if (ADDED_BY_LATER_MIGRATIONS.has(actionType)) continue
       expect(AUTOMATION_ACTION_TYPES_WITH_APPROVAL_CARD).toContain(actionType)
     }
   })

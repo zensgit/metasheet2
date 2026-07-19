@@ -157,7 +157,46 @@
               class="approval-detail__field"
             >
               <span class="approval-detail__label">{{ field.label }}</span>
-              <span>{{ field.value }}</span>
+              <!-- Attachment: auth-proxied links for live refs; tombstone for deleted/missing (G5). -->
+              <span
+                v-if="isAttachmentDisplayField(field.key)"
+                class="approval-detail__attachments"
+                data-testid="approval-detail-attachments"
+              >
+                <template v-if="attachmentIdsForField(field.key).length > 0">
+                  <template
+                    v-for="(attId, idx) in attachmentIdsForField(field.key)"
+                    :key="attId"
+                  >
+                    <span
+                      v-if="attachmentMetaById[attId]?.unavailable"
+                      class="approval-detail__attachment-unavailable"
+                      data-testid="approval-detail-attachment-unavailable"
+                    >
+                      {{ attachmentLabel(attId, idx) }}
+                    </span>
+                    <span
+                      v-else-if="attachmentMetaById[attId]?.tombstone"
+                      class="approval-detail__attachment-tombstone"
+                      data-testid="approval-detail-attachment-tombstone"
+                    >
+                      {{ attachmentLabel(attId, idx) }}
+                    </span>
+                    <a
+                      v-else
+                      class="approval-detail__attachment-link"
+                      data-testid="approval-detail-attachment-link"
+                      :href="attachmentDownloadUrl(attId)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {{ attachmentLabel(attId, idx) }}
+                    </a>
+                  </template>
+                </template>
+                <span v-else>{{ field.value }}</span>
+              </span>
+              <span v-else>{{ field.value }}</span>
             </div>
             <!-- detail / sub-form (明细): render the frozen rows × columns as a read-only
                  table driven by the instance's FROZEN formSchema columns (never the live
@@ -502,6 +541,71 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
+        <!-- FWB-3: collect declared decisionFieldIds on approve only. -->
+        <div
+          v-if="currentAction === 'approve' && currentDecisionFields.length > 0"
+          class="approval-detail__decision-fields"
+          data-testid="approval-decision-fields"
+        >
+          <el-form-item
+            v-for="field in currentDecisionFields"
+            :key="field.id"
+            :label="field.label"
+            required
+          >
+            <!-- FWB-3: number stays a string end-to-end (never el-input-number / JS Number). -->
+            <el-input
+              v-if="field.type === 'number'"
+              v-model="decisionDataDraft[field.id]"
+              inputmode="decimal"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+              data-field-type="number-string"
+            />
+            <el-date-picker
+              v-else-if="field.type === 'date'"
+              v-model="decisionDataDraft[field.id]"
+              type="date"
+              value-format="YYYY-MM-DD"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+            <!-- Datetime requires explicit offset; value-format emits Z so host TZ is never guessed. -->
+            <el-date-picker
+              v-else-if="field.type === 'datetime'"
+              v-model="decisionDataDraft[field.id]"
+              type="datetime"
+              value-format="YYYY-MM-DDTHH:mm:ss.SSSZ"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+            <el-select
+              v-else-if="field.type === 'select'"
+              v-model="decisionDataDraft[field.id]"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+            >
+              <el-option
+                v-for="opt in (field.options || [])"
+                :key="opt.value"
+                :label="opt.label"
+                :value="opt.value"
+              />
+            </el-select>
+            <el-input
+              v-else-if="field.type === 'textarea'"
+              v-model="decisionDataDraft[field.id]"
+              type="textarea"
+              :rows="3"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+            <el-input
+              v-else
+              v-model="decisionDataDraft[field.id]"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+          </el-form-item>
+        </div>
         <el-form-item :label="actionCommentLabel">
           <!-- B1-05: quick phrases — this user's recently-used phrases first, then the fixed
                preset list for 通过/驳回. Clicking a chip fills (or appends to) the textarea;
@@ -775,7 +879,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -790,7 +894,7 @@ import {
   CirclePlus,
   Remove,
 } from '@element-plus/icons-vue'
-import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph } from '../../types/approval'
+import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph, FormField } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
@@ -806,6 +910,12 @@ import {
   type DetailDisplayTable,
   type DisplayField,
 } from '../../approvals/detailField'
+import {
+  approvalAttachmentDownloadUrl,
+  attachmentDisplayLabel,
+  resolveAttachmentMeta,
+  type AttachmentMetaDto,
+} from '../../approvals/attachmentUpload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
@@ -845,6 +955,50 @@ const waitChipType = computed(() => {
   if (severity === 'warn') return 'warning'
   return 'info'
 })
+
+function isAttachmentDisplayField(fieldKey: string): boolean {
+  const schema = approval.value?.formSchema
+  const field = schema?.fields?.find((f) => f.id === fieldKey)
+  return field?.type === 'attachment'
+}
+
+function attachmentIdsForField(fieldKey: string): string[] {
+  const raw = approval.value?.formSnapshot?.[fieldKey]
+  if (!Array.isArray(raw)) return []
+  return raw.filter((id): id is string => typeof id === 'string' && id.length > 0)
+}
+
+function attachmentDownloadUrl(attId: string): string {
+  return approvalAttachmentDownloadUrl(attId)
+}
+
+const attachmentMetaById = ref<Record<string, AttachmentMetaDto>>({})
+
+function attachmentLabel(attId: string, idx: number): string {
+  return attachmentDisplayLabel(attachmentMetaById.value[attId], idx)
+}
+
+// Resolve frozen attachment ids → live link or tombstone (G5). Never storage keys / object-store URLs.
+watch(
+  () => approval.value?.id,
+  async (id) => {
+    attachmentMetaById.value = {}
+    if (!id || !approval.value?.formSchema || !approval.value.formSnapshot) return
+    const ids: string[] = []
+    for (const field of approval.value.formSchema.fields ?? []) {
+      if (field.type !== 'attachment') continue
+      ids.push(...attachmentIdsForField(field.id))
+    }
+    const next: Record<string, AttachmentMetaDto> = {}
+    await Promise.all(
+      ids.map(async (attId) => {
+        next[attId] = await resolveAttachmentMeta(attId)
+      }),
+    )
+    attachmentMetaById.value = next
+  },
+  { immediate: true },
+)
 
 // Read-only detail (明细) tables, keyed by snapshot field id. Built from the instance's FROZEN
 // formSchema (C-3a read-path) so a later column rename/reorder on the live template never
@@ -1026,6 +1180,32 @@ const pinnedGraph = computed<ApprovalGraph | null>(() => {
   return templateStore.activeVersion?.approvalGraph ?? templateStore.activeTemplate?.approvalGraph ?? null
 })
 
+/**
+ * FWB-3: form fields declared on the CURRENT approval node as decisionFieldIds.
+ * Prefer the pinned (instance-frozen) graph + formSchema so live template edits cannot drift.
+ */
+const currentDecisionFields = computed<FormField[]>(() => {
+  const detail = approval.value
+  if (!detail || detail.status !== 'pending') return []
+  const nodeKey = detail.currentNodeKey
+  if (!nodeKey) return []
+  const graph = pinnedGraph.value
+  if (!graph) return []
+  const node = graph.nodes.find((n) => n.key === nodeKey && n.type === 'approval')
+  if (!node) return []
+  const ids = (node.config as { decisionFieldIds?: unknown } | undefined)?.decisionFieldIds
+  if (!Array.isArray(ids) || ids.length === 0) return []
+  const schemaFields = detail.formSchema?.fields ?? []
+  const byId = new Map(schemaFields.map((f) => [f.id, f]))
+  const out: FormField[] = []
+  for (const raw of ids) {
+    if (typeof raw !== 'string' || !raw.trim()) continue
+    const field = byId.get(raw.trim())
+    if (field) out.push(field)
+  }
+  return out
+})
+
 // Parallel regions have no single unambiguous "current node" to walk forward from until the
 // branches rejoin at their `joinNodeKey` — skip rather than fabricate a merged/guessed path (the
 // "并行中" badge in the header already communicates the parallel state itself).
@@ -1046,6 +1226,8 @@ const commentDialogVisible = ref(false)
 const returnDialogVisible = ref(false)
 const currentAction = ref<ApprovalActionType>('approve')
 const actionComment = ref('')
+/** FWB-3: approver-entered decision values for the current node's decisionFieldIds. */
+const decisionDataDraft = reactive<Record<string, unknown>>({})
 // B1-04: dialog-scoped failure message for the approve/reject + comment dialogs (宽恕型错误三件套
 // part 2). Cleared on next dialog open / next submit attempt; the catch blocks below set it
 // INSTEAD OF a generic toast so the reader sees the server's actual reason without losing their
@@ -1327,6 +1509,21 @@ function openActionDialog(action: 'approve' | 'reject') {
   currentAction.value = action
   actionComment.value = ''
   actionDialogError.value = null
+  // Reset FWB-3 decision draft; seed from formSnapshot defaults when present.
+  // Number fields stay strings end-to-end (never JS Number / el-input-number).
+  for (const key of Object.keys(decisionDataDraft)) delete decisionDataDraft[key]
+  if (action === 'approve') {
+    for (const field of currentDecisionFields.value) {
+      const snap = approval.value?.formSnapshot?.[field.id]
+      if (snap === undefined || snap === null) {
+        decisionDataDraft[field.id] = undefined
+      } else if (field.type === 'number') {
+        decisionDataDraft[field.id] = typeof snap === 'string' ? snap : String(snap)
+      } else {
+        decisionDataDraft[field.id] = snap
+      }
+    }
+  }
   actionDialogVisible.value = true
 }
 
@@ -1392,11 +1589,28 @@ async function submitAction() {
   if (inFlightAction.value) return
   const id = route.params.id as string
   actionDialogError.value = null
+  // FWB-3 client pre-check: every declared decision field must be non-blank before dispatch.
+  if (currentAction.value === 'approve' && currentDecisionFields.value.length > 0) {
+    for (const field of currentDecisionFields.value) {
+      const v = decisionDataDraft[field.id]
+      if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) {
+        actionDialogError.value = `请填写核定字段：${field.label}`
+        return
+      }
+    }
+  }
   inFlightAction.value = currentAction.value
   try {
+    const decisionData =
+      currentAction.value === 'approve' && currentDecisionFields.value.length > 0
+        ? Object.fromEntries(
+            currentDecisionFields.value.map((f) => [f.id, decisionDataDraft[f.id]]),
+          )
+        : undefined
     await store.executeAction(id, {
       action: currentAction.value,
       comment: actionComment.value || undefined,
+      ...(decisionData ? { decisionData } : {}),
     })
     ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
     rememberQuickPhraseIfOffered(actionComment.value)
@@ -1778,6 +1992,31 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.approval-detail__attachments {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approval-detail__attachment-link {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+.approval-detail__attachment-link:hover {
+  text-decoration: underline;
+}
+
+.approval-detail__attachment-tombstone {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.approval-detail__attachment-unavailable {
+  color: var(--el-color-warning);
+  font-size: 13px;
 }
 
 .approval-detail__field {

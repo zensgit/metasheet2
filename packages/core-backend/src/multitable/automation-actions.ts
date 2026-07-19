@@ -24,6 +24,11 @@ export type AutomationActionType =
   // business side effect (no record write / no outbound / no job). Dispatched
   // through the SAME executor path as every other action (no parallel path).
   | 'record_click'
+  // FWB: dedicated approval-form writeback. Controlled exception to the
+  // approval.completed record-less v1 boundary (D11) — only this action may
+  // write multitable records from an approval.completed rule; generic
+  // create_record / update_record stay save-rejected on that trigger.
+  | 'write_approval_form_values'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -41,6 +46,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'start_approval',
   'parallel_branch',
   'record_click',
+  'write_approval_form_values',
 ]
 
 /** Config shape for update_record */
@@ -194,6 +200,46 @@ export interface ParallelBranchConfig {
     label?: string
     actions: AutomationAction[]
   }>
+}
+
+/**
+ * Config shape for `write_approval_form_values` (FWB-0 D11 / FWB-1/2/3).
+ *
+ * Values NEVER live in this config — only identifier mappings + target addressing +
+ * a server-issued Q6 confirmation id. Form / decision values load server-side at
+ * execute from form_snapshot / frozen decision rows. meta_fields is the sole type
+ * authority (config must NOT carry targetType/selectOptions as authority).
+ */
+export interface WriteApprovalFormValuesConfig {
+  /** FWB-1 create · FWB-2 update bound record · FWB-3 write frozen decision values. */
+  mode: 'create' | 'update' | 'decision'
+  /**
+   * Explicit formFieldId → targetFieldId mappings (export whitelist). Unmapped
+   * snapshot fields are never read or written. Types/options come from meta_fields.
+   */
+  mappings: Array<{
+    formFieldId: string
+    targetFieldId: string
+  }>
+  /**
+   * Q6: id of a server-persisted confirmed challenge (meta_fwb_confirmations).
+   * Save/execute re-verify fingerprint against current normalized subject.
+   */
+  confirmationId: string
+  /**
+   * FWB-2 / FWB-3: form field id of the record-link that binds the target record.
+   * Required when mode is `update` or `decision`.
+   */
+  recordLinkFieldId?: string
+  /**
+   * FWB-3: node_key whose frozen decision values to write. Required when mode is `decision`.
+   */
+  decisionNodeKey?: string
+  /**
+   * FWB-2 cross-base opt-in. When the linked record's sheet base ≠ rule sheet base,
+   * must equal the target sheet's real base_id (claim == truth) for evaluateCrossBaseWriteGate.
+   */
+  targetBaseId?: string
 }
 
 export interface AutomationAction {

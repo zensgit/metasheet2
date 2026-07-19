@@ -334,8 +334,15 @@ function validateFieldType(field: FormField, value: unknown): string | null {
     case 'text':
     case 'textarea':
     case 'user':
-    case 'attachment':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'attachment':
+      // Frozen form_snapshot value is an ordered array of approval_attachments.id strings (§8).
+      if (Array.isArray(value)) {
+        return value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
+          ? null
+          : `${field.id} must be an array of attachment ids`
+      }
+      return `${field.id} must be an array of attachment ids`
     case 'number':
       return typeof value === 'number' && Number.isFinite(value) ? null : `${field.id} must be a number`
     case 'date':
@@ -360,6 +367,20 @@ function validateFieldType(field: FormField, value: unknown): string | null {
         return `${field.id} must contain only configured options`
       }
       return null
+    case 'record-link': {
+      // Layer 2 structural shape only (sync): exactly one `{ recordId: non-empty string }`.
+      // Authz (filler can read) is an async check outside this function.
+      if (!isRecord(value)) return `${field.id} must be an object { recordId }`
+      const keys = Object.keys(value)
+      if (keys.length !== 1 || keys[0] !== 'recordId') {
+        return `${field.id} must be exactly { recordId } (no free-text id, no multi-value)`
+      }
+      const recordId = value.recordId
+      if (typeof recordId !== 'string' || !recordId.trim()) {
+        return `${field.id}.recordId must be a non-empty string`
+      }
+      return null
+    }
     default:
       return null
   }
@@ -1057,6 +1078,13 @@ export class ApprovalGraphExecutor {
       : []
 
     for (const branch of branches) {
+      // Defense-in-depth for LEGACY stored graphs: a rules-mode branch with ZERO rules must NOT
+      // match — `[].every(...)` is vacuously true, which would make the branch capture ALL traffic
+      // (first-match-wins) and dead-code the default edge. Authoring + create/update/publish now
+      // reject this shape (`validateConditionBranchRules`), so from valid graphs this is
+      // unreachable; for a pre-existing stored graph the branch is skipped and routing falls
+      // through to later branches / the default edge (the intended "else" mechanism).
+      if (!branch.formula && branch.rules.length === 0) continue
       const result = branch.formula
         ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData, this.options.requesterContext ?? null)
         : (() => {

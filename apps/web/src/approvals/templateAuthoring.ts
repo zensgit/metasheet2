@@ -62,19 +62,20 @@ export type {
 export { CONDITION_RULE_OPERATORS } from './conditionEdit'
 export { approvalFormulaInsertOptions } from './conditionEdit'
 export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
-export { PARALLEL_JOIN_MODES } from './parallelEdit'
+export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
 export { placeholderRoleNodeKeys } from './approvalNodeEdit'
 
-export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
-export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
-
 // Top-level authorable field types: the 8 leaf scalar types plus `detail` (repeatable
-// line-items group). `attachment` is intentionally excluded (not authorable in v1); `detail`
-// is top-level-only — its sub-fields are restricted to the leaf set (`DETAIL_LEAF_FIELD_TYPES`)
-// and may never themselves be `detail` (one nesting level).
+// line-items group). `attachment` is intentionally excluded until lock §7 rung 4
+// (authorability + strip-retirement) is owner-ratified AFTER the feature flag is ON —
+// that ratification has not happened; B2-28 honest-disable stays until then.
+// `detail` is top-level-only — its sub-fields are restricted to the leaf set
+// (`DETAIL_LEAF_FIELD_TYPES`) and may never themselves be `detail` (one nesting level).
+export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
+
 export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'text',
   'textarea',
@@ -85,7 +86,11 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'multi-select',
   'user',
   'detail',
+  // FWB-2 Layer 2: server-pinned baseId/sheetId record binding (single-record product field).
+  'record-link',
 ]
+
+export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
 
 /**
  * Editable representation of a `FormFieldVisibilityRule`. `dependsOnFieldId === ''`
@@ -112,6 +117,12 @@ export interface FieldAuthoringDraft {
   detailColumns: DetailColumnDraft[]
   minRowsText: string
   maxRowsText: string
+  /**
+   * FWB-2 record-link: server-pinned multitable binding. Meaningful only when `type === 'record-link'`.
+   * Both must be non-empty for save; the form fill UI scopes the single-record picker to this sheet.
+   */
+  recordLinkBaseId: string
+  recordLinkSheetId: string
   original?: FormField
 }
 
@@ -148,6 +159,11 @@ export interface ApprovalStepDraft {
   // runtime (server echo-redaction, shipped #2799); `readonly` round-trips but is runtime-inert
   // (enforcement deferred to T1-4b).
   fieldPermissions: NodeFieldPermission[]
+  /**
+   * FWB-3: closed set of form field ids the approver must submit via decisionData on approve.
+   * Empty ⇒ no decision freeze for this node. Ids must exist on the form schema (server re-checks).
+   */
+  decisionFieldIds: string[]
 }
 
 export interface TemplateAuthoringDraft {
@@ -224,6 +240,8 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     detailColumns: [],
     minRowsText: '',
     maxRowsText: '',
+    recordLinkBaseId: '',
+    recordLinkSheetId: '',
   }
 }
 
@@ -271,6 +289,7 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
     fieldPermissions: [],
+    decisionFieldIds: [],
   }
 }
 
@@ -394,6 +413,7 @@ export function setStepFieldPermission(
 
 function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
   if (!isAuthorableFieldType(field.type)) return null
+  const props = field.props && typeof field.props === 'object' ? field.props as Record<string, unknown> : {}
   return {
     localId: nextLocalId('field'),
     id: field.id,
@@ -406,6 +426,8 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     detailColumns: field.type === 'detail' ? detailColumnDraftsFromField(field) : [],
     minRowsText: field.type === 'detail' && field.minRows != null ? String(field.minRows) : '',
     maxRowsText: field.type === 'detail' && field.maxRows != null ? String(field.maxRows) : '',
+    recordLinkBaseId: field.type === 'record-link' && typeof props.baseId === 'string' ? props.baseId : '',
+    recordLinkSheetId: field.type === 'record-link' && typeof props.sheetId === 'string' ? props.sheetId : '',
     original: field,
   }
 }
@@ -472,6 +494,12 @@ function stepDraftFromApprovalNode(
         .map((entry) => ({ fieldId: entry.fieldId, access: entry.access }))
     : []
 
+  const decisionFieldIds = Array.isArray(config.decisionFieldIds)
+    ? config.decisionFieldIds
+        .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+    : []
+
   return {
     localId: nextLocalId('step'),
     name: node.name ?? `审批人 ${index}`,
@@ -485,6 +513,7 @@ function stepDraftFromApprovalNode(
     mergeWithRequester,
     ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
     fieldPermissions,
+    decisionFieldIds,
   }
 }
 
@@ -577,6 +606,8 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'emptyAssigneePolicy',
   'autoApprovalPolicy',
   'fieldPermissions',
+  // FWB-3: closed decision field set frozen at approve time (backend re-emits).
+  'decisionFieldIds',
 ]
 // The backend ALSO rebuilds the NESTED shapes from fixed fields, silently dropping any other — so the
 // allowlist must be shape-level, not just top-level:
@@ -779,19 +810,14 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
 }
 
 /**
- * G-1 — reason the GRAPH (not the whole template) must render READ-ONLY: the graph is complex
- * (any cc/condition/parallel node, or non-linear) so the v1 linear `steps` editor can't author
- * it. Distinct from `unsupportedTemplateAuthoringReason`: a complex graph is NOT unsupported — the
- * form/metadata stay EDITABLE and SAVE stays enabled (it preserves the graph verbatim via
- * `draftFromTemplate`→`preservedGraph`→`buildApprovalGraph`). Returns `null` for a linear graph
- * (the steps editor is live) and for a truly-unsupported template (that path is fully read-only
- * via `unsupportedTemplateAuthoringReason`; the graph view never opens). The G-2+ editors will
- * narrow this to only genuinely-unrepresentable constructs.
+ * Legacy-named informational message for templates that use the graph editor instead of the
+ * linear steps editor. Complex graphs remain editable and save-preserved; only genuinely unknown
+ * node config is blocked by `unsupportedTemplateAuthoringReason`.
  */
 export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
   if (unsupportedTemplateAuthoringReason(template)) return null
   if (!isComplexApprovalGraph(template.approvalGraph)) return null
-  return '该审批流程包含复杂节点：条件分支可在下方编辑分支规则，并行 / 抄送节点以只读结构展示；未改动的节点与连线在保存时原样保留，不会被改写。'
+  return '该模板已启用分支流程编辑：可在画布调整流程结构，并在结构列表编辑各节点配置。'
 }
 
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
@@ -870,6 +896,22 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       // editor, or delete all three so a field changed away from `detail` does not carry stale
       // detail keys resurrected from the `original` spread (mirrors the options omit discipline;
       // the backend rejects detail-only keys on a non-detail field).
+      if (field.type === 'record-link') {
+        const baseId = field.recordLinkBaseId.trim()
+        const sheetId = field.recordLinkSheetId.trim()
+        next.props = {
+          ...(next.props && typeof next.props === 'object' ? next.props : {}),
+          baseId,
+          sheetId,
+        }
+      } else if (field.type !== 'detail' && next.props && typeof next.props === 'object') {
+        // Drop stale record-link pins when the type changes away from record-link.
+        const props = { ...next.props } as Record<string, unknown>
+        delete props.baseId
+        delete props.sheetId
+        if (Object.keys(props).length === 0) delete next.props
+        else next.props = props
+      }
       if (field.type === 'detail') {
         next.columns = buildDetailColumns(field.detailColumns)
         const minRows = field.minRowsText.trim()
@@ -953,12 +995,24 @@ function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>): Approv
   const fieldPermissions = step.fieldPermissions
     .filter((permission) => permission.access !== 'editable' && fieldIds.has(permission.fieldId))
     .map((permission) => ({ fieldId: permission.fieldId, access: permission.access }))
+  // FWB-3: emit only field ids that still exist on the form (server also cross-validates).
+  const decisionFieldIds = (step.decisionFieldIds ?? [])
+    .map((id) => id.trim())
+    .filter((id) => id && fieldIds.has(id))
+  // Deduplicate while preserving order.
+  const seenDecision = new Set<string>()
+  const uniqueDecisionFieldIds = decisionFieldIds.filter((id) => {
+    if (seenDecision.has(id)) return false
+    seenDecision.add(id)
+    return true
+  })
   return {
     assigneeSources: [sourceFromStep(step)],
     approvalMode: step.approvalMode,
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
+    ...(uniqueDecisionFieldIds.length > 0 ? { decisionFieldIds: uniqueDecisionFieldIds } : {}),
   }
 }
 
@@ -1017,9 +1071,25 @@ export function applyTopologyToComplexDraft(
   op: (graph: ApprovalGraph) => ApprovalGraph,
 ): TemplateAuthoringDraft {
   if (!draft.preservedGraph) return draft
-  const next = op(buildApprovalGraph(draft))
+  return draftFromEditedGraph(draft, op(buildApprovalGraph(draft)))
+}
+
+/**
+ * Apply a topology operation to any draft. Linear drafts are promoted to the graph authoring model
+ * first, preserving the graph produced by their current steps. From this point on there is a single
+ * structural source of truth (`preservedGraph`).
+ */
+export function applyTopologyToDraft(
+  draft: TemplateAuthoringDraft,
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+): TemplateAuthoringDraft {
+  return draftFromEditedGraph(draft, op(buildApprovalGraph(draft)))
+}
+
+function draftFromEditedGraph(draft: TemplateAuthoringDraft, next: ApprovalGraph): TemplateAuthoringDraft {
   return {
     ...draft,
+    steps: [],
     preservedGraph: next,
     conditionEdits: conditionEditsFromGraph(next),
     parallelEdits: parallelEditsFromGraph(next),
@@ -1094,6 +1164,12 @@ export function validateTemplateFormFields(
           field.maxRowsText,
         ),
       )
+    }
+    // FWB-2 record-link: server-pinned baseId + sheetId required.
+    if (field.type === 'record-link') {
+      if (!field.recordLinkBaseId.trim() || !field.recordLinkSheetId.trim()) {
+        errors.push(`字段 ${field.label.trim() || field.id}（record-link）需要配置目标 baseId 与 sheetId`)
+      }
     }
   })
   // Mirror the server visibility-rule reject-set (normalizeFormFieldVisibilityRule +

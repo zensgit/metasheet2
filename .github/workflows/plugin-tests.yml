@@ -629,6 +629,14 @@ jobs:
             tests/integration/multitable-action-applied-ledger-realdb.test.ts \
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
+            tests/integration/multitable-fwb-write-action-realdb.test.ts \
+            tests/integration/multitable-fwb-production-e2e-realdb.test.ts \
+            tests/integration/multitable-fwb-runtime-modes-realdb.test.ts \
+            tests/integration/approval-attachment-gc-realdb.test.ts \
+            tests/integration/approval-attachment-bind-reconcile-realdb.test.ts \
+            tests/integration/approval-attachment-participant-realdb.test.ts \
+            tests/integration/approval-attachment-schema-invariants-realdb.test.ts \
+            tests/integration/approval-attachment-create-bind-realdb.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
@@ -670,6 +678,8 @@ jobs:
             tests/integration/approval-routing-policy-equivalence.db.test.ts \
             tests/integration/directory-binding-sync-hook.db.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
+            tests/integration/approval-template-authoring-uat.api.test.ts \
+            tests/integration/approval-automation-closeout-acceptance.realdb.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
