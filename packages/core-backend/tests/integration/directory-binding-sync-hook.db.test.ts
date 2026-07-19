@@ -33,6 +33,13 @@ import { createLocalDepartment } from '../../src/directory/local-directory-org'
  *      (returns a completed run; last_success stamped) — a sweep failure must never fail (or
  *      fail-mark) the sync that just committed. The admin `POST /department-bindings/sweep`
  *      endpoint is the retry path (proven in directory-binding-admin-routes.db.test.ts).
+ *
+ *   Note on the table-rename seam (gate P3): this deliberately breaks the sweep at the SQL
+ *   catalog, not via a production test-only injection point. A narrower production seam would
+ *   alter shipping behavior or require a non-trivial test hook; we retain rename because
+ *   `vitest.integration.config.ts` sets `fileParallelism: false` + `maxConcurrency: 1`, so
+ *   files share one Postgres serially and the rename cannot race another suite mid-file.
+ *   The rename is always restored in `finally`.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()

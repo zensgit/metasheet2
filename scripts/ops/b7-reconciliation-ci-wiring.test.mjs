@@ -4,21 +4,71 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-// B7 CI two-point wiring contract. The routing-policy schema suite proves the resolver over the (org,purpose)
-// policy store's DB invariants (cross-org FK-impossible, closed purpose set, RESTRICT) against real
-// Postgres — meaningless without a DB. It needs BOTH (1) the vitest.config.ts exclude (so the no-DB
-// job cannot skip-green it) AND (2) the plugin-tests.yml directory real-DB whole-file step. Removing
-// either point silently disables the proof while CI stays green. Runs in the gating no-DB test job.
+// B7 CI two-point wiring contract. The suggest-only reconciliation suite proves stale-not-inactive,
+// ambiguous-never-auto-match, and zero-write suggest against real Postgres — meaningless without a
+// DB. It needs BOTH (1) the vitest.config.ts exclude (so the no-DB job cannot skip-green it) AND
+// (2) the plugin-tests.yml directory real-DB whole-file step (the named step that hosts directory
+// integration suites). Removing either point silently disables the proof while CI stays green.
+// Runs in the gating no-DB test job.
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const FILE = 'tests/integration/directory-binding-reconciliation.db.test.ts'
 
-test('vitest.config.ts excludes the B7 routing-policy suite from the no-DB job', () => {
+// In plugin-tests.yml, directory real-DB suites (B4–B7 reconciliation/admin, org-directory-*,
+// local-directory-*) share the single named step "Run approval real-DB integration (...)" with
+// the approval suites. The guard anchors to that named step block — a path that appears only in
+// a comment, the multitable step, or elsewhere must NOT pass.
+const DIRECTORY_REAL_DB_STEP = 'Run approval real-DB integration'
+
+/**
+ * Body of the first workflow step whose name contains `nameNeedle`, from the line after
+ * `- name:` through (not including) the next same-indent `- name:`.
+ */
+function namedStepBody(wf, nameNeedle) {
+  const lines = wf.split('\n')
+  let start = -1
+  let indent = ''
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\s*)- name:\s*(.*)$/)
+    if (m && m[2].includes(nameNeedle)) {
+      start = i
+      indent = m[1]
+      break
+    }
+  }
+  assert.ok(start >= 0, `workflow step whose name includes ${JSON.stringify(nameNeedle)} not found`)
+  const body = []
+  for (let i = start + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^(\s*)- name:\s*/)
+    if (m && m[1] === indent) break
+    body.push(lines[i])
+  }
+  return body.join('\n')
+}
+
+/** Whole-file vitest arg line: newline + indent + path + trailing ` \`. */
+function wholeFileRunRe(file) {
+  return new RegExp(`\\n\\s*${file.replace(/[.]/g, '\\.')} \\\\`)
+}
+
+test('vitest.config.ts excludes the B7 reconciliation suite from the no-DB job', () => {
   const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
   assert.ok(cfg.includes(`'${FILE}'`), `vitest.config.ts must exclude ${FILE}`)
 })
 
-test('plugin-tests.yml runs the B7 routing-policy suite as a whole file in the directory real-DB step', () => {
+test('plugin-tests.yml runs the B7 reconciliation suite as a whole file in the directory real-DB step', () => {
   const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-  assert.match(wf, new RegExp(`\\n\\s*${FILE.replace(/[.]/g, '\\.')} \\\\`), `plugin-tests.yml must run ${FILE}`)
+  const step = namedStepBody(wf, DIRECTORY_REAL_DB_STEP)
+  assert.match(
+    step,
+    wholeFileRunRe(FILE),
+    `plugin-tests.yml directory real-DB step (${DIRECTORY_REAL_DB_STEP}) must run ${FILE} as a whole file`,
+  )
+  // Negative: must not be the sole (or any) placement under multitable real-DB.
+  const multi = namedStepBody(wf, 'Run multitable real-DB integration')
+  assert.doesNotMatch(
+    multi,
+    wholeFileRunRe(FILE),
+    `${FILE} must not be wired into the multitable real-DB step`,
+  )
 })
