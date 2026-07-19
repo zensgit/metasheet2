@@ -2499,6 +2499,44 @@ export class MultitableApiClient {
     await this.parseJson(res)
   }
 
+  /** FWB Q6: server-generated confirmation challenge (identifiers only). */
+  async createFwbConfirmationChallenge(
+    sheetId: string,
+    body: {
+      templateId: string
+      templateVersionId: string
+      targetSheetId: string
+      targetBaseId?: string | null
+      mappings: Array<{ formFieldId: string; targetFieldId: string }>
+    },
+  ): Promise<{ confirmationId: string; fingerprint: string; challengeNonce: string }> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/fwb-confirmation/challenge`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
+    return this.parseJson(res)
+  }
+
+  /** FWB Q6: explicit acknowledgement of a challenge. */
+  async confirmFwbConfirmation(
+    sheetId: string,
+    body: { confirmationId: string; challengeNonce: string },
+  ): Promise<{ ok: boolean; confirmationId: string }> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/fwb-confirmation/confirm`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
+    return this.parseJson(res)
+  }
+
   // --- Comments (uses /api/comments) ---
   async listComments(params: { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope): Promise<{ comments: MultitableComment[] }> {
     const normalized = normalizeCommentsParams(params)

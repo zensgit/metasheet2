@@ -54,9 +54,11 @@ import {
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult } from './automation-executor'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import {
-  computeFwbConfirmationHash,
+  assertFwbRuntimeActivatable,
   parseWriteApprovalFormValuesConfig,
 } from './approval-fwb-runtime'
+import { verifyFwbConfirmation } from './approval-fwb-confirmation'
+import { loadTargetFieldsFromMeta } from './approval-fwb-target-fields'
 import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
 import { isAdmin as isAdminUser } from '../rbac/service'
 import type { AutomationTrigger } from './automation-triggers'
@@ -1939,6 +1941,9 @@ export class AutomationService {
       if (action.type === 'write_approval_form_values') fwbActions.push({ config: action.config })
     }
     if (fwbActions.length > 0) {
+      // Activation: FWB flag + durable delivery must both be ON to save/enable an FWB rule.
+      const activationErr = assertFwbRuntimeActivatable()
+      if (activationErr) return activationErr
       // D1: FWB rules lock outcomes to approved-only (explicit or default).
       const outcomes = outcomesRaw === undefined
         ? ['approved']
@@ -1955,9 +1960,7 @@ export class AutomationService {
   }
 
   /**
-   * FWB save-time config + Q6 gates. confirmationHash must equal the server-computed hash of the
-   * normalized {template, target sheet/base, mappings}; configurer must be admin OR hold
-   * canManageSheetAccess on the target sheet, and must be able to write the target sheet.
+   * FWB save-time: flag gates, meta_fields authority, Q6 persisted confirmation, configurer ACL.
    */
   private async validateFwbActionConfigAtSave(
     rawConfig: Record<string, unknown>,
@@ -1968,7 +1971,6 @@ export class AutomationService {
     const parsed = parseWriteApprovalFormValuesConfig(rawConfig)
     if (!parsed.ok) return (parsed as { ok: false; error: string }).error
     const cfg = parsed.config
-    // FWB-1 target = rule sheet (D2). FWB-2/3 target sheet is pinned on the record-link field props.
     let targetSheetId = ruleSheetId
     let targetBaseId: string | null | undefined = cfg.targetBaseId ?? null
     if (cfg.mode === 'create') {
@@ -1982,24 +1984,51 @@ export class AutomationService {
       targetSheetId = linkResolved.sheetId
       if (targetBaseId == null && linkResolved.baseId) targetBaseId = linkResolved.baseId
     }
-    const expected = computeFwbConfirmationHash({
-      sourceTemplateId: templateId,
+    // meta_fields authority — every target must exist with supported type.
+    const fieldRes = await loadTargetFieldsFromMeta(
+      this.queryFn,
       targetSheetId,
-      targetBaseId: targetBaseId ?? null,
-      mappings: cfg.mappings,
-    })
-    if (cfg.confirmationHash !== expected) {
-      return 'write_approval_form_values.confirmationHash does not match the normalized config (Q6)'
+      cfg.mappings.map((m) => m.targetFieldId),
+    )
+    if (!fieldRes.ok) {
+      const fail = fieldRes as { ok: false; fieldId?: string }
+      return `write_approval_form_values target field ${fail.fieldId ?? ''} is missing or unsupported`
     }
-    // Q6 G1: admin OR canManageSheetAccess on target sheet.
+    // Latest published/active template version for fingerprint binding.
+    const verRes = await this.queryFn(
+      `SELECT id::text AS id FROM approval_template_versions
+        WHERE template_id = $1
+        ORDER BY version DESC NULLS LAST, created_at DESC LIMIT 1`,
+      [templateId],
+    )
+    const templateVersionId = (verRes.rows[0] as { id?: string } | undefined)?.id
+    if (!templateVersionId) return 'write_approval_form_values: template version not found'
+    const conf = await verifyFwbConfirmation(this.queryFn, {
+      confirmationId: cfg.confirmationId,
+      configurerUserId: createdBy,
+      subject: {
+        templateId,
+        templateVersionId,
+        targetBaseId: targetBaseId ?? null,
+        targetSheetId,
+        mappings: cfg.mappings,
+      },
+    })
+    if (!conf.ok) {
+      const fail = conf as { ok: false; code: string }
+      return `write_approval_form_values Q6 confirmation invalid (${fail.code})`
+    }
     const admin = await isAdminUser(createdBy)
     if (!admin) {
       const { capabilities } = await resolveSheetCapabilitiesForUser(this.queryFn, targetSheetId, createdBy)
       if (!capabilities.canManageSheetAccess) {
         return 'write_approval_form_values requires admin or canManageSheetAccess on the target sheet (Q6)'
       }
-      if (!capabilities.canEditRecord && !capabilities.canCreateRecord) {
-        return 'write_approval_form_values requires the creator to be able to write the target sheet (Q6)'
+      if (cfg.mode === 'create' && !capabilities.canCreateRecord) {
+        return 'write_approval_form_values requires canCreateRecord on the target sheet'
+      }
+      if ((cfg.mode === 'update' || cfg.mode === 'decision') && !capabilities.canEditRecord) {
+        return 'write_approval_form_values requires canEditRecord on the target sheet'
       }
     }
     return null

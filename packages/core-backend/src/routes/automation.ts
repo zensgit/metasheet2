@@ -298,6 +298,92 @@ export function createAutomationRoutes(
     }
   })
 
+  // ── FWB Q6 confirmation challenge / acknowledge (identifiers only) ──────
+  // POST challenge: server generates fingerprint + challenge nonce for a draft config.
+  // POST confirm: explicit ack binds confirmed_by; save/execute re-verify the persisted row.
+
+  router.post('/sheets/:sheetId/automations/fwb-confirmation/challenge', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    if (!sheetId) return res.status(400).json({ error: 'sheetId is required' })
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      const userId = typeof (req as { user?: { id?: string } }).user?.id === 'string'
+        ? (req as { user: { id: string } }).user.id
+        : ''
+      if (!userId) return res.status(401).json({ error: 'authentication required' })
+      const body = (req.body && typeof req.body === 'object') ? req.body as Record<string, unknown> : {}
+      const templateId = typeof body.templateId === 'string' ? body.templateId.trim() : ''
+      const templateVersionId = typeof body.templateVersionId === 'string' ? body.templateVersionId.trim() : ''
+      const targetSheetId = typeof body.targetSheetId === 'string' ? body.targetSheetId.trim() : sheetId
+      const targetBaseId = typeof body.targetBaseId === 'string' ? body.targetBaseId.trim() : null
+      const mappingsRaw = Array.isArray(body.mappings) ? body.mappings : []
+      const mappings: Array<{ formFieldId: string; targetFieldId: string }> = []
+      for (const m of mappingsRaw) {
+        if (!m || typeof m !== 'object') continue
+        const formFieldId = typeof (m as { formFieldId?: unknown }).formFieldId === 'string'
+          ? String((m as { formFieldId: string }).formFieldId).trim() : ''
+        const targetFieldId = typeof (m as { targetFieldId?: unknown }).targetFieldId === 'string'
+          ? String((m as { targetFieldId: string }).targetFieldId).trim() : ''
+        if (formFieldId && targetFieldId) mappings.push({ formFieldId, targetFieldId })
+      }
+      if (!templateId || !templateVersionId || mappings.length === 0) {
+        return res.status(400).json({ error: 'templateId, templateVersionId, and mappings are required' })
+      }
+      const { createFwbConfirmationChallenge } = await import('../multitable/approval-fwb-confirmation')
+      const challenge = await createFwbConfirmationChallenge(pool.query.bind(pool), {
+        sheetId,
+        configurerUserId: userId,
+        subject: { templateId, templateVersionId, targetBaseId, targetSheetId, mappings },
+      })
+      // Identifiers only — never echo form/decision values.
+      return res.status(201).json({
+        confirmationId: challenge.id,
+        fingerprint: challenge.fingerprint,
+        challengeNonce: challenge.challengeNonce,
+      })
+    } catch (err) {
+      return res.status(500).json({ error: 'failed to create FWB confirmation challenge' })
+    }
+  })
+
+  router.post('/sheets/:sheetId/automations/fwb-confirmation/confirm', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    if (!sheetId) return res.status(400).json({ error: 'sheetId is required' })
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      const userId = typeof (req as { user?: { id?: string } }).user?.id === 'string'
+        ? (req as { user: { id: string } }).user.id
+        : ''
+      if (!userId) return res.status(401).json({ error: 'authentication required' })
+      const body = (req.body && typeof req.body === 'object') ? req.body as Record<string, unknown> : {}
+      const confirmationId = typeof body.confirmationId === 'string' ? body.confirmationId.trim() : ''
+      const challengeNonce = typeof body.challengeNonce === 'string' ? body.challengeNonce.trim() : ''
+      if (!confirmationId || !challengeNonce) {
+        return res.status(400).json({ error: 'confirmationId and challengeNonce are required' })
+      }
+      const { acknowledgeFwbConfirmation } = await import('../multitable/approval-fwb-confirmation')
+      const result = await acknowledgeFwbConfirmation(pool.query.bind(pool), {
+        confirmationId,
+        configurerUserId: userId,
+        challengeNonce,
+      })
+      if (!result.ok) {
+        return res.status(400).json({ error: 'confirmation failed', code: (result as { code: string }).code })
+      }
+      return res.json({ ok: true, confirmationId })
+    } catch {
+      return res.status(500).json({ error: 'failed to acknowledge FWB confirmation' })
+    }
+  })
+
   // ── Execution logs ──────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/logs', async (req: Request, res: Response) => {
