@@ -1,9 +1,10 @@
-# 真实外部系统现场对接线 — 设计锁(design-lock)— 2026-07-12
+# 真实外部系统现场对接线 — 设计锁（RATIFIED E0）— 2026-07-12
 
-> **状态:PROPOSED / owner-ratification-required。** 本文是**下一条产品线**的第一刀 ——
+> **状态：RATIFIED E0（2026-07-19）。** 本文是**下一条产品线**的第一刀 ——
 > 按 owner 定调:「第一刀不是写代码,而是 runbook / design-lock」。**本文不请求任何编码,
-> 不请求任何外部写授权。** 它把现场对接的开放决策(OD-E1..OD-E6)显式列出,交 owner + 客户拍板;
-> 在拍板前,**任何 runtime 切片都不启动**。
+> 不请求任何外部写授权。** E0 边界与以下保守裁决现已生效：OD-E3=否、OD-E4=仅 smoke、
+> OD-E5=`externalWrite=false`、OD-E6=逐客户 gate、OD2=未实现策略 fail-closed、OD6=全 blocking。
+> OD-E1/E2 与 OD1/3/4/5 仍须逐客户样本或流程访谈，未满足前不启动对应 runtime。
 >
 > **2026-07-17 刷新(内容不改判,只补状态与表决单)**:①W3-W6 on-prem 验收弧已以 corrective-6 包
 > 终验 PASS 收口(#4101 CLOSED);RC-A(#4437,T3b approved-source 单窗验收)在途、等实体机执行,
@@ -11,6 +12,10 @@
 > (`http-routes.cjs:579-583/:602-608`,反 steering 拒绝已测)——本线 E2 的「readonly intake →
 > 内部表」底座较 07-12 更完整。③新增 §7/§8 **owner 表决单**(证据 · 选项 · 推荐 · 批准影响),
 > 沿用既有 OD-E1..E6 与备料 OD1..OD6 编号,不另设编号体系。代码证据锚 origin/main `9048c27e2`。
+>
+> **2026-07-19 owner final：** ratify E0 与上述六项；OD2 的最小安全实现已由 #4463
+> 合入 `fbce9d617`（服务端 422 + FE 摘除）。本次 ratify 不授权 E3/E4/E5，不把跨客户样本
+> 推断为现场证据，也不改变 RC-A #4437 的实体机门。
 
 ## 0. 为什么这是新线,不是备料 MVP 的漏项
 
@@ -45,7 +50,7 @@
 - **(2026-07-17 增)** T3a/T3b 服务端 auto-persist(approved source → 内部表),各自独立
   default-OFF flag + 反 steering 拒绝 —— E2 的 intake 落表面已有带闸生产入口,非仅样本管线。
 
-## 2. 开放决策(OD-E,需 owner + 客户拍板 —— 拍板前不启动 runtime)
+## 2. 决策集合（OD-E；部分已 ratified，其余逐客户拍板）
 
 | # | 决策 | 选项 | 依赖 |
 |---|---|---|---|
@@ -88,42 +93,43 @@
 
 - 本文**不**请求编码、**不**请求外部写授权、**不**声称任何客户对接已发生。
 - 本文**不**改变备料 MVP 的 `externalPlmK3ErpWrite=false` 事实。
-- E1-E5 **在 OD-E 未经 owner/客户拍板前一律不启动**。
+- E1 仅在逐客户 OD-E1/E2/E6 与真实只读样本齐备后启动；E2 依赖 E1 PASS；E3/E4/E5
+  维持未授权。ratified E0 本身不解锁这些 runtime。
 
 ## 6. 下一步(owner 动作)
 
-1. ratify 本 design-lock(或改)。
-2. 就 OD-E1..E6 给出客户口径 / 授权范围(尤其 OD-E3 值面读、OD-E4/E5 apply 姿态)——
-   **表决单见 §7(OD-E)与 §8(备料 OD1..OD6)**,逐行回帖即生效,无需整批。
-3. 提供现场只读样本(PLM / K3-ERP)以启动 E1 feasibility。
+1. ~~ratify 本 design-lock~~ **已完成：E0 于 2026-07-19 ratified。**
+2. 为具体客户提供现场只读样本，并逐客户裁 OD-E1/E2 与 OD1/3/4/5；样本不跨客户复用结论。
+3. E1 feasibility 只在上一步完成后启动，保持零写；E2 依赖 E1 PASS。
+4. OD-E3/E4/E5 的保守裁决保持，除非另开独立 owner + 客户授权门。
 
-在此之前:**hold,不启动任何 runtime 切片。**
+在逐客户前置完成前：**hold，不启动对应 runtime 切片。**
 
 ## 7. Owner 表决单 — OD-E1..OD-E6(证据 · 选项 · 推荐 · 批准影响)
 
-> 表决方式:逐行回帖(如「OD-E3: 否」「OD-E6: 批」),每行独立生效。证据锚 `9048c27e2`。
+> 本节现为决策台账；仍开放的逐客户行可继续逐行回帖，每行独立生效。证据锚 `9048c27e2`。
 > 推荐是我的倾向,不是预设;任何一行 owner 可改判。
 >
-> **round-1 review(2026-07-17)owner 预决五行(以修正后 owner 正式回帖为准,未回帖前不生效)**:
-> OD6=ratify 全 blocking · OD-E3=否 · OD-E4=仅 smoke · OD-E5=externalWrite=false · OD-E6=批;
-> 其余行等客户样本。另 OD2 须先按上表三选一裁 category_rule 的堵洞方式。
+> **owner final（2026-07-19）：** OD-E3=否 · OD-E4=仅 smoke · OD-E5=`externalWrite=false` ·
+> OD-E6=批；其余 OD-E 行等逐客户样本。备料侧 OD2=服务端 fail-closed + FE 摘除（已合入），
+> OD6=ratify 全 blocking；OD1/3/4/5 保持逐客户开放。
 
 | # | 证据(现状,可核) | 选项 | 推荐 | 批准影响 |
 |---|---|---|---|---|
 | **OD-E1** | 3 个 PLM-capable readonly kind 已 shipped,各带诚实完整性上界(能力表 `readonly-source-run.cjs:54-75`;`bridge:legacy-sql-readonly` clamp 默认 20,大源必 409 `SOURCE_RUN_COMPLETENESS_UNPROVABLE`);workbench 顾问自助面可作现场配置采样(#4437 审阅已核) | 逐客户收样后裁字段口径+kind / 先钉全局默认 | **逐客户收样后裁**(用 E1 现场采样回填,不设全局默认);选 kind 时按能力表核对源规模 | 与 OD-E2/E6 同批 → **启动 E1**(零写 feasibility,主要为 runbook/配置工作,复用探测+feeder) |
 | **OD-E2** | 4 个 ERP kind 已 shipped;`k3-wise-webapi` 10 行/页×10 页硬上界(`readonly-source-run.cjs:22-24,:71-74`);`k3-wise-sqlserver` 单页不可续(`:36-39`);完整性不可证即 fail-closed(`:442,:529`) | 同上逐客户 | 同 OD-E1 同批;小上界 kind 只适合小表/样本场景,选型时明示 | 同上 |
-| **OD-E3** | values-free 硬边界已构造性落地:项目读面只出 handle+闭枚举+计数(`project-reads.cjs:14-24,:43-46`);值面读显式 OD-W3-1-gated 未建 | 否(默认) / 是→单独 gated+audited read | **维持「否」**,直到首个现场 UAT 提出具名读值需求;届时先开 RBAC 范围+审计词表设计门,再实现 | 「是」→ 启动 E3(**新开发**:审计词表+RBAC 作用域设计先行) |
-| **OD-E4** | 备料线外部写结构性缺席:evidence 恒 false(验收 runner 硬编码 `onprem-acceptance.ps1:90`)+ 路由测试断言零外呼(`http-routes.test.cjs:7143,7192-7195` spy 装置,断言在 `:7246`);内部 apply sandbox-fail-closed(`table-actions.cjs:781-802`),生产 apply config-only(`:824-833`);**唯一带 dry-run→gated-apply 门的外写机制** = C6 `sql-write-gated`(`external-write-dry-run.cjs:18`),未接 K3/PLM——既有 K3 写路径(pipeline upsert/Save/Submit/Audit,`pipeline-runner.cjs:643` + k3 adapter)属 pipeline 线、config-gated、无 sandbox 概念,即 §4 的 C4 gated pool 项 | 仅 smoke / sandbox apply / 生产 apply | **首轮仅 smoke**(E1/E2 深度);**外部 sandbox apply = 全新机制**(现 sandbox 门只覆盖内部表),需单独立项评估后再议 | sandbox → 启动 E4(新机制开发);生产 → E5/C4,默认不进入 |
-| **OD-E5** | 现姿态强于只读:内部 auto-persist 都各自 default-OFF + 反 steering 拒绝(`http-routes.cjs:579-631`);OFF 时 source-run 逐字节只读 | `externalWrite=false`(默认) / sandbox-first | **维持 false** | sandbox-first → 同 OD-E4 的 E4 路径 |
-| **OD-E6** | 逐客户 gate 可零代码复用:S2-b 探测平台钉死 5000ms/10 行(`read-source-probe-contract.cjs:19-20`)+ approve-gated 配置 + 「完整性可证或诚实 fail-closed」run 语义 | 批 gate 协议 / 另行设计 | **现在就批**(纯程序性,零新代码):E1 逐客户入门判据 = 连得上 + 读得出 + 完整性可证或诚实 fail-closed | 定义 E1 的逐客户入门门槛;本身不启动任何 runtime |
+| **OD-E3** | values-free 硬边界已构造性落地:项目读面只出 handle+闭枚举+计数(`project-reads.cjs:14-24,:43-46`);值面读显式 OD-W3-1-gated 未建 | 否(默认) / 是→单独 gated+audited read | **RATIFIED：否**。首个现场 UAT 若提出具名读值需求，须重开 RBAC 范围+审计词表设计门 | E3 保持 barred |
+| **OD-E4** | 备料线外部写结构性缺席:evidence 恒 false(验收 runner 硬编码 `onprem-acceptance.ps1:90`)+ 路由测试断言零外呼(`http-routes.test.cjs:7143,7192-7195` spy 装置,断言在 `:7246`);内部 apply sandbox-fail-closed(`table-actions.cjs:781-802`),生产 apply config-only(`:824-833`);**唯一带 dry-run→gated-apply 门的外写机制** = C6 `sql-write-gated`(`external-write-dry-run.cjs:18`),未接 K3/PLM——既有 K3 写路径(pipeline upsert/Save/Submit/Audit,`pipeline-runner.cjs:643` + k3 adapter)属 pipeline 线、config-gated、无 sandbox 概念,即 §4 的 C4 gated pool 项 | 仅 smoke / sandbox apply / 生产 apply | **RATIFIED：首轮仅 smoke**（E1/E2 深度） | E4/E5 不解锁；sandbox/生产 apply 均须另立 owner+客户设计门 |
+| **OD-E5** | 现姿态强于只读:内部 auto-persist 都各自 default-OFF + 反 steering 拒绝(`http-routes.cjs:579-631`);OFF 时 source-run 逐字节只读 | `externalWrite=false`(默认) / sandbox-first | **RATIFIED：`externalWrite=false`** | sandbox-first 不解锁 |
+| **OD-E6** | 逐客户 gate 可零代码复用:S2-b 探测平台钉死 5000ms/10 行(`read-source-probe-contract.cjs:19-20`)+ approve-gated 配置 + 「完整性可证或诚实 fail-closed」run 语义 | 批 gate 协议 / 另行设计 | **RATIFIED：批 gate 协议**。E1 逐客户入门判据 = 连得上 + 读得出 + 完整性可证或诚实 fail-closed | 定义 E1 入门门槛；本身不启动 runtime |
 
 ## 8. Owner 表决单 — 备料产品决策 OD1..OD6(承接 §4,同表决方式)
 
 | # | 证据(现状,可核) | 选项 | 推荐 | 批准影响 |
 |---|---|---|---|---|
 | **OD1** 图号/版本字段 | DN_PDM read plan 钉死为默认且逐请求可覆写(`bom-expansion.cjs:157-207`:IdentityNo/SysVer);mapper 接地校验拒绝未接地映射 | ratify DN_PDM 为默认 / 逐客户收样后裁 | **逐客户**(E1 采样回填);DN_PDM 只是一家 schema,不宜升格为裁决 | 与 OD3/OD4 同批 → 解锁 `sp-export-import-templates` |
-| **OD2** 版本是否 ERP-区分 | **无服务端默认**:route 逐请求必填(`http-routes.cjs:4280` 注释「OD2: no server default」)。⚠️ **`category_rule` 当前不是安全状态**:FE 白名单可选(`materialMapping.ts:35,53`)、route 接受,但匹配器只显式实现 drawing_only/drawing_and_version——其余值落**尾部兜底**(`material-match.cjs:116-136`:缺任一版本即按图号放行,且 `mappingIsVersionConflict` 对非 drawing_and_version 恒 false)=行为等同 manual 而用户以为是品类规则,**静默错配风险** | (owner 定三选一)①暂从 UI/输入词表移除 ②服务端 fail-closed(未实现值 422)③完整实现品类规则 | **②服务端 fail-closed 先行**(最小改动立即堵洞),叠加①隐藏 FE 选项;③等具名客户需求再立项 | 选①/②=独立小 hardening 切片(非本 PR);选③=新设计门;裁后模板 versionPolicy 词表随之收敛 |
+| **OD2** 版本是否 ERP-区分 | 原缺口：`category_rule` 曾被 FE/route 接受但 matcher 未实现，可能尾部兜底为按图号匹配。#4463 已以 `fbce9d617` 合入服务端执行点前置 422 与 FE 摘除 | ①摘除 ②服务端 fail-closed ③完整实现 | **RATIFIED 且已完成：①+②**；③等具名客户需求另立设计门 | 当前无静默 category_rule 路径；模板 versionPolicy 词表已收敛 |
 | **OD3** 领料单位口径 | FIssueUnit 别名链钉死(`unit-rule-match.cjs:90-91`);无值→HELD `missing_issue_unit`(`:282-285`);规则确认 tri-XOR、未确认永不自动生效 | ratify FIssueUnit 链 / 逐客户裁 | **逐客户**核实 K3 领料实践(基础/库存/领料单位分歧场景)后裁 | 同 OD1 |
 | **OD4** 取整/最小领料量 | **机制已建但惰性**:none/ceil/floor/nearest/pack_size + minimum floor 全在(`mvp-generation.cjs:240-263`),默认 none,仅用户确认 unit rule 时手输,无品类默认表 | 保持逐规则手输 / 建品类默认表 | 保持手输至客户品类规则到位;品类默认表=模板工作,与 OD1/OD3 同批 | 同 OD1 |
 | **OD5** 确认粒度 | 任何粒度的 prep-line confirm 均未建;行无 human_preserved、重跑刷新(`generation-runtime.cjs:20`);现有确认全在底座级(mapping/unit,内容 hash 键) | project / BOM snapshot / 生产工单 | **客户流程访谈后裁**(无代码可证);裁前 C4 apply 本就 barred,无额外风险 | 决定未来 prep-line confirm 写面与 C4 apply 面的形状(E4/E5 前置) |
-| **OD6** 异常 blocking vs warning | 全 blocking 已完整实现+测试:severity 硬编码(`mvp-generation.cjs:274`),行有异常即不生成(`:410-425`),决议闭词表无 ignore/defer(`generation-runtime.cjs:22-23`);读模型已 warning-ready | ratify 全 blocking / 指定 warning 子集 | **本轮直接 ratify 全 blocking**(零工作量、最保守;首轮 UAT 后按客户容忍度再议 warning 子集) | ratify 即**当场关闭 OD6**;warning 子集=后续一个小设计门 |
+| **OD6** 异常 blocking vs warning | 全 blocking 已完整实现+测试:severity 硬编码(`mvp-generation.cjs:274`),行有异常即不生成(`:410-425`),决议闭词表无 ignore/defer(`generation-runtime.cjs:22-23`);读模型已 warning-ready | ratify 全 blocking / 指定 warning 子集 | **RATIFIED：全 blocking** | OD6 已关闭；warning 子集须后续独立设计门 |
