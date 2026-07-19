@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 // coverage for the DISCRIMINATED-UNION step contract and the RUNTIME fail-closed gate. Every rejection
 // carries a DISTINCT HttpError code, so these tests double as mutation canaries — removing any single
 // guard changes (or removes) the specific code its leg asserts, reddening exactly that leg rather than
-// being masked by a later 422. The port is faked (core-backend is the PROVIDER in prod); at S7-1
-// `implementedKinds` is empty so every well-formed dynamic step is unavailable — correct and safe.
+// being masked by a later 422. The port is faked (core-backend is the PROVIDER in prod). S7-1 cases
+// below default `implementedKinds: []` so well-formed dynamic steps hit UNAVAILABLE; S7-2 unit cases
+// override with `direct_manager` where they assert the implemented path.
 
 const require = createRequire(import.meta.url)
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
@@ -303,9 +304,16 @@ describe('S7-1 assertDynamicFlowStepsRuntimeAvailable — §4.1 runtime fail-clo
   })
 })
 
-describe('S7-1 buildAttendanceApprovalAssignments — dynamic step never reaches the admin fallback', () => {
-  it('a dynamic current step throws APPROVAL_STEP_DYNAMIC_UNGATED (defense-in-depth, distinct from the gates)', () => {
+describe('S7-1/S7-2 buildAttendanceApprovalAssignments — dynamic step never reaches the admin fallback', () => {
+  // S7-2: direct_manager is implemented — missing/empty/self snapshot → APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED
+  // (block-with-error, §4). Other kinds still hit the S7-1 UNGATED defense-in-depth arm.
+  it('direct_manager without frozen managerId throws APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED (never admin fallback)', () => {
     expect(httpCode(() => buildAttendanceApprovalAssignments([{ kind: 'direct_manager' }], 0)))
+      .toEqual({ status: 422, code: 'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED' })
+  })
+
+  it('an unimplemented dynamic kind (dept_head) still throws APPROVAL_STEP_DYNAMIC_UNGATED', () => {
+    expect(httpCode(() => buildAttendanceApprovalAssignments([{ kind: 'dept_head' }], 0)))
       .toEqual({ status: 422, code: 'APPROVAL_STEP_DYNAMIC_UNGATED' })
   })
 
@@ -317,3 +325,27 @@ describe('S7-1 buildAttendanceApprovalAssignments — dynamic step never reaches
     ])
   })
 })
+
+describe('S7-1 F4 NIT — non-string kind reaches DISTINCT 422 (not a silent static step)', () => {
+  it('kind: 123 (number) → APPROVAL_STEP_KIND_INVALID', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 123 }], allImplementedContext())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_KIND_INVALID' })
+  })
+
+  it('kind: null → APPROVAL_STEP_KIND_INVALID', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: null }], allImplementedContext())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_KIND_INVALID' })
+  })
+
+  it('kind: true (boolean) → APPROVAL_STEP_KIND_INVALID', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: true }], allImplementedContext())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_KIND_INVALID' })
+  })
+})
+
+function allImplementedContext() {
+  return makeContext({ implementedKinds: ['direct_manager', 'dept_head', 'manager_at_level'] })
+}

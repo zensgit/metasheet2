@@ -102,10 +102,15 @@ import {
   stopApprovalSlaScheduler,
 } from './services/ApprovalSlaScheduler'
 import { ApprovalProductService } from './services/ApprovalProductService'
-// S7-1 (OD-S7-5=d): the host-resolved chain-depth cap the attendance dynamic-assignee resolver PORT
-// exposes to plugin-attendance, so the plugin validates `manager_at_level.level` against the SAME
-// source the kernel uses and never re-parses APPROVAL_MANAGER_CHAIN_MAX_LEVELS into a second constant.
-import { MAX_MANAGER_CHAIN_LEVELS } from './services/ApprovalDirectoryOrg'
+// S7-1/S7-2 (OD-S7-5=d): host-resolved chain-depth cap + org-scoped directory-read path the attendance
+// dynamic-assignee resolver PORT exposes to plugin-attendance. The plugin validates
+// `manager_at_level.level` against MAX (never re-parses APPROVAL_MANAGER_CHAIN_MAX_LEVELS) and freezes
+// direct_manager via resolveApprovalRequesterOrgRelations (org-anchored, read-only).
+import {
+  MAX_MANAGER_CHAIN_LEVELS,
+  resolveApprovalRequesterOrgRelations,
+} from './services/ApprovalDirectoryOrg'
+import { query as pgQuery } from './db/pg'
 import {
   resolveAttendanceSchedulerIntervalMs,
   resolveAttendanceSchedulerLeaderOptions,
@@ -951,20 +956,57 @@ export class MetaSheetServer {
     return wrappedUnregister
   }
 
-  // S7-1 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host binding for the
-  // narrow, org-scoped dynamic approval-assignee resolver port plugin-attendance consumes. It exposes
-  // the SAME MAX_MANAGER_CHAIN_LEVELS constant the kernel uses (no plugin env re-parse) and — at S7-1 —
-  // a resolver that reports EVERY dynamic kind unimplemented (`implementedKinds: []`, `resolve` →
-  // `{ status: 'unimplemented' }`), so the plugin fail-closes at both authoring and runtime. S7-2/S7-3/
-  // S7-4 populate `implementedKinds` and implement per-kind, org-scoped, directory-read-only resolution
-  // here (never a write, never outside the core-backend process boundary).
+  // S7-1/S7-2 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host binding for
+  // the narrow, org-scoped dynamic approval-assignee resolver port plugin-attendance consumes. Exposes
+  // the SAME MAX_MANAGER_CHAIN_LEVELS constant the kernel uses (no plugin env re-parse). S7-2 wires
+  // `direct_manager` only (byte-identical to ApprovalDirectoryOrg §2.1: is_manager precedence, legacy
+  // leader_in_dept fallback, deterministic tie-break, same-integration binding, self-exclusion).
+  // `dept_head` / `manager_at_level` stay unimplemented (S7-3/S7-4). Directory data is READ-ONLY.
   private buildApprovalAssigneeResolverPort(): NonNullable<
     import('./types/plugin').PluginServices['approvalAssigneeResolver']
   > {
     return {
       maxManagerChainLevels: MAX_MANAGER_CHAIN_LEVELS,
-      implementedKinds: [],
-      resolve: async () => ({ status: 'unimplemented' as const }),
+      implementedKinds: ['direct_manager'],
+      resolve: async (orgId, request) => {
+        const kind = typeof request?.kind === 'string' ? request.kind.trim() : ''
+        if (kind !== 'direct_manager') {
+          return { status: 'unimplemented' as const }
+        }
+
+        const normalizedOrgId = typeof orgId === 'string' ? orgId.trim() : ''
+        const requesterUserId =
+          typeof request?.requesterUserId === 'string' ? request.requesterUserId.trim() : ''
+        if (!normalizedOrgId || !requesterUserId) {
+          return { status: 'unresolved' as const, reason: 'missing_org_or_requester' }
+        }
+
+        // CREATE-TIME freeze only (§3.3/§3.4). Always directory-resolve with the attendance org anchor;
+        // never trust a caller-supplied snapshot for live re-resolution (step-advance must not call this).
+        // QueryFn is unconstrained (Row not bound to QueryResultRow); adapt pg's typed query.
+        const queryFn = <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> =>
+          pgQuery(text, params).then((r) => ({ rows: r.rows as Row[] }))
+
+        const relations = await resolveApprovalRequesterOrgRelations(requesterUserId, queryFn, {
+          orgId: normalizedOrgId,
+        })
+        const managerId =
+          typeof relations.managerId === 'string' && relations.managerId.trim().length > 0
+            ? relations.managerId.trim()
+            : null
+        // Self-exclusion at the resolver (§2.1): a manager that resolves to the requester is treated
+        // as unresolved — never written as a self-assignment.
+        if (!managerId || managerId === requesterUserId) {
+          return {
+            status: 'unresolved' as const,
+            reason: managerId === requesterUserId ? 'self_manager' : 'no_manager_linked',
+          }
+        }
+        return {
+          status: 'resolved' as const,
+          assignees: [{ assignmentType: 'user' as const, assigneeId: managerId }],
+        }
+      },
     }
   }
 

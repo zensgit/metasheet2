@@ -152,8 +152,8 @@ function getApprovalStepKind(step) {
 // Static (kind-less) steps return early: their legacy tolerance (unmodeled keys stripped by zod, A1
 // round-trip) is deliberately unchanged. The level UPPER bound uses the HOST-resolved MAX
 // (context.services.approvalAssigneeResolver.maxManagerChainLevels), never a plugin-parsed env — one
-// source, two surfaces, no drift. At S7-1 `implementedKinds` is empty, so every well-formed dynamic
-// step lands on (5) — correct and safe.
+// source, two surfaces, no drift. S7-2 populates `implementedKinds: ['direct_manager']` only —
+// other well-formed dynamic kinds still land on (5) until S7-3/S7-4 wire them.
 function assertApprovalStepsContract(steps, context) {
   if (!Array.isArray(steps)) return
   const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
@@ -238,7 +238,7 @@ function assertApprovalStepsContract(steps, context) {
 // S7-1 §4.1 RUNTIME fail-closed gate. Given NORMALIZED flow steps (post-normalizeApprovalSteps, which
 // preserves a dynamic step's `kind`), throw HttpError(422) if a dynamic step is encountered while the
 // trigger set holds: flag OFF, OR the context.services resolver port is absent, OR the kind is not
-// resolver-implemented (S7-1: none are). A flow with NO dynamic step is a no-op (byte-identical legacy).
+// resolver-implemented (S7-2: only `direct_manager`). A flow with NO dynamic step is a no-op (byte-identical legacy).
 //   • request-create: pass no `onlyStepIndex` → WHOLE-flow scan, so a later dynamic step cannot start a
 //     flow and then strand mid-flight.
 //   • step-advance:   pass `onlyStepIndex = nextStepIndex` → check just the step about to become active.
@@ -20717,29 +20717,81 @@ function buildAttendanceApprovalNodeKey(stepIndex) {
   return `attendance_request_step_${Math.max(0, Number(stepIndex ?? 0))}`
 }
 
-function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0) {
+// S7-2: does the (normalized) flow carry a direct_manager step? Used to decide whether to call the
+// org-scoped resolver port once at request-create for freeze (§3.4). Other dynamic kinds (S7-3/4)
+// will extend this as they land.
+function flowStepsNeedDirectManagerFreeze(flowSteps) {
+  const steps = normalizeApprovalSteps(flowSteps)
+  return steps.some((step) => getApprovalStepKind(step) === 'direct_manager')
+}
+
+// S7-2 §3.4 CREATE-TIME freeze: call the host-injected org-scoped port ONCE for a flow that contains
+// `direct_manager`, and return `{ managerId }` on success. Never called at step-advance.
+//
+// Whole-flow posture (§4 block-with-error + zero-persistence): if ANY step is direct_manager, an
+// unresolved / empty / self-resolving result MUST throw 422 APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED
+// BEFORE any request/instance/assignment write — including multi-step flows whose step 0 is static.
+// Deferring the block to step-advance would let create persist rows that can never complete.
+// Static-only flows remain a no-op (return {}). Port missing / unimplemented / throw still map to
+// APPROVAL_STEP_KIND_UNAVAILABLE (§4.1 resolver-unavailable), never legacy admin fallback.
+async function resolveAttendanceDirectManagerFreeze({ orgId, userId, flowSteps, context }) {
+  if (!flowStepsNeedDirectManagerFreeze(flowSteps)) return {}
+  const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
+  if (!port || typeof port.resolve !== 'function') {
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      '动态审批人类型 "direct_manager" 无法解析(resolver 端口缺失)——请求已阻断(fail-closed)'
+    )
+  }
+  let result
+  try {
+    result = await port.resolve(String(orgId ?? ''), {
+      kind: 'direct_manager',
+      requesterUserId: String(userId ?? ''),
+    })
+  } catch (err) {
+    if (err instanceof HttpError) throw err
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      '动态审批人类型 "direct_manager" 无法解析(resolver 调用失败)——请求已阻断(fail-closed)'
+    )
+  }
+  if (result && result.status === 'unimplemented') {
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      '动态审批人类型 "direct_manager" 当前不可用(能力未启用或无对应 resolver)'
+    )
+  }
+  if (result && result.status === 'resolved' && Array.isArray(result.assignees)) {
+    const hit = result.assignees.find(
+      (a) => a && a.assignmentType === 'user' && typeof a.assigneeId === 'string' && a.assigneeId.trim()
+    )
+    if (hit) {
+      const managerId = hit.assigneeId.trim()
+      // Defense-in-depth self-exclusion (port also excludes); self is unresolvable, not freezable.
+      if (managerId && managerId !== String(userId ?? '').trim()) {
+        return { managerId }
+      }
+    }
+  }
+  // unresolved / empty / self — hard block at create (whole-flow), never empty freeze + later strand.
+  throw new HttpError(
+    422,
+    'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
+    '动态审批人类型 "direct_manager" 无法解析(无关联上级、上级未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列'
+  )
+}
+
+function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0, requesterSnapshot = null) {
   const steps = normalizeApprovalSteps(flowSteps)
   const index = steps.length > 0
     ? Math.min(Math.max(Number.isFinite(Number(stepIndex)) ? Number(stepIndex) : 0, 0), steps.length - 1)
     : 0
   const currentStep = steps[index]
-  // S7-1 §4.1 defense-in-depth: a DYNAMIC-kind step must NEVER fall through to the legacy admin-queue
-  // fallback below (that fallback is reserved for LEGACY static steps with empty approver arrays). The
-  // runtime gates (request-create whole-flow scan + step-advance) block a dynamic step before this
-  // function is reached; arriving here with a dynamic current step means a gate was bypassed — fail
-  // closed with an explicit error instead of silently admin-routing the resolved-less step.
   const dynamicKind = getApprovalStepKind(currentStep)
-  if (dynamicKind) {
-    // DISTINCT code from the §4.1 gates' APPROVAL_STEP_KIND_UNAVAILABLE: reaching here means a runtime
-    // gate was BYPASSED (a "should never happen" internal invariant), not the normal feature-off /
-    // port-missing path — so removing a gate surfaces this alarming code instead of being masked by the
-    // gates' own code (which is what makes each gate independently mutation-provable).
-    throw new HttpError(
-      422,
-      'APPROVAL_STEP_DYNAMIC_UNGATED',
-      `动态审批人类型 "${dynamicKind}" 未经运行时门控即到达指派构建(fail-closed)——不得回退到管理员兜底队列`
-    )
-  }
   const nodeKey = buildAttendanceApprovalNodeKey(index)
   const assignments = []
   const seen = new Set()
@@ -20757,6 +20809,40 @@ function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0) {
       nodeKey,
       metadata,
     })
+  }
+
+  // S7-2: direct_manager reads ONLY the creation-frozen requesterSnapshot.managerId (§3.4) — never a
+  // live directory re-query, never the host port again. Unavailable / unlinked / self / empty ⇒
+  // explicit 422 block-with-error (§4); NEVER the legacy admin/source_queue fallback.
+  if (dynamicKind === 'direct_manager') {
+    const snap = requesterSnapshot && typeof requesterSnapshot === 'object' ? requesterSnapshot : null
+    const managerId = snap && typeof snap.managerId === 'string' ? snap.managerId.trim() : ''
+    const requesterId = snap && typeof snap.id === 'string' ? snap.id.trim() : ''
+    if (managerId && managerId !== requesterId) {
+      pushAssignment('user', managerId, {
+        source: 'attendance',
+        kind: 'direct_manager',
+        stepName: currentStep?.name ?? null,
+        resolvedFrom: { kind: 'direct_manager' },
+      })
+      return assignments
+    }
+    throw new HttpError(
+      422,
+      'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
+      '动态审批人类型 "direct_manager" 无法解析(无关联上级、上级未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列'
+    )
+  }
+
+  // S7-1 §4.1 defense-in-depth: any OTHER dynamic kind must NEVER fall through to the legacy
+  // admin-queue fallback (that fallback is reserved for LEGACY static steps with empty approver
+  // arrays). S7-3/S7-4 will replace this arm per-kind; until then, fail closed with a distinct code.
+  if (dynamicKind) {
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_DYNAMIC_UNGATED',
+      `动态审批人类型 "${dynamicKind}" 未经运行时门控即到达指派构建(fail-closed)——不得回退到管理员兜底队列`
+    )
   }
 
   if (currentStep) {
@@ -20778,7 +20864,15 @@ function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0) {
   return assignments
 }
 
-function buildAttendanceApprovalInstancePayload({ approvalId, requestId, orgId, userId, requesterName, draft }) {
+function buildAttendanceApprovalInstancePayload({
+  approvalId,
+  requestId,
+  orgId,
+  userId,
+  requesterName,
+  draft,
+  orgRelations = null,
+}) {
   const requestType = draft?.requestType
   const requestLabel = attendanceRequestTypeLabel(requestType)
   const workDate = draft?.workDate ?? null
@@ -20797,6 +20891,14 @@ function buildAttendanceApprovalInstancePayload({ approvalId, requestId, orgId, 
     minutes: draft?.metadata?.minutes ?? null,
   }
 
+  // S7-2 §3.4: freeze create-time org relations (managerId today; deptHeadId/managerChainIds in S7-3/4)
+  // into the requester snapshot. Omitted fields stay omitted — never write null placeholders that would
+  // change the legacy {id,name}-only snapshot shape for static-only flows.
+  const frozenManagerId =
+    orgRelations && typeof orgRelations.managerId === 'string' && orgRelations.managerId.trim()
+      ? orgRelations.managerId.trim()
+      : null
+
   return {
     id: approvalId,
     status: 'pending',
@@ -20808,6 +20910,7 @@ function buildAttendanceApprovalInstancePayload({ approvalId, requestId, orgId, 
     requesterSnapshot: {
       id: userId,
       name: requesterName || userId,
+      ...(frozenManagerId ? { managerId: frozenManagerId } : {}),
     },
     subjectSnapshot: {
       type: 'attendance_request',
@@ -21316,6 +21419,9 @@ module.exports = {
     ATTENDANCE_DYNAMIC_ASSIGNEE_FLAG_ENV,
     ATTENDANCE_DYNAMIC_ASSIGNEE_KINDS,
     ATTENDANCE_MANAGER_AT_LEVEL_KIND,
+    // S7-2 create-time freeze seam (pure enough for unit tests with a faked port).
+    resolveAttendanceDirectManagerFreeze,
+    flowStepsNeedDirectManagerFreeze,
   },
 
   async activate(context) {
@@ -24977,12 +25083,14 @@ module.exports = {
     // assertApprovalStepsContract in the create/update handlers so each violation gets a distinct 422
     // code (not a generic 400 VALIDATION_ERROR). `level` is accepted as an unconstrained number here so
     // a non-integer / out-of-range value reaches the contract validator's APPROVAL_STEP_LEVEL_INVALID
-    // arm rather than a zod 400. NOT a blanket `.passthrough()` — only the two modeled union fields.
+    // arm rather than a zod 400. `kind` is z.unknown() (S7-1 F4 NIT folded in S7-2): a non-string kind
+    // (number/boolean/object/null) must reach APPROVAL_STEP_KIND_INVALID (422), not a generic zod 400.
+    // NOT a blanket `.passthrough()` — only the two modeled union fields.
     const approvalStepSchema = z.object({
       name: z.string().optional(),
       approverUserIds: z.array(z.string()).optional(),
       approverRoleIds: z.array(z.string()).optional(),
-      kind: z.string().optional(),
+      kind: z.unknown().optional(),
       level: z.number().optional(),
     })
     const approvalFlowCreateSchema = z.object({
@@ -25217,14 +25325,20 @@ module.exports = {
             }
             const requestId = randomUUID()
             const approvalId = `apv_${randomUUID()}`
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId, requestId, orgId, userId, requesterName: getUserLabel(req, userId), draft,
-            })
             // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation: a dynamic-kind step
             // anywhere in the flow blocks request-create (flag OFF / port missing / kind unimplemented),
             // so a later dynamic step cannot start a flow and strand it mid-flight.
             assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
-            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata.approvalFlow.steps, 0)
+            // S7-2 §3.4: freeze direct_manager once at create (org-scoped port); assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+              orgId, userId, flowSteps: draft.metadata.approvalFlow.steps, context,
+            })
+            const approvalPayload = buildAttendanceApprovalInstancePayload({
+              approvalId, requestId, orgId, userId, requesterName: getUserLabel(req, userId), draft, orgRelations,
+            })
+            const approvalAssignments = buildAttendanceApprovalAssignments(
+              draft.metadata.approvalFlow.steps, 0, approvalPayload.requesterSnapshot
+            )
             try {
               const request = await db.transaction(async (trx) => {
                 await acquireAttendanceRequestLock(trx, orgId, userId, workDate, 'outdoor_punch')
@@ -27781,6 +27895,12 @@ module.exports = {
 
         const requestId = randomUUID()
         const approvalId = `apv_${randomUUID()}`
+        // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
+        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+        // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
+        const orgRelations = await resolveAttendanceDirectManagerFreeze({
+          orgId, userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
+        })
         const approvalPayload = buildAttendanceApprovalInstancePayload({
           approvalId,
           requestId,
@@ -27788,10 +27908,11 @@ module.exports = {
           userId,
           requesterName: getUserLabel(req, userId),
           draft,
+          orgRelations,
         })
-        // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-        const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
+        const approvalAssignments = buildAttendanceApprovalAssignments(
+          draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
+        )
 
         try {
           const request = await db.transaction(async (trx) => {
@@ -28110,6 +28231,12 @@ module.exports = {
               reason: input.reason,
               metadata,
             }
+            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
+            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+            // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+              orgId, userId: input.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
+            })
             const approvalPayload = buildAttendanceApprovalInstancePayload({
               approvalId,
               requestId,
@@ -28117,10 +28244,11 @@ module.exports = {
               userId: input.userId,
               requesterName: getUserLabel(req, input.userId),
               draft,
+              orgRelations,
             })
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
+            const approvalAssignments = buildAttendanceApprovalAssignments(
+              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
+            )
             await upsertAttendanceApprovalInstance(trx, approvalPayload)
             await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
 
@@ -28527,6 +28655,12 @@ module.exports = {
               reason,
               metadata,
             }
+            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
+            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+            // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+              orgId, userId: requesterSource.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
+            })
             const approvalPayload = buildAttendanceApprovalInstancePayload({
               approvalId,
               requestId,
@@ -28534,10 +28668,11 @@ module.exports = {
               userId: requesterSource.userId,
               requesterName: getUserLabel(req, requesterSource.userId),
               draft,
+              orgRelations,
             })
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
+            const approvalAssignments = buildAttendanceApprovalAssignments(
+              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
+            )
             await upsertAttendanceApprovalInstance(trx, approvalPayload)
             await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
 
@@ -29033,6 +29168,15 @@ module.exports = {
             }
 
             const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
+            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
+            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+            // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+              userId: existingRequest.user_id,
+              flowSteps: draft.metadata?.approvalFlow?.steps,
+              context,
+            })
             const approvalPayload = buildAttendanceApprovalInstancePayload({
               approvalId,
               requestId,
@@ -29040,10 +29184,11 @@ module.exports = {
               userId: existingRequest.user_id,
               requesterName: existingRequest.user_id,
               draft,
+              orgRelations,
             })
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
+            const approvalAssignments = buildAttendanceApprovalAssignments(
+              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
+            )
             await upsertAttendanceApprovalInstance(trx, approvalPayload)
             await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
 
@@ -29246,6 +29391,15 @@ module.exports = {
           if (!isFinalApproval) {
             assertDynamicFlowStepsRuntimeAvailable(flowSteps, context, { onlyStepIndex: nextStepIndex })
           }
+          // S7-2 §3.4: step-advance reads the FROZEN requester_snapshot only — never re-calls the
+          // org-scoped resolver port / directory. Build next-step assignments BEFORE the instance
+          // UPDATE so an unresolved dynamic step throws inside the txn and rolls back unchanged
+          // (no advanced current_step, no swapped assignments, no appended record).
+          const frozenRequesterSnapshot = normalizeMetadata(approval.requester_snapshot)
+          const nextStepAssignments = isFinalApproval
+            ? null
+            : buildAttendanceApprovalAssignments(flowSteps, nextStepIndex, frozenRequesterSnapshot)
+
           await trx.query(
             `UPDATE approval_instances
              SET status = $1,
@@ -29263,7 +29417,7 @@ module.exports = {
             await replaceAttendanceApprovalAssignments(
               trx,
               approvalId,
-              buildAttendanceApprovalAssignments(flowSteps, nextStepIndex)
+              nextStepAssignments
             )
           }
 
@@ -30615,17 +30769,15 @@ module.exports = {
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
         const rawPayload = normalizeApprovalFlowPayload(req.body)
+        // S7-1 §7 authoring gate FIRST (before zod): a non-string `kind` (S7-1 F4 NIT) and every other
+        // shape violation must surface as a DISTINCT 422 contract code, never a generic zod 400.
+        // Zod still runs after for the static field types (name/requestType/approver arrays).
+        assertApprovalStepsContract(rawPayload.steps, context)
         const parsed = approvalFlowCreateSchema.safeParse(rawPayload)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-
-        // S7-1 §7 authoring gate — enforce the discriminated-union step contract on the PRE-zod raw
-        // steps (zod strips unmodeled keys, so only the raw shape can prove a dynamic step's closed
-        // union). Throws HttpError(422, <distinct code>) → caught by withAnyPermission's wrapper.
-        // A malformed/unavailable dynamic kind can never round-trip inert.
-        assertApprovalStepsContract(rawPayload.steps, context)
 
         const orgId = getOrgId(req)
         const steps = normalizeApprovalSteps(parsed.data.steps)
@@ -30675,15 +30827,13 @@ module.exports = {
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
         const rawPayload = normalizeApprovalFlowPayload(req.body ?? {})
+        // S7-1 §7 authoring gate FIRST (before zod) — same posture as create (non-string kind → 422).
+        assertApprovalStepsContract(rawPayload.steps, context)
         const parsed = approvalFlowUpdateSchema.safeParse(rawPayload)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-
-        // S7-1 §7 authoring gate on update — same discriminated-union contract as create, applied to the
-        // PRE-zod raw steps when the update supplies them (undefined ⇒ no-op, existing steps untouched).
-        assertApprovalStepsContract(rawPayload.steps, context)
 
         const orgId = getOrgId(req)
         const flowId = normalizeUuidString(req.params.id)

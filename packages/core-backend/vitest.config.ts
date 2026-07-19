@@ -301,6 +301,10 @@ export default defineConfig({
       // S7-1 real-DB: DATABASE_URL-gated describeIfDatabase, excluded from the no-DB default job so it
       // cannot skip-green, and wired as a WHOLE FILE into `Run attendance integration tests` below.
       'tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts',
+      // S7-2 direct_manager real-DB: freeze + assignment + org-anchor + authz + flag-off. DATABASE_URL-
+      // gated describeIfDatabase; excluded here so the no-DB job cannot skip-green it; wired whole-file
+      // into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
