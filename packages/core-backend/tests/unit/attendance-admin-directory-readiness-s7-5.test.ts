@@ -18,6 +18,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const queryMock = vi.fn()
 
@@ -65,6 +66,7 @@ const {
   readOrgDirectoryReadiness,
 } = await import('../../src/routes/attendance-admin')
 const { MAX_MANAGER_CHAIN_LEVELS } = await import('../../src/services/ApprovalDirectoryOrg')
+const pinned = usePinnedServer()
 
 function makeApp(user: Record<string, unknown> | null) {
   const app = express()
@@ -146,21 +148,24 @@ describe('GET /api/attendance-admin/directory-readiness (route)', () => {
 
   it('400 when orgId is missing', async () => {
     const app = makeApp({ id: 'delegated-admin' })
-    const res = await request(app).get('/api/attendance-admin/directory-readiness')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/attendance-admin/directory-readiness')
     expect(res.status).toBe(400)
     expect(res.body?.error?.code).toBe('ORG_ID_REQUIRED')
   })
 
   it('401 when unauthenticated', async () => {
     const app = makeApp(null)
-    const res = await request(app).get('/api/attendance-admin/directory-readiness?orgId=org-a')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/attendance-admin/directory-readiness?orgId=org-a')
     expect(res.status).toBe(401)
   })
 
   it('403 when the caller is not a member of the org (and not platform admin)', async () => {
     queryMock.mockResolvedValueOnce({ rows: [] })
     const app = makeApp({ id: 'foreign-admin' })
-    const res = await request(app).get('/api/attendance-admin/directory-readiness?orgId=org-b')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/attendance-admin/directory-readiness?orgId=org-b')
     expect(res.status).toBe(403)
     expect(res.body?.error?.code).toBe('FORBIDDEN')
   })
@@ -170,7 +175,8 @@ describe('GET /api/attendance-admin/directory-readiness (route)', () => {
       .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
       .mockResolvedValueOnce({ rows: [{ ready: false }] })
     const app = makeApp({ id: 'delegated-admin' })
-    const res = await request(app).get('/api/attendance-admin/directory-readiness?orgId=org-a')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/attendance-admin/directory-readiness?orgId=org-a')
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     expect(res.body.data).toEqual({
@@ -187,7 +193,8 @@ describe('GET /api/attendance-admin/directory-readiness (route)', () => {
       .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // membership ok
       .mockRejectedValueOnce(new Error('relation "directory_account_links" does not exist — SECRET_DETAIL'))
     const app = makeApp({ id: 'delegated-admin' })
-    const res = await request(app).get('/api/attendance-admin/directory-readiness?orgId=org-a')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/attendance-admin/directory-readiness?orgId=org-a')
     expect(res.status).toBe(500)
     expect(res.body?.error?.code).toBe('DIRECTORY_READINESS_FAILED')
     expect(res.body?.error?.message).toBe('Failed to load directory readiness')
@@ -199,7 +206,8 @@ describe('GET /api/attendance-admin/directory-readiness (route)', () => {
   it('does not expose a platform-admin-only directory path — this is attendance-admin only', async () => {
     const app = makeApp({ id: 'platform-admin' })
     queryMock.mockResolvedValueOnce({ rows: [{ ready: true }] })
-    const res = await request(app).get('/api/attendance-admin/directory-readiness?orgId=org-a')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/attendance-admin/directory-readiness?orgId=org-a')
     expect(res.status).toBe(200)
     expect(queryMock).toHaveBeenCalledTimes(1)
     const [sql] = queryMock.mock.calls[0] as [string]
