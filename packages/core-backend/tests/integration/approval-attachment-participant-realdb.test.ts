@@ -47,10 +47,12 @@ describeIfDatabase('approval attachment participation matrix (real DB)', () => {
       [INST],
     )
     await db().query(
-      `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, metadata)
+      `INSERT INTO approval_records (
+         instance_id, action, actor_id, actor_name, to_status, to_version, metadata
+       )
        VALUES
-         ($1, 'cc', 'system', 'System', $2::jsonb),
-         ($1, 'cc', 'system', 'System', $3::jsonb)`,
+         ($1, 'cc', 'system', 'System', 'pending', 0, $2::jsonb),
+         ($1, 'cc', 'system', 'System', 'pending', 0, $3::jsonb)`,
       [
         INST,
         JSON.stringify({ targetType: 'user', targetId: 'cc_user_1', nodeKey: 'cc1' }),

@@ -209,7 +209,6 @@ describeIfDatabase('createApproval attachment bind (real DB, production path)', 
       'utf8',
     )
     expect(src).toMatch(/bindAttachmentsOnSubmit\(/)
-    expect(src).toMatch(/scan_state.*infected|infected.*scan_state/)
     // infected guard lives in bind SQL
     const bindSrc = fs.readFileSync(
       path.join(__dirname, '../../src/services/approval-attachment-reconciler.ts'),
