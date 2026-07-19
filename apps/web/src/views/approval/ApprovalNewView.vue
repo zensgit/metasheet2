@@ -504,8 +504,10 @@ import {
   attachmentRejectMessage,
   CLIENT_ATTACHMENT_LIMITS,
   deleteApprovalAttachment,
+  dropStaleAttachmentIds,
   isApprovalAttachmentsEnabled,
   preValidateAttachments,
+  probeAttachmentAlive,
   uploadApprovalAttachment,
   type UploadedAttachment,
 } from '../../approvals/attachmentUpload'
@@ -546,8 +548,30 @@ function offerDraftRestore(): void {
   draftRestoreVisible.value = true
 }
 
-function applyDraftRestore(): void {
-  if (pendingDraft.value) Object.assign(formData, pendingDraft.value)
+async function applyDraftRestore(): Promise<void> {
+  if (!pendingDraft.value) {
+    draftRestoreVisible.value = false
+    return
+  }
+  const data = { ...pendingDraft.value }
+  // G13: when the uploader is live, drop GC-swept unbound attachment ids from the restored draft
+  // (never keep dangling refs that would fail create bind). Flag OFF: attachments were never drafted.
+  if (attachmentsEnabled && template.value) {
+    let dropped = 0
+    for (const field of template.value.formSchema.fields) {
+      if (field.type !== 'attachment') continue
+      const raw = data[field.id]
+      if (!Array.isArray(raw) || raw.length === 0) continue
+      const ids = raw.filter((id): id is string => typeof id === 'string')
+      const { live, stale } = await dropStaleAttachmentIds(ids, probeAttachmentAlive)
+      data[field.id] = live
+      dropped += stale.length
+    }
+    if (dropped > 0) {
+      ElMessage.warning(`有 ${dropped} 个附件已过期，请重新上传`)
+    }
+  }
+  Object.assign(formData, data)
   pendingDraft.value = null
   draftRestoreVisible.value = false
 }

@@ -103,29 +103,143 @@ export function createDownloadAuthChecks(
   }
 }
 
-/** Is `fieldId` an attachment-typed field on the template's (published/latest) form schema? */
+/**
+ * Upload-target authorization result.
+ *   - ok: template is visible, published, and fieldId is attachment-typed
+ *   - not_found: template missing OR not visible to the actor (anti-enumeration — same shape)
+ *   - not_published: template exists/visible but not published
+ *   - not_attachment_field: field missing or wrong type
+ */
+export type UploadTargetAuth =
+  | { ok: true }
+  | { ok: false; code: 'not_found' | 'not_published' | 'not_attachment_field' }
+
+export interface UploadVisibilityActor {
+  userId: string
+  departmentIds?: readonly string[]
+  roles?: readonly string[]
+  /** template managers bypass visibility scope (same as createApproval). */
+  isTemplateManager?: boolean
+}
+
+/**
+ * Authorize an upload against the SAME template visibility + published gate createApproval uses,
+ * plus the attachment-field type check. An arbitrary authenticated user must NOT be able to burn
+ * storage against an inaccessible template (field-existence alone is not enough).
+ */
+export async function authorizeUploadTarget(
+  db: Queryable,
+  templateId: string,
+  fieldId: string,
+  actor: UploadVisibilityActor,
+): Promise<UploadTargetAuth> {
+  // Mirror applyTemplateVisibilityFilter SQL (create path) — manager bypasses scope.
+  const params: unknown[] = [templateId]
+  let visibilitySql = ''
+  if (!actor.isTemplateManager) {
+    params.push(actor.userId)
+    const userParam = params.length
+    params.push(actor.departmentIds && actor.departmentIds.length > 0 ? [...actor.departmentIds] : ['__approval_template_no_dept__'])
+    const deptParam = params.length
+    params.push(actor.roles && actor.roles.length > 0 ? [...actor.roles] : ['__approval_template_no_role__'])
+    const roleParam = params.length
+    visibilitySql = `AND (
+      COALESCE(t.visibility_scope->>'type', 'all') = 'all'
+      OR (
+        t.visibility_scope->>'type' = 'user'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS visible_ids(id)
+          WHERE visible_ids.id = $${userParam}
+        )
+      )
+      OR (
+        t.visibility_scope->>'type' = 'dept'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS visible_ids(id)
+          WHERE visible_ids.id = ANY($${deptParam}::text[])
+        )
+      )
+      OR (
+        t.visibility_scope->>'type' = 'role'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS visible_ids(id)
+          WHERE visible_ids.id = ANY($${roleParam}::text[])
+        )
+      )
+    )`
+  }
+
+  const { rows } = await db.query(
+    `SELECT t.status AS template_status,
+            v.form_schema,
+            pd.id AS published_id,
+            pd.is_active AS published_active
+       FROM approval_templates t
+       JOIN approval_template_versions v ON v.id = COALESCE(t.active_version_id, t.latest_version_id)
+       LEFT JOIN approval_published_definitions pd
+         ON pd.template_id = t.id AND pd.is_active = TRUE
+      WHERE t.id = $1
+      ${visibilitySql}
+      LIMIT 1`,
+    params,
+  )
+  if (rows.length === 0) return { ok: false, code: 'not_found' }
+  const row = rows[0] as {
+    template_status: string
+    form_schema: FormSchema | null
+    published_id: string | null
+    published_active: boolean | null
+  }
+  if (row.template_status !== 'published' || !row.published_id || row.published_active !== true) {
+    return { ok: false, code: 'not_published' }
+  }
+  const fields = row.form_schema?.fields
+  if (!Array.isArray(fields)) return { ok: false, code: 'not_attachment_field' }
+  const field = fields.find((f) => f && typeof f === 'object' && (f as { id?: string }).id === fieldId)
+  if (!field || (field as { type?: string }).type !== 'attachment') {
+    return { ok: false, code: 'not_attachment_field' }
+  }
+  return { ok: true }
+}
+
+/**
+ * @deprecated Prefer authorizeUploadTarget — field existence alone is not sufficient authorization.
+ * Kept as a thin wrapper for older call sites that only need the type check (tests with pre-authorized actors).
+ */
 export async function resolveTemplateAttachmentField(
   db: Queryable,
   templateId: string,
   fieldId: string,
 ): Promise<boolean> {
+  const r = await authorizeUploadTarget(db, templateId, fieldId, {
+    userId: '__system__',
+    isTemplateManager: true, // type-check only; does not grant real users a bypass
+  })
+  return r.ok
+}
+
+/** Resolve frozen attachment ids for detail/tombstone rendering (§8 / G5). */
+export async function resolveAttachmentSummaries(
+  db: Queryable,
+  ids: readonly string[],
+): Promise<Array<{ id: string; fileName: string; status: 'live' | 'deleted' | 'missing'; scanState: string }>> {
+  if (ids.length === 0) return []
   const { rows } = await db.query(
-    `SELECT v.form_schema
-       FROM approval_templates t
-       JOIN approval_template_versions v ON v.template_id = t.id
-       LEFT JOIN approval_published_definitions pd
-         ON pd.template_id = t.id AND pd.is_active = TRUE
-      WHERE t.id = $1
-      ORDER BY CASE WHEN pd.template_version_id = v.id THEN 0 ELSE 1 END, v.version DESC
-      LIMIT 1`,
-    [templateId],
+    `SELECT id, file_name, status, COALESCE(scan_state, 'unscanned') AS scan_state
+       FROM approval_attachments WHERE id = ANY($1)`,
+    [[...ids]],
   )
-  if (rows.length === 0) return false
-  const schema = rows[0].form_schema as FormSchema | null
-  const fields = schema?.fields
-  if (!Array.isArray(fields)) return false
-  const field = fields.find((f) => f && typeof f === 'object' && (f as { id?: string }).id === fieldId)
-  return Boolean(field && (field as { type?: string }).type === 'attachment')
+  const byId = new Map(
+    (rows as Array<{ id: string; file_name: string; status: string; scan_state: string }>).map((r) => [r.id, r]),
+  )
+  return ids.map((id) => {
+    const row = byId.get(id)
+    if (!row) return { id, fileName: '', status: 'missing' as const, scanState: 'unscanned' }
+    if (row.status === 'deleted' || row.scan_state === 'infected') {
+      return { id, fileName: row.file_name, status: 'deleted' as const, scanState: row.scan_state }
+    }
+    return { id, fileName: row.file_name, status: 'live' as const, scanState: row.scan_state }
+  })
 }
 
 /**

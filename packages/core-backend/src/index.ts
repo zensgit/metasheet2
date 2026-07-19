@@ -84,11 +84,12 @@ import { startMetaRevisionRetention } from './multitable/meta-revision-retention
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from './routes/approval-attachments'
 import {
+  authorizeUploadTarget,
   createDownloadAuthChecks,
-  resolveTemplateAttachmentField,
   startApprovalAttachmentLifecycle,
 } from './services/approval-attachment-runtime'
 import { resolveApprovalAttachmentStore } from './services/approval-attachment-storage'
+import { defaultPassThroughScanHook } from './services/approval-attachment-scan'
 import { authenticate } from './middleware/auth'
 import { pool as approvalAttachmentPool } from './db/pg'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
@@ -1232,11 +1233,14 @@ export class MetaSheetServer {
         get: async () => { throw Object.assign(new Error('storage_unavailable'), { code: 'storage_unavailable' }) },
         delete: async () => false,
       }
+      // Same write capability as POST /api/approvals — upload is part of the create/submit path
+      // (canCreateApproval predicate below mirrors rbacGuard('approvals','write')).
       const attachmentRouter = createApprovalAttachmentRouter({
         db: approvalAttachmentPool,
         store,
         storeUnavailable,
         authenticate,
+        scanHook: defaultPassThroughScanHook,
         authChecks: createDownloadAuthChecks(approvalAttachmentPool),
         viewerId: (req) => {
           const u = req.user as { id?: unknown; userId?: unknown; sub?: unknown } | undefined
@@ -1248,11 +1252,56 @@ export class MetaSheetServer {
           const candidate = u?.orgId ?? u?.org_id ?? u?.tenantId ?? u?.tenant_id
           return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
         },
-        resolveAttachmentField: (templateId, fieldId) =>
-          resolveTemplateAttachmentField(approvalAttachmentPool!, templateId, fieldId),
+        canCreateApproval: async (req) => {
+          // rbacGuard is middleware; for the factory predicate we re-check the same permission shape.
+          // Production also runs requireApprovalsWrite before the handler when wired as stack middleware
+          // via authenticate — here we evaluate the resolved permission codes on req.user.
+          const u = req.user as { role?: string; roles?: unknown; permissions?: unknown; perms?: unknown } | undefined
+          if (!u) return false
+          if (u.role === 'admin') return true
+          const roles = Array.isArray(u.roles) ? u.roles.filter((r): r is string => typeof r === 'string') : []
+          if (roles.includes('admin')) return true
+          const perms = [
+            ...(Array.isArray(u.permissions) ? u.permissions : []),
+            ...(Array.isArray(u.perms) ? u.perms : []),
+          ].filter((p): p is string => typeof p === 'string')
+          return perms.includes('approvals:write')
+            || perms.includes('approvals:*')
+            || perms.includes('*:*')
+        },
+        uploadActor: (req) => {
+          const u = req.user as Record<string, unknown> | undefined
+          if (!u) return null
+          const userId = typeof u.id === 'string' ? u.id
+            : typeof u.userId === 'string' ? u.userId
+            : typeof u.sub === 'string' ? u.sub
+            : null
+          if (!userId?.trim()) return null
+          const roles = [
+            ...(typeof u.role === 'string' ? [u.role] : []),
+            ...(Array.isArray(u.roles) ? u.roles.filter((r): r is string => typeof r === 'string') : []),
+          ]
+          const permissions = [
+            ...(Array.isArray(u.permissions) ? u.permissions.filter((p): p is string => typeof p === 'string') : []),
+            ...(Array.isArray(u.perms) ? u.perms.filter((p): p is string => typeof p === 'string') : []),
+          ]
+          const deptRaw = [u.department, u.departmentId, u.deptId]
+          const departmentIds = deptRaw
+            .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+            .map((v) => v.trim())
+          const isTemplateManager = roles.includes('admin')
+            || permissions.includes('*:*')
+            || permissions.includes('approvals:*')
+            || permissions.includes('approvals:admin-templates')
+            || permissions.includes('approval-templates:manage')
+          return { userId: userId.trim(), departmentIds, roles, isTemplateManager }
+        },
+        authorizeUploadTarget: (templateId, fieldId, actor) =>
+          authorizeUploadTarget(approvalAttachmentPool!, templateId, fieldId, actor),
       })
       if (attachmentRouter) {
         // Auth is applied per-route inside the factory (via deps.authenticate) — never global.
+        // Upload capability is enforced inside the POST handler via canCreateApproval (same as create).
         this.app.use(attachmentRouter)
       }
     }

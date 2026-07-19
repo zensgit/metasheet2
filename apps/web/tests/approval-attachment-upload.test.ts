@@ -3,12 +3,15 @@ import { describe, expect, test, vi } from 'vitest'
 
 import {
   approvalAttachmentDownloadUrl,
+  attachmentDisplayLabel,
+  ATTACHMENT_TOMBSTONE_LABEL,
   CLIENT_ATTACHMENT_LIMITS,
   CLIENT_ATTACHMENT_RULES_VERSION,
   deleteApprovalAttachment,
   dropStaleAttachmentIds,
   isApprovalAttachmentsEnabled,
   preValidateAttachments,
+  resolveAttachmentMeta,
   uploadApprovalAttachment,
 } from '../src/approvals/attachmentUpload'
 
@@ -80,9 +83,10 @@ describe('approval attachment upload client', () => {
     expect(isApprovalAttachmentsEnabled({ VITE_APPROVAL_ATTACHMENTS_ENABLED: 'true' })).toBe(true)
   })
 
-  test('download URL is auth-proxied by attachment id — never a storage key or object-store URL', () => {
+  test('download URL is lock §4 plural path — never singular /api/approval/, never storage keys', () => {
     const url = approvalAttachmentDownloadUrl('att_abc')
-    expect(url).toBe('/api/approval/attachments/att_abc/download')
+    expect(url).toBe('/api/approvals/attachments/att_abc/download')
+    expect(url).not.toMatch(/\/api\/approval\/attachments/) // singular must not appear
     expect(url).not.toMatch(/s3|storage_key|amazonaws/)
   })
 
@@ -101,4 +105,34 @@ describe('approval attachment upload client', () => {
     expect(r.live).toEqual(['att_live'])
     expect(r.stale).toEqual(['att_stale'])
   })
+
+  test('detail tombstone label for deleted/missing; live shows fileName (positive control)', () => {
+    expect(attachmentDisplayLabel({ id: 'a', tombstone: true }, 0)).toBe(ATTACHMENT_TOMBSTONE_LABEL)
+    expect(attachmentDisplayLabel({ id: 'a', status: 'missing' }, 0)).toBe(ATTACHMENT_TOMBSTONE_LABEL)
+    expect(attachmentDisplayLabel({ id: 'a', fileName: 'invoice.pdf', status: 'bound' }, 0)).toBe('invoice.pdf')
+  })
+
+  test('resolveAttachmentMeta: 200 live; 410/404 tombstone', async () => {
+    const live = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'att_1', fileName: 'a.pdf', tombstone: false, status: 'bound' }), {
+        status: 200,
+      }),
+    )
+    expect(await resolveAttachmentMeta('att_1', live as unknown as typeof fetch)).toMatchObject({
+      id: 'att_1',
+      fileName: 'a.pdf',
+      tombstone: false,
+    })
+    const gone = vi.fn(async () => new Response(null, { status: 410 }))
+    expect(await resolveAttachmentMeta('att_x', gone as unknown as typeof fetch)).toMatchObject({
+      tombstone: true,
+      status: 'deleted',
+    })
+    const missing = vi.fn(async () => new Response(null, { status: 404 }))
+    expect(await resolveAttachmentMeta('att_y', missing as unknown as typeof fetch)).toMatchObject({
+      tombstone: true,
+      status: 'missing',
+    })
+  })
 })
+

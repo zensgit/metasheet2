@@ -6,6 +6,7 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  bindAttachmentsOnSubmit,
   reconcileBucket,
   RECONCILER_ORPHAN_GRACE_MS,
   type ReconcilerBlob,
@@ -73,3 +74,56 @@ describe('reconciler grace window (G15)', () => {
     await expect(reconcileBucket(db, async () => blobs, { graceMs: -1 })).rejects.toThrow(/non-negative/)
   })
 })
+
+describe('bindAttachmentsOnSubmit — infected never binds (G4 / §6)', () => {
+  test('infected row is excluded from bind UPDATE; whole submit fails; clean positive control binds', async () => {
+    let lastSql = ''
+    let lastParams: unknown[] = []
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        lastSql = sql
+        lastParams = params ?? []
+        if (sql.includes('UPDATE approval_attachments')) {
+          // Simulate infected exclusion: 0 rows when the SQL carries the infected guard
+          expect(sql).toMatch(/scan_state/)
+          expect(sql).toMatch(/infected/)
+          return { rows: [], rowCount: 0 }
+        }
+        if (sql.includes('sum(size_bytes)')) return { rows: [{ t: '0' }], rowCount: 1 }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    await expect(bindAttachmentsOnSubmit(db, 'u1', 'inst_1', { fld: ['att_infected'] })).rejects.toThrow(
+      /0\/1.*rejected/,
+    )
+    expect(lastSql).toMatch(/scan_state/)
+
+    // Positive control: when UPDATE returns 1, bind succeeds
+    const okDb = {
+      query: async (sql: string) => {
+        if (sql.includes('UPDATE approval_attachments')) return { rows: [], rowCount: 1 }
+        if (sql.includes('sum(size_bytes)')) return { rows: [{ t: '100' }], rowCount: 1 }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    expect(await bindAttachmentsOnSubmit(okDb, 'u1', 'inst_1', { fld: ['att_clean'] })).toEqual({ bound: 1 })
+  })
+
+  test('per-field cap 10 and submission 50MB are enforced at bind', async () => {
+    const db = { query: async () => ({ rows: [{ t: '0' }], rowCount: 0 }) }
+    const eleven = Array.from({ length: 11 }, (_, i) => `att_${i}`)
+    await expect(bindAttachmentsOnSubmit(db, 'u1', 'inst', { fld: eleven })).rejects.toThrow(/per-field cap/)
+
+    const overBytes = {
+      query: async (sql: string) => {
+        if (sql.includes('UPDATE')) return { rows: [], rowCount: 1 }
+        if (sql.includes('sum(size_bytes)')) return { rows: [{ t: String(50 * 1024 * 1024 + 1) }], rowCount: 1 }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    await expect(bindAttachmentsOnSubmit(overBytes, 'u1', 'inst', { fld: ['att_1'] })).rejects.toThrow(
+      /total-bytes cap/,
+    )
+  })
+})
+

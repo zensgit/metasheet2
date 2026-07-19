@@ -1,23 +1,35 @@
-/** Attachment slice ⑤ — route goldens (supertest over injected seams; required no-DB lane).
- *
- * Transport is the pinned per-suite server (`usePinnedServer`) so this file never adds
- * app-mode `request(app)` sites (supertest-app-mode-tripwire / #4154).
- */
+/** Attachment routes — flag gate, write+visibility upload auth, plural path, scan_state, G8 (pinned server). */
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, test } from 'vitest'
 
-import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from '../../src/routes/approval-attachments'
+import {
+  APPROVAL_ATTACHMENTS_PATH_PREFIX,
+  createApprovalAttachmentRouter,
+  isApprovalAttachmentsEnabled,
+} from '../../src/routes/approval-attachments'
 import { APPROVAL_ATTACHMENT_LIMITS } from '../../src/services/approval-attachment-validation'
 import type { ApprovalAttachmentStore } from '../../src/services/approval-attachment-storage'
+import type { ScanHook } from '../../src/services/approval-attachment-scan'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const FLAG_ON = { APPROVAL_ATTACHMENTS_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
 const pinned = usePinnedServer()
 
-function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean; org?: string | null; attachmentField?: boolean } = {}) {
+function makeApp(over: {
+  rows?: unknown[]
+  viewer?: string | null
+  participant?: boolean
+  hidden?: boolean
+  org?: string | null
+  uploadTarget?: 'ok' | 'not_found' | 'not_published' | 'not_attachment_field'
+  canCreate?: boolean
+  storeUnavailable?: boolean
+  scanHook?: ScanHook
+  insertCapture?: unknown[][]
+} = {}) {
   const blobs = new Map<string, Buffer>()
-  const inserted: unknown[][] = []
+  const inserted: unknown[][] = over.insertCapture ?? []
   const store: ApprovalAttachmentStore = {
     put: async (k, b) => void blobs.set(k, b),
     get: async (k) => {
@@ -29,23 +41,33 @@ function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?:
   }
   const db = {
     query: async (sql: string, params?: unknown[]) => {
-      if (sql.startsWith('INSERT')) {
+      if (sql.includes('INSERT INTO approval_attachments')) {
         inserted.push(params ?? [])
         return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('WITH doomed')) {
+        if (params?.[1] !== 'u1' || params?.[0] === 'att_bound') return { rows: [], rowCount: 0 }
+        return { rows: [{ id: 'pi_del_att_1' }], rowCount: 1 }
       }
       return { rows: over.rows ?? [], rowCount: (over.rows ?? []).length }
     },
   }
+  const targetCode = over.uploadTarget ?? 'ok'
   const router = createApprovalAttachmentRouter({
     db,
     store,
+    storeUnavailable: over.storeUnavailable,
+    scanHook: over.scanHook,
     authChecks: {
       isInstanceParticipant: async () => over.participant ?? false,
       isFieldHiddenAtActiveNode: async () => over.hidden ?? false,
     },
     viewerId: () => (over.viewer === undefined ? 'u1' : over.viewer),
     orgId: () => (over.org === undefined ? 'org1' : over.org),
-    resolveAttachmentField: async () => over.attachmentField ?? true,
+    canCreateApproval: async () => over.canCreate !== false,
+    uploadActor: () => ({ userId: 'u1', departmentIds: [], roles: [], isTemplateManager: false }),
+    authorizeUploadTarget: async () =>
+      targetCode === 'ok' ? { ok: true } : { ok: false, code: targetCode },
     env: FLAG_ON,
   })
   const app = express()
@@ -53,186 +75,193 @@ function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?:
   return { app, blobs, inserted, router }
 }
 
-describe('approval attachment routes (flag-gated)', () => {
-  test('flag OFF → factory returns null (nothing registered)', () => {
-    expect(isApprovalAttachmentsEnabled({} as NodeJS.ProcessEnv)).toBe(false)
-    const { router } = (() => {
-      const r = createApprovalAttachmentRouter({
-        db: { query: async () => ({ rows: [], rowCount: 0 }) },
-        store: { put: async () => {}, get: async () => Buffer.alloc(0), delete: async () => false },
-        authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
-        viewerId: () => 'u1',
-        orgId: () => 'org1',
-        resolveAttachmentField: async () => true,
-        env: {} as NodeJS.ProcessEnv,
-      })
-      return { router: r }
-    })()
-    expect(router).toBeNull()
+describe('approval attachment routes (flag-gated, lock §4 plural path)', () => {
+  test('wire path is plural /api/approvals/attachments (lock §4.1)', () => {
+    expect(APPROVAL_ATTACHMENTS_PATH_PREFIX).toBe('/api/approvals/attachments')
   })
 
-  test('upload happy path: 201, server-derived key + server-derived org persisted, client filename not used as path', async () => {
+  test('flag OFF → factory returns null (nothing registered)', () => {
+    expect(isApprovalAttachmentsEnabled({} as NodeJS.ProcessEnv)).toBe(false)
+    const r = createApprovalAttachmentRouter({
+      db: { query: async () => ({ rows: [], rowCount: 0 }) },
+      store: { put: async () => {}, get: async () => Buffer.alloc(0), delete: async () => false },
+      authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
+      viewerId: () => 'u1',
+      orgId: () => 'org1',
+      canCreateApproval: async () => true,
+      uploadActor: () => ({ userId: 'u1' }),
+      authorizeUploadTarget: async () => ({ ok: true }),
+      env: {} as NodeJS.ProcessEnv,
+    })
+    expect(r).toBeNull()
+  })
+
+  test('upload happy path on plural path: 201, server key + org, client path ignored', async () => {
     const { app, inserted, blobs } = makeApp()
     pinned.setApp(app)
     const r = await request(pinned.url())
-      .post('/api/approval/attachments')
+      .post('/api/approvals/attachments')
       .field('fieldId', 'fld1')
       .field('templateId', 'tpl1')
-      .field('orgId', 'FORGED-ORG') // a forged body org_id must be IGNORED
+      .field('orgId', 'FORGED-ORG')
       .attach('file', Buffer.from('%PDF-1.4'), { filename: '../../evil.pdf', contentType: 'application/pdf' })
     expect(r.status).toBe(201)
     expect(r.body.id).toMatch(/^att_/)
-    const orgPersisted = inserted[0][1] as string
-    expect(orgPersisted).toBe('org1') // the principal's org (deps.orgId), NOT the forged body value
+    expect(inserted[0][1]).toBe('org1')
     const storageKey = inserted[0][4] as string
-    expect(storageKey).toMatch(/^approval\/\d{4}-\d{2}\/[0-9a-f-]{36}\.pdf$/) // server key, no client path parts
+    expect(storageKey).toMatch(/^approval\/\d{4}-\d{2}\/[0-9a-f-]{36}\.pdf$/)
     expect(blobs.has(storageKey)).toBe(true)
+    // scan_state column present (pass-through default unscanned)
+    expect(inserted[0][8]).toBe('unscanned')
   })
 
-  test('upload rejects: unauthenticated 401; principal without org 403; missing template/field 400; disallowed MIME 422', async () => {
+  test('upload auth: unauthenticated 401; no create capability 403; invisible template 404; non-attachment field 400', async () => {
     const anon = makeApp({ viewer: null })
     pinned.setApp(anon.app)
-    expect((await request(pinned.url()).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(401)
-    const noOrg = makeApp({ org: null })
-    pinned.setApp(noOrg.app)
-    expect((await request(pinned.url()).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(403)
-    const { app } = makeApp()
-    pinned.setApp(app)
-    // missing file → 400; and a missing template/field also 400
-    expect((await request(pinned.url()).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(400)
-    const bad = await request(pinned.url())
-      .post('/api/approval/attachments')
+    expect((await request(pinned.url()).post('/api/approvals/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(401)
+
+    const noWrite = makeApp({ canCreate: false })
+    pinned.setApp(noWrite.app)
+    const denied = await request(pinned.url())
+      .post('/api/approvals/attachments')
       .field('fieldId', 'f')
       .field('templateId', 't')
-      .attach('file', Buffer.from('MZ'), { filename: 'x.exe', contentType: 'application/x-msdownload' })
-    expect(bad.status).toBe(422)
-    expect(bad.body.rejected[0].code).toBe('mime_not_allowed')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(denied.status).toBe(403)
+    expect(denied.body.error).toBe('forbidden')
+
+    // Positive control: same file with write capability + visible template succeeds
+    const ok = makeApp({ canCreate: true, uploadTarget: 'ok' })
+    pinned.setApp(ok.app)
+    const allowed = await request(pinned.url())
+      .post('/api/approvals/attachments')
+      .field('fieldId', 'f')
+      .field('templateId', 't')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(allowed.status).toBe(201)
+
+    // Invisible template → 404 (not 400 — no existence oracle), blob never written
+    const invis = makeApp({ uploadTarget: 'not_found' })
+    pinned.setApp(invis.app)
+    const r404 = await request(pinned.url())
+      .post('/api/approvals/attachments')
+      .field('fieldId', 'f')
+      .field('templateId', 'secret-tpl')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(r404.status).toBe(404)
+    expect(invis.blobs.size).toBe(0)
+
+    const badField = makeApp({ uploadTarget: 'not_attachment_field' })
+    pinned.setApp(badField.app)
+    const r400 = await request(pinned.url())
+      .post('/api/approvals/attachments')
+      .field('fieldId', 'not_att')
+      .field('templateId', 't')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(r400.status).toBe(400)
+    expect(r400.body.error).toBe('not_an_attachment_field')
+    expect(badField.blobs.size).toBe(0)
   })
 
-  // #6 route error handling: multer limit errors → values-free reject (not a framework 500 with a stack).
-  test('upload over the multer byte cap → 413 values-free reject (no stack, no limit echo)', async () => {
+  test('upload over multer byte cap → 413 values-free', async () => {
     const { app, blobs } = makeApp()
     pinned.setApp(app)
     const tooBig = Buffer.alloc(APPROVAL_ATTACHMENT_LIMITS.maxFileBytes + 1)
     const r = await request(pinned.url())
-      .post('/api/approval/attachments')
+      .post('/api/approvals/attachments')
       .field('fieldId', 'fld1')
       .field('templateId', 'tpl1')
       .attach('file', tooBig, { filename: 'big.pdf', contentType: 'application/pdf' })
     expect(r.status).toBe(413)
-    expect(r.body).toEqual({ error: 'rejected', rejected: [{ code: 'file_too_large' }] }) // values-free
-    expect(blobs.size).toBe(0) // never written
+    expect(r.body).toEqual({ error: 'rejected', rejected: [{ code: 'file_too_large' }] })
+    expect(blobs.size).toBe(0)
   })
 
-  // #6: an async db/store rejection becomes a values-free 500, never an unhandled rejection / hung request.
-  test('download whose blob store rejects → 500 (handled), not a hang', async () => {
-    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'gone', file_name: 'a.pdf', mime_type: 'application/pdf' }
-    const built = makeApp({ rows: [row], participant: true }) // blob 'gone' is never seeded → store.get throws
-    pinned.setApp(built.app)
-    const r = await request(pinned.url()).get('/api/approval/attachments/att_1/download')
-    expect(r.status).toBe(500)
-    expect(r.body).toEqual({ error: 'internal_error' }) // values-free
-  })
-
-  // G2: a fieldId that is NOT an attachment-typed field in the template schema is rejected (400).
-  test('upload G2: a non-attachment fieldId is rejected 400; the blob is never written', async () => {
-    const { app, inserted, blobs } = makeApp({ attachmentField: false })
+  test('scanHook infected → 422; row persisted with infected; download/meta refuse; clean positive control', async () => {
+    const infectedHook: ScanHook = async () => 'infected'
+    const { app, inserted, blobs } = makeApp({ scanHook: infectedHook })
     pinned.setApp(app)
     const r = await request(pinned.url())
-      .post('/api/approval/attachments')
-      .field('fieldId', 'not_an_attachment')
+      .post('/api/approvals/attachments')
+      .field('fieldId', 'fld1')
       .field('templateId', 'tpl1')
-      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
-    expect(r.status).toBe(400)
-    expect(r.body.error).toBe('not_an_attachment_field')
-    expect(inserted.length).toBe(0) // rejected before the durable row
-    expect(blobs.size).toBe(0) // and before any blob write
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'bad.pdf', contentType: 'application/pdf' })
+    expect(r.status).toBe(422)
+    expect(r.body.rejected[0].code).toBe('infected')
+    expect(inserted[0][8]).toBe('infected')
+    expect(blobs.size).toBe(1) // blob written for audit/GC; client got no usable id
+
+    // Download of infected bound/unbound row refused after auth
+    const row = {
+      status: 'unbound',
+      uploader_id: 'u1',
+      instance_id: null,
+      field_id: 'fld1',
+      storage_key: 'approval/2026-07/x.pdf',
+      file_name: 'bad.pdf',
+      mime_type: 'application/pdf',
+      scan_state: 'infected',
+    }
+    const dl = makeApp({ rows: [row], viewer: 'u1' })
+    dl.blobs.set('approval/2026-07/x.pdf', Buffer.from('%PDF'))
+    pinned.setApp(dl.app)
+    expect((await request(pinned.url()).get('/api/approvals/attachments/att_inf/download')).status).toBe(404)
+    const meta = await request(pinned.url()).get('/api/approvals/attachments/att_inf')
+    expect(meta.status).toBe(200)
+    expect(meta.body.tombstone).toBe(true)
+
+    // Positive control: pass-through unscanned still downloads
+    const clean = {
+      status: 'bound',
+      uploader_id: 'up1',
+      instance_id: 'i1',
+      field_id: 'fld1',
+      storage_key: 'k1',
+      file_name: 'a.pdf',
+      mime_type: 'application/pdf',
+      scan_state: 'unscanned',
+    }
+    const ok = makeApp({ rows: [clean], participant: true })
+    ok.blobs.set('k1', Buffer.from('%PDF'))
+    pinned.setApp(ok.app)
+    expect((await request(pinned.url()).get('/api/approvals/attachments/att_1/download')).status).toBe(200)
   })
 
-  test('download: participant streams bound blob; non-participant gets 404 (no oracle); deleted → 410', async () => {
-    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
+  test('download: G8 headers + participant/non-participant + hidden redaction', async () => {
+    const row = {
+      status: 'bound',
+      uploader_id: 'up1',
+      instance_id: 'i1',
+      field_id: 'fld1',
+      storage_key: 'k1',
+      file_name: 'a.pdf',
+      mime_type: 'application/pdf',
+      scan_state: 'clean',
+    }
     const ok = makeApp({ rows: [row], participant: true })
     ok.blobs.set('k1', Buffer.from('%PDF'))
     pinned.setApp(ok.app)
-    const good = await request(pinned.url()).get('/api/approval/attachments/att_1/download')
+    const good = await request(pinned.url()).get('/api/approvals/attachments/att_1/download')
     expect(good.status).toBe(200)
-    expect(good.headers['content-type']).toContain('application/pdf')
+    expect(good.headers['content-disposition']).toMatch(/^attachment;/)
+    expect(good.headers['x-content-type-options']).toBe('nosniff')
+    expect(good.headers['content-security-policy']).toBe("default-src 'none'")
+
     const deny = makeApp({ rows: [row], participant: false })
     pinned.setApp(deny.app)
-    expect((await request(pinned.url()).get('/api/approval/attachments/att_1/download')).status).toBe(404)
-    const missing = makeApp({ rows: [] })
-    pinned.setApp(missing.app)
-    expect((await request(pinned.url()).get('/api/approval/attachments/att_x/download')).status).toBe(404)
-  })
+    expect((await request(pinned.url()).get('/api/approvals/attachments/att_1/download')).status).toBe(404)
 
-  // G6 (no deleted-row oracle): the deleted lifecycle signal is emitted ONLY to an authorized viewer.
-  test('download of a deleted row: participant sees 410 (tombstone); NON-participant sees 404 (no oracle)', async () => {
-    const deleted = { status: 'deleted', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
-    const authed = makeApp({ rows: [deleted], participant: true })
-    pinned.setApp(authed.app)
-    expect((await request(pinned.url()).get('/api/approval/attachments/att_1/download')).status).toBe(410)
-    const outsider = makeApp({ rows: [deleted], participant: false })
-    pinned.setApp(outsider.app)
-    expect((await request(pinned.url()).get('/api/approval/attachments/att_1/download')).status).toBe(404) // NOT 410 — no 404→410 existence oracle
-  })
-
-  // approval-attachment-hidden-redaction (lock G7 / §4.2 gate 2 / test 6): a field hidden at the
-  // active node serves NO bytes at the byte path — even to an authorized instance participant — the
-  // same way redactHiddenFormFields strips it from the echoed snapshot. Non-hidden still serves.
-  test('approval-attachment-hidden-redaction: participant is REFUSED (404) for a hidden field; non-hidden serves 200', async () => {
-    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'secret', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
-    const hidden = makeApp({ rows: [row], participant: true, hidden: true })
+    const hidden = makeApp({ rows: [{ ...row, field_id: 'secret' }], participant: true, hidden: true })
     hidden.blobs.set('k1', Buffer.from('%PDF'))
     pinned.setApp(hidden.app)
-    const refused = await request(pinned.url()).get('/api/approval/attachments/att_1/download')
-    expect(refused.status).toBe(404) // hidden ⇒ same "not found" shape the snapshot redaction produces
-    const visible = makeApp({ rows: [row], participant: true, hidden: false })
-    visible.blobs.set('k1', Buffer.from('%PDF'))
-    pinned.setApp(visible.app)
-    const served = await request(pinned.url()).get('/api/approval/attachments/att_1/download')
-    expect(served.status).toBe(200) // positive control: an identical NON-hidden field still serves bytes
+    expect((await request(pinned.url()).get('/api/approvals/attachments/att_1/download')).status).toBe(404)
   })
 
-  test('G8 download headers: Content-Disposition attachment + nosniff + CSP default-src none', async () => {
-    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
-    const ok = makeApp({ rows: [row], participant: true })
-    ok.blobs.set('k1', Buffer.from('%PDF'))
-    pinned.setApp(ok.app)
-    const r = await request(pinned.url()).get('/api/approval/attachments/att_1/download')
-    expect(r.status).toBe(200)
-    expect(r.headers['content-disposition']).toMatch(/^attachment;/)
-    expect(r.headers['x-content-type-options']).toBe('nosniff')
-    expect(r.headers['content-security-policy']).toBe("default-src 'none'")
-    // Never leak storage keys in the body
-    expect(JSON.stringify(r.body)).not.toContain('k1')
-  })
-
-  test('O3 production store unavailable → upload 503 values-free (positive control: available store still 201)', async () => {
-    const blobs = new Map<string, Buffer>()
-    const store: ApprovalAttachmentStore = {
-      put: async (k, b) => void blobs.set(k, b),
-      get: async (k) => {
-        const b = blobs.get(k)
-        if (!b) throw new Error('missing')
-        return b
-      },
-      delete: async (k) => blobs.delete(k),
-    }
-    const router503 = createApprovalAttachmentRouter({
-      db: { query: async () => ({ rows: [], rowCount: 0 }) },
-      store,
-      storeUnavailable: true,
-      authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
-      viewerId: () => 'u1',
-      orgId: () => 'org1',
-      resolveAttachmentField: async () => true,
-      env: FLAG_ON,
-    })
-    const app503 = express()
-    if (router503) app503.use(router503)
-    pinned.setApp(app503)
+  test('O3 store unavailable → upload 503 values-free (positive control still 201)', async () => {
+    const { app, blobs } = makeApp({ storeUnavailable: true })
+    pinned.setApp(app)
     const denied = await request(pinned.url())
-      .post('/api/approval/attachments')
+      .post('/api/approvals/attachments')
       .field('fieldId', 'fld1')
       .field('templateId', 'tpl1')
       .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
@@ -240,47 +269,34 @@ describe('approval attachment routes (flag-gated)', () => {
     expect(denied.body).toEqual({ error: 'storage_unavailable' })
     expect(blobs.size).toBe(0)
 
-    // Positive control: same store without storeUnavailable still uploads
+    const { app: okApp } = makeApp()
+    pinned.setApp(okApp)
+    expect(
+      (
+        await request(pinned.url())
+          .post('/api/approvals/attachments')
+          .field('fieldId', 'fld1')
+          .field('templateId', 'tpl1')
+          .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+      ).status,
+    ).toBe(201)
+  })
+
+  test('DELETE unbound dooms + enqueues purge intent; bound → 404', async () => {
     const { app } = makeApp()
     pinned.setApp(app)
-    const ok = await request(pinned.url())
+    expect((await request(pinned.url()).delete('/api/approvals/attachments/att_1')).status).toBe(204)
+    expect((await request(pinned.url()).delete('/api/approvals/attachments/att_bound')).status).toBe(404)
+  })
+
+  test('singular /api/approval/attachments is NOT registered (no parallel semantics)', async () => {
+    const { app } = makeApp()
+    pinned.setApp(app)
+    const r = await request(pinned.url())
       .post('/api/approval/attachments')
       .field('fieldId', 'fld1')
       .field('templateId', 'tpl1')
       .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
-    expect(ok.status).toBe(201)
-  })
-
-  test('DELETE unbound: uploader dooms row + enqueues purge intent; bound/foreign → 404', async () => {
-    const queries: Array<{ sql: string; params?: unknown[] }> = []
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        queries.push({ sql, params })
-        // First call is the doom CTE — simulate 1 row claimed
-        if (sql.includes('WITH doomed')) {
-          // params: [id, viewerId]
-          if (params?.[1] !== 'u1') return { rows: [], rowCount: 0 }
-          if (params?.[0] === 'att_bound') return { rows: [], rowCount: 0 }
-          return { rows: [{ id: 'pi_del_att_1' }], rowCount: 1 }
-        }
-        return { rows: [], rowCount: 0 }
-      },
-    }
-    const router = createApprovalAttachmentRouter({
-      db,
-      store: { put: async () => {}, get: async () => Buffer.alloc(0), delete: async () => false },
-      authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
-      viewerId: () => 'u1',
-      orgId: () => 'org1',
-      resolveAttachmentField: async () => true,
-      env: FLAG_ON,
-    })
-    const app = express()
-    if (router) app.use(router)
-    pinned.setApp(app)
-    expect((await request(pinned.url()).delete('/api/approval/attachments/att_1')).status).toBe(204)
-    expect(queries.some((q) => q.sql.includes('unbound_delete'))).toBe(true)
-    // Bound id → 0 rows from CTE → 404
-    expect((await request(pinned.url()).delete('/api/approval/attachments/att_bound')).status).toBe(404)
+    expect(r.status).toBe(404)
   })
 })

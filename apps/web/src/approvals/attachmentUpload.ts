@@ -85,8 +85,70 @@ export interface UploadedAttachment {
 /**
  * Auth-proxied download URL — attachment id only. Never embeds storage keys or object-store URLs.
  */
+/** Auth-proxied download URL — ratified lock §4.2 path (plural `approvals`). */
 export function approvalAttachmentDownloadUrl(attachmentId: string): string {
-  return `/api/approval/attachments/${encodeURIComponent(attachmentId)}/download`
+  return `/api/approvals/attachments/${encodeURIComponent(attachmentId)}/download`
+}
+
+/** Metadata URL for detail/tombstone resolution (no storage keys). */
+export function approvalAttachmentMetaUrl(attachmentId: string): string {
+  return `/api/approvals/attachments/${encodeURIComponent(attachmentId)}`
+}
+
+export const ATTACHMENT_TOMBSTONE_LABEL = '附件已删除'
+
+export interface AttachmentMetaDto {
+  id: string
+  fileName?: string
+  status?: string
+  tombstone?: boolean
+}
+
+/** Resolve frozen attachment refs for detail display — tombstone when deleted/missing/infected. */
+export async function resolveAttachmentMeta(
+  attachmentId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<AttachmentMetaDto> {
+  try {
+    const res = await fetcher(approvalAttachmentMetaUrl(attachmentId), { credentials: 'include' })
+    if (res.status === 200) {
+      const body = (await res.json()) as AttachmentMetaDto
+      return {
+        id: attachmentId,
+        fileName: body.fileName,
+        status: body.tombstone ? 'deleted' : body.status,
+        tombstone: Boolean(body.tombstone),
+      }
+    }
+    if (res.status === 410) return { id: attachmentId, tombstone: true, status: 'deleted' }
+    return { id: attachmentId, tombstone: true, status: 'missing' }
+  } catch {
+    return { id: attachmentId, tombstone: true, status: 'missing' }
+  }
+}
+
+/** Display label for a resolved ref — never exposes storage keys. */
+export function attachmentDisplayLabel(meta: AttachmentMetaDto | undefined, index: number): string {
+  if (!meta || meta.tombstone || meta.status === 'deleted' || meta.status === 'missing') {
+    return ATTACHMENT_TOMBSTONE_LABEL
+  }
+  return meta.fileName?.trim() || `附件${index + 1}`
+}
+
+/**
+ * G13 — probe whether an unbound draft attachment id still resolves for the uploader.
+ * 200 = live; 404/410 = stale (GC-swept or deleted).
+ */
+export async function probeAttachmentAlive(
+  attachmentId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<boolean> {
+  try {
+    const res = await fetcher(approvalAttachmentMetaUrl(attachmentId), { credentials: 'include' })
+    return res.status === 200
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -106,7 +168,8 @@ export async function uploadApprovalAttachment(
   form.append('templateId', templateId)
   form.append('fieldId', fieldId)
   form.append('file', file)
-  const res = await fetcher('/api/approval/attachments', { method: 'POST', body: form, credentials: 'include' })
+  // Wire path matches ratified lock §4.1: `/api/approvals/attachments` (plural).
+  const res = await fetcher('/api/approvals/attachments', { method: 'POST', body: form, credentials: 'include' })
   if (res.status === 201) {
     const body = (await res.json()) as UploadedAttachment
     return { id: body.id, sizeBytes: body.sizeBytes, fileName: file.name }
@@ -127,7 +190,7 @@ export async function deleteApprovalAttachment(
   attachmentId: string,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
-  const res = await fetcher(`/api/approval/attachments/${encodeURIComponent(attachmentId)}`, {
+  const res = await fetcher(`/api/approvals/attachments/${encodeURIComponent(attachmentId)}`, {
     method: 'DELETE',
     credentials: 'include',
   })

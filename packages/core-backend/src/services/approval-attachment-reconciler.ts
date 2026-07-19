@@ -36,10 +36,15 @@ export async function bindAttachmentsOnSubmit(
     if (ids.length > APPROVAL_ATTACHMENT_LIMITS.maxFilesPerField) {
       throw new RangeError(`field ${fieldId}: ${ids.length} attachments exceeds the ratified per-field cap`)
     }
+    // G4 / §4.4: unbound + owned + field-matched + NOT infected. Infected rows never bind.
     const res = await trx.query(
       `UPDATE approval_attachments
           SET status='bound', instance_id=$1, bound_at=now()
-        WHERE id = ANY($2) AND field_id = $3 AND uploader_id = $4 AND status = 'unbound'`,
+        WHERE id = ANY($2)
+          AND field_id = $3
+          AND uploader_id = $4
+          AND status = 'unbound'
+          AND COALESCE(scan_state, 'unscanned') <> 'infected'`,
       [instanceId, [...ids], fieldId, submitterId],
     )
     const n = Number(res.rowCount ?? 0)

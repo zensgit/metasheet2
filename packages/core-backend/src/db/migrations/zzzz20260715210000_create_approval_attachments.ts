@@ -40,6 +40,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                        CONSTRAINT approval_att_size_bounds CHECK (size_bytes > 0 AND size_bytes <= 20971520),
       status         text NOT NULL DEFAULT 'unbound'
                        CONSTRAINT approval_att_status_valid CHECK (status IN ('unbound','bound','deleted')),
+      -- §6 scan seam: default unscanned (pass-through); infected never binds/downloads.
+      scan_state     text NOT NULL DEFAULT 'unscanned'
+                       CONSTRAINT approval_att_scan_state_valid CHECK (scan_state IN ('unscanned','clean','infected')),
       created_at     timestamptz NOT NULL DEFAULT now(),
       bound_at       timestamptz,
       -- bound rows must reference their instance; unbound/deleted rows may not dangle a fake binding.
@@ -81,6 +84,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // Explicit unbound DELETE endpoint reason (uploader-only doom path) — widen CHECK idempotently.
   await sql`ALTER TABLE approval_attachment_purge_intents DROP CONSTRAINT IF EXISTS approval_purge_reason_valid`.execute(db)
   await sql`ALTER TABLE approval_attachment_purge_intents ADD CONSTRAINT approval_purge_reason_valid CHECK (reason IN ('unbound_ttl','row_deleted','reconciler_orphan','unbound_delete'))`.execute(db)
+
+  // §6 scan_state column — additive for environments that created the table before the seam landed.
+  await sql`ALTER TABLE approval_attachments ADD COLUMN IF NOT EXISTS scan_state text NOT NULL DEFAULT 'unscanned'`.execute(db)
+  await sql`ALTER TABLE approval_attachments DROP CONSTRAINT IF EXISTS approval_att_scan_state_valid`.execute(db)
+  await sql`ALTER TABLE approval_attachments ADD CONSTRAINT approval_att_scan_state_valid CHECK (scan_state IN ('unscanned','clean','infected'))`.execute(db)
   await sql`
     CREATE INDEX IF NOT EXISTS idx_approval_purge_pending
     ON approval_attachment_purge_intents (status, created_at)
