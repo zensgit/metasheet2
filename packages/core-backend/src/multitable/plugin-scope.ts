@@ -3,6 +3,7 @@ import type {
   MultitableRecordsWriteUnitOfWorkAPI,
   StockPreparationPersistUnitOfWorkInput,
 } from '../types/plugin'
+import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
 
 export type MultitableScopeQueryFn = (
   sql: string,
@@ -297,9 +298,13 @@ export function createPluginScopedMultitableApi(
         if (!input || typeof input !== 'object' || Array.isArray(input)) {
           throw new TypeError('input must be an object')
         }
-        const allowedSheetIds = new Set(Array.isArray(input.sheetIds) ? input.sheetIds : [])
+        // Fail closed on the same validated/trimmed shape the host locks and owns. Building the
+        // callback allowlist from raw input.sheetIds would permit a whitespace variant the host
+        // never locked (and would refuse the trimmed id the host did lock).
+        const normalized = validateStockPreparationPersistUnitOfWorkInput(input)
+        const allowedSheetIds = new Set(normalized.sheetIds)
         return hooks.runStockPreparationPersistUnitOfWork(
-          { ...input, pluginName },
+          { ...normalized, pluginName },
           async (records) => {
             const assertAllowed = (sheetId: string) => {
               if (!allowedSheetIds.has(sheetId)) throw new MultitableUnitOfWorkScopeError()
