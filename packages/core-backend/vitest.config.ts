@@ -160,6 +160,12 @@ export default defineConfig({
       // DATABASE_URL-gated; wired as a WHOLE FILE into the directory real-DB step (both points
       // asserted by b5c-routing-routes-ci-wiring.test.mjs).
       'tests/integration/org-directory-routing-policy-routes.db.test.ts',
+      // Canonical Org MVP B6 (§10.1): approval-routing local/DingTalk REAL-DB equivalence — the
+      // sentinel source-check + seeded-equivalent parity matrix + pinned deptHead legacy asymmetry +
+      // in-flight snapshot invariance through the REAL MetaSheetServer createApproval path.
+      // DATABASE_URL-gated; wired as a WHOLE FILE into the APPROVAL real-DB step (server-based,
+      // like approval-direct-manager) — both points asserted by b6-equivalence-ci-wiring.test.mjs.
+      'tests/integration/approval-routing-policy-equivalence.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
