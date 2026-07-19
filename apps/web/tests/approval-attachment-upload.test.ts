@@ -173,6 +173,3 @@ describe('approval attachment upload client', () => {
     expect(nMeta.tombstone).toBeFalsy()
   })
 })
-
-
-

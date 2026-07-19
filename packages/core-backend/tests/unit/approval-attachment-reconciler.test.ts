@@ -126,4 +126,3 @@ describe('bindAttachmentsOnSubmit — infected never binds (G4 / §6)', () => {
     )
   })
 })
-
