@@ -31,6 +31,8 @@ import {
  *   - make the sweep ALSO archive the local department (inject) → A reds (the headline pin).
  *   - inject an INSERT of the suggested (local, remote) binding inside suggest → E reds
  *     (count/fingerprint/pair-absence all fail — proves the zero-write pin is load-bearing).
+ *   - drop suggest's `rd.provider = ri.provider` predicate → I reds (mislabeled local child under
+ *     a dingtalk integration surfaces as a remote proposal).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -294,6 +296,51 @@ describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real D
     expect(await sweepStaleDepartmentBindings(org, { remoteIntegrationId: dtX })).toEqual({ staled: 1, healed: 0 })
     expect(await bindingStatus(bX)).toBe('stale')
     expect(await bindingStatus(bY)).toBe('active') // narrowed out — the sync hook's exact scope
+  })
+
+  it('I. read-boundary provider integrity: a mislabeled provider=local child under an active dingtalk integration is never a remote proposal', async () => {
+    // B4 only rejects this shape when a BINDING is applied. The suggest surface is a separate
+    // read boundary: a raw/malformed directory_departments row (provider='local' under dingtalk)
+    // must not appear in suggestions / ambiguous / unmatched. Positive control: a correctly
+    // labeled dingtalk sibling with a unique local name match still surfaces as a suggestion.
+    // Load-bearing: deleting ONLY `rd.provider = ri.provider` from the suggest JOIN reds this test.
+    const org = orgId('malformed-child')
+    seededOrgIds.push(org)
+    await getOrCreateLocalIntegration(org)
+    const dt = await dingtalkIntegration(org, 'mf')
+
+    const malformed = await query<{ id: string }>(
+      `INSERT INTO directory_departments (integration_id, provider, external_department_id, name, is_active, raw)
+       VALUES ($1, 'local', $2, $3, true, '{}'::jsonb) RETURNING id`,
+      [dt, `mf-local-under-dt-${STAMP}`, `Mislabeled ${STAMP}`],
+    )
+    const malformedId = malformed.rows[0].id
+
+    // Same name on the local side would otherwise make this an appliable unique-name suggestion
+    // if the mislabeled child were accepted as a remote row.
+    await createLocalDepartment({ orgId: org, name: `Mislabeled ${STAMP}` })
+
+    const live = await createLocalDepartment({ orgId: org, name: `Healthy ${STAMP}` })
+    const rHealthy = await dtDept(dt, `mf-healthy-${STAMP}`, `Healthy ${STAMP}`)
+
+    const res = await suggestDepartmentBindings(org)
+    const allRemoteIds = [
+      ...res.suggestions.map((s) => s.remoteDepartmentId),
+      ...res.ambiguous.map((a) => a.remoteDepartmentId),
+      ...res.unmatched.map((u) => u.remoteDepartmentId),
+    ]
+    expect(allRemoteIds).not.toContain(malformedId)
+    expect(res.suggestions).toEqual([
+      {
+        remoteIntegrationId: dt,
+        remoteDepartmentId: rHealthy,
+        remoteDepartmentName: `Healthy ${STAMP}`,
+        localDepartmentId: live.id,
+        matchStrategy: 'exact-name',
+      },
+    ])
+    expect(res.ambiguous).toHaveLength(0)
+    expect(res.unmatched.map((u) => u.remoteDepartmentId)).not.toContain(malformedId)
   })
 
   it('E. suggest is READ-ONLY zero-write: org binding count+fingerprint set unchanged; suggested pair never gains a row', async () => {

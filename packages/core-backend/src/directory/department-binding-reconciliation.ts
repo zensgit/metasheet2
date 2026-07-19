@@ -118,6 +118,12 @@ export async function suggestDepartmentBindings(orgId: string): Promise<Departme
   // One read: every UNBOUND active remote department of the org's active non-local integrations,
   // with its exact-name candidate set among the org's ACTIVE local departments (active local
   // integration). LEFT JOIN keeps zero-candidate remotes visible as `unmatched`.
+  //
+  // Read-boundary provider integrity: `rd.provider = ri.provider` rejects a raw/malformed child
+  // whose provider is mislabeled relative to its parent integration (e.g. provider='local' under
+  // an active dingtalk integration). With `ri.provider <> 'local'` that excludes mislabeled local
+  // children from suggestions/ambiguous/unmatched — B4 only rejects them later if a binding is
+  // applied, so the suggest surface must not present them as remote proposals.
   const rows = await query<{
     remote_integration_id: string
     remote_department_id: string
@@ -132,6 +138,7 @@ export async function suggestDepartmentBindings(orgId: string): Promise<Departme
        JOIN directory_departments rd
          ON rd.integration_id = ri.id
         AND rd.is_active = true
+        AND rd.provider = ri.provider
        LEFT JOIN directory_department_bindings b
          ON b.remote_department_id = rd.id
         AND b.remote_integration_id = ri.id
