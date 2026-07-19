@@ -14,7 +14,7 @@ import {
  *
  * Design authority: `…v37-exact-anchor-trust-design-lock-20260715.md` (#4331) §1.3 (exact recovery anchor
  * resolution), §0/P2-B (why a wall-clock `T` / a mutable `MAX(seq)` is NOT a trustworthy anchor), §9 item 6
- * (sealed operation ledger; server-minted, exact anchorSeq frozen in a signed identity). PROPOSED design.
+ * (sealed operation ledger; server-minted, exact anchorSeq frozen in a signed identity). Owner-ratified design.
  *
  * THE PROTOCOL (§1.3):
  *   PREVIEW  `resolveExactAnchor`:
@@ -33,7 +33,8 @@ import {
  *     The token's `anchorSeq` is the sole recovery authority; the execute NEVER re-derives it.
  *
  * WALL-CLOCK REFUSAL (§1.3, values-free / no-oracle): a destructive-recovery request that carries a free
- * wall-clock `T` instead of an `anchorBatchId` is REFUSED `exact-anchor-required` BEFORE any DB access — the
+ * wall-clock `T` instead of an exact `anchorOperationId` or server-resolved `historyBatchId` is REFUSED
+ * `exact-anchor-required` BEFORE any DB access — the
  * refusal is identical whether the sheet/data exists or not, so it leaks nothing. Manual-datetime navigation of
  * a read-only point-in-time VIEW still uses `T` (`reconstructRecordsAtT`, v3.7 §9.2) — that is display, not the
  * destructive authority; only the destructive recovery authority is anchor-only.
