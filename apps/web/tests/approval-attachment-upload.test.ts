@@ -5,12 +5,14 @@ import {
   approvalAttachmentDownloadUrl,
   attachmentDisplayLabel,
   ATTACHMENT_TOMBSTONE_LABEL,
+  ATTACHMENT_UNAVAILABLE_LABEL,
   CLIENT_ATTACHMENT_LIMITS,
   CLIENT_ATTACHMENT_RULES_VERSION,
   deleteApprovalAttachment,
   dropStaleAttachmentIds,
   isApprovalAttachmentsEnabled,
   preValidateAttachments,
+  probeAttachmentRef,
   resolveAttachmentMeta,
   uploadApprovalAttachment,
 } from '../src/approvals/attachmentUpload'
@@ -99,20 +101,46 @@ describe('approval attachment upload client', () => {
     await expect(deleteApprovalAttachment('att_1', bad as unknown as typeof fetch)).rejects.toThrow(/500/)
   })
 
-  test('G13 stale draft refs: drop ids the probe says are gone; keep live ones', async () => {
-    const probe = async (id: string) => id !== 'att_stale'
-    const r = await dropStaleAttachmentIds(['att_live', 'att_stale'], probe)
-    expect(r.live).toEqual(['att_live'])
+  test('G13 tri-state: drop only stale; preserve unavailable (network positive control)', async () => {
+    const probe = async (id: string) => {
+      if (id === 'att_stale') return 'stale' as const
+      if (id === 'att_net') return 'unavailable' as const
+      return 'live' as const
+    }
+    const r = await dropStaleAttachmentIds(['att_live', 'att_stale', 'att_net'], probe)
     expect(r.stale).toEqual(['att_stale'])
+    expect(r.unavailable).toEqual(['att_net'])
+    // live list keeps both live and unavailable (never drop on transient failure)
+    expect(r.live).toEqual(['att_live', 'att_net'])
   })
 
-  test('detail tombstone label for deleted/missing; live shows fileName (positive control)', () => {
+  test('probeAttachmentRef: 200 live; 404/410 stale; 503/network unavailable', async () => {
+    expect(
+      await probeAttachmentRef('a', (async () => new Response(null, { status: 200 })) as unknown as typeof fetch),
+    ).toBe('live')
+    expect(
+      await probeAttachmentRef('a', (async () => new Response(null, { status: 404 })) as unknown as typeof fetch),
+    ).toBe('stale')
+    expect(
+      await probeAttachmentRef('a', (async () => new Response(null, { status: 410 })) as unknown as typeof fetch),
+    ).toBe('stale')
+    expect(
+      await probeAttachmentRef('a', (async () => new Response(null, { status: 503 })) as unknown as typeof fetch),
+    ).toBe('unavailable')
+    expect(
+      await probeAttachmentRef('a', (async () => {
+        throw new Error('network down')
+      }) as unknown as typeof fetch),
+    ).toBe('unavailable')
+  })
+
+  test('detail labels: tombstone vs unavailable vs live (positive control)', () => {
     expect(attachmentDisplayLabel({ id: 'a', tombstone: true }, 0)).toBe(ATTACHMENT_TOMBSTONE_LABEL)
-    expect(attachmentDisplayLabel({ id: 'a', status: 'missing' }, 0)).toBe(ATTACHMENT_TOMBSTONE_LABEL)
+    expect(attachmentDisplayLabel({ id: 'a', unavailable: true }, 0)).toBe(ATTACHMENT_UNAVAILABLE_LABEL)
     expect(attachmentDisplayLabel({ id: 'a', fileName: 'invoice.pdf', status: 'bound' }, 0)).toBe('invoice.pdf')
   })
 
-  test('resolveAttachmentMeta: 200 live; 410/404 tombstone', async () => {
+  test('resolveAttachmentMeta: 200 live; 410/404 tombstone; 503/network unavailable (not tombstone)', async () => {
     const live = vi.fn(async () =>
       new Response(JSON.stringify({ id: 'att_1', fileName: 'a.pdf', tombstone: false, status: 'bound' }), {
         status: 200,
@@ -133,6 +161,18 @@ describe('approval attachment upload client', () => {
       tombstone: true,
       status: 'missing',
     })
+    const unavailable = vi.fn(async () => new Response(null, { status: 503 }))
+    const uMeta = await resolveAttachmentMeta('att_z', unavailable as unknown as typeof fetch)
+    expect(uMeta.unavailable).toBe(true)
+    expect(uMeta.tombstone).toBeFalsy()
+    const net = vi.fn(async () => {
+      throw new Error('ECONNRESET')
+    })
+    const nMeta = await resolveAttachmentMeta('att_n', net as unknown as typeof fetch)
+    expect(nMeta.unavailable).toBe(true)
+    expect(nMeta.tombstone).toBeFalsy()
   })
 })
+
+
 

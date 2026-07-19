@@ -89,6 +89,27 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE approval_attachments ADD COLUMN IF NOT EXISTS scan_state text NOT NULL DEFAULT 'unscanned'`.execute(db)
   await sql`ALTER TABLE approval_attachments DROP CONSTRAINT IF EXISTS approval_att_scan_state_valid`.execute(db)
   await sql`ALTER TABLE approval_attachments ADD CONSTRAINT approval_att_scan_state_valid CHECK (scan_state IN ('unscanned','clean','infected'))`.execute(db)
+
+  // One-blob-per-attachment invariant (owner ruling §10 item 8) — UNIQUE(storage_key).
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_att_storage_key
+    ON approval_attachments (storage_key)
+  `.execute(db)
+
+  // Purge lease/data invariants: attempts>=0, fence>=0, lease/status biconditional.
+  await sql`ALTER TABLE approval_attachment_purge_intents DROP CONSTRAINT IF EXISTS approval_purge_attempts_nonneg`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD CONSTRAINT approval_purge_attempts_nonneg CHECK (attempts >= 0)`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents DROP CONSTRAINT IF EXISTS approval_purge_fence_nonneg`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD CONSTRAINT approval_purge_fence_nonneg CHECK (fence >= 0)`.execute(db)
+  // in_progress requires a live lease; terminal/pending must not hold one.
+  await sql`ALTER TABLE approval_attachment_purge_intents DROP CONSTRAINT IF EXISTS approval_purge_lease_status_biconditional`.execute(db)
+  await sql`
+    ALTER TABLE approval_attachment_purge_intents
+      ADD CONSTRAINT approval_purge_lease_status_biconditional CHECK (
+        (status = 'in_progress' AND lease_expires_at IS NOT NULL)
+        OR (status IN ('pending', 'done', 'dead_letter') AND lease_expires_at IS NULL)
+      )
+  `.execute(db)
   await sql`
     CREATE INDEX IF NOT EXISTS idx_approval_purge_pending
     ON approval_attachment_purge_intents (status, created_at)

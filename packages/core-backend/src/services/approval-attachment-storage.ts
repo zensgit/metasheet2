@@ -203,14 +203,20 @@ export interface AttachmentRowForAuth {
   fieldId: string
 }
 
+/** Explicit viewer contract for download auth — roles + admin are required for participation. */
+export interface AttachmentViewerContext {
+  id: string
+  roles: readonly string[]
+  /** Admin may bypass participation only; hidden-field denial still applies. */
+  isAdmin: boolean
+}
+
 export interface DownloadAuthChecks {
-  /** is the viewer a participant (initiator/approver/cc) of the instance? */
-  isInstanceParticipant(viewerId: string, instanceId: string): Promise<boolean>
+  /** is the viewer a participant (requester/assignee/cc/admin) of the instance? */
+  isInstanceParticipant(viewer: AttachmentViewerContext, instanceId: string): Promise<boolean>
   /**
    * Does the instance's ACTIVE node(s) mark `fieldId` as `access:'hidden'`? (§4.2 gate 2 / G7.)
-   * The production wiring MUST back this with the SAME `collectHiddenFieldIds(...)` the snapshot
-   * redaction uses (`approval-form-redaction.ts`), keyed on the instance's active node(s) — never a
-   * re-derived hidden decision — so the byte path and the echoed snapshot cannot drift on "hidden".
+   * Applies to EVERY authorized reader including admin — admin bypasses participation only.
    */
   isFieldHiddenAtActiveNode(instanceId: string, fieldId: string): Promise<boolean>
 }
@@ -221,47 +227,46 @@ export type DownloadAuthResult =
 
 /**
  * Recomputed on EVERY download; fail-closed on error. Two gates in order (§4.2):
- *   1. instance-visibility (uploader while unbound; instance participant once bound);
- *   2. hidden-field redaction — a field the snapshot would hide serves NO bytes to ANYONE (G7).
+ *   1. instance-visibility (uploader while unbound; instance participant once bound; admin bypasses
+ *      participation only);
+ *   2. hidden-field redaction — a field the snapshot would hide serves NO bytes to ANYONE including
+ *      admin (G7).
  * The `deleted → gone` lifecycle signal is emitted LAST, so an unauthorized outsider always gets the
  * same authorization denial and never a 404→410 existence/lifecycle oracle (P2 #3 moves it here / G6).
  */
 export async function authorizeAttachmentDownload(
   row: AttachmentRowForAuth,
-  viewerId: string,
+  viewer: AttachmentViewerContext | string,
   checks: DownloadAuthChecks,
 ): Promise<DownloadAuthResult> {
-  // Gate 1: instance-visibility. Evaluated BEFORE any deleted/gone signal so an unauthorized outsider
-  // always gets the same authorization denial (→ 404) and never a 404→410 existence/lifecycle oracle
-  // (G6). Unbound (no instance) is uploader-only; bound/cascade-deleted uses the participant predicate.
+  // Backward-compat: plain string viewerId from older tests → non-admin empty roles.
+  const ctx: AttachmentViewerContext =
+    typeof viewer === 'string' ? { id: viewer, roles: [], isAdmin: false } : viewer
+
   let authorized: boolean
   let denyCode: 'not_uploader' | 'not_participant'
   if (!row.instanceId) {
-    authorized = row.uploaderId === viewerId // pre-submit: only the uploader
+    authorized = row.uploaderId === ctx.id // pre-submit: only the uploader (admin cannot probe others' drafts)
     denyCode = 'not_uploader'
   } else {
     denyCode = 'not_participant'
     try {
-      authorized = await checks.isInstanceParticipant(viewerId, row.instanceId)
+      authorized = await checks.isInstanceParticipant(ctx, row.instanceId)
     } catch {
       authorized = false // fail-closed
     }
   }
   if (!authorized) return { ok: false, code: denyCode }
-  // Gate 2 (G7): even an authorized participant gets NO bytes for a field hidden at the active node —
-  // the byte path inherits the snapshot's redaction. Bound rows only (unbound has no active node).
-  // Fail-closed: if we cannot confirm not-hidden, refuse.
+  // Gate 2 (G7): even admin / authorized participant gets NO bytes for a hidden field.
   if (row.instanceId) {
     let hidden = true
     try {
       hidden = await checks.isFieldHiddenAtActiveNode(row.instanceId, row.fieldId)
     } catch {
-      hidden = true // fail-closed: an ACL/graph-load failure must never leak a byte a hidden field would strip
+      hidden = true
     }
     if (hidden) return { ok: false, code: 'hidden' }
   }
-  // Gate 3: lifecycle. Only an AUTHORIZED viewer reaches this — they see the deleted tombstone (410);
-  // an outsider was already denied at gate 1, so the deleted state is never an oracle for them (G6).
   if (row.status === 'deleted') return { ok: false, code: 'gone' }
   return { ok: true }
 }

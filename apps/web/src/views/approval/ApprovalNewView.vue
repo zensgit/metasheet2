@@ -507,7 +507,7 @@ import {
   dropStaleAttachmentIds,
   isApprovalAttachmentsEnabled,
   preValidateAttachments,
-  probeAttachmentAlive,
+  probeAttachmentRef,
   uploadApprovalAttachment,
   type UploadedAttachment,
 } from '../../approvals/attachmentUpload'
@@ -554,18 +554,30 @@ async function applyDraftRestore(): Promise<void> {
     return
   }
   const data = { ...pendingDraft.value }
-  // G13: when the uploader is live, drop GC-swept unbound attachment ids from the restored draft
-  // (never keep dangling refs that would fail create bind). Flag OFF: attachments were never drafted.
+  // G13 tri-state: drop ONLY proven-stale (404/410). Unavailable (network/5xx) PRESERVES ids
+  // and blocks restore with a retryable error — never silently lose a valid draft ref.
   if (attachmentsEnabled && template.value) {
     let dropped = 0
+    let blocked = 0
     for (const field of template.value.formSchema.fields) {
       if (field.type !== 'attachment') continue
       const raw = data[field.id]
       if (!Array.isArray(raw) || raw.length === 0) continue
       const ids = raw.filter((id): id is string => typeof id === 'string')
-      const { live, stale } = await dropStaleAttachmentIds(ids, probeAttachmentAlive)
-      data[field.id] = live
-      dropped += stale.length
+      const { live, stale, unavailable } = await dropStaleAttachmentIds(ids, probeAttachmentRef)
+      if (unavailable.length > 0) {
+        blocked += unavailable.length
+        // Keep original ids (including unavailable) — do not apply a partial sanitize
+        data[field.id] = ids
+      } else {
+        data[field.id] = live
+        dropped += stale.length
+      }
+    }
+    if (blocked > 0) {
+      ElMessage.error('无法校验部分附件状态，请检查网络后重试恢复草稿')
+      // Leave pendingDraft so the user can retry; do not clear the offer.
+      return
     }
     if (dropped > 0) {
       ElMessage.warning(`有 ${dropped} 个附件已过期，请重新上传`)

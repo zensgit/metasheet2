@@ -96,15 +96,26 @@ export function approvalAttachmentMetaUrl(attachmentId: string): string {
 }
 
 export const ATTACHMENT_TOMBSTONE_LABEL = '附件已删除'
+export const ATTACHMENT_UNAVAILABLE_LABEL = '附件暂时不可用'
+
+/** Tri-state probe: only 404/410 is stale; 200 live; everything else (incl. network) unavailable. */
+export type AttachmentProbeState = 'live' | 'stale' | 'unavailable'
 
 export interface AttachmentMetaDto {
   id: string
   fileName?: string
   status?: string
   tombstone?: boolean
+  /** Transient failure — NOT deleted; must not drop draft refs or show tombstone. */
+  unavailable?: boolean
 }
 
-/** Resolve frozen attachment refs for detail display — tombstone when deleted/missing/infected. */
+/**
+ * Resolve frozen attachment refs for detail display.
+ *   - 200 + !tombstone → live link
+ *   - 200 + tombstone / 410 / 404 → tombstone (deleted/missing)
+ *   - 401/403/5xx/network → unavailable (retryable; NOT deleted)
+ */
 export async function resolveAttachmentMeta(
   attachmentId: string,
   fetcher: typeof fetch = fetch,
@@ -113,42 +124,83 @@ export async function resolveAttachmentMeta(
     const res = await fetcher(approvalAttachmentMetaUrl(attachmentId), { credentials: 'include' })
     if (res.status === 200) {
       const body = (await res.json()) as AttachmentMetaDto
+      if (body.tombstone) {
+        return { id: attachmentId, fileName: body.fileName, status: 'deleted', tombstone: true }
+      }
       return {
         id: attachmentId,
         fileName: body.fileName,
-        status: body.tombstone ? 'deleted' : body.status,
-        tombstone: Boolean(body.tombstone),
+        status: body.status,
+        tombstone: false,
       }
     }
-    if (res.status === 410) return { id: attachmentId, tombstone: true, status: 'deleted' }
-    return { id: attachmentId, tombstone: true, status: 'missing' }
+    if (res.status === 404 || res.status === 410) {
+      return { id: attachmentId, tombstone: true, status: res.status === 410 ? 'deleted' : 'missing' }
+    }
+    // 401/403/5xx — transient / auth; never treat as deleted
+    return { id: attachmentId, unavailable: true, status: 'unavailable' }
   } catch {
-    return { id: attachmentId, tombstone: true, status: 'missing' }
+    return { id: attachmentId, unavailable: true, status: 'unavailable' }
   }
 }
 
 /** Display label for a resolved ref — never exposes storage keys. */
 export function attachmentDisplayLabel(meta: AttachmentMetaDto | undefined, index: number): string {
-  if (!meta || meta.tombstone || meta.status === 'deleted' || meta.status === 'missing') {
+  if (!meta) return ATTACHMENT_UNAVAILABLE_LABEL
+  if (meta.unavailable) return ATTACHMENT_UNAVAILABLE_LABEL
+  if (meta.tombstone || meta.status === 'deleted' || meta.status === 'missing') {
     return ATTACHMENT_TOMBSTONE_LABEL
   }
   return meta.fileName?.trim() || `附件${index + 1}`
 }
 
 /**
- * G13 — probe whether an unbound draft attachment id still resolves for the uploader.
- * 200 = live; 404/410 = stale (GC-swept or deleted).
+ * G13 tri-state probe for unbound draft attachment ids.
+ *   - live: 200
+ *   - stale: 404 / 410 only
+ *   - unavailable: network / 401 / 403 / 5xx — MUST NOT drop the id
  */
+export async function probeAttachmentRef(
+  attachmentId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<AttachmentProbeState> {
+  try {
+    const res = await fetcher(approvalAttachmentMetaUrl(attachmentId), { credentials: 'include' })
+    if (res.status === 200) return 'live'
+    if (res.status === 404 || res.status === 410) return 'stale'
+    return 'unavailable'
+  } catch {
+    return 'unavailable'
+  }
+}
+
+/** @deprecated Prefer probeAttachmentRef (tri-state). Treats unavailable as live to avoid silent drop. */
 export async function probeAttachmentAlive(
   attachmentId: string,
   fetcher: typeof fetch = fetch,
 ): Promise<boolean> {
-  try {
-    const res = await fetcher(approvalAttachmentMetaUrl(attachmentId), { credentials: 'include' })
-    return res.status === 200
-  } catch {
-    return false
+  const state = await probeAttachmentRef(attachmentId, fetcher)
+  return state !== 'stale'
+}
+
+/**
+ * Classify draft attachment ids. Only `stale` is dropped; `unavailable` is preserved and
+ * surfaced so the caller can block restore / show retry rather than silently losing data.
+ */
+export async function classifyAttachmentRefs(
+  ids: readonly string[],
+  probe: (id: string) => Promise<AttachmentProbeState> = probeAttachmentRef,
+): Promise<{ live: string[]; stale: string[]; unavailable: string[] }> {
+  const live: string[] = []
+  const stale: string[] = []
+  const unavailable: string[] = []
+  for (const id of ids) {
+    const state = await probe(id)
+    if (state === 'live') live.push(id)
+    else if (state === 'stale') stale.push(id)
+    else unavailable.push(id)
   }
+  return { live, stale, unavailable }
 }
 
 /**
@@ -200,25 +252,34 @@ export async function deleteApprovalAttachment(
 }
 
 /**
- * Drop attachment ids that no longer resolve (GC-swept unbound drafts — G13).
- * `probe` returns true when the id is still live (HEAD/download 200/410-with-auth), false when gone.
- * Stale ids are removed; the caller surfaces them to the user.
+ * Drop ONLY proven-stale attachment ids (G13). Unavailable (network/5xx/auth) is PRESERVED —
+ * never silently drop a valid draft id on a transient failure.
+ * When `probe` returns boolean: true=live, false=stale (legacy); prefer AttachmentProbeState.
  */
 export async function dropStaleAttachmentIds(
   ids: readonly string[],
-  probe: (id: string) => Promise<boolean>,
-): Promise<{ live: string[]; stale: string[] }> {
+  probe: ((id: string) => Promise<boolean | AttachmentProbeState>) = probeAttachmentRef,
+): Promise<{ live: string[]; stale: string[]; unavailable: string[] }> {
   const live: string[] = []
   const stale: string[] = []
+  const unavailable: string[] = []
   for (const id of ids) {
     try {
-      if (await probe(id)) live.push(id)
-      else stale.push(id)
+      const result = await probe(id)
+      if (result === true || result === 'live') live.push(id)
+      else if (result === false || result === 'stale') stale.push(id)
+      else {
+        // unavailable — preserve
+        unavailable.push(id)
+        live.push(id)
+      }
     } catch {
-      stale.push(id)
+      // Network throw → unavailable, preserve
+      unavailable.push(id)
+      live.push(id)
     }
   }
-  return { live, stale }
+  return { live, stale, unavailable }
 }
 
 /** Human-readable reject message for UX (values-free codes only). */

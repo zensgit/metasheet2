@@ -25,6 +25,7 @@ import {
   resolveApprovalAttachmentStore,
   type ApprovalAttachmentStore,
   type ApprovalAttachmentStoreListable,
+  type AttachmentViewerContext,
   type DownloadAuthChecks,
   type ResolvedApprovalAttachmentStore,
 } from './approval-attachment-storage'
@@ -37,14 +38,24 @@ export function isApprovalAttachmentsEnabledEnv(env: NodeJS.ProcessEnv = process
   return isApprovalAttachmentsEnabled(env)
 }
 
-/** Shared participant predicate used by download auth (mirrors approval-metrics ACL shape). */
+/**
+ * Shared participant predicate for download auth (§4.2 gate 1).
+ *
+ * Recognizes: requester, user assignee, role assignee (viewer.roles), historical actor,
+ * CC user (approval_records.action='cc' + metadata.targetType/targetId — actor_id is 'system'),
+ * CC role, and admin (participation bypass only — caller still runs hidden-field gate).
+ */
 export async function isApprovalInstanceParticipant(
   db: Queryable,
-  viewerId: string,
+  viewer: AttachmentViewerContext | string,
   instanceId: string,
   actorRoles: readonly string[] = [],
 ): Promise<boolean> {
-  const roles = actorRoles.length > 0 ? [...actorRoles] : ['__none__']
+  const ctx: AttachmentViewerContext =
+    typeof viewer === 'string' ? { id: viewer, roles: actorRoles, isAdmin: false } : viewer
+  if (ctx.isAdmin) return true // participation bypass only
+
+  const roles = ctx.roles.length > 0 ? [...ctx.roles] : ['__none__']
   const { rows } = await db.query(
     `SELECT EXISTS(
       SELECT 1 FROM approval_instances i
@@ -62,25 +73,32 @@ export async function isApprovalInstanceParticipant(
           SELECT 1 FROM approval_records r
           WHERE r.instance_id = i.id AND r.actor_id = $2
         )
+        -- CC lives in records with actor_id='system'; the target is in metadata (user or role).
+        OR EXISTS(
+          SELECT 1 FROM approval_records r
+          WHERE r.instance_id = i.id
+            AND r.action = 'cc'
+            AND (
+              (COALESCE(r.metadata->>'targetType', '') = 'user' AND COALESCE(r.metadata->>'targetId', '') = $2)
+              OR (COALESCE(r.metadata->>'targetType', '') = 'role' AND COALESCE(r.metadata->>'targetId', '') = ANY($3::text[]))
+            )
+        )
       )
     ) AS exists`,
-    [instanceId, viewerId, roles],
+    [instanceId, ctx.id, roles],
   )
   return Boolean(rows[0]?.exists)
 }
 
 /**
  * Production download-auth checks: participant predicate + active-node hidden set via the SAME
- * `collectHiddenFieldIds` the snapshot redaction uses (G7 — no drift).
+ * `collectHiddenFieldIds` the snapshot redaction uses (G7 — no drift). Admin participation
+ * bypass is inside isApprovalInstanceParticipant; hidden still applies to admin.
  */
-export function createDownloadAuthChecks(
-  db: Queryable,
-  resolveViewerRoles: (viewerId: string) => Promise<readonly string[]> = async () => [],
-): DownloadAuthChecks {
+export function createDownloadAuthChecks(db: Queryable): DownloadAuthChecks {
   return {
-    async isInstanceParticipant(viewerId, instanceId) {
-      const roles = await resolveViewerRoles(viewerId)
-      return isApprovalInstanceParticipant(db, viewerId, instanceId, roles)
+    async isInstanceParticipant(viewer, instanceId) {
+      return isApprovalInstanceParticipant(db, viewer, instanceId)
     },
     async isFieldHiddenAtActiveNode(instanceId, fieldId) {
       const { rows } = await db.query(

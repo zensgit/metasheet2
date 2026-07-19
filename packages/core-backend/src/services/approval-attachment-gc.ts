@@ -130,7 +130,8 @@ export async function drainPurgeIntents(
       // TERMINAL-SUCCESS by contract; only a real (permission/network) error THROWS.
       await deleteBlob(r.storage_key)
       await db.query(
-        `UPDATE approval_attachment_purge_intents SET status='done', purged_at=now()
+        `UPDATE approval_attachment_purge_intents
+            SET status='done', purged_at=now(), lease_expires_at=NULL
           WHERE id=$1 AND fence=$2 AND status='in_progress'`,
         [r.id, r.fence],
       )
@@ -140,7 +141,8 @@ export async function drainPurgeIntents(
       if (Number(r.attempts) >= maxAttempts) {
         // bounded attempts exhausted → terminal dead_letter (fence-CAS) + alert seam; no unbounded retry.
         const cas = await db.query(
-          `UPDATE approval_attachment_purge_intents SET status='dead_letter', last_error=$3
+          `UPDATE approval_attachment_purge_intents
+              SET status='dead_letter', last_error=$3, lease_expires_at=NULL
             WHERE id=$1 AND fence=$2 AND status='in_progress'`,
           [r.id, r.fence, errCode],
         )

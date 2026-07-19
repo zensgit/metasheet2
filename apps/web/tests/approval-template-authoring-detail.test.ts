@@ -49,9 +49,15 @@ function draftWith(fields: FieldAuthoringDraft[]): TemplateAuthoringDraft {
 }
 
 describe('templateAuthoring — detail is authorable', () => {
-  it('includes detail in AUTHORABLE_FIELD_TYPES (top-level), excludes attachment', () => {
-    expect(AUTHORABLE_FIELD_TYPES).toContain('detail')
-    expect(AUTHORABLE_FIELD_TYPES).not.toContain('attachment')
+  it('includes detail in AUTHORABLE_FIELD_TYPES (top-level); attachment flag-OFF excluded, flag-ON included', async () => {
+    const { getAuthorableFieldTypes, AUTHORABLE_FIELD_TYPES: staticOff } = await import(
+      '../src/approvals/templateAuthoring'
+    )
+    expect(staticOff).toContain('detail')
+    expect(staticOff).not.toContain('attachment') // default-OFF snapshot
+    expect(getAuthorableFieldTypes(false)).not.toContain('attachment')
+    expect(getAuthorableFieldTypes(true)).toContain('attachment') // ON authorability pin
+    expect(getAuthorableFieldTypes(true)).toContain('detail')
   })
 
   it('a fresh field draft seeds empty detail authoring state', () => {

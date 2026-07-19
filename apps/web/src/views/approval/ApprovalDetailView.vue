@@ -169,7 +169,14 @@
                     :key="attId"
                   >
                     <span
-                      v-if="attachmentMetaById[attId]?.tombstone"
+                      v-if="attachmentMetaById[attId]?.unavailable"
+                      class="approval-detail__attachment-unavailable"
+                      data-testid="approval-detail-attachment-unavailable"
+                    >
+                      {{ attachmentLabel(attId, idx) }}
+                    </span>
+                    <span
+                      v-else-if="attachmentMetaById[attId]?.tombstone"
                       class="approval-detail__attachment-tombstone"
                       data-testid="approval-detail-attachment-tombstone"
                     >
@@ -1880,6 +1887,11 @@ watch(
 
 .approval-detail__attachment-tombstone {
   color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.approval-detail__attachment-unavailable {
+  color: var(--el-color-warning);
   font-size: 13px;
 }
 

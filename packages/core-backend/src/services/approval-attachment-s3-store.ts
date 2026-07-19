@@ -58,6 +58,16 @@ function assertSafeKey(storageKey: string, prefix: string): void {
   }
 }
 
+/** True only for a proven missing object — never for AccessDenied / 5xx / network. */
+export function isProvenNotFound(err: unknown): boolean {
+  const e = err as { name?: string; Code?: string; $metadata?: { httpStatusCode?: number }; code?: string } | null
+  if (!e) return false
+  const name = e.name ?? e.Code ?? e.code ?? ''
+  if (name === 'NotFound' || name === 'NoSuchKey' || name === 'NotFoundError') return true
+  if (e.$metadata?.httpStatusCode === 404) return true
+  return false
+}
+
 async function streamToBuffer(body: unknown): Promise<Buffer> {
   if (!body) throw new ApprovalAttachmentStorageError('empty_body')
   if (Buffer.isBuffer(body)) return body
@@ -147,19 +157,21 @@ export class S3ApprovalAttachmentStore implements ApprovalAttachmentStore, Appro
 
   async delete(storageKey: string): Promise<boolean> {
     assertSafeKey(storageKey, this.keyPrefix)
+    // Probe existence: return false ONLY for a proven 404/NoSuchKey. AccessDenied / 5xx /
+    // network / timeout MUST throw so the purge worker retries / dead-letters instead of
+    // marking done and permanently leaking the blob.
     try {
-      // Probe existence so we can return false for missing (idempotent contract matches LocalFs).
-      try {
-        await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: storageKey }))
-      } catch (err) {
-        const code = (err as { name?: string })?.name
-        if (code === 'NotFound' || code === 'NoSuchKey') return false
-        // Some S3-compat stacks use 404 without NotFound name — treat any head failure as gone.
-        return false
-      }
+      await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: storageKey }))
+    } catch (err) {
+      if (isProvenNotFound(err)) return false
+      throw new ApprovalAttachmentStorageError('storage_unavailable')
+    }
+    try {
       await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: storageKey }))
       return true
-    } catch {
+    } catch (err) {
+      // DeleteObject on an already-gone key is also terminal-success on some stacks.
+      if (isProvenNotFound(err)) return false
       throw new ApprovalAttachmentStorageError('storage_unavailable')
     }
   }
