@@ -32,9 +32,10 @@ import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from
  *   G. TOCTOU disable-first (two real connections): an uncommitted disable holds the exclusive
  *      row lock; PATCH's write-point `FOR SHARE` blocks (observed via pg_blocking_pids, never a
  *      fixed sleep); after disable commits, PATCH returns 409 with zero policy/audit.
- *   H. TOCTOU set-first: PATCH holds `FOR SHARE` through its write (barrier so disable can race
- *      while the lock is still held); disable blocks; after set commits, disable proceeds; the
- *      existing resolver fails closed on the now-disabled canonical.
+ *   H. TOCTOU set-first: advisory barrier parks PATCH mid-txn after write-point FOR SHARE; the
+ *      proof is a PID-exact chain (holder → PATCH via pg_blocking_pids + advisory wait; disabler →
+ *      PATCH via pg_blocking_pids(disablerPid)), never a broad pg_stat_activity scan; after set
+ *      commits, disable proceeds; the existing resolver fails closed on the now-disabled canonical.
  *
  * Load-bearing mutations (out-of-band, each reds this file):
  *   - remove the PATCH `status !== 'active'` check → C's 409 leg reds (broken policy accepted).
@@ -119,6 +120,54 @@ async function withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
 
 /** Stable bigint key for the set-first advisory barrier (session-level, not xact). */
 const SET_FIRST_ADVISORY_KEY = 0xb5c5e701 // B5-c set-first barrier
+
+/**
+ * H set-first step 1: poll until a backend is advisory-waiting with `holderPid` in
+ * `pg_blocking_pids(pid)`. Returns that exact PATCH backend PID (not a count of any waiter).
+ * Poll backoff only — correctness is the PID match, never a fixed sleep oracle.
+ */
+async function waitForPatchPidBlockedByAdvisoryHolder(holderPid: number): Promise<number> {
+  for (let i = 0; i < 500; i++) {
+    const r = await query<{ pid: number }>(
+      `SELECT pid
+         FROM pg_stat_activity
+        WHERE state = 'active'
+          AND datname = current_database()
+          AND pid <> pg_backend_pid()
+          AND pid <> $1
+          AND wait_event_type = 'Lock'
+          AND wait_event = 'advisory'
+          AND $1 = ANY(pg_blocking_pids(pid))
+        ORDER BY pid
+        LIMIT 1`,
+      [holderPid],
+    )
+    if (r.rows[0]?.pid != null) return r.rows[0].pid
+    await new Promise((res) => setTimeout(res, 20))
+  }
+  throw new Error(
+    `timed out waiting for PATCH backend blocked by advisory holder pid ${holderPid} (exact chain never engaged)`,
+  )
+}
+
+/**
+ * H set-first step 2: poll until `pg_blocking_pids(waiterPid)` contains `blockerPid` —
+ * proves the disabler is blocked specifically by the PATCH backend that holds FOR SHARE.
+ */
+async function waitUntilPidBlockedBy(waiterPid: number, blockerPid: number): Promise<void> {
+  for (let i = 0; i < 500; i++) {
+    const r = await query<{ blocked: boolean }>(
+      `SELECT $2::int = ANY(pg_blocking_pids($1::int)) AS blocked`,
+      [waiterPid, blockerPid],
+    )
+    if (r.rows[0]?.blocked === true) return
+    await new Promise((res) => setTimeout(res, 20))
+  }
+  throw new Error(
+    `timed out waiting for pid ${waiterPid} to be blocked specifically by pid ${blockerPid} via pg_blocking_pids`,
+  )
+}
+
 describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real DB, HTTP)', () => {
   const cleanupAccountIds: string[] = []
   const cleanupIntegrationIds: string[] = []
@@ -383,10 +432,12 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
     ])
     cleanupAccountIds.push(await linkedAccount(target, 'dingtalk', user, 'Race Title'))
 
-    // Advisory barrier: a BEFORE INSERT/UPDATE trigger on the policy table parks the PATCH
-    // transaction AFTER it has taken FOR SHARE on the integration row and BEFORE commit — so a
-    // concurrent disable can be observed blocking on the row lock (never a fixed sleep).
+    // Advisory barrier: BEFORE INSERT/UPDATE trigger parks the PATCH txn AFTER write-point
+    // FOR SHARE and BEFORE commit. The chain proof is PID-exact:
+    //   barrier holder (advisory) → PATCH backend (advisory wait + holder in pg_blocking_pids)
+    //   → disabler (holder of FOR SHARE = PATCH pid in pg_blocking_pids(disablerPid)).
     await withClient(async (barrier) => {
+      const holderPid = (await barrier.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
       await barrier.query('SELECT pg_advisory_lock($1)', [SET_FIRST_ADVISORY_KEY])
       try {
         await query(`
@@ -414,14 +465,20 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
             return r
           })
 
-        // Wait until PATCH is parked on the advisory (it already holds FOR SHARE at this point).
-        await waitUntilAdvisoryWaiters(1)
+        // Exact chain link 1: the PATCH backend is advisory-blocked by THIS holder PID.
+        const patchPid = await waitForPatchPidBlockedByAdvisoryHolder(holderPid)
         expect(patchSettled).toBe(false)
+        expect(patchPid).not.toBe(holderPid)
 
-        // Concurrent disable: must block on the exclusive lock conflict with PATCH's FOR SHARE.
+        // Concurrent disable: must block on exclusive lock conflict with PATCH's FOR SHARE.
         const disabler = new Client({ connectionString: process.env.DATABASE_URL })
         await disabler.connect()
         try {
+          const disablerPid = (await disabler.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]
+            .pid
+          expect(disablerPid).not.toBe(patchPid)
+          expect(disablerPid).not.toBe(holderPid)
+
           let disableSettled = false
           const disableP = disabler
             .query(`UPDATE directory_integrations SET status = 'disabled' WHERE id = $1`, [target])
@@ -430,8 +487,8 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
               return r
             })
 
-          // Observe disable blocked by someone (the PATCH txn holding FOR SHARE).
-          await waitUntilDisableBlocked(target)
+          // Exact chain link 2: disabler is blocked specifically by the PATCH backend PID.
+          await waitUntilPidBlockedBy(disablerPid, patchPid)
           expect(disableSettled).toBe(false)
           expect(patchSettled).toBe(false)
 
@@ -465,48 +522,3 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
     await expect(resolveApprovalRequesterOrgRelations(user, query)).rejects.toBeInstanceOf(ApprovalRoutingPolicyError)
   })
 })
-
-/** Wait until ≥ min backends are Lock-waiting on an advisory lock (set-first barrier engaged). */
-async function waitUntilAdvisoryWaiters(min: number): Promise<void> {
-  for (let i = 0; i < 500; i++) {
-    const r = await query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE wait_event_type = 'Lock' AND wait_event = 'advisory' AND state = 'active'`,
-    )
-    if ((r.rows[0]?.n ?? 0) >= min) return
-    await new Promise((res) => setTimeout(res, 20))
-  }
-  throw new Error('timed out waiting for PATCH parked on the set-first advisory barrier')
-}
-
-/**
- * Wait until a concurrent UPDATE of directory_integrations for `targetId` is Lock-blocked
- * (proves disable is serialized behind the PATCH write-point FOR SHARE).
- */
-async function waitUntilDisableBlocked(targetId: string): Promise<void> {
-  for (let i = 0; i < 500; i++) {
-    const r = await query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE state = 'active'
-          AND datname = current_database()
-          AND wait_event_type = 'Lock'
-          AND query ILIKE '%directory_integrations%'
-          AND query ILIKE '%status%'
-          AND query ILIKE '%' || $1 || '%'`,
-      [targetId],
-    )
-    if ((r.rows[0]?.n ?? 0) >= 1) return
-    // Also accept any backend blocked on a lock whose query mentions the table (param may be bound).
-    const r2 = await query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE state = 'active'
-          AND datname = current_database()
-          AND wait_event_type = 'Lock'
-          AND cardinality(pg_blocking_pids(pid)) > 0
-          AND (query ILIKE '%directory_integrations%' OR query ILIKE '%SET status%')`,
-    )
-    if ((r2.rows[0]?.n ?? 0) >= 1) return
-    await new Promise((res) => setTimeout(res, 20))
-  }
-  throw new Error('timed out waiting for disable UPDATE blocked behind PATCH FOR SHARE')
-}
