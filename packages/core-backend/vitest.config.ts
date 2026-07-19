@@ -474,6 +474,12 @@ export default defineConfig({
       // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
       // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
+      // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
+      'tests/integration/multitable-fwb-write-action-realdb.test.ts',
+      // FWB production E2E: approval.completed → write_approval_form_values create (real executor path).
+      'tests/integration/multitable-fwb-production-e2e-realdb.test.ts',
+      // FWB runtime modes (create/update/lock/missing/permission/decision re-entry) — real-DB.
+      'tests/integration/multitable-fwb-runtime-modes-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

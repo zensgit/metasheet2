@@ -502,6 +502,71 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
+        <!-- FWB-3: collect declared decisionFieldIds on approve only. -->
+        <div
+          v-if="currentAction === 'approve' && currentDecisionFields.length > 0"
+          class="approval-detail__decision-fields"
+          data-testid="approval-decision-fields"
+        >
+          <el-form-item
+            v-for="field in currentDecisionFields"
+            :key="field.id"
+            :label="field.label"
+            required
+          >
+            <!-- FWB-3: number stays a string end-to-end (never el-input-number / JS Number). -->
+            <el-input
+              v-if="field.type === 'number'"
+              v-model="decisionDataDraft[field.id]"
+              inputmode="decimal"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+              data-field-type="number-string"
+            />
+            <el-date-picker
+              v-else-if="field.type === 'date'"
+              v-model="decisionDataDraft[field.id]"
+              type="date"
+              value-format="YYYY-MM-DD"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+            <!-- Datetime requires explicit offset; value-format emits Z so host TZ is never guessed. -->
+            <el-date-picker
+              v-else-if="field.type === 'datetime'"
+              v-model="decisionDataDraft[field.id]"
+              type="datetime"
+              value-format="YYYY-MM-DDTHH:mm:ss.SSSZ"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+            <el-select
+              v-else-if="field.type === 'select'"
+              v-model="decisionDataDraft[field.id]"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+            >
+              <el-option
+                v-for="opt in (field.options || [])"
+                :key="opt.value"
+                :label="opt.label"
+                :value="opt.value"
+              />
+            </el-select>
+            <el-input
+              v-else-if="field.type === 'textarea'"
+              v-model="decisionDataDraft[field.id]"
+              type="textarea"
+              :rows="3"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+            <el-input
+              v-else
+              v-model="decisionDataDraft[field.id]"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+          </el-form-item>
+        </div>
         <el-form-item :label="actionCommentLabel">
           <!-- B1-05: quick phrases — this user's recently-used phrases first, then the fixed
                preset list for 通过/驳回. Clicking a chip fills (or appends to) the textarea;
@@ -775,7 +840,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -790,7 +855,7 @@ import {
   CirclePlus,
   Remove,
 } from '@element-plus/icons-vue'
-import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph } from '../../types/approval'
+import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph, FormField } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
@@ -1026,6 +1091,32 @@ const pinnedGraph = computed<ApprovalGraph | null>(() => {
   return templateStore.activeVersion?.approvalGraph ?? templateStore.activeTemplate?.approvalGraph ?? null
 })
 
+/**
+ * FWB-3: form fields declared on the CURRENT approval node as decisionFieldIds.
+ * Prefer the pinned (instance-frozen) graph + formSchema so live template edits cannot drift.
+ */
+const currentDecisionFields = computed<FormField[]>(() => {
+  const detail = approval.value
+  if (!detail || detail.status !== 'pending') return []
+  const nodeKey = detail.currentNodeKey
+  if (!nodeKey) return []
+  const graph = pinnedGraph.value
+  if (!graph) return []
+  const node = graph.nodes.find((n) => n.key === nodeKey && n.type === 'approval')
+  if (!node) return []
+  const ids = (node.config as { decisionFieldIds?: unknown } | undefined)?.decisionFieldIds
+  if (!Array.isArray(ids) || ids.length === 0) return []
+  const schemaFields = detail.formSchema?.fields ?? []
+  const byId = new Map(schemaFields.map((f) => [f.id, f]))
+  const out: FormField[] = []
+  for (const raw of ids) {
+    if (typeof raw !== 'string' || !raw.trim()) continue
+    const field = byId.get(raw.trim())
+    if (field) out.push(field)
+  }
+  return out
+})
+
 // Parallel regions have no single unambiguous "current node" to walk forward from until the
 // branches rejoin at their `joinNodeKey` — skip rather than fabricate a merged/guessed path (the
 // "并行中" badge in the header already communicates the parallel state itself).
@@ -1046,6 +1137,8 @@ const commentDialogVisible = ref(false)
 const returnDialogVisible = ref(false)
 const currentAction = ref<ApprovalActionType>('approve')
 const actionComment = ref('')
+/** FWB-3: approver-entered decision values for the current node's decisionFieldIds. */
+const decisionDataDraft = reactive<Record<string, unknown>>({})
 // B1-04: dialog-scoped failure message for the approve/reject + comment dialogs (宽恕型错误三件套
 // part 2). Cleared on next dialog open / next submit attempt; the catch blocks below set it
 // INSTEAD OF a generic toast so the reader sees the server's actual reason without losing their
@@ -1327,6 +1420,21 @@ function openActionDialog(action: 'approve' | 'reject') {
   currentAction.value = action
   actionComment.value = ''
   actionDialogError.value = null
+  // Reset FWB-3 decision draft; seed from formSnapshot defaults when present.
+  // Number fields stay strings end-to-end (never JS Number / el-input-number).
+  for (const key of Object.keys(decisionDataDraft)) delete decisionDataDraft[key]
+  if (action === 'approve') {
+    for (const field of currentDecisionFields.value) {
+      const snap = approval.value?.formSnapshot?.[field.id]
+      if (snap === undefined || snap === null) {
+        decisionDataDraft[field.id] = undefined
+      } else if (field.type === 'number') {
+        decisionDataDraft[field.id] = typeof snap === 'string' ? snap : String(snap)
+      } else {
+        decisionDataDraft[field.id] = snap
+      }
+    }
+  }
   actionDialogVisible.value = true
 }
 
@@ -1392,11 +1500,28 @@ async function submitAction() {
   if (inFlightAction.value) return
   const id = route.params.id as string
   actionDialogError.value = null
+  // FWB-3 client pre-check: every declared decision field must be non-blank before dispatch.
+  if (currentAction.value === 'approve' && currentDecisionFields.value.length > 0) {
+    for (const field of currentDecisionFields.value) {
+      const v = decisionDataDraft[field.id]
+      if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) {
+        actionDialogError.value = `请填写核定字段：${field.label}`
+        return
+      }
+    }
+  }
   inFlightAction.value = currentAction.value
   try {
+    const decisionData =
+      currentAction.value === 'approve' && currentDecisionFields.value.length > 0
+        ? Object.fromEntries(
+            currentDecisionFields.value.map((f) => [f.id, decisionDataDraft[f.id]]),
+          )
+        : undefined
     await store.executeAction(id, {
       action: currentAction.value,
       comment: actionComment.value || undefined,
+      ...(decisionData ? { decisionData } : {}),
     })
     ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
     rememberQuickPhraseIfOffered(actionComment.value)

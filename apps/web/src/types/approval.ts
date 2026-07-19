@@ -43,6 +43,8 @@ export type FormFieldType =
   | 'user'
   | 'attachment'
   | 'detail'
+  /** FWB-2: single linked multitable record (server-pinned baseId/sheetId in props). */
+  | 'record-link'
 
 export interface ApprovalNode {
   key: string
@@ -292,6 +294,11 @@ export interface ApprovalActionRequest {
   addSignMode?: 'before' | 'parallel'
   /** P1-B reduce_sign — assignee_id of the add-signed row to remove. */
   targetAssignmentUserId?: string
+  /**
+   * FWB-3: approver-confirmed decision field values for the current node's `decisionFieldIds`.
+   * Server freezes inside the dispatchAction FOR UPDATE transaction; never reused after re-entry.
+   */
+  decisionData?: Record<string, unknown>
 }
 
 export interface ApprovalTemplateListItemDTO {

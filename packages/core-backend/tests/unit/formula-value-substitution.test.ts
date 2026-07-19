@@ -30,6 +30,11 @@ describe('evaluateField — scalar substitution (regression: unchanged by A2b)',
   it('string passes through as a (quoted) literal', async () => {
     expect(await evalField('={fld_s}', { fld_s: 'hi' })).toBe('hi')
   })
+  it('numeric-looking text remains text; only numeric field types use D7 numeric strings', async () => {
+    expect(await evalField('={fld_s}', { fld_s: '12' })).toBe('12')
+    expect(await evalField('=CONCAT({fld_s},"3")', { fld_s: '12' })).toBe('123')
+    expect(await evalField('={fld_a}+1', { fld_a: '12' })).toBe(13)
+  })
 })
 
 describe('evaluateField — complex values (A2b contract)', () => {

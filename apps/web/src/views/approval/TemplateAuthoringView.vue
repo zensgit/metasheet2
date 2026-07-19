@@ -272,6 +272,7 @@
                 <el-option label="多选" value="multi-select" />
                 <el-option label="用户" value="user" />
                 <el-option label="明细（子表单）" value="detail" />
+                <el-option label="关联记录 (record-link)" value="record-link" />
               </el-select>
             </el-form-item>
             <el-form-item label="占位文本">
@@ -279,6 +280,34 @@
             </el-form-item>
             <el-form-item label="是否必填">
               <el-checkbox v-model="field.required" :disabled="readOnly">必填</el-checkbox>
+            </el-form-item>
+            <el-form-item
+              v-if="field.type === 'record-link'"
+              label="关联表（服务端钉死）"
+              class="template-authoring__wide"
+              data-testid="approval-record-link-config"
+            >
+              <div class="template-authoring__grid">
+                <el-form-item label="baseId">
+                  <el-input
+                    v-model="field.recordLinkBaseId"
+                    :disabled="readOnly"
+                    placeholder="目标 base id"
+                    data-testid="approval-record-link-base-id"
+                  />
+                </el-form-item>
+                <el-form-item label="sheetId">
+                  <el-input
+                    v-model="field.recordLinkSheetId"
+                    :disabled="readOnly"
+                    placeholder="目标 sheet id"
+                    data-testid="approval-record-link-sheet-id"
+                  />
+                </el-form-item>
+              </div>
+              <div class="template-authoring__hint">
+                提交时只允许选择该 sheet 内单条记录；服务端会按 filler 读权限 fail-closed 校验，不暴露存在性。
+              </div>
             </el-form-item>
             <el-form-item
               v-if="field.type === 'select' || field.type === 'multi-select'"
@@ -1163,6 +1192,28 @@
                   :value="field.id"
                 />
               </el-select>
+            </el-form-item>
+            <el-form-item label="核定字段 (FWB-3)" data-testid="approval-step-decision-fields">
+              <el-select
+                v-model="step.decisionFieldIds"
+                :disabled="readOnly"
+                multiple
+                filterable
+                clearable
+                class="ms-w-100pct"
+                placeholder="选择审批人必须填写的核定字段"
+                data-testid="approval-step-decision-field-ids"
+              >
+                <el-option
+                  v-for="opt in decisionFieldOptions"
+                  :key="opt.id"
+                  :label="opt.label"
+                  :value="opt.id"
+                />
+              </el-select>
+              <div class="template-authoring__hint">
+                选中字段将在该节点「同意」时由审批人提交 decisionData；服务端在 FOR UPDATE 事务内冻结，缺项/多项/空值均拒绝。
+              </div>
             </el-form-item>
             <el-form-item label="审批模式">
               <el-select v-model="step.approvalMode" :disabled="readOnly" class="ms-w-100pct">
@@ -2200,6 +2251,28 @@ function setApprovalSourceLevel(nodeKey: string, value: number): void {
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
+// FWB-3 v1: only supported scalar decision types (text/textarea/number/date/datetime/select).
+// Exclude attachment, user, multi-select, detail, record-link (backend rejects them at publish too).
+const FWB_DECISION_FIELD_TYPES = new Set([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'datetime',
+  'select',
+])
+const decisionFieldOptions = computed(() =>
+  draft.value.fields
+    .filter((field) => {
+      const id = field.id.trim()
+      if (!id) return false
+      return FWB_DECISION_FIELD_TYPES.has(field.type)
+    })
+    .map((field) => ({
+      id: field.id.trim(),
+      label: field.label.trim() ? `${field.label.trim()} (${field.id.trim()})` : field.id.trim(),
+    })),
+)
 
 // T1-4 node field permissions: every top-level form field is a candidate for a per-node access
 // override (the linear editor shows the same field list for every approval step).

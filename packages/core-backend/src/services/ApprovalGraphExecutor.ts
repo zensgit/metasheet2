@@ -360,6 +360,20 @@ function validateFieldType(field: FormField, value: unknown): string | null {
         return `${field.id} must contain only configured options`
       }
       return null
+    case 'record-link': {
+      // Layer 2 structural shape only (sync): exactly one `{ recordId: non-empty string }`.
+      // Authz (filler can read) is an async check outside this function.
+      if (!isRecord(value)) return `${field.id} must be an object { recordId }`
+      const keys = Object.keys(value)
+      if (keys.length !== 1 || keys[0] !== 'recordId') {
+        return `${field.id} must be exactly { recordId } (no free-text id, no multi-value)`
+      }
+      const recordId = value.recordId
+      if (typeof recordId !== 'string' || !recordId.trim()) {
+        return `${field.id}.recordId must be a non-empty string`
+      }
+      return null
+    }
     default:
       return null
   }

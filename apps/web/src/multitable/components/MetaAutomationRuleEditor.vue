@@ -394,6 +394,127 @@
               <el-button size="small" class="meta-rule-editor__btn" @click="addFieldUpdate(action)">{{ automationLabel('editor.addField', isZh) }}</el-button>
             </div>
 
+            <!-- write_approval_form_values (FWB) config — selectors only; no pasted templateVersionId / field IDs / confirmationId -->
+            <div v-if="action.type === 'write_approval_form_values'" class="meta-rule-editor__action-config" data-field="fwbActionConfig">
+              <label class="meta-rule-editor__label">{{ isZh ? '回写模式' : 'Writeback mode' }}</label>
+              <el-select
+                v-model="action.config.mode"
+                data-field="fwbMode"
+                @change="onFwbModeChange(action)"
+                @focus="fwbActiveTargetAction = action"
+              >
+                <el-option value="create" :label="isZh ? '新建记录 (FWB-1)' : 'Create record (FWB-1)'" />
+                <el-option value="update" :label="isZh ? '更新关联记录 (FWB-2)' : 'Update linked record (FWB-2)'" />
+                <el-option value="decision" :label="isZh ? '核定值写回 (FWB-3)' : 'Decision values (FWB-3)'" />
+              </el-select>
+              <div v-if="action.config.mode === 'update' || action.config.mode === 'decision'" class="meta-rule-editor__field">
+                <label class="meta-rule-editor__label">{{ isZh ? 'record-link 表单字段' : 'record-link form field' }}</label>
+                <el-select
+                  v-model="action.config.recordLinkFieldId"
+                  data-field="fwbRecordLinkFieldId"
+                  filterable
+                  clearable
+                  :placeholder="isZh ? '选择 record-link 字段' : 'Select record-link field'"
+                  @change="onFwbRecordLinkChange(action)"
+                  @focus="fwbActiveTargetAction = action"
+                >
+                  <el-option
+                    v-for="opt in fwbRecordLinkFieldOptions"
+                    :key="opt.id"
+                    :value="opt.id"
+                    :label="opt.label"
+                  />
+                </el-select>
+                <div v-if="!fwbRecordLinkFieldOptions.length" class="meta-rule-editor__hint">
+                  {{ isZh ? '当前模板活动版本没有 record-link 字段' : 'No record-link fields on the template active version' }}
+                </div>
+              </div>
+              <div v-if="action.config.mode === 'decision'" class="meta-rule-editor__field">
+                <label class="meta-rule-editor__label">{{ isZh ? '核定节点' : 'Decision node' }}</label>
+                <el-select
+                  v-model="action.config.decisionNodeKey"
+                  data-field="fwbDecisionNodeKey"
+                  filterable
+                  clearable
+                  :placeholder="isZh ? '选择核定节点' : 'Select decision node'"
+                  @change="onFwbDecisionNodeChange(action)"
+                  @focus="fwbActiveTargetAction = action"
+                >
+                  <el-option
+                    v-for="opt in fwbDecisionNodeOptions"
+                    :key="opt.key"
+                    :value="opt.key"
+                    :label="opt.label"
+                  />
+                </el-select>
+              </div>
+              <label class="meta-rule-editor__label">{{ isZh ? '字段映射' : 'Field mappings' }}</label>
+              <div v-for="(pair, mi) in (action.config.fwbMappings || [])" :key="mi" class="meta-rule-editor__pair-row">
+                <el-select
+                  v-model="pair.formFieldId"
+                  class="meta-rule-editor__input--sm"
+                  filterable
+                  data-field="fwbFormFieldId"
+                  :placeholder="isZh ? '源表单字段' : 'Source form field'"
+                  @change="invalidateFwbConfirmation(action)"
+                  @focus="activateFwbAction(action)"
+                >
+                  <el-option
+                    v-for="opt in fwbSourceFieldOptionsFor(action)"
+                    :key="opt.id"
+                    :value="opt.id"
+                    :label="opt.label"
+                  />
+                </el-select>
+                <el-select
+                  v-model="pair.targetFieldId"
+                  class="meta-rule-editor__input--sm"
+                  filterable
+                  data-field="fwbTargetFieldId"
+                  :placeholder="isZh ? '目标表字段' : 'Target sheet field'"
+                  @change="invalidateFwbConfirmation(action)"
+                  @focus="activateFwbAction(action)"
+                >
+                  <el-option
+                    v-for="opt in fwbTargetFieldOptionsFor(action)"
+                    :key="opt.id"
+                    :value="opt.id"
+                    :label="`${opt.label} (${opt.type})`"
+                  />
+                </el-select>
+                <el-button size="small" @click="removeFwbMapping(action, mi)">×</el-button>
+              </div>
+              <el-button size="small" data-field="fwbAddMapping" @click="addFwbMapping(action)">
+                {{ isZh ? '添加映射' : 'Add mapping' }}
+              </el-button>
+              <div class="meta-rule-editor__field meta-rule-editor__fwb-confirmation">
+                <label class="meta-rule-editor__label">{{ isZh ? 'Q6 显式确认' : 'Q6 explicit confirmation' }}</label>
+                <div class="meta-rule-editor__hint">
+                  {{ isZh
+                    ? '服务端按活动发布版本解析并生成确认；映射/目标/模板版本变更会使确认失效。确认 id 由服务端写入，无需粘贴。'
+                    : 'Server resolves the active published version and issues a challenge. Mapping/target/template-version changes invalidate it. confirmationId is server-filled — never paste.' }}
+                </div>
+                <el-button
+                  size="small"
+                  data-field="fwbRequestConfirm"
+                  class="meta-rule-editor__fwb-confirm-button"
+                  :loading="fwbConfirmLoading"
+                  @click="requestFwbConfirmation(action)"
+                >
+                  {{ isZh ? '请求并确认' : 'Request & confirm' }}
+                </el-button>
+                <span
+                  v-if="action.config.fwbConfirmStatus === 'confirmed'"
+                  data-field="fwbConfirmOk"
+                  class="meta-rule-editor__hint"
+                >✓ confirmed</span>
+                <span
+                  v-else-if="action.config.fwbConfirmStatus === 'failed'"
+                  data-field="fwbConfirmFail"
+                  class="meta-rule-editor__hint"
+                >✗ failed</span>
+              </div>
+            </div>
             <!-- create_record config -->
             <div v-if="action.type === 'create_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.targetSheetId', isZh) }}</label>
@@ -1360,6 +1481,13 @@
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
+import {
+  type FwbMappingDraft,
+  isFwbV1SourceFieldType,
+  isFwbV1TargetFieldType,
+  normalizeFwbTargetFieldType,
+  validateFwbMappingConfig,
+} from '../../approvals/fwbMappingConfig'
 import type { MultitableApiClient } from '../api/client'
 import type {
   AutomationRule,
@@ -1486,6 +1614,12 @@ type DraftActionConfig = Record<string, unknown> & {
   parallelBranches?: ParallelBranchDraft[]
   parallelBranchUnsupportedReason?: string | null
   parallelBranchOriginal?: Record<string, unknown> | null
+  mode?: 'create' | 'update' | 'decision'
+  recordLinkFieldId?: string
+  decisionNodeKey?: string
+  confirmationId?: string
+  fwbConfirmStatus?: 'none' | 'confirmed' | 'failed'
+  fwbMappings?: FwbMappingDraft[]
 }
 
 interface DraftAction {
@@ -1584,6 +1718,267 @@ let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 const { isZh } = useLocale()
 
+// ── FWB authoring selectors (active template version + target meta_fields) ──
+// No free-text templateVersionId / field IDs / confirmationId — server resolves authority.
+type FwbFormFieldOption = { id: string; label: string; type: string }
+type FwbTargetFieldOption = { id: string; label: string; type: string }
+type FwbDecisionNodeOption = { key: string; label: string }
+const fwbTemplateFormFields = ref<FwbFormFieldOption[]>([])
+/** Full form fields from the active template (includes props for record-link pin resolution). */
+const fwbTemplateFormFieldsRaw = ref<Array<{ id: string; type: string; label?: string; props?: Record<string, unknown> }>>([])
+const fwbDecisionNodeOptions = ref<FwbDecisionNodeOption[]>([])
+/** Map decisionNodeKey → closed decisionFieldIds (FWB-3). */
+const fwbDecisionFieldIdsByNode = ref<Record<string, string[]>>({})
+const fwbTargetFieldOptionsByAction = ref<Record<string, FwbTargetFieldOption[]>>({})
+const fwbConfirmLoading = ref(false)
+let fwbContextLoadId = 0
+const fwbTargetFieldsLoadIds = new Map<string, number>()
+/** The FWB action currently driving target-field load (mode / record-link). */
+const fwbActiveTargetAction = ref<DraftAction | null>(null)
+
+const fwbRecordLinkFieldOptions = computed(() =>
+  fwbTemplateFormFields.value.filter((f) => f.type === 'record-link'),
+)
+
+/** FWB-3 v1 scalar decision types (must match backend DECISION_FIELD_TYPES). */
+/**
+ * Source selector options:
+ * - create/update: only v1 scalar form fields
+ * - decision: only the selected node's decisionFieldIds (scalar types)
+ */
+function fwbSourceFieldOptionsFor(action: DraftAction): FwbFormFieldOption[] {
+  if (action && action.config.mode === 'decision') {
+    const nodeKey = typeof action.config.decisionNodeKey === 'string'
+      ? action.config.decisionNodeKey.trim()
+      : ''
+    const declared = nodeKey ? (fwbDecisionFieldIdsByNode.value[nodeKey] ?? []) : []
+    const declaredSet = new Set(declared)
+    return fwbTemplateFormFields.value.filter(
+      (f) => declaredSet.has(f.id) && isFwbV1SourceFieldType(f.type),
+    )
+  }
+  return fwbTemplateFormFields.value.filter((f) => isFwbV1SourceFieldType(f.type))
+}
+
+function fwbTargetFieldOptionsFor(action: DraftAction): FwbTargetFieldOption[] {
+  return fwbTargetFieldOptionsByAction.value[action.draftId] ?? []
+}
+
+function mapFieldsToFwbTargetOptions(
+  fields: Array<{ id: string; name?: string; type?: string }>,
+): FwbTargetFieldOption[] {
+  return fields
+    .filter((f) => isFwbV1TargetFieldType(String(f.type)))
+    .map((f) => ({
+      id: f.id,
+      label: (typeof f.name === 'string' && f.name) || f.id,
+      type: normalizeFwbTargetFieldType(String(f.type)),
+    }))
+}
+
+function invalidateFwbConfirmation(action: DraftAction): void {
+  action.config.confirmationId = ''
+  action.config.fwbConfirmStatus = 'none'
+}
+
+function activateFwbAction(action: DraftAction): void {
+  fwbActiveTargetAction.value = action
+  void loadFwbTargetFields(action)
+}
+
+function onFwbModeChange(action: DraftAction): void {
+  invalidateFwbConfirmation(action)
+  if (action.config.mode === 'create') {
+    action.config.recordLinkFieldId = ''
+    action.config.decisionNodeKey = ''
+  } else if (action.config.mode === 'update') {
+    action.config.decisionNodeKey = ''
+  }
+  fwbActiveTargetAction.value = action
+  void loadFwbTargetFields(action)
+}
+
+function onFwbRecordLinkChange(action: DraftAction): void {
+  invalidateFwbConfirmation(action)
+  // Clear target mappings that belonged to the previous target sheet.
+  if (Array.isArray(action.config.fwbMappings)) {
+    for (const m of action.config.fwbMappings as Array<{ targetFieldId?: string }>) {
+      m.targetFieldId = ''
+    }
+  }
+  fwbActiveTargetAction.value = action
+  void loadFwbTargetFields(action)
+}
+
+function onFwbDecisionNodeChange(action: DraftAction): void {
+  invalidateFwbConfirmation(action)
+  // Clear source mappings — declared decision fields may differ per node.
+  if (Array.isArray(action.config.fwbMappings)) {
+    for (const m of action.config.fwbMappings as Array<{ formFieldId?: string }>) {
+      m.formFieldId = ''
+    }
+  }
+  fwbActiveTargetAction.value = action
+}
+
+function addFwbMapping(action: DraftAction): void {
+  if (!Array.isArray(action.config.fwbMappings)) action.config.fwbMappings = []
+  ;(action.config.fwbMappings as Array<{ formFieldId: string; targetFieldId: string }>).push({
+    formFieldId: '',
+    targetFieldId: '',
+  })
+  invalidateFwbConfirmation(action)
+}
+
+function removeFwbMapping(action: DraftAction, index: number): void {
+  if (!Array.isArray(action.config.fwbMappings)) return
+  ;(action.config.fwbMappings as unknown[]).splice(index, 1)
+  invalidateFwbConfirmation(action)
+}
+
+async function loadFwbAuthoringContext(): Promise<void> {
+  const loadId = ++fwbContextLoadId
+  const templateId = typeof draft.value.triggerConfig?.templateId === 'string'
+    ? String(draft.value.triggerConfig.templateId).trim()
+    : ''
+  if (!templateId) {
+    fwbTemplateFormFields.value = []
+    fwbTemplateFormFieldsRaw.value = []
+    fwbDecisionNodeOptions.value = []
+    fwbDecisionFieldIdsByNode.value = {}
+    return
+  }
+  try {
+    // Dynamic import keeps the multitable editor free of a hard approvals-api cycle at module load.
+    const { getTemplate } = await import('../../approvals/api')
+    const detail = await getTemplate(templateId)
+    if (loadId !== fwbContextLoadId) return
+    const fields = Array.isArray(detail.formSchema?.fields) ? detail.formSchema.fields : []
+    fwbTemplateFormFieldsRaw.value = fields
+      .filter((f) => f && typeof f.id === 'string')
+      .map((f) => ({
+        id: f.id,
+        type: typeof f.type === 'string' ? f.type : 'text',
+        label: typeof f.label === 'string' ? f.label : undefined,
+        props: f.props && typeof f.props === 'object' ? (f.props as Record<string, unknown>) : undefined,
+      }))
+    fwbTemplateFormFields.value = fwbTemplateFormFieldsRaw.value.map((f) => ({
+      id: f.id,
+      label: typeof f.label === 'string' && f.label.trim() ? f.label : f.id,
+      type: f.type,
+    }))
+    const nodes = Array.isArray(detail.approvalGraph?.nodes) ? detail.approvalGraph.nodes : []
+    fwbDecisionNodeOptions.value = nodes
+      .filter((n) => n && n.type === 'approval' && typeof n.key === 'string')
+      .map((n) => ({
+        key: n.key,
+        label: typeof n.name === 'string' && n.name.trim() ? `${n.name} (${n.key})` : n.key,
+      }))
+    const byNode: Record<string, string[]> = {}
+    for (const n of nodes) {
+      if (!n || n.type !== 'approval' || typeof n.key !== 'string') continue
+      const ids = (n.config as { decisionFieldIds?: unknown } | undefined)?.decisionFieldIds
+      byNode[n.key] = Array.isArray(ids)
+        ? ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0).map((id) => id.trim())
+        : []
+    }
+    fwbDecisionFieldIdsByNode.value = byNode
+  } catch {
+    if (loadId !== fwbContextLoadId) return
+    fwbTemplateFormFields.value = []
+    fwbTemplateFormFieldsRaw.value = []
+    fwbDecisionNodeOptions.value = []
+    fwbDecisionFieldIdsByNode.value = {}
+  }
+}
+
+/**
+ * Resolve FWB target meta_fields for authoring:
+ * - create → host sheet
+ * - update/decision → server-pinned sheetId from the selected record-link field
+ * Race-guarded: stale async results are dropped when a newer load is in flight.
+ */
+async function loadFwbTargetFields(action?: DraftAction | null): Promise<void> {
+  const act = action ?? fwbActiveTargetAction.value
+  if (!act) return
+  const actionKey = act.draftId
+  const loadId = (fwbTargetFieldsLoadIds.get(actionKey) ?? 0) + 1
+  fwbTargetFieldsLoadIds.set(actionKey, loadId)
+  const isCurrent = () => fwbTargetFieldsLoadIds.get(actionKey) === loadId
+  const setOptions = (options: FwbTargetFieldOption[]) => {
+    if (!isCurrent()) return
+    fwbTargetFieldOptionsByAction.value = {
+      ...fwbTargetFieldOptionsByAction.value,
+      [actionKey]: options,
+    }
+  }
+  const mode = act && (act.config.mode === 'update' || act.config.mode === 'decision')
+    ? act.config.mode
+    : 'create'
+
+  let targetSheetId = props.sheetId
+  if (mode === 'update' || mode === 'decision') {
+    const linkId = typeof act?.config.recordLinkFieldId === 'string'
+      ? act.config.recordLinkFieldId.trim()
+      : ''
+    if (!linkId) {
+      setOptions([])
+      return
+    }
+    const linkField = fwbTemplateFormFieldsRaw.value.find(
+      (f) => f.id === linkId && f.type === 'record-link',
+    )
+    const pinnedSheetId = typeof linkField?.props?.sheetId === 'string'
+      ? linkField.props.sheetId.trim()
+      : ''
+    if (!pinnedSheetId) {
+      setOptions([])
+      return
+    }
+    targetSheetId = pinnedSheetId
+  }
+
+  const applyHostFallback = () => {
+    // Host sheet fallback only for create mode; update/decision must not list host fields.
+    if (mode !== 'create') {
+      setOptions([])
+      return
+    }
+    setOptions(mapFieldsToFwbTargetOptions(
+      (props.fields ?? []).map((f) => ({
+        id: f.id,
+        name: 'name' in f && typeof f.name === 'string' ? f.name : undefined,
+        type: String(f.type),
+      })),
+    ))
+  }
+
+  if (!props.client) {
+    if (!isCurrent()) return
+    applyHostFallback()
+    return
+  }
+  try {
+    const res = await props.client.listFields(targetSheetId)
+    if (!isCurrent()) return
+    setOptions(mapFieldsToFwbTargetOptions(
+      (res.fields ?? []).map((f) => ({
+        id: f.id,
+        name: typeof f.name === 'string' ? f.name : undefined,
+        type: String(f.type),
+      })),
+    ))
+  } catch {
+    if (!isCurrent()) return
+    applyHostFallback()
+  }
+}
+
+async function loadAllFwbTargetFields(): Promise<void> {
+  const actions = draft.value.actions.filter((action) => action.type === 'write_approval_form_values')
+  await Promise.all(actions.map((action) => loadFwbTargetFields(action)))
+}
+
 // ── T1-3 / T1-2 trigger exposure (approval.completed + webhook.received) ──
 const APPROVAL_COMPLETED_OUTCOME_OPTIONS = ['approved', 'rejected', 'revoked', 'cancelled'] as const
 type ApprovalCompletedOutcome = (typeof APPROVAL_COMPLETED_OUTCOME_OPTIONS)[number]
@@ -1595,6 +1990,7 @@ const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES = new Set<string>([
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
+  'write_approval_form_values',
 ])
 // A-2b: the approval card additionally mounts on the pending-task trigger (and ONLY there).
 const APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES = new Set<string>([
@@ -1694,6 +2090,8 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   // so it is a first-class selectable action — both for new rules and to keep existing lock_record rules
   // editable (it must appear in SUPPORTED so an existing rule's option isn't dropped to empty).
   'lock_record',
+  // FWB: approval form writeback (server-gated by APPROVAL_FWB_RUNTIME_ENABLED + durable delivery).
+  'write_approval_form_values',
 ]
 
 // A6-3-2a: BRANCH_AUTHORABLE_ACTION_TYPES (the v1 in-branch action subset) is imported from
@@ -2163,6 +2561,25 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       : Object.entries(fields).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
     return { ...config, fieldUpdates }
   }
+  if (type === 'write_approval_form_values') {
+    const mappings = Array.isArray(config.mappings)
+      ? config.mappings.map((m) => {
+        const row = isPlainRecord(m) ? m : {}
+        return {
+          formFieldId: typeof row.formFieldId === 'string' ? row.formFieldId : '',
+          targetFieldId: typeof row.targetFieldId === 'string' ? row.targetFieldId : '',
+        }
+      })
+      : [{ formFieldId: '', targetFieldId: '' }]
+    return {
+      mode: config.mode === 'update' || config.mode === 'decision' ? config.mode : 'create',
+      fwbMappings: mappings,
+      recordLinkFieldId: typeof config.recordLinkFieldId === 'string' ? config.recordLinkFieldId : '',
+      decisionNodeKey: typeof config.decisionNodeKey === 'string' ? config.decisionNodeKey : '',
+      confirmationId: typeof config.confirmationId === 'string' ? config.confirmationId : '',
+      fwbConfirmStatus: typeof config.confirmationId === 'string' && config.confirmationId ? 'confirmed' : 'none',
+    }
+  }
   if (type === 'create_record') {
     const data = isPlainRecord(config.data)
       ? config.data
@@ -2537,15 +2954,41 @@ watch(
         } catch {
           availableSheets.value = []
         }
+        // Host-sheet targets for create; update/decision reloads after authoring context resolves record-link pins.
+        const fwbAct = draft.value.actions.find((a) => a.type === 'write_approval_form_values') ?? null
+        fwbActiveTargetAction.value = fwbAct
+        await loadAllFwbTargetFields()
       } else {
         dingTalkDestinations.value = []
         approvalTemplates.value = []
         availableSheets.value = []
+        const fwbAct = draft.value.actions.find((a) => a.type === 'write_approval_form_values') ?? null
+        fwbActiveTargetAction.value = fwbAct
+        await loadAllFwbTargetFields()
       }
+      await loadFwbAuthoringContext()
+      // After template fields (incl. record-link props) load, re-resolve target sheet fields.
+      await loadAllFwbTargetFields()
     }
   },
   { immediate: true },
 )
+
+// Reload FWB source-field / decision-node selectors when the trigger template changes.
+watch(
+  () => draft.value.triggerConfig?.templateId,
+  async () => {
+    invalidateAllFwbConfirmations()
+    await loadFwbAuthoringContext()
+    await loadAllFwbTargetFields()
+  },
+)
+
+function invalidateAllFwbConfirmations(): void {
+  for (const action of draft.value.actions) {
+    if (action.type === 'write_approval_form_values') invalidateFwbConfirmation(action)
+  }
+}
 
 // UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6 "确认一律 ElMessageBox").
 // CFG-3 precedent (DirectoryManagementView.vue confirmApprovalCardSecretRegenerate): service-style
@@ -3397,6 +3840,77 @@ function appendPersonTemplateToken(
   action.config[field] = appendTemplateToken(current, token, multiline)
 }
 
+async function requestFwbConfirmation(action: DraftAction): Promise<void> {
+  if (!props.client) {
+    error.value = 'API client unavailable for FWB confirmation'
+    return
+  }
+  const mappings = Array.isArray(action.config.fwbMappings)
+    ? (action.config.fwbMappings as Array<{ formFieldId?: string; targetFieldId?: string }>)
+      .map((m) => ({
+        formFieldId: typeof m.formFieldId === 'string' ? m.formFieldId.trim() : '',
+        targetFieldId: typeof m.targetFieldId === 'string' ? m.targetFieldId.trim() : '',
+      }))
+    : []
+  const mappingIssues = validateFwbMappingConfig(
+    mappings,
+    fwbSourceFieldOptionsFor(action),
+    fwbTargetFieldOptionsFor(action),
+  )
+  if (mappingIssues.length > 0) {
+    error.value = isZh.value
+      ? '字段映射不完整、重复或已失效，请重新选择'
+      : 'A field mapping is incomplete, duplicated, or stale; select it again'
+    return
+  }
+  const templateId = typeof draft.value.triggerConfig?.templateId === 'string'
+    ? String(draft.value.triggerConfig.templateId).trim()
+    : ''
+  if (!templateId) {
+    error.value = isZh.value ? '请先选择审批完成触发器上的模板' : 'Select the approval template on the trigger first'
+    return
+  }
+  const mode = action.config.mode === 'update' || action.config.mode === 'decision' ? action.config.mode : 'create'
+  if ((mode === 'update' || mode === 'decision') && !String(action.config.recordLinkFieldId ?? '').trim()) {
+    error.value = isZh.value ? '请选择 record-link 表单字段' : 'Select a record-link form field'
+    return
+  }
+  if (mode === 'decision' && !String(action.config.decisionNodeKey ?? '').trim()) {
+    error.value = isZh.value ? '请选择核定节点' : 'Select a decision node'
+    return
+  }
+  fwbConfirmLoading.value = true
+  try {
+    // Server resolves active_version_id + target binding + ACL; client never pastes version/field IDs.
+    const challenge = await props.client.createFwbConfirmationChallenge(props.sheetId, {
+      templateId,
+      mode,
+      mappings,
+      ...(mode !== 'create'
+        ? { recordLinkFieldId: String(action.config.recordLinkFieldId ?? '').trim() }
+        : {}),
+    })
+    await props.client.confirmFwbConfirmation(props.sheetId, {
+      confirmationId: challenge.confirmationId,
+      challengeNonce: challenge.challengeNonce,
+    })
+    action.config.confirmationId = challenge.confirmationId
+    action.config.fwbConfirmStatus = 'confirmed'
+    // Persist authoritative subject identifiers returned by the server (read-only, for debug/status).
+    if (challenge.subject) {
+      action.config.fwbBoundTemplateVersionId = challenge.subject.templateVersionId
+      action.config.fwbBoundTargetSheetId = challenge.subject.targetSheetId
+    }
+    error.value = ''
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'FWB confirmation failed'
+    action.config.fwbConfirmStatus = 'failed'
+    action.config.confirmationId = ''
+  } finally {
+    fwbConfirmLoading.value = false
+  }
+}
+
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
   switch (type) {
     case 'condition_branch':
@@ -3407,6 +3921,15 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       return { fieldUpdates: [] }
     case 'create_record':
       return { fieldValues: [] }
+    case 'write_approval_form_values':
+      return {
+        mode: 'create',
+        fwbMappings: [{ formFieldId: '', targetFieldId: '' }],
+        recordLinkFieldId: '',
+        decisionNodeKey: '',
+        confirmationId: '',
+        fwbConfirmStatus: 'none',
+      }
     case 'send_webhook':
       return { method: 'POST' }
     case 'send_notification':
@@ -3652,6 +4175,29 @@ function buildPayload(): Partial<AutomationRule> {
         },
       }
     }
+    if (action.type === 'write_approval_form_values') {
+      const mappings = Array.isArray(action.config.fwbMappings)
+        ? (action.config.fwbMappings as Array<{ formFieldId?: string; targetFieldId?: string }>)
+          .map((m) => ({
+            formFieldId: typeof m.formFieldId === 'string' ? m.formFieldId.trim() : '',
+            targetFieldId: typeof m.targetFieldId === 'string' ? m.targetFieldId.trim() : '',
+          }))
+          .filter((m) => m.formFieldId && m.targetFieldId)
+        : []
+      const mode = action.config.mode === 'update' || action.config.mode === 'decision' ? action.config.mode : 'create'
+      const config: Record<string, unknown> = {
+        mode,
+        mappings,
+        confirmationId: typeof action.config.confirmationId === 'string' ? action.config.confirmationId.trim() : '',
+      }
+      if (mode === 'update' || mode === 'decision') {
+        config.recordLinkFieldId = typeof action.config.recordLinkFieldId === 'string' ? action.config.recordLinkFieldId.trim() : ''
+      }
+      if (mode === 'decision') {
+        config.decisionNodeKey = typeof action.config.decisionNodeKey === 'string' ? action.config.decisionNodeKey.trim() : ''
+      }
+      return { type: action.type, config }
+    }
     if (action.type === 'send_notification') {
       return {
         type: action.type,
@@ -3857,6 +4403,9 @@ async function onTestRun(): Promise<void> {
 }
 
 .meta-rule-editor__label { font-size: 12px; font-weight: 600; color: var(--ms-text-2); margin-top: 4px; }
+
+.meta-rule-editor__fwb-confirmation { margin-top: 8px; }
+.meta-rule-editor__fwb-confirm-button { margin-top: 4px; }
 
 .meta-rule-editor__hint--error { color: var(--el-color-danger-dark-2); }
 

@@ -7,6 +7,8 @@
  * groups when API clients send them.
  */
 
+import { compareExactDecimal, coerceExactDecimal } from './approval-fwb-target-fields'
+
 export type ConditionOperator =
   | 'equals'
   | 'not_equals'
@@ -423,6 +425,35 @@ export function validateConditionGroupAgainstFields(
 }
 
 /**
+ * Coerce a field/condition value for legacy numeric display helpers.
+ *
+ * Prefer `compareExactDecimal` / `valuesEqualLoose` for condition evaluation — those never use
+ * JS Number and remain correct above 2^53. This helper still returns a JS number for callers that
+ * need a float (e.g. charts); it returns null for non-decimal or values that would lose low bits.
+ */
+export function coerceComparableNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null
+    return Number.isInteger(value) && !Number.isSafeInteger(value) ? null : value
+  }
+  const exact = coerceExactDecimal(value, undefined)
+  if (!exact.ok) return null
+  const n = Number(exact.v)
+  if (!Number.isFinite(n)) return null
+  // Refuse values that cannot round-trip through Number without low-bit loss (above 2^53 etc.).
+  if (compareExactDecimal(exact.v, n) !== 0) return null
+  return n
+}
+
+/** Equality that treats number 1.5 and D7 string "1.5" as equal via exact decimal (no Number). */
+function valuesEqualLoose(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  const cmp = compareExactDecimal(a, b)
+  if (cmp !== null) return cmp === 0
+  return false
+}
+
+/**
  * Evaluate a single condition against a field value.
  */
 export function evaluateCondition(
@@ -433,10 +464,10 @@ export function evaluateCondition(
 
   switch (condition.operator) {
     case 'equals':
-      return fieldValue === condition.value
+      return valuesEqualLoose(fieldValue, condition.value)
 
     case 'not_equals':
-      return fieldValue !== condition.value
+      return !valuesEqualLoose(fieldValue, condition.value)
 
     case 'contains': {
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
@@ -459,9 +490,8 @@ export function evaluateCondition(
     }
 
     case 'greater_than': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue > condition.value
-      }
+      const cmp = compareExactDecimal(fieldValue, condition.value)
+      if (cmp !== null) return cmp > 0
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue > condition.value
       }
@@ -469,9 +499,8 @@ export function evaluateCondition(
     }
 
     case 'less_than': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue < condition.value
-      }
+      const cmp = compareExactDecimal(fieldValue, condition.value)
+      if (cmp !== null) return cmp < 0
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue < condition.value
       }
@@ -479,9 +508,8 @@ export function evaluateCondition(
     }
 
     case 'greater_or_equal': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue >= condition.value
-      }
+      const cmp = compareExactDecimal(fieldValue, condition.value)
+      if (cmp !== null) return cmp >= 0
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue >= condition.value
       }
@@ -489,9 +517,8 @@ export function evaluateCondition(
     }
 
     case 'less_or_equal': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue <= condition.value
-      }
+      const cmp = compareExactDecimal(fieldValue, condition.value)
+      if (cmp !== null) return cmp <= 0
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue <= condition.value
       }
@@ -506,12 +533,12 @@ export function evaluateCondition(
 
     case 'in': {
       if (!Array.isArray(condition.value)) return false
-      return (condition.value as unknown[]).includes(fieldValue)
+      return (condition.value as unknown[]).some((entry) => valuesEqualLoose(fieldValue, entry))
     }
 
     case 'not_in': {
       if (!Array.isArray(condition.value)) return true
-      return !(condition.value as unknown[]).includes(fieldValue)
+      return !(condition.value as unknown[]).some((entry) => valuesEqualLoose(fieldValue, entry))
     }
 
     default:
