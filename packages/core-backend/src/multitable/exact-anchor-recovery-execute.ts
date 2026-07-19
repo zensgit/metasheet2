@@ -35,6 +35,14 @@ import {
   assertExactRestorableScalarValue,
   ExactRestoreValueError,
 } from './exact-anchor-restore-validate'
+import {
+  assertNoHierarchyParentCycle,
+  buildHierarchyParentOverridesByField,
+  collectSameSheetLinkChangeFieldIds,
+  HierarchyCycleError,
+  loadHierarchyParentFieldIds,
+  type HierarchyCycleLinkGuard,
+} from './hierarchy-cycle-guard'
 
 /** Normalize a link-field cell (array | single | null) to a string[] of foreign record ids. */
 function normalizeLinkIds(value: unknown): string[] {
@@ -141,7 +149,7 @@ export type ExactAnchorApplyRefusal =
   | 'preview-drift' // the live reconstruction diverged from the signed scope (409-class; re-preview)
   | 'schema-drift' // schemaHash mismatch (retype/property/field set) OR plan.driftCount > 0 ⇒ WHOLE apply refused, zero writes
   | 'inbound-unprovable' // plan.resurrects.length > 0 — at-anchor inbound relations cannot be proven (D1c)
-  | 'link-integrity' // missing/ambiguous foreign sheet, missing/wrong-sheet target, same-op delete target, or mirror
+  | 'link-integrity' // missing/ambiguous foreign sheet, missing/wrong-sheet target, same-op delete target, mirror, or hierarchy parent cycle
   | 'value-invalid' // current-schema scalar exactness OR whole-record validateRecord fails
   | 'record-locked' // in-fence lock check: record locked by another actor (values-free)
   | 'recovery-trust-required' // fence+strict substrate missing or HISTORY_INCOMPLETE under the fence
@@ -440,6 +448,91 @@ export async function applyExactAnchorRecovery(
           )
           const foundSet = new Set((found.rows as Array<{ id: unknown }>).map((row) => String(row.id)))
           if (targetIds.some((id) => !foundSet.has(id))) throw new ApplyRefusalError('link-integrity')
+        }
+      }
+
+      // Hierarchy parent cycle (RecordWriteService parity): multi-record FINAL-STATE overrides, before mutation.
+      // A historical same-sheet parent link can be valid at the anchor yet cycle against the CURRENT live graph.
+      {
+        const changesByRecord = new Map<string, Array<{ fieldId: string; value: unknown }>>()
+        for (const rw of revertWrites) {
+          if (rw.linkUpdates.length === 0) continue
+          changesByRecord.set(
+            rw.recordId,
+            rw.linkUpdates.map((lu) => ({ fieldId: lu.fieldId, value: lu.targetIds })),
+          )
+        }
+        if (changesByRecord.size > 0) {
+          const linkGuardById = new Map<string, HierarchyCycleLinkGuard>()
+          for (const f of fields) {
+            if (f.type !== 'link') {
+              linkGuardById.set(f.id, { type: f.type })
+              continue
+            }
+            const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(f.id))
+            const prop = rawPropById.get(f.id) ?? {}
+            const limitSingle =
+              prop.limitSingleRecord === true ||
+              prop.isSingle === true ||
+              // property may use nested link shape after serializeFieldRow
+              (f.property as { link?: { limitSingleRecord?: unknown } } | undefined)?.link?.limitSingleRecord === true
+            linkGuardById.set(f.id, {
+              type: 'link',
+              link: foreignSheetId
+                ? { foreignSheetId, limitSingleRecord: limitSingle }
+                : null,
+            })
+          }
+          const sameSheetLinkChangeFieldIds = collectSameSheetLinkChangeFieldIds({
+            changesByRecord,
+            fieldById: linkGuardById,
+            sheetId: input.sheetId,
+          })
+          if (sameSheetLinkChangeFieldIds.size > 0) {
+            const hierarchyParentFieldIds = await loadHierarchyParentFieldIds({
+              query,
+              sheetId: input.sheetId,
+              fields: fields.map((f) => ({
+                id: f.id,
+                type: f.type,
+                order: typeof f.order === 'number' ? f.order : undefined,
+                property: f.property as Record<string, unknown> | undefined,
+              })),
+            })
+            const guardedHierarchyParentFieldIds = new Set(
+              [...sameSheetLinkChangeFieldIds].filter((fid) => hierarchyParentFieldIds.has(fid)),
+            )
+            if (guardedHierarchyParentFieldIds.size > 0) {
+              const hierarchyParentOverridesByField = buildHierarchyParentOverridesByField({
+                changesByRecord,
+                hierarchyParentFieldIds: guardedHierarchyParentFieldIds,
+                normalizeLinkIds,
+              })
+              for (const rw of revertWrites) {
+                for (const lu of rw.linkUpdates) {
+                  if (!guardedHierarchyParentFieldIds.has(lu.fieldId)) continue
+                  const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(lu.fieldId))
+                  if (foreignSheetId !== input.sheetId) continue
+                  // Empty parent clears the edge — cannot create a cycle.
+                  if (lu.targetIds.length === 0) continue
+                  try {
+                    await assertNoHierarchyParentCycle({
+                      query,
+                      sheetId: input.sheetId,
+                      recordId: rw.recordId,
+                      fieldId: lu.fieldId,
+                      parentRecordIds: lu.targetIds,
+                      parentOverridesByRecord: hierarchyParentOverridesByField.get(lu.fieldId) ?? new Map(),
+                      normalizeLinkIds,
+                    })
+                  } catch (e) {
+                    if (e instanceof HierarchyCycleError) throw new ApplyRefusalError('link-integrity')
+                    throw e
+                  }
+                }
+              }
+            }
+          }
         }
       }
 

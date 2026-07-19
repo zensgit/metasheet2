@@ -10,7 +10,7 @@
  *   RESTORABLE-PROJECTION  formula preserved; derived-only ⇒ no revision/version/link/endpoint BUT token burns.
  *   SCHEMA-HASH-DRIFT      post-preview retype / property-only change ⇒ schema-drift; missing field still covered.
  *   VALUE-INVALID     unsafe rich longText / select-option drift refuse with zero writes.
- *   LINK-INTEGRITY    missing target, wrong sheet, alias ambiguity, same-op delete target.
+ *   LINK-INTEGRITY    missing target, wrong sheet, alias ambiguity, same-op delete target, hierarchy cycle.
  *   RESET two-phase   cross-linked delete candidates both get inbound tombstones.
  *
  * The module is NOT wired to any route. Flags toggled only inside this test process (default OFF real).
@@ -117,6 +117,7 @@ async function wipe(): Promise<void> {
     [SHEET],
   ).catch(() => {})
   await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [SHEET]).catch(() => {})
+  await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET]).catch(() => {})
   for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records'])
     await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
   await q('DELETE FROM meta_record_history_operations WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -1058,6 +1059,99 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     } finally {
       await q('DELETE FROM meta_fields WHERE id = $1', [F_AMB]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [OTHER]).catch(() => {})
+    }
+  })
+
+  test('LINK-INTEGRITY hierarchy cycle: restoring old parent link would cycle against live graph ⇒ whole refuse, zero burn/revision/data/link; acyclic sibling world applies', async () => {
+    // Live tree is valid (A ← B ← C). At-anchor A pointed at C. Restoring A→C while live B→A, C→B cycles A→C→B→A.
+    // Hierarchy view marks F_LINK as the parent field so RecordWriteService's cycle primitives engage.
+    const VIEW = `view_hier_${TS}`
+    await q(
+      `INSERT INTO meta_views (id, sheet_id, name, type, config) VALUES ($1,$2,$3,$4,$5::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+      [VIEW, SHEET, 'Tree', 'hierarchy', JSON.stringify({ parentFieldId: F_LINK })],
+    )
+    try {
+      const R_A = `rec_hier_a_${TS}`
+      const R_B = `rec_hier_b_${TS}`
+      const R_C = `rec_hier_c_${TS}`
+      // Order: B,C exist before A's at-anchor parent=[C] event; post-anchor clears A.parent so only A reverts.
+      const [sB, sC, sA1, sA2, sPost] = await seqBand(5)
+      await revSeq(R_B, 1, 'create', { [F_STR]: 'B', [F_LINK]: [R_A] }, sB)
+      await revSeq(R_C, 1, 'create', { [F_STR]: 'C', [F_LINK]: [R_B] }, sC)
+      const op = await sealAnchorOp(R_A, [
+        { seq: sA1, version: 1, action: 'create', snap: { [F_STR]: 'A', [F_LINK]: [] } },
+        { seq: sA2, version: 2, action: 'update', snap: { [F_STR]: 'A', [F_LINK]: [R_C] } },
+      ])
+      await revSeq(R_A, 3, 'update', { [F_STR]: 'A', [F_LINK]: [] }, sPost)
+      // Live: valid tree A ← B ← C (A has no parent).
+      await live(R_A, { [F_STR]: 'A', [F_LINK]: [] }, 3)
+      await live(R_B, { [F_STR]: 'B', [F_LINK]: [R_A] }, 1)
+      await live(R_C, { [F_STR]: 'C', [F_LINK]: [R_B] }, 1)
+      await insertLink(F_LINK, R_B, R_A)
+      await insertLink(F_LINK, R_C, R_B)
+
+      const beforeA = await liveRow(R_A)
+      const beforeB = await liveRow(R_B)
+      const beforeC = await liveRow(R_C)
+      const linkCountBefore = Number(((await q(
+        `SELECT count(*)::int c FROM meta_links
+         WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)`,
+        [SHEET],
+      )).rows[0] as { c: number }).c)
+      const revsBefore = Number(((await q(
+        `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1`,
+        [SHEET],
+      )).rows[0] as { c: number }).c)
+
+      const pv = await preview(op, 'revert')
+      expect(pv.ok).toBe(true)
+      const refused = await applyExactAnchorRecovery(txn, applyArgs(pv.token))
+      expect(refused).toEqual({ ok: false, reason: 'link-integrity' })
+      expect(await liveRow(R_A)).toEqual(beforeA)
+      expect(await liveRow(R_B)).toEqual(beforeB)
+      expect(await liveRow(R_C)).toEqual(beforeC)
+      expect(Number(((await q(
+        `SELECT count(*)::int c FROM meta_links
+         WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)`,
+        [SHEET],
+      )).rows[0] as { c: number }).c)).toBe(linkCountBefore)
+      expect(Number(((await q(
+        `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1`,
+        [SHEET],
+      )).rows[0] as { c: number }).c)).toBe(revsBefore)
+      expect(await burnCount()).toBe(0)
+
+      // POSITIVE control (acyclic sibling world): restore parent to a leaf that has no path back.
+      // Hierarchy view still armed — proves the guard does not over-refuse legitimate parent restores.
+      await wipe()
+      const R_ROOT = `rec_hier_root_${TS}`
+      const R_LEAF = `rec_hier_leaf_${TS}`
+      const [sLeaf, sRoot1, sRoot2, sRootPost] = await seqBand(4)
+      await revSeq(R_LEAF, 1, 'create', { [F_STR]: 'leaf', [F_LINK]: [] }, sLeaf)
+      const opOk = await sealAnchorOp(R_ROOT, [
+        { seq: sRoot1, version: 1, action: 'create', snap: { [F_STR]: 'root', [F_LINK]: [] } },
+        { seq: sRoot2, version: 2, action: 'update', snap: { [F_STR]: 'root', [F_LINK]: [R_LEAF] } },
+      ])
+      await revSeq(R_ROOT, 3, 'update', { [F_STR]: 'root', [F_LINK]: [] }, sRootPost)
+      await live(R_ROOT, { [F_STR]: 'root', [F_LINK]: [] }, 3)
+      await live(R_LEAF, { [F_STR]: 'leaf', [F_LINK]: [] }, 1)
+      // re-create hierarchy view (wipe removes views)
+      await q(
+        `INSERT INTO meta_views (id, sheet_id, name, type, config) VALUES ($1,$2,$3,$4,$5::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [VIEW, SHEET, 'Tree', 'hierarchy', JSON.stringify({ parentFieldId: F_LINK })],
+      )
+      const pvOk = await preview(opOk, 'revert')
+      const applied = await applyExactAnchorRecovery(txn, applyArgs(pvOk.token))
+      expect(applied.ok).toBe(true)
+      if (!applied.ok) return
+      expect(applied.applied.reverts).toBe(1)
+      expect((await liveRow(R_ROOT))?.data[F_LINK]).toEqual([R_LEAF])
+      expect(await linkTargets(F_LINK, R_ROOT)).toEqual([R_LEAF])
+      expect(await burnCount()).toBe(1)
+    } finally {
+      await q('DELETE FROM meta_views WHERE id = $1', [VIEW]).catch(() => {})
     }
   })
 
