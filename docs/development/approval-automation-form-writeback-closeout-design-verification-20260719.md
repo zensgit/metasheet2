@@ -31,9 +31,15 @@
 4. Attachment runtime（closeout rehearsal merge）  
 5. Follow-up：`validateAuthoringDefinition` 把 create/update/**restore** 对齐（empty-rules + decisionFieldIds；`assertNoParallelDynamicAssigneeConflicts` 仍 **publish-only**）
 
-**明确未做**：`git push` · merge PR 到 main · 改任何 flag 默认值 · 改 #4450 fan-out 语义 · 打开附件 authorability / 删 B2-28 strip。
+**明确未做**：merge PR 到 main · 改任何 flag 默认值 · 改 #4450 fan-out 语义 · 打开附件 authorability / 删 B2-28 strip。
 
-### 1.1 Runtime flags（默认全部 OFF）
+### 1.1 实施与复核职责
+
+- **Grok Build**：在隔离 worktree 中实现/整合 tree authoring、version restore、FWB、attachment 与 A1–A8 验收入口，并运行分层测试。
+- **Codex**：逐分支审阅产品语义、权限、事务、幂等、存储错误分类与 CI 接线；修正 restore 共享校验、附件真库 fixture、closeout 拓扑断言和两点接线解析；在组合 HEAD 上独立复跑测试与变异。
+- **Owner**：保留 merge、私有 ACL 前置、DingTalk UAT、runtime flag 开启、fan-out ratify 与附件 rung-4 的最终决策。
+
+### 1.2 Runtime flags（默认全部 OFF）
 
 | Flag | 默认 | 作用 |
 |---|---|---|
@@ -118,11 +124,12 @@
 | 证据 | 结果 |
 |---|---|
 | Fresh full migrations（CI `MIGRATION_EXCLUDE` 纪律） | **pass** |
-| Real-DB 相关套件（本 closeout 地图覆盖面） | **9 files / 53 tests** |
+| Real-DB 相关套件（closeout + authoring UAT + FWB×3 + attachment×5） | **10 files / 62 tests** |
 | 变更面 backend units | **31 files / 346 tests** |
 | 变更面 web specs | **17 files / 255 tests** |
 | `packages/core-backend` `tsc --noEmit` | **clean** |
 | `apps/web` `vue-tsc --noEmit` | **clean** |
+| `apps/web` production build（`vue-tsc -b && vite build`） | **pass** |
 
 ### 3.2 精确 mutation 证据（fail-closed · 已观测 RED）
 
@@ -131,6 +138,9 @@
 | 从 `restoreTemplateVersion` 去掉 shared `validateAuthoringDefinition` 调用 | **3 restore negatives RED** | empty-rules / invalid decisionFieldId / 合约漂移 revalidation 不再 fail-closed |
 | 将 S3 `AccessDenied` 错误分类成 `not_found` | **3 S3 tests RED** | 附件存储错误语义被冲淡 → 值自由/安全断言失败 |
 | 关掉 create-time attachment bind（`createApproval` 路径） | **3 production real-DB tests RED** | clean bind 正控 + infected/foreign 负控依赖生产 bind 调用 |
+| 从 `plugin-tests.yml` 删除一个 manifest 文件的 executable run-list 行 | **closeout wiring test RED** | 静态 pin 不能冒充 CI 真执行 |
+| 只把 manifest 文件留在 `vitest.config.ts` 块注释中 | **closeout wiring test RED** | 注释/路径子串不能冒充 no-DB exclude |
+| 中和 FWB `duplicate → already_applied` 分支 | **3 FWB real-DB tests RED** | 顺序重复、并发重复与 D9 W4 均出现第二次 apply |
 
 ### 3.3 其它闸证据（既有 suite · 不重编造）
 
