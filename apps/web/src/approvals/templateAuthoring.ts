@@ -68,13 +68,14 @@ export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
 export { placeholderRoleNodeKeys } from './approvalNodeEdit'
 
-export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
-export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
-
 // Top-level authorable field types: the 8 leaf scalar types plus `detail` (repeatable
-// line-items group). `attachment` is intentionally excluded (not authorable in v1); `detail`
-// is top-level-only — its sub-fields are restricted to the leaf set (`DETAIL_LEAF_FIELD_TYPES`)
-// and may never themselves be `detail` (one nesting level).
+// line-items group). `attachment` is intentionally excluded until lock §7 rung 4
+// (authorability + strip-retirement) is owner-ratified AFTER the feature flag is ON —
+// that ratification has not happened; B2-28 honest-disable stays until then.
+// `detail` is top-level-only — its sub-fields are restricted to the leaf set
+// (`DETAIL_LEAF_FIELD_TYPES`) and may never themselves be `detail` (one nesting level).
+export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
+
 export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'text',
   'textarea',
@@ -88,6 +89,8 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   // FWB-2 Layer 2: server-pinned baseId/sheetId record binding (single-record product field).
   'record-link',
 ]
+
+export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
 
 /**
  * Editable representation of a `FormFieldVisibilityRule`. `dependsOnFieldId === ''`

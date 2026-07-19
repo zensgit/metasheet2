@@ -48,6 +48,13 @@ import {
   pruneHiddenFormData,
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
+import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
+import {
+  extractAttachmentIdsByField,
+  stripAttachmentFormData,
+} from './approval-attachment-runtime'
+import { bindAttachmentsOnSubmit } from './approval-attachment-reconciler'
+import { isCreateApprovalTemplateManager } from './approval-template-manager'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import {
@@ -3946,11 +3953,11 @@ export class ApprovalProductService {
       departmentIds: actor.departmentIds ?? (actor.department ? [actor.department] : []),
       roles: actor.roles ?? [],
       permissions: actor.permissions ?? [],
-      isTemplateManager: (actor.permissions ?? []).includes('approval-templates:manage')
-        || (actor.permissions ?? []).includes('approvals:admin-templates')
-        || (actor.permissions ?? []).includes('approvals:*')
-        || (actor.permissions ?? []).includes('*:*')
-        || (actor.roles ?? []).includes('admin'),
+      // Shared predicate with attachment upload actor (approval-template-manager.ts).
+      isTemplateManager: isCreateApprovalTemplateManager({
+        roles: actor.roles,
+        permissions: actor.permissions,
+      }),
     })
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
@@ -3972,7 +3979,12 @@ export class ApprovalProductService {
     // REDUNDANT defense-in-depth for the owner's gate ③, not the sole enforcer — see the
     // route-preview-api "HARD GATE ③" golden, which stays green if either layer holds and only
     // flips if BOTH are removed.
-    const normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
+    let normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
+    // Attachment flag OFF (default): strip attachment keys so create stays B2-28 honest (no bind,
+    // no frozen ids). Flag ON: keep id arrays for same-txn bind in createApproval.
+    if (!isApprovalAttachmentsEnabled()) {
+      normalizedFormData = stripAttachmentFormData(formSchema, normalizedFormData)
+    }
     // RP-1 hard gate (owner order, ratified lock): on the PREVIEW path formData is interpreted
     // STRICTLY per the template field whitelist — unknown keys are dropped BEFORE validation,
     // amount-check and graph evaluation, so a request body can never smuggle org-probing
@@ -4432,6 +4444,32 @@ export class ApprovalProductService {
           initial.currentNodeKey,
         ],
       )
+
+      // Attachment form-freeze (§4.4): bind submitter-owned unbound ids in THIS transaction so a
+      // bind failure rolls back the whole create (instance + snapshot). Flag OFF ⇒ no-op (keys stripped).
+      if (isApprovalAttachmentsEnabled()) {
+        const formSchema = asFormSchema(bundle.version.form_schema)
+        try {
+          const idsByField = extractAttachmentIdsByField(formSchema, normalizedFormData)
+          await bindAttachmentsOnSubmit(client, actor.userId, instanceId, idsByField)
+        } catch (bindErr) {
+          // Values-free: never echo raw bindErr.message (host/port/user/SQL). RangeError =
+          // validation (foreign/infected/cap) → 400; unknown/DB/storage → 503 so the client
+          // does not treat infra faults as "bad form data".
+          if (bindErr instanceof RangeError) {
+            throw new ServiceError(
+              'Approval attachment bind rejected',
+              400,
+              'APPROVAL_ATTACHMENT_BIND_FAILED',
+            )
+          }
+          throw new ServiceError(
+            'Approval attachment bind unavailable',
+            503,
+            'APPROVAL_ATTACHMENT_BIND_UNAVAILABLE',
+          )
+        }
+      }
 
       // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
       // same-transaction auto-approval cascade at this node carries that same epoch (§7).

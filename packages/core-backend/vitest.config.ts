@@ -488,6 +488,16 @@ export default defineConfig({
       'tests/integration/multitable-fwb-production-e2e-realdb.test.ts',
       // FWB runtime modes (create/update/lock/missing/permission/decision re-entry) — real-DB.
       'tests/integration/multitable-fwb-runtime-modes-realdb.test.ts',
+      // approval attachment GC worker (TTL sweep + purge-intent drain) — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-gc-realdb.test.ts',
+      // attachment bind (form-freeze) + bucket reconciler — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-bind-reconcile-realdb.test.ts',
+      // attachment download participation matrix (CC/roles/admin) — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-participant-realdb.test.ts',
+      // attachment DB invariants (UNIQUE storage_key, purge lease biconditional) — real-DB.
+      'tests/integration/approval-attachment-schema-invariants-realdb.test.ts',
+      // createApproval production-path bind golden (clean/infected/foreign) — real-DB.
+      'tests/integration/approval-attachment-create-bind-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

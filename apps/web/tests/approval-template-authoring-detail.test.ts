@@ -49,7 +49,9 @@ function draftWith(fields: FieldAuthoringDraft[]): TemplateAuthoringDraft {
 }
 
 describe('templateAuthoring — detail is authorable', () => {
-  it('includes detail in AUTHORABLE_FIELD_TYPES (top-level), excludes attachment', () => {
+  it('includes detail in AUTHORABLE_FIELD_TYPES (top-level), excludes attachment (rung 4 owner-gated)', () => {
+    // Lock §7 rung 4 (authorability + strip-retirement) is owner-gated until the feature flag
+    // is ratified ON — attachment must stay unauthorable; B2-28 honest-disable unchanged.
     expect(AUTHORABLE_FIELD_TYPES).toContain('detail')
     expect(AUTHORABLE_FIELD_TYPES).not.toContain('attachment')
   })

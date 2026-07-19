@@ -254,7 +254,8 @@ describe('G-1 unsupportedTemplateAuthoringReason — complex graphs are save-abl
     expect(unsupportedTemplateAuthoringReason(buildTemplate(CC_GRAPH))).toBeNull()
   })
 
-  it('still returns a reason for an unauthorable attachment field type', () => {
+  it('still returns a reason for an unauthorable attachment field type (rung 4 not ratified)', () => {
+    // Lock §7 rung 4 is owner-gated; until flag is ratified ON, attachment remains unauthorable.
     const template = buildTemplate(LINEAR_GRAPH)
     template.formSchema = { fields: [{ id: 'file', type: 'attachment', label: '附件' }] }
     expect(unsupportedTemplateAuthoringReason(template)).toContain('暂不支持编辑的字段类型')

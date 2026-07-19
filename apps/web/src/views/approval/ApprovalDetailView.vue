@@ -157,7 +157,46 @@
               class="approval-detail__field"
             >
               <span class="approval-detail__label">{{ field.label }}</span>
-              <span>{{ field.value }}</span>
+              <!-- Attachment: auth-proxied links for live refs; tombstone for deleted/missing (G5). -->
+              <span
+                v-if="isAttachmentDisplayField(field.key)"
+                class="approval-detail__attachments"
+                data-testid="approval-detail-attachments"
+              >
+                <template v-if="attachmentIdsForField(field.key).length > 0">
+                  <template
+                    v-for="(attId, idx) in attachmentIdsForField(field.key)"
+                    :key="attId"
+                  >
+                    <span
+                      v-if="attachmentMetaById[attId]?.unavailable"
+                      class="approval-detail__attachment-unavailable"
+                      data-testid="approval-detail-attachment-unavailable"
+                    >
+                      {{ attachmentLabel(attId, idx) }}
+                    </span>
+                    <span
+                      v-else-if="attachmentMetaById[attId]?.tombstone"
+                      class="approval-detail__attachment-tombstone"
+                      data-testid="approval-detail-attachment-tombstone"
+                    >
+                      {{ attachmentLabel(attId, idx) }}
+                    </span>
+                    <a
+                      v-else
+                      class="approval-detail__attachment-link"
+                      data-testid="approval-detail-attachment-link"
+                      :href="attachmentDownloadUrl(attId)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {{ attachmentLabel(attId, idx) }}
+                    </a>
+                  </template>
+                </template>
+                <span v-else>{{ field.value }}</span>
+              </span>
+              <span v-else>{{ field.value }}</span>
             </div>
             <!-- detail / sub-form (明细): render the frozen rows × columns as a read-only
                  table driven by the instance's FROZEN formSchema columns (never the live
@@ -871,6 +910,12 @@ import {
   type DetailDisplayTable,
   type DisplayField,
 } from '../../approvals/detailField'
+import {
+  approvalAttachmentDownloadUrl,
+  attachmentDisplayLabel,
+  resolveAttachmentMeta,
+  type AttachmentMetaDto,
+} from '../../approvals/attachmentUpload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
@@ -910,6 +955,50 @@ const waitChipType = computed(() => {
   if (severity === 'warn') return 'warning'
   return 'info'
 })
+
+function isAttachmentDisplayField(fieldKey: string): boolean {
+  const schema = approval.value?.formSchema
+  const field = schema?.fields?.find((f) => f.id === fieldKey)
+  return field?.type === 'attachment'
+}
+
+function attachmentIdsForField(fieldKey: string): string[] {
+  const raw = approval.value?.formSnapshot?.[fieldKey]
+  if (!Array.isArray(raw)) return []
+  return raw.filter((id): id is string => typeof id === 'string' && id.length > 0)
+}
+
+function attachmentDownloadUrl(attId: string): string {
+  return approvalAttachmentDownloadUrl(attId)
+}
+
+const attachmentMetaById = ref<Record<string, AttachmentMetaDto>>({})
+
+function attachmentLabel(attId: string, idx: number): string {
+  return attachmentDisplayLabel(attachmentMetaById.value[attId], idx)
+}
+
+// Resolve frozen attachment ids → live link or tombstone (G5). Never storage keys / object-store URLs.
+watch(
+  () => approval.value?.id,
+  async (id) => {
+    attachmentMetaById.value = {}
+    if (!id || !approval.value?.formSchema || !approval.value.formSnapshot) return
+    const ids: string[] = []
+    for (const field of approval.value.formSchema.fields ?? []) {
+      if (field.type !== 'attachment') continue
+      ids.push(...attachmentIdsForField(field.id))
+    }
+    const next: Record<string, AttachmentMetaDto> = {}
+    await Promise.all(
+      ids.map(async (attId) => {
+        next[attId] = await resolveAttachmentMeta(attId)
+      }),
+    )
+    attachmentMetaById.value = next
+  },
+  { immediate: true },
+)
 
 // Read-only detail (明细) tables, keyed by snapshot field id. Built from the instance's FROZEN
 // formSchema (C-3a read-path) so a later column rename/reorder on the live template never
@@ -1903,6 +1992,31 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.approval-detail__attachments {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approval-detail__attachment-link {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+.approval-detail__attachment-link:hover {
+  text-decoration: underline;
+}
+
+.approval-detail__attachment-tombstone {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.approval-detail__attachment-unavailable {
+  color: var(--el-color-warning);
+  font-size: 13px;
 }
 
 .approval-detail__field {

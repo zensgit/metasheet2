@@ -87,6 +87,23 @@ import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from './routes/approval-attachments'
+import {
+  resolveApprovalActorId,
+  resolveApprovalActorRoles,
+  resolveApprovalTenantId,
+  resolveCreateApprovalActorFromRequest,
+} from './routes/approvals'
+import {
+  authorizeUploadTarget,
+  createDownloadAuthChecks,
+  startApprovalAttachmentLifecycle,
+} from './services/approval-attachment-runtime'
+import { resolveApprovalAttachmentStore } from './services/approval-attachment-storage'
+import { defaultPassThroughScanHook } from './services/approval-attachment-scan'
+import { authenticate } from './middleware/auth'
+import { rbacGuard } from './rbac/rbac'
+import { pool as approvalAttachmentPool } from './db/pg'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
@@ -281,6 +298,7 @@ export class MetaSheetServer {
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
+  private stopApprovalAttachmentLifecycle?: () => void
   private automationService?: AutomationService
   // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
   // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
@@ -1255,6 +1273,69 @@ export class MetaSheetServer {
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
+    // Approval attachments (default OFF): mount upload/download/delete only when the flag is ON.
+    // Local FS is refuse-closed in production (O3 → values-free 503); no dormant routes when OFF.
+    if (isApprovalAttachmentsEnabled() && approvalAttachmentPool) {
+      const resolved = resolveApprovalAttachmentStore()
+      const storeUnavailable = resolved.store === null
+      const store = resolved.store ?? {
+        put: async () => { throw Object.assign(new Error('storage_unavailable'), { code: 'storage_unavailable' }) },
+        get: async () => { throw Object.assign(new Error('storage_unavailable'), { code: 'storage_unavailable' }) },
+        delete: async () => false,
+      }
+      // Exact create-approval capability stack: authenticate + rbacGuard('approvals','write').
+      // Mounted BEFORE multer inside the router factory so denials never parse/store.
+      const authorizeCreate = [authenticate, rbacGuard('approvals', 'write')]
+      // Viewer + upload actor: REUSE exported createApproval resolvers (no parallel parsing).
+      const viewerContext = (req: import('express').Request) => {
+        const id = resolveApprovalActorId(req)
+        if (!id) return null
+        const roles = resolveApprovalActorRoles(req)
+        const actor = resolveCreateApprovalActorFromRequest(req)
+        // isAdmin for download participation only — NOT for template visibility bypass.
+        // Mirror operational admin (role admin / *:* / approvals:*) used elsewhere; does not
+        // expand isTemplateManager (that stays isCreateApprovalTemplateManager).
+        const isAdmin = roles.includes('admin')
+          || (actor?.permissions ?? []).includes('*:*')
+          || (actor?.permissions ?? []).includes('approvals:*')
+        return { id, roles, isAdmin }
+      }
+      const attachmentRouter = createApprovalAttachmentRouter({
+        db: approvalAttachmentPool,
+        store,
+        storeUnavailable,
+        authenticate,
+        authorizeCreate,
+        scanHook: defaultPassThroughScanHook,
+        authChecks: createDownloadAuthChecks(approvalAttachmentPool),
+        viewerContext,
+        orgId: (req) => {
+          // Prefer tenant from the same resolver createApproval uses (tenantId).
+          const tenant = resolveApprovalTenantId(req)
+          if (tenant) return tenant
+          const u = req.user as Record<string, unknown> | undefined
+          const candidate = u?.orgId ?? u?.org_id
+          return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
+        },
+        uploadActor: (req) => {
+          // Exact createApproval actor fields (departmentIds includes departments/dept arrays).
+          const actor = resolveCreateApprovalActorFromRequest(req)
+          if (!actor) return null
+          return {
+            userId: actor.userId,
+            departmentIds: actor.departmentIds,
+            roles: actor.roles,
+            // Same predicate as assembleCreationContext — approvals:admin alone does NOT bypass.
+            isTemplateManager: actor.isTemplateManager,
+          }
+        },
+        authorizeUploadTarget: (templateId, fieldId, actor) =>
+          authorizeUploadTarget(approvalAttachmentPool!, templateId, fieldId, actor),
+      })
+      if (attachmentRouter) {
+        this.app.use(attachmentRouter)
+      }
+    }
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
@@ -2102,6 +2183,13 @@ export class MetaSheetServer {
         this.stopMultitableAttachmentBlobPurge?.()
       } catch (err) {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        this.stopApprovalAttachmentLifecycle?.()
+      } catch (err) {
+        this.logger.warn(`Approval attachment lifecycle stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -3158,6 +3246,19 @@ export class MetaSheetServer {
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })
       this.stopMultitableAttachmentBlobPurge = startMultitableAttachmentBlobPurge({ logger: this.logger })
+      // Approval attachment GC / purge / reconciler — only when flag ON and a usable store exists.
+      if (isApprovalAttachmentsEnabled() && approvalAttachmentPool) {
+        const resolved = resolveApprovalAttachmentStore()
+        if (resolved.store) {
+          this.stopApprovalAttachmentLifecycle = startApprovalAttachmentLifecycle({
+            db: approvalAttachmentPool,
+            store: resolved.store,
+            logger: this.logger,
+          })
+        } else {
+          this.logger.warn('approval attachment lifecycle not started: storage unavailable (values-free)')
+        }
+      }
     }
 
     // Register signal handlers only for real runtime, not test runners.
