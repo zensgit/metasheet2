@@ -127,10 +127,12 @@ async function syncOneOutboundLinkField(
  *   6. Dual-hash drift (composed scopeHash + live liveSetHash) + plan (L7).
  *   7. schema-drift whole-reject; RESURRECT fail-closed (`inbound-unprovable` — D1c link history unsolved;
  *      temporary kernel boundary, not route-deferred replay).
- *   8. Canonical restorable projection per revert (projectRestorableOntoLive): derived-only ⇒ no-op;
- *      foreign-link integrity for every changed writable forward link; REQUIRED
- *      `evaluatePlanAuthorization` over the true restorable delta (before mint/writes).
- *   9. APPLY: restorable reverts (data + meta_links) + RESET canonical delete parity; seal last.
+ *   8. Canonical restorable PROJECTION only (projectRestorableOntoLive) — derived-only ⇒ no-op. Builds the
+ *      exact write delta WITHOUT scalar/link validation (no-oracle: value/existence must not leak before auth).
+ *   9. REQUIRED `evaluatePlanAuthorization` over that delta (person membership + foreign-target read/edit
+ *      authority belong here in the route adapter). Deny ⇒ uniform `forbidden` before any sensitive validator.
+ *  10. AFTER planAuth=true: scalar/whole-record CURRENT validation, foreign-target existence, hierarchy cycle.
+ *  11. APPLY: restorable reverts (data + meta_links) + RESET canonical delete parity; seal last.
  *
  * KERNEL-OWNED: security adjudication, restorable projection, link integrity, both-direction reset cleanup,
  * tombstone/trash, anti-replay, trust substrate. Route-owned: presentation masking, size ceilings, realtime,
@@ -178,21 +180,33 @@ export interface ExactAnchorRevertWriteIntent {
 
 /**
  * Context for the REQUIRED in-fence write-authorization dependency. Built AFTER plan + restorable
- * projection so the eventual route adapter can enforce manage-sheet + per-record edit/delete/row ownership
- * + field-write permissions over exactly the true restorable delta (not full snapshots).
+ * PROJECTION (before scalar/link validation) so the route adapter can enforce manage-sheet + per-record
+ * edit/delete/row ownership + field-write permissions over exactly the true restorable delta (not full
+ * snapshots).
+ *
+ * ROUTE ADAPTER MUST also adjudicate inside this callback (no-oracle / cross-base parity):
+ *   - person-field membership (whether historical person ids are still allowable for the actor/sheet),
+ *   - foreign link target READ/EDIT authority (including cross-base target sheet access).
+ * Those checks MUST run here so a denied actor receives uniform `forbidden` and cannot distinguish
+ * value-invalid / link-integrity / missing-target via response shape.
  */
 export interface ExactAnchorPlanAuthContext {
   mode: ExactAnchorApplyMode
   sheetId: string
   actorId: string
   plan: ExactAnchorRecoveryPlan
-  /** reverts that would write (isNoOp filtered out). */
+  /** reverts that would write (isNoOp filtered out) — projected delta, not yet value/target validated. */
   revertWrites: ExactAnchorRevertWriteIntent[]
   /** record ids the TOKEN-BOUND reset mode would delete. */
   deleteRecordIds: string[]
 }
 
-/** REQUIRED — omission is a TypeScript error. Must return true to proceed to mint/writes. */
+/**
+ * REQUIRED — omission is a TypeScript error. Must return true to proceed to sensitive validation + writes.
+ * Invoked AFTER restorable projection and BEFORE scalar/whole-record validation, foreign-target existence,
+ * and hierarchy-cycle checks. Route adapters: include person membership + foreign-target read/edit authority
+ * (see {@link ExactAnchorPlanAuthContext}).
+ */
 export type EvaluatePlanAuthorization = (
   query: QueryFn,
   context: ExactAnchorPlanAuthContext,
@@ -220,8 +234,9 @@ export interface ExactAnchorApplyInput {
   /** REQUIRED in-fence full-read adjudication (P1-2) — same contract as the preview. */
   evaluateFullReadAccess: EvaluateRecoveryFullReadAccess
   /**
-   * REQUIRED in-fence WRITE authorization over the true restorable plan/projection (v3.7 §5 step 7).
-   * Re-evaluated FRESH under the fence after the plan is known and BEFORE mintOperation/any write.
+   * REQUIRED in-fence WRITE authorization over the true restorable projection delta (v3.7 §5).
+   * Invoked AFTER projection and BEFORE scalar/link validation + mintOperation/any write (no-oracle).
+   * Route adapters must include person membership + foreign-target read/edit authority here.
    * Omission is structurally impossible (typed required field). Full-read alone is insufficient.
    */
   evaluatePlanAuthorization: EvaluatePlanAuthorization
@@ -371,8 +386,8 @@ export async function applyExactAnchorRecovery(
         mode === 'reset' ? [...plan.deletedAtAnchorLiveNow, ...plan.createdAfterAnchor] : []
       const deleteIdSet = new Set(deleteRecordIds)
 
-      // Restorable projection per plan.revert — derived-only differences become no-ops.
-      // Current-schema exact validation on every changed scalar (fail closed value-invalid).
+      // Restorable PROJECTION only (no value/target validation yet — no-oracle ordering).
+      // Build the exact write delta first; planAuth adjudicates it before any sensitive validator can leak.
       const revertWrites: ExactAnchorRevertWriteIntent[] = []
       for (const r of plan.reverts) {
         const live = liveById.get(r.recordId)
@@ -387,14 +402,40 @@ export async function applyExactAnchorRecovery(
           normalizeLinkIds,
         })
         if (projection.isNoOp) continue
+        revertWrites.push({
+          recordId: r.recordId,
+          liveVersion: r.liveVersion,
+          changedFieldIds: projection.changedFieldIds,
+          patch: projection.patch,
+          projectedData: projection.data,
+          linkUpdates: projection.linkUpdates,
+        })
+      }
+
+      // REQUIRED in-fence WRITE authorization over the true restorable delta (BEFORE scalar/link validation).
+      // Route adapter: person membership + foreign-target read/edit authority must live here so deny is
+      // uniform `forbidden` and value-invalid / missing-target cannot oracle write/target authority.
+      if (!(await input.evaluatePlanAuthorization(query, {
+        mode,
+        sheetId: input.sheetId,
+        actorId: input.actorId,
+        plan,
+        revertWrites,
+        deleteRecordIds,
+      }))) {
+        throw new ApplyRefusalError('forbidden')
+      }
+
+      // AFTER planAuth=true — sensitive validators (may distinguish shapes only for authorized writers).
+      // Per-scalar exactness under CURRENT codecs (delegates longText → validateLongTextValue).
+      for (const rw of revertWrites) {
         try {
-          // Per-scalar exactness under CURRENT codecs (delegates longText → validateLongTextValue).
-          for (const fid of projection.changedFieldIds) {
+          for (const fid of rw.changedFieldIds) {
             const field = fieldById.get(fid)
             if (!field) continue
-            if (field.type === 'link') continue // dedicated link path
-            const hist = projection.patch[fid]
-            if (hist === null || hist === undefined) continue // unset of this key; whole-record check covers required
+            if (field.type === 'link') continue // dedicated link path below
+            const hist = rw.patch[fid]
+            if (hist === null || hist === undefined) continue // unset; whole-record check covers required
             assertExactRestorableScalarValue(
               {
                 id: field.id,
@@ -414,23 +455,15 @@ export async function applyExactAnchorRecovery(
               type: f.type,
               property: f.property as Record<string, unknown> | undefined,
             })),
-            projection.data,
+            rw.projectedData,
           )
         } catch (e) {
           if (e instanceof ExactRestoreValueError) throw new ApplyRefusalError('value-invalid')
           throw e
         }
-        revertWrites.push({
-          recordId: r.recordId,
-          liveVersion: r.liveVersion,
-          changedFieldIds: projection.changedFieldIds,
-          patch: projection.patch,
-          projectedData: projection.data,
-          linkUpdates: projection.linkUpdates,
-        })
       }
 
-      // Foreign-link integrity for every changed writable forward link (before any mutation).
+      // Foreign-link integrity for every changed writable forward link (incl. existence — oracle-class).
       for (const rw of revertWrites) {
         for (const lu of rw.linkUpdates) {
           const field = fieldById.get(lu.fieldId)
@@ -536,20 +569,7 @@ export async function applyExactAnchorRecovery(
         }
       }
 
-      // 8. REQUIRED in-fence WRITE authorization over the true restorable plan (after plan/projection,
-      //    before mint/writes). Revocation between preview and execute, or field/record deny ⇒ forbidden.
-      if (!(await input.evaluatePlanAuthorization(query, {
-        mode,
-        sheetId: input.sheetId,
-        actorId: input.actorId,
-        plan,
-        revertWrites,
-        deleteRecordIds,
-      }))) {
-        throw new ApplyRefusalError('forbidden')
-      }
-
-      // 9. Apply — every write revision-emitted + ledger-tagged.
+      // Apply — every write revision-emitted + ledger-tagged.
       const op = await mintOperation(query, input.sheetId)
 
       let sheetBaseId: string | null = null

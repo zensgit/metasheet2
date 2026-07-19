@@ -6,7 +6,8 @@
  *                     token burned. Resurrect is fail-closed (inbound-unprovable) — success paths do not
  *                     depend on resurrection.
  *   MODE-MATRIX       reset deletes createdAfterAnchor (trash + delete revision); revert keeps them.
- *   REPLAY / LIVE-DRIFT / AUTH / PLAN-AUTH / DRIFT-REJECT / link+reset parity / trust substrate.
+ *   REPLAY / LIVE-DRIFT / AUTH / PLAN-AUTH (+ no-oracle over value-invalid/missing-target) /
+ *                     DRIFT-REJECT / link+reset parity / trust substrate.
  *   RESTORABLE-PROJECTION  formula preserved; derived-only ⇒ no revision/version/link/endpoint BUT token burns.
  *   SCHEMA-HASH-DRIFT      post-preview retype / property-only change ⇒ schema-drift; missing field still covered.
  *   VALUE-INVALID     unsafe rich longText / select-option drift refuse with zero writes.
@@ -839,6 +840,63 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     } finally {
       holder.release()
     }
+  })
+
+  test('PLAN-AUTH-NO-ORACLE scalar: planAuth=false dominates CURRENT-schema value-invalid (uniform forbidden; validator must not decide)', async () => {
+    // Historical XSS HTML would be value-invalid for an authorized writer — a denied writer must NOT see that.
+    const F_LT = `fld_eaa_noor_lt_${TS}`
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
+      [F_LT, SHEET, 'Body', 'longText', JSON.stringify({ rich: true }), 20],
+    )
+    try {
+      const R = `rec_noor_scalar_${TS}`
+      const unsafe = '<script>alert(1)</script><p>safe</p>'
+      const [sCreate, sUpdate] = await seqBand(2)
+      const op = await sealAnchorOp(R, [
+        { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'same', [F_LT]: unsafe } },
+      ])
+      await revSeq(R, 2, 'update', { [F_STR]: 'same', [F_LT]: '<p>clean</p>' }, sUpdate)
+      await live(R, { [F_STR]: 'same', [F_LT]: '<p>clean</p>' }, 2)
+      const before = await liveRow(R)
+      const pv = await preview(op, 'revert')
+      // Positive control: authorized path is value-invalid (proves the invalid scalar is real, not vacuous).
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'value-invalid' })
+      expect(await burnCount()).toBe(0)
+      // Denied planAuth: MUST be uniform forbidden — not value-invalid (no validator oracle).
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token, { planAuth: DENY_PLAN })))
+        .toEqual({ ok: false, reason: 'forbidden' })
+      expect(await liveRow(R)).toEqual(before)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_fields WHERE id = $1', [F_LT]).catch(() => {})
+    }
+  })
+
+  test('PLAN-AUTH-NO-ORACLE missing-target: planAuth=false dominates link-integrity missing foreign target (uniform forbidden)', async () => {
+    const R_A = `rec_noor_a_${TS}`
+    const R_REV = `rec_noor_link_${TS}`
+    const MISSING = `rec_noor_missing_${TS}`
+    const [sA, sCreate, sUpdate] = await seqBand(3)
+    await revSeq(R_A, 1, 'create', { [F_STR]: 'A' }, sA)
+    const op = await sealAnchorOp(R_REV, [
+      { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'x', [F_LINK]: [MISSING] } },
+    ])
+    await revSeq(R_REV, 2, 'update', { [F_STR]: 'x', [F_LINK]: [R_A] }, sUpdate)
+    await live(R_A, { [F_STR]: 'A' }, 1)
+    await live(R_REV, { [F_STR]: 'x', [F_LINK]: [R_A] }, 2)
+    await insertLink(F_LINK, R_REV, R_A)
+    const before = await liveRow(R_REV)
+    const pv = await preview(op, 'revert')
+    // Positive control: authorized path is link-integrity (missing target exists as a real check).
+    expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'link-integrity' })
+    expect(await burnCount()).toBe(0)
+    // Denied planAuth: MUST be uniform forbidden — not link-integrity (no existence-oracle).
+    expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token, { planAuth: DENY_PLAN })))
+      .toEqual({ ok: false, reason: 'forbidden' })
+    expect(await liveRow(R_REV)).toEqual(before)
+    expect(await linkTargets(F_LINK, R_REV)).toEqual([R_A])
+    expect(await burnCount()).toBe(0)
   })
 
   // ── D: foreign-link integrity ──────────────────────────────────────────────────────────────────────────
