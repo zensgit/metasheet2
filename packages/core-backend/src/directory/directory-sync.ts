@@ -3884,16 +3884,13 @@ export async function syncDirectoryIntegration(
           integrationId,
         })
       }
-    } catch (error) {
-      // Values-free: bounded reason code + Error.name only. Never interpolate error.message /
-      // readErrorMessage — raw DB/adapter text can carry relation names, SQL fragments, values.
-      const errorClass =
-        error instanceof Error && typeof error.name === 'string' && error.name.length > 0
-          ? error.name
-          : 'sweep_failed'
+    } catch (_error) {
+      // Values-free BY CONSTRUCTION: fixed message + closed meta only. Never log error.message,
+      // error.name, code, stack, relation, SQL, or any adapter-derived text — those are mutable /
+      // attacker-or-adapter-controlled and can carry values. Admin sweep endpoint is the retry path.
       logger.warn(
         'Department-binding sweep after successful sync failed (sync unaffected; retry via admin sweep endpoint)',
-        { integrationId, reason: 'sweep_failed', errorClass },
+        { integrationId, reason: 'sweep_failed' },
       )
     }
 
