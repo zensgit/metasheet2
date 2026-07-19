@@ -157,6 +157,27 @@ interface RequesterDirectoryRow {
   primary_department_name: string | null
 }
 
+interface RoutingPolicyProbeRow {
+  org_id: string
+  canonical_integration_id: string
+  canonical_status: string | null
+}
+
+/**
+ * B5-b fail-closed CONFIG error (design lock Lock 2): thrown when an `approval_routing` policy
+ * exists but cannot be honored — its canonical integration is missing/not-active, or the requester
+ * is linked in MORE THAN ONE policy-governed org. Deliberately a distinct type so the create-time
+ * caller can surface "routing policy misconfigured — contact an administrator" instead of the
+ * generic transient "please retry": retrying never fixes a broken policy. NOT thrown for data
+ * absence (a requester simply missing from the canonical directory resolves to `{}`).
+ */
+export class ApprovalRoutingPolicyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ApprovalRoutingPolicyError'
+  }
+}
+
 /**
  * Read-only resolution of the requester's direct manager + department head as
  * LOCAL user ids. Returns `{}` when the requester has no linked directory account
@@ -165,12 +186,17 @@ interface RequesterDirectoryRow {
  * `query` is injected (defaults to the shared pool) so the unit path can drive it
  * against an in-memory fixture without a database.
  *
- * `options.orgId` (S7 §3.3, optional / backward compatible): when supplied, the
- * requester-account pick is anchored to `directory_integrations.org_id` BEFORE the
- * `ORDER BY ... LIMIT 1` tie-break, so a local user linked into two orgs cannot have
- * the wrong org's account selected. Callers that omit `orgId` retain today's unscoped
- * (most-recently-updated) pick — kernel `ApprovalProductService` callers included.
- * Attendance-facing paths MUST pass `orgId`.
+ * `options.orgId` (S7 §3.3, optional / backward compatible) is a TENANT BOUNDARY:
+ * when supplied, every step of resolution is confined to that org — including the
+ * B5-b `approval_routing` policy probe (foreign-org policies must neither steer the
+ * pick nor trigger multi-org ambiguity). Within that org:
+ *   - a same-org policy is AUTHORITATIVE (canonical-integration pick);
+ *   - no same-org policy → org-anchored requester SELECT (`directory_integrations.org_id`
+ *     before ORDER BY/LIMIT 1) so a local user linked into two orgs cannot have the
+ *     wrong org's account selected.
+ * Callers that omit `orgId` retain the unscoped kernel path (B5-b Q4 across all
+ * linked orgs) — kernel `ApprovalProductService` callers included. Attendance-facing
+ * paths MUST pass `orgId`.
  */
 export async function resolveApprovalRequesterOrgRelations(
   localUserId: string,
@@ -182,17 +208,132 @@ export async function resolveApprovalRequesterOrgRelations(
 
   // Optional org anchor (S7 §3.3). Trim + non-empty only — an empty string must NOT
   // accidentally join against `org_id = ''` and force every row out of scope.
+  // When present this is a tenant boundary: it SCOPES the B5-b policy probe first,
+  // then (if no same-org policy) the requester-account pick.
   const orgId =
     typeof options.orgId === 'string' && options.orgId.trim().length > 0
       ? options.orgId.trim()
       : null
 
-  // 1) Requester's linked directory account + its primary department's raw.
-  // When `orgId` is set, join `directory_integrations` so the ORDER BY/LIMIT 1 only
-  // ever competes among accounts already inside the calling org.
-  const requesterRows = await query<RequesterDirectoryRow>(
+  // 0) B5-b (design lock Lock 2 + Q4): explicit `(org, purpose='approval_routing')` routing policy.
+  //    Since B1 an org can hold MULTIPLE directory integrations (DingTalk + local), and the legacy
+  //    requester pick below guesses among them by `ORDER BY a.updated_at DESC` — the exact
+  //    "latest integration wins" behavior the §6 owner ruling forbids.
+  //
+  //    TENANT BOUNDARY: when `orgId` is set, the probe is restricted to
+  //    `p.org_id = $2` for that exact org. A foreign-org policy is invisible here —
+  //    it must neither select a canonical integration nor inflate multi-org ambiguity.
+  //
+  //    When `orgId` is OMITTED (kernel path), the probe considers every org the user
+  //    is linked in (B5-b Q4, unchanged):
+  //      - NO policy row  → LEGACY unscoped pick below (Q1: zero behavior change until a
+  //        policy is explicitly set — staged opt-in).
+  //      - ONE policy     → the policy is AUTHORITATIVE: the requester pick is restricted to the
+  //        canonical integration. A policy whose canonical target is missing or not 'active' is a
+  //        CONFIG error → fail-closed typed throw (operator must fix the policy; silently falling
+  //        back to guessing would defeat the policy's purpose). A requester with no active account
+  //        in the canonical integration is DATA absence, not a config error → `{}` (same semantics
+  //        as "no linked directory account", e.g. a not-yet-synced employee).
+  //      - POLICIES IN >1 ORG the user is linked in → ambiguity is real and policy-managed →
+  //        fail-closed typed throw (multi-org users need explicit resolution, Q4). A user linked in
+  //        one policy-governed org AND one policy-less org follows the single governed policy —
+  //        deterministic, never a guess.
+  //
+  //    When `orgId` IS set:
+  //      - NO same-org policy → fall through to the S7 org-anchored requester SELECT.
+  //      - ONE same-org policy → AUTHORITATIVE canonical-integration pick (within the tenant).
+  //      - (multi-org ambiguity cannot fire: foreign policies are filtered out by p.org_id = $2.)
+  const policyRows = await query<RoutingPolicyProbeRow>(
     orgId
-      ? `SELECT a.integration_id::text       AS integration_id,
+      ? `SELECT DISTINCT p.org_id                            AS org_id,
+            p.canonical_integration_id::text             AS canonical_integration_id,
+            ci.status                                    AS canonical_status
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+       JOIN directory_integrations ai
+         ON ai.id = a.integration_id
+       JOIN org_directory_routing_policy p
+         ON p.org_id = ai.org_id
+        AND p.purpose = 'approval_routing'
+       LEFT JOIN directory_integrations ci
+         ON ci.id = p.canonical_integration_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'
+        AND p.org_id = $2`
+      : `SELECT DISTINCT p.org_id                            AS org_id,
+            p.canonical_integration_id::text             AS canonical_integration_id,
+            ci.status                                    AS canonical_status
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+       JOIN directory_integrations ai
+         ON ai.id = a.integration_id
+       JOIN org_directory_routing_policy p
+         ON p.org_id = ai.org_id
+        AND p.purpose = 'approval_routing'
+       LEFT JOIN directory_integrations ci
+         ON ci.id = p.canonical_integration_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'`,
+    orgId ? [userId, orgId] : [userId],
+  )
+  let canonicalIntegrationId: string | null = null
+  if (policyRows.rows.length > 0) {
+    const orgs = new Set(policyRows.rows.map((r) => r.org_id))
+    if (orgs.size > 1) {
+      // Only reachable on the no-orgId (kernel) path: org-scoped probe binds p.org_id = $2.
+      throw new ApprovalRoutingPolicyError(
+        `approval routing is policy-managed in ${orgs.size} orgs this user is linked in; multi-org routing requires explicit resolution`,
+      )
+    }
+    const policy = policyRows.rows[0]
+    if (policy.canonical_status !== 'active') {
+      throw new ApprovalRoutingPolicyError(
+        `the approval_routing policy for org "${policy.org_id}" points at a ${policy.canonical_status === null ? 'missing' : `'${policy.canonical_status}'`} integration; fix the routing policy`,
+      )
+    }
+    canonicalIntegrationId = policy.canonical_integration_id
+  }
+
+  // 1) Requester's linked directory account + its primary department's raw.
+  //    Precedence (tenant-scoped policy first, then S7 org anchor, then legacy):
+  //      a) POLICY-SCOPED when a (tenant-visible) policy governs — restricted to the
+  //         canonical integration (identical projection; consumers below are source-agnostic).
+  //      b) ORG-ANCHORED when no same-org/no-orgId policy and `orgId` is set — join
+  //         directory_integrations so ORDER BY/LIMIT 1 only competes inside the calling org (S7).
+  //      c) LEGACY unscoped otherwise — byte-identical pre-B5/pre-S7 pick (no-orgId + no policy).
+  const requesterRows = canonicalIntegrationId
+    ? await query<RequesterDirectoryRow>(
+        `SELECT a.integration_id::text       AS integration_id,
+            a.id::text                   AS account_id,
+            a.external_user_id           AS external_user_id,
+            a.raw                        AS raw,
+            a.title                      AS title,
+            d.external_department_id     AS primary_external_department_id,
+            d.raw                        AS primary_department_raw,
+            d.name                       AS primary_department_name
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+        AND a.integration_id = $2::uuid
+       LEFT JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+        AND ad.is_primary = true
+       LEFT JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'
+      ORDER BY a.updated_at DESC, a.id ASC
+      LIMIT 1`,
+        [userId, canonicalIntegrationId],
+      )
+    : orgId
+      ? await query<RequesterDirectoryRow>(
+          `SELECT a.integration_id::text       AS integration_id,
                 a.id::text                   AS account_id,
                 a.external_user_id           AS external_user_id,
                 a.raw                        AS raw,
@@ -215,30 +356,33 @@ export async function resolveApprovalRequesterOrgRelations(
           WHERE l.local_user_id = $1
             AND l.link_status = 'linked'
           ORDER BY a.updated_at DESC, a.id ASC
-          LIMIT 1`
-      : `SELECT a.integration_id::text       AS integration_id,
-                a.id::text                   AS account_id,
-                a.external_user_id           AS external_user_id,
-                a.raw                        AS raw,
-                a.title                      AS title,
-                d.external_department_id     AS primary_external_department_id,
-                d.raw                        AS primary_department_raw,
-                d.name                       AS primary_department_name
-           FROM directory_account_links l
-           JOIN directory_accounts a
-             ON a.id = l.directory_account_id
-            AND a.is_active = true
-           LEFT JOIN directory_account_departments ad
-             ON ad.directory_account_id = a.id
-            AND ad.is_primary = true
-           LEFT JOIN directory_departments d
-             ON d.id = ad.directory_department_id
-          WHERE l.local_user_id = $1
-            AND l.link_status = 'linked'
-          ORDER BY a.updated_at DESC, a.id ASC
           LIMIT 1`,
-    orgId ? [userId, orgId] : [userId],
-  )
+          [userId, orgId],
+        )
+      : await query<RequesterDirectoryRow>(
+          `SELECT a.integration_id::text       AS integration_id,
+            a.id::text                   AS account_id,
+            a.external_user_id           AS external_user_id,
+            a.raw                        AS raw,
+            a.title                      AS title,
+            d.external_department_id     AS primary_external_department_id,
+            d.raw                        AS primary_department_raw,
+            d.name                       AS primary_department_name
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+       LEFT JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+        AND ad.is_primary = true
+       LEFT JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'
+      ORDER BY a.updated_at DESC, a.id ASC
+      LIMIT 1`,
+          [userId],
+        )
   const requester = requesterRows.rows[0]
   if (!requester) return {}
 

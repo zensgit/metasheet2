@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { resolveApprovalRequesterOrgRelations } from '../../src/services/ApprovalDirectoryOrg'
+import {
+  ApprovalRoutingPolicyError,
+  resolveApprovalRequesterOrgRelations,
+} from '../../src/services/ApprovalDirectoryOrg'
 
 /**
  * Lane G (P1-A) plumbing unit test — drives the read-only org resolver against an
@@ -29,25 +32,66 @@ interface FakeDb {
   localByAccountId?: Record<string, string | null>
   // external_user_id -> linked local user id
   localByExternalId?: Record<string, string | null>
+  // B5-b routing-policy probe rows (default undefined/empty = no policy = legacy path)
+  policies?: Array<{ org_id: string; canonical_integration_id: string; canonical_status: string | null }>
 }
 
-function makeQuery(db: FakeDb & {
+type FakeDbWithTrace = FakeDb & {
   // When the org-anchored path is used, the fake can assert the orgId param and optionally return
   // a different requester (or empty) so the two-org / one-local-user contract is unit-provable.
   orgAnchoredRequester?: FakeDb['requester'] | null
+  // Policy-scoped path (`a.integration_id = $2::uuid`) can return a different account than
+  // the unscoped / org-anchored fixtures so same-org policy vs foreign-policy steering is
+  // discriminable.
+  policyScopedRequester?: FakeDb['requester'] | null
   lastOrgIdParam?: string | null
   lastRequesterSql?: string
-}) {
+  lastPolicySql?: string
+  lastPolicyOrgIdParam?: string | null
+  lastPolicyCanonicalParam?: string | null
+}
+
+function makeQuery(db: FakeDbWithTrace) {
   return async <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> => {
+    // B5-b routing-policy probe (`org_directory_routing_policy`). Default-empty means NO policy
+    // governs any org the user is linked in, so the resolver runs the LEGACY path byte-identical —
+    // which is why every pre-B5 fixture below keeps its expectations unchanged (same convention as
+    // the B3 normalized-manager default-empty note further down). Policy scenarios set db.policies.
+    //
+    // When production SQL includes `p.org_id = $2`, filter fixture rows to that org so the unit
+    // boundary cases below stay meaningful. This is NOT the load-bearing proof of the tenant
+    // boundary — that lives in org-directory-routing-policy-resolver.db.test.ts case F (real
+    // Postgres). Do not add permanent tests that assert vulnerable B-steering via a mutated fake.
+    if (text.includes('FROM directory_account_links l') && text.includes('org_directory_routing_policy')) {
+      db.lastPolicySql = text
+      let rows = db.policies ?? []
+      if (text.includes('p.org_id = $2')) {
+        const scopedOrg = params?.[1] != null ? String(params[1]) : null
+        db.lastPolicyOrgIdParam = scopedOrg
+        rows = rows.filter((p) => p.org_id === scopedOrg)
+      } else {
+        db.lastPolicyOrgIdParam = null
+      }
+      return { rows: rows as Row[] }
+    }
     if (text.includes('FROM directory_account_links l') && text.includes('LEFT JOIN directory_account_departments')) {
       db.lastRequesterSql = text
+      // Policy-scoped SELECT binds the canonical integration as $2 (must precede org-anchor check).
+      if (text.includes('a.integration_id = $2::uuid') || text.includes('a.integration_id = $2')) {
+        db.lastPolicyCanonicalParam = params?.[1] != null ? String(params[1]) : null
+        db.lastOrgIdParam = null
+        const row = db.policyScopedRequester !== undefined ? db.policyScopedRequester : db.requester
+        return { rows: (row ? [row] : []) as Row[] }
+      }
       // Org-anchored SELECT joins directory_integrations and binds org_id as $2.
       if (text.includes('JOIN directory_integrations di') && text.includes('di.org_id = $2')) {
         db.lastOrgIdParam = params?.[1] != null ? String(params[1]) : null
+        db.lastPolicyCanonicalParam = null
         const row = db.orgAnchoredRequester !== undefined ? db.orgAnchoredRequester : db.requester
         return { rows: (row ? [row] : []) as Row[] }
       }
       db.lastOrgIdParam = null
+      db.lastPolicyCanonicalParam = null
       return { rows: (db.requester ? [db.requester] : []) as Row[] }
     }
     // B3 normalized-manager gate query (`ad.is_manager = true`). Default-empty means the dept has
@@ -369,5 +413,176 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     expect(result.managerId).toBe('local-mgr')
     expect(db.lastOrgIdParam).toBeNull()
     expect(db.lastRequesterSql).not.toContain('directory_integrations')
+  })
+
+  // ── S7 tenant boundary × B5-b policy probe (orgId scopes policy visibility) ──
+  it('tenant boundary: policy only in org-B + orgId=A selects A via org-anchor (foreign policy neither steers nor multi-org-fails)', async () => {
+    const db: FakeDbWithTrace = {
+      // Unscoped / foreign-policy path would serve this B-side account (wrong).
+      requester: {
+        integration_id: 'int-B-canonical',
+        account_id: 'acc-B',
+        external_user_id: 'ext-B',
+        raw: {},
+        primary_external_department_id: 'D-B',
+        primary_department_raw: {},
+      },
+      policyScopedRequester: {
+        integration_id: 'int-B-canonical',
+        account_id: 'acc-B-policy',
+        external_user_id: 'ext-B-policy',
+        raw: {},
+        primary_external_department_id: 'D-B',
+        primary_department_raw: {},
+      },
+      // Correct: org-anchored A account.
+      orgAnchoredRequester: {
+        integration_id: 'int-A',
+        account_id: 'acc-A',
+        external_user_id: 'ext-A',
+        raw: {},
+        primary_external_department_id: 'D-A',
+        primary_department_raw: {},
+      },
+      // Policy only in foreign org B — must be invisible when orgId=A.
+      policies: [
+        {
+          org_id: 'org-B',
+          canonical_integration_id: 'int-B-canonical',
+          canonical_status: 'active',
+        },
+      ],
+      // Only the A manager is linked so a B-steered path cannot accidentally share the same id.
+      // Path discrimination is primarily lastPolicyCanonicalParam / lastOrgIdParam / lastRequesterSql.
+      normalizedDeptManagers: [{ account_id: 'acc-A-mgr', external_user_id: 'ext-A-mgr' }],
+      localByAccountId: { 'acc-A-mgr': 'local-A-mgr' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db), { orgId: 'org-A' })
+    // Probe was tenant-scoped and saw zero same-org policies → org-anchored A pick.
+    expect(db.lastPolicySql).toContain('p.org_id = $2')
+    expect(db.lastPolicyOrgIdParam).toBe('org-A')
+    expect(db.lastPolicyCanonicalParam).toBeNull()
+    expect(db.lastOrgIdParam).toBe('org-A')
+    expect(db.lastRequesterSql).toContain('di.org_id = $2')
+    expect(result.managerId).toBe('local-A-mgr')
+  })
+
+  it('tenant boundary: same-org policy + orgId=A selects the policy canonical integration (authoritative within A)', async () => {
+    const db: FakeDbWithTrace = {
+      // Org-anchored would pick a non-canonical A integration (wrong under policy).
+      orgAnchoredRequester: {
+        integration_id: 'int-A-other',
+        account_id: 'acc-A-other',
+        external_user_id: 'ext-A-other',
+        raw: {},
+        primary_external_department_id: 'D-A',
+        primary_department_raw: {},
+      },
+      // Policy-scoped canonical account inside A.
+      policyScopedRequester: {
+        integration_id: 'int-A-canonical',
+        account_id: 'acc-A-canonical',
+        external_user_id: 'ext-A-canonical',
+        raw: {},
+        primary_external_department_id: 'D-A',
+        primary_department_raw: {},
+      },
+      requester: {
+        integration_id: 'int-A-other',
+        account_id: 'acc-A-other',
+        external_user_id: 'ext-A-other',
+        raw: {},
+        primary_external_department_id: 'D-A',
+        primary_department_raw: {},
+      },
+      policies: [
+        {
+          org_id: 'org-A',
+          canonical_integration_id: 'int-A-canonical',
+          canonical_status: 'active',
+        },
+      ],
+      normalizedDeptManagers: [{ account_id: 'acc-A-canon-mgr', external_user_id: 'ext-A-canon-mgr' }],
+      localByAccountId: { 'acc-A-canon-mgr': 'local-A-canon-mgr' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db), { orgId: 'org-A' })
+    expect(db.lastPolicySql).toContain('p.org_id = $2')
+    expect(db.lastPolicyOrgIdParam).toBe('org-A')
+    expect(db.lastPolicyCanonicalParam).toBe('int-A-canonical')
+    expect(db.lastOrgIdParam).toBeNull() // not the org-anchored path
+    expect(db.lastRequesterSql).toMatch(/a\.integration_id = \$2/)
+    expect(result.managerId).toBe('local-A-canon-mgr')
+  })
+
+  it('tenant boundary: two policies (A+B) with orgId=A considers only A (no multi-org fail-close)', async () => {
+    const db: FakeDbWithTrace = {
+      policyScopedRequester: {
+        integration_id: 'int-A-canonical',
+        account_id: 'acc-A-canonical',
+        external_user_id: 'ext-A-canonical',
+        raw: {},
+        primary_external_department_id: 'D-A',
+        primary_department_raw: {},
+      },
+      orgAnchoredRequester: {
+        integration_id: 'int-A-other',
+        account_id: 'acc-A-other',
+        external_user_id: 'ext-A-other',
+        raw: {},
+        primary_external_department_id: 'D-A',
+        primary_department_raw: {},
+      },
+      policies: [
+        {
+          org_id: 'org-A',
+          canonical_integration_id: 'int-A-canonical',
+          canonical_status: 'active',
+        },
+        {
+          org_id: 'org-B',
+          canonical_integration_id: 'int-B-canonical',
+          canonical_status: 'active',
+        },
+      ],
+      normalizedDeptManagers: [{ account_id: 'acc-A-canon-mgr', external_user_id: 'ext-A-canon-mgr' }],
+      localByAccountId: { 'acc-A-canon-mgr': 'local-A-canon-mgr' },
+    }
+    // Must NOT throw multi-org ambiguity — B is filtered by p.org_id = $2.
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db), { orgId: 'org-A' })
+    expect(db.lastPolicyOrgIdParam).toBe('org-A')
+    expect(db.lastPolicyCanonicalParam).toBe('int-A-canonical')
+    expect(result.managerId).toBe('local-A-canon-mgr')
+  })
+
+  it('B5-b Q4 unchanged: no-orgId + two governed orgs still fail-closes (multi-org ambiguity)', async () => {
+    const db: FakeDbWithTrace = {
+      requester: {
+        integration_id: 'int-A',
+        account_id: 'acc-A',
+        external_user_id: 'ext-A',
+        raw: {},
+        primary_external_department_id: 'D-A',
+        primary_department_raw: {},
+      },
+      policies: [
+        {
+          org_id: 'org-A',
+          canonical_integration_id: 'int-A-canonical',
+          canonical_status: 'active',
+        },
+        {
+          org_id: 'org-B',
+          canonical_integration_id: 'int-B-canonical',
+          canonical_status: 'active',
+        },
+      ],
+    }
+    await expect(
+      resolveApprovalRequesterOrgRelations('local-req', makeQuery(db)),
+    ).rejects.toBeInstanceOf(ApprovalRoutingPolicyError)
+    // Kernel path: unscoped probe (no p.org_id = $2), so both policies are visible.
+    expect(db.lastPolicySql).toBeTruthy()
+    expect(db.lastPolicySql).not.toContain('p.org_id = $2')
+    expect(db.lastPolicyOrgIdParam).toBeNull()
   })
 })
