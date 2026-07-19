@@ -9,6 +9,7 @@ import {
   authorizeAttachmentDownload,
   deriveStorageKey,
   LocalFsApprovalAttachmentStore,
+  resolveApprovalAttachmentStore,
 } from '../../src/services/approval-attachment-storage'
 
 const root = mkdtempSync(path.join(tmpdir(), 'att-store-'))
@@ -81,3 +82,56 @@ describe('attachment storage + download auth', () => {
     expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1', fieldId: 'secret' }, 'u2', participantHiddenThrows)).toEqual({ ok: false, code: 'hidden' })
   })
 })
+
+  test('O3 production fail-closed: local provider in production → store null (values-free)', () => {
+    const r = resolveApprovalAttachmentStore({
+      NODE_ENV: 'production',
+      APPROVAL_ATTACHMENT_STORAGE_PROVIDER: 'local',
+    } as NodeJS.ProcessEnv)
+    expect(r.store).toBeNull()
+    expect(r.unavailableReason).toBe('local_in_production')
+  })
+
+  test('O3 production fail-closed: missing S3 bucket → misconfigured; positive control s3+bucket resolves', () => {
+    const missing = resolveApprovalAttachmentStore({
+      NODE_ENV: 'production',
+      APPROVAL_ATTACHMENT_STORAGE_PROVIDER: 's3',
+      APPROVAL_ATTACHMENT_S3_BUCKET: '',
+    } as NodeJS.ProcessEnv)
+    expect(missing.store).toBeNull()
+    expect(missing.unavailableReason).toBe('misconfigured')
+
+    const ok = resolveApprovalAttachmentStore({
+      NODE_ENV: 'production',
+      APPROVAL_ATTACHMENT_STORAGE_PROVIDER: 's3',
+      APPROVAL_ATTACHMENT_S3_BUCKET: 'approval-bucket',
+      APPROVAL_ATTACHMENT_S3_REGION: 'us-east-1',
+      APPROVAL_ATTACHMENT_S3_ACCESS_KEY_ID: 'test',
+      APPROVAL_ATTACHMENT_S3_SECRET_ACCESS_KEY: 'test',
+    } as NodeJS.ProcessEnv)
+    expect(ok.kind).toBe('s3')
+    expect(ok.store).not.toBeNull()
+  })
+
+  test('O3 positive control: non-production local store is usable', () => {
+    const r = resolveApprovalAttachmentStore({
+      NODE_ENV: 'development',
+      APPROVAL_ATTACHMENT_STORAGE_PROVIDER: 'local',
+      APPROVAL_ATTACHMENT_LOCAL_ROOT: root,
+    } as NodeJS.ProcessEnv)
+    expect(r.kind).toBe('local')
+    expect(r.store).not.toBeNull()
+  })
+
+  test('list is prefix-scoped: non-approval sibling files are never enumerated', async () => {
+    const k = deriveStorageKey('text/plain')
+    await store.put(k, Buffer.from('in-prefix'))
+    // Write a sibling outside the approval/ prefix under the same root
+    const fs = await import('node:fs/promises')
+    await fs.writeFile(path.join(root, 'other-product-blob.bin'), Buffer.from('outside'))
+    const listed = await store.list()
+    expect(listed.some((b) => b.key === k)).toBe(true)
+    expect(listed.every((b) => b.key.startsWith('approval/'))).toBe(true)
+    expect(listed.some((b) => b.key.includes('other-product'))).toBe(false)
+    await store.delete(k)
+  })

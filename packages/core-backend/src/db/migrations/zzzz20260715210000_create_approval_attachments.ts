@@ -58,7 +58,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       storage_key      text NOT NULL
                          CONSTRAINT approval_purge_key_nonblank CHECK (storage_key ~ '[!-~]'),
       reason           text NOT NULL
-                         CONSTRAINT approval_purge_reason_valid CHECK (reason IN ('unbound_ttl','row_deleted','reconciler_orphan')),
+                         CONSTRAINT approval_purge_reason_valid CHECK (reason IN ('unbound_ttl','row_deleted','reconciler_orphan','unbound_delete')),
       -- §3-bis full state machine: pending → in_progress (claimed under a live lease) → done | dead_letter.
       status           text NOT NULL DEFAULT 'pending'
                          CONSTRAINT approval_purge_status_valid CHECK (status IN ('pending','in_progress','done','dead_letter')),
@@ -78,6 +78,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE approval_attachment_purge_intents ADD COLUMN IF NOT EXISTS last_error text`.execute(db)
   await sql`ALTER TABLE approval_attachment_purge_intents DROP CONSTRAINT IF EXISTS approval_purge_status_valid`.execute(db)
   await sql`ALTER TABLE approval_attachment_purge_intents ADD CONSTRAINT approval_purge_status_valid CHECK (status IN ('pending','in_progress','done','dead_letter'))`.execute(db)
+  // Explicit unbound DELETE endpoint reason (uploader-only doom path) — widen CHECK idempotently.
+  await sql`ALTER TABLE approval_attachment_purge_intents DROP CONSTRAINT IF EXISTS approval_purge_reason_valid`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD CONSTRAINT approval_purge_reason_valid CHECK (reason IN ('unbound_ttl','row_deleted','reconciler_orphan','unbound_delete'))`.execute(db)
   await sql`
     CREATE INDEX IF NOT EXISTS idx_approval_purge_pending
     ON approval_attachment_purge_intents (status, created_at)

@@ -50,9 +50,11 @@ export function resolveWithinBase(basePath: string, key: string): string {
 }
 
 /**
- * 存储提供者接口
+ * Storage provider contract (exported for S3-compatible / approval-attachment adapters).
+ * Approval attachments use `ApprovalAttachmentStore` for put/get/delete-by-key; the cross-process
+ * delete contract here is the same idea as `deleteByKey` (idempotent, ENOENT-as-success).
  */
-interface StorageProvider {
+export interface StorageProvider {
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
   download(fileId: string): Promise<Buffer>
   /** F3 design-lock G3: read a physical object by its deterministic storage key, bypassing the

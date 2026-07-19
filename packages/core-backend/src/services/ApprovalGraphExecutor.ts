@@ -334,8 +334,15 @@ function validateFieldType(field: FormField, value: unknown): string | null {
     case 'text':
     case 'textarea':
     case 'user':
-    case 'attachment':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'attachment':
+      // Frozen form_snapshot value is an ordered array of approval_attachments.id strings (§8).
+      if (Array.isArray(value)) {
+        return value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
+          ? null
+          : `${field.id} must be an array of attachment ids`
+      }
+      return `${field.id} must be an array of attachment ids`
     case 'number':
       return typeof value === 'number' && Number.isFinite(value) ? null : `${field.id} must be a number`
     case 'date':

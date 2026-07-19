@@ -1,5 +1,5 @@
 /**
- * Approval attachments — slice ④: storage provider (server-side keys, containment-first) + auth-proxied
+ * Approval attachments — storage provider (server-side keys, containment-first) + auth-proxied
  * download gate (#4195: object storage provider, 上传/鉴权代理下载; mirrors the F3-hardened
  * LocalStorageProvider doctrine: server-generated keys, path containment, no client-supplied paths).
  *
@@ -10,12 +10,15 @@
  *   - Download is AUTH-PROXIED: `authorizeAttachmentDownload` recomputes the viewer's right on EVERY
  *     download (uploader while unbound; instance participant once bound; deleted → gone), fail-closed on
  *     error. The route slice streams the blob only after this returns ok — no signed public URLs in v1.
- *
- * No callers yet — routes + form-freeze land in the next slice behind the attachment flag.
+ *   - Production (NODE_ENV=production + flag ON) requires a non-local S3-compatible provider (O3); local
+ *     FS is dev/test only and fail-closes uploads with a values-free 503 when used in production.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
+
+import type { ReconcilerBlob } from './approval-attachment-reconciler'
+import { S3ApprovalAttachmentStore } from './approval-attachment-s3-store'
 
 const MIME_EXT: Readonly<Record<string, string>> = Object.freeze({
   'application/pdf': 'pdf',
@@ -25,13 +28,16 @@ const MIME_EXT: Readonly<Record<string, string>> = Object.freeze({
   'text/csv': 'csv',
 })
 
+/** Unbypassable approval-owned prefix — reconciler and server write path both enforce this partition. */
+export const APPROVAL_ATTACHMENT_KEY_PREFIX = 'approval/'
+
 /** Server-side key derivation — validated mime decides the extension; the client filename is IGNORED. */
 export function deriveStorageKey(validatedMime: string, now: () => Date = () => new Date()): string {
   const ext = MIME_EXT[validatedMime]
   if (!ext) throw new RangeError(`deriveStorageKey: mime "${validatedMime}" is not in the v1 allowlist`)
   const d = now()
   const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
-  return `approval/${ym}/${randomUUID()}.${ext}`
+  return `${APPROVAL_ATTACHMENT_KEY_PREFIX}${ym}/${randomUUID()}.${ext}`
 }
 
 export interface ApprovalAttachmentStore {
@@ -41,8 +47,23 @@ export interface ApprovalAttachmentStore {
   delete(storageKey: string): Promise<boolean>
 }
 
-/** Local-FS store with fail-closed containment. S3-compatible impl lands with ops config (same interface). */
-export class LocalFsApprovalAttachmentStore implements ApprovalAttachmentStore {
+/** Optional list capability for the bucket reconciler (G15). Prefix-scoped implementations only. */
+export interface ApprovalAttachmentStoreListable {
+  list(): Promise<ReconcilerBlob[]>
+}
+
+export type ApprovalAttachmentStoreKind = 'local' | 's3' | 'unavailable'
+
+export interface ResolvedApprovalAttachmentStore {
+  kind: ApprovalAttachmentStoreKind
+  /** Ready store, or null when production fail-closed (local/missing/misconfigured). */
+  store: (ApprovalAttachmentStore & Partial<ApprovalAttachmentStoreListable>) | null
+  /** Values-free reason when store is null (never credentials / endpoints / keys). */
+  unavailableReason?: 'local_in_production' | 'missing' | 'misconfigured'
+}
+
+/** Local-FS store with fail-closed containment. S3-compatible impl is production; local is dev/test only. */
+export class LocalFsApprovalAttachmentStore implements ApprovalAttachmentStore, ApprovalAttachmentStoreListable {
   constructor(private readonly rootDir: string) {
     if (typeof rootDir !== 'string' || rootDir.trim() === '') throw new RangeError('rootDir required')
   }
@@ -51,6 +72,9 @@ export class LocalFsApprovalAttachmentStore implements ApprovalAttachmentStore {
   private contain(storageKey: string): string {
     if (typeof storageKey !== 'string' || storageKey.trim() === '' || storageKey.includes('\0')) {
       throw new RangeError('invalid storage key')
+    }
+    if (!storageKey.startsWith(APPROVAL_ATTACHMENT_KEY_PREFIX)) {
+      throw new RangeError('storage key outside approval prefix — refused')
     }
     const root = path.resolve(this.rootDir)
     const resolved = path.resolve(root, storageKey)
@@ -78,6 +102,96 @@ export class LocalFsApprovalAttachmentStore implements ApprovalAttachmentStore {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
       throw err
     }
+  }
+
+  /** Prefix-scoped walk under `approval/` only — never enumerates non-approval siblings. */
+  async list(): Promise<ReconcilerBlob[]> {
+    const root = path.resolve(this.rootDir)
+    const prefixDir = path.join(root, APPROVAL_ATTACHMENT_KEY_PREFIX.replace(/\/$/, ''))
+    const out: ReconcilerBlob[] = []
+    const now = Date.now()
+    async function walk(dir: string, relBase: string): Promise<void> {
+      let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>
+      try {
+        entries = await readdir(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw err
+      }
+      for (const entry of entries) {
+        const abs = path.join(dir, entry.name)
+        const rel = relBase ? `${relBase}/${entry.name}` : entry.name
+        if (entry.isDirectory()) {
+          await walk(abs, rel)
+        } else if (entry.isFile()) {
+          const st = await stat(abs)
+          const ageMs = Math.max(0, now - st.mtimeMs)
+          out.push({ key: `${APPROVAL_ATTACHMENT_KEY_PREFIX}${rel}`.replace(/\/{2,}/g, '/'), ageMs })
+        }
+      }
+    }
+    await walk(prefixDir, '')
+    return out
+  }
+}
+
+/**
+ * Resolve the approval attachment store from env (O3).
+ *
+ *   - `APPROVAL_ATTACHMENT_STORAGE_PROVIDER=s3` → S3-compatible (requires bucket; optional endpoint/region)
+ *   - `local` or unset → LocalFs under `APPROVAL_ATTACHMENT_LOCAL_ROOT` (dev/test)
+ *   - Production (`NODE_ENV=production`) with local/missing/misconfigured S3 → fail-closed (`store: null`)
+ *
+ * Never logs credentials, endpoints, bucket names, keys, or raw provider errors.
+ */
+export function resolveApprovalAttachmentStore(
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedApprovalAttachmentStore {
+  const isProd = String(env.NODE_ENV ?? '').trim().toLowerCase() === 'production'
+  const provider = String(env.APPROVAL_ATTACHMENT_STORAGE_PROVIDER ?? 'local').trim().toLowerCase()
+
+  if (provider === 's3') {
+    const bucket = String(env.APPROVAL_ATTACHMENT_S3_BUCKET ?? '').trim()
+    if (!bucket) {
+      return { kind: 'unavailable', store: null, unavailableReason: 'misconfigured' }
+    }
+    try {
+      const accessKeyId = String(env.APPROVAL_ATTACHMENT_S3_ACCESS_KEY_ID ?? env.AWS_ACCESS_KEY_ID ?? '').trim()
+      const secretAccessKey = String(env.APPROVAL_ATTACHMENT_S3_SECRET_ACCESS_KEY ?? env.AWS_SECRET_ACCESS_KEY ?? '').trim()
+      const sessionToken = String(env.APPROVAL_ATTACHMENT_S3_SESSION_TOKEN ?? env.AWS_SESSION_TOKEN ?? '').trim() || undefined
+      const endpoint = String(env.APPROVAL_ATTACHMENT_S3_ENDPOINT ?? '').trim() || undefined
+      const region = String(env.APPROVAL_ATTACHMENT_S3_REGION ?? env.AWS_REGION ?? 'us-east-1').trim()
+      const forcePathStyle = String(env.APPROVAL_ATTACHMENT_S3_FORCE_PATH_STYLE ?? 'true').trim().toLowerCase() !== 'false'
+      const store = new S3ApprovalAttachmentStore({
+        bucket,
+        region,
+        endpoint,
+        forcePathStyle,
+        keyPrefix: APPROVAL_ATTACHMENT_KEY_PREFIX,
+        credentials: accessKeyId && secretAccessKey
+          ? { accessKeyId, secretAccessKey, sessionToken }
+          : undefined,
+      })
+      return { kind: 's3', store }
+    } catch {
+      return { kind: 'unavailable', store: null, unavailableReason: 'misconfigured' }
+    }
+  }
+
+  if (provider !== 'local' && provider !== '') {
+    return { kind: 'unavailable', store: null, unavailableReason: 'misconfigured' }
+  }
+
+  // Local FS — allowed only outside production.
+  if (isProd) {
+    return { kind: 'unavailable', store: null, unavailableReason: 'local_in_production' }
+  }
+  const root = String(env.APPROVAL_ATTACHMENT_LOCAL_ROOT ?? '').trim()
+    || path.join(process.cwd(), 'uploads', 'approval-attachments')
+  try {
+    return { kind: 'local', store: new LocalFsApprovalAttachmentStore(root) }
+  } catch {
+    return { kind: 'unavailable', store: null, unavailableReason: 'misconfigured' }
   }
 }
 

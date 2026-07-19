@@ -192,4 +192,95 @@ describe('approval attachment routes (flag-gated)', () => {
     const served = await request(pinned.url()).get('/api/approval/attachments/att_1/download')
     expect(served.status).toBe(200) // positive control: an identical NON-hidden field still serves bytes
   })
+
+  test('G8 download headers: Content-Disposition attachment + nosniff + CSP default-src none', async () => {
+    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
+    const ok = makeApp({ rows: [row], participant: true })
+    ok.blobs.set('k1', Buffer.from('%PDF'))
+    pinned.setApp(ok.app)
+    const r = await request(pinned.url()).get('/api/approval/attachments/att_1/download')
+    expect(r.status).toBe(200)
+    expect(r.headers['content-disposition']).toMatch(/^attachment;/)
+    expect(r.headers['x-content-type-options']).toBe('nosniff')
+    expect(r.headers['content-security-policy']).toBe("default-src 'none'")
+    // Never leak storage keys in the body
+    expect(JSON.stringify(r.body)).not.toContain('k1')
+  })
+
+  test('O3 production store unavailable → upload 503 values-free (positive control: available store still 201)', async () => {
+    const blobs = new Map<string, Buffer>()
+    const store: ApprovalAttachmentStore = {
+      put: async (k, b) => void blobs.set(k, b),
+      get: async (k) => {
+        const b = blobs.get(k)
+        if (!b) throw new Error('missing')
+        return b
+      },
+      delete: async (k) => blobs.delete(k),
+    }
+    const router503 = createApprovalAttachmentRouter({
+      db: { query: async () => ({ rows: [], rowCount: 0 }) },
+      store,
+      storeUnavailable: true,
+      authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
+      viewerId: () => 'u1',
+      orgId: () => 'org1',
+      resolveAttachmentField: async () => true,
+      env: FLAG_ON,
+    })
+    const app503 = express()
+    if (router503) app503.use(router503)
+    pinned.setApp(app503)
+    const denied = await request(pinned.url())
+      .post('/api/approval/attachments')
+      .field('fieldId', 'fld1')
+      .field('templateId', 'tpl1')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(denied.status).toBe(503)
+    expect(denied.body).toEqual({ error: 'storage_unavailable' })
+    expect(blobs.size).toBe(0)
+
+    // Positive control: same store without storeUnavailable still uploads
+    const { app } = makeApp()
+    pinned.setApp(app)
+    const ok = await request(pinned.url())
+      .post('/api/approval/attachments')
+      .field('fieldId', 'fld1')
+      .field('templateId', 'tpl1')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(ok.status).toBe(201)
+  })
+
+  test('DELETE unbound: uploader dooms row + enqueues purge intent; bound/foreign → 404', async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = []
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        queries.push({ sql, params })
+        // First call is the doom CTE — simulate 1 row claimed
+        if (sql.includes('WITH doomed')) {
+          // params: [id, viewerId]
+          if (params?.[1] !== 'u1') return { rows: [], rowCount: 0 }
+          if (params?.[0] === 'att_bound') return { rows: [], rowCount: 0 }
+          return { rows: [{ id: 'pi_del_att_1' }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    const router = createApprovalAttachmentRouter({
+      db,
+      store: { put: async () => {}, get: async () => Buffer.alloc(0), delete: async () => false },
+      authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
+      viewerId: () => 'u1',
+      orgId: () => 'org1',
+      resolveAttachmentField: async () => true,
+      env: FLAG_ON,
+    })
+    const app = express()
+    if (router) app.use(router)
+    pinned.setApp(app)
+    expect((await request(pinned.url()).delete('/api/approval/attachments/att_1')).status).toBe(204)
+    expect(queries.some((q) => q.sql.includes('unbound_delete'))).toBe(true)
+    // Bound id → 0 rows from CTE → 404
+    expect((await request(pinned.url()).delete('/api/approval/attachments/att_bound')).status).toBe(404)
+  })
 })

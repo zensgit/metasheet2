@@ -157,7 +157,28 @@
               class="approval-detail__field"
             >
               <span class="approval-detail__label">{{ field.label }}</span>
-              <span>{{ field.value }}</span>
+              <!-- Attachment: authorized download links only (auth-proxied URL by id — never storage keys). -->
+              <span
+                v-if="isAttachmentDisplayField(field.key)"
+                class="approval-detail__attachments"
+                data-testid="approval-detail-attachments"
+              >
+                <template v-if="attachmentIdsForField(field.key).length > 0">
+                  <a
+                    v-for="(attId, idx) in attachmentIdsForField(field.key)"
+                    :key="attId"
+                    class="approval-detail__attachment-link"
+                    data-testid="approval-detail-attachment-link"
+                    :href="attachmentDownloadUrl(attId)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    附件{{ idx + 1 }}
+                  </a>
+                </template>
+                <span v-else>{{ field.value }}</span>
+              </span>
+              <span v-else>{{ field.value }}</span>
             </div>
             <!-- detail / sub-form (明细): render the frozen rows × columns as a read-only
                  table driven by the instance's FROZEN formSchema columns (never the live
@@ -806,6 +827,7 @@ import {
   type DetailDisplayTable,
   type DisplayField,
 } from '../../approvals/detailField'
+import { approvalAttachmentDownloadUrl } from '../../approvals/attachmentUpload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
@@ -845,6 +867,22 @@ const waitChipType = computed(() => {
   if (severity === 'warn') return 'warning'
   return 'info'
 })
+
+function isAttachmentDisplayField(fieldKey: string): boolean {
+  const schema = approval.value?.formSchema
+  const field = schema?.fields?.find((f) => f.id === fieldKey)
+  return field?.type === 'attachment'
+}
+
+function attachmentIdsForField(fieldKey: string): string[] {
+  const raw = approval.value?.formSnapshot?.[fieldKey]
+  if (!Array.isArray(raw)) return []
+  return raw.filter((id): id is string => typeof id === 'string' && id.length > 0)
+}
+
+function attachmentDownloadUrl(attId: string): string {
+  return approvalAttachmentDownloadUrl(attId)
+}
 
 // Read-only detail (明细) tables, keyed by snapshot field id. Built from the instance's FROZEN
 // formSchema (C-3a read-path) so a later column rename/reorder on the live template never
@@ -1778,6 +1816,21 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.approval-detail__attachments {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approval-detail__attachment-link {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+.approval-detail__attachment-link:hover {
+  text-decoration: underline;
 }
 
 .approval-detail__field {

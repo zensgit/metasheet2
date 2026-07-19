@@ -14,7 +14,7 @@
  *     `approval_attachments` row still references its storage_key — a still-referenced blob is skipped and
  *     surfaced via the result for the reconciler to inspect (never silently deleted).
  *
- * No callers yet — the worker is wired behind the attachment flag with the provider/routes slice.
+ * Wired by `startApprovalAttachmentLifecycle` when `APPROVAL_ATTACHMENTS_ENABLED=true`.
  */
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 

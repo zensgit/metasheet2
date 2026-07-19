@@ -2,8 +2,12 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import {
+  approvalAttachmentDownloadUrl,
   CLIENT_ATTACHMENT_LIMITS,
   CLIENT_ATTACHMENT_RULES_VERSION,
+  deleteApprovalAttachment,
+  dropStaleAttachmentIds,
+  isApprovalAttachmentsEnabled,
   preValidateAttachments,
   uploadApprovalAttachment,
 } from '../src/approvals/attachmentUpload'
@@ -52,7 +56,11 @@ describe('approval attachment upload client', () => {
   test('upload client: 201 returns id; 422 surfaces the server code; pre-reject never hits the network', async () => {
     const ok = vi.fn(async () => new Response(JSON.stringify({ id: 'att_1', sizeBytes: 3 }), { status: 201 }))
     const file = new File([new Uint8Array([1, 2, 3])], 'a.pdf', { type: 'application/pdf' })
-    expect(await uploadApprovalAttachment(file, 'tpl', 'fld', ok as unknown as typeof fetch)).toEqual({ id: 'att_1', sizeBytes: 3 })
+    expect(await uploadApprovalAttachment(file, 'tpl', 'fld', ok as unknown as typeof fetch)).toEqual({
+      id: 'att_1',
+      sizeBytes: 3,
+      fileName: 'a.pdf',
+    })
     // the body carries {templateId, fieldId} and NEVER an org id (org is server-derived)
     const sentForm = (ok.mock.calls[0][1] as RequestInit).body as FormData
     expect(sentForm.get('templateId')).toBe('tpl')
@@ -64,5 +72,33 @@ describe('approval attachment upload client', () => {
     const net = vi.fn()
     await expect(uploadApprovalAttachment(bad, 'tpl', 'fld', net as unknown as typeof fetch)).rejects.toThrow(/mime_not_allowed/)
     expect(net).not.toHaveBeenCalled() // pre-validated locally, no round trip
+  })
+
+  test('flag defaults OFF; only exact true enables', () => {
+    expect(isApprovalAttachmentsEnabled({} as never)).toBe(false)
+    expect(isApprovalAttachmentsEnabled({ VITE_APPROVAL_ATTACHMENTS_ENABLED: 'false' })).toBe(false)
+    expect(isApprovalAttachmentsEnabled({ VITE_APPROVAL_ATTACHMENTS_ENABLED: 'true' })).toBe(true)
+  })
+
+  test('download URL is auth-proxied by attachment id — never a storage key or object-store URL', () => {
+    const url = approvalAttachmentDownloadUrl('att_abc')
+    expect(url).toBe('/api/approval/attachments/att_abc/download')
+    expect(url).not.toMatch(/s3|storage_key|amazonaws/)
+  })
+
+  test('delete client: 204/404 succeed; other statuses throw values-free', async () => {
+    const ok = vi.fn(async () => new Response(null, { status: 204 }))
+    await expect(deleteApprovalAttachment('att_1', ok as unknown as typeof fetch)).resolves.toBeUndefined()
+    const gone = vi.fn(async () => new Response(null, { status: 404 }))
+    await expect(deleteApprovalAttachment('att_1', gone as unknown as typeof fetch)).resolves.toBeUndefined()
+    const bad = vi.fn(async () => new Response(null, { status: 500 }))
+    await expect(deleteApprovalAttachment('att_1', bad as unknown as typeof fetch)).rejects.toThrow(/500/)
+  })
+
+  test('G13 stale draft refs: drop ids the probe says are gone; keep live ones', async () => {
+    const probe = async (id: string) => id !== 'att_stale'
+    const r = await dropStaleAttachmentIds(['att_live', 'att_stale'], probe)
+    expect(r.live).toEqual(['att_live'])
+    expect(r.stale).toEqual(['att_stale'])
   })
 })

@@ -7,9 +7,8 @@
  * files in the same change or the parity spec goes red.
  *
  * Ratified v1: 20 MB/file · 10 files/field · 50 MB/submission; MIME allowlist PDF/JPEG/PNG/TXT/CSV with
- * extension⇄MIME agreement. The UPLOAD CONTROL stays detached from ApprovalNewView until the backend
- * pipeline (#4342) lands and `APPROVAL_ATTACHMENTS_ENABLED` exists — B2-28's honest-disable stopgap is
- * removed only in that wiring change.
+ * extension⇄MIME agreement. Feature-gated by `VITE_APPROVAL_ATTACHMENTS_ENABLED` (default OFF) — when
+ * OFF, ApprovalNewView keeps the B2-28 honest-disable stopgap byte-equivalent.
  */
 export const CLIENT_ATTACHMENT_RULES_VERSION = 'v1-20-10-50-pdf-jpeg-png-txt-csv'
 
@@ -18,6 +17,18 @@ export const CLIENT_ATTACHMENT_LIMITS = Object.freeze({
   maxFilesPerField: 10,
   maxSubmissionBytes: 50 * 1024 * 1024,
 })
+
+/**
+ * Master frontend gate — must stay default OFF. Only the exact string `'true'` enables the real
+ * uploader; any other value (including unset) preserves B2-28 honest-disable.
+ */
+export function isApprovalAttachmentsEnabled(
+  env: { VITE_APPROVAL_ATTACHMENTS_ENABLED?: string } = import.meta.env as {
+    VITE_APPROVAL_ATTACHMENTS_ENABLED?: string
+  },
+): boolean {
+  return String(env.VITE_APPROVAL_ATTACHMENTS_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
 
 const ALLOW: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'application/pdf': ['pdf'],
@@ -49,11 +60,12 @@ export function preValidateAttachments(files: ReadonlyArray<{ name: string; type
     const mime = (f.type ?? '').toLowerCase().trim()
     const i = f.name.lastIndexOf('.')
     const ext = i < 0 ? '' : f.name.slice(i + 1).toLowerCase()
-    // Object.hasOwn guard (server parity): a plain-object `ALLOW[mime]` lookup keyed by an
+    // Own-property guard (server parity): a plain-object `ALLOW[mime]` lookup keyed by an
     // attacker-controlled `mime` ('constructor' / '__proto__') would otherwise resolve an INHERITED
     // Object.prototype member — truthy, not an array — and `allowed.includes(ext)` would throw an
     // uncaught TypeError. Only own properties may resolve; anything else rejects as mime_not_allowed.
-    const allowed = Object.hasOwn(ALLOW, mime) ? ALLOW[mime] : undefined
+    // `Object.prototype.hasOwnProperty.call` keeps the check ES2020-compatible for this package's lib target.
+    const allowed = Object.prototype.hasOwnProperty.call(ALLOW, mime) ? ALLOW[mime] : undefined
     const extKnown = Object.values(ALLOW).some((xs) => xs.includes(ext))
     if (!allowed) rejected.push({ fileName: f.name, code: 'mime_not_allowed' })
     else if (!extKnown) rejected.push({ fileName: f.name, code: 'extension_not_allowed' })
@@ -66,6 +78,15 @@ export function preValidateAttachments(files: ReadonlyArray<{ name: string; type
 export interface UploadedAttachment {
   id: string
   sizeBytes: number
+  /** Client-side display only — never sent as a storage key. */
+  fileName?: string
+}
+
+/**
+ * Auth-proxied download URL — attachment id only. Never embeds storage keys or object-store URLs.
+ */
+export function approvalAttachmentDownloadUrl(attachmentId: string): string {
+  return `/api/approval/attachments/${encodeURIComponent(attachmentId)}/download`
 }
 
 /**
@@ -86,10 +107,74 @@ export async function uploadApprovalAttachment(
   form.append('fieldId', fieldId)
   form.append('file', file)
   const res = await fetcher('/api/approval/attachments', { method: 'POST', body: form, credentials: 'include' })
-  if (res.status === 201) return (await res.json()) as UploadedAttachment
+  if (res.status === 201) {
+    const body = (await res.json()) as UploadedAttachment
+    return { id: body.id, sizeBytes: body.sizeBytes, fileName: file.name }
+  }
   if (res.status === 422) {
     const body = (await res.json().catch(() => ({}))) as { rejected?: Array<{ code: string }> }
     throw new Error(`attachment rejected: ${body.rejected?.[0]?.code ?? 'rejected'}`)
   }
+  if (res.status === 503) throw new Error('attachment upload failed: storage_unavailable')
   throw new Error(`attachment upload failed: ${res.status}`)
+}
+
+/**
+ * Unbound delete — uploader-only. Bound rows are refused server-side (cascade only).
+ * Safe to call when removing a draft ref; 404 is treated as already-gone success for UX.
+ */
+export async function deleteApprovalAttachment(
+  attachmentId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  const res = await fetcher(`/api/approval/attachments/${encodeURIComponent(attachmentId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  })
+  if (res.status === 204 || res.status === 404) return
+  if (res.status === 503) throw new Error('attachment delete failed: storage_unavailable')
+  throw new Error(`attachment delete failed: ${res.status}`)
+}
+
+/**
+ * Drop attachment ids that no longer resolve (GC-swept unbound drafts — G13).
+ * `probe` returns true when the id is still live (HEAD/download 200/410-with-auth), false when gone.
+ * Stale ids are removed; the caller surfaces them to the user.
+ */
+export async function dropStaleAttachmentIds(
+  ids: readonly string[],
+  probe: (id: string) => Promise<boolean>,
+): Promise<{ live: string[]; stale: string[] }> {
+  const live: string[] = []
+  const stale: string[] = []
+  for (const id of ids) {
+    try {
+      if (await probe(id)) live.push(id)
+      else stale.push(id)
+    } catch {
+      stale.push(id)
+    }
+  }
+  return { live, stale }
+}
+
+/** Human-readable reject message for UX (values-free codes only). */
+export function attachmentRejectMessage(code: string): string {
+  switch (code) {
+    case 'file_too_large':
+      return '单个附件不能超过 20 MB'
+    case 'too_many_files':
+      return '单个附件字段最多 10 个文件'
+    case 'submission_too_large':
+      return '全部附件合计不能超过 50 MB'
+    case 'mime_not_allowed':
+    case 'extension_not_allowed':
+    case 'extension_mime_mismatch':
+    case 'content_mime_mismatch':
+      return '不支持的文件类型（仅 PDF / JPEG / PNG / TXT / CSV）'
+    case 'storage_unavailable':
+      return '附件存储暂不可用，请稍后重试'
+    default:
+      return '附件上传失败'
+  }
 }

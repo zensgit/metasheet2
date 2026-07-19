@@ -13,7 +13,7 @@
  *       (b) live row WITHOUT a blob (store lost data) → surfaced values-free for alerting, NEVER auto-deleted
  *           (losing the row too would destroy the evidence that data was lost).
  *
- * No callers yet — wired behind the attachment flag with the boot slice.
+ * Wired by createApproval (same-txn bind) + lifecycle workers (reconciler) when the flag is ON.
  */
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { APPROVAL_ATTACHMENT_LIMITS } from './approval-attachment-validation'

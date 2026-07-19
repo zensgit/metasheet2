@@ -379,21 +379,59 @@
               </div>
             </div>
 
-            <!-- attachment: B2-28 honest-disable STOPGAP until the real upload pipeline lands (audit
-                 follow-up B3-07). The previous el-upload (action="#" + auto-upload=false) was fully
-                 interactive but never actually uploaded anything: the raw File a user dropped landed in
-                 formData, and JSON.stringify-ing that for the request body silently turned it into `{}`
-                 — a success toast over quietly-dropped data. An honest disabled placeholder beats a fake
-                 uploader. The field label + required marker (rendered by the surrounding el-form-item)
-                 stay visible; `formRules` (below) excludes attachment fields so a `required` attachment
-                 can never block submission — there being no working way to satisfy it yet. handleSubmit
-                 additionally strips attachment-typed keys defensively (see stripAttachmentFields). -->
+            <!-- attachment: flag OFF → B2-28 honest-disable (byte-equivalent stopgap). Flag ON → real
+                 uploader that stores ONLY server attachment ids in formData (never File / storage keys). -->
             <div
-              v-else-if="field.type === 'attachment'"
+              v-else-if="field.type === 'attachment' && !attachmentsEnabled"
               class="approval-new__attachment-disabled"
               data-testid="approval-attachment-disabled"
             >
               附件上传功能即将支持，请先在其他字段中注明附件信息。
+            </div>
+            <div
+              v-else-if="field.type === 'attachment' && attachmentsEnabled"
+              class="approval-new__attachment"
+              data-testid="approval-attachment-uploader"
+            >
+              <input
+                type="file"
+                class="approval-new__attachment-input"
+                data-testid="approval-attachment-input"
+                :accept="attachmentAccept"
+                :disabled="!canWrite || attachmentUploading[field.id]"
+                @change="onAttachmentFileChange(field, $event)"
+              />
+              <ul
+                v-if="attachmentIds(field.id).length > 0"
+                class="approval-new__attachment-list"
+                data-testid="approval-attachment-list"
+              >
+                <li
+                  v-for="attId in attachmentIds(field.id)"
+                  :key="attId"
+                  class="approval-new__attachment-item"
+                  data-testid="approval-attachment-item"
+                >
+                  <span class="approval-new__attachment-name">{{ attachmentLabel(attId) }}</span>
+                  <el-button
+                    type="danger"
+                    link
+                    size="small"
+                    data-testid="approval-attachment-remove"
+                    :disabled="!canWrite"
+                    @click="removeAttachment(field.id, attId)"
+                  >
+                    移除
+                  </el-button>
+                </li>
+              </ul>
+              <span
+                v-if="attachmentFieldHint(field)"
+                class="approval-new__detail-hint"
+                data-testid="approval-attachment-hint"
+              >
+                {{ attachmentFieldHint(field) }}
+              </span>
             </div>
 
             <!-- fallback -->
@@ -462,6 +500,15 @@ import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
 import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
+import {
+  attachmentRejectMessage,
+  CLIENT_ATTACHMENT_LIMITS,
+  deleteApprovalAttachment,
+  isApprovalAttachmentsEnabled,
+  preValidateAttachments,
+  uploadApprovalAttachment,
+  type UploadedAttachment,
+} from '../../approvals/attachmentUpload'
 
 const route = useRoute()
 const router = useRouter()
@@ -574,38 +621,139 @@ function amountWordsFor(fieldId: string): string {
   return amountToChineseWords(formData[fieldId])
 }
 
+/** Default OFF — preserves B2-28 honest-disable when the vite flag is unset. */
+const attachmentsEnabled = isApprovalAttachmentsEnabled()
+const attachmentAccept = '.pdf,.jpg,.jpeg,.png,.txt,.csv,application/pdf,image/jpeg,image/png,text/plain,text/csv'
+/** Local display labels for uploaded ids (never storage keys). */
+const attachmentMeta = reactive<Record<string, { fileName: string; sizeBytes: number }>>({})
+const attachmentUploading = reactive<Record<string, boolean>>({})
+
+function attachmentIds(fieldId: string): string[] {
+  const value = formData[fieldId]
+  return Array.isArray(value) ? (value as string[]).filter((id) => typeof id === 'string') : []
+}
+
+function attachmentLabel(attId: string): string {
+  return attachmentMeta[attId]?.fileName || attId
+}
+
+function attachmentFieldHint(field: FormField): string {
+  const count = attachmentIds(field.id).length
+  return `已上传 ${count}/${CLIENT_ATTACHMENT_LIMITS.maxFilesPerField} · 单文件 ≤ 20 MB · 合计 ≤ 50 MB`
+}
+
+function totalAttachmentBytes(): number {
+  let total = 0
+  if (!template.value) return 0
+  for (const field of template.value.formSchema.fields) {
+    if (field.type !== 'attachment') continue
+    for (const id of attachmentIds(field.id)) {
+      total += attachmentMeta[id]?.sizeBytes ?? 0
+    }
+  }
+  return total
+}
+
+async function onAttachmentFileChange(field: FormField, event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || !template.value || !canWrite.value) return
+  const existing = attachmentIds(field.id)
+  if (existing.length >= CLIENT_ATTACHMENT_LIMITS.maxFilesPerField) {
+    ElMessage.warning(attachmentRejectMessage('too_many_files'))
+    return
+  }
+  const pre = preValidateAttachments([{ name: file.name, type: file.type, size: file.size }])
+  if (pre.length > 0) {
+    ElMessage.warning(attachmentRejectMessage(pre[0].code))
+    return
+  }
+  if (totalAttachmentBytes() + file.size > CLIENT_ATTACHMENT_LIMITS.maxSubmissionBytes) {
+    ElMessage.warning(attachmentRejectMessage('submission_too_large'))
+    return
+  }
+  attachmentUploading[field.id] = true
+  try {
+    const uploaded: UploadedAttachment = await uploadApprovalAttachment(file, template.value.id, field.id)
+    attachmentMeta[uploaded.id] = { fileName: uploaded.fileName || file.name, sizeBytes: uploaded.sizeBytes }
+    formData[field.id] = [...existing, uploaded.id]
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : ''
+    const code = msg.includes('storage_unavailable')
+      ? 'storage_unavailable'
+      : msg.match(/attachment rejected: (\w+)/)?.[1] || 'upload_failed'
+    ElMessage.error(attachmentRejectMessage(code))
+  } finally {
+    attachmentUploading[field.id] = false
+  }
+}
+
+async function removeAttachment(fieldId: string, attId: string): Promise<void> {
+  const next = attachmentIds(fieldId).filter((id) => id !== attId)
+  formData[fieldId] = next
+  try {
+    await deleteApprovalAttachment(attId)
+  } catch {
+    // Best-effort: unbound GC will eventually reclaim; UI already dropped the id.
+  }
+  delete attachmentMeta[attId]
+}
+
 const formRules = computed<FormRules>(() => {
   const rules: FormRules = {}
   for (const field of visibleFields.value) {
-    // B2-28: attachment fields render a disabled stopgap block (no working uploader yet — see the
-    // template comment above), so a `required` attachment must never make the form unsubmittable;
-    // there is no way for the user to satisfy it. Excluded from validation entirely.
-    if (field.required && field.type !== 'attachment') {
-      rules[field.id] = [
-        // B2-15: `blur` alone never reliably fires for a select / date-picker (the user picks via
-        // a click in a popper, not a native blur on a text input), so a required select/date left
-        // unset could silently pass validation until submit-time. `change` catches those; `blur`
-        // stays too so leaving a text/textarea/number field empty validates without a submit click.
-        { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
-      ]
+    // Flag OFF (B2-28): exclude attachment from required so the disabled placeholder never blocks submit.
+    // Flag ON: a required attachment must have at least one server id.
+    if (field.required && (field.type !== 'attachment' || attachmentsEnabled)) {
+      if (field.type === 'attachment' && attachmentsEnabled) {
+        rules[field.id] = [
+          {
+            validator: (_rule, value, callback) => {
+              const ids = Array.isArray(value) ? value : []
+              if (ids.length === 0) callback(new Error(`请上传${field.label}`))
+              else callback()
+            },
+            trigger: ['change', 'blur'],
+          },
+        ]
+      } else {
+        rules[field.id] = [
+          // B2-15: `blur` alone never reliably fires for a select / date-picker (the user picks via
+          // a click in a popper, not a native blur on a text input), so a required select/date left
+          // unset could silently pass validation until submit-time. `change` catches those; `blur`
+          // stays too so leaving a text/textarea/number field empty validates without a submit click.
+          { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
+        ]
+      }
     }
   }
   return rules
 })
 
 /**
- * B2-28: defensive submit-time exclusion of attachment-typed fields. The disabled placeholder never
- * populates `formData` for these ids, but this strips them anyway — belt-and-suspenders so a future
- * edit to the fill view (e.g. reintroducing a real uploader before the B3-07 pipeline lands) can't
- * silently reach the create-approval payload without an explicit decision here. Kept local to this
- * view's submit composition rather than folded into the shared `detailField` prune utils, which are
- * also used by the read-only detail-view snapshot rendering (a different concern: displaying
- * already-submitted data, not gating what a NEW submission may contain).
+ * Flag OFF (B2-28): defensive submit-time exclusion of attachment-typed fields.
+ * Flag ON: keep server attachment id arrays in the create payload (form-freeze binds them).
  */
 function stripAttachmentFields(
   formSchema: FormSchema,
   data: Record<string, unknown>,
 ): Record<string, unknown> {
+  if (attachmentsEnabled) {
+    // Only server ids are stored; drop any accidental non-array garbage.
+    const result: Record<string, unknown> = { ...data }
+    for (const field of formSchema.fields) {
+      if (field.type !== 'attachment') continue
+      const value = result[field.id]
+      if (!Array.isArray(value)) {
+        if (value === undefined) continue
+        result[field.id] = []
+      } else {
+        result[field.id] = value.filter((id) => typeof id === 'string' && id.length > 0)
+      }
+    }
+    return result
+  }
   const attachmentFieldIds = new Set(
     formSchema.fields.filter((field) => field.type === 'attachment').map((field) => field.id),
   )
@@ -973,6 +1121,38 @@ watch([visibleFieldIds, template], () => {
   color: var(--el-text-color-secondary);
   font-size: 13px;
   line-height: 1.6;
+}
+
+.approval-new__attachment {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.approval-new__attachment-input {
+  max-width: 100%;
+}
+
+.approval-new__attachment-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.approval-new__attachment-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.approval-new__attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .approval-new__submit {

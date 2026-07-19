@@ -47,6 +47,12 @@ import {
   pruneHiddenFormData,
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
+import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
+import {
+  extractAttachmentIdsByField,
+  stripAttachmentFormData,
+} from './approval-attachment-runtime'
+import { bindAttachmentsOnSubmit } from './approval-attachment-reconciler'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import {
@@ -3578,7 +3584,12 @@ export class ApprovalProductService {
     // REDUNDANT defense-in-depth for the owner's gate ③, not the sole enforcer — see the
     // route-preview-api "HARD GATE ③" golden, which stays green if either layer holds and only
     // flips if BOTH are removed.
-    const normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
+    let normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
+    // Attachment flag OFF (default): strip attachment keys so create stays B2-28 honest (no bind,
+    // no frozen ids). Flag ON: keep id arrays for same-txn bind in createApproval.
+    if (!isApprovalAttachmentsEnabled()) {
+      normalizedFormData = stripAttachmentFormData(formSchema, normalizedFormData)
+    }
     // RP-1 hard gate (owner order, ratified lock): on the PREVIEW path formData is interpreted
     // STRICTLY per the template field whitelist — unknown keys are dropped BEFORE validation,
     // amount-check and graph evaluation, so a request body can never smuggle org-probing
@@ -4027,6 +4038,23 @@ export class ApprovalProductService {
           initial.currentNodeKey,
         ],
       )
+
+      // Attachment form-freeze (§4.4): bind submitter-owned unbound ids in THIS transaction so a
+      // bind failure rolls back the whole create (instance + snapshot). Flag OFF ⇒ no-op (keys stripped).
+      if (isApprovalAttachmentsEnabled()) {
+        const formSchema = asFormSchema(bundle.version.form_schema)
+        try {
+          const idsByField = extractAttachmentIdsByField(formSchema, normalizedFormData)
+          await bindAttachmentsOnSubmit(client, actor.userId, instanceId, idsByField)
+        } catch (bindErr) {
+          throw new ServiceError(
+            'Approval attachment bind failed',
+            400,
+            'APPROVAL_ATTACHMENT_BIND_FAILED',
+            { reason: bindErr instanceof Error ? bindErr.message.replace(/[^A-Za-z0-9_ /.-]/g, '').slice(0, 120) : 'bind_failed' },
+          )
+        }
+      }
 
       // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
       // same-transaction auto-approval cascade at this node carries that same epoch (§7).
