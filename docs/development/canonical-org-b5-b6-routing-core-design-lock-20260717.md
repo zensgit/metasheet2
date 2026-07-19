@@ -1,9 +1,9 @@
 # B5/B6 Routing-Core Design Lock（Q1–Q6 已裁决 — 锁定）
 
-Date: 2026-07-17 · Status: **Q1–Q6 已由 owner 裁决（2026-07-17）— 锁定；实现处于 owner CHANGES 返工轮**
+Date: 2026-07-17 · Status: **Q1–Q6 已由 owner 裁决（2026-07-17）— 锁定；实现返工与 fresh gate 已完成，待逐窗落地**
 Basis: #4215 §6/§7/§10.1（已 ratify-by-merge `66c7459a8`）+ B4 落地形态（#4419 `b94dcd644`）。
 本文件不重新设计 §6 —— 只把 §6 的 owner ruling 固化为可实现、可 mutation 验证的锁。§3 记录
-owner 对 Q1–Q6 的最终裁决；§5 记录当前真实开发状态（B5-a..B7 已开发、owner 复审 CHANGES 返工中）。
+owner 对 Q1–Q6 的最终裁决；§5 记录当前真实开发状态（B5-a..B7 已开发、返工与独立 gate 已完成，仍未合并）。
 
 ## 0. B5 关闭的具体缺陷（现状实证）
 
@@ -132,14 +132,14 @@ purpose=`approval_routing` 的解析顺序：
   **CI 事实修正（owner 抓）**：stacked PR（base≠main）只触发 pr-validate，**不构成 required CI
   全绿**；落地时逐张 retarget→rebase→重放 mutation→全套 required CI→owner 复审。
 
-## 5. 当前真实开发状态（2026-07-17 owner 复审轮）
+## 5. 当前真实开发状态（2026-07-19 落地前）
 
 | 票 | PR | 状态 |
 |---|---|---|
-| B5-a schema | #4429 | HOLD（无新 P1/P2；等本锁修订后随队 retarget/重跑）|
-| B5-b resolver | #4430 | CHANGES（P1 fail-open，修法见 §3）|
-| B5-c routes | #4431 | CHANGES（unsupported-purpose + local 启用保护）|
-| B6 等价 | #4434 | CHANGES（真 pending instance/assignment 证明）|
-| B7 对账 | #4436 | CHANGES（两条 SQL 守卫 + 管理入口 + Q6 hook）|
+| B5-a schema | #4429 · `71e4a3319` | 返工后 gate APPROVE，无 P1/P2；base=main，旧 head required CI 曾全绿，落地窗仍须对齐 main 后重跑 |
+| B5-b resolver | #4430 · `3312cf6d1` | P1 fail-open 已按 §3 修闭；fresh gate 无 P1/P2；stacked/unarmed |
+| B5-c routes | #4431 · `605b0498a` | unsupported-purpose、local 启用保护与 env 严格解析测试已修闭；fresh gate 无 P1/P2；stacked/unarmed |
+| B6 等价 | #4434 · `8f0ad9429` | 真 pending instance + assignment 的在途不变证明已补；fresh gate 无 P1/P2；stacked/unarmed |
+| B7 对账 | #4436 · `56e0b03ad` | 两条 SQL 守卫、管理入口、Q6 hook 与 heal 方向测试已补；fresh gate 无 P1/P2；stacked/unarmed |
 
-Transfer T1 冻结不变；Canonical Org 收官门待五 PR 返工后逐张落地再定稿。
+Transfer T1 继续冻结；Canonical Org 收官门待五 PR 按顺序 retarget/rebase、重放 mutation、跑 required CI、逐张落地后再定稿。
