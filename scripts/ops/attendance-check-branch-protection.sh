@@ -193,10 +193,12 @@ else
   strict_current="$(jq -r '.required_status_checks.strict // false' "$protection_json")"
   enforce_admins_current="$(jq -r '.enforce_admins.enabled // false' "$protection_json")"
   pr_reviews_required_current="$(jq -r 'if (.required_pull_request_reviews == null) then false else true end' "$protection_json")"
-  pr_reviews_required_current="$(jq -r 'if (.required_pull_request_reviews == null) then false else true end' "$protection_json")"
   approving_review_count_current="$(jq -r '.required_pull_request_reviews.required_approving_review_count // 0' "$protection_json")"
   code_owner_reviews_current="$(jq -r '.required_pull_request_reviews.require_code_owner_reviews // false' "$protection_json")"
-  mapfile -t contexts_current < <(jq -r '.required_status_checks.contexts[]? // empty' "$protection_json")
+  while IFS= read -r context; do
+    [[ -n "$context" ]] || continue
+    contexts_current+=("$context")
+  done < <(jq -r '.required_status_checks.contexts[]? // empty' "$protection_json")
 fi
 
 missing_checks=()

@@ -174,11 +174,14 @@ jobs:
       - name: B4 department-bindings CI wiring contract
         run: node --test scripts/ops/b4-department-bindings-ci-wiring.test.mjs
 
-      # The production monitor invokes the same state helper covered here.
-      # Keep this in the required 18/20 matrix so HTTP classification, silence
-      # barriers, and alert/recovery streak semantics cannot drift silently.
-      - name: Prod health probe monitor contract
-        run: node --test scripts/ops/prod-health-probe-state.test.mjs
+      # Production monitors invoke the same helpers covered here. Keep these in
+      # the required 18/20 matrix so health semantics and shell portability
+      # cannot drift silently.
+      - name: Production monitor contracts
+        run: |
+          node --test \
+            scripts/ops/prod-health-probe-state.test.mjs \
+            scripts/ops/attendance-check-branch-protection.test.mjs
 
       # #4210 T9: the stock-preparation one-click acceptance script's cross-platform contract + behavioural
       # tests are pure pwsh 7 + tar + node. Run once in the required 20.x arm. The package's target-shell
