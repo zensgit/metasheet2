@@ -165,9 +165,10 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
   })
 
   afterAll(async () => {
+    // Policy delete first (cross-suite-dangerous residue). server.stop() always runs; cleanup
+    // failure must fail the suite (no silent catch).
+    let cleanupError: unknown
     try {
-      // gate P3-2: the 'default' routing policy is the single most cross-suite-dangerous residue —
-      // delete it FIRST so a throw later in this block can never leak it into serially-later suites.
       await query(`DELETE FROM org_directory_routing_policy WHERE org_id = ANY($1)`, [['default', ...cleanupOrgs]])
       const pool = poolManager.get()
       const tids = (await pool.query(`SELECT id FROM approval_templates WHERE key LIKE $1`, [`%-${TS}`])).rows.map((r) => r.id as string)
@@ -188,10 +189,11 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
       for (const id of cleanupIntegrationIds.splice(0)) await query(`DELETE FROM directory_integrations WHERE id = $1`, [id])
       for (const org of cleanupOrgs.splice(0)) await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [org])
       for (const uid of cleanupUsers.splice(0)) await query(`DELETE FROM users WHERE id = $1`, [uid])
-    } catch {
-      /* best effort */
+    } catch (err) {
+      cleanupError = err
     }
     if (server) await server.stop()
+    if (cleanupError) throw cleanupError
   })
 
   it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
