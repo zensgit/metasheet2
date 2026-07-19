@@ -216,6 +216,16 @@ jobs:
       - name: T2 source-freeze CI wiring contract
         run: node --test scripts/ops/t2-source-freeze-ci-wiring.test.mjs
 
+      # T2-Gate CI contracts (no DB): (1) collision-mechanism suite two-point wiring —
+      # exact quoted path inside test.exclude + whole-file arg inside the named
+      # "Run approval real-DB integration" step (DATABASE_URL + vitest.integration.config.ts);
+      # (2) values-free runbook contract — closed booleans only (duplicate_key_detected /
+      # expected_constraint_detected), never raw error_message / err-head; provenance
+      # (SHA, date/actor, internal integration ids) is allowed.
+      # Dropping either contract silently disables the §3.4 mechanism/evidence gate.
+      - name: T2-Gate collision-mechanism CI wiring contract
+        run: node --test scripts/ops/t2gate-collision-mechanism-ci-wiring.test.mjs scripts/ops/t2gate-runbook-values-free-contract.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -684,6 +694,7 @@ jobs:
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/directory-org-transfer-source-freeze.db.test.ts \
+            tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
             tests/integration/directory-sync-schedule-timezone.db.test.ts \
             tests/integration/directory-local-provider-bootstrap.db.test.ts \
             tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts \
