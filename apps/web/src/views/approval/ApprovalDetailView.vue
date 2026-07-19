@@ -514,17 +514,29 @@
             :label="field.label"
             required
           >
-            <el-input-number
+            <!-- FWB-3: number stays a string end-to-end (never el-input-number / JS Number). -->
+            <el-input
               v-if="field.type === 'number'"
               v-model="decisionDataDraft[field.id]"
+              inputmode="decimal"
               class="ms-w-100pct"
               :data-testid="`approval-decision-field-${field.id}`"
+              data-field-type="number-string"
             />
             <el-date-picker
               v-else-if="field.type === 'date'"
               v-model="decisionDataDraft[field.id]"
               type="date"
               value-format="YYYY-MM-DD"
+              class="ms-w-100pct"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
+            <!-- Datetime requires explicit offset; value-format emits Z so host TZ is never guessed. -->
+            <el-date-picker
+              v-else-if="field.type === 'datetime'"
+              v-model="decisionDataDraft[field.id]"
+              type="datetime"
+              value-format="YYYY-MM-DDTHH:mm:ss.SSSZ"
               class="ms-w-100pct"
               :data-testid="`approval-decision-field-${field.id}`"
             />
@@ -541,6 +553,13 @@
                 :value="opt.value"
               />
             </el-select>
+            <el-input
+              v-else-if="field.type === 'textarea'"
+              v-model="decisionDataDraft[field.id]"
+              type="textarea"
+              :rows="3"
+              :data-testid="`approval-decision-field-${field.id}`"
+            />
             <el-input
               v-else
               v-model="decisionDataDraft[field.id]"
@@ -1402,11 +1421,18 @@ function openActionDialog(action: 'approve' | 'reject') {
   actionComment.value = ''
   actionDialogError.value = null
   // Reset FWB-3 decision draft; seed from formSnapshot defaults when present.
+  // Number fields stay strings end-to-end (never JS Number / el-input-number).
   for (const key of Object.keys(decisionDataDraft)) delete decisionDataDraft[key]
   if (action === 'approve') {
     for (const field of currentDecisionFields.value) {
       const snap = approval.value?.formSnapshot?.[field.id]
-      decisionDataDraft[field.id] = snap !== undefined ? snap : undefined
+      if (snap === undefined || snap === null) {
+        decisionDataDraft[field.id] = undefined
+      } else if (field.type === 'number') {
+        decisionDataDraft[field.id] = typeof snap === 'string' ? snap : String(snap)
+      } else {
+        decisionDataDraft[field.id] = snap
+      }
     }
   }
   actionDialogVisible.value = true

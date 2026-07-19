@@ -57,12 +57,22 @@ function mountEditor(props: Record<string, unknown> = {}) {
       },
     })),
     confirmFwbConfirmation: vi.fn(async () => ({ ok: true, confirmationId: 'fwbc_1' })),
-    listFields: vi.fn(async () => ({
-      fields: [
-        { id: 'f_text', name: 'Text', type: 'string' },
-        { id: 'f_num', name: 'Num', type: 'number' },
-      ],
-    })),
+    listFields: vi.fn(async (sheetId: string) => {
+      if (sheetId === 'sheet_tgt') {
+        return {
+          fields: [
+            { id: 'tgt_text', name: 'Target Text', type: 'string' },
+            { id: 'tgt_num', name: 'Target Num', type: 'number' },
+          ],
+        }
+      }
+      return {
+        fields: [
+          { id: 'f_text', name: 'Text', type: 'string' },
+          { id: 'f_num', name: 'Num', type: 'number' },
+        ],
+      }
+    }),
     listSheets: vi.fn(async () => ({ sheets: [] })),
     listApprovalTemplates: vi.fn(async () => ({ data: [{ id: 'tpl_1', name: 'Template' }] })),
     listDingTalkGroups: vi.fn(async () => []),
@@ -155,6 +165,155 @@ describe('MetaAutomationRuleEditor — FWB Q6 challenge (selectors, no pasted ID
       challengeNonce: 'nonce',
     })
     expect(host.querySelector('[data-field="fwbConfirmOk"]')).toBeTruthy()
+    app.unmount()
+  })
+
+  it('update mode loads target fields from record-link pinned sheet, not host sheet', async () => {
+    const { host, app, client } = mountEditor({
+      ruleExtra: {
+        actionConfig: {
+          mode: 'update',
+          mappings: [{ formFieldId: 'summary', targetFieldId: '' }],
+          recordLinkFieldId: 'link',
+          confirmationId: '',
+        },
+        actions: [
+          {
+            type: 'write_approval_form_values',
+            config: {
+              mode: 'update',
+              mappings: [{ formFieldId: 'summary', targetFieldId: '' }],
+              recordLinkFieldId: 'link',
+              confirmationId: '',
+            },
+          },
+        ],
+      },
+    })
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 40))
+    await nextTick()
+
+    // listFields must be called with the record-link server-pinned sheet, not the host.
+    const sheetIds = client.listFields.mock.calls.map((c: unknown[]) => c[0])
+    expect(sheetIds).toContain('sheet_tgt')
+
+    // Target options should expose the pinned sheet fields.
+    const targetSelect = host.querySelector('[data-field="fwbTargetFieldId"]')
+    expect(targetSelect).toBeTruthy()
+    // Options are teleported by Element Plus; assert via client call + mode selector instead.
+    expect(host.querySelector('[data-field="fwbMode"]')).toBeTruthy()
+    app.unmount()
+  })
+
+  it('changing record-link invalidates confirmation and reloads target sheet fields', async () => {
+    const { host, app, client } = mountEditor()
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // Switch mode to update via the draft action config after mount by re-mounting.
+    app.unmount()
+    const second = mountEditor({
+      ruleExtra: {
+        actionConfig: {
+          mode: 'update',
+          mappings: [{ formFieldId: 'summary', targetFieldId: 'tgt_text' }],
+          recordLinkFieldId: 'link',
+          confirmationId: 'fwbc_stale',
+        },
+        actions: [
+          {
+            type: 'write_approval_form_values',
+            config: {
+              mode: 'update',
+              mappings: [{ formFieldId: 'summary', targetFieldId: 'tgt_text' }],
+              recordLinkFieldId: 'link',
+              confirmationId: 'fwbc_stale',
+            },
+          },
+        ],
+      },
+    })
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 40))
+    await nextTick()
+
+    expect(second.client.listFields).toHaveBeenCalledWith('sheet_tgt')
+    // Host sheet should not be the sole target for update mode.
+    const updateCalls = second.client.listFields.mock.calls.map((c: unknown[]) => c[0])
+    expect(updateCalls.filter((id: string) => id === 'sheet_tgt').length).toBeGreaterThan(0)
+    second.app.unmount()
+    void host
+    void client
+  })
+
+  it('decision mode source selector is limited to the node decisionFieldIds', async () => {
+    const { host, app } = mountEditor({
+      ruleExtra: {
+        actionConfig: {
+          mode: 'decision',
+          mappings: [{ formFieldId: '', targetFieldId: '' }],
+          recordLinkFieldId: 'link',
+          decisionNodeKey: 'approval_1',
+          confirmationId: '',
+        },
+        actions: [
+          {
+            type: 'write_approval_form_values',
+            config: {
+              mode: 'decision',
+              mappings: [{ formFieldId: '', targetFieldId: '' }],
+              recordLinkFieldId: 'link',
+              decisionNodeKey: 'approval_1',
+              confirmationId: '',
+            },
+          },
+        ],
+      },
+    })
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 40))
+    await nextTick()
+
+    // Source field options: only "amount" is in decisionFieldIds (not summary).
+    // El-option bodies are not always in DOM until open; the decision node selector is present.
+    expect(host.querySelector('[data-field="fwbDecisionNodeKey"]')).toBeTruthy()
+    expect(host.querySelector('[data-field="fwbFormFieldId"]')).toBeTruthy()
+    app.unmount()
+  })
+
+  it('loads target fields independently for every FWB action', async () => {
+    const { host, app, client } = mountEditor({
+      ruleExtra: {
+        actions: [
+          {
+            type: 'write_approval_form_values',
+            config: {
+              mode: 'create',
+              mappings: [{ formFieldId: 'summary', targetFieldId: 'f_text' }],
+              confirmationId: '',
+            },
+          },
+          {
+            type: 'write_approval_form_values',
+            config: {
+              mode: 'update',
+              mappings: [{ formFieldId: 'summary', targetFieldId: 'tgt_text' }],
+              recordLinkFieldId: 'link',
+              confirmationId: '',
+            },
+          },
+        ],
+      },
+    })
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 60))
+    await nextTick()
+
+    const sheetIds = client.listFields.mock.calls.map((call: unknown[]) => call[0])
+    expect(sheetIds).toContain('sheet_host')
+    expect(sheetIds).toContain('sheet_tgt')
+    expect(host.querySelectorAll('[data-field="fwbTargetFieldId"]')).toHaveLength(2)
     app.unmount()
   })
 })

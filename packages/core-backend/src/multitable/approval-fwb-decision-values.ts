@@ -18,7 +18,11 @@ import { claimActionApplied } from './automation-action-idempotency'
 import { mapApprovalFormValues, type FwbFieldMapping } from './approval-form-value-mapping'
 import { recheckFwbPermissionGates, type FwbGateChecks, type FwbGateId, type FwbGateSubject } from './approval-fwb-permission-gates'
 import { recheckBoundRecordAtExecute, type FwbUpdateSeam, type RecordLinkChecks, type RecordLinkRejectCode } from './approval-fwb-record-link'
-import { coerceExactDecimal } from './approval-fwb-target-fields'
+import {
+  canonicalizeDatetimeToUtcIso,
+  coerceExactDecimal,
+  isStrictCalendarDate,
+} from './approval-fwb-target-fields'
 
 export interface FrozenDecisionSnapshot {
   nodeKey: string
@@ -42,19 +46,28 @@ export type FreezeResult =
         | 'no_declared_fields'
     }
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
-const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/
+/** v1 decision field types — attachment/user/multi-select/detail/record-link are excluded. */
+export const FWB_DECISION_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'datetime',
+  'select',
+])
 
 export type DecisionFieldSchemaHint = {
   /** form field type from the template schema (authoritative when present). */
   type?: string
   /** number field precision for D7/Q5 when type is number. */
   numberPrecision?: number
+  /** select options from the template formSchema (authoritative when type is select). */
+  selectOptions?: readonly string[]
 }
 
 /**
- * Normalize one decision value (D7 number → exact decimal string; D8 date → ISO date string).
- * Returns null when blank/invalid.
+ * Normalize one decision value (D7 number → exact decimal string; D8 date → ISO date string;
+ * datetime → UTC ISO with required offset; select → template options only).
  */
 export function normalizeDecisionFieldValue(
   raw: unknown,
@@ -65,23 +78,37 @@ export function normalizeDecisionFieldValue(
 
   const type = hint?.type
   if (type === 'number') {
+    // Always store as exact decimal string end-to-end (never JS Number).
     const r = coerceExactDecimal(raw, hint?.numberPrecision)
     if (!r.ok) return { ok: false, code: 'invalid_value' }
     return { ok: true, value: r.v }
   }
   if (type === 'date') {
-    if (typeof raw !== 'string' || !ISO_DATE.test(raw.trim())) return { ok: false, code: 'invalid_value' }
-    const t = Date.parse(`${raw.trim()}T00:00:00Z`)
-    if (!Number.isFinite(t)) return { ok: false, code: 'invalid_value' }
+    if (typeof raw !== 'string' || !isStrictCalendarDate(raw)) return { ok: false, code: 'invalid_value' }
     return { ok: true, value: raw.trim() }
   }
   if (type === 'datetime') {
-    if (typeof raw !== 'string' || !ISO_DATETIME.test(raw.trim())) return { ok: false, code: 'invalid_value' }
-    const t = Date.parse(raw.trim())
-    if (!Number.isFinite(t)) return { ok: false, code: 'invalid_value' }
-    return { ok: true, value: raw.trim() }
+    if (typeof raw !== 'string') return { ok: false, code: 'invalid_value' }
+    const r = canonicalizeDatetimeToUtcIso(raw)
+    if (!r.ok) return { ok: false, code: 'invalid_value' }
+    return { ok: true, value: r.v }
   }
-  // text / select / untyped: reject blank string (already handled); pass through finite scalars.
+  if (type === 'select') {
+    if (!hint?.selectOptions || hint.selectOptions.length === 0) {
+      return { ok: false, code: 'invalid_value' }
+    }
+    if (typeof raw !== 'string' || !hint.selectOptions.includes(raw)) {
+      return { ok: false, code: 'invalid_value' }
+    }
+    return { ok: true, value: raw }
+  }
+  if (type === 'text' || type === 'textarea') {
+    if (typeof raw === 'string') return { ok: true, value: raw }
+    if (typeof raw === 'number' && Number.isSafeInteger(raw)) return { ok: true, value: String(raw) }
+    if (typeof raw === 'boolean') return { ok: true, value: raw ? 'true' : 'false' }
+    return { ok: false, code: 'invalid_value' }
+  }
+  // Untyped (legacy tests): reject blank string (already handled); pass through finite scalars.
   if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
     if (typeof raw === 'number' && !Number.isFinite(raw)) return { ok: false, code: 'invalid_value' }
     return { ok: true, value: raw }

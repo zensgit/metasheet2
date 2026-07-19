@@ -27,6 +27,10 @@ const RUN = randomUUID().slice(0, 8)
 const BASE_ID = `base_fwbe_${TS}`
 const SHEET_ID = `sheet_fwbe_${TS}`
 const FIELD_ID = `fld_title_${TS}`
+const RICH_FIELD_ID = `fld_rich_${TS}`
+const DATETIME_FIELD_ID = `fld_datetime_${TS}`
+const DENIED_RECORD_ID = `rec_fwbe_denied_${TS}`
+const ALLOWED_RECORD_ID = `rec_fwbe_allowed_${TS}`
 const CREATOR = `u_fwbe_c_${TS}`
 const REQUESTER = `u_fwbe_r_${TS}`
 const APPROVER = `u_fwbe_a_${TS}`
@@ -63,6 +67,25 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
        VALUES ($1,$2,'Title','text','{}'::jsonb,0)`,
       [FIELD_ID, SHEET_ID],
     )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1,$2,'Rich notes','longText','{"rich":true}'::jsonb,1)`,
+      [RICH_FIELD_ID, SHEET_ID],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1,$2,'Submitted at','dateTime','{"timezone":"UTC"}'::jsonb,2)`,
+      [DATETIME_FIELD_ID, SHEET_ID],
+    )
+    await q(
+      `UPDATE meta_sheets SET row_level_read_permissions_enabled = TRUE WHERE id = $1`,
+      [SHEET_ID],
+    )
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version)
+       VALUES ($1,$3,'{"kind":"denied"}'::jsonb,1),($2,$3,'{"kind":"allowed"}'::jsonb,1)`,
+      [DENIED_RECORD_ID, ALLOWED_RECORD_ID, SHEET_ID],
+    )
 
     await q(
       `INSERT INTO permissions (code, name, description)
@@ -83,13 +106,32 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
     }
     await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1,'admin') ON CONFLICT DO NOTHING`, [CREATOR]).catch(() => {})
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:write') ON CONFLICT DO NOTHING`, [REQUESTER])
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [REQUESTER])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:act') ON CONFLICT DO NOTHING`, [APPROVER])
+    await q(
+      `INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level, created_by)
+       VALUES ($1,$2,'user',$3,'none',$4)`,
+      [SHEET_ID, DENIED_RECORD_ID, REQUESTER, CREATOR],
+    )
 
     approvals = new ApprovalProductService()
     const template = await approvals.createTemplate({
       key: `fwbe-${TS}`,
       name: 'FWBE Template',
-      formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+      formSchema: {
+        fields: [
+          { id: 'summary', type: 'text', label: 'Summary', required: true },
+          { id: 'notes', type: 'textarea', label: 'Notes' },
+          { id: 'submittedAt', type: 'datetime', label: 'Submitted at' },
+          { id: 'amount', type: 'number', label: 'Approved amount', props: { decimals: 2 } },
+          {
+            id: 'linked',
+            type: 'record-link',
+            label: 'Linked record',
+            props: { baseId: BASE_ID, sheetId: SHEET_ID },
+          },
+        ],
+      },
       approvalGraph: {
         nodes: [
           { key: 'start', type: 'start', name: 'Start', config: {} },
@@ -97,7 +139,11 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
             key: 'approval_1',
             type: 'approval',
             name: 'Approver',
-            config: { mode: 'any', assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }] },
+            config: {
+              mode: 'any',
+              assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }],
+              decisionFieldIds: ['amount'],
+            },
           },
           { key: 'end', type: 'end', name: 'End', config: {} },
         ],
@@ -123,7 +169,11 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
         templateVersionId,
         targetBaseId: null,
         targetSheetId: SHEET_ID,
-        mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_ID }],
+        mappings: [
+          { formFieldId: 'summary', targetFieldId: FIELD_ID },
+          { formFieldId: 'notes', targetFieldId: RICH_FIELD_ID },
+          { formFieldId: 'submittedAt', targetFieldId: DATETIME_FIELD_ID },
+        ],
       },
     })
     const ack = await acknowledgeFwbConfirmation(queryFn, {
@@ -143,7 +193,11 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
       actionType: 'write_approval_form_values',
       actionConfig: {
         mode: 'create',
-        mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_ID }],
+        mappings: [
+          { formFieldId: 'summary', targetFieldId: FIELD_ID },
+          { formFieldId: 'notes', targetFieldId: RICH_FIELD_ID },
+          { formFieldId: 'submittedAt', targetFieldId: DATETIME_FIELD_ID },
+        ],
         confirmationId: challenge.id,
       },
       createdBy: CREATOR,
@@ -279,13 +333,118 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
     }
   })
 
+  test('save rejects FWB on any trigger other than approval.completed', async () => {
+    await expect(
+      svc.createRule(SHEET_ID, {
+        name: `fwbe-wrong-trigger-${RUN}`,
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mode: 'create',
+          mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_ID }],
+          confirmationId: 'fwbc_not_relevant',
+        },
+        createdBy: CREATOR,
+        enabled: true,
+      }),
+    ).rejects.toThrow(/only allowed on approval\.completed/i)
+  })
+
+  test('save re-reads the active template and rejects unsupported source field types', async () => {
+    const challenge = await createFwbConfirmationChallenge(queryFn, {
+      sheetId: SHEET_ID,
+      configurerUserId: CREATOR,
+      subject: {
+        templateId,
+        templateVersionId,
+        targetBaseId: null,
+        targetSheetId: SHEET_ID,
+        mappings: [{ formFieldId: 'linked', targetFieldId: FIELD_ID }],
+      },
+    })
+    await acknowledgeFwbConfirmation(queryFn, {
+      confirmationId: challenge.id,
+      configurerUserId: CREATOR,
+      challengeNonce: challenge.challengeNonce,
+    })
+
+    await expect(
+      svc.createRule(SHEET_ID, {
+        name: `fwbe-unsupported-source-${RUN}`,
+        triggerType: 'approval.completed',
+        triggerConfig: { templateId, outcomes: ['approved'] },
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mode: 'create',
+          mappings: [{ formFieldId: 'linked', targetFieldId: FIELD_ID }],
+          confirmationId: challenge.id,
+        },
+        createdBy: CREATOR,
+        enabled: false,
+      }),
+    ).rejects.toThrow(/source field.*unsupported v1 type/i)
+  })
+
+  test('record-link submit enforces row-level read deny with a readable positive control', async () => {
+    await expect(
+      approvals.createApproval(
+        {
+          templateId,
+          formData: {
+            summary: `fwbe-denied-link-${RUN}`,
+            linked: { recordId: DENIED_RECORD_ID },
+          },
+        },
+        { userId: REQUESTER, userName: REQUESTER },
+      ),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+
+    const allowed = await approvals.createApproval(
+      {
+        templateId,
+        formData: {
+          summary: `fwbe-allowed-link-${RUN}`,
+          linked: { recordId: ALLOWED_RECORD_ID },
+        },
+      },
+      { userId: REQUESTER, userName: REQUESTER },
+    )
+    expect((allowed as { id?: string }).id).toEqual(expect.any(String))
+  })
+
   test('approve → writeback creates record + claim + durable outbox (same-txn path)', async () => {
     const dto = await approvals.createApproval(
-      { templateId, formData: { summary: `fwbe-${RUN}` } },
+      {
+        templateId,
+        formData: {
+          summary: `fwbe-${RUN}`,
+          notes: '<p>allowed</p><img src=x onerror="alert(1)"><script>alert(2)</script>',
+          submittedAt: '2026-07-19T09:30:00+08:00',
+        },
+      },
       { userId: REQUESTER, userName: REQUESTER },
     )
     const instanceId = (dto as { id: string }).id
-    await approvals.dispatchAction(instanceId, { action: 'approve', comment: 'ok' }, { userId: APPROVER, userName: APPROVER })
+    await approvals.dispatchAction(
+      instanceId,
+      { action: 'approve', comment: 'ok', decisionData: { amount: '9007199254740993.12' } },
+      { userId: APPROVER, userName: APPROVER },
+    )
+
+    const frozen = await q(
+      `SELECT node_key, entry_epoch, field_id, value
+         FROM approval_node_decision_values
+        WHERE instance_id=$1 AND field_id='amount'`,
+      [instanceId],
+    )
+    expect(frozen.rows).toHaveLength(1)
+    expect(frozen.rows[0]).toMatchObject({
+      node_key: 'approval_1',
+      entry_epoch: 1,
+      field_id: 'amount',
+      value: '9007199254740993.12',
+    })
 
     // Durable ON suppresses legacy bus emit (REPLACE). Drive the approval-trigger consumer from the
     // same-txn outbox payload (production dispatcher would await the same adapter).
@@ -315,6 +474,17 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
       throw new Error(`writeback missing. executions=${JSON.stringify(execs.rows)} outboxN=${completionRows.rows.length}`)
     }
 
+    const record = await q(
+      `SELECT data FROM meta_records WHERE sheet_id=$1 AND data->>$2=$3 ORDER BY created_at DESC LIMIT 1`,
+      [SHEET_ID, FIELD_ID, `fwbe-${RUN}`],
+    )
+    const data = (record.rows[0] as { data: Record<string, unknown> }).data
+    const storedRich = String(data[RICH_FIELD_ID])
+    expect(storedRich).toContain('<p>allowed</p>')
+    expect(storedRich).not.toContain('onerror')
+    expect(storedRich).not.toContain('<script')
+    expect(data[DATETIME_FIELD_ID]).toBe('2026-07-19T01:30:00.000Z')
+
     const claims = await q(
       `SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE instance_id=$1 AND rule_id=$2`,
       [instanceId, ruleId],
@@ -336,4 +506,23 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
     const totalObx = Number((outbox.rows[0] as { c: number }).c) + Number((outboxAlt.rows[0] as { c: number }).c)
     expect(totalObx).toBeGreaterThanOrEqual(1)
   }, 45_000)
+
+  test('non-approve action never freezes supplied decisionData', async () => {
+    const dto = await approvals.createApproval(
+      { templateId, formData: { summary: `fwbe-reject-${RUN}` } },
+      { userId: REQUESTER, userName: REQUESTER },
+    )
+    const instanceId = (dto as { id: string }).id
+    await approvals.dispatchAction(
+      instanceId,
+      { action: 'reject', comment: 'no', decisionData: { amount: '99.99' } },
+      { userId: APPROVER, userName: APPROVER },
+    )
+
+    const frozen = await q(
+      `SELECT count(*)::int AS c FROM approval_node_decision_values WHERE instance_id=$1`,
+      [instanceId],
+    )
+    expect(Number((frozen.rows[0] as { c: number }).c)).toBe(0)
+  })
 })

@@ -75,12 +75,16 @@ import {
   type ApprovalCompletionEventV1,
   type ApprovalCompletionTransitionSnapshot,
 } from './ApprovalCompletionEvent'
-import { freezeDecisionValues } from '../multitable/approval-fwb-decision-values'
+import {
+  FWB_DECISION_FIELD_TYPES,
+  freezeDecisionValues,
+} from '../multitable/approval-fwb-decision-values'
 import {
   assertRecordLinksReadableAtSubmit,
   parseRecordLinkValue,
   persistFrozenDecisionValues,
 } from '../multitable/approval-fwb-runtime'
+import { isRecordReadDeniedForUser } from '../multitable/permission-service'
 import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
 import {
   buildApprovalTaskCreatedEvent,
@@ -1178,23 +1182,30 @@ function validateNodeFieldPermissionsAgainstFormSchema(
 }
 
 /**
- * FWB-3: every decisionFieldIds entry must exist on the version's formSchema.
- * Decision values are form fields the approver re-confirms / overrides at approve time.
+ * FWB-3: every decisionFieldIds entry must exist on the version's formSchema AND be a supported
+ * scalar v1 decision type. Direct API attempts with unsupported types fail closed at publish/normalize.
  */
 function validateDecisionFieldIdsAgainstFormSchema(
   approvalGraph: ApprovalGraph,
   formSchema: FormSchema,
   context: ValidationContext,
 ): void {
-  const fieldIds = new Set(formSchema.fields.map((field) => field.id))
+  const fieldsById = new Map(formSchema.fields.map((field) => [field.id, field]))
   approvalGraph.nodes.forEach((node) => {
     if (node.type !== 'approval') return
     const config = node.config as { decisionFieldIds?: string[] }
     for (const fieldId of config.decisionFieldIds ?? []) {
-      if (!fieldIds.has(fieldId)) {
+      const field = fieldsById.get(fieldId)
+      if (!field) {
         failValidation(
           context,
           `approvalGraph node ${node.key} decisionFieldIds references unknown field ${fieldId}`,
+        )
+      }
+      if (!FWB_DECISION_FIELD_TYPES.has(field.type)) {
+        failValidation(
+          context,
+          `approvalGraph node ${node.key} decisionFieldIds field ${fieldId} has unsupported type ${field.type} (allowed: text, textarea, number, date, datetime, select)`,
         )
       }
     }
@@ -3629,7 +3640,8 @@ export class ApprovalProductService {
         if (rec.rows.length === 0) return false
         const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(queryFn, sheetId, userId)
         if (isAdminRole) return true
-        return capabilities.canRead === true
+        if (capabilities.canRead !== true) return false
+        return !(await isRecordReadDeniedForUser(queryFn, sheetId, recordId, userId))
       },
     }
     const result = await assertRecordLinksReadableAtSubmit(checks, fillerUserId, links)
@@ -5657,8 +5669,23 @@ export class ApprovalProductService {
         : undefined
       const declaredDecisionFields = (nodeForDecision?.config as { decisionFieldIds?: string[] } | undefined)?.decisionFieldIds
       const pendingDecisionData = isRecord(request.decisionData) ? request.decisionData : {}
+      const suppliedDecisionKeys = Object.keys(pendingDecisionData)
+      if (suppliedDecisionKeys.length > 0) {
+        const declaredSet = new Set(Array.isArray(declaredDecisionFields) ? declaredDecisionFields : [])
+        const undeclared = suppliedDecisionKeys.find((key) => !declaredSet.has(key))
+        if (undeclared) {
+          throw new ServiceError(
+            `decisionData contains undeclared field ${undeclared}`,
+            400,
+            'VALIDATION_ERROR',
+          )
+        }
+      }
       // Schema hints from the instance's frozen template version form_schema (D7/D8 normalize).
-      const decisionFieldHints: Record<string, { type?: string; numberPrecision?: number }> = {}
+      const decisionFieldHints: Record<
+        string,
+        { type?: string; numberPrecision?: number; selectOptions?: readonly string[] }
+      > = {}
       if (Array.isArray(declaredDecisionFields) && declaredDecisionFields.length > 0) {
         const verSchema = await client.query(
           `SELECT v.form_schema
@@ -5670,16 +5697,28 @@ export class ApprovalProductService {
         const fs = (verSchema.rows[0] as { form_schema?: unknown } | undefined)?.form_schema
         const fieldsList =
           fs && typeof fs === 'object' && !Array.isArray(fs) && Array.isArray((fs as { fields?: unknown }).fields)
-            ? (fs as { fields: Array<{ id?: string; type?: string; props?: Record<string, unknown> }> }).fields
+            ? (fs as {
+                fields: Array<{
+                  id?: string
+                  type?: string
+                  props?: Record<string, unknown>
+                  options?: Array<{ value?: unknown }>
+                }>
+              }).fields
             : []
         for (const f of fieldsList) {
           if (!f || typeof f.id !== 'string' || !declaredDecisionFields.includes(f.id)) continue
-          const hint: { type?: string; numberPrecision?: number } = {}
+          const hint: { type?: string; numberPrecision?: number; selectOptions?: readonly string[] } = {}
           if (typeof f.type === 'string') hint.type = f.type
           if (f.type === 'number') {
             const props = f.props && typeof f.props === 'object' ? f.props : {}
             const d = (props as { decimals?: unknown }).decimals
             if (typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 20) hint.numberPrecision = d
+          }
+          if (f.type === 'select' && Array.isArray(f.options)) {
+            hint.selectOptions = f.options
+              .map((o) => (typeof o?.value === 'string' ? o.value : null))
+              .filter((v): v is string => v !== null)
           }
           decisionFieldHints[f.id] = hint
         }

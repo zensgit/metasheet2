@@ -13,8 +13,8 @@
  *      downstream fan-out commits or rolls back WITH the claim and the record).
  *
  * Any throw from the seam propagates and aborts the caller's transaction — claim, record, revision and
- * outbox rows all vanish together (proven in the real-DB spec). NO production caller yet; the dispatchAction
- * wiring lands with the FWB activation slice behind its own gate.
+ * outbox rows all vanish together (proven in the real-DB spec). The production automation executor calls this
+ * through approval-fwb-runtime while the dedicated FWB and durable-delivery flags are enabled.
  */
 import type { Queryable } from './automation-durable-dispatcher'
 import type { TransactionalQueryable } from './pg-transaction-guard'

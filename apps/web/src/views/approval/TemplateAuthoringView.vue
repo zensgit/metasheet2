@@ -2251,13 +2251,22 @@ function setApprovalSourceLevel(nodeKey: string, value: number): void {
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
-// FWB-3: decision fields are form fields the approver re-confirms at approve time (no detail/attachment/record-link).
+// FWB-3 v1: only supported scalar decision types (text/textarea/number/date/datetime/select).
+// Exclude attachment, user, multi-select, detail, record-link (backend rejects them at publish too).
+const FWB_DECISION_FIELD_TYPES = new Set([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'datetime',
+  'select',
+])
 const decisionFieldOptions = computed(() =>
   draft.value.fields
     .filter((field) => {
       const id = field.id.trim()
       if (!id) return false
-      return field.type !== 'detail' && field.type !== 'record-link'
+      return FWB_DECISION_FIELD_TYPES.has(field.type)
     })
     .map((field) => ({
       id: field.id.trim(),

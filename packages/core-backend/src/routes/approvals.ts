@@ -1893,6 +1893,18 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
       const targetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : undefined
       const targetNodeKey = typeof req.body?.targetNodeKey === 'string' ? req.body.targetNodeKey.trim() : undefined
+      const rawDecisionData = req.body?.decisionData
+      if (rawDecisionData !== undefined && (action !== 'approve' || !isPlainRecord(rawDecisionData))) {
+        return res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'decisionData is allowed only as an object on approve',
+          },
+        })
+      }
+      const decisionData = action === 'approve' && isPlainRecord(rawDecisionData)
+        ? { ...rawDecisionData }
+        : undefined
       // P1-B add_sign: approver user IDs to pull into the current node.
       const targetUserIds = Array.isArray(req.body?.targetUserIds)
         ? req.body.targetUserIds
@@ -1962,6 +1974,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               comment,
               targetUserId,
               targetNodeKey,
+              decisionData,
               targetUserIds,
               addSignMode,
               targetAssignmentUserId,

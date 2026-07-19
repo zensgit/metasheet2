@@ -20,9 +20,24 @@ import {
   loadActiveTemplateVersionBundle,
   resolveActiveTemplateVersionId,
 } from './approval-template-visibility'
-import { loadTargetFieldsFromMeta } from './approval-fwb-target-fields'
+import { loadTargetFieldsFromMeta, resolvePinnedRecordLinkTarget } from './approval-fwb-target-fields'
 
 const NON_BLANK = /[!-~]/
+export const FWB_V1_SOURCE_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'datetime',
+  'select',
+])
+
+export function isSupportedFwbSourceField(field: Record<string, unknown>): boolean {
+  return typeof field.id === 'string'
+    && NON_BLANK.test(field.id.trim())
+    && typeof field.type === 'string'
+    && FWB_V1_SOURCE_FIELD_TYPES.has(field.type)
+}
 
 export interface FwbConfirmationSubject {
   templateId: string
@@ -65,6 +80,7 @@ export type FwbChallengeBuildError =
   | 'active_version_missing'
   | 'mappings_invalid'
   | 'source_field_missing'
+  | 'source_field_unsupported'
   | 'target_field_missing'
   | 'record_link_required'
   | 'record_link_invalid'
@@ -118,8 +134,10 @@ export async function buildAuthoritativeFwbChallengeSubject(
   }
 
   const formFields = formFieldsFromSchema(bundle.formSchema)
-  const formFieldIds = new Set(
-    formFields.map((f) => (typeof f.id === 'string' ? f.id.trim() : '')).filter(Boolean),
+  const formFieldsById = new Map(
+    formFields
+      .map((f) => [typeof f.id === 'string' ? f.id.trim() : '', f] as const)
+      .filter(([id]) => Boolean(id)),
   )
 
   const mappings: Array<{ formFieldId: string; targetFieldId: string }> = []
@@ -130,7 +148,11 @@ export async function buildAuthoritativeFwbChallengeSubject(
     if (!NON_BLANK.test(formFieldId) || !NON_BLANK.test(targetFieldId)) {
       return { ok: false, code: 'mappings_invalid' }
     }
-    if (!formFieldIds.has(formFieldId)) return { ok: false, code: 'source_field_missing' }
+    const formField = formFieldsById.get(formFieldId)
+    if (!formField) return { ok: false, code: 'source_field_missing' }
+    if (!isSupportedFwbSourceField(formField)) {
+      return { ok: false, code: 'source_field_unsupported' }
+    }
     if (seenTargets.has(targetFieldId)) return { ok: false, code: 'mappings_invalid' }
     seenTargets.add(targetFieldId)
     mappings.push({ formFieldId, targetFieldId })
@@ -153,11 +175,11 @@ export async function buildAuthoritativeFwbChallengeSubject(
     )
     if (!field) return { ok: false, code: 'record_link_invalid' }
     const props = isRecord(field.props) ? field.props : {}
-    const sheetId = typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
-    const baseId = typeof props.baseId === 'string' ? props.baseId.trim() : ''
-    if (!NON_BLANK.test(sheetId)) return { ok: false, code: 'record_link_invalid' }
-    targetSheetId = sheetId
-    targetBaseId = baseId || null
+    // Fail closed: sheetId required AND baseId must exactly match non-deleted meta_sheets.base_id.
+    const pinned = await resolvePinnedRecordLinkTarget(queryFn, props)
+    if (!pinned.ok) return { ok: false, code: 'record_link_invalid' }
+    targetSheetId = pinned.sheetId
+    targetBaseId = pinned.baseId
   }
 
   // Target field authority from meta_fields.
