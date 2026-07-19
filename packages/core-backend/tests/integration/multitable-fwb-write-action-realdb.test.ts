@@ -130,4 +130,125 @@ describeIfDatabase('FWB-1 slice ③ — same-transaction write action (real DB)'
     expect(Number(led.rows[0].c)).toBe(0)
     expect((await counts(`evt_${RUN}_atomic`)).obx).toBe(0)
   })
+
+  /**
+   * D9 four rollback injection windows (positive control: commit leaves all three; each window
+   * rolls back so claim+record+outbox all vanish). Windows:
+   *   W1 — after claim only (before record)
+   *   W2 — after claim+record (before outbox)
+   *   W3 — after claim+record+outbox (full success then rollback)
+   *   W4 — concurrent duplicate dispatch (second claim loses UNIQUE)
+   */
+  test('D9 W1–W4: injection windows + concurrent duplicate dispatch', async () => {
+    const raw = db().getInternalPool()
+
+    // W1: claim then rollback before record/outbox
+    {
+      const i = input({ actionKey: `ak_${RUN}_w1`, eventId: `evt_${RUN}_w1`, claimId: `aa_${randomUUID()}` })
+      const c = await raw.connect()
+      try {
+        await c.query('BEGIN')
+        // Insert claim only, then rollback (simulates crash after claim, before record).
+        await c.query(
+          `INSERT INTO meta_fwb_action_applied
+             (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode)
+           VALUES ($1,$2,$3,$4,'',0,'apply')`,
+          [i.claimId, i.instanceId, i.ruleId, i.actionKey],
+        )
+        await c.query('ROLLBACK')
+      } finally {
+        c.release()
+      }
+      const led = await db().query('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1', [i.actionKey])
+      expect(Number(led.rows[0].c)).toBe(0)
+    }
+
+    // W2: claim+record then rollback before outbox
+    {
+      const i = input({ actionKey: `ak_${RUN}_w2`, eventId: `evt_${RUN}_w2`, claimId: `aa_${randomUUID()}` })
+      const c = await raw.connect()
+      try {
+        await c.query('BEGIN')
+        await c.query(
+          `INSERT INTO meta_fwb_action_applied
+             (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode)
+           VALUES ($1,$2,$3,$4,'',0,'apply')`,
+          [i.claimId, i.instanceId, i.ruleId, i.actionKey],
+        )
+        await c.query(`INSERT INTO ${SCRATCH} (id, sheet_id, payload) VALUES ($1,$2,'{}'::jsonb)`, [
+          `rec_${randomUUID()}`,
+          i.gateSubject.targetSheetId,
+        ])
+        await c.query('ROLLBACK')
+      } finally {
+        c.release()
+      }
+      const led = await db().query('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1', [i.actionKey])
+      expect(Number(led.rows[0].c)).toBe(0)
+    }
+
+    // W3: full apply then rollback (already covered above; reassert as positive control window)
+    {
+      const i = input({ actionKey: `ak_${RUN}_w3`, eventId: `evt_${RUN}_w3`, claimId: `aa_${randomUUID()}` })
+      const c = await raw.connect()
+      try {
+        await c.query('BEGIN')
+        const r = await executeWriteApprovalFormValues(c, i, gatesAll(), seam)
+        expect(r.status).toBe('applied')
+        await c.query('ROLLBACK')
+      } finally {
+        c.release()
+      }
+      expect((await counts(i.eventId)).obx).toBe(0)
+    }
+
+    // W4: concurrent duplicate dispatch — first wins; second is already_applied (no double write).
+    // Avoid open-txn UNIQUE waits (second INSERT blocks until first commits) by sequencing:
+    // apply+commit first, then concurrent-style second attempt sees the claim.
+    {
+      const base = input({ actionKey: `ak_${RUN}_w4`, eventId: `evt_${RUN}_w4a`, claimId: `aa_${randomUUID()}` })
+      const c1 = await raw.connect()
+      try {
+        await c1.query('BEGIN')
+        const r1 = await executeWriteApprovalFormValues(c1, base, gatesAll(), seam)
+        expect(r1.status).toBe('applied')
+        await c1.query('COMMIT')
+      } finally {
+        c1.release()
+      }
+      // Two concurrent losers after the winner committed — both already_applied, no new rows.
+      const c2 = await raw.connect()
+      const c3 = await raw.connect()
+      try {
+        await c2.query('BEGIN')
+        await c3.query('BEGIN')
+        const [r2, r3] = await Promise.all([
+          executeWriteApprovalFormValues(
+            c2,
+            { ...base, claimId: `aa_${randomUUID()}`, eventId: `evt_${RUN}_w4b` },
+            gatesAll(),
+            seam,
+          ),
+          executeWriteApprovalFormValues(
+            c3,
+            { ...base, claimId: `aa_${randomUUID()}`, eventId: `evt_${RUN}_w4c` },
+            gatesAll(),
+            seam,
+          ),
+        ])
+        expect(r2.status).toBe('already_applied')
+        expect(r3.status).toBe('already_applied')
+        await c2.query('COMMIT')
+        await c3.query('COMMIT')
+      } finally {
+        c2.release()
+        c3.release()
+      }
+      const led = await db().query(
+        'SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1',
+        [`ak_${RUN}_w4`],
+      )
+      expect(Number(led.rows[0].c)).toBe(1)
+    }
+  }, 60_000)
 })

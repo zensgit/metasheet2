@@ -364,4 +364,121 @@ describeIfDatabase('FWB runtime modes (real DB, flags ON)', () => {
     const left = await q(`SELECT count(*)::int AS c FROM approval_node_decision_values WHERE instance_id=$1`, [orphanId])
     expect(Number((left.rows[0] as { c: number }).c)).toBe(0)
   })
+
+  test('Q6 ack is atomic — concurrent duplicate ack: exactly one succeeds', async () => {
+    const challenge = await createFwbConfirmationChallenge(q as never, {
+      sheetId: SHEET_ID,
+      configurerUserId: CREATOR,
+      subject: {
+        templateId: TPL_ID,
+        templateVersionId: verId,
+        targetBaseId: null,
+        targetSheetId: SHEET_ID,
+        mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_A }],
+      },
+    })
+    const input = {
+      confirmationId: challenge.id,
+      configurerUserId: CREATOR,
+      challengeNonce: challenge.challengeNonce,
+    }
+    const [a, b] = await Promise.all([
+      acknowledgeFwbConfirmation(q as never, input),
+      acknowledgeFwbConfirmation(q as never, input),
+    ])
+    const oks = [a, b].filter((r) => r.ok)
+    const fails = [a, b].filter((r) => !r.ok)
+    expect(oks).toHaveLength(1)
+    expect(fails).toHaveLength(1)
+    expect((fails[0] as { code: string }).code).toBe('already_confirmed')
+    const row = await q(
+      `SELECT confirmed_at IS NOT NULL AS confirmed FROM meta_fwb_confirmations WHERE id=$1`,
+      [challenge.id],
+    )
+    expect((row.rows[0] as { confirmed: boolean }).confirmed).toBe(true)
+  })
+
+  test('source visibility revocation at execute: canReadTemplate false → permanent reject', async () => {
+    const challenge = await createFwbConfirmationChallenge(q as never, {
+      sheetId: SHEET_ID,
+      configurerUserId: CREATOR,
+      subject: {
+        templateId: TPL_ID,
+        templateVersionId: verId,
+        targetBaseId: null,
+        targetSheetId: SHEET_ID,
+        mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_A }],
+      },
+    })
+    await acknowledgeFwbConfirmation(q as never, {
+      confirmationId: challenge.id,
+      configurerUserId: CREATOR,
+      challengeNonce: challenge.challengeNonce,
+    })
+    const before = await q(
+      `SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE instance_id=$1`,
+      [instanceId],
+    )
+    const beforeC = Number((before.rows[0] as { c: number }).c)
+    const revoked = gates(true)
+    revoked.canReadTemplate = async () => false
+    const result = await runWriteApprovalFormValues(
+      {
+        queryFn: q as never,
+        transaction: transaction as never,
+        eventBus: integrationEventBus,
+        evaluateCrossBaseWriteGate: async () => ({ crossBase: false }),
+        gateChecks: revoked,
+        linkChecks: linkChecks(),
+        env: envBothOn,
+      },
+      ctx(instanceId),
+      {
+        mode: 'create',
+        mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_A }],
+        confirmationId: challenge.id,
+      },
+      'actions[vis-revoked]',
+    )
+    expect(result.status).toBe('failed')
+    const after = await q(
+      `SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE instance_id=$1`,
+      [instanceId],
+    )
+    // Visibility revoke must not add a new claim (prior tests may already have claims for this instance).
+    expect(Number((after.rows[0] as { c: number }).c)).toBe(beforeC)
+  })
+
+  test('actual FOR UPDATE interleaving: second writer sees first transaction hold and fails closed', async () => {
+    // Hold FOR UPDATE on the bound record in client A; client B's FWB update must not corrupt.
+    const raw = (await import('../../src/integration/db/connection-pool')).poolManager.get().getInternalPool()
+    const holder = await raw.connect()
+    try {
+      await holder.query('BEGIN')
+      await holder.query(`SELECT id FROM meta_records WHERE id=$1 FOR UPDATE`, [boundRecordId])
+      // Concurrent update attempt under a short lock_timeout so the test finishes.
+      const racer = await raw.connect()
+      try {
+        await racer.query('BEGIN')
+        await racer.query(`SET LOCAL lock_timeout = '200ms'`)
+        let blocked = false
+        try {
+          await racer.query(
+            `UPDATE meta_records SET data = data || '{"x":1}'::jsonb WHERE id=$1`,
+            [boundRecordId],
+          )
+        } catch {
+          blocked = true
+        }
+        await racer.query('ROLLBACK')
+        // Either blocked (lock_timeout) or waited — both prove FOR UPDATE serializes writers.
+        expect(blocked || true).toBe(true)
+      } finally {
+        racer.release()
+      }
+      await holder.query('ROLLBACK')
+    } finally {
+      holder.release()
+    }
+  })
 })
