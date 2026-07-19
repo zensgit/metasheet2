@@ -6,6 +6,7 @@ const path = require('node:path')
 const {
   persistStockPreparationSyncRun,
   BATCH_OBJECT_ID,
+  BATCH_KEY_FIELD,
   LINE_OBJECT_ID,
   RUN_OBJECT_ID,
   PROJECT_OBJECT_ID,
@@ -278,6 +279,59 @@ async function main() {
     assert.equal(recordsApi.store.get(PROJECT_SHEET_ID).length, 0)
     assert.equal(recordsApi.createCalls.length, createsBefore)
     assert.equal(recordsApi.patchCalls.length, patchesBefore)
+  })
+
+  await run('a missing project row cannot select between same-version batch histories', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun(persistInput(recordsApi, provisioning))
+    const candidate = recordsApi.store.get(BATCH_SHEET_ID)[0]
+    const sibling = structuredClone(candidate)
+    sibling.id = 'same-version-sibling'
+    sibling.data[physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, BATCH_KEY_FIELD)] = 'batch_same_version'
+    recordsApi.store.get(BATCH_SHEET_ID).push(sibling)
+    recordsApi.store.set(PROJECT_SHEET_ID, [])
+    const createsBefore = recordsApi.createCalls.length
+
+    await assert.rejects(
+      () => repairStockPreparationSyncRunOnce(repairInput(recordsApi, provisioning, { apply: true })),
+      (error) => error.status === 409 && error.code === 'PERSIST_REPAIR_REFUSED' &&
+        error.details.target === 'project' && error.details.reason === 'ambiguous_history',
+    )
+    assert.equal(recordsApi.store.get(PROJECT_SHEET_ID).length, 0)
+    assert.equal(recordsApi.createCalls.length, createsBefore)
+  })
+
+  await run('a stale pointer cannot advance to an intermediate batch when newer orphan history exists', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun(persistInput(recordsApi, provisioning))
+    await persistStockPreparationSyncRun(persistInput(recordsApi, provisioning, {
+      syncRunId: 'run_2',
+      snapshotBatchId: 'batch_2',
+      snapshotVersion: 2,
+    }))
+    await persistStockPreparationSyncRun(persistInput(recordsApi, provisioning, {
+      syncRunId: 'run_3',
+      snapshotBatchId: 'batch_3',
+      snapshotVersion: 3,
+    }))
+    const project = recordsApi.store.get(PROJECT_SHEET_ID)[0]
+    project.data[physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'lastSyncRunId')] = 'run_1'
+    const patchesBefore = recordsApi.patchCalls.length
+
+    await assert.rejects(
+      () => repairStockPreparationSyncRunOnce(repairInput(recordsApi, provisioning, {
+        apply: true,
+        syncRunId: 'run_2',
+        snapshotBatchId: 'batch_2',
+        snapshotVersion: 2,
+      })),
+      (error) => error.status === 409 && error.code === 'PERSIST_REPAIR_REFUSED' &&
+        error.details.target === 'project' && error.details.reason === 'advanced_history',
+    )
+    assert.equal(recordsApi.patchCalls.length, patchesBefore)
+    assert.equal(logicalProjectRow(recordsApi).lastSyncRunId, 'run_1')
   })
 
   await run('a duplicate batch identity fails closed before any repair write', async () => {
