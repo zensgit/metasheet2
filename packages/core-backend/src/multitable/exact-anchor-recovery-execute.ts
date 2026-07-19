@@ -29,6 +29,11 @@ import {
   precheckSheetHistoryIntegrityStrict,
 } from './history-integrity-precheck'
 import type { MultitableField } from './field-codecs'
+import { validateLongTextValue } from './field-codecs'
+import {
+  assertExactRestorableScalarValue,
+  ExactRestoreValueError,
+} from './exact-anchor-restore-validate'
 
 /** Normalize a link-field cell (array | single | null) to a string[] of foreign record ids. */
 function normalizeLinkIds(value: unknown): string[] {
@@ -36,13 +41,25 @@ function normalizeLinkIds(value: unknown): string[] {
   return typeof value === 'string' && value.length > 0 ? [value] : []
 }
 
-/** Resolve a link field's declared foreign sheet (aliases used across codecs / writers). */
-function resolveForeignSheetId(field: MultitableField): string | null {
-  const property = (field.property ?? {}) as Record<string, unknown>
-  for (const c of [property.foreignSheetId, property.foreignDatasheetId, property.datasheetId]) {
-    if (typeof c === 'string' && c.trim().length > 0) return c.trim()
+/**
+ * Resolve a link field's declared foreign sheet from a RAW property bag (not post-serialize).
+ * Conflicting non-empty aliases (foreignSheetId / foreignDatasheetId / datasheetId) are
+ * AMBIGUOUS → fail closed (null). Exactly one distinct trimmed value is required.
+ * Prefer calling with the DB `meta_fields.property` blob; `serializeFieldRow` collapses aliases.
+ */
+export function resolveForeignSheetIdFromProperty(property: Record<string, unknown> | null | undefined): string | null {
+  const p = property ?? {}
+  const unique = new Set<string>()
+  for (const c of [p.foreignSheetId, p.foreignDatasheetId, p.datasheetId]) {
+    if (typeof c === 'string' && c.trim().length > 0) unique.add(c.trim())
   }
-  return null
+  if (unique.size !== 1) return null
+  return [...unique][0]!
+}
+
+/** Convenience over MultitableField.property (may already be alias-normalized by serializeFieldRow). */
+export function resolveForeignSheetId(field: MultitableField): string | null {
+  return resolveForeignSheetIdFromProperty(field.property as Record<string, unknown> | undefined)
 }
 
 /**
@@ -123,7 +140,8 @@ export type ExactAnchorApplyRefusal =
   | 'preview-drift' // the live reconstruction diverged from the signed scope (409-class; re-preview)
   | 'schema-drift' // plan.driftCount > 0 ⇒ WHOLE apply refused, zero writes
   | 'inbound-unprovable' // plan.resurrects.length > 0 — at-anchor inbound relations cannot be proven (D1c)
-  | 'link-integrity' // missing/ambiguous foreign sheet, missing/wrong-sheet target, or mirror write attempt
+  | 'link-integrity' // missing/ambiguous foreign sheet, missing/wrong-sheet target, same-op delete target, or mirror
+  | 'value-invalid' // current-schema validation rejects the historical scalar OR would sanitize/coerce it
   | 'recovery-trust-required' // fence+strict substrate missing or HISTORY_INCOMPLETE under the fence
 
 export interface ExactAnchorApplySuccess {
@@ -307,7 +325,22 @@ export async function applyExactAnchorRecovery(
       if (plan.resurrects.length > 0) throw new ApplyRefusalError('inbound-unprovable')
 
       // Field surface for restorable projection (exclude mirror-owned link fields — spine invariant).
+      // Also load RAW property blobs so link alias ambiguity is not collapsed by serializeFieldRow.
       const fields = await loadFieldsForSheet(query, input.sheetId)
+      const rawPropRes = await query('SELECT id, property FROM meta_fields WHERE sheet_id = $1', [input.sheetId])
+      const rawPropById = new Map<string, Record<string, unknown>>()
+      for (const r of rawPropRes.rows as Array<{ id: unknown; property: unknown }>) {
+        let prop: Record<string, unknown> = {}
+        if (r.property && typeof r.property === 'object' && !Array.isArray(r.property)) {
+          prop = r.property as Record<string, unknown>
+        } else if (typeof r.property === 'string' && r.property.trim()) {
+          try {
+            const parsed = JSON.parse(r.property) as unknown
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) prop = parsed as Record<string, unknown>
+          } catch { /* ignore */ }
+        }
+        rawPropById.set(String(r.id), prop)
+      }
       const fieldById = new Map<string, MultitableField>()
       const projectionFieldById = new Map<string, { type: string }>()
       for (const f of fields) {
@@ -316,7 +349,12 @@ export async function applyExactAnchorRecovery(
         projectionFieldById.set(f.id, { type: f.type })
       }
 
+      const deleteRecordIds =
+        mode === 'reset' ? [...plan.deletedAtAnchorLiveNow, ...plan.createdAfterAnchor] : []
+      const deleteIdSet = new Set(deleteRecordIds)
+
       // Restorable projection per plan.revert — derived-only differences become no-ops.
+      // Current-schema exact validation on every changed scalar (fail closed value-invalid).
       const revertWrites: ExactAnchorRevertWriteIntent[] = []
       for (const r of plan.reverts) {
         const live = liveById.get(r.recordId)
@@ -331,6 +369,31 @@ export async function applyExactAnchorRecovery(
           normalizeLinkIds,
         })
         if (projection.isNoOp) continue
+        for (const fid of projection.changedFieldIds) {
+          const field = fieldById.get(fid)
+          if (!field) continue
+          if (field.type === 'link') continue // dedicated link path
+          const hist = projection.patch[fid]
+          if (hist === null || hist === undefined) continue // unset
+          try {
+            assertExactRestorableScalarValue(
+              {
+                id: field.id,
+                type: field.type,
+                property: field.property as Record<string, unknown> | undefined,
+                options: field.options,
+              },
+              hist,
+            )
+            // Chokepoint pin: rich longText must go through validateLongTextValue (structural guard).
+            if (field.type === 'longText') {
+              validateLongTextValue(hist, field.id, field.property)
+            }
+          } catch (e) {
+            if (e instanceof ExactRestoreValueError) throw new ApplyRefusalError('value-invalid')
+            throw e
+          }
+        }
         revertWrites.push({
           recordId: r.recordId,
           liveVersion: r.liveVersion,
@@ -347,10 +410,12 @@ export async function applyExactAnchorRecovery(
           const field = fieldById.get(lu.fieldId)
           if (!field || field.type !== 'link') throw new ApplyRefusalError('link-integrity')
           if (isFieldAlwaysReadOnly(field)) throw new ApplyRefusalError('link-integrity')
-          const foreignSheetId = resolveForeignSheetId(field)
-          if (!foreignSheetId) throw new ApplyRefusalError('link-integrity')
+          const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(lu.fieldId))
+          if (!foreignSheetId) throw new ApplyRefusalError('link-integrity') // missing OR ambiguous aliases
           const targetIds = lu.targetIds
           if (targetIds.length === 0) continue
+          // Same-operation delete: a projected link target that this apply will delete becomes dangling.
+          if (targetIds.some((id) => deleteIdSet.has(id))) throw new ApplyRefusalError('link-integrity')
           const found = await query(
             'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
             [foreignSheetId, targetIds],
@@ -359,9 +424,6 @@ export async function applyExactAnchorRecovery(
           if (targetIds.some((id) => !foundSet.has(id))) throw new ApplyRefusalError('link-integrity')
         }
       }
-
-      const deleteRecordIds =
-        mode === 'reset' ? [...plan.deletedAtAnchorLiveNow, ...plan.createdAfterAnchor] : []
 
       // 8. REQUIRED in-fence WRITE authorization over the true restorable plan (after plan/projection,
       //    before mint/writes). Revocation between preview and execute, or field/record deny ⇒ forbidden.
@@ -387,11 +449,18 @@ export async function applyExactAnchorRecovery(
         sheetBaseId = baseRow && typeof baseRow.base_id === 'string' ? baseRow.base_id : null
       }
 
-      // RESET deletes BEFORE reverts so inbound edges that a concurrent restorable projection
-      // would clear (peer rows linking to a created-after-anchor delete candidate) are still
-      // present for tombstone capture — same-txn, still all-or-nothing.
+      // RESET: two-phase delete inside the same txn so cross-links between delete candidates are captured
+      // against the ORIGINAL graph (not order-dependent after the first link wipe).
+      //   phase 1 — lock + pre-gen revision ids + inbound tombstone capture/cap for ALL deletes
+      //   phase 2 — both-direction link delete + revision + trash + live delete for each
       let deletes = 0
       if (mode === 'reset') {
+        type PendingDelete = {
+          recordId: string
+          live: NonNullable<ReturnType<typeof liveById.get>>
+          revisionId: string
+        }
+        const pending: PendingDelete[] = []
         for (const recordId of deleteRecordIds) {
           const live = liveById.get(recordId)
           if (!live) continue
@@ -400,60 +469,65 @@ export async function applyExactAnchorRecovery(
             live,
             () => new Error(`exact-anchor apply refused: record ${recordId} is locked`),
           )
-          // Canonical delete parity (deleteRecord / PIT-reset): pre-gen id → optional inbound capture →
-          // both-direction meta_links delete → revision → trash → live delete.
-          const resetDeleteRevisionId = randomUUID()
-          if (isTombstoneCaptureEnabled()) {
-            const totalToCapture = await countInboundLinkCaptureRows(query, recordId)
-            assertWithinCaptureCap(totalToCapture)
+          pending.push({ recordId, live, revisionId: randomUUID() })
+        }
+        // Phase 1: capture ALL inbound tombstones against the original graph.
+        if (isTombstoneCaptureEnabled()) {
+          let totalCap = 0
+          for (const p of pending) totalCap += await countInboundLinkCaptureRows(query, p.recordId)
+          assertWithinCaptureCap(totalCap)
+          for (const p of pending) {
             await insertInboundLinkTombstones(query, {
               sheetId: input.sheetId,
-              recordId,
-              sourceRevisionId: resetDeleteRevisionId,
+              recordId: p.recordId,
+              sourceRevisionId: p.revisionId,
             })
           }
-          await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [recordId])
-          // lock-guarded: L8 reset delete — ensureRecordNotLocked above, same txn.
+        }
+        // Phase 2: destroy links + revise + trash + live delete.
+        for (const p of pending) {
+          await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [p.recordId])
+          // lock-guarded: L8 reset delete — ensureRecordNotLocked in phase-1 loop, same txn.
           // revision-emitted: L8 reset delete — pre-gen id so trash + tombstones share the causal anchor.
           await recordRecordRevision(query, {
             sheetId: input.sheetId,
-            recordId,
-            version: live.version,
+            recordId: p.recordId,
+            version: p.live.version,
             action: 'delete',
             source: 'restore',
             actorId: input.actorId,
             changedFieldIds: [],
             patch: {},
-            snapshot: live.data,
-            id: resetDeleteRevisionId,
+            snapshot: p.live.data,
+            id: p.revisionId,
             ledger: op,
           })
-          const createdBy = typeof live.created_by === 'string' ? live.created_by : null
+          const createdBy = typeof p.live.created_by === 'string' ? p.live.created_by : null
           await query(
             `INSERT INTO meta_records_trash
                (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by,
                 original_created_at, original_updated_at, delete_revision_id)
              VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
             [
-              recordId,
+              p.recordId,
               input.sheetId,
               sheetBaseId,
-              JSON.stringify(live.data),
-              live.version,
+              JSON.stringify(p.live.data),
+              p.live.version,
               createdBy,
               input.actorId,
-              live.created_at ?? null,
-              live.updated_at ?? null,
-              resetDeleteRevisionId,
+              p.live.created_at ?? null,
+              p.live.updated_at ?? null,
+              p.revisionId,
             ],
           )
-          // lock-guarded: L8 reset delete — ensureRecordNotLocked earlier in this loop body, same txn.
-          // revision-emitted: L8 reset delete — recordRecordRevision(action:'delete', id=pre-gen) above, same txn.
+          // lock-guarded: L8 reset delete — ensureRecordNotLocked earlier in this txn.
+          // revision-emitted: L8 reset delete — recordRecordRevision(action:'delete', id=pre-gen) above.
           const del = await query(
             'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2 RETURNING version',
-            [recordId, input.sheetId],
+            [p.recordId, input.sheetId],
           )
-          if (!del.rows[0]) throw new Error(`exact-anchor apply: reset delete found no row for ${recordId}`)
+          if (!del.rows[0]) throw new Error(`exact-anchor apply: reset delete found no row for ${p.recordId}`)
           deletes++
         }
       }

@@ -102,6 +102,19 @@ export interface RestorableProjection {
   isNoOp: boolean
 }
 
+/** Order-preserving dedupe of link target ids (shared by data / patch / meta_links). */
+export function canonicalDedupeLinkIds(ids: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of ids) {
+    if (typeof id !== 'string' || id.length === 0) continue
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
 export function projectRestorableOntoLive(input: RestoreDiffInput): RestorableProjection {
   const changes = computeRecordRestoreDiff(input)
   if (changes.length === 0) {
@@ -124,22 +137,19 @@ export function projectRestorableOntoLive(input: RestoreDiffInput): RestorablePr
       patch[c.fieldId] = null
       continue
     }
-    data[c.fieldId] = c.value
-    patch[c.fieldId] = c.value
     if (input.fieldById.get(c.fieldId)?.type === 'link') {
-      const targetIds = Array.isArray(c.value)
+      const raw = Array.isArray(c.value)
         ? (c.value as unknown[]).filter((v): v is string => typeof v === 'string' && v.length > 0)
         : input.normalizeLinkIds(c.value)
-      // Deduplicate while preserving first-seen order (meta_links has no multi-edge for the same triple).
-      const seen = new Set<string>()
-      const deduped: string[] = []
-      for (const id of targetIds) {
-        if (seen.has(id)) continue
-        seen.add(id)
-        deduped.push(id)
-      }
+      // ONE canonical array for data, patch, and meta_links — no data/meta_links divergence.
+      const deduped = canonicalDedupeLinkIds(raw)
+      data[c.fieldId] = deduped
+      patch[c.fieldId] = deduped
       linkUpdates.push({ fieldId: c.fieldId, targetIds: deduped })
+      continue
     }
+    data[c.fieldId] = c.value
+    patch[c.fieldId] = c.value
   }
   return { data, patch, changedFieldIds, linkUpdates, isNoOp: false }
 }

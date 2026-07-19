@@ -65,9 +65,9 @@ function listRuntimeTsFiles(): string[] {
  */
 const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: string }> = {
   'multitable/exact-anchor-recovery-execute.ts': {
-    disposition: 'SAFE',
+    disposition: 'CHOKEPOINT',
     reason:
-      'L8 destructive apply writes ONLY previously-persisted at-anchor snapshots (revision-chain / checkpoint-baseline data, validated at their ORIGINAL write through the chokepoints above); no new user payload enters this module',
+      'L8 exact-anchor apply re-validates every changed restorable scalar under the CURRENT schema via assertExactRestorableScalarValue + validateLongTextValue (rich longText sanitizer); fail-closed value-invalid if validation rejects or would sanitize/coerce the historical value — never a silent exact restore of unsafe HTML',
   },
   'multitable/records.ts': {
     disposition: 'CHOKEPOINT',

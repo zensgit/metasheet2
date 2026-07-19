@@ -5,7 +5,12 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { computeRecordRestoreDiff, projectRestorableOntoLive } from '../../src/multitable/record-restore-diff'
+import {
+  computeRecordRestoreDiff,
+  projectRestorableOntoLive,
+  canonicalDedupeLinkIds,
+} from '../../src/multitable/record-restore-diff'
+import { assertExactRestorableScalarValue, ExactRestoreValueError } from '../../src/multitable/exact-anchor-restore-validate'
 
 // Minimal stand-in for the route's normalizeLinkIds (array → string[]; the helper only needs the parse contract).
 const nlz = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v ? [v] : [])
@@ -135,5 +140,54 @@ describe('projectRestorableOntoLive — canonical restorable projection for L8 a
     expect(out.patch).toEqual({ gone: null })
     expect(out.data).toEqual({ f: 'keep-me' })
     expect(Object.prototype.hasOwnProperty.call(out.data, 'gone')).toBe(false)
+  })
+
+  it('link id duplicates are deduped once into the SAME content for data, patch, and linkUpdates', () => {
+    const out = projectRestorableOntoLive({
+      fieldById: new Map([['rel', { type: 'link' }]]),
+      rawTypeById: new Map(),
+      targetSnapshot: { rel: ['A', 'A', 'B'] },
+      currentData: { rel: [] },
+      recordId: 'r1',
+      currentVersion: 1,
+      normalizeLinkIds: nlz,
+    })
+    expect(out.linkUpdates).toEqual([{ fieldId: 'rel', targetIds: ['A', 'B'] }])
+    expect(out.data.rel).toEqual(['A', 'B'])
+    expect(out.patch.rel).toEqual(['A', 'B'])
+    expect(canonicalDedupeLinkIds(['x', 'x', 'y'])).toEqual(['x', 'y'])
+  })
+})
+
+describe('assertExactRestorableScalarValue — exact-anchor current-schema fail-closed', () => {
+  it('rich longText that would be sanitized differs from history ⇒ ExactRestoreValueError', () => {
+    const unsafe = '<script>alert(1)</script><p>hi</p>'
+    expect(() =>
+      assertExactRestorableScalarValue(
+        { id: 'lt', type: 'longText', property: { rich: true } },
+        unsafe,
+      ),
+    ).toThrow(ExactRestoreValueError)
+  })
+
+  it('select option absent from CURRENT options ⇒ ExactRestoreValueError', () => {
+    expect(() =>
+      assertExactRestorableScalarValue(
+        { id: 's', type: 'select', options: [{ value: 'a' }, { value: 'b' }] },
+        'gone-option',
+      ),
+    ).toThrow(ExactRestoreValueError)
+  })
+
+  it('number string that would coerce to number differs from history ⇒ ExactRestoreValueError', () => {
+    expect(() =>
+      assertExactRestorableScalarValue({ id: 'n', type: 'number' }, '42'),
+    ).toThrow(ExactRestoreValueError)
+  })
+
+  it('identical valid string scalar passes', () => {
+    expect(() =>
+      assertExactRestorableScalarValue({ id: 's', type: 'string' }, 'hello'),
+    ).not.toThrow()
   })
 })

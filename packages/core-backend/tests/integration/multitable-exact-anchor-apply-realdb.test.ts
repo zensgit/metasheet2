@@ -1,31 +1,20 @@
 /**
  * W0-1 v3.7 Lane L8 — the exact-anchor DESTRUCTIVE APPLY (real DB): one transaction, all-or-nothing.
  *
- * Module under test: `exact-anchor-recovery-execute.ts` `applyExactAnchorRecovery`. Goldens (each
- * mutation-proven in the PR matrix):
- *   HAPPY-REVERT      end-to-end revert-mode apply: reverts + resurrects land atomically, every write
- *                     revision-emitted (`source:'restore'`) and ledger-tagged; the apply itself seals an
- *                     operation endpoint (a future exact anchor); token burned.
- *   MODE-MATRIX       the SAME world under 'reset' also deletes deletedAtAnchorLiveNow + createdAfterAnchor
- *                     (with delete revisions); under 'revert' both survive.
- *   REPLAY            a second execute of the SAME token ⇒ `token-replayed`, zero writes.
- *   LIVE-DRIFT (409)  a CONCURRENT COMMITTED WRITE between preview and execute ⇒ `preview-drift`, ZERO
- *                     writes — including the token burn (the token is still executable after the world is
- *                     restored to the previewed state ⇒ proves full rollback of the burn row).
- *   CHECKPOINT-GONE   the covering checkpoint pruned/removed between preview and execute ⇒
- *                     `no-covering-checkpoint`; a DIFFERENT covering checkpoint (superseding activation
- *                     below the anchor) ⇒ `checkpoint-changed`. Zero writes.
- *   INJECTED-FAILURE  a mid-apply failure (second revision INSERT forced to fail via a synthetic
- *                     constraint collision) ⇒ the WHOLE apply rolls back: no record changed, no revisions,
- *                     no endpoint, no burn.
- *   BASELINE          a record whose history lives ONLY in the checkpoint baseline (zero revisions ≤
- *                     anchor): non-trashed baseline row resurrects/reverts from the baseline data;
- *                     is_trashed=true baseline row stays deleted.
- *   FENCE-PARK (race) a raw client holds the canonical fence in an open transaction; the apply PARKS
- *                     (proven via pg_locks/pg_blocking_pids sampling) and completes after release.
+ * Module under test: `exact-anchor-recovery-execute.ts` `applyExactAnchorRecovery`. Goldens include:
+ *   HAPPY-REVERT      restorable revert lands; revision source=restore + ledger-tagged; endpoint sealed;
+ *                     token burned. Resurrect is fail-closed (inbound-unprovable) — success paths do not
+ *                     depend on resurrection.
+ *   MODE-MATRIX       reset deletes createdAfterAnchor (trash + delete revision); revert keeps them.
+ *   REPLAY / LIVE-DRIFT / AUTH / PLAN-AUTH / DRIFT-REJECT / link+reset parity / trust substrate.
+ *   RESTORABLE-PROJECTION  formula preserved; derived-only ⇒ no revision/version/link/endpoint (token still
+ *                          burns on successful consume).
+ *   VALUE-INVALID     unsafe rich longText / select-option drift refuse with zero writes.
+ *   LINK-INTEGRITY    missing target, wrong sheet, alias ambiguity, same-op delete target.
+ *   RESET two-phase   cross-linked delete candidates both get inbound tombstones.
  *
- * The module is NOT wired to any route; the L4 fence flag is toggled only inside this test process
- * (default OFF everywhere real). P2-C hygiene: explicit synthetic seq literals, no `setval`, own-row
+ * The module is NOT wired to any route. Flags toggled only inside this test process (default OFF real).
+ * P2-C hygiene: seqs reserved via nextval() only (never setval on the shared chain sequence); own-row
  * cleanup. Two-point wiring: plugin-tests.yml real-DB run list + vitest glob; fail-not-skip sentinel.
  */
 import { randomUUID } from 'node:crypto'
@@ -176,9 +165,8 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
   })
 
   /**
-   * Allocate a monotonic synthetic-seq band ABOVE the active checkpoint's trusted_since_seq, then
-   * advance the shared chain sequence past that band so post-apply real nextval() rows stay strictly
-   * after fixtures (strict contiguity ORDER BY seq stays healthy).
+   * Reserve `count` REAL sequence values strictly ABOVE the active checkpoint's trusted_since_seq
+   * using nextval() only — NEVER setval (no cross-suite sequence coupling).
    */
   async function seqBand(count: number): Promise<string[]> {
     await activate()
@@ -188,17 +176,23 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       [SHEET],
     )
     const floor = BigInt(String((floorRes.rows[0] as { s: string }).s))
-    const seqs = Array.from({ length: count }, (_, i) => String(floor + BigInt(1000 * (i + 1))))
-    const hi = floor + BigInt(1000 * (count + 5))
-    await q(`SELECT setval('meta_record_chain_seq', $1::bigint, true)`, [String(hi)])
+    const seqs: string[] = []
+    // Drain nextval until we sit above the floor, then take `count` consecutive values.
+    while (seqs.length < count) {
+      const r = await q(`SELECT nextval('meta_record_chain_seq')::text AS s`)
+      const s = BigInt(String((r.rows[0] as { s: string }).s))
+      if (s > floor) seqs.push(String(s))
+    }
     return seqs
   }
 
-  /** Additional synthetic seqs above the current shared chain head (does not re-activate). */
+  /** Additional real nextval() seqs (does not re-activate). */
   async function moreSeqs(count: number): Promise<string[]> {
-    const head = BigInt(String((await q(`SELECT last_value::text AS s FROM meta_record_chain_seq`)).rows[0] as { s: string }).s)
-    const seqs = Array.from({ length: count }, (_, i) => String(head + BigInt(1000 * (i + 1))))
-    await q(`SELECT setval('meta_record_chain_seq', $1::bigint, true)`, [String(head + BigInt(1000 * (count + 5)))])
+    const seqs: string[] = []
+    for (let i = 0; i < count; i++) {
+      const r = await q(`SELECT nextval('meta_record_chain_seq')::text AS s`)
+      seqs.push(String((r.rows[0] as { s: string }).s))
+    }
     return seqs
   }
 
@@ -727,7 +721,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       expect(rev.patch).toEqual({ [F_STR]: 'at-anchor' })
       expect(rev.snapshot[F_FORM]).toBe('formula-live')
 
-      // Derived-only: string already at-anchor; only formula live differs from at-anchor snapshot ⇒ no-op.
+      // Derived-only: string already at-anchor; only formula live differs from at-anchor snapshot ⇒ no-op writes.
       await wipe()
       const R2 = `rec_noop_${TS}`
       const [s2] = await seqBand(1)
@@ -736,13 +730,15 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       ])
       await live(R2, { [F_STR]: 'same', [F_FORM]: 'f-live' }, 1)
       const pv2 = await preview(op2, 'revert')
-      // plan may still list a revert if full dataEquals sees formula drift — projection makes it no-op.
       const out2 = await applyExactAnchorRecovery(txn, applyArgs(pv2.token))
       expect(out2.ok).toBe(true)
       if (!out2.ok) return
-      expect(out2.applied.reverts).toBe(0) // no write
-      expect((await liveRow(R2))?.version).toBe(1)
+      expect(out2.applied.reverts).toBe(0) // no restorable write
+      expect((await liveRow(R2))?.version).toBe(1) // no version bump
       expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+      // No restore-sourced revision and no version bump (zero restorable writes).
+      // Successful token consume still burns (anti-replay) even when restorable writes are empty.
+      expect(await burnCount()).toBe(1)
     } finally {
       await q('DELETE FROM meta_fields WHERE id = $1', [F_FORM]).catch(() => {})
     }
@@ -848,6 +844,158 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     process.env[FLAG] = 'true'
     expect(await liveRow(R_REV)).toEqual(before)
     expect(await burnCount()).toBe(0)
+  })
+
+  // ── VALUE-INVALID: current-schema exact validation ────────────────────────────────────────────────────
+  test('VALUE-INVALID rich longText: historical XSS HTML that would be sanitized ⇒ value-invalid, zero writes', async () => {
+    const F_LT = `fld_eaa_lt_${TS}`
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
+      [F_LT, SHEET, 'Body', 'longText', JSON.stringify({ rich: true }), 9],
+    )
+    try {
+      const R = `rec_rich_${TS}`
+      const unsafe = '<script>alert(1)</script><p>safe</p>'
+      const [sCreate, sUpdate] = await seqBand(2)
+      // At-anchor carries UNSAFE rich HTML; live is clean — restore would re-introduce it.
+      const op = await sealAnchorOp(R, [
+        { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'same', [F_LT]: unsafe } },
+      ])
+      await revSeq(R, 2, 'update', { [F_STR]: 'same', [F_LT]: '<p>clean</p>' }, sUpdate)
+      await live(R, { [F_STR]: 'same', [F_LT]: '<p>clean</p>' }, 2)
+      const before = await liveRow(R)
+      const pv = await preview(op, 'revert')
+      const out = await applyExactAnchorRecovery(txn, applyArgs(pv.token))
+      expect(out).toEqual({ ok: false, reason: 'value-invalid' })
+      expect(await liveRow(R)).toEqual(before)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_fields WHERE id = $1', [F_LT]).catch(() => {})
+    }
+  })
+
+  test('VALUE-INVALID select: historical option removed from CURRENT property/options ⇒ value-invalid', async () => {
+    const F_SEL = `fld_eaa_sel_${TS}`
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
+      [F_SEL, SHEET, 'Choice', 'select', JSON.stringify({ options: [{ value: 'a' }, { value: 'b' }] }), 10],
+    )
+    try {
+      const R = `rec_sel_${TS}`
+      const [sCreate, sUpdate] = await seqBand(2)
+      const op = await sealAnchorOp(R, [
+        { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'x', [F_SEL]: 'legacy' } },
+      ])
+      await revSeq(R, 2, 'update', { [F_STR]: 'y', [F_SEL]: 'a' }, sUpdate)
+      await live(R, { [F_STR]: 'y', [F_SEL]: 'a' }, 2)
+      // Current schema only allows a|b — historical 'legacy' fails exact validation.
+      const pv = await preview(op, 'revert')
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'value-invalid' })
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_fields WHERE id = $1', [F_SEL]).catch(() => {})
+    }
+  })
+
+  // ── LINK alias ambiguity + same-op delete target ──────────────────────────────────────────────────────
+  test('LINK-INTEGRITY alias conflict: foreignSheetId ≠ foreignDatasheetId ⇒ link-integrity', async () => {
+    const F_AMB = `fld_eaa_amb_${TS}`
+    const OTHER = `${SHEET}_amb`
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3) ON CONFLICT (id) DO NOTHING', [OTHER, BASE, 'amb'])
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
+      [F_AMB, SHEET, 'Amb', 'link', JSON.stringify({ foreignSheetId: SHEET, foreignDatasheetId: OTHER }), 11],
+    )
+    try {
+      const R_T = `rec_amb_t_${TS}`
+      const R = `rec_amb_${TS}`
+      const [sT, sCreate, sUpdate] = await seqBand(3)
+      await revSeq(R_T, 1, 'create', { [F_STR]: 't' }, sT)
+      await live(R_T, { [F_STR]: 't' }, 1)
+      const op = await sealAnchorOp(R, [
+        { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'x', [F_AMB]: [R_T] } },
+      ])
+      await revSeq(R, 2, 'update', { [F_STR]: 'x', [F_AMB]: [] }, sUpdate)
+      await live(R, { [F_STR]: 'x', [F_AMB]: [] }, 2)
+      const pv = await preview(op, 'revert')
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'link-integrity' })
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_fields WHERE id = $1', [F_AMB]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = $1', [OTHER]).catch(() => {})
+    }
+  })
+
+  test('LINK-INTEGRITY same-op delete: projected link target is itself a RESET delete candidate ⇒ refuse', async () => {
+    const R_KEEP = `rec_sod_keep_${TS}`
+    const R_NEW = `rec_sod_new_${TS}`
+    const R_REV = `rec_sod_rev_${TS}`
+    const [sKeep, sCreate, sUpdate, sNew] = await seqBand(4)
+    await revSeq(R_KEEP, 1, 'create', { [F_STR]: 'keep' }, sKeep)
+    const op = await sealAnchorOp(R_REV, [
+      { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'x', [F_LINK]: [R_NEW] } },
+    ])
+    // At-anchor R_REV points at R_NEW, but R_NEW is only created AFTER the anchor ⇒ reset deletes R_NEW,
+    // while revert would re-link R_REV→R_NEW — same-op dangling target.
+    await revSeq(R_REV, 2, 'update', { [F_STR]: 'x', [F_LINK]: [R_KEEP] }, sUpdate)
+    await revSeq(R_NEW, 1, 'create', { [F_STR]: 'newbie' }, sNew)
+    await live(R_KEEP, { [F_STR]: 'keep' }, 1)
+    await live(R_REV, { [F_STR]: 'x', [F_LINK]: [R_KEEP] }, 2)
+    await live(R_NEW, { [F_STR]: 'newbie' }, 1)
+    await insertLink(F_LINK, R_REV, R_KEEP)
+    const pv = await preview(op, 'reset')
+    expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'link-integrity' })
+    expect(await liveRow(R_NEW)).toBeDefined()
+    expect(await burnCount()).toBe(0)
+  })
+
+  test('RESET two-phase cross-link: two delete candidates linked both ways both get inbound tombstones', async () => {
+    process.env.MULTITABLE_TOMBSTONE_CAPTURE_ENABLED = 'true'
+    const R_A = `rec_xdel_a_${TS}`
+    const R_B = `rec_xdel_b_${TS}`
+    const R_REV = `rec_xdel_rev_${TS}`
+    const [sCreate, sUpdate, sA, sB] = await seqBand(4)
+    const op = await sealAnchorOp(R_REV, [
+      { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'anchor' } },
+    ])
+    await revSeq(R_REV, 2, 'update', { [F_STR]: 'now' }, sUpdate)
+    await revSeq(R_A, 1, 'create', { [F_STR]: 'A', [F_LINK]: [R_B] }, sA)
+    await revSeq(R_B, 1, 'create', { [F_STR]: 'B', [F_LINK]: [R_A] }, sB)
+    await live(R_REV, { [F_STR]: 'now' }, 2)
+    await live(R_A, { [F_STR]: 'A', [F_LINK]: [R_B] }, 1)
+    await live(R_B, { [F_STR]: 'B', [F_LINK]: [R_A] }, 1)
+    await insertLink(F_LINK, R_A, R_B)
+    await insertLink(F_LINK, R_B, R_A)
+    expect(await countInboundLinkCaptureRows(q as unknown as QueryFn, R_A)).toBe(1)
+    expect(await countInboundLinkCaptureRows(q as unknown as QueryFn, R_B)).toBe(1)
+    const pv = await preview(op, 'reset')
+    const out = await applyExactAnchorRecovery(txn, applyArgs(pv.token))
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.applied.deletes).toBeGreaterThanOrEqual(2)
+    const trashA = (await q(
+      `SELECT delete_revision_id FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2`,
+      [R_A, SHEET],
+    )).rows[0] as { delete_revision_id: string }
+    const trashB = (await q(
+      `SELECT delete_revision_id FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2`,
+      [R_B, SHEET],
+    )).rows[0] as { delete_revision_id: string }
+    expect(trashA?.delete_revision_id).toBeTruthy()
+    expect(trashB?.delete_revision_id).toBeTruthy()
+    expect(trashA.delete_revision_id).not.toBe(trashB.delete_revision_id)
+    const tombsA = (await q(
+      `SELECT record_id, foreign_record_id FROM meta_link_tombstones
+       WHERE foreign_record_id = $1 AND source_revision_id = $2::uuid AND reason = 'record_delete'`,
+      [R_A, trashA.delete_revision_id],
+    )).rows as Array<{ record_id: string; foreign_record_id: string }>
+    const tombsB = (await q(
+      `SELECT record_id, foreign_record_id FROM meta_link_tombstones
+       WHERE foreign_record_id = $1 AND source_revision_id = $2::uuid AND reason = 'record_delete'`,
+      [R_B, trashB.delete_revision_id],
+    )).rows as Array<{ record_id: string; foreign_record_id: string }>
+    expect(tombsA).toEqual([{ record_id: R_B, foreign_record_id: R_A }])
+    expect(tombsB).toEqual([{ record_id: R_A, foreign_record_id: R_B }])
   })
 
   // ── G1 (pre-wiring gate list): burn-retention sweep ─────────────────────────────────────────────────────
