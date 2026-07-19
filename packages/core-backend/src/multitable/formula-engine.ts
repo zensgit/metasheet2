@@ -5,6 +5,10 @@
  */
 
 import { FormulaEngine, type CellValue, type FormulaContext } from '../formula/engine'
+import {
+  coerceExactDecimal,
+  isExactlyRepresentableAsJsNumber,
+} from './approval-fwb-target-fields'
 import type { MultitableField } from './field-codecs'
 import type { MultitableRecordsQueryFn } from './records'
 import { isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
@@ -108,12 +112,36 @@ export class MultitableFormulaEngine {
     // SAFE literals, never raw-substituted — the old `String(value)` injected `[object Object]`
     // (object) or an unquoted `a,b` (array) straight into the expression, polluting/breaking the
     // parse (A2b hardening; `evaluateField` is shared by record recalc + dry-run).
+    //
+    // FWB D7 number strings: inject as unquoted numeric literals when exactly representable in JS
+    // IEEE-754 (ordinary decimal arithmetic). High-precision decimals that would silently lose
+    // low bits via Number() fail closed as #NUM! — never return a wrong numeric result.
     let hasUnusableValue = false
+    let hasInexactNumeric = false
+    const fieldTypeById = new Map(fields.map((field) => [field.id, field.type]))
     const resolved = expression.replace(FIELD_REF_PATTERN, (_match, fieldId: string) => {
       const value = recordData[fieldId]
       if (value === null || value === undefined) return '0'
-      if (typeof value === 'string') return JSON.stringify(value)
-      if (typeof value === 'number') return String(value)
+      if (typeof value === 'string') {
+        if (NUMERIC_FIELD_TYPES.has(fieldTypeById.get(fieldId) ?? '')) {
+          const asDecimal = coerceExactDecimal(value, undefined)
+          if (asDecimal.ok) {
+            if (!isExactlyRepresentableAsJsNumber(asDecimal.v)) {
+              hasInexactNumeric = true
+              return '0'
+            }
+            return asDecimal.v
+          }
+        }
+        return JSON.stringify(value)
+      }
+      if (typeof value === 'number') {
+        if (!Number.isFinite(value) || !isExactlyRepresentableAsJsNumber(value)) {
+          hasInexactNumeric = true
+          return '0'
+        }
+        return String(value)
+      }
       if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
       // multi-value lookup / multiSelect of SCALARS → quoted joined string literal. An array that
       // holds an object/array (e.g. a multi-value lookup of an object/location-valued field — a real
@@ -134,6 +162,8 @@ export class MultitableFormulaEngine {
     // An object-valued reference makes the whole field error (Excel-style propagation) instead of
     // computing against a placeholder.
     if (hasUnusableValue) return '#VALUE!'
+    // High-precision FWB decimals that the IEEE-754 engine cannot compute exactly.
+    if (hasInexactNumeric) return '#NUM!'
 
     const context: FormulaContext = {
       sheetId: '',

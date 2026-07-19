@@ -57,7 +57,7 @@ import {
   parseWriteApprovalFormValuesConfig,
   requireFwbActivationForEnabledRule,
 } from './approval-fwb-runtime'
-import { verifyFwbConfirmation } from './approval-fwb-confirmation'
+import { isSupportedFwbSourceField, verifyFwbConfirmation } from './approval-fwb-confirmation'
 import { loadTargetFieldsFromMeta } from './approval-fwb-target-fields'
 import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
 import { isAdmin as isAdminUser } from '../rbac/service'
@@ -1931,7 +1931,16 @@ export class AutomationService {
     /** When false, FWB/durable production flags are NOT required (operator staging of a disabled draft). */
     enabled: boolean,
   ): Promise<string | null> {
-    if (triggerType !== APPROVAL_COMPLETED_TRIGGER) return null
+    const fwbActions: Array<{ config: Record<string, unknown> }> = []
+    if (actionType === 'write_approval_form_values') fwbActions.push({ config: actionConfig })
+    for (const action of nestedActions) {
+      if (action.type === 'write_approval_form_values') fwbActions.push({ config: action.config })
+    }
+    if (triggerType !== APPROVAL_COMPLETED_TRIGGER) {
+      return fwbActions.length > 0
+        ? 'write_approval_form_values is only allowed on approval.completed rules'
+        : null
+    }
     const config = triggerConfig ?? {}
     const templateIdRaw = config.templateId
     const templateId = typeof templateIdRaw === 'string' ? templateIdRaw.trim() : ''
@@ -1975,11 +1984,6 @@ export class AutomationService {
     }
 
     // FWB D11/D1/Q6: validate every write_approval_form_values action (top-level + nested).
-    const fwbActions: Array<{ config: Record<string, unknown> }> = []
-    if (actionType === 'write_approval_form_values') fwbActions.push({ config: actionConfig })
-    for (const action of nestedActions) {
-      if (action.type === 'write_approval_form_values') fwbActions.push({ config: action.config })
-    }
     if (fwbActions.length > 0) {
       // Activation flags required only when enabling. Disabled drafts may be staged while flags are OFF.
       const activationErr = requireFwbActivationForEnabledRule(enabled)
@@ -2022,8 +2026,10 @@ export class AutomationService {
       const linkResolved = await this.resolveRecordLinkFieldBinding(templateId, cfg.recordLinkFieldId!)
       if ('error' in linkResolved) return linkResolved.error
       targetSheetId = linkResolved.sheetId
-      if (targetBaseId == null && linkResolved.baseId) targetBaseId = linkResolved.baseId
+      targetBaseId = linkResolved.baseId
     }
+    const sourceErr = await this.validateFwbSourceFieldsAtSave(templateId, cfg.mappings)
+    if (sourceErr) return sourceErr
     // meta_fields authority — every target must exist with supported type.
     const fieldRes = await loadTargetFieldsFromMeta(
       this.queryFn,
@@ -2033,6 +2039,12 @@ export class AutomationService {
     if (!fieldRes.ok) {
       const fail = fieldRes as { ok: false; fieldId?: string }
       return `write_approval_form_values target field ${fail.fieldId ?? ''} is missing or unsupported`
+    }
+    // FWB-3 mode=decision: decisionNodeKey must be an approval node; every mapping source must be in
+    // that node's decisionFieldIds (closed set).
+    if (cfg.mode === 'decision') {
+      const decisionErr = await this.validateFwbDecisionNodeAtSave(templateId, cfg.decisionNodeKey!, cfg.mappings)
+      if (decisionErr) return decisionErr
     }
     // Authoritative active published version for fingerprint binding (same as Q6 challenge).
     const { resolveActiveTemplateVersionId } = await import('./approval-template-visibility')
@@ -2069,12 +2081,78 @@ export class AutomationService {
     return null
   }
 
+  /** Re-read the active template at save; a prior challenge cannot authorize later schema drift. */
+  private async validateFwbSourceFieldsAtSave(
+    templateId: string,
+    mappings: readonly { formFieldId: string; targetFieldId: string }[],
+  ): Promise<string | null> {
+    const { loadActiveTemplateVersionBundle } = await import('./approval-template-visibility')
+    const bundle = await loadActiveTemplateVersionBundle(this.queryFn, templateId)
+    if (!bundle) return 'write_approval_form_values: active published template version not found'
+    const rawFields = Array.isArray(bundle.formSchema.fields) ? bundle.formSchema.fields : []
+    const fields = new Map<string, Record<string, unknown>>()
+    for (const raw of rawFields) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+      const field = raw as Record<string, unknown>
+      if (typeof field.id === 'string' && field.id.trim()) fields.set(field.id.trim(), field)
+    }
+    for (const mapping of mappings) {
+      const field = fields.get(mapping.formFieldId)
+      if (!field) {
+        return `write_approval_form_values source field "${mapping.formFieldId}" is missing from the active template version`
+      }
+      if (!isSupportedFwbSourceField(field)) {
+        return `write_approval_form_values source field "${mapping.formFieldId}" has an unsupported v1 type`
+      }
+    }
+    return null
+  }
+
+  /**
+   * FWB-3 save-time: decisionNodeKey is an approval node on the active version graph, and every
+   * mapping formFieldId is declared in that node's decisionFieldIds.
+   */
+  private async validateFwbDecisionNodeAtSave(
+    templateId: string,
+    decisionNodeKey: string,
+    mappings: readonly { formFieldId: string; targetFieldId: string }[],
+  ): Promise<string | null> {
+    const { loadActiveTemplateVersionBundle } = await import('./approval-template-visibility')
+    const bundle = await loadActiveTemplateVersionBundle(this.queryFn, templateId)
+    if (!bundle) return 'write_approval_form_values: active published template version not found'
+    const graph = bundle.approvalGraph as { nodes?: unknown } | null
+    const nodes = Array.isArray(graph?.nodes) ? graph!.nodes : []
+    const node = nodes.find(
+      (n) => typeof n === 'object' && n !== null
+        && (n as { key?: string }).key === decisionNodeKey
+        && (n as { type?: string }).type === 'approval',
+    )
+    if (!node || typeof node !== 'object') {
+      return `write_approval_form_values decisionNodeKey "${decisionNodeKey}" is not an approval node on the active template version`
+    }
+    const declaredRaw = (node as { config?: { decisionFieldIds?: unknown } }).config?.decisionFieldIds
+    const declared = Array.isArray(declaredRaw)
+      ? declaredRaw.filter((id): id is string => typeof id === 'string' && id.trim().length > 0).map((id) => id.trim())
+      : []
+    if (declared.length === 0) {
+      return `write_approval_form_values decision node "${decisionNodeKey}" has no decisionFieldIds declared`
+    }
+    const declaredSet = new Set(declared)
+    for (const m of mappings) {
+      if (!declaredSet.has(m.formFieldId)) {
+        return `write_approval_form_values mapping source "${m.formFieldId}" is not in decisionFieldIds of node "${decisionNodeKey}"`
+      }
+    }
+    return null
+  }
+
   /** Resolve server-pinned sheet/base from a template's record-link form field (active version). */
   private async resolveRecordLinkFieldBinding(
     templateId: string,
     recordLinkFieldId: string,
-  ): Promise<{ sheetId: string; baseId: string | null } | { error: string }> {
+  ): Promise<{ sheetId: string; baseId: string } | { error: string }> {
     const { loadActiveTemplateVersionBundle } = await import('./approval-template-visibility')
+    const { resolvePinnedRecordLinkTarget } = await import('./approval-fwb-target-fields')
     const bundle = await loadActiveTemplateVersionBundle(this.queryFn, templateId)
     if (!bundle) {
       return { error: 'template form_schema not found for record-link binding' }
@@ -2094,14 +2172,14 @@ export class AutomationService {
     if (!props || typeof props !== 'object' || Array.isArray(props)) {
       return { error: `record-link field ${recordLinkFieldId} missing props.baseId/sheetId` }
     }
-    const sheetId = typeof (props as { sheetId?: unknown }).sheetId === 'string'
-      ? String((props as { sheetId: string }).sheetId).trim()
-      : ''
-    const baseId = typeof (props as { baseId?: unknown }).baseId === 'string'
-      ? String((props as { baseId: string }).baseId).trim()
-      : null
-    if (!sheetId) return { error: `record-link field ${recordLinkFieldId} missing props.sheetId` }
-    return { sheetId, baseId }
+    // Fail closed: props.sheetId required AND props.baseId must exactly match non-deleted meta_sheets.base_id.
+    const pinned = await resolvePinnedRecordLinkTarget(this.queryFn, props as { sheetId?: unknown; baseId?: unknown })
+    if (!pinned.ok) {
+      return {
+        error: `record-link field ${recordLinkFieldId} props.sheetId/baseId missing or baseId does not match meta_sheets.base_id`,
+      }
+    }
+    return { sheetId: pinned.sheetId, baseId: pinned.baseId }
   }
 
   /**

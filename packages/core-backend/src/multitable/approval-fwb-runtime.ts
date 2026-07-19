@@ -51,11 +51,13 @@ import { isApprovalTemplateVisibleToUser } from './approval-template-visibility'
 import {
   buildAuthoritativeMappings,
   loadTargetFieldsFromMeta,
+  resolvePinnedRecordLinkTarget,
 } from './approval-fwb-target-fields'
 import { recordRecordRevision } from './record-history-service'
 import { canEditWhileLocked, lockableFromRow } from './record-lock'
 import { isRecordReadDeniedForUser } from './permission-service'
 import { resolveSheetCapabilitiesForUser, canWriteRecord } from './sheet-capabilities'
+import { sanitizeRichLongText } from './field-codecs'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import type { Queryable } from './automation-durable-dispatcher'
 
@@ -71,6 +73,23 @@ export type ParseFwbConfigResult =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Rich-longText is sanitized before entering the transaction and again by the pure mapping core.
+ * The second pass is intentional defense-in-depth for direct callers of the lower-level executors.
+ */
+function sanitizeFwbSourceValues(
+  mappings: readonly FwbFieldMapping[],
+  values: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const sanitized = { ...values }
+  for (const mapping of mappings) {
+    if (!mapping.richLongText) continue
+    const value = sanitized[mapping.formFieldId]
+    if (typeof value === 'string') sanitized[mapping.formFieldId] = sanitizeRichLongText(value)
+  }
+  return sanitized
 }
 
 /** Normalize + validate action config. Types/options are NOT accepted as authority. */
@@ -256,10 +275,10 @@ async function loadRecordLinkBinding(
   const field = fields.find((f) => isRecord(f) && f.id === recordLinkFieldId && f.type === 'record-link')
   if (!isRecord(field)) return { error: FWB_TARGET_UNAVAILABLE }
   const props = isRecord(field.props) ? field.props : {}
-  const sheetId = typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
-  const baseId = typeof props.baseId === 'string' ? props.baseId.trim() : null
-  if (!NON_BLANK.test(sheetId)) return { error: FWB_TARGET_UNAVAILABLE }
-  return { sheetId, recordId: parsed.recordId, baseId }
+  // Fail closed: sheetId + baseId must exist and baseId must match non-deleted meta_sheets.base_id.
+  const pinned = await resolvePinnedRecordLinkTarget(queryFn, props)
+  if (!pinned.ok) return { error: FWB_TARGET_UNAVAILABLE }
+  return { sheetId: pinned.sheetId, recordId: parsed.recordId, baseId: pinned.baseId }
 }
 
 /**
@@ -537,7 +556,8 @@ export async function runWriteApprovalFormValues(
     }
     targetSheetId = binding.sheetId
     boundRecordId = binding.recordId
-    if (!declaredTargetBaseId && binding.baseId) declaredTargetBaseId = binding.baseId
+    // The record-link field is server authority; never preserve a client-supplied base claim.
+    declaredTargetBaseId = binding.baseId
   }
 
   // Server meta_fields authority — config types ignored.
@@ -656,6 +676,15 @@ export async function runWriteApprovalFormValues(
     for (const [k, v] of Object.entries(snap)) {
       if (allowed.has(k)) formValues[k] = v
     }
+  }
+
+  if (config.mode === 'decision' && decisionSnapshot) {
+    decisionSnapshot = {
+      ...decisionSnapshot,
+      values: sanitizeFwbSourceValues(authoritativeMappings, decisionSnapshot.values),
+    }
+  } else {
+    formValues = sanitizeFwbSourceValues(authoritativeMappings, formValues)
   }
 
   const mappedPre = mapApprovalFormValues(

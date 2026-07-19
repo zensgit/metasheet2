@@ -101,6 +101,10 @@ const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: st
     disposition: 'SAFE',
     reason: 'W7-1 approval-result backwrite writes ONLY system outcome values (status enum / approver id / ISO timestamp) — never user-supplied longText',
   },
+  'multitable/approval-fwb-runtime.ts': {
+    disposition: 'CHOKEPOINT',
+    reason: 'FWB resolves the target meta_field rich-longText property and routes mapped user content through sanitizeRichLongText before each bare-SQL write.',
+  },
   'multitable/side-door-delete-trash.ts': {
     disposition: 'SAFE',
     reason:

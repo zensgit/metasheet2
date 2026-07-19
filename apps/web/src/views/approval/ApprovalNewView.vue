@@ -237,6 +237,7 @@
               v-else-if="field.type === 'date'"
               v-model="formData[field.id]"
               type="date"
+              value-format="YYYY-MM-DD"
               :placeholder="field.placeholder || `请选择${field.label}`"
               class="ms-w-100pct"
             />
@@ -246,6 +247,7 @@
               v-else-if="field.type === 'datetime'"
               v-model="formData[field.id]"
               type="datetime"
+              value-format="YYYY-MM-DDTHH:mm:ss.SSSZ"
               :placeholder="field.placeholder || `请选择${field.label}`"
               class="ms-w-100pct"
             />

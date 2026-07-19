@@ -5,16 +5,14 @@
  * The editor may only offer valid choices, but the model re-validates the WHOLE draft before save
  * (edit-safety = fail-closed allowlist, same doctrine as template authoring):
  *   - every mapping must reference an EXISTING template field and an EXISTING target field;
- *   - the target field's type must be one of the ratified v1 four (text/number/date/select);
- *   - a select target must carry a non-empty option set (the executor enforces the closed vocabulary);
+ *   - source fields are limited to the ratified scalar surface;
+ *   - the target field's normalized type must be one of the ratified v1 types;
  *   - no two mappings may write the same target field (last-write ambiguity is a config bug);
  *   - an empty mapping list is invalid (a no-op rule must not be saveable as if it did something).
  *
  * Values-free error codes; the server re-validates on save AND the executor re-checks at run time
  * (§11 Q6 gates + fail-closed mapping) — this model is UX, not the security boundary.
  */
-export type FwbTargetType = 'text' | 'number' | 'date' | 'select'
-
 export interface FwbMappingDraft {
   formFieldId: string
   targetFieldId: string
@@ -23,20 +21,41 @@ export interface FwbMappingDraft {
 export interface TemplateFieldInfo {
   id: string
   label: string
+  type?: string
 }
 
 export interface TargetFieldInfo {
   id: string
   label: string
   type: string
-  selectOptions?: readonly string[]
 }
 
 export type FwbConfigIssue =
   | { code: 'empty_config' }
-  | { code: 'unknown_form_field' | 'unknown_target_field' | 'unsupported_target_type' | 'select_options_missing' | 'duplicate_target'; index: number }
+  | { code: 'unknown_form_field' | 'unsupported_source_type' | 'unknown_target_field' | 'unsupported_target_type' | 'duplicate_target'; index: number }
 
-const V1_TYPES: readonly string[] = ['text', 'number', 'date', 'select']
+export const FWB_V1_SOURCE_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'text', 'textarea', 'number', 'date', 'datetime', 'select',
+])
+
+export const FWB_V1_TARGET_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'text', 'number', 'date', 'dateTime', 'select',
+])
+
+export function isFwbV1SourceFieldType(type: string): boolean {
+  return FWB_V1_SOURCE_FIELD_TYPES.has(type)
+}
+
+export function normalizeFwbTargetFieldType(type: string): string {
+  if (type === 'singleLineText' || type === 'longText' || type === 'string') return 'text'
+  if (type === 'datetime') return 'dateTime'
+  if (type === 'singleSelect') return 'select'
+  return type
+}
+
+export function isFwbV1TargetFieldType(type: string): boolean {
+  return FWB_V1_TARGET_FIELD_TYPES.has(normalizeFwbTargetFieldType(type))
+}
 
 /** Validate the whole draft; [] = saveable. Editor disables save while non-empty. */
 export function validateFwbMappingConfig(
@@ -46,38 +65,23 @@ export function validateFwbMappingConfig(
 ): FwbConfigIssue[] {
   if (!draft || draft.length === 0) return [{ code: 'empty_config' }]
   const issues: FwbConfigIssue[] = []
-  const tpl = new Set(templateFields.map((f) => f.id))
+  const tpl = new Map(templateFields.map((f) => [f.id, f]))
   const tgt = new Map(targetFields.map((f) => [f.id, f]))
   const seenTargets = new Set<string>()
   draft.forEach((m, index) => {
-    if (!tpl.has(m.formFieldId)) issues.push({ code: 'unknown_form_field', index })
+    const source = tpl.get(m.formFieldId)
+    if (!source) issues.push({ code: 'unknown_form_field', index })
+    else if (source.type && !isFwbV1SourceFieldType(source.type)) {
+      issues.push({ code: 'unsupported_source_type', index })
+    }
     const t = tgt.get(m.targetFieldId)
     if (!t) {
       issues.push({ code: 'unknown_target_field', index })
       return
     }
-    if (!V1_TYPES.includes(t.type)) issues.push({ code: 'unsupported_target_type', index })
-    if (t.type === 'select' && (!t.selectOptions || t.selectOptions.length === 0)) issues.push({ code: 'select_options_missing', index })
+    if (!isFwbV1TargetFieldType(t.type)) issues.push({ code: 'unsupported_target_type', index })
     if (seenTargets.has(m.targetFieldId)) issues.push({ code: 'duplicate_target', index })
     seenTargets.add(m.targetFieldId)
   })
   return issues
-}
-
-/** Executor-shaped mappings from a VALIDATED draft (throws if called on an invalid one — programmer error). */
-export function toExecutorMappings(
-  draft: readonly FwbMappingDraft[],
-  targetFields: readonly TargetFieldInfo[],
-): Array<{ formFieldId: string; targetFieldId: string; targetType: FwbTargetType; selectOptions?: readonly string[] }> {
-  const tgt = new Map(targetFields.map((f) => [f.id, f]))
-  return draft.map((m) => {
-    const t = tgt.get(m.targetFieldId)
-    if (!t || !V1_TYPES.includes(t.type)) throw new RangeError('toExecutorMappings called on an unvalidated draft')
-    return {
-      formFieldId: m.formFieldId,
-      targetFieldId: m.targetFieldId,
-      targetType: t.type as FwbTargetType,
-      ...(t.type === 'select' ? { selectOptions: t.selectOptions } : {}),
-    }
-  })
 }

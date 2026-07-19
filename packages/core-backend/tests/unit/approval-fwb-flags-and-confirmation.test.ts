@@ -6,8 +6,11 @@ import { describe, expect, test } from 'vitest'
 import { isFwbRuntimeEnabled, requireFwbActivationForEnabledRule } from '../../src/multitable/approval-fwb-flags'
 import { isDurableDeliveryEnabled } from '../../src/multitable/automation-durable-delivery'
 import { assertFwbRuntimeActivatable, parseWriteApprovalFormValuesConfig } from '../../src/multitable/approval-fwb-runtime'
-import { computeFwbConfigFingerprint } from '../../src/multitable/approval-fwb-confirmation'
-import { coerceExactDecimal } from '../../src/multitable/approval-fwb-target-fields'
+import {
+  computeFwbConfigFingerprint,
+  isSupportedFwbSourceField,
+} from '../../src/multitable/approval-fwb-confirmation'
+import { coerceExactDecimal, loadTargetFieldsFromMeta } from '../../src/multitable/approval-fwb-target-fields'
 import { mapApprovalFormValues } from '../../src/multitable/approval-form-value-mapping'
 
 describe('FWB activation flags (default OFF) + staging nuance', () => {
@@ -128,5 +131,31 @@ describe('FWB config parse (confirmationId, no type authority)', () => {
       mode: 'create',
       mappings: [{ formFieldId: 'f', targetFieldId: 't' }],
     }).ok).toBe(false)
+  })
+})
+
+describe('FWB v1 source/target type boundary', () => {
+  test('source fields are scalar-only; record-link/attachment cannot be mapped as values', () => {
+    for (const type of ['text', 'textarea', 'number', 'date', 'datetime', 'select']) {
+      expect(isSupportedFwbSourceField({ id: 'f', type })).toBe(true)
+    }
+    for (const type of ['record-link', 'attachment', 'multi-select', 'user', 'detail']) {
+      expect(isSupportedFwbSourceField({ id: 'f', type })).toBe(false)
+    }
+  })
+
+  test('target schema authority preserves dateTime separately from calendar date', async () => {
+    const queryFn = (async () => ({
+      rows: [
+        { id: 'd', type: 'date', property: {} },
+        { id: 'dt', type: 'dateTime', property: { timezone: 'Asia/Taipei' } },
+      ],
+    })) as never
+    const resolved = await loadTargetFieldsFromMeta(queryFn, 'sheet', ['d', 'dt'])
+    expect(resolved.ok).toBe(true)
+    if (resolved.ok) {
+      expect(resolved.fields.get('d')?.type).toBe('date')
+      expect(resolved.fields.get('dt')?.type).toBe('dateTime')
+    }
   })
 })

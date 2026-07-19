@@ -10,7 +10,7 @@
  *
  * `executeUpdateBoundRecord` composes exactly like FWB-1's executor (gates → mapping → claim → seam) but
  * UPDATES the bound record + bumps its revision instead of creating one; same-transaction with the ledger
- * claim and the outbox row. Checks and writes are injected seams; no production caller yet.
+ * claim and the outbox row. The production runtime supplies the permission and record-write seams.
  */
 import type { Queryable } from './automation-durable-dispatcher'
 import type { TransactionalQueryable } from './pg-transaction-guard'
