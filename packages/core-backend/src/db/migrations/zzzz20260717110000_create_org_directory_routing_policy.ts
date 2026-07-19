@@ -10,7 +10,7 @@ import { sql } from 'kysely'
  * `provider='local'` alongside DingTalk), the canonical source for each purpose is chosen by THIS
  * stored policy — never by array position / "latest active integration wins" guessing (§6 owner
  * ruling, Wave 3 2026-07-12). A missing policy row means "legacy behavior, byte-identical"
- * (design-lock Q1 recommendation: staged opt-in — zero behavior change until a policy is set);
+ * (design-lock Q1 ruling: staged opt-in — zero behavior change until a policy is set);
  * a PRESENT policy is authoritative and fail-closed (resolver work is B5-b, not this migration).
  *
  * Schema locks carried over from B4's rigor:
@@ -30,10 +30,10 @@ import { sql } from 'kysely'
  *     intended posture regardless: deleting an integration a policy still references must be a LOUD
  *     error that forces an explicit policy edit — a routing policy silently losing its target is
  *     exactly the mass-misrouting hazard §6 exists to prevent.
- *   - No `mode` column (design-lock Q3 recommendation): §6's sketch carried `mode`
+ *   - No `mode` column (design-lock Q3 ruling): §6's sketch carried `mode`
  *     (`dingtalk`/`local`), but it is fully derivable from the canonical integration's own
- *     `provider` — a second copy is redundant state that can drift. Single source of truth wins;
- *     if the owner rules to keep it, it comes back with a three-column provider FK (B4 pattern).
+ *     `provider` — a second copy is redundant state that can drift. The integration row remains
+ *     the single source of truth.
  *
  * `directory_integrations` is created by a zzzz migration, so this MUST also be zzzz-prefixed.
  * The table is `CREATE TABLE IF NOT EXISTS` (atomic with its inline constraints) — idempotent on
