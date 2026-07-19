@@ -127,6 +127,10 @@ export interface Database {
   dingtalk_group_deliveries: DingTalkGroupDeliveriesTable
   dingtalk_person_deliveries: DingTalkPersonDeliveriesTable
   dingtalk_approval_card_deliveries: DingTalkApprovalCardDeliveriesTable
+  // FWB (form writeback) tables
+  meta_fwb_action_applied: MetaFwbActionAppliedTable
+  meta_fwb_confirmations: MetaFwbConfirmationsTable
+  approval_node_decision_values: ApprovalNodeDecisionValuesTable
 }
 
 export interface SnapshotsTable {
@@ -1589,4 +1593,51 @@ export interface DingTalkPersonDeliveriesTable {
   initiated_by: string | null
   created_at: CreatedAt
   delivered_at: NullableTimestamp
+}
+
+// ============================================
+// FWB (approval form writeback) tables
+// ============================================
+
+/** Instance/action-scoped FWB claim ledger (not the #4196 execution-scoped ledger). */
+export interface MetaFwbActionAppliedTable {
+  id: string
+  instance_id: string
+  rule_id: string
+  action_key: string
+  node_key: string
+  entry_epoch: number
+  application_mode: 'apply' | 'test_run'
+  result_ref: string | null
+  applied_at: CreatedAt
+}
+
+/** §11 Q6 server challenge + ack (identifiers only). */
+export interface MetaFwbConfirmationsTable {
+  id: string
+  sheet_id: string
+  configurer_user_id: string
+  fingerprint: string
+  template_id: string
+  template_version_id: string
+  target_base_id: string | null
+  target_sheet_id: string
+  mapping_json: JsonObjectArrayColumn
+  challenge_nonce: string
+  confirmed_at: NullableTimestamp
+  confirmed_by: string | null
+  created_at: CreatedAt
+}
+
+/** FWB-3 decision freeze rows (dispatchAction lock-time snapshot). */
+export interface ApprovalNodeDecisionValuesTable {
+  id: string
+  instance_id: string
+  node_key: string
+  entry_epoch: number
+  assignment_id: string | null
+  field_id: string
+  value: JsonValueColumn
+  actor_id: string | null
+  created_at: CreatedAt
 }

@@ -423,6 +423,32 @@ export function validateConditionGroupAgainstFields(
 }
 
 /**
+ * Coerce a field/condition value to a finite number for comparison.
+ * Accepts JS numbers and D7 exact decimal strings written by FWB (no silent float rewrite of storage —
+ * comparison only). Returns null when not numeric.
+ */
+export function coerceComparableNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    // Exact decimal shape (same family as D7); reject scientific notation.
+    if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(trimmed)) return null
+    const n = Number(trimmed)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+/** Equality that treats number 1.5 and D7 string "1.5" as equal without rewriting storage. */
+function valuesEqualLoose(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  const na = coerceComparableNumber(a)
+  const nb = coerceComparableNumber(b)
+  if (na !== null && nb !== null) return na === nb
+  return false
+}
+
+/**
  * Evaluate a single condition against a field value.
  */
 export function evaluateCondition(
@@ -433,10 +459,10 @@ export function evaluateCondition(
 
   switch (condition.operator) {
     case 'equals':
-      return fieldValue === condition.value
+      return valuesEqualLoose(fieldValue, condition.value)
 
     case 'not_equals':
-      return fieldValue !== condition.value
+      return !valuesEqualLoose(fieldValue, condition.value)
 
     case 'contains': {
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
@@ -459,9 +485,9 @@ export function evaluateCondition(
     }
 
     case 'greater_than': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue > condition.value
-      }
+      const left = coerceComparableNumber(fieldValue)
+      const right = coerceComparableNumber(condition.value)
+      if (left !== null && right !== null) return left > right
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue > condition.value
       }
@@ -469,9 +495,9 @@ export function evaluateCondition(
     }
 
     case 'less_than': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue < condition.value
-      }
+      const left = coerceComparableNumber(fieldValue)
+      const right = coerceComparableNumber(condition.value)
+      if (left !== null && right !== null) return left < right
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue < condition.value
       }
@@ -479,9 +505,9 @@ export function evaluateCondition(
     }
 
     case 'greater_or_equal': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue >= condition.value
-      }
+      const left = coerceComparableNumber(fieldValue)
+      const right = coerceComparableNumber(condition.value)
+      if (left !== null && right !== null) return left >= right
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue >= condition.value
       }
@@ -489,9 +515,9 @@ export function evaluateCondition(
     }
 
     case 'less_or_equal': {
-      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
-        return fieldValue <= condition.value
-      }
+      const left = coerceComparableNumber(fieldValue)
+      const right = coerceComparableNumber(condition.value)
+      if (left !== null && right !== null) return left <= right
       if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
         return fieldValue <= condition.value
       }
@@ -506,12 +532,12 @@ export function evaluateCondition(
 
     case 'in': {
       if (!Array.isArray(condition.value)) return false
-      return (condition.value as unknown[]).includes(fieldValue)
+      return (condition.value as unknown[]).some((entry) => valuesEqualLoose(fieldValue, entry))
     }
 
     case 'not_in': {
       if (!Array.isArray(condition.value)) return true
-      return !(condition.value as unknown[]).includes(fieldValue)
+      return !(condition.value as unknown[]).some((entry) => valuesEqualLoose(fieldValue, entry))
     }
 
     default:
