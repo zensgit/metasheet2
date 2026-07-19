@@ -6,6 +6,8 @@
  * Design: docs/development/multitable-agg-footer-design-20260525.md
  *       + docs/development/multitable-agg-footer-2b-design-20260526.md (#4-3b-2a group subtotals).
  */
+import { coerceExactDecimal, isExactlyRepresentableAsJsNumber } from './approval-fwb-target-fields'
+
 export type AggregationFn = 'sum' | 'avg' | 'min' | 'max' | 'count' | 'countNonEmpty' | 'countDistinct'
 
 const FN_SET: ReadonlySet<string> = new Set<AggregationFn>(['sum', 'avg', 'min', 'max', 'count', 'countNonEmpty', 'countDistinct'])
@@ -19,9 +21,15 @@ export function isNumericFieldType(type: string): boolean {
 }
 
 // replicated from chart-aggregation-service.ts (private there)
-function toNumber(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v
+const INEXACT_NUMBER = Symbol('inexact-number')
+
+function toNumber(v: unknown): number | null | typeof INEXACT_NUMBER {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    return isExactlyRepresentableAsJsNumber(v) ? v : INEXACT_NUMBER
+  }
   if (typeof v === 'string') {
+    const exact = coerceExactDecimal(v, undefined)
+    if (exact.ok && !isExactlyRepresentableAsJsNumber(exact.v)) return INEXACT_NUMBER
     const n = Number(v)
     if (Number.isFinite(n)) return n
   }
@@ -78,6 +86,7 @@ export function aggregateField(values: unknown[], fn: AggregationFn, fieldType: 
       const nums: number[] = []
       for (const v of values) {
         const n = toNumber(v)
+        if (n === INEXACT_NUMBER) return null
         if (n !== null) nums.push(n)
       }
       if (fn === 'sum') return nums.reduce((a, b) => a + b, 0)

@@ -298,6 +298,123 @@ export function createAutomationRoutes(
     }
   })
 
+  // ── FWB Q6 confirmation challenge / acknowledge (identifiers only) ──────
+  // POST challenge: server resolves active_version_id + record-link target + ACL, then issues challenge.
+  // Client must NOT supply templateVersionId/field raw IDs as authority — only selectors' identifiers.
+  // POST confirm: atomic conditional UPDATE RETURNING; exactly one concurrent ack succeeds.
+
+  router.post('/sheets/:sheetId/automations/fwb-confirmation/challenge', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    if (!sheetId) return res.status(400).json({ error: 'sheetId is required' })
+    try {
+      const pool = poolManager.get()
+      const queryFn = pool.query.bind(pool)
+      const { capabilities } = await resolveSheetCapabilities(req, queryFn, sheetId)
+      if (!capabilities.canManageAutomation) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      const userId = typeof (req as { user?: { id?: string } }).user?.id === 'string'
+        ? (req as { user: { id: string } }).user.id
+        : ''
+      if (!userId) return res.status(401).json({ error: 'authentication required' })
+      const body = (req.body && typeof req.body === 'object') ? req.body as Record<string, unknown> : {}
+      const templateId = typeof body.templateId === 'string' ? body.templateId.trim() : ''
+      const modeRaw = typeof body.mode === 'string' ? body.mode.trim() : 'create'
+      const mode = modeRaw === 'update' || modeRaw === 'decision' || modeRaw === 'create' ? modeRaw : null
+      if (!mode) return res.status(400).json({ error: 'mode must be create|update|decision' })
+      const recordLinkFieldId = typeof body.recordLinkFieldId === 'string' ? body.recordLinkFieldId.trim() : null
+      const targetSheetId = typeof body.targetSheetId === 'string' ? body.targetSheetId.trim() : null
+      const mappingsRaw = Array.isArray(body.mappings) ? body.mappings : []
+      const mappings: Array<{ formFieldId: string; targetFieldId: string }> = []
+      for (const m of mappingsRaw) {
+        if (!m || typeof m !== 'object') continue
+        const formFieldId = typeof (m as { formFieldId?: unknown }).formFieldId === 'string'
+          ? String((m as { formFieldId: string }).formFieldId).trim() : ''
+        const targetFieldId = typeof (m as { targetFieldId?: unknown }).targetFieldId === 'string'
+          ? String((m as { targetFieldId: string }).targetFieldId).trim() : ''
+        if (formFieldId && targetFieldId) mappings.push({ formFieldId, targetFieldId })
+      }
+      if (!templateId || mappings.length === 0) {
+        return res.status(400).json({ error: 'templateId and mappings are required' })
+      }
+      const {
+        buildAuthoritativeFwbChallengeSubject,
+        createFwbConfirmationChallenge,
+      } = await import('../multitable/approval-fwb-confirmation')
+      const built = await buildAuthoritativeFwbChallengeSubject(queryFn, {
+        configurerUserId: userId,
+        templateId,
+        hostSheetId: sheetId,
+        mode,
+        mappings,
+        recordLinkFieldId,
+        targetSheetId,
+      })
+      if (built.ok !== true) {
+        const code = built.code
+        const status =
+          code === 'template_not_visible' || code === 'target_manage_denied' || code === 'target_write_denied'
+            ? 403
+            : 400
+        return res.status(status).json({ error: 'FWB confirmation challenge rejected', code })
+      }
+      const challenge = await createFwbConfirmationChallenge(queryFn, {
+        sheetId,
+        configurerUserId: userId,
+        subject: built.subject,
+      })
+      // Identifiers only — never echo form/decision values. Return authoritative subject for client persistence.
+      return res.status(201).json({
+        confirmationId: challenge.id,
+        fingerprint: challenge.fingerprint,
+        challengeNonce: challenge.challengeNonce,
+        subject: {
+          templateId: challenge.subject.templateId,
+          templateVersionId: challenge.subject.templateVersionId,
+          targetBaseId: challenge.subject.targetBaseId,
+          targetSheetId: challenge.subject.targetSheetId,
+          mappings: challenge.subject.mappings,
+        },
+      })
+    } catch {
+      return res.status(500).json({ error: 'failed to create FWB confirmation challenge' })
+    }
+  })
+
+  router.post('/sheets/:sheetId/automations/fwb-confirmation/confirm', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    if (!sheetId) return res.status(400).json({ error: 'sheetId is required' })
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      const userId = typeof (req as { user?: { id?: string } }).user?.id === 'string'
+        ? (req as { user: { id: string } }).user.id
+        : ''
+      if (!userId) return res.status(401).json({ error: 'authentication required' })
+      const body = (req.body && typeof req.body === 'object') ? req.body as Record<string, unknown> : {}
+      const confirmationId = typeof body.confirmationId === 'string' ? body.confirmationId.trim() : ''
+      const challengeNonce = typeof body.challengeNonce === 'string' ? body.challengeNonce.trim() : ''
+      if (!confirmationId || !challengeNonce) {
+        return res.status(400).json({ error: 'confirmationId and challengeNonce are required' })
+      }
+      const { acknowledgeFwbConfirmation } = await import('../multitable/approval-fwb-confirmation')
+      const result = await acknowledgeFwbConfirmation(pool.query.bind(pool), {
+        confirmationId,
+        configurerUserId: userId,
+        challengeNonce,
+      })
+      if (result.ok !== true) {
+        return res.status(400).json({ error: 'confirmation failed', code: result.code })
+      }
+      return res.json({ ok: true, confirmationId: result.confirmationId })
+    } catch {
+      return res.status(500).json({ error: 'failed to acknowledge FWB confirmation' })
+    }
+  })
+
   // ── Execution logs ──────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/logs', async (req: Request, res: Response) => {

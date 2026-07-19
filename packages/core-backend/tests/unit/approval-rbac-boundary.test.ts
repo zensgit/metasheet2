@@ -594,5 +594,44 @@ describe('Approval RBAC boundary verification', () => {
         expect(res.status).not.toBe(403)
       }
     })
+
+    it('forwards decisionData only on approve and rejects other wire shapes', async () => {
+      authState.user = actorUser()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const runtimeSpy = vi
+        .spyOn(ApprovalProductService.prototype, 'isTemplateRuntimeInstance')
+        .mockResolvedValue(true)
+      const dispatchSpy = vi
+        .spyOn(ApprovalProductService.prototype, 'dispatchAction')
+        .mockResolvedValue({ id: 'apr-1', status: 'approved' } as never)
+      try {
+        const approved = await request(pinned.url())
+          .post('/api/approvals/apr-1/actions')
+          .send({ action: 'approve', decisionData: { amount: '12.34' } })
+        expect(approved.status).toBe(200)
+        expect(dispatchSpy).toHaveBeenCalledWith(
+          'apr-1',
+          expect.objectContaining({
+            action: 'approve',
+            decisionData: { amount: '12.34' },
+          }),
+          expect.objectContaining({ userId: 'u-actor' }),
+        )
+
+        const nonObject = await request(pinned.url())
+          .post('/api/approvals/apr-2/actions')
+          .send({ action: 'approve', decisionData: ['not', 'an', 'object'] })
+        expect(nonObject.status).toBe(400)
+
+        const wrongAction = await request(pinned.url())
+          .post('/api/approvals/apr-3/actions')
+          .send({ action: 'reject', decisionData: { amount: '12.34' } })
+        expect(wrongAction.status).toBe(400)
+        expect(dispatchSpy).toHaveBeenCalledTimes(1)
+      } finally {
+        runtimeSpy.mockRestore()
+        dispatchSpy.mockRestore()
+      }
+    })
   })
 })

@@ -208,9 +208,16 @@ const ElOption = defineComponent({
 })
 const ElDatePicker = defineComponent({
   name: 'ElDatePicker',
-  props: { modelValue: [String, Date], type: String, placeholder: String },
+  props: { modelValue: [String, Date], type: String, valueFormat: String, placeholder: String },
   emits: ['update:modelValue'],
-  render() { return h('input', { 'data-el-date-picker': 'true', type: 'date' }) },
+  render() {
+    return h('input', {
+      'data-el-date-picker': 'true',
+      'data-picker-type': this.type,
+      'data-value-format': this.valueFormat,
+      type: 'date',
+    })
+  },
 })
 const ElButton = defineComponent({
   name: 'ElButton',
@@ -297,6 +304,13 @@ function formSchemaWithNumberPropsAndAttachment(): FormSchema {
         defaultValue: 1,
         props: { min: 0.5, step: 0.5 },
       } as FormField,
+      { id: 'start_date', type: 'date', label: '开始日期', defaultValue: '2026-07-19' } as FormField,
+      {
+        id: 'submitted_at',
+        type: 'datetime',
+        label: '提交时间',
+        defaultValue: '2026-07-19T09:30:00+08:00',
+      } as FormField,
       { id: 'proof', type: 'attachment', label: '证明材料', required: true } as FormField,
     ],
   }
@@ -369,6 +383,14 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     expect(input).toBeTruthy()
     expect(input.getAttribute('min')).toBe('0.5')
     expect(input.getAttribute('step')).toBe('0.5')
+  })
+
+  it('serializes date as a calendar literal and datetime with an explicit offset', async () => {
+    await mountView()
+    const date = container!.querySelector('[data-picker-type="date"]')
+    const datetime = container!.querySelector('[data-picker-type="datetime"]')
+    expect(date?.getAttribute('data-value-format')).toBe('YYYY-MM-DD')
+    expect(datetime?.getAttribute('data-value-format')).toBe('YYYY-MM-DDTHH:mm:ss.SSSZ')
   })
 
   // -------------------------------------------------------------------------

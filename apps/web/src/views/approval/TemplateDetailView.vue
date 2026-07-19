@@ -749,6 +749,7 @@ function fieldTypeLabel(type: FormFieldType) {
     user: '用户',
     attachment: '附件',
     detail: '明细',
+    'record-link': '关联记录',
   }
   return map[type] ?? type
 }

@@ -77,6 +77,17 @@ import {
   type ApprovalCompletionTransitionSnapshot,
 } from './ApprovalCompletionEvent'
 import {
+  FWB_DECISION_FIELD_TYPES,
+  freezeDecisionValues,
+} from '../multitable/approval-fwb-decision-values'
+import {
+  assertRecordLinksReadableAtSubmit,
+  parseRecordLinkValue,
+  persistFrozenDecisionValues,
+} from '../multitable/approval-fwb-runtime'
+import { isRecordReadDeniedForUser } from '../multitable/permission-service'
+import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
+import {
   buildApprovalTaskCreatedEvent,
   collectLiveApprovalTaskCreatedEvents,
   emitApprovalTaskCreatedEvent,
@@ -352,13 +363,16 @@ const FORM_FIELD_TYPES = new Set([
   'user',
   'attachment',
   'detail',
+  // FWB-2 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
+  'record-link',
 ])
 
 // Leaf sub-field types allowed inside a `detail` group's columns (everything except `detail`
 // itself — one nesting level only). `attachment` is permitted at the type/contract layer;
-// the authoring UI (C-3) governs which are offered.
+// the authoring UI (C-3) governs which are offered. `record-link` is v1-excluded from detail
+// (FWB-0 Layer 2: nested link semantics not defined).
 const DETAIL_LEAF_FIELD_TYPES = new Set(
-  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
+  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail' && type !== 'record-link'),
 )
 
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
@@ -718,6 +732,19 @@ function normalizeFormField(
     failValidation(context, `formSchema.fields[${index}].props must be an object`)
   }
 
+  // FWB-2 Layer 2: record-link requires server-pinned baseId + sheetId (non-empty strings).
+  if (value.type === 'record-link') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] record-link cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const baseId = props && typeof props.baseId === 'string' ? props.baseId.trim() : ''
+    const sheetId = props && typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
+    if (!baseId || !sheetId) {
+      failValidation(context, `formSchema.fields[${index}] record-link requires props.baseId and props.sheetId`)
+    }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -978,6 +1005,34 @@ function validateFormFieldVisibilityRules(
  * unchanged (hot-file collision discipline) while still failing closed on a
  * dangling `fieldId`.
  */
+/**
+ * FWB-3: normalize a node's closed `decisionFieldIds` set (shape only — non-empty unique strings).
+ * Absent/empty ⇒ undefined (node carries no decision freeze).
+ */
+function normalizeDecisionFieldIds(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    failValidation(context, `${path} must be an array`)
+  }
+  if (value.length === 0) return undefined
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const [i, entry] of value.entries()) {
+    if (!isNonEmptyString(entry)) {
+      failValidation(context, `${path}[${i}] must be a non-empty string`)
+    }
+    const id = entry.trim()
+    if (seen.has(id)) failValidation(context, `${path}[${i}] is duplicated`)
+    seen.add(id)
+    normalized.push(id)
+  }
+  return normalized
+}
+
 function normalizeNodeFieldPermissions(
   value: unknown,
   context: ValidationContext,
@@ -1122,6 +1177,37 @@ function validateNodeFieldPermissionsAgainstFormSchema(
         failValidation(
           context,
           `approvalGraph node ${node.key} fieldPermissions references unknown field ${permission.fieldId}`,
+        )
+      }
+    }
+  })
+}
+
+/**
+ * FWB-3: every decisionFieldIds entry must exist on the version's formSchema AND be a supported
+ * scalar v1 decision type. Direct API attempts with unsupported types fail closed at publish/normalize.
+ */
+function validateDecisionFieldIdsAgainstFormSchema(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const fieldsById = new Map(formSchema.fields.map((field) => [field.id, field]))
+  approvalGraph.nodes.forEach((node) => {
+    if (node.type !== 'approval') return
+    const config = node.config as { decisionFieldIds?: string[] }
+    for (const fieldId of config.decisionFieldIds ?? []) {
+      const field = fieldsById.get(fieldId)
+      if (!field) {
+        failValidation(
+          context,
+          `approvalGraph node ${node.key} decisionFieldIds references unknown field ${fieldId}`,
+        )
+      }
+      if (!FWB_DECISION_FIELD_TYPES.has(field.type)) {
+        failValidation(
+          context,
+          `approvalGraph node ${node.key} decisionFieldIds field ${fieldId} has unsupported type ${field.type} (allowed: text, textarea, number, date, datetime, select)`,
         )
       }
     }
@@ -1503,6 +1589,11 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.fieldPermissions`,
           )
+          const decisionFieldIds = normalizeDecisionFieldIds(
+            node.config.decisionFieldIds,
+            context,
+            `approvalGraph.nodes[${index}].config.decisionFieldIds`,
+          )
           const timeout = normalizeNodeTimeout(
             node.config.timeout,
             context,
@@ -1526,6 +1617,7 @@ function normalizeApprovalGraph(
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
+            ...(decisionFieldIds ? { decisionFieldIds } : {}),
             ...(timeout ? { timeout } : {}),
             ...(signaturePolicy ? { signaturePolicy } : {}),
           }
@@ -3145,6 +3237,7 @@ export class ApprovalProductService {
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateDecisionFieldIdsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
     validateConditionBranchRules(approvalGraph)
@@ -3302,6 +3395,7 @@ export class ApprovalProductService {
         const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateDecisionFieldIdsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
         validateConditionBranchRules(nextApprovalGraph)
@@ -3405,6 +3499,7 @@ export class ApprovalProductService {
       const approvalGraph = asApprovalGraph(version.approval_graph)
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      validateDecisionFieldIdsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // RA-1b CURATED-VOCABULARY — THE HARD GATE. Only when the graph actually routes on requester.role do
       // we fetch the curated set (one read, on this transaction client) and reject any uncurated literal at
       // publish. Independent of any picker, so an author can never publish a route on an admin/system role.
@@ -3762,6 +3857,46 @@ export class ApprovalProductService {
    * wedge guards, org/role/delegation snapshot freezing and resolver wiring — one source).
    * Persistence never happens here; the caller decides whether to write (create) or walk (preview).
    */
+  /**
+   * FWB-2 Layer 2 submit-time authz: every record-link value must be readable by the filler.
+   * Missing and unreadable share one error string (no existence oracle).
+   */
+  private async assertRecordLinksReadableAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    fillerUserId: string,
+  ): Promise<string | null> {
+    if (!pool) return 'Database not available'
+    const links: Array<{ sheetId: string; recordId: string }> = []
+    for (const field of formSchema.fields ?? []) {
+      if (field.type !== 'record-link') continue
+      const raw = formData[field.id]
+      if (raw === undefined || raw === null) continue
+      const parsed = parseRecordLinkValue(raw)
+      if (!parsed.ok) return `form field ${field.id} must be exactly { recordId }`
+      const sheetId = typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : ''
+      if (!sheetId) return `form field ${field.id} is missing server-pinned sheetId`
+      links.push({ sheetId, recordId: parsed.recordId })
+    }
+    if (links.length === 0) return null
+    const queryFn = (sqlText: string, params?: unknown[]) => pool!.query(sqlText, params)
+    const checks = {
+      async fillerCanReadRecord(userId: string, sheetId: string, recordId: string): Promise<boolean> {
+        const rec = await queryFn(
+          `SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2`,
+          [recordId, sheetId],
+        )
+        if (rec.rows.length === 0) return false
+        const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(queryFn, sheetId, userId)
+        if (isAdminRole) return true
+        if (capabilities.canRead !== true) return false
+        return !(await isRecordReadDeniedForUser(queryFn, sheetId, recordId, userId))
+      },
+    }
+    const result = await assertRecordLinksReadableAtSubmit(checks, fillerUserId, links)
+    return result.ok ? null : 'linked record is not readable'
+  }
+
   private async assembleCreationContext(
     request: { templateId: string; formData: Record<string, unknown> },
     actor: CreateApprovalActor,
@@ -3846,6 +3981,17 @@ export class ApprovalProductService {
         'VALIDATION_ERROR',
         { errors: validationErrors },
       )
+    }
+
+    // FWB-2 Layer 2: submit-time record-link authz (confused-deputy close). Filler must be able to
+    // READ every linked record; missing and unreadable share one fail-closed shape (no existence oracle).
+    const recordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+      formSchema,
+      normalizedFormData,
+      actor.userId,
+    )
+    if (recordLinkAuthzError) {
+      throw new ServiceError(recordLinkAuthzError, 400, 'VALIDATION_ERROR')
     }
 
     // Server-side amount total-check (design-lock #3161): if the template declares an
@@ -5763,6 +5909,98 @@ export class ApprovalProductService {
       const currentNodeEpoch = currentNodeKey
         ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         : null
+
+      // FWB-3: decision freeze is prepared here but applied ONLY when this approve RESOLVES the
+      // node (not intermediate all-mode votes). transfer/jump/timeout never reach this path.
+      // Concurrent double-freeze collides on UNIQUE (no silent ON CONFLICT DO NOTHING).
+      const nodeForDecision = currentNodeKey
+        ? runtimeGraph.nodes.find((n) => n.key === currentNodeKey)
+        : undefined
+      const declaredDecisionFields = (nodeForDecision?.config as { decisionFieldIds?: string[] } | undefined)?.decisionFieldIds
+      const pendingDecisionData = isRecord(request.decisionData) ? request.decisionData : {}
+      const suppliedDecisionKeys = Object.keys(pendingDecisionData)
+      if (suppliedDecisionKeys.length > 0) {
+        const declaredSet = new Set(Array.isArray(declaredDecisionFields) ? declaredDecisionFields : [])
+        const undeclared = suppliedDecisionKeys.find((key) => !declaredSet.has(key))
+        if (undeclared) {
+          throw new ServiceError(
+            `decisionData contains undeclared field ${undeclared}`,
+            400,
+            'VALIDATION_ERROR',
+          )
+        }
+      }
+      // Schema hints from the instance's frozen template version form_schema (D7/D8 normalize).
+      const decisionFieldHints: Record<
+        string,
+        { type?: string; numberPrecision?: number; selectOptions?: readonly string[] }
+      > = {}
+      if (Array.isArray(declaredDecisionFields) && declaredDecisionFields.length > 0) {
+        const verSchema = await client.query(
+          `SELECT v.form_schema
+             FROM approval_instances i
+             JOIN approval_template_versions v ON v.id = i.template_version_id
+            WHERE i.id = $1`,
+          [id],
+        )
+        const fs = (verSchema.rows[0] as { form_schema?: unknown } | undefined)?.form_schema
+        const fieldsList =
+          fs && typeof fs === 'object' && !Array.isArray(fs) && Array.isArray((fs as { fields?: unknown }).fields)
+            ? (fs as {
+                fields: Array<{
+                  id?: string
+                  type?: string
+                  props?: Record<string, unknown>
+                  options?: Array<{ value?: unknown }>
+                }>
+              }).fields
+            : []
+        for (const f of fieldsList) {
+          if (!f || typeof f.id !== 'string' || !declaredDecisionFields.includes(f.id)) continue
+          const hint: { type?: string; numberPrecision?: number; selectOptions?: readonly string[] } = {}
+          if (typeof f.type === 'string') hint.type = f.type
+          if (f.type === 'number') {
+            const props = f.props && typeof f.props === 'object' ? f.props : {}
+            const d = (props as { decimals?: unknown }).decimals
+            if (typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 20) hint.numberPrecision = d
+          }
+          if (f.type === 'select' && Array.isArray(f.options)) {
+            hint.selectOptions = f.options
+              .map((o) => (typeof o?.value === 'string' ? o.value : null))
+              .filter((v): v is string => v !== null)
+          }
+          decisionFieldHints[f.id] = hint
+        }
+      }
+      const freezeDecisionIfNodeResolves = async (): Promise<void> => {
+        if (!currentNodeKey || currentNodeEpoch === null || currentNodeEpoch < 1) return
+        if (!Array.isArray(declaredDecisionFields) || declaredDecisionFields.length === 0) return
+        const freezeRaw = freezeDecisionValues(
+          currentNodeKey,
+          currentNodeEpoch,
+          declaredDecisionFields,
+          pendingDecisionData,
+          () => new Date(),
+          decisionFieldHints,
+        )
+        if ((freezeRaw as { ok: boolean }).ok !== true) {
+          throw new ServiceError(
+            `decisionData freeze rejected: ${(freezeRaw as { code?: string }).code ?? 'unknown'}`,
+            400,
+            'VALIDATION_ERROR',
+          )
+        }
+        const assignmentId = actorAssignments[0]?.id ?? null
+        await persistFrozenDecisionValues(client, {
+          instanceId: id,
+          assignmentId,
+          actorId: actor.userId,
+          snapshot: (freezeRaw as {
+            snapshot: import('../multitable/approval-fwb-decision-values').FrozenDecisionSnapshot
+          }).snapshot,
+        })
+      }
+
       // Approval aggregation semantics:
       //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
       //   'any'    (或签): first approver wins — deactivate siblings with an audit trail
@@ -5774,6 +6012,7 @@ export class ApprovalProductService {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
         if (remainingAssignments > 0) {
+          // Intermediate vote — no freeze (only the resolving approve freezes).
           await client.query(
             `UPDATE approval_instances
              SET version = $2,
@@ -5803,7 +6042,11 @@ export class ApprovalProductService {
           await client.query('COMMIT')
           return (await this.getApproval(id))!
         }
+        // Last approve in all-mode — freeze now (node resolves).
+        await freezeDecisionIfNodeResolves()
       } else if (approvalMode === 'any') {
+        // First-wins — this approve resolves the node; freeze decision values now.
+        await freezeDecisionIfNodeResolves()
         // Deactivate actor's own assignment first.
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         // Identify siblings (still-active, non-actor) whose assignments the first-wins aggregation cancels.
@@ -5949,8 +6192,8 @@ export class ApprovalProductService {
           await client.query('COMMIT')
           return (await this.getApproval(id))!
         }
-        // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
-        // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
+        // Threshold reached on THIS approval (first-N-wins) — freeze once, then cancel remaining.
+        await freezeDecisionIfNodeResolves()
         const siblingAssignments = currentNodeAssignments.filter((assignment) =>
           !assignmentMatchesActor(assignment, actor.userId, actorRoles))
         aggregateCancelledAssigneeIds = Array.from(
@@ -5974,10 +6217,10 @@ export class ApprovalProductService {
           )
         }
       } else {
-        // Single-approver mode. In parallel state the blanket
-        // `deactivateAllActiveAssignments` would cancel sibling branches'
-        // pending assignments as well, so scope the deactivation to the
-        // actor's own branch node. Linear state keeps the legacy behavior.
+        // Single-approver mode — this approve resolves the node.
+        await freezeDecisionIfNodeResolves()
+        // In parallel state the blanket `deactivateAllActiveAssignments` would cancel sibling
+        // branches' pending assignments as well, so scope deactivation to the actor's branch node.
         if (isInParallelRegion) {
           await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         } else {
