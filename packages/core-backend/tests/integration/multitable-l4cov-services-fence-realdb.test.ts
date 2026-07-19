@@ -333,22 +333,46 @@ describeIfDatabase('W0-1 L4-cov-services — service writers on the canonical fe
     const query = ((sql: string, params?: unknown[]) => q(sql, params)) as MultitableRecordsQueryFn
     expect(pool).toBeTruthy()
     const holder = await pool!.connect()
+    let holderOpenTxn = false
     try {
       await holder.query('BEGIN')
+      holderOpenTxn = true
       await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`meta:auto-number:sheet:${SHEET}`])
+      const holderPid = Number(((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
       const inflight = engine.recalculateRecordFromData(query, SHEET, R, { [F_STR]: 'x' }, fields)
+      // Precise attribution (post-merge review of #4438, Low-1): the previous DB-wide
+      // `pg_locks … NOT granted` count could be satisfied by an UNRELATED suite sharing this database.
+      // Attribute the waiter to THIS holder via pg_blocking_pids — same pattern as the sibling
+      // waitUntilBlockedOnFence helper in the univer-meta writers suite. Poll via `q` (the
+      // poolManager channel — the waiter's own session), NOT via `holder`: observed empirically
+      // during development (twice, deterministic until switched), the raw internal-pool client's
+      // pg_stat_activity view returned NO client-backend rows at all — reading as "no waiter"
+      // forever — while `pg_locks` (shared lock state) still showed the parked lock from the same
+      // connection, and the identical poll through `q` saw the waiter immediately. Mechanism
+      // unresolved (both channels nominally share one pool); polling where the waiter's session is
+      // provably visible is the load-bearing choice either way.
       let sawWaiter = false
       for (let i = 0; i < 100; i++) {
-        const waiters = await holder.query(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)
+        const waiters = await q(
+          `SELECT count(*)::int AS c FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock'
+             AND $1 = ANY(pg_blocking_pids(pid)) AND query ILIKE '%pg_advisory_xact_lock%'`,
+          [holderPid],
+        )
         if (Number((waiters.rows[0] as { c: number }).c) > 0) { sawWaiter = true; break }
         await new Promise((r) => setTimeout(r, 50))
       }
-      expect(sawWaiter).toBe(true) // the recompute genuinely parked behind the fence holder
+      expect(sawWaiter).toBe(true) // the recompute genuinely parked behind THIS holder's fence
       await holder.query('COMMIT') // release ⇒ the recompute proceeds and materializes
+      holderOpenTxn = false
       const result = await inflight
       expect(result?.[F_FORMULA]).toBe(2)
       expect((await recordRow(R))?.data?.[F_FORMULA]).toBe(2)
     } finally {
+      // Failure-path hygiene (review Low-1b): a thrown expect above would otherwise release this client
+      // mid-BEGIN still holding the fence key — node-postgres does NOT reset a connection on release(),
+      // so the advisory xact lock + idle-in-transaction connection would poison the rest of the suite.
+      if (holderOpenTxn) await holder.query('ROLLBACK').catch(() => {})
       holder.release()
     }
   })

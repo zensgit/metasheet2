@@ -94,6 +94,35 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
     scheduler.stop()
   })
 
+  test('FIRST-ATTEMPT stray recovery: pending + next_retry_at NULL past the grace is claimed; a fresh in-flight first attempt is NOT', async () => {
+    // deliverEvent fire-and-forgets the first HTTP attempt; a crash before the outcome handler stamps
+    // status/next_retry_at leaves pending + next_retry_at NULL — formerly a stuck absorbing state the
+    // scheduled-retry leg could never select (sink audit 2026-07-17).
+    captured = []
+    const strayId = `del_retry_stray_${TS}`
+    const freshId = `del_retry_fresh_${TS}`
+    const oldCreated = new Date(Date.now() - 10 * 60_000).toISOString() // well past the 5-min stray grace
+    await q(
+      'INSERT INTO multitable_webhook_deliveries (id, webhook_id, event, payload, status, attempt_count, created_at, next_retry_at) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)',
+      [strayId, WH_ID, 'record.updated', JSON.stringify({ recordId: 'r-stray' }), 'pending', 0, oldCreated, null],
+    )
+    await q(
+      'INSERT INTO multitable_webhook_deliveries (id, webhook_id, event, payload, status, attempt_count, created_at, next_retry_at) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)',
+      [freshId, WH_ID, 'record.updated', JSON.stringify({ recordId: 'r-fresh' }), 'pending', 0, new Date().toISOString(), null],
+    )
+    const scheduler = new WebhookRetryScheduler({
+      service: new WebhookService(db, loopbackFetch),
+    })
+    const retried = await scheduler.tick()
+    expect(retried).toBe(1) // the stray only — the fresh row's first attempt may still be in flight
+    const stray = await q('SELECT status FROM multitable_webhook_deliveries WHERE id = $1', [strayId])
+    expect(stray.rows[0].status).toBe('success') // recovered and delivered (loopback 200)
+    const fresh = await q('SELECT status, next_retry_at FROM multitable_webhook_deliveries WHERE id = $1', [freshId])
+    expect(fresh.rows[0].status).toBe('pending')
+    expect(fresh.rows[0].next_retry_at).toBeNull() // untouched — no double-fire of a live first attempt
+    scheduler.stop()
+  })
+
   test('a second tick does no work once the due delivery is resolved', async () => {
     captured = []
     const scheduler = new WebhookRetryScheduler({

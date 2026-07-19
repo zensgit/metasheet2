@@ -12,7 +12,15 @@
  */
 import { sql, type Kysely } from 'kysely'
 
-/** `{ fence }` when THIS caller owns the (rule, dedup) claim; `'skip'` when it is already done or live-leased. */
+/**
+ * `{ fence }` when THIS caller owns the (rule, dedup) claim; `'done'` when the delivery is already terminal
+ * (done / outcome_unknown / failed / dead_letter — nothing left to run); `'busy'` when ANOTHER worker holds a
+ * LIVE lease. The done/busy split is load-bearing (sink-recoverability audit 2026-07-17): the outbox lease
+ * (30s default) can expire before this sink lease (60s), so a crashed worker's redelivery arrives while the
+ * dead worker's lease is still live — mapping that to a silent skip would mark the consumer row `done` and
+ * PERMANENTLY lose the work. `'busy'` lets the caller fail retryably so the outbox redelivers after the sink
+ * lease has expired, when the reclaim path takes over.
+ */
 // schema-agnostic query helper: Kysely<T> is invariant so we accept any schema (repo precedent:
 // record-subscription-service.ts, several migrations). Only raw `sql` is used, never typed query builders.
 export async function claimEventFiresLease(
@@ -21,7 +29,7 @@ export async function claimEventFiresLease(
   ruleId: string,
   dedupKey: string,
   leaseMs: number,
-): Promise<{ fence: string } | 'skip'> {
+): Promise<{ fence: string } | 'done' | 'busy'> {
   const ms = Math.max(1, Math.floor(leaseMs))
   // Fresh claim: in_progress + lease + fence 1. ON CONFLICT DO NOTHING → an existing row falls through.
   const fresh = await sql<{ fence: string }>`
@@ -41,7 +49,19 @@ export async function claimEventFiresLease(
       AND status = 'in_progress' AND lease_expires_at < now()
     RETURNING fence::text AS fence
   `.execute(db)
-  return reclaim.rows.length > 0 ? { fence: reclaim.rows[0].fence } : 'skip'
+  if (reclaim.rows.length > 0) return { fence: reclaim.rows[0].fence }
+  // Neither claimed nor reclaimed: classify. Resolve-permitting terminals → 'done' (delivered / permanently
+  // poisoned — never re-run). ANYTHING else → 'busy' (fail-closed toward retry): an in_progress LIVE lease is
+  // the composed-timing hole above; a row that VANISHED between the INSERT conflict and this SELECT (TTL
+  // sweep / races) also maps to 'busy' — the next redelivery simply fresh-claims, bounded by the outbox
+  // attempts cap, whereas a false 'done' would silently drop work.
+  const row = await sql<{ status: string }>`
+    SELECT status FROM meta_automation_event_fires WHERE rule_id = ${ruleId} AND dedup_key = ${dedupKey}
+  `.execute(db)
+  const status = row.rows[0]?.status
+  return status === 'done' || status === 'outcome_unknown' || status === 'failed' || status === 'dead_letter'
+    ? 'done'
+    : 'busy'
 }
 
 /** fence-CAS the leased row to terminal `done` (clears the lease atomically). A stale-fence zombie hits 0 rows. */

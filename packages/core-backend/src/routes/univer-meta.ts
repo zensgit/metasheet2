@@ -196,6 +196,8 @@ import {
   serializeAutomationRule,
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from '../multitable/automation-producer-emit'
+import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -242,6 +244,7 @@ import {
 } from '../multitable/canonical-sheet-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
+import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
 import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
   createYjsInvalidationPostCommitHook,
@@ -2947,6 +2950,11 @@ async function recalculateFormulaFields(
   )
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
+  // W0-1 L4-cov follow-up: once a durable recovery writer-block refuses one relation-agg
+  // materialization on this sheet, skip the remaining records' relation-agg compute+write round
+  // trips too (the block is sheet-scoped; pure-formula materialization keeps its own engine-side
+  // fence posture per record).
+  let derivedWriteBlocked = false
   for (const recordId of updatedRecordIds) {
     const hydrated = hydratedDataByRecord?.get(recordId)
     const formulaData: Record<string, unknown> = {}
@@ -2960,7 +2968,7 @@ async function recalculateFormulaFields(
         }
       }
     }
-    if (relationAggByField.size > 0 || cliffFieldIds.size > 0) {
+    if ((relationAggByField.size > 0 || cliffFieldIds.size > 0) && !derivedWriteBlocked) {
       const recData = hydrated ?? (await loadRecordDataById(query, sheetId, recordId))
       if (recData) {
         const updates: Record<string, unknown> = {}
@@ -2970,14 +2978,27 @@ async function recalculateFormulaFields(
         for (const fieldId of cliffFieldIds) {
           updates[fieldId] = '#ERROR!' // composition deferred (Slice A is sole-call) — fail loud, never silent-wrong
         }
+        // W0-1 L4-cov follow-up (post-merge review of #4438): the relation-agg materialization joins the
+        // canonical fence via the SHARED derived-write seam (flag-gated; flag-OFF = byte-identical legacy
+        // write on the caller's query). A durable recovery block on this sheet is an EXPECTED operational
+        // condition, not an error — the primary user write (if any) already committed, so refusal here
+        // must NOT fail the request or kill the remaining post-commit steps: skip the materialization AND
+        // its echo (the DB did not change; receivers only consume invalidation ids and refetch — carrying
+        // a value the DB refused would display data that reverts on reload), latch the sheet so remaining
+        // records skip their compute+fence round trips. Values-free log. Any OTHER error keeps today's
+        // propagation semantics.
         if (Object.keys(updates).length > 0) {
-          // lock-exempt: system relation-aggregation materialization — derived value, no user actor (same posture as recalculateRecordFromData; a record lock is read-only to users, not system recompute).
-          // revision-exempt: relation-aggregation same-record materialization, no version bump — derived value.
-          await query(
-            'UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3',
-            [JSON.stringify(updates), recordId, sheetId],
-          )
-          Object.assign(formulaData, updates)
+          try {
+            await applyFencedDerivedDataMerge(query as unknown as DerivedMergeQueryFn, sheetId, recordId, updates)
+            Object.assign(formulaData, updates)
+          } catch (err) {
+            if (err instanceof SheetWriterBlockedError) {
+              derivedWriteBlocked = true
+              console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+            } else {
+              throw err
+            }
+          }
         }
       }
     }
@@ -3867,11 +3888,25 @@ async function computeDependentLookupRollupRecords(
           if (!call) continue
           updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
         }
+        // W0-1 L4-cov follow-up (post-merge review of #4438): the fan-out materialization joins the
+        // canonical fence via the SHARED derived-write seam, keyed on the DEPENDENT sheet being written
+        // (this loop's `sheetId` — NOT `sourceSheetId`; the primary write's fence covered only the source
+        // sheet, so a recovery block here is the COMMON refusal case, not a race). Refusal is expected
+        // during a recovery on this dependent sheet: skip this sheet's remaining materializations and
+        // their echo/invalidation ids (the DB did not change ⇒ nothing to invalidate), let OTHER
+        // dependent sheets and the rest of the post-commit pipeline continue. Values-free log. Any other
+        // error keeps today's propagation semantics.
         if (Object.keys(updates).length > 0) {
-          // lock-exempt: system relation-aggregation fan-out materialization — derived value, no user actor (same posture as the same-record recompute write).
-          // revision-exempt: relation-aggregation fan-out materialization, no version bump — derived value.
-          await query('UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3', [JSON.stringify(updates), recordId, sheetId])
-          formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
+          try {
+            await applyFencedDerivedDataMerge(query as unknown as DerivedMergeQueryFn, sheetId, recordId, updates)
+            formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
+          } catch (err) {
+            if (err instanceof SheetWriterBlockedError) {
+              console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              break
+            }
+            throw err
+          }
         }
       }
     }
@@ -4976,6 +5011,25 @@ function getAttachmentStorageService(): StorageServiceImpl {
 function getRequestActorId(req: Request): string | null {
   const actorId = req.user?.id
   return typeof actorId === 'string' && actorId.trim().length > 0 ? actorId.trim() : null
+}
+
+/**
+ * P2 durable-delivery P1#2d (producer family 5) — wrap the live in-transaction `query` of a
+ * `pool.transaction` as the produce-seam's `TransactionalQueryable`. Call it ONLY with the query handle of
+ * the SAME transaction the source write runs in: the seam's xid probe (`assertInTransaction`) rejects a
+ * pool / autocommit handle at runtime, so a mis-wired call fails loud instead of half-committing an outbox
+ * row.
+ */
+function asProducerTxnQueryable(
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>,
+): TransactionalQueryable {
+  return {
+    isTransaction: true,
+    query: async (sql, params) => {
+      const r = await query(sql, params)
+      return { rows: r.rows, rowCount: r.rowCount ?? null }
+    },
+  }
 }
 
 const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
@@ -10395,6 +10449,13 @@ export function univerMetaRouter(): Router {
         // the spine invariant (mirror never owns a meta_links row) is structural, not snapshot-hygiene-reliant.
         const linkFieldIds = fields.filter((f) => f.type === 'link' && fieldById.get(f.id)?.readOnly !== true).map((f) => f.id)
         const undeleteActorId = getRequestActorId(req)
+        // P1#2d REPLACE — build each resurrect's event payload ONCE before the txn (stable `_eventId`) so the
+        // same-txn durable enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF)
+        // carry the same event identity. Keyed by recordId; total over `resurrects` by construction — the txn is
+        // all-or-nothing, so on success `resurrectedIds` is exactly the ids of `resurrects`.
+        const undeleteEventPayloads = new Map(
+          resurrects.map((r) => [r.recordId, withAutomationEventId({ sheetId, recordId: r.recordId, actorId: undeleteActorId })]),
+        )
         try {
           await pool.transaction(async ({ query }) => {
             // W0-1 L4: the recovery's OWN resurrect writes take the canonical fence (for seq-ordering) but
@@ -10460,6 +10521,14 @@ export function univerMetaRouter(): Router {
                   undeleteInboundTotals.total += replay.total
                 }
               }
+              // P1#2d REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with THIS
+              // record's resurrect INSERT + links + 'restore' create-revision (any conflict throw in this loop
+              // rolls the WHOLE txn — and every enqueue — back; nothing half-delivered). One enqueue per
+              // resurrected record, mirroring the legacy per-record post-commit emit 1:1. Flag OFF ⇒ no-op.
+              const undeleteDurablePayload = undeleteEventPayloads.get(r.recordId)
+              if (undeleteDurablePayload) {
+                await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.record.created', undeleteDurablePayload)
+              }
               resurrectedIds.push(r.recordId)
             }
           })
@@ -10469,7 +10538,10 @@ export function univerMetaRouter(): Router {
         }
         for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
           publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
-          eventBus.emit('multitable.record.created', withAutomationEventId({ sheetId, recordId, actorId: undeleteActorId }))
+          // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emit (the SAME prebuilt payload object — byte-identical
+          // fields); flag ON ⇒ SUPPRESSED (the same-txn enqueue inside the txn above is the delivery path).
+          const undeleteLegacyPayload = undeleteEventPayloads.get(recordId)
+          if (undeleteLegacyPayload) emitRecordEventIfLegacy(eventBus, 'multitable.record.created', undeleteLegacyPayload)
         }
       }
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
@@ -10623,6 +10695,12 @@ export function univerMetaRouter(): Router {
       const batchId = randomUUID()
       const updatedRows: Array<{ recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown> }> = []
       const deletedRecordIds: string[] = []
+      // P1#2d REPLACE — per-row event payloads, built ONCE (stable `_eventId`) INSIDE the txn at the point each
+      // row's write completes (the update payload's `changes` = the in-txn-computed revisionPatch, so it CANNOT
+      // be prebuilt before the txn), shared verbatim by the same-txn durable enqueue (flag ON) and the legacy
+      // post-commit emit loops below (flag OFF). A txn abort discards them with the response (409/422/…).
+      const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+      const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
 
       try {
         await pool.transaction(async ({ query }) => {
@@ -10776,6 +10854,13 @@ export function univerMetaRouter(): Router {
               }
               if (ids.length === 0) await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [change.fieldId, candidate.recordId])
             }
+            // P1#2d REPLACE: build this row's payload ONCE, then same-transaction durable enqueue on the SUCCESS
+            // path (flag ON) — atomic with the row's UPDATE + revision + link replay (any later candidate's
+            // conflict throw rolls the WHOLE reset — and every enqueue — back). One enqueue per updated row,
+            // mirroring the legacy per-row post-commit emit 1:1. Flag OFF ⇒ no-op (legacy loop below fires).
+            const updatedEventPayload = withAutomationEventId({ sheetId, recordId: candidate.recordId, changes: revisionPatch, actorId })
+            updatedEventPayloads.push(updatedEventPayload)
+            await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.record.updated', updatedEventPayload)
             updatedRows.push({ recordId: candidate.recordId, version: nextVersion, fieldIds: [...Object.keys(patch), ...unsetIds], patch: revisionPatch })
           }
 
@@ -10835,6 +10920,12 @@ export function univerMetaRouter(): Router {
             // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
             // revision-emitted: PIT reset delete — recordRecordRevision(action:'delete') below, same txn.
             await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
+            // P1#2d REPLACE: build this row's payload ONCE, then same-transaction durable enqueue on the SUCCESS
+            // path (flag ON) — atomic with the row's tombstone capture + trash + delete revision + DELETE. One
+            // enqueue per deleted record, mirroring the legacy per-record post-commit emit 1:1. Flag OFF ⇒ no-op.
+            const deletedEventPayload = withAutomationEventId({ sheetId, recordId: candidate.recordId, actorId })
+            deletedEventPayloads.push(deletedEventPayload)
+            await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.record.deleted', deletedEventPayload)
             deletedRecordIds.push(candidate.recordId)
           }
         })
@@ -10869,8 +10960,11 @@ export function univerMetaRouter(): Router {
           fieldIds: [...new Set(updatedRows.flatMap((r) => r.fieldIds))],
           recordPatches: updatedRows.map((r) => ({ recordId: r.recordId, version: r.version, patch: r.patch })),
         })
-        for (const row of updatedRows) {
-          eventBus.emit('multitable.record.updated', withAutomationEventId({ sheetId, recordId: row.recordId, changes: row.patch, actorId }))
+        // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emits (the SAME prebuilt per-row payload objects —
+        // byte-identical fields: recordId/changes are the very candidate.recordId/revisionPatch the legacy
+        // literal read back off updatedRows); flag ON ⇒ SUPPRESSED (the same-txn enqueues are the delivery path).
+        for (const updatedLegacyPayload of updatedEventPayloads) {
+          emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', updatedLegacyPayload)
         }
       }
       if (deletedRecordIds.length > 0) {
@@ -10881,8 +10975,9 @@ export function univerMetaRouter(): Router {
           kind: 'record-deleted',
           recordIds: deletedRecordIds,
         })
-        for (const recordId of deletedRecordIds) {
-          eventBus.emit('multitable.record.deleted', withAutomationEventId({ sheetId, recordId, actorId }))
+        // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emits (same prebuilt objects); flag ON ⇒ SUPPRESSED.
+        for (const deletedLegacyPayload of deletedEventPayloads) {
+          emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', deletedLegacyPayload)
         }
       }
       return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'reset', revertedCount: updatedRows.length, deletedCount: deletedRecordIds.length, deletedRecordIds } })
@@ -14730,6 +14825,18 @@ export function univerMetaRouter(): Router {
       let resultRecordId = recordId ?? buildId('rec')
       let nextVersion = 1
 
+      // P1#2d REPLACE — build the form.submitted payload ONCE before the txn (stable `_eventId`) so the
+      // same-txn durable enqueue (flag ON, at the end of BOTH the EDIT and CREATE branches below) and the
+      // legacy post-commit emit (flag OFF) carry the same event identity. `recordId: resultRecordId` is the
+      // value the legacy literal read back post-commit as `record.id`: EDIT ⇒ the request's recordId; CREATE ⇒
+      // the pre-generated id the INSERT writes verbatim ($1) and RETURNING echoes unchanged.
+      const formSubmittedPayload = withAutomationEventId({
+        sheetId: view.sheetId,
+        recordId: resultRecordId,
+        actorId: getRequestActorId(req),
+        mode: recordId ? 'update' : 'create',
+      })
+
       await pool.transaction(async ({ query }) => {
         // W0-1 L4cov (close the form-submit create/edit PARTIAL gap — L4 map's univer-meta.ts:14585). The
         // canonical sheet fence stays UNCONDITIONAL (the pre-existing auto-number serialization lock — the
@@ -14849,6 +14956,11 @@ export function univerMetaRouter(): Router {
           }
           // W0-1 L6-a: seal the operation LAST for the EDIT branch (no-op when inert or a no-field-change edit).
           await sealOperation(query, op)
+          // P1#2d REPLACE: same-transaction durable enqueue on the EDIT branch's SUCCESS path (flag ON) —
+          // atomic with the UPDATE + revision + link replay (a version-conflict/lock/not-found throw above
+          // rolls the enqueue back with the txn). After the seal: the outbox row is not a record-history event,
+          // so it never enters the operation's event count. Flag OFF ⇒ no-op (legacy post-commit emit fires).
+          await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
           return
         }
 
@@ -14908,6 +15020,10 @@ export function univerMetaRouter(): Router {
         })
         // W0-1 L6-a: seal the operation LAST for the CREATE branch. No-op when inert.
         await sealOperation(query, op)
+        // P1#2d REPLACE: same-transaction durable enqueue on the CREATE branch's SUCCESS path (flag ON) —
+        // atomic with the INSERT + links + create revision. After the seal for the same reason as the EDIT
+        // branch (the outbox row is not a record-history event). Flag OFF ⇒ no-op.
+        await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
       })
 
       const recordRes = await pool.query(
@@ -15030,12 +15146,10 @@ export function univerMetaRouter(): Router {
       // unchanged.) Payload is sheetId/recordId only (matchesTrigger + handleEvent key off those, and
       // actions re-read the record) — no raw record.data egress. `mode` distinguishes a new submission
       // ('create') from a form-link edit ('update').
-      eventBus.emit('multitable.form.submitted', withAutomationEventId({
-        sheetId: view.sheetId,
-        recordId: record.id,
-        actorId: getRequestActorId(req),
-        mode: recordId ? 'update' : 'create',
-      }))
+      // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emit (the SAME prebuilt payload object — byte-identical
+      // fields; `recordId: resultRecordId` === the `record.id` the old literal read here, see the payload's
+      // construction above the txn); flag ON ⇒ SUPPRESSED (the same-txn enqueue is the delivery path).
+      emitRecordEventIfLegacy(eventBus, 'multitable.form.submitted', formSubmittedPayload)
 
       return res.json({
         ok: true,
@@ -17248,6 +17362,13 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      // W0-1 L4-cov follow-up: the PRIMARY fenced write (record-write-service txn entry) observed a
+      // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape the
+      // reset/revert/config-restore routes use, instead of falling through to a 500. (Derived-value
+      // materialization refusals never reach here — they are caught + skipped at their sites.)
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof ConflictError) {
         return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
       }

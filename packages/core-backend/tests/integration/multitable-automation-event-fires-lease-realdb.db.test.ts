@@ -59,7 +59,7 @@ describeDb('S6 event_fires lease claim/reclaim (real DB, isolated schema)', () =
 
   it('fresh claim leases the row (in_progress, fence 1); markDone fence-CAS → done, lease cleared', async () => {
     const c = await claimEventFiresLease(db, RULE, 'e1', 60_000)
-    expect(c).not.toBe('skip')
+    expect(typeof c).toBe('object')
     const r = await row('e1')
     expect(r).toMatchObject({ status: 'in_progress', fence: '1', attempts: 1 })
     expect(r.lease).not.toBeNull()
@@ -67,24 +67,24 @@ describeDb('S6 event_fires lease claim/reclaim (real DB, isolated schema)', () =
     expect(await row('e1')).toMatchObject({ status: 'done', lease: null })
   })
 
-  it('a DONE delivery is skipped on re-claim (at-most-once for a completed event)', async () => {
+  it("a DONE delivery re-claims as 'done' (at-most-once for a completed event — resolve-permitting skip)", async () => {
     const c = await claimEventFiresLease(db, RULE, 'e2', 60_000)
     await markEventFiresDone(db, RULE, 'e2', (c as { fence: string }).fence)
-    expect(await claimEventFiresLease(db, RULE, 'e2', 60_000)).toBe('skip')
+    expect(await claimEventFiresLease(db, RULE, 'e2', 60_000)).toBe('done')
   })
 
-  it('a LIVE (unexpired) lease is skipped — a second worker does NOT double-run', async () => {
+  it("a LIVE (unexpired) lease claims as 'busy' — a second worker neither double-runs NOR resolves done (the composed-timing hole: a silent skip here would let an early outbox redelivery mark the crashed holder's work done forever)", async () => {
     await claimEventFiresLease(db, RULE, 'e3', 60_000) // long lease, still live
-    expect(await claimEventFiresLease(db, RULE, 'e3', 60_000)).toBe('skip')
+    expect(await claimEventFiresLease(db, RULE, 'e3', 60_000)).toBe('busy')
   })
 
   it('WINDOW-2: a crash (claim but no markDone) leaves an EXPIRED lease the next claim RECLAIMS (redelivers)', async () => {
     const first = await claimEventFiresLease(db, RULE, 'e4', 1) // 1ms lease → expires immediately
-    expect(first).not.toBe('skip')
+    expect(typeof first).toBe('object')
     // "crash": executeRule never finished, markEventFiresDone never called → the row is in_progress + expired.
     await new Promise((r) => setTimeout(r, 20))
     const reclaim = await claimEventFiresLease(db, RULE, 'e4', 60_000)
-    expect(reclaim).not.toBe('skip') // the work is RECLAIMED, not dropped (legacy tombstone would have skipped)
+    expect(typeof reclaim).toBe('object') // the work is RECLAIMED, not dropped (legacy tombstone would have skipped)
     expect(Number((reclaim as { fence: string }).fence)).toBe(2) // fence bumped on reclaim
     expect(await row('e4')).toMatchObject({ status: 'in_progress', attempts: 2 })
   })
@@ -106,6 +106,6 @@ describeDb('S6 event_fires lease claim/reclaim (real DB, isolated schema)', () =
     // legacy path: bare INSERT (status defaults to done)
     await sql`INSERT INTO meta_automation_event_fires (rule_id, dedup_key) VALUES (${RULE}, 'e6')`.execute(db)
     expect(await row('e6')).toMatchObject({ status: 'done', fence: '0' })
-    expect(await claimEventFiresLease(db, RULE, 'e6', 60_000)).toBe('skip') // already delivered under the old path
+    expect(await claimEventFiresLease(db, RULE, 'e6', 60_000)).toBe('done') // already delivered under the old path
   })
 })

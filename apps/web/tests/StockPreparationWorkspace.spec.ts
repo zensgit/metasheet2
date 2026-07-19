@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h as vh, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import { readFileSync } from 'node:fs'
+import {
+  ATTENDANCE_FOCUS_ALLOWED_PATHS,
+  PLM_WORKBENCH_ALLOWED_PREFIXES,
+  buildRouteGuardContext,
+  buildRouteGuardInput,
+  resolveRouteGuardDecision,
+} from '../src/router/guardPolicy'
 import { join } from 'node:path'
 
 // Stock Preparation MVP (#3751 — docs/development/stock-preparation-mvp-design-20260707.md).
@@ -156,6 +163,286 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     const TYPES = readFileSync(join(__dirname, '../src/router/types.ts'), 'utf8')
     expect(TYPES).toContain("INTEGRATION_STOCK_PREPARATION: 'integration-stock-preparation'")
   })
+
+  // Round-12 terminal state (owner-prescribed): guard decision logic is a PURE, directly
+  // executable function (src/router/guardPolicy.ts) pinned by BEHAVIOR — permission ordering,
+  // focus semantics and redirect targets are exercised, not pattern-matched. main.ts keeps only a
+  // thin delegation, pinned structurally below (direct statements of the guard's try block).
+  describe('route guard policy (behavior)', () => {
+    const ctx = (over: Partial<import('../src/router/guardPolicy').RouteGuardPolicyContext> = {}) => ({
+      hasFeature: () => true,
+      hasPermission: () => true,
+      attendanceFocused: false,
+      plmWorkbenchFocused: false,
+      resolveHomePath: () => '/HOME',
+      ...over,
+    })
+    const decide = (path: string, meta: unknown, over: Parameters<typeof ctx>[0] = {}) =>
+      resolveRouteGuardDecision({ path, meta }, ctx(over))
+
+    it('permission denial redirects home and WINS over a focus-mode allowlist match (ordering)', () => {
+      expect(decide('/stock-prep', { permissions: ['integration:write'] }, { hasPermission: () => false, plmWorkbenchFocused: true }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      expect(decide('/stock-prep', { permissions: ['integration:write'] }, { plmWorkbenchFocused: true }))
+        .toEqual({ action: 'allow' })
+    })
+
+    it('plm-workbench focus: every allowlisted prefix (exact and subpath) is reachable — /stock-prep included', () => {
+      for (const prefix of PLM_WORKBENCH_ALLOWED_PREFIXES) {
+        expect(decide(prefix, {}, { plmWorkbenchFocused: true })).toEqual({ action: 'allow' })
+        expect(decide(`${prefix}/deep/link`, {}, { plmWorkbenchFocused: true })).toEqual({ action: 'allow' })
+      }
+    })
+
+    it('plm-workbench focus: anything else redirects to /plm (an empty/loose prefix would break this)', () => {
+      for (const path of ['/multitable', '/apps', '/stock-preparation', '/x', '']) {
+        expect(decide(path, {}, { plmWorkbenchFocused: true })).toEqual({ action: 'redirect', target: '/plm' })
+      }
+    })
+
+    it('attendance focus: exact paths only — subpaths redirect to /attendance', () => {
+      for (const path of ATTENDANCE_FOCUS_ALLOWED_PATHS) {
+        expect(decide(path, {}, { attendanceFocused: true })).toEqual({ action: 'allow' })
+      }
+      expect(decide('/attendance/sub', {}, { attendanceFocused: true })).toEqual({ action: 'redirect', target: '/attendance' })
+      expect(decide('/multitable', {}, { attendanceFocused: true })).toEqual({ action: 'redirect', target: '/attendance' })
+    })
+
+    it('required-feature gate redirects home before focus handling; unknown feature strings are ignored', () => {
+      expect(decide('/plm', { requiredFeature: 'plm' }, { hasFeature: () => false, plmWorkbenchFocused: true }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      expect(decide('/plm', { requiredFeature: 'nonsense' }, { hasFeature: () => false })).toEqual({ action: 'allow' })
+    })
+
+    it('the plm allowlist is exactly the five workbench prefixes — all non-empty absolute strings', () => {
+      expect([...PLM_WORKBENCH_ALLOWED_PREFIXES]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
+      expect(PLM_WORKBENCH_ALLOWED_PREFIXES.every((p) => typeof p === 'string' && p.startsWith('/') && p.length > 1)).toBe(true)
+    })
+
+    // Round-13: pairwise priority matrix — the declared ordering (feature → permission →
+    // attendance → plm) is pinned as behavior, not prose. Swapping any two stages breaks a case.
+    it('priority matrix: every earlier stage wins over every later stage', () => {
+      // feature deny + plm focus (path not plm-allowed): feature wins → /HOME (not /plm).
+      expect(decide('/x', { requiredFeature: 'plm' }, { hasFeature: () => false, plmWorkbenchFocused: true }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      // permission deny + attendance focus: permission wins → /HOME (not /attendance).
+      expect(decide('/x', { permissions: ['integration:write'] }, { hasPermission: () => false, attendanceFocused: true }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      // attendance AND plm both on, path allowed by neither: attendance wins → /attendance (not /plm).
+      expect(decide('/x', {}, { attendanceFocused: true, plmWorkbenchFocused: true }))
+        .toEqual({ action: 'redirect', target: '/attendance' })
+      // feature deny short-circuits: the permission probe must NOT be consulted (ordering contract).
+      let permissionProbed = false
+      expect(decide('/x', { requiredFeature: 'plm', permissions: ['integration:write'] }, {
+        hasFeature: () => false,
+        hasPermission: () => {
+          permissionProbed = true
+          return true
+        },
+      })).toEqual({ action: 'redirect', target: '/HOME' })
+      expect(permissionProbed, 'feature denial must short-circuit before the permission probe').toBe(false)
+    })
+
+    // Round-13: the runtime adapter is executable and fake-injectable — its wiring is behavior.
+    it('buildRouteGuardContext delegates hasPermission to auth.hasPermission and keeps the typeof tolerance', () => {
+      const seen: string[] = []
+      const deps = {
+        auth: { hasPermission: (p: string) => { seen.push(p); return p === 'integration:write' } },
+        flags: {
+          hasFeature: () => true,
+          isAttendanceFocused: () => false,
+          isPlmWorkbenchFocused: () => true,
+          resolveHomePath: () => '/HOME',
+        },
+      }
+      const built = buildRouteGuardContext(deps)
+      expect(built.hasPermission('integration:write')).toBe(true)
+      expect(built.hasPermission('other:perm')).toBe(false)
+      expect(seen).toEqual(['integration:write', 'other:perm'])
+      expect(built.plmWorkbenchFocused).toBe(true)
+      // typeof tolerance: absent / non-function isPlmWorkbenchFocused folds to false.
+      expect(buildRouteGuardContext({ ...deps, flags: { ...deps.flags, isPlmWorkbenchFocused: undefined } }).plmWorkbenchFocused).toBe(false)
+      expect(buildRouteGuardContext({ ...deps, flags: { ...deps.flags, isPlmWorkbenchFocused: 42 } }).plmWorkbenchFocused).toBe(false)
+      // end-to-end: adapter-built context + real policy = real deny behavior.
+      const denyDeps = { ...deps, auth: { hasPermission: () => false } }
+      expect(resolveRouteGuardDecision({ path: '/stock-prep', meta: { permissions: ['integration:write'] } }, buildRouteGuardContext(denyDeps)))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+    })
+
+    // Round-14: the INPUT adapter is behavior-pinned too — meta must pass through IDENTICALLY
+    // (an inline meta: {} bypassed every route's requiredFeature/permissions, M20).
+    it('buildRouteGuardInput passes meta through identically and folds path to a string', () => {
+      const meta = { permissions: ['integration:write'], requiredFeature: 'plm' }
+      const input = buildRouteGuardInput({ path: '/stock-prep', meta })
+      expect(input.meta).toBe(meta)
+      expect(input.path).toBe('/stock-prep')
+      expect(buildRouteGuardInput({ path: undefined, meta }).path).toBe('')
+      expect(buildRouteGuardInput({ path: 123 as unknown as string, meta }).path).toBe('123')
+      // end-to-end: real route meta flows through input adapter + ctx adapter into the policy.
+      const deps = {
+        auth: { hasPermission: () => false },
+        flags: {
+          hasFeature: () => true,
+          isAttendanceFocused: () => false,
+          isPlmWorkbenchFocused: () => false,
+          resolveHomePath: () => '/HOME',
+        },
+      }
+      expect(resolveRouteGuardDecision(buildRouteGuardInput({ path: '/stock-prep', meta }), buildRouteGuardContext(deps)))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+    })
+
+    // Round-14: adapter fields item-by-item (M21 proved hasFeature was unpinned; attendanceFocused
+    // and resolveHomePath get the same treatment).
+    it('buildRouteGuardContext delegates hasFeature / attendanceFocused / resolveHomePath faithfully', () => {
+      const featureSeen: string[] = []
+      const deps = {
+        auth: { hasPermission: () => true },
+        flags: {
+          hasFeature: (f: string) => { featureSeen.push(f); return f === 'plm' },
+          isAttendanceFocused: () => true,
+          isPlmWorkbenchFocused: () => false,
+          resolveHomePath: () => '/HOME-LAZY',
+        },
+      }
+      const built = buildRouteGuardContext(deps)
+      expect(built.hasFeature('plm' as never)).toBe(true)
+      expect(built.hasFeature('workflow' as never)).toBe(false)
+      expect(featureSeen).toEqual(['plm', 'workflow'])
+      expect(built.attendanceFocused).toBe(true)
+      expect(built.resolveHomePath()).toBe('/HOME-LAZY')
+      // adapter+policy feature-deny discriminating leg: a real feature denial through the ADAPTER
+      // must redirect home (an adapter hasFeature: () => true erases this).
+      const denyFeature = { ...deps, flags: { ...deps.flags, hasFeature: () => false, isAttendanceFocused: () => false } }
+      expect(resolveRouteGuardDecision({ path: '/plm', meta: { requiredFeature: 'plm' } }, buildRouteGuardContext(denyFeature)))
+        .toEqual({ action: 'redirect', target: '/HOME-LAZY' })
+    })
+  })
+
+  // Thin delegation pin: main.ts must DELEGATE to the policy as DIRECT statements of the guard's
+  // try block — `const decision = resolveRouteGuardDecision(...)` followed by the redirect
+  // if-statement whose branch is exactly `return next(decision.target)`. Decision logic must not be
+  // re-inlined (negative token pins). Dead-branch wrapping breaks the direct-statement requirement.
+  it('main.ts delegates guard decisions to guardPolicy (direct statements; no inlined decision logic)', async () => {
+    const ts = (await import('typescript')).default
+    type TsNode = import('typescript').Node
+    const MAIN = readFileSync(join(__dirname, '../src/main.ts'), 'utf8')
+    expect(MAIN).not.toContain('allowedPrefixes')
+    expect(MAIN).not.toContain('isRoutePermitted(')
+    expect(MAIN).not.toContain('hasPermission:')
+    expect(MAIN).toContain("import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from './router/guardPolicy'")
+
+    const source = ts.createSourceFile('main.ts', MAIN, ts.ScriptTarget.ES2022, true)
+    let guardBody: import('typescript').Block | null = null
+    const findGuard = (node: TsNode): void => {
+      if (
+        guardBody === null &&
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'beforeEach' &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === 'router' &&
+        node.arguments.length >= 1 &&
+        ts.isArrowFunction(node.arguments[0]) &&
+        ts.isBlock((node.arguments[0] as import('typescript').ArrowFunction).body)
+      ) {
+        guardBody = (node.arguments[0] as import('typescript').ArrowFunction).body as import('typescript').Block
+        return
+      }
+      ts.forEachChild(node, findGuard)
+    }
+    findGuard(source)
+    expect(guardBody, 'router.beforeEach(arrow with block body) must exist').not.toBeNull()
+
+    // The try statement is a DIRECT statement of the guard body; the delegation pair must be DIRECT
+    // statements of its try block.
+    const tryStmt = guardBody!.statements.find((st) => ts.isTryStatement(st)) as
+      | import('typescript').TryStatement
+      | undefined
+    expect(tryStmt, 'the guard must contain its try/catch as a direct statement').toBeTruthy()
+    const stmts = tryStmt!.tryBlock.statements
+
+    const declIdx = stmts.findIndex(
+      (st) =>
+        ts.isVariableStatement(st) &&
+        st.declarationList.declarations.some(
+          (d) =>
+            ts.isIdentifier(d.name) &&
+            d.name.text === 'decision' &&
+            !!d.initializer &&
+            ts.isCallExpression(d.initializer) &&
+            ts.isIdentifier(d.initializer.expression) &&
+            d.initializer.expression.text === 'resolveRouteGuardDecision' &&
+            // Round-13/14: BOTH arguments must be executable adapter calls — inline objects (where
+            // hasPermission: () => true or meta: {} could hide) are not accepted shapes.
+            d.initializer.arguments.length === 2 &&
+            ts.isCallExpression(d.initializer.arguments[0]) &&
+            ts.isIdentifier((d.initializer.arguments[0] as import('typescript').CallExpression).expression) &&
+            ((d.initializer.arguments[0] as import('typescript').CallExpression).expression as import('typescript').Identifier).text === 'buildRouteGuardInput' &&
+            // Round-15 (M22): the input adapter must receive EXACTLY the identifier `to` — a
+            // synthesized object ({ path: to.path, meta: {} }) is not an accepted argument.
+            (d.initializer.arguments[0] as import('typescript').CallExpression).arguments.length === 1 &&
+            ts.isIdentifier((d.initializer.arguments[0] as import('typescript').CallExpression).arguments[0]) &&
+            ((d.initializer.arguments[0] as import('typescript').CallExpression).arguments[0] as import('typescript').Identifier).text === 'to' &&
+            ts.isCallExpression(d.initializer.arguments[1]) &&
+            ts.isIdentifier((d.initializer.arguments[1] as import('typescript').CallExpression).expression) &&
+            ((d.initializer.arguments[1] as import('typescript').CallExpression).expression as import('typescript').Identifier).text === 'buildRouteGuardContext' &&
+            // Round-15 (M23): the ctx adapter must receive EXACTLY { auth, flags } — two shorthand
+            // properties, no spread, no extras, no substitute expressions (where an overriding
+            // flags object with hasFeature: () => true could hide).
+            (() => {
+              const ctxArgs = (d.initializer!.arguments[1] as import('typescript').CallExpression).arguments
+              if (ctxArgs.length !== 1 || !ts.isObjectLiteralExpression(ctxArgs[0])) return false
+              const props = (ctxArgs[0] as import('typescript').ObjectLiteralExpression).properties
+              return (
+                props.length === 2 &&
+                props.every((pr) => ts.isShorthandPropertyAssignment(pr)) &&
+                (props[0] as import('typescript').ShorthandPropertyAssignment).name.text === 'auth' &&
+                (props[1] as import('typescript').ShorthandPropertyAssignment).name.text === 'flags'
+              )
+            })(),
+        ),
+    )
+    expect(declIdx, 'const decision = resolveRouteGuardDecision(...) must be a DIRECT try-block statement').toBeGreaterThan(-1)
+
+    const redirectIdx = stmts.findIndex((st) => {
+      if (!ts.isIfStatement(st)) return false
+      // Round-13: the CONDITION must be exactly decision.action === 'redirect' — if (false) around
+      // the same branch body previously passed.
+      const cond = st.expression
+      const condOk =
+        ts.isBinaryExpression(cond) &&
+        cond.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+        ts.isPropertyAccessExpression(cond.left) &&
+        cond.left.name.text === 'action' &&
+        ts.isIdentifier(cond.left.expression) &&
+        cond.left.expression.text === 'decision' &&
+        ts.isStringLiteral(cond.right) &&
+        cond.right.text === 'redirect'
+      if (!condOk) return false
+      const thenSt = st.thenStatement
+      const single = ts.isBlock(thenSt)
+        ? thenSt.statements.length === 1
+          ? thenSt.statements[0]
+          : null
+        : thenSt
+      return (
+        !!single &&
+        ts.isReturnStatement(single) &&
+        !!single.expression &&
+        ts.isCallExpression(single.expression) &&
+        ts.isIdentifier(single.expression.expression) &&
+        single.expression.expression.text === 'next' &&
+        single.expression.arguments.length === 1 &&
+        ts.isPropertyAccessExpression(single.expression.arguments[0]) &&
+        single.expression.arguments[0].name.text === 'target' &&
+        ts.isIdentifier(single.expression.arguments[0].expression) &&
+        single.expression.arguments[0].expression.text === 'decision'
+      )
+    })
+    expect(redirectIdx, 'if (…) { return next(decision.target) } must be a DIRECT try-block statement').toBeGreaterThan(declIdx)
+  })
+
 })
 
 describe('StockPreparationWorkspace shell', () => {

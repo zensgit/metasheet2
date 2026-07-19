@@ -33,7 +33,7 @@ import { assertInTransaction, type TransactionalQueryable } from './pg-transacti
 export type { TransactionalQueryable } from './pg-transaction-guard'
 
 export interface OutboxEventInput {
-  /** Manifest event family, e.g. 'approval.approved' | 'multitable.record.created' | 'form.submitted'. */
+  /** Manifest event family, e.g. 'approval.approved' | 'multitable.record.created' | 'multitable.form.submitted'. */
   eventType: string
   /** Stable original-event identity (#4203): forwarded downstream as the per-rule dedup key. Non-blank ASCII. */
   eventId: string

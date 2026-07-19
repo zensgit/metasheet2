@@ -10,6 +10,9 @@
 //   - PROJECT-SCOPE SPLIT: findObjectSheet uses the STAGING targetProjectId (business project => null),
 //     so using the business project as the locator finds nothing (kills a revert of the split);
 //   - COMPLETENESS: a batch with a row but zero lines OR a missing run row => incomplete:true;
+//   - H-1 GATE (#4452 P4 round-1): diff + diff/rows refuse an incomplete CURRENT or BASE (explicit
+//     AND auto-picked — no silent skip to an older complete batch) with 409
+//     SNAPSHOT_DIFF_BATCH_INCOMPLETE and closed values-free details { target, reason };
 //   - admin-denied => 403 before any read (fail closed);
 //   - READONLY: createRecord/patchRecord/deleteRecord are NEVER called;
 //   - values-free: a planted drawing number / quantity / exception message never reaches a summary.
@@ -383,6 +386,12 @@ async function main() {
         { snapshotLineId: 'l1', snapshotBatchId: 'b1', childDrawingNo: 'A', childVersion: 'V1', pathKey: '/root/A', designQty: 1 },
         { snapshotLineId: 'l3', snapshotBatchId: 'b3', childDrawingNo: 'A', childVersion: 'V3', pathKey: '/root/A', designQty: 1 },
       ],
+      // H-1: run rows so b1/b3 (the gated current/base pair) are COMPLETE — this test locks the base-
+      // override validation codes, not the completeness gate (which has its own tests below).
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'r1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'r3', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
     }
     // Explicit base b1 (predecessor auto-pick would choose b2): version change A V1 -> V3 counts.
     const result = await getSnapshotDiff({
@@ -465,6 +474,11 @@ async function main() {
         { snapshotLineId: 'c2', snapshotBatchId: 'd2', childDrawingNo: 'B', childVersion: 'V2', pathKey: '/root/B', designQty: 1 },
         { snapshotLineId: 'c3', snapshotBatchId: 'd2', childDrawingNo: 'C', childVersion: 'V1', pathKey: '/root/C', designQty: 1 },
       ],
+      // H-1: run rows so both sides of the browsed pair are complete (the gate has its own tests).
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'r1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'r2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
     }
     const DIFF_ROW_KEY_SET = new Set([
       'diffId', 'diffType', 'reviewStatus', 'changeTypes', 'reason', 'rowCount',
@@ -540,6 +554,10 @@ async function main() {
         { snapshotBatchId: 'big1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, syncRunId: 'r1' },
       ],
       [SHEET_IDS[LINE_OBJECT_ID]]: manyLines,
+      // H-1: big1 must be COMPLETE so the read reaches the row-cap check (not the completeness 409).
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'r1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
     }
     let caught = null
     try {
@@ -555,6 +573,342 @@ async function main() {
     }
     assert.equal(caught && caught.status, 422)
     assert.equal(caught && caught.code, 'SNAPSHOT_READS_ROWS_TOO_LARGE')
+  })
+
+  // ---- H-1 (#4452 P4 round-1): SERVER-SIDE diff completeness gate ----
+  // The FE only DISABLES the diff entry for an incomplete batch; deep links / list-vs-diff races reach
+  // the endpoints directly. Any incomplete side => 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE, values-free.
+  const expectIncomplete409 = async (fn, args) => {
+    let caught = null
+    try {
+      await fn({
+        provisioning: makeProvisioning(),
+        targetProjectId: STAGING_PROJECT,
+        permission: 'admin',
+        ...args,
+      })
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught, 'an incomplete side must not be answered')
+    assert.ok(caught instanceof StockPreparationTargetProvisioningError)
+    assert.equal(caught.status, 409)
+    assert.equal(caught.code, 'SNAPSHOT_DIFF_BATCH_INCOMPLETE')
+    return caught
+  }
+
+  // a1 COMPLETE (v1) < a2 INCOMPLETE (v2, zero lines, run row present) < a3 COMPLETE (v3): the
+  // auto-pick for a3 is a2 (highest version strictly below 3) — the incomplete one.
+  const h1AutoBaseFixture = () => ({
+    [SHEET_IDS[BATCH_OBJECT_ID]]: [
+      { snapshotBatchId: 'a1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'superseded', syncRunId: 'ar1', createdAt: 'x' },
+      { snapshotBatchId: 'a2', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'ar2' },
+      { snapshotBatchId: 'a3', projectId: BUSINESS_PROJECT, snapshotVersion: 3, snapshotStatus: 'active', syncRunId: 'ar3', createdAt: 'x' },
+    ],
+    [SHEET_IDS[LINE_OBJECT_ID]]: [
+      { snapshotLineId: 'al1', snapshotBatchId: 'a1', childDrawingNo: 'A', childVersion: 'V1', pathKey: '/root/A', designQty: 1 },
+      // a2: NO lines — the 0-line orphan sitting between two complete batches.
+      { snapshotLineId: 'al3', snapshotBatchId: 'a3', childDrawingNo: 'A', childVersion: 'V2', pathKey: '/root/A', designQty: 2 },
+    ],
+    [SHEET_IDS[RUN_OBJECT_ID]]: [
+      { runId: 'ar1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      { runId: 'ar2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      { runId: 'ar3', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+    ],
+  })
+
+  await run('H-1 gate: current batch with zero lines => 409 incomplete {target: current}', async () => {
+    // Run row PRESENT + zero lines: isolates the lineCount signal of the shared predicate.
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'g1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'gr1', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [{ runId: 'gr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' }],
+    }
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: 'g1',
+    })
+    assert.deepEqual(caught.details, { target: 'current', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: current with lines but missing run row => 409 incomplete {target: current}', async () => {
+    // fullFixture b4: 1 line, no run4 row. Its auto-pick b3 is ALSO incomplete — the CURRENT side is
+    // checked first, so target must say 'current'.
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(fullFixture()),
+      snapshotBatchId: 'b4',
+    })
+    assert.deepEqual(caught.details, { target: 'current', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: explicit base incomplete (0-line orphan) => 409 incomplete {target: base}', async () => {
+    // The 0-line orphan as an EXPLICIT base is exactly the fabricated all-'added' diff H-1 closes.
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'e1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'er1' },
+        { snapshotBatchId: 'e2', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'active', syncRunId: 'er2', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        // e1 has NO lines (orphan); e2 is complete.
+        { snapshotLineId: 'el2', snapshotBatchId: 'e2', childDrawingNo: 'A', childVersion: 'V1', pathKey: '/root/A', designQty: 1 },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'er1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'er2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
+    }
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: 'e2',
+      baseSnapshotBatchId: 'e1',
+    })
+    assert.deepEqual(caught.details, { target: 'base', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: AUTO-picked predecessor incomplete => 409 {target: base}, never a silent skip', async () => {
+    // a1 (older) is COMPLETE: a silent-skip implementation would answer with base a1 and silently
+    // change the diff result. The lock chose loud-409 — the incomplete auto-picked a2 must surface.
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(h1AutoBaseFixture()),
+      snapshotBatchId: 'a3',
+    })
+    assert.deepEqual(caught.details, { target: 'base', reason: 'incomplete' })
+  })
+
+  await run('H-1 gate: both sides complete => diff and diff/rows answer exactly as before (regression)', async () => {
+    const diffResult = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(fullFixture()),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'b2',
+      permission: 'admin',
+    })
+    assert.equal(diffResult.baseSnapshotBatchId, 'b1')
+    assert.deepEqual(diffResult.changeCounts, {
+      added: 1,
+      removed: 1,
+      quantityChanged: 1,
+      unitChanged: 0,
+      versionChanged: 0,
+      pathChanged: 0,
+      missingChildBom: 0,
+      fingerprintChanged: 0,
+    })
+    assert.equal(diffResult.blockingExceptionCount, 2)
+    const rowsResult = await listSnapshotDiffRows({
+      recordsApi: makeRecordsApi(fullFixture()),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'b2',
+      permission: 'admin',
+    })
+    assert.equal(rowsResult.baseSnapshotBatchId, 'b1')
+    assert.ok(rowsResult.rowCount >= 3, 'changed + removed + added rows still surface under the gate')
+  })
+
+  await run('H-1 gate: diff/rows is gated identically (incomplete current AND incomplete auto base)', async () => {
+    const caughtCurrent = await expectIncomplete409(listSnapshotDiffRows, {
+      recordsApi: makeRecordsApi(fullFixture()),
+      snapshotBatchId: 'b4',
+    })
+    assert.deepEqual(caughtCurrent.details, { target: 'current', reason: 'incomplete' })
+    const caughtBase = await expectIncomplete409(listSnapshotDiffRows, {
+      recordsApi: makeRecordsApi(h1AutoBaseFixture()),
+      snapshotBatchId: 'a3',
+    })
+    assert.deepEqual(caughtBase.details, { target: 'base', reason: 'incomplete' })
+  })
+
+  await run('H-1 round-2: GHOST current (no batch row) with orphan LINE rows => 409, never a fabricated all-added diff; empty ghost keeps the #4002 graceful shape', async () => {
+    // Orphan line rows under an id that has NO batch row: the row-conditioned gate cannot fire, so a
+    // dedicated ghost-with-lines gate must. A genuinely empty ghost id (second call) still answers
+    // the locked graceful shape.
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'gl1', snapshotBatchId: 'ghost_with_lines', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caught = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(rows),
+        snapshotBatchId: 'ghost_with_lines',
+      })
+      assert.deepEqual(caught.details, { target: 'current', reason: 'incomplete' })
+    }
+    const emptyGhost = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(rows),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'ghost_truly_empty',
+      permission: 'admin',
+    })
+    assert.equal(emptyGhost.baseSnapshotBatchId, null)
+  })
+
+  await run('R3: duplicate batch identity (same snapshotBatchId, different projects) => 409 ambiguous on BOTH endpoints, never an arbitrary twin', async () => {
+    // Two batch rows share one snapshotBatchId (substrate has no unique index; concurrent writers can
+    // produce this — P4 lock §0.3). Both twins are individually COMPLETE so the completeness gate
+    // alone would pass; the exactly-one identity check must refuse instead of answering from rows[0].
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'dup1', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'dr1', createdAt: 'x' },
+        { snapshotBatchId: 'dup1', projectId: 'proj_other', snapshotVersion: 5, snapshotStatus: 'draft', syncRunId: 'dr2', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'dl1', snapshotBatchId: 'dup1', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'dr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'dr2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caught = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(rows),
+        snapshotBatchId: 'dup1',
+      })
+      assert.deepEqual(caught.details, { target: 'current', reason: 'ambiguous' })
+    }
+  })
+
+  await run('R3: duplicate BASE identity and duplicate RUN identity => 409 ambiguous {target: base/current}', async () => {
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'cur1', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'cr1', createdAt: 'x' },
+        { snapshotBatchId: 'baseX', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br1', createdAt: 'x' },
+        { snapshotBatchId: 'baseX', projectId: 'proj_other', snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br2', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'cl1', snapshotBatchId: 'cur1', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+        { snapshotLineId: 'bl1', snapshotBatchId: 'baseX', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'cr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'br1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'br2', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+      ],
+    }
+    // Explicit-base path: base identity is duplicated -> ambiguous {target: 'base'}.
+    const caughtBase = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: 'cur1',
+      baseSnapshotBatchId: 'baseX',
+    })
+    assert.deepEqual(caughtBase.details, { target: 'base', reason: 'ambiguous' })
+
+    // Round-4: REVERSED twin order must yield the SAME verdict — before the fix the outcome depended
+    // on database return order ([other-project twin first] surfaced BASE_PROJECT_MISMATCH instead).
+    const reversedRows = {
+      ...rows,
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        rows[SHEET_IDS[BATCH_OBJECT_ID]][0],
+        { snapshotBatchId: 'baseX', projectId: 'proj_other', snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br2', createdAt: 'x' },
+        { snapshotBatchId: 'baseX', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'br1', createdAt: 'x' },
+      ],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caughtReversed = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(reversedRows),
+        snapshotBatchId: 'cur1',
+        baseSnapshotBatchId: 'baseX',
+      })
+      assert.deepEqual(caughtReversed.details, { target: 'base', reason: 'ambiguous' })
+    }
+
+    // Duplicate RUN identity for the current batch -> ambiguous {target: 'current'} (both endpoints).
+    const runDupRows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'cur2', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'rr1', createdAt: 'x' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'rl1', snapshotBatchId: 'cur2', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+      ],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [
+        { runId: 'rr1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        { runId: 'rr1', runType: 'plm_sync', status: 'failed', startedAt: 'y' },
+      ],
+    }
+    for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+      const caught = await expectIncomplete409(fn, {
+        recordsApi: makeRecordsApi(runDupRows),
+        snapshotBatchId: 'cur2',
+      })
+      assert.deepEqual(caught.details, { target: 'current', reason: 'ambiguous' })
+    }
+  })
+
+  await run('R5: AUTO base tie — two distinct predecessors at the same highest version => 409 ambiguous on BOTH endpoints, forward AND reversed order', async () => {
+    // Two COMPLETE predecessor batches share the highest prior version (substrate has no logical
+    // unique index; concurrent writers can produce this). The auto-pick previously depended on
+    // database return order ({"ab":"base_a","ba":"base_b"} at the pre-fix head).
+    const makeRows = (reversed) => {
+      const preds = [
+        { snapshotBatchId: 'base_a', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'ta1', createdAt: 'x' },
+        { snapshotBatchId: 'base_b', projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: 'tb1', createdAt: 'x' },
+      ]
+      return {
+        [SHEET_IDS[BATCH_OBJECT_ID]]: [
+          { snapshotBatchId: 'tie_cur', projectId: BUSINESS_PROJECT, snapshotVersion: 2, snapshotStatus: 'draft', syncRunId: 'tc1', createdAt: 'x' },
+          ...(reversed ? [...preds].reverse() : preds),
+        ],
+        [SHEET_IDS[LINE_OBJECT_ID]]: [
+          { snapshotLineId: 'tc_l1', snapshotBatchId: 'tie_cur', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+          { snapshotLineId: 'ta_l1', snapshotBatchId: 'base_a', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+          { snapshotLineId: 'tb_l1', snapshotBatchId: 'base_b', projectId: BUSINESS_PROJECT, pathKey: '/root/a', childDrawingNo: 'D-1', designQty: 1, lineStatus: 'active' },
+        ],
+        [SHEET_IDS[RUN_OBJECT_ID]]: [
+          { runId: 'tc1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+          { runId: 'ta1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+          { runId: 'tb1', runType: 'plm_sync', status: 'succeeded', startedAt: 'x' },
+        ],
+      }
+    }
+    for (const reversed of [false, true]) {
+      for (const fn of [getSnapshotDiff, listSnapshotDiffRows]) {
+        const caught = await expectIncomplete409(fn, {
+          recordsApi: makeRecordsApi(makeRows(reversed)),
+          snapshotBatchId: 'tie_cur',
+        })
+        assert.deepEqual(caught.details, { target: 'base', reason: 'ambiguous' })
+      }
+    }
+    // Positive control: an EXPLICIT base pick between the twins remains allowed (caller named one).
+    const explicit = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(makeRows(false)),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'tie_cur',
+      baseSnapshotBatchId: 'base_a',
+      permission: 'admin',
+    })
+    assert.equal(explicit.baseSnapshotBatchId, 'base_a')
+  })
+
+  await run('H-1 gate: 409 error is values-free — details carry ONLY {target, reason}, no ids or counts', async () => {
+    // Plant the secret into the HANDLES the gate touches (batch id / run id): none of them may appear
+    // anywhere in the thrown 409 (closed details shape + fixed values-free message).
+    const batchId = `batch_${SECRET}`
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: batchId, projectId: BUSINESS_PROJECT, snapshotVersion: 1, snapshotStatus: 'draft', syncRunId: `run_${SECRET}` },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [],
+      [SHEET_IDS[RUN_OBJECT_ID]]: [],
+    }
+    const caught = await expectIncomplete409(getSnapshotDiff, {
+      recordsApi: makeRecordsApi(rows),
+      snapshotBatchId: batchId,
+    })
+    assert.deepEqual(Object.keys(caught.details).sort(), ['reason', 'target'])
+    assert.equal(caught.details.target, 'current')
+    assert.equal(caught.details.reason, 'incomplete')
+    const serialized = JSON.stringify({ message: caught.message, details: caught.details })
+    assert.equal(serialized.includes(SECRET), false, 'no handle/value leaks through the 409')
+    assert.equal(/\d/.test(JSON.stringify(caught.details)), false, 'no counts leak into the details')
   })
 
   console.log(`\nstock-preparation-snapshot-reads.test.cjs: ${passed} passed, ${failed} failed`)

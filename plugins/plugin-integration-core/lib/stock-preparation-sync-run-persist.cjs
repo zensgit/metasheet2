@@ -50,6 +50,7 @@ const {
     LINE_FIELD_IDS,
     RUN_FIELD_IDS,
   },
+  parseStrictVersion,
 } = require('./stock-preparation-sync-run-plan.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const {
@@ -71,6 +72,15 @@ const LINE_KEY_FIELD = LINE_TEMPLATE.keyFields[0]
 const RUN_KEY_FIELD = RUN_TEMPLATE.keyFields[0]
 const READ_PAGE_LIMIT = 500
 const READ_MAX_PAGES = 50
+// H-3 (P4 lock round-1: prerequisite for the Option-A long transaction, and a replay-provability
+// precondition TODAY): a plan larger than the bounded replay read could be CREATED but never exactly
+// replayed — every retry would 409 PERSIST_EXISTING_BATCH_READ_UNPROVABLE forever. Reject loudly
+// before any provisioning / records access instead of persisting an unprovable batch.
+// The bound is READ_PAGE_LIMIT×READ_MAX_PAGES − 1, NOT the product itself: completeness is only
+// provable by a SHORT page, so 50 full 500-row pages (exactly 25,000 rows) fall out of the read loop
+// unprovable (adversarial round-2 finding — a 25,000-line batch persisted fine and then every replay
+// 409'd forever).
+const PERSIST_MAX_PLAN_LINES = READ_PAGE_LIMIT * READ_MAX_PAGES - 1
 
 // #4163 T1: the PROJECT table template — grounds the project-row upsert the SAME way BATCH/LINE/RUN are
 // grounded above (frozen template, never an invented field name).
@@ -221,6 +231,73 @@ function existingBatchIncomplete(target, reason) {
   )
 }
 
+// H-2 (P4 lock round-1: mandatory-first hardening). reason ∈ {stale_pointer, pointer_unresolvable}.
+function projectPointerStale(reason) {
+  throw new StockPreparationSyncRunPersistError(
+    409,
+    'PERSIST_PROJECT_POINTER_STALE',
+    'existing project live pointer does not cover this batch',
+    { target: 'project', reason },
+  )
+}
+
+// H-2 precondition (rounds 2-4): the stale-pointer discriminator compares snapshotVersion, which is
+// caller-supplied and DEFAULTS to 1 — without enforcement, two default-version syncs make
+// CW4-existing invisible again. The CREATE path therefore enforces strictly-monotonic per-project
+// versions against the WHOLE batch history of the business project (not the pointer batch — orphan
+// complete batches are part of the history; and not gated on the project row existing — a first-sync
+// crash leaves history with no project row). Matches what the read side already assumes (predecessor
+// picking / latest-complete resolution order by version). reason ∈ {not_monotonic, history_unprovable}.
+function versionNotMonotonic(reason) {
+  throw new StockPreparationSyncRunPersistError(
+    422,
+    'PERSIST_VERSION_NOT_MONOTONIC',
+    'snapshot version must strictly increase per project',
+    { field: 'snapshotVersion', reason },
+  )
+}
+
+// Resolve the batch row named by the project live pointer (same business project; limit 2). Returns
+// its numeric snapshotVersion, or null when the pointer/batch/version cannot be resolved.
+async function resolvePointerBatchVersion({ batchScoped, plan, pointerRunId }) {
+  const pointerBatches = await batchScoped.queryRecords({
+    filters: { projectId: optionalString(plan.snapshotBatch.projectId), syncRunId: pointerRunId },
+    limit: 2,
+    offset: 0,
+  })
+  if (!Array.isArray(pointerBatches)) {
+    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+  }
+  if (pointerBatches.length !== 1) return null
+  return parseStrictVersion(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
+}
+
+// Round-5: parseStrictVersion is SHARED from sync-run-plan.cjs — plan (preview) and persist
+// (commit + history scan) reject identically; see that module for the canonical-decimal contract.
+
+// Round-3: bounded, numeric MAX-version scan over ALL batch rows of a business project (orphan
+// complete batches included — the pointer alone is not the history). Returns the maximum numeric
+// snapshotVersion (0 when the project has no batch rows), or null when the history is unprovable
+// (page bound exceeded, malformed page, or any row with a non-numeric version) — callers fail closed.
+async function readProjectMaxBatchVersion(batchScoped, projectId) {
+  let maxVersion = 0
+  for (let page = 0; page < READ_MAX_PAGES; page += 1) {
+    const pageRows = await batchScoped.queryRecords({
+      filters: { projectId },
+      limit: READ_PAGE_LIMIT,
+      offset: page * READ_PAGE_LIMIT,
+    })
+    if (!Array.isArray(pageRows) || pageRows.length > READ_PAGE_LIMIT) return null
+    for (const row of pageRows) {
+      const version = parseStrictVersion(row && row.data && row.data.snapshotVersion)
+      if (version === null) return null
+      if (version > maxVersion) maxVersion = version
+    }
+    if (pageRows.length < READ_PAGE_LIMIT) return maxVersion
+  }
+  return null
+}
+
 function assertPlanIdentityKeys(plan, snapshotLines) {
   if (!optionalString(plan && plan.snapshotBatch && plan.snapshotBatch[BATCH_KEY_FIELD])) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshot batch key is required', { field: BATCH_KEY_FIELD })
@@ -295,6 +372,7 @@ async function assertExactReplay({
   snapshotLines,
   lineScoped,
   runScoped,
+  batchScoped,
   projectRows,
 }) {
   if (!projectionsEqual(BATCH_TEMPLATE, plan.snapshotBatch, existingBatch)) {
@@ -330,6 +408,29 @@ async function assertExactReplay({
   }
 
   if (projectRows.length === 0) existingBatchIncomplete('project', 'missing')
+
+  // H-2 (P4 lock round-1: mandatory-first): project-row EXISTENCE is not enough. A crash between the
+  // run create and the project upsert on a repeat sync (CW4-existing) used to replay as a silent 200
+  // with the live pointer still on an OLDER run — the only crash window with no observable at all.
+  // Discriminator (run rows carry no timestamps by design): batch rows carry `syncRunId`, so resolve
+  // the batch the pointer's run belongs to (same business project) and compare `snapshotVersion`:
+  //   pointer at this run                    -> covered, 200 path continues;
+  //   pointer batch at a HIGHER/EQUAL version -> a later sync legitimately advanced the pointer, 200;
+  //   pointer batch at a LOWER version        -> stale pointer (CW4-existing), 409;
+  //   pointer/pointer-batch not resolvable    -> not provable either way, fail closed 409.
+  const pointerRunId = optionalString(projectRows[0] && projectRows[0].data && projectRows[0].data.lastSyncRunId)
+  const currentRunId = optionalString(plan.syncRun[RUN_KEY_FIELD])
+  if (pointerRunId !== currentRunId) {
+    if (!pointerRunId) projectPointerStale('pointer_unresolvable')
+    const pointerVersion = await resolvePointerBatchVersion({ batchScoped, plan, pointerRunId })
+    const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+    if (pointerVersion === null || currentVersion === null) projectPointerStale('pointer_unresolvable')
+    if (pointerVersion < currentVersion) projectPointerStale('stale_pointer')
+    // EQUAL version on a DIFFERENT run cannot prove the pointer advanced (adversarial round-2: with
+    // versions enforced monotonic at create, this state is only reachable on legacy/degenerate data)
+    // — fail closed rather than silently blessing it.
+    if (pointerVersion === currentVersion) projectPointerStale('pointer_unresolvable')
+  }
 }
 
 // #4163 T1 — upsert the PROJECT row: query by the key field first (never trust "it must be new"), then
@@ -433,6 +534,18 @@ async function persistStockPreparationSyncRun(input = {}) {
   const snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
   assertPlanIdentityKeys(plan, snapshotLines)
 
+  // H-3: explicit plan-size bound — fail before ANY provisioning / records access. See
+  // PERSIST_MAX_PLAN_LINES above; counts are values-free by doctrine, the details carry only the
+  // design-constant bound and the field name, never row content.
+  if (snapshotLines.length > PERSIST_MAX_PLAN_LINES) {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_PLAN_TOO_LARGE',
+      'planned snapshot line count exceeds the provable persist bound',
+      { field: 'snapshotLines', maxLines: PERSIST_MAX_PLAN_LINES },
+    )
+  }
+
   // The MVP tables are provisioned under an INTERNAL STAGING project (readiness/ensure route
   // resolveIntegrationStagingProjectId -> `<tenant>:integration-core`), NOT the business projectId. So
   // sheet resolution MUST use the caller-derived targetProjectId (staging); the plan rows keep the
@@ -475,6 +588,7 @@ async function persistStockPreparationSyncRun(input = {}) {
       snapshotLines,
       lineScoped: lineTarget.scoped,
       runScoped: runTarget.scoped,
+      batchScoped: batchTarget.scoped,
       projectRows,
     })
     const created = { batch: 0, lines: 0, run: 0 }
@@ -485,6 +599,21 @@ async function persistStockPreparationSyncRun(input = {}) {
       project: { mode: 'skipped' },
       evidence: buildEvidence({ persisted: false, mode: 'skipped_existing', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: true, projectSync: null }),
     }
+  }
+
+  // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write, for EVERY new
+  // batch): the new snapshotVersion must be strictly above EVERY existing batch of the business
+  // project. The scan runs UNCONDITIONALLY — round-4: a FIRST-sync crash at the project create
+  // (CW4-first) leaves orphan batch history with NO project row, so gating the scan on the project
+  // row's existence let the next lower-version sync through. Empty history scans to max 0 (any
+  // positive version passes); unprovable history (page bound exceeded / non-strict version values)
+  // fails closed. This is what makes the replay-side stale/advanced inference sound.
+  {
+    const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+    if (currentVersion === null) versionNotMonotonic('history_unprovable')
+    const maxVersion = await readProjectMaxBatchVersion(batchTarget.scoped, optionalString(planInputs.projectId))
+    if (maxVersion === null) versionNotMonotonic('history_unprovable')
+    if (currentVersion <= maxVersion) versionNotMonotonic('not_monotonic')
   }
 
   // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
@@ -551,5 +680,6 @@ module.exports = {
     PROJECT_FIELD_IDS,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
+    PERSIST_MAX_PLAN_LINES,
   },
 }

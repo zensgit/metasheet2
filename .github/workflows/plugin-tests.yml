@@ -545,6 +545,7 @@ jobs:
             tests/integration/multitable-date-reminder-trigger.test.ts \
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \
+            tests/integration/multitable-webhook-durable-dedup.test.ts \
             tests/integration/multitable-ai-shortcut-run.test.ts \
             tests/integration/multitable-ai-bulk-preview.test.ts \
             tests/integration/multitable-ai-bulk-commit.test.ts \
@@ -573,6 +574,7 @@ jobs:
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
+            tests/integration/multitable-automation-durable-activation-realdb.test.ts \
             tests/integration/multitable-attachment-readgate.security.test.ts \
             tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts \
             tests/integration/multitable-automation-branch-local-wait.test.ts \
@@ -732,6 +734,14 @@ jobs:
             tests/integration/files-orphan-blob-retention.db.test.ts \
             tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts \
             tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts \
+            tests/integration/multitable-automation-approval-bridge-lease-migration.db.test.ts \
+            tests/integration/multitable-automation-approval-bridge-lease-realdb.test.ts \
+            tests/integration/multitable-automation-producer-emit-realdb.test.ts \
+            tests/integration/multitable-automation-producer-family2-realdb.test.ts \
+            tests/integration/multitable-durable-startup-failclosed.db.test.ts \
+            tests/integration/multitable-automation-producer-family5-realdb.test.ts \
+            tests/integration/multitable-automation-producer-family4-realdb.test.ts \
+            tests/integration/multitable-automation-producer-family1-realdb.test.ts \
             tests/integration/multitable-attachment-blob-purge.db.test.ts \
             tests/integration/multitable-attachment-root-escape.db.test.ts \
             tests/integration/stock-prep-audit-immutable-trigger.db.test.ts \

@@ -46,7 +46,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { EventBus } from '../../src/integration/events/event-bus'
 import { RecordService } from '../../src/multitable/record-service'
-import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { recalculateFormulaFieldsForActor, univerMetaRouter } from '../../src/routes/univer-meta'
 import { deriveCapabilities } from '../../src/multitable/sheet-capabilities'
 import { createRecord as pluginCreateRecord } from '../../src/multitable/records'
 import { backfillAutoNumberField } from '../../src/multitable/auto-number-service'
@@ -606,22 +606,271 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
     await setBlock(null)
   })
 
-  // ── §C — POST-COMMIT derived-value recompute — ANALYZED, DEFERRED (documented). ─────────────────────────
-  // The relation-aggregation materialization (univer-meta.ts recalculateFormulaFields @≈2973 /
-  // computeDependentLookupRollupRecords @≈3869) and the pure-formula path (formula-engine.ts
-  // recalculateRecordFromData) run POST-COMMIT on a fresh pool connection: record-write-service.ts Step 4/4c
-  // call them with `this.pool.query.bind(this.pool)` AFTER the fenced write txn (line ≈776) has committed. BUT
-  // every one of those writes is an in-place `UPDATE meta_records SET data = data || …` — they emit NO
-  // meta_record_revisions row and allocate NO `seq` (verified: `revision-exempt` in-code + no INSERT into
-  // meta_record_revisions / nextval / chain_seq in formula-engine.ts). So the specific trust hole this lane
-  // targets (non-causal `seq`) is NOT present. A fence here would be behavior-changing (extend the fence-hold
-  // window across heavy recompute; the cross-sheet fan-out touches RELATED sheets and would need multi-sheet
-  // fences; and coupling the user write's durability to recompute success — today a recompute failure is logged
-  // and tolerated). Correct call: DEFER. This placeholder is skipped, not silently absent.
-  test.skip('C [post-commit recompute] DEFERRED — no seq allocated post-commit (in-place data only); see lane report', () => {
-    // Intentionally skipped. The analysis + decision live in the PR body / lane report (§C). If a future slice
-    // moves the recompute into the fenced txn, replace this with a golden proving the recompute\'s seq is
-    // allocated under the fence (causal). Until then, fencing it would be a wrong fence, not a fix.
-    expect(true).toBe(true)
+  // ── §C — POST-COMMIT derived-value recompute JOINS THE FENCE (relation-aggregation). ────────────────────
+  // Replaces the former DEFERRED skip. The post-merge review of #4438 ruled the deferral inconsistent: the
+  // engine's v2 fenced txn had already closed the pure-formula path, leaving the two relation-agg sites
+  // (same-record materialization in recalculateFormulaFields; dependent-sheet fan-out in
+  // computeDependentLookupRollupRecords) as the ONLY derived writers that could land inside a recovery's
+  // applying window and clobber just-recovered data. Both now route through the shared seam
+  // (`src/multitable/derived-write-fence.ts`); these are the behavioral proofs. Refusal semantics: a durable
+  // block on the sheet being written ⇒ SKIP the materialization AND its echo/invalidation ids (DB unchanged
+  // ⇒ nothing to invalidate), never fail the already-committed primary write; other dependent sheets keep
+  // materializing. The PRIMARY fence refusal (the write txn entry itself) maps to 409 RECOVERY_IN_PROGRESS
+  // at POST /patch (C3).
+  // Honest residuals (named, still true — deliberately NOT covered by these goldens):
+  //  (a) reads-outside-txn: the aggregation is computed from reads taken BEFORE the fenced write txn; a
+  //      recovery that starts AND finishes inside that gap clears the block, so a stale pre-recovery-derived
+  //      value can still commit (same engine-v2 posture, documented at the seam).
+  //  (b) no post-recovery re-trigger: a refused materialization stays stale until the next source edit
+  //      (relation-agg is materialize-model, not computed-on-read); includes the cliff `#ERROR!` writes that
+  //      ride the same UPDATE.
+  //  (c) these writes remain revision-exempt / no-seq — the lane's non-causal-seq trust hole is still absent
+  //      here; the fence closes the recovered-data CLOBBER hazard, not a history hazard.
+  //  (d) each fence+UPDATE is its own single-sheet short txn, so there is no multi-sheet fence ordering
+  //      today; if fan-out batching is ever introduced, the ordering question reopens.
+  describe('§C — relation-agg materialization joins the fence (shared derived-write seam)', () => {
+    const C_SRC = `sheet_l4cov_csrc_${TS}`
+    const C_DEP = `sheet_l4cov_cdep_${TS}`
+    const C_DEP2 = `sheet_l4cov_cdep2_${TS}`
+    const F_SRC_AMT = `fld_l4cov_camt_${TS}`
+    const F_SRC_STATUS = `fld_l4cov_cstat_${TS}`
+    const F_DEP_LINK = `fld_l4cov_cdlink_${TS}`
+    const F_DEP_CURVAL = `fld_l4cov_cdcur_${TS}`
+    const F_DEP_SUM = `fld_l4cov_cdsum_${TS}`
+    const F_DEP2_LINK = `fld_l4cov_cd2link_${TS}`
+    const F_DEP2_CURVAL = `fld_l4cov_cd2cur_${TS}`
+    const F_DEP2_SUM = `fld_l4cov_cd2sum_${TS}`
+    // The DIRECT recompute call (C1) resolves the actor DB-authoritatively (buildWriterTaintContext carries
+    // only the id — the Yjs-bridge shape), so this actor needs REAL stored perms, not req-carried ones:
+    // legacy users.permissions JSONB path, same as the w11 bridge-freshness suite.
+    const C_ACTOR = `u_l4cov_cactor_${TS}`
+
+    const relSumExpr = (linkFieldId: string, curvalFieldId: string) =>
+      `RELSUMIF("${linkFieldId}","${F_SRC_AMT}","${F_SRC_STATUS}","is",{${curvalFieldId}})`
+
+    const setBlockFor = async (sheetId: string, state: WriterBlockState | null) =>
+      q('UPDATE meta_sheets SET recovery_writer_state = $2 WHERE id = $1', [sheetId, state])
+    const blockOf = async (sheetId: string): Promise<unknown> =>
+      ((await q('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as
+        | { recovery_writer_state: unknown }
+        | undefined)?.recovery_writer_state ?? null
+    // Gate P2 hardening: every §C test asserts a clean-block precondition so a stale block from a
+    // prior test (or a parallel process) fails HERE with a diagnosable message instead of as a
+    // baffling positive-control red deeper in the test.
+    const assertNoStaleBlocks = async (): Promise<void> => {
+      for (const s of [C_SRC, C_DEP, C_DEP2]) expect(await blockOf(s)).toBeNull()
+    }
+    const rowOf = async (id: string): Promise<{ data: Record<string, unknown>; version: number; updatedAt: string }> => {
+      const r = await q('SELECT data, version, updated_at FROM meta_records WHERE id = $1', [id])
+      const row = r.rows[0] as { data: Record<string, unknown>; version: unknown; updated_at: Date }
+      expect(row).toBeTruthy()
+      return { data: row.data ?? {}, version: Number(row.version), updatedAt: new Date(row.updated_at).toISOString() }
+    }
+    const seedSrc = async (id: string, amt: number): Promise<void> => {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [
+        id, C_SRC, JSON.stringify({ [F_SRC_AMT]: amt, [F_SRC_STATUS]: 'paid' }), ACTOR,
+      ])
+    }
+    const seedDep = async (id: string, sheetId: string, linkFieldId: string, curvalFieldId: string, linkedIds: string[]): Promise<void> => {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [
+        id, sheetId, JSON.stringify({ [linkFieldId]: linkedIds, [curvalFieldId]: 'paid' }), ACTOR,
+      ])
+      for (const fr of linkedIds) {
+        await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [
+          `lnk_l4cov_${id}_${fr}`, linkFieldId, id, fr,
+        ])
+      }
+    }
+    const depFields = [
+      { id: F_DEP_LINK, name: 'CLink', type: 'link', property: { foreignSheetId: C_SRC }, order: 1 },
+      { id: F_DEP_CURVAL, name: 'CCur', type: 'string', property: {}, order: 2 },
+      { id: F_DEP_SUM, name: 'CSum', type: 'formula', property: { expression: relSumExpr(F_DEP_LINK, F_DEP_CURVAL) }, order: 3 },
+    ] as never
+    const patchVia = async (sheetId: string, recordId: string, fieldId: string, value: unknown) => {
+      actor = MEMBER
+      const cur = await q('SELECT version FROM meta_records WHERE id = $1', [recordId])
+      const expectedVersion = Number((cur.rows[0] as { version: unknown } | undefined)?.version ?? 1)
+      return request(app).post('/api/multitable/patch').send({
+        sheetId,
+        changes: [{ recordId, fieldId, value, expectedVersion }],
+      })
+    }
+
+    beforeAll(async () => {
+      await q(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+         VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE)
+         ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
+        [C_ACTOR, `${C_ACTOR}@example.test`, JSON.stringify(['multitable:read', 'multitable:write'])],
+      )
+      for (const [sid, name] of [[C_SRC, 'L4cov C Source'], [C_DEP, 'L4cov C Dependent'], [C_DEP2, 'L4cov C Dependent 2']] as const) {
+        await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sid, BASE, name])
+      }
+      for (const [fid, sid, name, type, property, order] of [
+        [F_SRC_AMT, C_SRC, 'CAmt', 'number', '{}', 1],
+        [F_SRC_STATUS, C_SRC, 'CStatus', 'string', '{}', 2],
+        [F_DEP_LINK, C_DEP, 'CLink', 'link', JSON.stringify({ foreignSheetId: C_SRC }), 1],
+        [F_DEP_CURVAL, C_DEP, 'CCur', 'string', '{}', 2],
+        [F_DEP_SUM, C_DEP, 'CSum', 'formula', JSON.stringify({ expression: relSumExpr(F_DEP_LINK, F_DEP_CURVAL) }), 3],
+        [F_DEP2_LINK, C_DEP2, 'C2Link', 'link', JSON.stringify({ foreignSheetId: C_SRC }), 1],
+        [F_DEP2_CURVAL, C_DEP2, 'C2Cur', 'string', '{}', 2],
+        [F_DEP2_SUM, C_DEP2, 'C2Sum', 'formula', JSON.stringify({ expression: relSumExpr(F_DEP2_LINK, F_DEP2_CURVAL) }), 3],
+      ] as const) {
+        await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [
+          fid, sid, name, type, property, order,
+        ])
+      }
+      // Same-record recompute trigger (C1): the RELSUMIF depends on the current-record criteria field.
+      await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,NULL)', [C_DEP, F_DEP_SUM, F_DEP_CURVAL])
+      await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,NULL)', [C_DEP2, F_DEP2_SUM, F_DEP2_CURVAL])
+    })
+
+    afterEach(async () => {
+      // Gate P2 hardening: clears fail LOUDLY (no catch-swallow) — a silently failed clear here is
+      // exactly the stale-block shape that would red a later test's POSITIVE control with a
+      // misleading message. The sheets exist for the whole suite, so a failure is a real defect.
+      for (const s of [C_SRC, C_DEP, C_DEP2]) await setBlockFor(s, null)
+    })
+
+    afterAll(async () => {
+      await q('DELETE FROM formula_dependencies WHERE sheet_id = ANY($1::text[])', [[C_DEP, C_DEP2]]).catch(() => {})
+      await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[F_DEP_LINK, F_DEP2_LINK]]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[C_SRC, C_DEP, C_DEP2]]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[C_SRC, C_DEP, C_DEP2]]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[C_SRC, C_DEP, C_DEP2]]).catch(() => {})
+      await q('DELETE FROM users WHERE id = $1', [C_ACTOR]).catch(() => {})
+    })
+
+    test('C1 same-record: block ⇒ silent skip (no throw, no write, no echo); positive control materializes; flag-off parity', async () => {
+      await assertNoStaleBlocks()
+      const SR1 = mkRecord('c1s1')
+      const SR2 = mkRecord('c1s2')
+      const DR = mkRecord('c1d')
+      const DRB = mkRecord('c1db')
+      await seedSrc(SR1, 10)
+      await seedSrc(SR2, 20)
+      await seedDep(DR, C_DEP, F_DEP_LINK, F_DEP_CURVAL, [SR1, SR2])
+      await seedDep(DRB, C_DEP, F_DEP_LINK, F_DEP_CURVAL, [SR1])
+
+      // Leg 1 — flag ON + durable block on the DEP sheet: the DIRECT recompute entry (the Yjs-bridge shape,
+      // and the deterministic stand-in for the commit→recompute gap race) must NOT throw, NOT write, NOT echo.
+      process.env[FLAG] = 'true'
+      await setBlockFor(C_DEP, 'applying')
+      const before = await rowOf(DR)
+      expect(before.data).not.toHaveProperty(F_DEP_SUM)
+      const blocked = await recalculateFormulaFieldsForActor(
+        C_ACTOR, q as never, C_DEP, depFields, [DR], [F_DEP_CURVAL],
+      )
+      expect(blocked).toEqual([]) // no echo entry for a refused materialization
+      const afterBlocked = await rowOf(DR)
+      expect(afterBlocked.data).not.toHaveProperty(F_DEP_SUM) // zero write…
+      expect(afterBlocked.updatedAt).toBe(before.updatedAt) // …not even a touch (updated_at = now() is in the UPDATE)
+
+      // Leg 2 — positive control (flag ON, no block): the SAME call materializes 10+20=30. This also proves
+      // the direct-call chain is non-vacuous (C_ACTOR's DB-authoritative read really resolves — a taint-skip
+      // or perm failure would yield no value / '#PERM!' here, not 30).
+      await setBlockFor(C_DEP, null)
+      const ok = await recalculateFormulaFieldsForActor(
+        C_ACTOR, q as never, C_DEP, depFields, [DR], [F_DEP_CURVAL],
+      )
+      expect(ok).toEqual([{ recordId: DR, data: { [F_DEP_SUM]: 30 } }])
+      expect((await rowOf(DR)).data[F_DEP_SUM]).toBe(30)
+
+      // Leg 3 — flag-off parity: block present but flag OFF ⇒ byte-identical legacy write proceeds.
+      delete process.env[FLAG]
+      await setBlockFor(C_DEP, 'applying')
+      const parity = await recalculateFormulaFieldsForActor(
+        C_ACTOR, q as never, C_DEP, depFields, [DRB], [F_DEP_CURVAL],
+      )
+      expect(parity).toEqual([{ recordId: DRB, data: { [F_DEP_SUM]: 10 } }])
+      expect((await rowOf(DRB)).data[F_DEP_SUM]).toBe(10)
+      await setBlockFor(C_DEP, null) // belt-and-braces: don't rely on afterEach alone
+    })
+
+    test('C2 fan-out: block on ONE dependent sheet skips ONLY that sheet (200, source applied, healthy sheet materializes); flag-off parity', async () => {
+      await assertNoStaleBlocks()
+      const SR1 = mkRecord('c2s1')
+      const SR2 = mkRecord('c2s2')
+      const DR = mkRecord('c2d')
+      const DR2 = mkRecord('c2d2')
+      await seedSrc(SR1, 10)
+      await seedSrc(SR2, 20)
+      await seedDep(DR, C_DEP, F_DEP_LINK, F_DEP_CURVAL, [SR1, SR2])
+      await seedDep(DR2, C_DEP2, F_DEP2_LINK, F_DEP2_CURVAL, [SR1, SR2])
+
+      // Leg 1 — positive control (flag ON, no block): editing the foreign TARGET field fans out to BOTH
+      // dependent sheets. 30+20 = 50.
+      process.env[FLAG] = 'true'
+      const res1 = await patchVia(C_SRC, SR1, F_SRC_AMT, 30)
+      expect(res1.status).toBe(200)
+      expect((await rowOf(DR)).data[F_DEP_SUM]).toBe(50)
+      expect((await rowOf(DR2)).data[F_DEP2_SUM]).toBe(50)
+
+      // Leg 2 — durable block on C_DEP ONLY: the source PATCH still succeeds (its own sheet is unblocked),
+      // the BLOCKED dependent sheet's materialization is refused (stale value + updated_at untouched, and
+      // its field id absent from the echo), while the HEALTHY dependent sheet still materializes. This leg
+      // also kills the wrong-sheet-key mutation (fencing sourceSheetId instead of the written sheet would
+      // see no block on C_SRC and write through).
+      await setBlockFor(C_DEP, 'applying')
+      const beforeDR = await rowOf(DR)
+      const res2 = await patchVia(C_SRC, SR2, F_SRC_AMT, 200)
+      expect(res2.status).toBe(200)
+      expect((await rowOf(SR2)).data[F_SRC_AMT]).toBe(200) // primary write applied
+      const afterDR = await rowOf(DR)
+      expect(afterDR.data[F_DEP_SUM]).toBe(50) // stale (30+200=230 was refused)
+      expect(afterDR.updatedAt).toBe(beforeDR.updatedAt) // zero write on the blocked sheet
+      expect((await rowOf(DR2)).data[F_DEP2_SUM]).toBe(230) // healthy sheet materialized
+      // Echo contract: the HTTP `relatedRecords` shape is {sheetId, recordId, data} (affectedFieldIds is
+      // internal fan-out metadata, "never part of the response contract" — record-write-service Step 5).
+      // The healthy sheet's record echoes its freshly materialized value; the BLOCKED sheet's record must
+      // NOT carry one (the DB did not change — a carried value would revert on reload).
+      const related = (res2.body?.data?.relatedRecords ?? []) as Array<{ recordId: string; data?: Record<string, unknown> }>
+      const echoDR = related.find((r) => r.recordId === DR)
+      if (echoDR) {
+        expect(echoDR.data ?? {}).not.toHaveProperty(F_DEP_SUM)
+      }
+      const echoDR2 = related.find((r) => r.recordId === DR2)
+      expect(echoDR2?.data?.[F_DEP2_SUM]).toBe(230)
+
+      // Leg 3 — flag-off parity: block still on C_DEP, flag OFF ⇒ the legacy bare write proceeds anyway.
+      delete process.env[FLAG]
+      const res3 = await patchVia(C_SRC, SR1, F_SRC_AMT, 31)
+      expect(res3.status).toBe(200)
+      expect((await rowOf(DR)).data[F_DEP_SUM]).toBe(231) // 31+200, despite the (inert) block
+      await setBlockFor(C_DEP, null) // belt-and-braces: don't rely on afterEach alone
+    })
+
+    test('C3 POST /patch primary-fence refusal maps to 409 RECOVERY_IN_PROGRESS (not 500); positive control; flag-off parity', async () => {
+      await assertNoStaleBlocks()
+      const SR = mkRecord('c3s')
+      await seedSrc(SR, 5)
+
+      // Leg 1 — flag ON + durable block on the SOURCE sheet: the PRIMARY fenced write refuses at txn entry
+      // and the route maps it (previously an unmapped 500 INTERNAL_ERROR — the pre-existing gap the review
+      // named). Zero write.
+      process.env[FLAG] = 'true'
+      await setBlockFor(C_SRC, 'applying')
+      const before = await rowOf(SR)
+      const res1 = await patchVia(C_SRC, SR, F_SRC_AMT, 7)
+      expect(res1.status).toBe(409)
+      expect(res1.body?.error?.code).toBe('RECOVERY_IN_PROGRESS')
+      const after = await rowOf(SR)
+      expect(after.data[F_SRC_AMT]).toBe(5)
+      expect(after.version).toBe(before.version)
+
+      // Leg 2 — positive control: clear the block ⇒ the same patch succeeds.
+      await setBlockFor(C_SRC, null)
+      const res2 = await patchVia(C_SRC, SR, F_SRC_AMT, 7)
+      expect(res2.status).toBe(200)
+      expect((await rowOf(SR)).data[F_SRC_AMT]).toBe(7)
+
+      // Leg 3 — flag-off parity: block present but flag OFF ⇒ inert, the write proceeds.
+      delete process.env[FLAG]
+      await setBlockFor(C_SRC, 'applying')
+      const res3 = await patchVia(C_SRC, SR, F_SRC_AMT, 9)
+      expect(res3.status).toBe(200)
+      expect((await rowOf(SR)).data[F_SRC_AMT]).toBe(9)
+      await setBlockFor(C_SRC, null) // belt-and-braces: don't rely on afterEach alone
+    })
   })
 })
