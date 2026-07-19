@@ -37,7 +37,7 @@
 
 - **Grok Build**：在隔离 worktree 中实现/整合 tree authoring、version restore、FWB、attachment 与 A1–A8 验收入口，并运行分层测试。
 - **Codex**：逐分支审阅产品语义、权限、事务、幂等、存储错误分类与 CI 接线；修正 restore 共享校验、附件真库 fixture、closeout 拓扑断言和两点接线解析；在组合 HEAD 上独立复跑测试与变异。
-- **Owner**：保留 merge、私有 ACL 前置、DingTalk UAT、runtime flag 开启、fan-out ratify 与附件 rung-4 的最终决策。
+- **Owner**：保留 merge、owner-private `S-0` 前置、DingTalk UAT、runtime flag 开启、fan-out ratify 与附件 rung-4 的最终决策。
 
 ### 1.2 Runtime flags（默认全部 OFF）
 
@@ -169,7 +169,7 @@ FWB/附件 real-DB 文件仍在 multitable real-DB step；authoring UAT / closeo
 下列项 **仅 owner** 可关闭；本 composite / 本文档 **无权** 代为 ratify 或 flip：
 
 1. **Review + merge 源 PR 到 `main`**（本 worktree 仅为 rehearsal）。
-2. **Private ACL 前置**（FWB-0：受限字段回写目标表 = 显式解密；Q6 四闸与确认哈希在生产 enable 前必须按锁强制）。
+2. **Owner-private `S-0` 前置**（公开材料只记录依赖与 owner gate；实现面和状态留在私有处置渠道）。
 3. **DingTalk UAT**（卡片/投递实网，非本 composite 范围）。
 4. **Flag flips**（`APPROVAL_FWB_RUNTIME_ENABLED` · durable delivery · `APPROVAL_ATTACHMENTS_ENABLED`）— 默认保持 OFF。
 5. **#4450 linked-record multi-value fan-out** — 须单独 ratify；v1 仍「恰一条，多值整步 REJECT」。
@@ -210,4 +210,4 @@ pnpm --filter @metasheet/web exec vue-tsc --noEmit
 ## 8. 结论
 
 本 composite 把 **tree authoring · version restore · FWB · attachment** 的 as-built 代码与 real-DB 证据收口到可复查的 A1–A8 地图，并修了 restore 与 create/update 的 authoring-definition 漂移。
-**收尾完成 ≠ 可上线**：merge、private ACL 运营、DingTalk UAT、flag ON、#4450、附件 rung-4 仍全部挂在 owner 闸上。
+**收尾完成 ≠ 可上线**：merge、owner-private `S-0`、DingTalk UAT、flag ON、#4450、附件 rung-4 仍全部挂在 owner 闸上。
