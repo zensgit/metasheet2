@@ -3,7 +3,7 @@ import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import { ensurePlatformAdmin } from './admin-directory'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
 import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk } from '../util/response'
 
@@ -187,35 +187,68 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         return
       }
 
-      const integration = await loadOrgIntegration(orgId, canonical)
-      if (!integration) {
+      // TOCTOU close (write-point): active-target validation and the policy upsert MUST share one
+      // transaction, and the target integration row is locked `FOR SHARE` at the write point
+      // through commit. A concurrent disable that commits between a separate SELECT and INSERT
+      // would otherwise accept a policy pointing at a now-inactive target (B5-b would then
+      // fail-close every consuming approval). `FOR SHARE` conflicts with the exclusive row lock
+      // a status UPDATE takes, so the two serialize: disable-first → PATCH re-reads inactive →
+      // 409 with zero write; set-first → set commits, then disable, resolver fails closed.
+      // Audit is deliberately POST-commit (and values-free) so a rolled-back / rejected write
+      // never leaves a partial audit trail.
+      type WriteOutcome =
+        | { kind: 'not_found' }
+        | { kind: 'not_active' }
+        | { kind: 'local_not_enabled' }
+        | { kind: 'ok'; provider: string }
+
+      const outcome = await transaction(async (client) => {
+        const locked = await client.query(
+          `SELECT id::text AS id, provider, status
+             FROM directory_integrations
+            WHERE id = $1::uuid AND org_id = $2
+            FOR SHARE`,
+          [canonical, orgId],
+        )
+        const integration = (locked.rows[0] as IntegrationRow | undefined) ?? null
+        if (!integration) return { kind: 'not_found' } satisfies WriteOutcome
+        if (integration.status !== 'active') {
+          // fail at WRITE time — a policy pointing at a broken target would fail-close every
+          // policy-consuming approval later (B5-b), which is strictly worse than rejecting here.
+          return { kind: 'not_active' } satisfies WriteOutcome
+        }
+        // Owner review (#4431): switching approval routing to the LOCAL provider is a capability
+        // decision, not a config edit — it must be explicitly enabled (env-gate, default OFF, the
+        // repo's staged-opt-in pattern) after the owner accepts the B6 parity evidence for the
+        // deployment. Until then a local canonical is rejected at the WRITE surface. (Preview stays
+        // available for local candidates on purpose — it is the read-only evidence tool for making
+        // exactly this decision.)
+        if (integration.provider === 'local' && !isLocalCanonicalEnabled()) {
+          return { kind: 'local_not_enabled' } satisfies WriteOutcome
+        }
+        await client.query(
+          `INSERT INTO org_directory_routing_policy (org_id, purpose, canonical_integration_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT ON CONSTRAINT orp_org_purpose_uniq
+           DO UPDATE SET canonical_integration_id = EXCLUDED.canonical_integration_id, updated_at = NOW()`,
+          [orgId, purpose, canonical],
+        )
+        return { kind: 'ok', provider: integration.provider } satisfies WriteOutcome
+      })
+
+      if (outcome.kind === 'not_found') {
         jsonError(res, 404, 'ROUTING_POLICY_INTEGRATION_NOT_FOUND', 'Integration not found in this organization')
         return
       }
-      if (integration.status !== 'active') {
-        // fail at WRITE time — a policy pointing at a broken target would fail-close every
-        // policy-consuming approval later (B5-b), which is strictly worse than rejecting here.
+      if (outcome.kind === 'not_active') {
         jsonError(res, 409, 'ROUTING_POLICY_TARGET_NOT_ACTIVE', 'The target integration is not active')
         return
       }
-      // Owner review (#4431): switching approval routing to the LOCAL provider is a capability
-      // decision, not a config edit — it must be explicitly enabled (env-gate, default OFF, the
-      // repo's staged-opt-in pattern) after the owner accepts the B6 parity evidence for the
-      // deployment. Until then a local canonical is rejected at the WRITE surface. (Preview stays
-      // available for local candidates on purpose — it is the read-only evidence tool for making
-      // exactly this decision.)
-      if (integration.provider === 'local' && !isLocalCanonicalEnabled()) {
+      if (outcome.kind === 'local_not_enabled') {
         jsonError(res, 409, 'ROUTING_POLICY_LOCAL_NOT_ENABLED', 'Routing to the local provider is not enabled (set DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED=1 after accepting parity evidence)')
         return
       }
 
-      await query(
-        `INSERT INTO org_directory_routing_policy (org_id, purpose, canonical_integration_id)
-         VALUES ($1, $2, $3)
-         ON CONFLICT ON CONSTRAINT orp_org_purpose_uniq
-         DO UPDATE SET canonical_integration_id = EXCLUDED.canonical_integration_id, updated_at = NOW()`,
-        [orgId, purpose, canonical],
-      )
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -225,7 +258,7 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         // values-free: ids only, no config echo
         meta: { orgId, purpose, integrationId: canonical },
       })
-      jsonOk(res, { policy: { purpose, canonicalIntegrationId: canonical, canonicalProvider: integration.provider } })
+      jsonOk(res, { policy: { purpose, canonicalIntegrationId: canonical, canonicalProvider: outcome.provider } })
     } catch (error) {
       logger.error(`Failed to set routing policy: ${error instanceof Error ? error.message : 'unknown'}`)
       jsonError(res, 500, 'ROUTING_POLICY_WRITE_FAILED', 'Failed to update the routing policy')
