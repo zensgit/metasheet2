@@ -304,16 +304,21 @@ describe('S7-1 assertDynamicFlowStepsRuntimeAvailable — §4.1 runtime fail-clo
   })
 })
 
-describe('S7-1/S7-2 buildAttendanceApprovalAssignments — dynamic step never reaches the admin fallback', () => {
-  // S7-2: direct_manager is implemented — missing/empty/self snapshot → APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED
-  // (block-with-error, §4). Other kinds still hit the S7-1 UNGATED defense-in-depth arm.
+describe('S7-1/S7-2/S7-3 buildAttendanceApprovalAssignments — dynamic step never reaches the admin fallback', () => {
+  // S7-2/S7-3: direct_manager + dept_head are implemented — missing/empty/self snapshot →
+  // APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED (block-with-error, §4). manager_at_level still hits UNGATED.
   it('direct_manager without frozen managerId throws APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED (never admin fallback)', () => {
     expect(httpCode(() => buildAttendanceApprovalAssignments([{ kind: 'direct_manager' }], 0)))
       .toEqual({ status: 422, code: 'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED' })
   })
 
-  it('an unimplemented dynamic kind (dept_head) still throws APPROVAL_STEP_DYNAMIC_UNGATED', () => {
+  it('dept_head without frozen deptHeadId throws APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED (never admin fallback)', () => {
     expect(httpCode(() => buildAttendanceApprovalAssignments([{ kind: 'dept_head' }], 0)))
+      .toEqual({ status: 422, code: 'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED' })
+  })
+
+  it('an unimplemented dynamic kind (manager_at_level) still throws APPROVAL_STEP_DYNAMIC_UNGATED', () => {
+    expect(httpCode(() => buildAttendanceApprovalAssignments([{ kind: 'manager_at_level', level: 1 }], 0)))
       .toEqual({ status: 422, code: 'APPROVAL_STEP_DYNAMIC_UNGATED' })
   })
 

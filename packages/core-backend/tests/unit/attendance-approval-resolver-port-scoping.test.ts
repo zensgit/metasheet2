@@ -29,9 +29,9 @@ describe('S7-2 precursor — approvalAssigneeResolver port is scoped to plugin-a
     expect(typeof services.approvalAssigneeResolver?.maxManagerChainLevels).toBe('number')
     expect(services.approvalAssigneeResolver?.maxManagerChainLevels).toBeGreaterThanOrEqual(1)
     expect(Array.isArray(services.approvalAssigneeResolver?.implementedKinds)).toBe(true)
-    // S7-2: direct_manager is the only implemented kind; dept_head / manager_at_level stay out.
+    // S7-2/S7-3: direct_manager + dept_head implemented; manager_at_level stays S7-4.
     expect(services.approvalAssigneeResolver?.implementedKinds).toContain('direct_manager')
-    expect(services.approvalAssigneeResolver?.implementedKinds).not.toContain('dept_head')
+    expect(services.approvalAssigneeResolver?.implementedKinds).toContain('dept_head')
     expect(services.approvalAssigneeResolver?.implementedKinds).not.toContain('manager_at_level')
     expect(services.approvalAssigneeResolver?.implementedKinds).not.toContain('continuous_managers')
   })

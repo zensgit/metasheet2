@@ -102,10 +102,10 @@ import {
   stopApprovalSlaScheduler,
 } from './services/ApprovalSlaScheduler'
 import { ApprovalProductService } from './services/ApprovalProductService'
-// S7-1/S7-2 (OD-S7-5=d): host-resolved chain-depth cap + org-scoped directory-read path the attendance
-// dynamic-assignee resolver PORT exposes to plugin-attendance. The plugin validates
+// S7-1/S7-2/S7-3 (OD-S7-5=d): host-resolved chain-depth cap + org-scoped directory-read path the
+// attendance dynamic-assignee resolver PORT exposes to plugin-attendance. The plugin validates
 // `manager_at_level.level` against MAX (never re-parses APPROVAL_MANAGER_CHAIN_MAX_LEVELS) and freezes
-// direct_manager via resolveApprovalRequesterOrgRelations (org-anchored, read-only).
+// direct_manager / dept_head via resolveApprovalRequesterOrgRelations (org-anchored, read-only).
 import {
   MAX_MANAGER_CHAIN_LEVELS,
   resolveApprovalRequesterOrgRelations,
@@ -956,21 +956,21 @@ export class MetaSheetServer {
     return wrappedUnregister
   }
 
-  // S7-1/S7-2 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host binding for
-  // the narrow, org-scoped dynamic approval-assignee resolver port plugin-attendance consumes. Exposes
-  // the SAME MAX_MANAGER_CHAIN_LEVELS constant the kernel uses (no plugin env re-parse). S7-2 wires
-  // `direct_manager` only (byte-identical to ApprovalDirectoryOrg §2.1: is_manager precedence, legacy
-  // leader_in_dept fallback, deterministic tie-break, same-integration binding, self-exclusion).
-  // `dept_head` / `manager_at_level` stay unimplemented (S7-3/S7-4). Directory data is READ-ONLY.
+  // S7-1/S7-2/S7-3 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host
+  // binding for the narrow, org-scoped dynamic approval-assignee resolver port plugin-attendance
+  // consumes. Exposes the SAME MAX_MANAGER_CHAIN_LEVELS constant the kernel uses (no plugin env
+  // re-parse). S7-2 wires `direct_manager` (byte-identical to ApprovalDirectoryOrg §2.1); S7-3 adds
+  // `dept_head` (byte-identical to §2.2: first-linked dept_manager_userid_list entry, self-exclusion).
+  // `manager_at_level` stays unimplemented (S7-4). Directory data is READ-ONLY.
   private buildApprovalAssigneeResolverPort(): NonNullable<
     import('./types/plugin').PluginServices['approvalAssigneeResolver']
   > {
     return {
       maxManagerChainLevels: MAX_MANAGER_CHAIN_LEVELS,
-      implementedKinds: ['direct_manager'],
+      implementedKinds: ['direct_manager', 'dept_head'],
       resolve: async (orgId, request) => {
         const kind = typeof request?.kind === 'string' ? request.kind.trim() : ''
-        if (kind !== 'direct_manager') {
+        if (kind !== 'direct_manager' && kind !== 'dept_head') {
           return { status: 'unimplemented' as const }
         }
 
@@ -990,21 +990,43 @@ export class MetaSheetServer {
         const relations = await resolveApprovalRequesterOrgRelations(requesterUserId, queryFn, {
           orgId: normalizedOrgId,
         })
-        const managerId =
-          typeof relations.managerId === 'string' && relations.managerId.trim().length > 0
-            ? relations.managerId.trim()
+
+        // S7-2 direct_manager — preserved byte-for-byte (reads only managerId).
+        if (kind === 'direct_manager') {
+          const managerId =
+            typeof relations.managerId === 'string' && relations.managerId.trim().length > 0
+              ? relations.managerId.trim()
+              : null
+          // Self-exclusion at the resolver (§2.1): a manager that resolves to the requester is treated
+          // as unresolved — never written as a self-assignment.
+          if (!managerId || managerId === requesterUserId) {
+            return {
+              status: 'unresolved' as const,
+              reason: managerId === requesterUserId ? 'self_manager' : 'no_manager_linked',
+            }
+          }
+          return {
+            status: 'resolved' as const,
+            assignees: [{ assignmentType: 'user' as const, assigneeId: managerId }],
+          }
+        }
+
+        // S7-3 dept_head — same org-anchored relations call; read ONLY deptHeadId (§2.2).
+        const deptHeadId =
+          typeof relations.deptHeadId === 'string' && relations.deptHeadId.trim().length > 0
+            ? relations.deptHeadId.trim()
             : null
-        // Self-exclusion at the resolver (§2.1): a manager that resolves to the requester is treated
+        // Self-exclusion at the resolver (§2.2): a dept head that resolves to the requester is treated
         // as unresolved — never written as a self-assignment.
-        if (!managerId || managerId === requesterUserId) {
+        if (!deptHeadId || deptHeadId === requesterUserId) {
           return {
             status: 'unresolved' as const,
-            reason: managerId === requesterUserId ? 'self_manager' : 'no_manager_linked',
+            reason: deptHeadId === requesterUserId ? 'self_dept_head' : 'no_dept_head_linked',
           }
         }
         return {
           status: 'resolved' as const,
-          assignees: [{ assignmentType: 'user' as const, assigneeId: managerId }],
+          assignees: [{ assignmentType: 'user' as const, assigneeId: deptHeadId }],
         }
       },
     }

@@ -6,16 +6,17 @@ import http from 'http'
 import { Pool } from 'pg'
 import { randomUUID } from 'crypto'
 
-// S7-2 (RATIFIED attendance-approval-s7 resolver design-lock §2.1 / §3.3 / §3.4 / §4 / §4.1 / §7 S7-2):
-// real-DB, HTTP-level coverage of direct_manager end-to-end:
-//   linked resolution + freeze into requester_snapshot.managerId
-//   unlinked block-with-error + zero persistence
+// S7-3 (RATIFIED attendance-approval-s7 resolver design-lock §2.2 / §3.3 / §3.4 / §4 / §4.1 / §7 S7-3):
+// real-DB, HTTP-level coverage of dept_head end-to-end:
+//   linked resolution + freeze into requester_snapshot.deptHeadId
+//   vacant/unlinked head fail-closed + zero persistence
+//   self-exclusion
 //   two-org / one-local-user org-anchor
 //   2-step freeze after directory relation mutation
 //   dynamic assignment approve+reject authorization (negative / positive / admin)
-//   flag-off create + flag-off advance rollback
+//   flag-off create + flag-off advance rollback (§4.1 both paths)
 //   legacy static still works with flag off
-//   S7-1 NITs folded: empty-static-array MIXED + non-string kind → distinct 422
+//   direct_manager regression control
 //
 // RBAC_BYPASS is toggled per-case: authoring / create paths use 'true' for simplicity; the
 // assignment-authorization legs force 'false' so the S7-0 predicate is what we observe.
@@ -73,7 +74,7 @@ const NODE_KEY_1 = 'attendance_request_step_1'
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
 
-describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)', () => {
+describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
   let pool: Pool | undefined
@@ -81,38 +82,48 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
   let prevFlag: string | undefined
 
   const runSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  const orgHome = `s7-2-home-${runSuffix}`
-  const orgForeign = `s7-2-foreign-${runSuffix}`
-  const orgUnlinked = `s7-2-unlinked-${runSuffix}`
-  const orgFreeze = `s7-2-freeze-${runSuffix}`
-  const orgAuthz = `s7-2-authz-${runSuffix}`
-  const orgFlagOff = `s7-2-flagoff-${runSuffix}`
+  const orgHome = `s7-3-home-${runSuffix}`
+  const orgForeign = `s7-3-foreign-${runSuffix}`
+  const orgVacant = `s7-3-vacant-${runSuffix}`
+  const orgSelf = `s7-3-self-${runSuffix}`
+  const orgFreeze = `s7-3-freeze-${runSuffix}`
+  const orgAuthz = `s7-3-authz-${runSuffix}`
+  const orgFlagOff = `s7-3-flagoff-${runSuffix}`
+  const orgDm = `s7-3-dm-${runSuffix}`
 
-  const requester = `s7-2-req-${runSuffix}`
-  const managerHome = `s7-2-mgr-home-${runSuffix}`
-  const managerForeign = `s7-2-mgr-foreign-${runSuffix}`
-  const managerAlt = `s7-2-mgr-alt-${runSuffix}`
-  const otherApprover = `s7-2-other-${runSuffix}`
-  const adminActor = `s7-2-admin-${runSuffix}`
+  const requester = `s7-3-req-${runSuffix}`
+  const headHome = `s7-3-head-home-${runSuffix}`
+  const headForeign = `s7-3-head-foreign-${runSuffix}`
+  const headAlt = `s7-3-head-alt-${runSuffix}`
+  const managerHome = `s7-3-mgr-home-${runSuffix}`
+  const otherApprover = `s7-3-other-${runSuffix}`
+  const adminActor = `s7-3-admin-${runSuffix}`
 
-  const userIds: string[] = [requester, managerHome, managerForeign, managerAlt, otherApprover, adminActor]
+  const userIds: string[] = [
+    requester,
+    headHome,
+    headForeign,
+    headAlt,
+    managerHome,
+    otherApprover,
+    adminActor,
+  ]
   const integrationIds: string[] = []
   const createdFlowIds: string[] = []
   const createdInstanceIds: string[] = []
   const createdRequestIds: string[] = []
 
   let adminToken = ''
+  let headToken = ''
   let managerToken = ''
   let otherToken = ''
   let adminActorToken = ''
 
   // Directory fixture handles for freeze-mutation + org-anchor cases.
-  let homeMgrAccountId = ''
-  let homeDeptId = ''
-  let homeIntegrationId = ''
-  let freezeMgrAccountId = ''
-  let freezeAltAccountId = ''
+  let homeHeadExternal = ''
   let freezeDeptId = ''
+  let freezeHeadExternal = ''
+  let freezeAltExternal = ''
 
   function setFlag(on: boolean): void {
     if (on) process.env[DYNAMIC_FLAG] = 'true'
@@ -137,7 +148,7 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
   async function seedUser(userId: string): Promise<void> {
     await (pool as Pool).query(
       `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') ON CONFLICT (id) DO NOTHING`,
-      [userId, `${userId}@s7-2.test`],
+      [userId, `${userId}@s7-3.test`],
     )
   }
 
@@ -153,12 +164,17 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     return id
   }
 
-  async function seedDept(integrationId: string, externalId: string, name: string): Promise<string> {
+  async function seedDept(
+    integrationId: string,
+    externalId: string,
+    name: string,
+    raw: Record<string, unknown> = {},
+  ): Promise<string> {
     return (
       await (pool as Pool).query<{ id: string }>(
         `INSERT INTO directory_departments (integration_id, provider, external_department_id, name, is_active, raw)
-         VALUES ($1, 'dingtalk', $2, $3, true, '{}'::jsonb) RETURNING id`,
-        [integrationId, externalId, name],
+         VALUES ($1, 'dingtalk', $2, $3, true, $4::jsonb) RETURNING id`,
+        [integrationId, externalId, name, JSON.stringify(raw)],
       )
     ).rows[0].id
   }
@@ -248,7 +264,7 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     return requestJson(`${baseUrl}/api/attendance/requests/${requestId}/${action}`, {
       method: 'POST',
       headers: authHeaders(token),
-      body: JSON.stringify({ comment: `s7-2 ${action}` }),
+      body: JSON.stringify({ comment: `s7-3 ${action}` }),
     })
   }
 
@@ -258,8 +274,8 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       s.once('error', () => resolve(false))
       s.listen(0, '127.0.0.1', () => s.close(() => resolve(true)))
     })
-    if (!canListen) throw new Error('S7-2 tests require an available loopback port.')
-    if (!dbUrl) throw new Error('DATABASE_URL / ATTENDANCE_TEST_DATABASE_URL is required for the S7-2 suite.')
+    if (!canListen) throw new Error('S7-3 tests require an available loopback port.')
+    if (!dbUrl) throw new Error('DATABASE_URL / ATTENDANCE_TEST_DATABASE_URL is required for the S7-3 suite.')
 
     process.env.DATABASE_URL = dbUrl
     prevRbac = process.env.RBAC_BYPASS
@@ -273,56 +289,124 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
 
     for (const uid of userIds) await seedUser(uid)
 
-    // ── orgHome: linked requester + normalized is_manager (authoritative) ──
-    homeIntegrationId = await seedIntegration(orgHome, `s7-2-home-int-${runSuffix}`, `corp-home-${runSuffix}`)
-    homeDeptId = await seedDept(homeIntegrationId, `dept-home-${runSuffix}`, 'Home Eng')
-    const homeReqAcc = await seedAccount(homeIntegrationId, `ext-req-home-${runSuffix}`, `key-req-home-${runSuffix}`, 'ReqHome')
-    homeMgrAccountId = await seedAccount(homeIntegrationId, `ext-mgr-home-${runSuffix}`, `key-mgr-home-${runSuffix}`, 'MgrHome')
-    // Legacy leader that would resolve to managerAlt — precedence must pick normalized managerHome.
-    const homeLegacyAcc = await seedAccount(
-      homeIntegrationId,
-      `ext-legacy-home-${runSuffix}`,
-      `key-legacy-home-${runSuffix}`,
-      'LegacyHome',
-      { leader_in_dept: [{ dept_id: `dept-home-${runSuffix}`, leader: true }] },
-    )
+    // ── orgHome: linked requester + dept head via dept_manager_userid_list (first-linked wins) ──
+    const homeInt = await seedIntegration(orgHome, `s7-3-home-int-${runSuffix}`, `corp-home-${runSuffix}`)
+    homeHeadExternal = `ext-head-home-${runSuffix}`
+    const homeDeptExternal = `dept-home-${runSuffix}`
+    const homeDeptId = await seedDept(homeInt, homeDeptExternal, 'Home Eng', {
+      dept_manager_userid_list: [homeHeadExternal],
+    })
+    const homeReqAcc = await seedAccount(homeInt, `ext-req-home-${runSuffix}`, `key-req-home-${runSuffix}`, 'ReqHome')
+    const homeHeadAcc = await seedAccount(homeInt, homeHeadExternal, `key-head-home-${runSuffix}`, 'HeadHome')
+    // Also seed a direct manager distinct from dept head so mixed-flow controls stay independent.
+    const homeMgrAcc = await seedAccount(homeInt, `ext-mgr-home-${runSuffix}`, `key-mgr-home-${runSuffix}`, 'MgrHome')
     await link(homeReqAcc, requester)
-    await link(homeMgrAccountId, managerHome)
-    await link(homeLegacyAcc, managerAlt)
+    await link(homeHeadAcc, headHome)
+    await link(homeMgrAcc, managerHome)
     await membership(homeReqAcc, homeDeptId, true, false)
-    await membership(homeMgrAccountId, homeDeptId, false, true) // normalized manager
-    await membership(homeLegacyAcc, homeDeptId, false, false)
+    await membership(homeHeadAcc, homeDeptId, false, false)
+    await membership(homeMgrAcc, homeDeptId, false, true)
 
-    // ── orgForeign: same local requester linked into a different org with a different manager ──
-    // updated_at will be more recent than home (inserted later) so the unscoped pick would choose
-    // foreign — the org anchor must force home when attendance requests use orgHome.
-    const foreignInt = await seedIntegration(orgForeign, `s7-2-foreign-int-${runSuffix}`, `corp-foreign-${runSuffix}`)
-    const foreignDept = await seedDept(foreignInt, `dept-foreign-${runSuffix}`, 'Foreign Eng')
-    const foreignReqAcc = await seedAccount(foreignInt, `ext-req-foreign-${runSuffix}`, `key-req-foreign-${runSuffix}`, 'ReqForeign')
-    const foreignMgrAcc = await seedAccount(foreignInt, `ext-mgr-foreign-${runSuffix}`, `key-mgr-foreign-${runSuffix}`, 'MgrForeign')
+    // ── orgForeign: same local requester linked into a different org with a different dept head ──
+    // updated_at will be more recent than home so the unscoped pick would choose foreign —
+    // the org anchor must force home when attendance requests use orgHome.
+    const foreignInt = await seedIntegration(orgForeign, `s7-3-foreign-int-${runSuffix}`, `corp-foreign-${runSuffix}`)
+    const foreignHeadExternal = `ext-head-foreign-${runSuffix}`
+    const foreignDept = await seedDept(foreignInt, `dept-foreign-${runSuffix}`, 'Foreign Eng', {
+      dept_manager_userid_list: [foreignHeadExternal],
+    })
+    const foreignReqAcc = await seedAccount(
+      foreignInt,
+      `ext-req-foreign-${runSuffix}`,
+      `key-req-foreign-${runSuffix}`,
+      'ReqForeign',
+    )
+    const foreignHeadAcc = await seedAccount(
+      foreignInt,
+      foreignHeadExternal,
+      `key-head-foreign-${runSuffix}`,
+      'HeadForeign',
+    )
     await link(foreignReqAcc, requester)
-    await link(foreignMgrAcc, managerForeign)
+    await link(foreignHeadAcc, headForeign)
     await membership(foreignReqAcc, foreignDept, true, false)
-    await membership(foreignMgrAcc, foreignDept, false, true)
-    // Bump foreign account updated_at so it is "more recent" than home (unscoped would pick it).
+    await membership(foreignHeadAcc, foreignDept, false, false)
     await pool.query(`UPDATE directory_accounts SET updated_at = now() + interval '1 hour' WHERE id = $1`, [
       foreignReqAcc,
     ])
 
-    // ── orgFreeze: 2-step flow freeze fixture (static step 0 + direct_manager step 1) ──
-    const freezeInt = await seedIntegration(orgFreeze, `s7-2-freeze-int-${runSuffix}`, `corp-freeze-${runSuffix}`)
-    freezeDeptId = await seedDept(freezeInt, `dept-freeze-${runSuffix}`, 'Freeze Eng')
-    const freezeReqAcc = await seedAccount(freezeInt, `ext-req-freeze-${runSuffix}`, `key-req-freeze-${runSuffix}`, 'ReqFreeze')
-    freezeMgrAccountId = await seedAccount(freezeInt, `ext-mgr-freeze-${runSuffix}`, `key-mgr-freeze-${runSuffix}`, 'MgrFreeze')
-    freezeAltAccountId = await seedAccount(freezeInt, `ext-mgr-alt-${runSuffix}`, `key-mgr-alt-${runSuffix}`, 'MgrAlt')
-    // Separate local user for freeze-org requester to avoid multi-org link noise on the shared requester.
-    // Reuse managerHome as the initial freeze manager; managerAlt as the post-mutation manager.
+    // ── orgFreeze: 2-step flow freeze fixture (static step 0 + dept_head step 1) ──
+    const freezeInt = await seedIntegration(orgFreeze, `s7-3-freeze-int-${runSuffix}`, `corp-freeze-${runSuffix}`)
+    freezeHeadExternal = `ext-head-freeze-${runSuffix}`
+    freezeAltExternal = `ext-head-alt-${runSuffix}`
+    freezeDeptId = await seedDept(freezeInt, `dept-freeze-${runSuffix}`, 'Freeze Eng', {
+      dept_manager_userid_list: [freezeHeadExternal],
+    })
+    const freezeReqAcc = await seedAccount(
+      freezeInt,
+      `ext-req-freeze-${runSuffix}`,
+      `key-req-freeze-${runSuffix}`,
+      'ReqFreeze',
+    )
+    const freezeHeadAcc = await seedAccount(
+      freezeInt,
+      freezeHeadExternal,
+      `key-head-freeze-${runSuffix}`,
+      'HeadFreeze',
+    )
+    const freezeAltAcc = await seedAccount(
+      freezeInt,
+      freezeAltExternal,
+      `key-head-alt-${runSuffix}`,
+      'HeadAlt',
+    )
     await link(freezeReqAcc, requester)
-    await link(freezeMgrAccountId, managerHome)
-    await link(freezeAltAccountId, managerAlt)
+    await link(freezeHeadAcc, headHome)
+    await link(freezeAltAcc, headAlt)
     await membership(freezeReqAcc, freezeDeptId, true, false)
-    await membership(freezeMgrAccountId, freezeDeptId, false, true)
-    await membership(freezeAltAccountId, freezeDeptId, false, false)
+    await membership(freezeHeadAcc, freezeDeptId, false, false)
+    await membership(freezeAltAcc, freezeDeptId, false, false)
+
+    // ── orgSelf: requester is the only linked dept head → self-exclusion at freeze ──
+    const selfInt = await seedIntegration(orgSelf, `s7-3-self-int-${runSuffix}`, `corp-self-${runSuffix}`)
+    const selfReqExternal = `ext-req-self-${runSuffix}`
+    const selfDept = await seedDept(selfInt, `dept-self-${runSuffix}`, 'Self Eng', {
+      dept_manager_userid_list: [selfReqExternal],
+    })
+    const selfReqAcc = await seedAccount(selfInt, selfReqExternal, `key-req-self-${runSuffix}`, 'ReqSelf')
+    await link(selfReqAcc, requester)
+    await membership(selfReqAcc, selfDept, true, false)
+
+    // ── orgVacant: department with empty / unlinked head list ──
+    const vacantInt = await seedIntegration(orgVacant, `s7-3-vacant-int-${runSuffix}`, `corp-vacant-${runSuffix}`)
+    const vacantDept = await seedDept(vacantInt, `dept-vacant-${runSuffix}`, 'Vacant Eng', {
+      dept_manager_userid_list: [`ext-unlinked-head-${runSuffix}`],
+    })
+    const vacantReqAcc = await seedAccount(
+      vacantInt,
+      `ext-req-vacant-${runSuffix}`,
+      `key-req-vacant-${runSuffix}`,
+      'ReqVacant',
+    )
+    // Unlinked head account (no directory_account_links row) → vacant for resolution purposes.
+    await seedAccount(
+      vacantInt,
+      `ext-unlinked-head-${runSuffix}`,
+      `key-unlinked-head-${runSuffix}`,
+      'UnlinkedHead',
+    )
+    await link(vacantReqAcc, requester)
+    await membership(vacantReqAcc, vacantDept, true, false)
+
+    // ── orgDm: direct_manager regression control (normalized is_manager) ──
+    const dmInt = await seedIntegration(orgDm, `s7-3-dm-int-${runSuffix}`, `corp-dm-${runSuffix}`)
+    const dmDept = await seedDept(dmInt, `dept-dm-${runSuffix}`, 'Dm Eng', {})
+    const dmReqAcc = await seedAccount(dmInt, `ext-req-dm-${runSuffix}`, `key-req-dm-${runSuffix}`, 'ReqDm')
+    const dmMgrAcc = await seedAccount(dmInt, `ext-mgr-dm-${runSuffix}`, `key-mgr-dm-${runSuffix}`, 'MgrDm')
+    await link(dmReqAcc, requester)
+    await link(dmMgrAcc, managerHome)
+    await membership(dmReqAcc, dmDept, true, false)
+    await membership(dmMgrAcc, dmDept, false, true)
 
     // RBAC substrate for authz legs (real DB tables, not just JWT claims).
     await pool.query(
@@ -338,12 +422,13 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
        VALUES
          ($1, 'attendance:approve'),
          ($2, 'attendance:approve'),
-         ($3, 'attendance:admin'),
-         ($4, 'attendance:write'),
-         ($4, 'attendance:approve'),
-         ($4, 'attendance:admin')
+         ($3, 'attendance:approve'),
+         ($4, 'attendance:admin'),
+         ($5, 'attendance:write'),
+         ($5, 'attendance:approve'),
+         ($5, 'attendance:admin')
        ON CONFLICT DO NOTHING`,
-      [managerHome, otherApprover, adminActor, requester],
+      [headHome, managerHome, otherApprover, adminActor, requester],
     )
 
     const repoRoot = path.join(__dirname, '../../../../')
@@ -355,10 +440,11 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     })
     await server.start()
     const address = server.getAddress()
-    if (!address || typeof address === 'string') throw new Error('S7-2 server did not expose a TCP address.')
+    if (!address || typeof address === 'string') throw new Error('S7-3 server did not expose a TCP address.')
     baseUrl = `http://127.0.0.1:${address.port}`
 
     adminToken = await devToken(requester, 'user', 'attendance:admin,attendance:write,attendance:approve')
+    headToken = await devToken(headHome, 'user', 'attendance:approve')
     managerToken = await devToken(managerHome, 'user', 'attendance:approve')
     otherToken = await devToken(otherApprover, 'user', 'attendance:approve')
     adminActorToken = await devToken(adminActor, 'user', 'attendance:admin')
@@ -370,7 +456,7 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
         if (createdRequestIds.length > 0) {
           await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
         }
-        for (const oid of [orgHome, orgForeign, orgUnlinked, orgFreeze, orgAuthz, orgFlagOff]) {
+        for (const oid of [orgHome, orgForeign, orgVacant, orgSelf, orgFreeze, orgAuthz, orgFlagOff, orgDm]) {
           await pool.query('DELETE FROM attendance_requests WHERE org_id = $1', [oid]).catch(() => undefined)
           await pool.query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [oid]).catch(() => undefined)
         }
@@ -403,16 +489,16 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  // ── Authoring: S7-2 makes direct_manager available when flag ON ──
-  it('AUTHORING: flag ON + direct_manager accepted (S7-2 implements the kind)', async () => {
+  // ── Authoring: S7-3 makes dept_head available when flag ON ──
+  it('AUTHORING: flag ON + dept_head accepted (S7-3 implements the kind)', async () => {
     setFlag(true)
     const res = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
       method: 'POST',
       headers: authHeaders(adminToken),
       body: JSON.stringify({
-        name: `s7-2-dm-flow-${runSuffix}`,
+        name: `s7-3-dh-flow-${runSuffix}`,
         requestType: 'time_correction',
-        steps: [{ kind: 'direct_manager' }],
+        steps: [{ kind: 'dept_head' }],
         orgId: orgHome,
         isActive: true,
       }),
@@ -421,7 +507,7 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     const id = (res.body as { data?: { id?: string } }).data?.id
     if (id) createdFlowIds.push(id)
     const steps = (res.body as { data?: { steps?: unknown[] } }).data?.steps
-    expect(steps).toEqual([{ name: undefined, kind: 'direct_manager' }])
+    expect(steps).toEqual([{ name: undefined, kind: 'dept_head' }])
   })
 
   it('AUTHORING: manager_at_level still UNAVAILABLE (S7-4 not shipped)', async () => {
@@ -430,7 +516,7 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       method: 'POST',
       headers: authHeaders(adminToken),
       body: JSON.stringify({
-        name: `s7-2-mal-unavail-${runSuffix}`,
+        name: `s7-3-mal-unavail-${runSuffix}`,
         requestType: 'time_correction',
         steps: [{ kind: 'manager_at_level', level: 1 }],
         orgId: orgHome,
@@ -441,49 +527,14 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
   })
 
-  // ── S7-1 NITs folded ──
-  it('NIT: dynamic + empty approverUserIds:[] → 422 MIXED (key-shape constraint)', async () => {
-    setFlag(true)
-    const res = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
-      method: 'POST',
-      headers: authHeaders(adminToken),
-      body: JSON.stringify({
-        name: `s7-2-mixed-empty-${runSuffix}`,
-        requestType: 'time_correction',
-        steps: [{ kind: 'direct_manager', approverUserIds: [] }],
-        orgId: orgHome,
-        isActive: true,
-      }),
-    })
-    expect(res.status, res.raw).toBe(422)
-    expect(errorCode(res)).toBe('APPROVAL_STEP_STATIC_DYNAMIC_MIXED')
-  })
-
-  it('NIT: non-string kind (number) → 422 APPROVAL_STEP_KIND_INVALID (not zod 400)', async () => {
-    setFlag(true)
-    const res = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
-      method: 'POST',
-      headers: authHeaders(adminToken),
-      body: JSON.stringify({
-        name: `s7-2-nonstr-kind-${runSuffix}`,
-        requestType: 'time_correction',
-        steps: [{ kind: 123 }],
-        orgId: orgHome,
-        isActive: true,
-      }),
-    })
-    expect(res.status, res.raw).toBe(422)
-    expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_INVALID')
-  })
-
   // ── Linked resolution + freeze + assignment ──
-  it('RUNTIME create: linked direct_manager freezes managerId and builds user assignment', async () => {
+  it('RUNTIME create: linked dept_head freezes deptHeadId and builds user assignment', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
-    await seedFlow(orgHome, 'time_correction', [{ kind: 'direct_manager' }], `s7-2-linked-${runSuffix}`)
+    await seedFlow(orgHome, 'time_correction', [{ kind: 'dept_head' }], `s7-3-linked-${runSuffix}`)
 
-    const workDate = '2026-06-01'
-    const res = await createRequest(orgHome, adminToken, workDate, 's7-2 linked resolution')
+    const workDate = '2026-07-01'
+    const res = await createRequest(orgHome, adminToken, workDate, 's7-3 linked resolution')
     expect(res.status, res.raw).toBe(201)
     const requestId = requestIdFrom(res) as string
     expect(requestId).toBeTruthy()
@@ -500,9 +551,8 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       'SELECT requester_snapshot, current_node_key FROM approval_instances WHERE id = $1',
       [instanceId],
     )
-    const snap = inst.rows[0].requester_snapshot as { id?: string; managerId?: string }
-    // Normalized is_manager (managerHome) wins over legacy leader_in_dept (managerAlt).
-    expect(snap.managerId).toBe(managerHome)
+    const snap = inst.rows[0].requester_snapshot as { id?: string; deptHeadId?: string }
+    expect(snap.deptHeadId).toBe(headHome)
     expect(snap.id).toBe(requester)
 
     const assignments = await (pool as Pool).query(
@@ -514,7 +564,7 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     expect(assignments.rows).toHaveLength(1)
     expect(assignments.rows[0]).toMatchObject({
       assignment_type: 'user',
-      assignee_id: managerHome,
+      assignee_id: headHome,
     })
     // Must NOT have fallen through to admin/source_queue.
     expect(assignments.rows.some((r) => r.assignment_type === 'source_queue')).toBe(false)
@@ -522,18 +572,13 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
   })
 
   // ── Org anchor: two orgs, one local user ──
-  it('ORG-ANCHOR: two-org/one-local-user resolves manager from the requesting org only', async () => {
+  it('ORG-ANCHOR: two-org/one-local-user resolves dept head from the requesting org only', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
-    // orgHome flow (already seeded above is leave+direct_manager; ensure one is active for leave).
-    // Create against orgHome — must get managerHome, NEVER managerForeign (even though foreign
-    // account is more recently updated and would win the unscoped pick).
-    const workDate = '2026-06-02'
-    // Deactivate any leftover leave flows on orgHome except we already have one; create a fresh one
-    // in case the prior test's flow is fine.
-    await seedFlow(orgHome, 'time_correction', [{ kind: 'direct_manager' }], `s7-2-anchor-${runSuffix}`)
+    const workDate = '2026-07-02'
+    await seedFlow(orgHome, 'time_correction', [{ kind: 'dept_head' }], `s7-3-anchor-${runSuffix}`)
 
-    const res = await createRequest(orgHome, adminToken, workDate, 's7-2 org anchor')
+    const res = await createRequest(orgHome, adminToken, workDate, 's7-3 org anchor')
     expect(res.status, res.raw).toBe(201)
     const requestId = requestIdFrom(res) as string
     createdRequestIds.push(requestId)
@@ -546,72 +591,83 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     const inst = await (pool as Pool).query('SELECT requester_snapshot FROM approval_instances WHERE id = $1', [
       instanceId,
     ])
-    const snap = inst.rows[0].requester_snapshot as { managerId?: string }
-    expect(snap.managerId).toBe(managerHome)
-    expect(snap.managerId).not.toBe(managerForeign)
+    const snap = inst.rows[0].requester_snapshot as { deptHeadId?: string }
+    expect(snap.deptHeadId).toBe(headHome)
+    expect(snap.deptHeadId).not.toBe(headForeign)
   })
 
-  // ── Unlinked block-with-error + zero persistence ──
-  it('UNLINKED: direct_manager create fails 422 with ZERO attendance_requests / approval rows', async () => {
+  // ── Vacant/unlinked head block-with-error + zero persistence ──
+  it('VACANT: unlinked dept head create fails 422 with ZERO attendance_requests / approval rows', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
-    // Purely-local user with no directory link in orgUnlinked.
-    const unlinkedUser = `s7-2-unlinked-user-${runSuffix}`
-    await seedUser(unlinkedUser)
-    userIds.push(unlinkedUser)
-    await (pool as Pool).query(
-      `INSERT INTO user_permissions (user_id, permission_code)
-       VALUES ($1, 'attendance:write'), ($1, 'attendance:admin')
-       ON CONFLICT DO NOTHING`,
-      [unlinkedUser],
-    )
-    await seedFlow(orgUnlinked, 'time_correction', [{ kind: 'direct_manager' }], `s7-2-unlinked-${runSuffix}`)
+    await seedFlow(orgVacant, 'time_correction', [{ kind: 'dept_head' }], `s7-3-vacant-${runSuffix}`)
 
-    const unlinkedToken = await devToken(unlinkedUser, 'user', 'attendance:admin,attendance:write')
     const beforeReq = await (pool as Pool).query(
       'SELECT COUNT(*)::int AS n FROM attendance_requests WHERE org_id = $1',
-      [orgUnlinked],
+      [orgVacant],
     )
     const beforeInst = await (pool as Pool).query(
-      `SELECT COUNT(*)::int AS n FROM approval_instances WHERE business_key LIKE $1`,
-      [`attendance-request:%`],
+      `SELECT COUNT(*)::int AS n FROM approval_instances
+        WHERE (metadata->>'orgId' = $1 OR subject_snapshot->>'orgId' = $1)`,
+      [orgVacant],
+    )
+    const beforeAssign = await (pool as Pool).query(
+      `SELECT COUNT(*)::int AS n FROM approval_assignments aa
+         JOIN approval_instances ai ON ai.id = aa.instance_id
+        WHERE (ai.metadata->>'orgId' = $1 OR ai.subject_snapshot->>'orgId' = $1)`,
+      [orgVacant],
     )
 
-    const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
-      method: 'POST',
-      headers: authHeaders(unlinkedToken),
-      body: JSON.stringify({
-        orgId: orgUnlinked,
-        workDate: '2026-06-03',
-        requestType: 'time_correction',
-        requestedInAt: '2026-06-03T01:00:00Z',
-        requestedOutAt: '2026-06-03T10:00:00Z',
-        reason: 's7-2 unlinked block',
-      }),
-    })
+    const res = await createRequest(orgVacant, adminToken, '2026-07-03', 's7-3 vacant head block')
     expect(res.status, res.raw).toBe(422)
     expect(errorCode(res)).toBe('APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED')
 
     const afterReq = await (pool as Pool).query(
       'SELECT COUNT(*)::int AS n FROM attendance_requests WHERE org_id = $1',
-      [orgUnlinked],
+      [orgVacant],
+    )
+    const afterInst = await (pool as Pool).query(
+      `SELECT COUNT(*)::int AS n FROM approval_instances
+        WHERE (metadata->>'orgId' = $1 OR subject_snapshot->>'orgId' = $1)`,
+      [orgVacant],
+    )
+    const afterAssign = await (pool as Pool).query(
+      `SELECT COUNT(*)::int AS n FROM approval_assignments aa
+         JOIN approval_instances ai ON ai.id = aa.instance_id
+        WHERE (ai.metadata->>'orgId' = $1 OR ai.subject_snapshot->>'orgId' = $1)`,
+      [orgVacant],
     )
     expect(afterReq.rows[0].n).toBe(beforeReq.rows[0].n)
-    // No new instance for this org's request path (business_key contains the request id which was never written).
-    const afterInst = await (pool as Pool).query(
-      `SELECT COUNT(*)::int AS n FROM approval_instances WHERE business_key LIKE $1`,
-      [`attendance-request:%`],
-    )
     expect(afterInst.rows[0].n).toBe(beforeInst.rows[0].n)
+    expect(afterAssign.rows[0].n).toBe(beforeAssign.rows[0].n)
   })
 
-  // P2 fix: multi-step [static, direct_manager] must ALSO fail closed at create when manager is
-  // unresolvable — never persist step-0 and strand on advance.
-  it('UNLINKED multi-step [static, direct_manager]: create 422 + zero request/instance/assignment rows (org-scoped)', async () => {
+  // ── Self-exclusion ──
+  it('SELF-EXCLUSION: requester-as-dept-head fails 422 with zero persistence', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
-    const orgMulti = `s7-2-unlinked-multi-${runSuffix}`
-    const multiUser = `s7-2-unlinked-multi-user-${runSuffix}`
+    await seedFlow(orgSelf, 'time_correction', [{ kind: 'dept_head' }], `s7-3-self-${runSuffix}`)
+
+    const beforeReq = await (pool as Pool).query(
+      'SELECT COUNT(*)::int AS n FROM attendance_requests WHERE org_id = $1',
+      [orgSelf],
+    )
+    const res = await createRequest(orgSelf, adminToken, '2026-07-04', 's7-3 self-exclusion')
+    expect(res.status, res.raw).toBe(422)
+    expect(errorCode(res)).toBe('APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED')
+    const afterReq = await (pool as Pool).query(
+      'SELECT COUNT(*)::int AS n FROM attendance_requests WHERE org_id = $1',
+      [orgSelf],
+    )
+    expect(afterReq.rows[0].n).toBe(beforeReq.rows[0].n)
+  })
+
+  // ── Multi-step zero-persistence when later step is unresolvable ──
+  it('UNLINKED multi-step [static, dept_head]: create 422 + zero request/instance/assignment rows', async () => {
+    setFlag(true)
+    process.env.RBAC_BYPASS = 'true'
+    const orgMulti = `s7-3-unlinked-multi-${runSuffix}`
+    const multiUser = `s7-3-unlinked-multi-user-${runSuffix}`
     await seedUser(multiUser)
     userIds.push(multiUser)
     await (pool as Pool).query(
@@ -620,15 +676,14 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
        ON CONFLICT DO NOTHING`,
       [multiUser],
     )
-    // Static step 0 would have assigned multiUser; direct_manager at step 1 is unresolvable (no link).
     await seedFlow(
       orgMulti,
       'time_correction',
       [
         { name: 'S0', approverUserIds: [multiUser] },
-        { name: 'S1', kind: 'direct_manager' },
+        { name: 'S1', kind: 'dept_head' },
       ],
-      `s7-2-unlinked-multi-${runSuffix}`,
+      `s7-3-unlinked-multi-${runSuffix}`,
     )
 
     const multiToken = await devToken(multiUser, 'user', 'attendance:admin,attendance:write')
@@ -636,7 +691,6 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       'SELECT COUNT(*)::int AS n FROM attendance_requests WHERE org_id = $1',
       [orgMulti],
     )
-    // approval_instances store attendance org on metadata/subject_snapshot (no org_id column).
     const beforeInst = await (pool as Pool).query(
       `SELECT COUNT(*)::int AS n FROM approval_instances
         WHERE (metadata->>'orgId' = $1 OR subject_snapshot->>'orgId' = $1)`,
@@ -654,11 +708,11 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       headers: authHeaders(multiToken),
       body: JSON.stringify({
         orgId: orgMulti,
-        workDate: '2026-06-11',
+        workDate: '2026-07-05',
         requestType: 'time_correction',
-        requestedInAt: '2026-06-11T01:00:00Z',
-        requestedOutAt: '2026-06-11T10:00:00Z',
-        reason: 's7-2 unlinked multi-step block at create',
+        requestedInAt: '2026-07-05T01:00:00Z',
+        requestedOutAt: '2026-07-05T10:00:00Z',
+        reason: 's7-3 unlinked multi-step block at create',
       }),
     })
     expect(res.status, res.raw).toBe(422)
@@ -689,21 +743,21 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
   })
 
   // ── 2-step freeze after directory mutation ──
-  it('FREEZE: 2-step flow keeps step-2 assignee after directory manager mutation', async () => {
+  it('FREEZE: 2-step flow keeps step-2 assignee after directory dept-head mutation', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
     await seedFlow(
       orgFreeze,
       'time_correction',
       [
-        { name: 'S0', approverUserIds: [managerHome] },
-        { name: 'S1', kind: 'direct_manager' },
+        { name: 'S0', approverUserIds: [headHome] },
+        { name: 'S1', kind: 'dept_head' },
       ],
-      `s7-2-freeze-${runSuffix}`,
+      `s7-3-freeze-${runSuffix}`,
     )
 
-    const workDate = '2026-06-04'
-    const res = await createRequest(orgFreeze, adminToken, workDate, 's7-2 freeze')
+    const workDate = '2026-07-06'
+    const res = await createRequest(orgFreeze, adminToken, workDate, 's7-3 freeze')
     expect(res.status, res.raw).toBe(201)
     const requestId = requestIdFrom(res) as string
     createdRequestIds.push(requestId)
@@ -716,23 +770,19 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
 
     const snapBefore = (
       await (pool as Pool).query('SELECT requester_snapshot FROM approval_instances WHERE id = $1', [instanceId])
-    ).rows[0].requester_snapshot as { managerId?: string }
-    expect(snapBefore.managerId).toBe(managerHome)
+    ).rows[0].requester_snapshot as { deptHeadId?: string }
+    expect(snapBefore.deptHeadId).toBe(headHome)
 
-    // Mutate directory: flip is_manager from managerHome → managerAlt BEFORE step-1 advance.
+    // Mutate directory: swap dept_manager_userid_list to headAlt BEFORE step-1 advance.
     await (pool as Pool).query(
-      `UPDATE directory_account_departments SET is_manager = false
-        WHERE directory_account_id = $1 AND directory_department_id = $2`,
-      [freezeMgrAccountId, freezeDeptId],
-    )
-    await (pool as Pool).query(
-      `UPDATE directory_account_departments SET is_manager = true
-        WHERE directory_account_id = $1 AND directory_department_id = $2`,
-      [freezeAltAccountId, freezeDeptId],
+      `UPDATE directory_departments
+          SET raw = jsonb_set(COALESCE(raw, '{}'::jsonb), '{dept_manager_userid_list}', $1::jsonb)
+        WHERE id = $2`,
+      [JSON.stringify([freezeAltExternal]), freezeDeptId],
     )
 
-    // Step 0 assignee (managerHome) approves → advances to step 1 (direct_manager).
-    const approve = await act(requestId, managerToken, 'approve')
+    // Step 0 assignee (headHome) approves → advances to step 1 (dept_head).
+    const approve = await act(requestId, headToken, 'approve')
     expect(approve.status, approve.raw).toBe(200)
 
     const snapAfter = (
@@ -741,7 +791,7 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
         [instanceId],
       )
     ).rows[0]
-    expect((snapAfter.requester_snapshot as { managerId?: string }).managerId).toBe(managerHome)
+    expect((snapAfter.requester_snapshot as { deptHeadId?: string }).deptHeadId).toBe(headHome)
     expect(snapAfter.current_step).toBe(1)
     expect(snapAfter.current_node_key).toBe(NODE_KEY_1)
 
@@ -751,32 +801,43 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       [instanceId, NODE_KEY_1],
     )
     expect(assignments.rows).toEqual([
-      expect.objectContaining({ assignment_type: 'user', assignee_id: managerHome }),
+      expect.objectContaining({ assignment_type: 'user', assignee_id: headHome }),
     ])
-    // The mutated managerAlt must NOT be the assignee.
-    expect(assignments.rows.some((r) => r.assignee_id === managerAlt)).toBe(false)
+    // The mutated headAlt must NOT be the assignee.
+    expect(assignments.rows.some((r) => r.assignee_id === headAlt)).toBe(false)
   })
 
   // ── Dynamic assignment authorization (S7-0 re-run for this kind) ──
-  it('AUTHZ: dynamic user assignee can approve; unassigned scope-authorized actor 403s; admin override works', async () => {
+  it('AUTHZ: dynamic user assignee can approve/reject; unassigned scope-authorized actor 403s; admin override works', async () => {
     setFlag(true)
-    // Force real authorization (no RBAC bypass).
     process.env.RBAC_BYPASS = 'false'
     try {
-      await seedFlow(orgAuthz, 'time_correction', [{ kind: 'direct_manager' }], `s7-2-authz-${runSuffix}`)
-      // Seed directory for orgAuthz so create can freeze managerHome.
-      const authzInt = await seedIntegration(orgAuthz, `s7-2-authz-int-${runSuffix}`, `corp-authz-${runSuffix}`)
-      const authzDept = await seedDept(authzInt, `dept-authz-${runSuffix}`, 'Authz Eng')
-      const authzReqAcc = await seedAccount(authzInt, `ext-req-authz-${runSuffix}`, `key-req-authz-${runSuffix}`, 'ReqAuthz')
-      const authzMgrAcc = await seedAccount(authzInt, `ext-mgr-authz-${runSuffix}`, `key-mgr-authz-${runSuffix}`, 'MgrAuthz')
+      await seedFlow(orgAuthz, 'time_correction', [{ kind: 'dept_head' }], `s7-3-authz-${runSuffix}`)
+      const authzInt = await seedIntegration(orgAuthz, `s7-3-authz-int-${runSuffix}`, `corp-authz-${runSuffix}`)
+      const authzHeadExternal = `ext-head-authz-${runSuffix}`
+      const authzDept = await seedDept(authzInt, `dept-authz-${runSuffix}`, 'Authz Eng', {
+        dept_manager_userid_list: [authzHeadExternal],
+      })
+      const authzReqAcc = await seedAccount(
+        authzInt,
+        `ext-req-authz-${runSuffix}`,
+        `key-req-authz-${runSuffix}`,
+        'ReqAuthz',
+      )
+      const authzHeadAcc = await seedAccount(
+        authzInt,
+        authzHeadExternal,
+        `key-head-authz-${runSuffix}`,
+        'HeadAuthz',
+      )
       await link(authzReqAcc, requester)
-      await link(authzMgrAcc, managerHome)
+      await link(authzHeadAcc, headHome)
       await membership(authzReqAcc, authzDept, true, false)
-      await membership(authzMgrAcc, authzDept, false, true)
+      await membership(authzHeadAcc, authzDept, false, false)
 
       // Positive approve leg
-      const workDateA = '2026-06-05'
-      const createA = await createRequest(orgAuthz, adminToken, workDateA, 's7-2 authz approve')
+      const workDateA = '2026-07-07'
+      const createA = await createRequest(orgAuthz, adminToken, workDateA, 's7-3 authz approve')
       expect(createA.status, createA.raw).toBe(201)
       const requestIdA = requestIdFrom(createA) as string
       createdRequestIds.push(requestIdA)
@@ -785,18 +846,18 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       ).rows[0].approval_instance_id as string
       createdInstanceIds.push(instA)
 
-      // Negative: otherApprover holds attendance:approve (broad gate) but is NOT the manager.
+      // Negative: otherApprover holds attendance:approve (broad gate) but is NOT the dept head.
       const negApprove = await act(requestIdA, otherToken, 'approve')
       expect(negApprove.status, negApprove.raw).toBe(403)
       expect(errorCode(negApprove)).toBe('FORBIDDEN')
 
-      // Positive: managerHome is the frozen assignee.
-      const posApprove = await act(requestIdA, managerToken, 'approve')
+      // Positive: headHome is the frozen assignee.
+      const posApprove = await act(requestIdA, headToken, 'approve')
       expect(posApprove.status, posApprove.raw).toBe(200)
 
       // Reject legs on a fresh request.
-      const workDateB = '2026-06-06'
-      const createB = await createRequest(orgAuthz, adminToken, workDateB, 's7-2 authz reject')
+      const workDateB = '2026-07-08'
+      const createB = await createRequest(orgAuthz, adminToken, workDateB, 's7-3 authz reject')
       expect(createB.status, createB.raw).toBe(201)
       const requestIdB = requestIdFrom(createB) as string
       createdRequestIds.push(requestIdB)
@@ -809,12 +870,12 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       expect(negReject.status, negReject.raw).toBe(403)
       expect(errorCode(negReject)).toBe('FORBIDDEN')
 
-      const posReject = await act(requestIdB, managerToken, 'reject')
+      const posReject = await act(requestIdB, headToken, 'reject')
       expect(posReject.status, posReject.raw).toBe(200)
 
       // Admin override (not the assignee) on a third request — approve.
-      const workDateC = '2026-06-07'
-      const createC = await createRequest(orgAuthz, adminToken, workDateC, 's7-2 authz admin')
+      const workDateC = '2026-07-09'
+      const createC = await createRequest(orgAuthz, adminToken, workDateC, 's7-3 authz admin')
       expect(createC.status, createC.raw).toBe(201)
       const requestIdC = requestIdFrom(createC) as string
       createdRequestIds.push(requestIdC)
@@ -826,9 +887,9 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       const adminApprove = await act(requestIdC, adminActorToken, 'approve')
       expect(adminApprove.status, adminApprove.raw).toBe(200)
 
-      // P3: admin override reject (symmetric with approve — non-assignee admin still authorized).
-      const workDateD = '2026-06-12'
-      const createD = await createRequest(orgAuthz, adminToken, workDateD, 's7-2 authz admin reject')
+      // Admin override reject (symmetric).
+      const workDateD = '2026-07-10'
+      const createD = await createRequest(orgAuthz, adminToken, workDateD, 's7-3 authz admin reject')
       expect(createD.status, createD.raw).toBe(201)
       const requestIdD = requestIdFrom(createD) as string
       createdRequestIds.push(requestIdD)
@@ -845,16 +906,16 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
   })
 
   // ── Flag-off create ──
-  it('FLAG-OFF create: dynamic flow fails-closed with zero rows', async () => {
+  it('FLAG-OFF create: dynamic dept_head flow fails-closed with zero rows', async () => {
     setFlag(false)
     process.env.RBAC_BYPASS = 'true'
-    await seedFlow(orgFlagOff, 'time_correction', [{ kind: 'direct_manager' }], `s7-2-flagoff-create-${runSuffix}`)
+    await seedFlow(orgFlagOff, 'time_correction', [{ kind: 'dept_head' }], `s7-3-flagoff-create-${runSuffix}`)
 
     const before = await (pool as Pool).query(
       'SELECT COUNT(*)::int AS n FROM attendance_requests WHERE org_id = $1',
       [orgFlagOff],
     )
-    const res = await createRequest(orgFlagOff, adminToken, '2026-06-08', 's7-2 flag-off create')
+    const res = await createRequest(orgFlagOff, adminToken, '2026-07-11', 's7-3 flag-off create')
     expect(res.status, res.raw).toBe(422)
     expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
     const after = await (pool as Pool).query(
@@ -864,32 +925,46 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     expect(after.rows[0].n).toBe(before.rows[0].n)
   })
 
-  // ── Flag-off advance rollback ──
-  it('FLAG-OFF advance: step-1 approve fails and rolls back (instance still at step 0)', async () => {
+  // ── Flag-off advance rollback (design-lock §4.1 path (b) re-verified for dept_head) ──
+  it('FLAG-OFF advance: step-0 approve into dept_head fails and rolls back (instance still at step 0)', async () => {
     process.env.RBAC_BYPASS = 'true'
     setFlag(true)
-    const orgAdv = `s7-2-adv-${runSuffix}`
-    // Directory for this org so create succeeds under flag ON.
-    const advInt = await seedIntegration(orgAdv, `s7-2-adv-int-${runSuffix}`, `corp-adv-${runSuffix}`)
-    const advDept = await seedDept(advInt, `dept-adv-${runSuffix}`, 'Adv Eng')
-    const advReqAcc = await seedAccount(advInt, `ext-req-adv-${runSuffix}`, `key-req-adv-${runSuffix}`, 'ReqAdv')
-    const advMgrAcc = await seedAccount(advInt, `ext-mgr-adv-${runSuffix}`, `key-mgr-adv-${runSuffix}`, 'MgrAdv')
+    const orgAdv = `s7-3-adv-${runSuffix}`
+    // Directory for this org so create freezes dept_head successfully under flag ON.
+    const advInt = await seedIntegration(orgAdv, `s7-3-adv-int-${runSuffix}`, `corp-adv-${runSuffix}`)
+    const advHeadExternal = `ext-head-adv-${runSuffix}`
+    const advDept = await seedDept(advInt, `dept-adv-${runSuffix}`, 'Adv Eng', {
+      dept_manager_userid_list: [advHeadExternal],
+    })
+    const advReqAcc = await seedAccount(
+      advInt,
+      `ext-req-adv-${runSuffix}`,
+      `key-req-adv-${runSuffix}`,
+      'ReqAdv',
+    )
+    const advHeadAcc = await seedAccount(
+      advInt,
+      advHeadExternal,
+      `key-head-adv-${runSuffix}`,
+      'HeadAdv',
+    )
     await link(advReqAcc, requester)
-    await link(advMgrAcc, managerHome)
+    await link(advHeadAcc, headHome)
     await membership(advReqAcc, advDept, true, false)
-    await membership(advMgrAcc, advDept, false, true)
+    await membership(advHeadAcc, advDept, false, false)
 
+    // 2-step: static step 0 (headHome) → dynamic dept_head step 1.
     await seedFlow(
       orgAdv,
       'time_correction',
       [
-        { name: 'S0', approverUserIds: [managerHome] },
-        { name: 'S1', kind: 'direct_manager' },
+        { name: 'S0', approverUserIds: [headHome] },
+        { name: 'S1', kind: 'dept_head' },
       ],
-      `s7-2-flagoff-adv-${runSuffix}`,
+      `s7-3-flagoff-adv-${runSuffix}`,
     )
 
-    const create = await createRequest(orgAdv, adminToken, '2026-06-09', 's7-2 flag-off advance')
+    const create = await createRequest(orgAdv, adminToken, '2026-07-15', 's7-3 flag-off advance')
     expect(create.status, create.raw).toBe(201)
     const requestId = requestIdFrom(create) as string
     createdRequestIds.push(requestId)
@@ -898,51 +973,81 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     ).rows[0].approval_instance_id as string
     createdInstanceIds.push(instanceId)
 
-    // Flip flag OFF before step advance.
+    // Freeze succeeded under flag ON (dept head present in snapshot).
+    const snapBefore = (
+      await (pool as Pool).query('SELECT requester_snapshot FROM approval_instances WHERE id = $1', [instanceId])
+    ).rows[0].requester_snapshot as { deptHeadId?: string }
+    expect(snapBefore.deptHeadId).toBe(headHome)
+
+    // Flip flag OFF before step advance — §4.1 path (b): next dynamic step is unavailable.
     setFlag(false)
-    const approve = await act(requestId, managerToken, 'approve')
-    expect(approve.status, approve.raw).toBe(422)
-    expect(errorCode(approve)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
+    try {
+      const approve = await act(requestId, headToken, 'approve')
+      expect(approve.status, approve.raw).toBe(422)
+      expect(errorCode(approve)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
 
-    const inst = await (pool as Pool).query(
-      'SELECT status, current_step, current_node_key, version FROM approval_instances WHERE id = $1',
-      [instanceId],
-    )
-    expect(inst.rows[0].status).toBe('pending')
-    expect(inst.rows[0].current_step).toBe(0)
-    expect(inst.rows[0].current_node_key).toBe(NODE_KEY_0)
-    // No approval_records appended for the failed advance.
-    const records = await (pool as Pool).query(
-      'SELECT COUNT(*)::int AS n FROM approval_records WHERE instance_id = $1',
-      [instanceId],
-    )
-    expect(records.rows[0].n).toBe(0)
-    // Active assignment still step 0's static assignee.
-    const assignments = await (pool as Pool).query(
-      `SELECT assignment_type, assignee_id FROM approval_assignments
-        WHERE instance_id = $1 AND is_active = TRUE`,
-      [instanceId],
-    )
-    expect(assignments.rows).toEqual([
-      expect.objectContaining({ assignment_type: 'user', assignee_id: managerHome }),
-    ])
+      // Transaction fully rolls back: instance still pending at step 0.
+      const inst = await (pool as Pool).query(
+        'SELECT status, current_step, current_node_key, version FROM approval_instances WHERE id = $1',
+        [instanceId],
+      )
+      expect(inst.rows[0].status).toBe('pending')
+      expect(inst.rows[0].current_step).toBe(0)
+      expect(inst.rows[0].current_node_key).toBe(NODE_KEY_0)
 
-    await (pool as Pool).query('DELETE FROM attendance_requests WHERE org_id = $1', [orgAdv]).catch(() => undefined)
-    await (pool as Pool).query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [orgAdv]).catch(() => undefined)
+      // Attendance request remains pending (no status advance / finalization).
+      const reqRow = await (pool as Pool).query(
+        'SELECT status FROM attendance_requests WHERE id = $1',
+        [requestId],
+      )
+      expect(reqRow.rows[0].status).toBe('pending')
+
+      // No approval_records appended for the failed advance.
+      const records = await (pool as Pool).query(
+        'SELECT COUNT(*)::int AS n FROM approval_records WHERE instance_id = $1',
+        [instanceId],
+      )
+      expect(records.rows[0].n).toBe(0)
+
+      // Original step-0 assignment remains the only active assignment; no step-1 rows.
+      const active = await (pool as Pool).query(
+        `SELECT assignment_type, assignee_id, node_key FROM approval_assignments
+          WHERE instance_id = $1 AND is_active = TRUE`,
+        [instanceId],
+      )
+      expect(active.rows).toEqual([
+        expect.objectContaining({
+          assignment_type: 'user',
+          assignee_id: headHome,
+          node_key: NODE_KEY_0,
+        }),
+      ])
+      const step1Any = await (pool as Pool).query(
+        `SELECT COUNT(*)::int AS n FROM approval_assignments
+          WHERE instance_id = $1 AND node_key = $2`,
+        [instanceId, NODE_KEY_1],
+      )
+      expect(step1Any.rows[0].n).toBe(0)
+    } finally {
+      // Restore flag for subsequent legs (suite afterAll also restores prevFlag).
+      setFlag(true)
+      await (pool as Pool).query('DELETE FROM attendance_requests WHERE org_id = $1', [orgAdv]).catch(() => undefined)
+      await (pool as Pool).query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [orgAdv]).catch(() => undefined)
+    }
   })
 
   // ── Legacy static byte-identity under flag off ──
   it('LEGACY static: flag OFF flow with no dynamic kind still creates + assigns statically', async () => {
     setFlag(false)
     process.env.RBAC_BYPASS = 'true'
-    const orgLegacy = `s7-2-legacy-${runSuffix}`
+    const orgLegacy = `s7-3-legacy-${runSuffix}`
     await seedFlow(
       orgLegacy,
       'time_correction',
-      [{ name: 'LM', approverUserIds: [managerHome] }],
-      `s7-2-legacy-${runSuffix}`,
+      [{ name: 'LM', approverUserIds: [headHome] }],
+      `s7-3-legacy-${runSuffix}`,
     )
-    const res = await createRequest(orgLegacy, adminToken, '2026-06-10', 's7-2 legacy static')
+    const res = await createRequest(orgLegacy, adminToken, '2026-07-12', 's7-3 legacy static')
     expect(res.status, res.raw).toBe(201)
     const requestId = requestIdFrom(res) as string
     createdRequestIds.push(requestId)
@@ -953,7 +1058,8 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     const snap = (
       await (pool as Pool).query('SELECT requester_snapshot FROM approval_instances WHERE id = $1', [instanceId])
     ).rows[0].requester_snapshot as Record<string, unknown>
-    // Legacy snapshot shape: id/name only (no managerId freeze when no dynamic kind).
+    // Legacy snapshot shape: id/name only (no deptHeadId freeze when no dynamic kind).
+    expect(snap.deptHeadId).toBeUndefined()
     expect(snap.managerId).toBeUndefined()
     expect(snap.id).toBe(requester)
     const assignments = await (pool as Pool).query(
@@ -962,9 +1068,89 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
       [instanceId],
     )
     expect(assignments.rows).toEqual([
-      expect.objectContaining({ assignment_type: 'user', assignee_id: managerHome }),
+      expect.objectContaining({ assignment_type: 'user', assignee_id: headHome }),
     ])
     await (pool as Pool).query('DELETE FROM attendance_requests WHERE org_id = $1', [orgLegacy]).catch(() => undefined)
     await (pool as Pool).query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [orgLegacy]).catch(() => undefined)
+  })
+
+  // ── direct_manager regression control ──
+  it('REGRESSION: direct_manager still freezes managerId and assigns (S7-2 preserved)', async () => {
+    setFlag(true)
+    process.env.RBAC_BYPASS = 'true'
+    await seedFlow(orgDm, 'time_correction', [{ kind: 'direct_manager' }], `s7-3-dm-reg-${runSuffix}`)
+
+    const res = await createRequest(orgDm, adminToken, '2026-07-13', 's7-3 dm regression')
+    expect(res.status, res.raw).toBe(201)
+    const requestId = requestIdFrom(res) as string
+    createdRequestIds.push(requestId)
+    const instanceId = (
+      await (pool as Pool).query('SELECT approval_instance_id FROM attendance_requests WHERE id = $1', [requestId])
+    ).rows[0].approval_instance_id as string
+    createdInstanceIds.push(instanceId)
+    const snap = (
+      await (pool as Pool).query('SELECT requester_snapshot FROM approval_instances WHERE id = $1', [instanceId])
+    ).rows[0].requester_snapshot as { managerId?: string; deptHeadId?: string }
+    expect(snap.managerId).toBe(managerHome)
+    expect(snap.deptHeadId).toBeUndefined()
+    const assignments = await (pool as Pool).query(
+      `SELECT assignment_type, assignee_id FROM approval_assignments
+        WHERE instance_id = $1 AND is_active = TRUE`,
+      [instanceId],
+    )
+    expect(assignments.rows).toEqual([
+      expect.objectContaining({ assignment_type: 'user', assignee_id: managerHome }),
+    ])
+  })
+
+  // ── Mixed direct_manager + dept_head flow freezes both ──
+  it('MIXED: direct_manager + dept_head freezes both and assigns step 0 from manager', async () => {
+    setFlag(true)
+    process.env.RBAC_BYPASS = 'true'
+    await seedFlow(
+      orgHome,
+      'time_correction',
+      [
+        { name: 'S0', kind: 'direct_manager' },
+        { name: 'S1', kind: 'dept_head' },
+      ],
+      `s7-3-mixed-${runSuffix}`,
+    )
+
+    const res = await createRequest(orgHome, adminToken, '2026-07-14', 's7-3 mixed flow')
+    expect(res.status, res.raw).toBe(201)
+    const requestId = requestIdFrom(res) as string
+    createdRequestIds.push(requestId)
+    const instanceId = (
+      await (pool as Pool).query('SELECT approval_instance_id FROM attendance_requests WHERE id = $1', [requestId])
+    ).rows[0].approval_instance_id as string
+    createdInstanceIds.push(instanceId)
+
+    const snap = (
+      await (pool as Pool).query('SELECT requester_snapshot FROM approval_instances WHERE id = $1', [instanceId])
+    ).rows[0].requester_snapshot as { managerId?: string; deptHeadId?: string }
+    expect(snap.managerId).toBe(managerHome)
+    expect(snap.deptHeadId).toBe(headHome)
+
+    const step0 = await (pool as Pool).query(
+      `SELECT assignment_type, assignee_id FROM approval_assignments
+        WHERE instance_id = $1 AND is_active = TRUE AND node_key = $2`,
+      [instanceId, NODE_KEY_0],
+    )
+    expect(step0.rows).toEqual([
+      expect.objectContaining({ assignment_type: 'user', assignee_id: managerHome }),
+    ])
+
+    // Advance: manager approves → step 1 uses frozen dept head (not live).
+    const approve = await act(requestId, managerToken, 'approve')
+    expect(approve.status, approve.raw).toBe(200)
+    const step1 = await (pool as Pool).query(
+      `SELECT assignment_type, assignee_id FROM approval_assignments
+        WHERE instance_id = $1 AND is_active = TRUE AND node_key = $2`,
+      [instanceId, NODE_KEY_1],
+    )
+    expect(step1.rows).toEqual([
+      expect.objectContaining({ assignment_type: 'user', assignee_id: headHome }),
+    ])
   })
 })

@@ -152,8 +152,8 @@ function getApprovalStepKind(step) {
 // Static (kind-less) steps return early: their legacy tolerance (unmodeled keys stripped by zod, A1
 // round-trip) is deliberately unchanged. The level UPPER bound uses the HOST-resolved MAX
 // (context.services.approvalAssigneeResolver.maxManagerChainLevels), never a plugin-parsed env — one
-// source, two surfaces, no drift. S7-2 populates `implementedKinds: ['direct_manager']` only —
-// other well-formed dynamic kinds still land on (5) until S7-3/S7-4 wire them.
+// source, two surfaces, no drift. S7-2/S7-3 populate `direct_manager` + `dept_head`;
+// other well-formed dynamic kinds still land on (5) until S7-4 wires them.
 function assertApprovalStepsContract(steps, context) {
   if (!Array.isArray(steps)) return
   const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
@@ -238,7 +238,8 @@ function assertApprovalStepsContract(steps, context) {
 // S7-1 §4.1 RUNTIME fail-closed gate. Given NORMALIZED flow steps (post-normalizeApprovalSteps, which
 // preserves a dynamic step's `kind`), throw HttpError(422) if a dynamic step is encountered while the
 // trigger set holds: flag OFF, OR the context.services resolver port is absent, OR the kind is not
-// resolver-implemented (S7-2: only `direct_manager`). A flow with NO dynamic step is a no-op (byte-identical legacy).
+// resolver-implemented (S7-2/S7-3: `direct_manager` + `dept_head`). A flow with NO dynamic step is a
+// no-op (byte-identical legacy).
 //   • request-create: pass no `onlyStepIndex` → WHOLE-flow scan, so a later dynamic step cannot start a
 //     flow and then strand mid-flight.
 //   • step-advance:   pass `onlyStepIndex = nextStepIndex` → check just the step about to become active.
@@ -20718,11 +20719,72 @@ function buildAttendanceApprovalNodeKey(stepIndex) {
 }
 
 // S7-2: does the (normalized) flow carry a direct_manager step? Used to decide whether to call the
-// org-scoped resolver port once at request-create for freeze (§3.4). Other dynamic kinds (S7-3/4)
-// will extend this as they land.
+// org-scoped resolver port once at request-create for freeze (§3.4).
 function flowStepsNeedDirectManagerFreeze(flowSteps) {
   const steps = normalizeApprovalSteps(flowSteps)
   return steps.some((step) => getApprovalStepKind(step) === 'direct_manager')
+}
+
+// S7-3: does the (normalized) flow carry a dept_head step? Used to decide whether to call the
+// org-scoped resolver port once at request-create for freeze (§3.4).
+function flowStepsNeedDeptHeadFreeze(flowSteps) {
+  const steps = normalizeApprovalSteps(flowSteps)
+  return steps.some((step) => getApprovalStepKind(step) === 'dept_head')
+}
+
+// Shared create-time port resolve for one dynamic kind. Port missing / unimplemented / throw map to
+// APPROVAL_STEP_KIND_UNAVAILABLE (§4.1); unresolved / empty / self map to
+// APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED (§4). Never called at step-advance.
+async function resolveAttendanceDynamicKindFreeze({
+  orgId,
+  userId,
+  kind,
+  context,
+  unresolvedMessage,
+}) {
+  const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
+  if (!port || typeof port.resolve !== 'function') {
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      `动态审批人类型 "${kind}" 无法解析(resolver 端口缺失)——请求已阻断(fail-closed)`
+    )
+  }
+  let result
+  try {
+    result = await port.resolve(String(orgId ?? ''), {
+      kind,
+      requesterUserId: String(userId ?? ''),
+    })
+  } catch (err) {
+    if (err instanceof HttpError) throw err
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      `动态审批人类型 "${kind}" 无法解析(resolver 调用失败)——请求已阻断(fail-closed)`
+    )
+  }
+  if (result && result.status === 'unimplemented') {
+    throw new HttpError(
+      422,
+      'APPROVAL_STEP_KIND_UNAVAILABLE',
+      `动态审批人类型 "${kind}" 当前不可用(能力未启用或无对应 resolver)`
+    )
+  }
+  if (result && result.status === 'resolved' && Array.isArray(result.assignees)) {
+    const hit = result.assignees.find(
+      (a) => a && a.assignmentType === 'user' && typeof a.assigneeId === 'string' && a.assigneeId.trim()
+    )
+    if (hit) {
+      const assigneeId = hit.assigneeId.trim()
+      // Defense-in-depth self-exclusion (port also excludes); self is unresolvable, not freezable.
+      if (assigneeId && assigneeId !== String(userId ?? '').trim()) {
+        return assigneeId
+      }
+    }
+  }
+  // unresolved / empty / self — hard block at create (whole-flow), never empty freeze + later strand.
+  throw new HttpError(422, 'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED', unresolvedMessage)
 }
 
 // S7-2 §3.4 CREATE-TIME freeze: call the host-injected org-scoped port ONCE for a flow that contains
@@ -20736,53 +20798,40 @@ function flowStepsNeedDirectManagerFreeze(flowSteps) {
 // APPROVAL_STEP_KIND_UNAVAILABLE (§4.1 resolver-unavailable), never legacy admin fallback.
 async function resolveAttendanceDirectManagerFreeze({ orgId, userId, flowSteps, context }) {
   if (!flowStepsNeedDirectManagerFreeze(flowSteps)) return {}
-  const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
-  if (!port || typeof port.resolve !== 'function') {
-    throw new HttpError(
-      422,
-      'APPROVAL_STEP_KIND_UNAVAILABLE',
-      '动态审批人类型 "direct_manager" 无法解析(resolver 端口缺失)——请求已阻断(fail-closed)'
-    )
-  }
-  let result
-  try {
-    result = await port.resolve(String(orgId ?? ''), {
-      kind: 'direct_manager',
-      requesterUserId: String(userId ?? ''),
-    })
-  } catch (err) {
-    if (err instanceof HttpError) throw err
-    throw new HttpError(
-      422,
-      'APPROVAL_STEP_KIND_UNAVAILABLE',
-      '动态审批人类型 "direct_manager" 无法解析(resolver 调用失败)——请求已阻断(fail-closed)'
-    )
-  }
-  if (result && result.status === 'unimplemented') {
-    throw new HttpError(
-      422,
-      'APPROVAL_STEP_KIND_UNAVAILABLE',
-      '动态审批人类型 "direct_manager" 当前不可用(能力未启用或无对应 resolver)'
-    )
-  }
-  if (result && result.status === 'resolved' && Array.isArray(result.assignees)) {
-    const hit = result.assignees.find(
-      (a) => a && a.assignmentType === 'user' && typeof a.assigneeId === 'string' && a.assigneeId.trim()
-    )
-    if (hit) {
-      const managerId = hit.assigneeId.trim()
-      // Defense-in-depth self-exclusion (port also excludes); self is unresolvable, not freezable.
-      if (managerId && managerId !== String(userId ?? '').trim()) {
-        return { managerId }
-      }
-    }
-  }
-  // unresolved / empty / self — hard block at create (whole-flow), never empty freeze + later strand.
-  throw new HttpError(
-    422,
-    'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
-    '动态审批人类型 "direct_manager" 无法解析(无关联上级、上级未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列'
-  )
+  const managerId = await resolveAttendanceDynamicKindFreeze({
+    orgId,
+    userId,
+    kind: 'direct_manager',
+    context,
+    unresolvedMessage:
+      '动态审批人类型 "direct_manager" 无法解析(无关联上级、上级未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列',
+  })
+  return { managerId }
+}
+
+// S7-3 §3.4 CREATE-TIME freeze: call the host-injected org-scoped port ONCE for a flow that contains
+// `dept_head`, and return `{ deptHeadId }` on success. Never called at step-advance.
+// Whole-flow posture mirrors S7-2: unresolved / empty / self → 422 APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED
+// before any write; port missing / unimplemented / throw → APPROVAL_STEP_KIND_UNAVAILABLE.
+async function resolveAttendanceDeptHeadFreeze({ orgId, userId, flowSteps, context }) {
+  if (!flowStepsNeedDeptHeadFreeze(flowSteps)) return {}
+  const deptHeadId = await resolveAttendanceDynamicKindFreeze({
+    orgId,
+    userId,
+    kind: 'dept_head',
+    context,
+    unresolvedMessage:
+      '动态审批人类型 "dept_head" 无法解析(无关联部门主管、主管未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列',
+  })
+  return { deptHeadId }
+}
+
+// S7-2 + S7-3: freeze every dynamic org relation the flow requires. A flow with both
+// direct_manager and dept_head freezes BOTH; either unresolved kind fails closed with zero persistence.
+async function resolveAttendanceOrgRelationsFreeze({ orgId, userId, flowSteps, context }) {
+  const directManager = await resolveAttendanceDirectManagerFreeze({ orgId, userId, flowSteps, context })
+  const deptHead = await resolveAttendanceDeptHeadFreeze({ orgId, userId, flowSteps, context })
+  return { ...directManager, ...deptHead }
 }
 
 function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0, requesterSnapshot = null) {
@@ -20834,9 +20883,33 @@ function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0, requesterS
     )
   }
 
+  // S7-3: dept_head reads ONLY the creation-frozen requesterSnapshot.deptHeadId (§3.4) — never a
+  // live directory re-query, never the host port again. Missing / blank / self ⇒
+  // APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED; NEVER the legacy admin/source_queue fallback.
+  if (dynamicKind === 'dept_head') {
+    const snap = requesterSnapshot && typeof requesterSnapshot === 'object' ? requesterSnapshot : null
+    const deptHeadId = snap && typeof snap.deptHeadId === 'string' ? snap.deptHeadId.trim() : ''
+    const requesterId = snap && typeof snap.id === 'string' ? snap.id.trim() : ''
+    if (deptHeadId && deptHeadId !== requesterId) {
+      pushAssignment('user', deptHeadId, {
+        source: 'attendance',
+        kind: 'dept_head',
+        stepName: currentStep?.name ?? null,
+        resolvedFrom: { kind: 'dept_head' },
+      })
+      return assignments
+    }
+    throw new HttpError(
+      422,
+      'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED',
+      '动态审批人类型 "dept_head" 无法解析(无关联部门主管、主管未绑定本地用户或解析到本人)——请求已阻断(fail-closed)，不得回退到管理员兜底队列'
+    )
+  }
+
   // S7-1 §4.1 defense-in-depth: any OTHER dynamic kind must NEVER fall through to the legacy
   // admin-queue fallback (that fallback is reserved for LEGACY static steps with empty approver
-  // arrays). S7-3/S7-4 will replace this arm per-kind; until then, fail closed with a distinct code.
+  // arrays). S7-4 will replace this arm for manager_at_level; until then, fail closed with a
+  // distinct code.
   if (dynamicKind) {
     throw new HttpError(
       422,
@@ -20891,12 +20964,16 @@ function buildAttendanceApprovalInstancePayload({
     minutes: draft?.metadata?.minutes ?? null,
   }
 
-  // S7-2 §3.4: freeze create-time org relations (managerId today; deptHeadId/managerChainIds in S7-3/4)
+  // S7-2/S7-3 §3.4: freeze create-time org relations (managerId + deptHeadId; managerChainIds in S7-4)
   // into the requester snapshot. Omitted fields stay omitted — never write null placeholders that would
   // change the legacy {id,name}-only snapshot shape for static-only flows.
   const frozenManagerId =
     orgRelations && typeof orgRelations.managerId === 'string' && orgRelations.managerId.trim()
       ? orgRelations.managerId.trim()
+      : null
+  const frozenDeptHeadId =
+    orgRelations && typeof orgRelations.deptHeadId === 'string' && orgRelations.deptHeadId.trim()
+      ? orgRelations.deptHeadId.trim()
       : null
 
   return {
@@ -20911,6 +20988,7 @@ function buildAttendanceApprovalInstancePayload({
       id: userId,
       name: requesterName || userId,
       ...(frozenManagerId ? { managerId: frozenManagerId } : {}),
+      ...(frozenDeptHeadId ? { deptHeadId: frozenDeptHeadId } : {}),
     },
     subjectSnapshot: {
       type: 'attendance_request',
@@ -21419,9 +21497,12 @@ module.exports = {
     ATTENDANCE_DYNAMIC_ASSIGNEE_FLAG_ENV,
     ATTENDANCE_DYNAMIC_ASSIGNEE_KINDS,
     ATTENDANCE_MANAGER_AT_LEVEL_KIND,
-    // S7-2 create-time freeze seam (pure enough for unit tests with a faked port).
+    // S7-2/S7-3 create-time freeze seams (pure enough for unit tests with a faked port).
     resolveAttendanceDirectManagerFreeze,
+    resolveAttendanceDeptHeadFreeze,
+    resolveAttendanceOrgRelationsFreeze,
     flowStepsNeedDirectManagerFreeze,
+    flowStepsNeedDeptHeadFreeze,
   },
 
   async activate(context) {
@@ -25329,8 +25410,8 @@ module.exports = {
             // anywhere in the flow blocks request-create (flag OFF / port missing / kind unimplemented),
             // so a later dynamic step cannot start a flow and strand it mid-flight.
             assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
-            // S7-2 §3.4: freeze direct_manager once at create (org-scoped port); assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create (org-scoped port); assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
               orgId, userId, flowSteps: draft.metadata.approvalFlow.steps, context,
             })
             const approvalPayload = buildAttendanceApprovalInstancePayload({
@@ -27897,8 +27978,8 @@ module.exports = {
         const approvalId = `apv_${randomUUID()}`
         // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
         assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-        // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
-        const orgRelations = await resolveAttendanceDirectManagerFreeze({
+        // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
+        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
           orgId, userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
         })
         const approvalPayload = buildAttendanceApprovalInstancePayload({
@@ -28233,8 +28314,8 @@ module.exports = {
             }
             // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
             assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
               orgId, userId: input.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
             })
             const approvalPayload = buildAttendanceApprovalInstancePayload({
@@ -28657,8 +28738,8 @@ module.exports = {
             }
             // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
             assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
               orgId, userId: requesterSource.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
             })
             const approvalPayload = buildAttendanceApprovalInstancePayload({
@@ -29170,8 +29251,8 @@ module.exports = {
             const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
             // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
             assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2 §3.4: freeze direct_manager once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceDirectManagerFreeze({
+            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
+            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
               orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
               userId: existingRequest.user_id,
               flowSteps: draft.metadata?.approvalFlow?.steps,
