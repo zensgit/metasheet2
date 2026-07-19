@@ -487,7 +487,7 @@
               <el-button size="small" data-field="fwbAddMapping" @click="addFwbMapping(action)">
                 {{ isZh ? '添加映射' : 'Add mapping' }}
               </el-button>
-              <div class="meta-rule-editor__field" style="margin-top: 8px">
+              <div class="meta-rule-editor__field meta-rule-editor__fwb-confirmation">
                 <label class="meta-rule-editor__label">{{ isZh ? 'Q6 显式确认' : 'Q6 explicit confirmation' }}</label>
                 <div class="meta-rule-editor__hint">
                   {{ isZh
@@ -497,7 +497,7 @@
                 <el-button
                   size="small"
                   data-field="fwbRequestConfirm"
-                  style="margin-top: 4px"
+                  class="meta-rule-editor__fwb-confirm-button"
                   :loading="fwbConfirmLoading"
                   @click="requestFwbConfirmation(action)"
                 >
@@ -4403,6 +4403,9 @@ async function onTestRun(): Promise<void> {
 }
 
 .meta-rule-editor__label { font-size: 12px; font-weight: 600; color: var(--ms-text-2); margin-top: 4px; }
+
+.meta-rule-editor__fwb-confirmation { margin-top: 8px; }
+.meta-rule-editor__fwb-confirm-button { margin-top: 4px; }
 
 .meta-rule-editor__hint--error { color: var(--el-color-danger-dark-2); }
 
