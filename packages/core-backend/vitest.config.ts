@@ -135,6 +135,13 @@ export default defineConfig({
       // the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step
       // in plugin-tests.yml (both points asserted by b4-department-bindings-ci-wiring.test.mjs).
       'tests/integration/directory-department-bindings.db.test.ts',
+      // Canonical Org MVP B5-a (design lock Lock 1): org_directory_routing_policy schema — the
+      // explicit (org,purpose) policy store; cross-org policy FK-impossible, closed purpose set,
+      // RESTRICT posture. Real-DB constraint proofs by name — meaningless without a DB.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
+      // WHOLE FILE into the directory real-DB step in plugin-tests.yml (both points asserted by
+      // b5a-routing-policy-ci-wiring.test.mjs so neither can silently drop).
+      'tests/integration/org-directory-routing-policy-schema.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
