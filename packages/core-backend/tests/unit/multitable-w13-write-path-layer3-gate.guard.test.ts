@@ -18,10 +18,10 @@
  *     `field_permissions` scope check on the semantic field being edited (not the shared
  *     `isFieldWriteForbidden` helper), thrown from inside its `preWriteGuard` callback before
  *     `patchRecords`' internal write.
- *   - `multitable/plugin-scope.ts`'s `records.patchRecord` wrapper textually matches the `.patchRecord(`
- *     call-site scan but calls a COMPLETELY DIFFERENT function (`multitable/records.ts`'s own raw-SQL
- *     `patchRecord`, not `RecordService.patchRecord`) — an actor-less plugin-SDK write path with no
- *     per-subject identity to gate against. Classified EXEMPT, not GATED.
+ *   - `multitable/plugin-scope.ts`'s two `records.patchRecord` wrappers textually match the `.patchRecord(`
+ *     call-site scan but call COMPLETELY DIFFERENT functions (the regular plugin records API and the
+ *     transaction-scoped records API, not `RecordService.patchRecord`) — actor-less plugin-SDK write
+ *     paths with no per-subject identity to gate against. Classified EXEMPT, not GATED.
  * This refines (does not contradict) the design-lock: the bridge and the single-record PATCH route remain
  * the only two paths that were actually ungated; the true existing-gated count is higher than "six".
  *
@@ -147,10 +147,17 @@ const PATCHRECORD_ALLOWLIST: Record<string, Array<{ disposition: Disposition; re
     {
       disposition: 'EXEMPT',
       reason:
-        "Different function: delegates to multitable/records.ts's OWN patchRecord (raw SQL " +
+        "Regular records wrapper: delegates to multitable/records.ts's OWN patchRecord (raw SQL " +
         "'UPDATE meta_records SET data = ...'), NOT RecordService.patchRecord — a structurally actor-less " +
         'plugin-SDK write path (guardRecordNotLockedForPlugin is called with actor=null). There is no ' +
         'per-subject identity for field_permissions to gate against on this path.',
+    },
+    {
+      disposition: 'EXEMPT',
+      reason:
+        'P4 transaction-scoped records wrapper: delegates to the host-owned unit-of-work patchRecord, ' +
+        'NOT RecordService.patchRecord. It remains actor-less and is additionally constrained to the ' +
+        'four sheets declared by the stock-preparation persist operation.',
     },
   ],
 }
