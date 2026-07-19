@@ -41,7 +41,7 @@
 | K1 | **快照对账骨架**（rounds 1-2 收窄：**骨架可抽，不是现成内核，事务边界待 P4**）：persist 的**分页重放、冻结投影判等、写入编排**可抽；**事务骨架当前不存在**——P4 方案 A（受限 unit-of-work）落地后才形成可抽的事务边界 | sync-run-plan **并非无域数学**：computeFlags（sync-run-plan.cjs:129）计算 missingChildBom、设计数量/单位、duplicatePathKey 与阻断状态——**mapper、flag aggregator、run-status 分类全部属 preset 注入面**；snapshot-diff 同样：pathKey 主键、`childDrawingNo\|childVersion` 身份回退、重复键 HELD 策略、数量合法性、阻断分类、输出投影全部代码化（snapshot-diff.cjs:124,148-152,196-215） | **身份策略、mapper、flag/run-status 分类器、阻断规则、投影、比较器全部由 preset 注入**；模板集、key picker、change-type/blocking 词表 |
 | K2 | **确认流内核**：系统产候选→人工确认（server 戳身份、XOR 确认模式、create-only、human_preserved 结构性剥离）+ 异常队列（severity + 闭词表 resolution） | confirm-writes/generation-runtime/confirm-reads 的机制层全部同型复用；域只在 XOR/tri-XOR 语义与 8 异常类型词表 | 候选方法词表、确认模式、异常类型/决议词表 |
 | K3 | **场景表模板 manifest 原语** | 仓内**四套**并行 manifest 机制共用同一 idiom（normalize-fail-closed、FORBIDDEN_CONTENT_KEYS、secret-shape 拒绝、values-free）：S3-1 integration-templates、S3-3 reference catalog、DF-T3a reference-mapping、备料 9 冻结模板——统一为一个平台 manifest 原语是**最强的单点通用化** | 模板清单、字段所有权（plm_system/human_preserved）、optionSource 契约键 |
-| K4 | **values-free 审计原语** | audit-store 的结构闸完全通用（enum-shaped ≤80 字符、一层计数嵌套、append-only）；场景绑定只有 8-action 词表 + 表名 `integration_stock_prep_audit`（066 迁移） | {action 词表, 表名} |
+| K4 | **values-free 审计原语** | audit-store 的结构闸完全通用（enum-shaped ≤80 字符、一层计数嵌套、append-only）；场景绑定只有闭词表（8 个常规业务动作 + P4 一次性 repair 动作）与表名 `integration_stock_prep_audit`（066/067 迁移） | {action 词表, 表名} |
 | K5 | **完整性可证 feeder 面** | readonly-source-run 骑在平台 read-source 上；SOURCE_KIND_CAPABILITIES + fail-closed limitContract 是场景无关工程；域残留只有 PLM/ERP 分区与 channel 名 | source-kind 分区、channel 词表、intake 归一化器 |
 
 ### 2.3 真域核心（保留为「备料场景包」的内容，不抽）

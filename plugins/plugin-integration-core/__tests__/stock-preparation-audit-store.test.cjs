@@ -2,7 +2,7 @@
 
 // #3751 stock-prep MVP W5b (#3890) — values-free audit store. Covered:
 //   (a) append happy path — row shape (snake_case columns, scoped table), returned id;
-//   (b) closed action vocabulary — all 8 accepted, unknown refused 422 (never stored);
+//   (b) closed action vocabulary — all 9 accepted, unknown refused 422 (never stored);
 //   (c) tenantId required fail-closed;
 //   (d) STRUCTURAL values-free gate — long strings, strings with spaces (drawing-number shaped),
 //       URL-shaped strings, arrays, deep nesting all refused; the thrown error carries the offending

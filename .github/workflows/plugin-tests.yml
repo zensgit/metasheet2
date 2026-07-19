@@ -226,6 +226,12 @@ jobs:
       - name: T2-Gate collision-mechanism CI wiring contract
         run: node --test scripts/ops/t2gate-collision-mechanism-ci-wiring.test.mjs scripts/ops/t2gate-runbook-values-free-contract.test.mjs
 
+      # P4 Option C is DATABASE_URL-gated. Pin both its no-DB exclusion and required real-DB
+      # whole-file invocation so the one-shot repair proof cannot become skip-green.
+      - name: Stock-preparation P4 repair CI wiring contract
+        run: node --test scripts/ops/stock-preparation-p4-repair-ci-wiring.test.mjs
+
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -636,6 +642,7 @@ jobs:
             tests/integration/approval-record-projection.test.ts \
             tests/integration/stock-preparation-t3a-erp-autopersist-realdb.test.ts \
             tests/integration/stock-preparation-t3b-replay-hardening-realdb.test.ts \
+            tests/integration/stock-preparation-p4-repair-once-realdb.test.ts \
             tests/integration/stock-preparation-t3b-plm-autopersist-realdb.test.ts \
             tests/integration/multitable-l4-canonical-fence-realdb.test.ts \
             tests/integration/multitable-l4cov-univer-meta-writers-realdb.test.ts \

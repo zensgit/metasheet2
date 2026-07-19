@@ -596,6 +596,9 @@ export default defineConfig({
       // multitable substrate) via ApprovalRecordProjectionService.reconcile — multitable-relevant despite
       // the `approval-` filename prefix. Same DB-gated/never-run state and same two-point wiring as above.
       'tests/integration/approval-record-projection.test.ts',
+      // P4 Option C repair proof constructs legacy partial writes against real Postgres and is wired
+      // as a whole file in plugin-tests.yml. Keep it out of the no-DB default run so it cannot skip-green.
+      'tests/integration/stock-preparation-p4-repair-once-realdb.test.ts',
       // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and
       // self-contains its RBAC mocking — it runs under the default config + setup.ts, so
       // it stays IN the standard `test` job (runs on every PR, Node 18 + 20). Excluding it
