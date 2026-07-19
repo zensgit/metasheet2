@@ -1,8 +1,11 @@
 import { randomUUID } from 'crypto'
 import express from 'express'
 import request from 'supertest'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as auditModule from '../../src/audit/audit'
+import { Logger } from '../../src/core/logger'
 import { query } from '../../src/db/pg'
+import * as orgTransferService from '../../src/directory/org-transfer-service'
 import {
   noopOrgTransferAdapter,
   registerOrgTransferAdapter,
@@ -31,7 +34,14 @@ import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directo
  *   - at-most-one-ACTIVE-transfer-per-source (both halves: cap while active, free after cancel);
  *   - terminal states reject every further mutation;
  *   - apply/apply concurrency linearizes on the row lock (exactly one 200);
- *   - the registered no-op apply writes NOTHING to any directory_* table (fingerprint equality).
+ *   - the registered no-op apply writes NOTHING to any directory_* table (fingerprint equality);
+ *   - lifecycle body contract: scan / apply (dry-run + real) / cancel reject ANY smuggled field
+ *     with 400 ORG_TRANSFER_UNKNOWN_FIELDS, zero state change, zero success audit, and never
+ *     reach the service seam (independent mutations: remove each endpoint's body guard → its
+ *     own test reds); CREATE rejects arrays/non-plain objects the same way;
+ *   - unexpected-error and audit-failure logs are values-free fixed metadata only (never
+ *     Error.message/name, SQL detail, body, provider, corp/tenant, URLs, directory values) —
+ *     restoring raw error logging reds the log-boundary tests.
  *
  * DATABASE_URL-gated (describeIfDatabase): excluded from the no-DB vitest job so it cannot
  * skip-green, and wired as a WHOLE FILE into the directory real-DB step in plugin-tests.yml
@@ -551,5 +561,253 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     const malformed = await request(adminApp).get('/api/admin/directory/org-transfers/not-a-uuid')
     expect(malformed.status).toBe(400)
     expect(malformed.body.error.code).toBe('ORG_TRANSFER_INVALID_INPUT')
+  })
+
+  // -------------------------------------------------------------------------------------------
+  // Lifecycle body contract — fail-closed before service + audit (distinct smuggled field each)
+  // -------------------------------------------------------------------------------------------
+
+  it('scan rejects a smuggled body field — 400 UNKNOWN_FIELDS, zero state/audit, never reaches service', async () => {
+    // Distinct field for THIS endpoint only. Remove the scan-route body guard → this test reds
+    // (service is called, status flips to scanned with the registered no-op).
+    enableNoopAdapter()
+    const { source, target } = await seedPair('body-scan')
+    const transferId = await createTransfer(source, target)
+    const auditBefore = await orgTransferAuditCount()
+    const before = await transferRow(transferId)
+    const scanSpy = vi.spyOn(orgTransferService, 'scanOrgTransfer')
+
+    const res = await request(adminApp)
+      .post(`/api/admin/directory/org-transfers/${transferId}/scan`)
+      .send({ org_id: 'evil-scan-smuggle' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+    expect(scanSpy).not.toHaveBeenCalled()
+    expect(await transferRow(transferId)).toEqual(before)
+    expect(await decisionCount(transferId)).toBe(0)
+    expect(await auditRowFor('scan', transferId)).toBe(0)
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+    scanSpy.mockRestore()
+  })
+
+  it('dry-run apply rejects a smuggled body field — 400 UNKNOWN_FIELDS, zero state/audit, never reaches service', async () => {
+    // Distinct field vs scan/cancel/real-apply. Remove the apply-route body guard → this test reds.
+    enableNoopAdapter()
+    const { source, target } = await seedPair('body-dryrun')
+    const transferId = await createTransfer(source, target)
+    await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
+    const auditBefore = await orgTransferAuditCount()
+    const before = await transferRow(transferId)
+    const dryRunSpy = vi.spyOn(orgTransferService, 'dryRunOrgTransfer')
+    const applySpy = vi.spyOn(orgTransferService, 'applyOrgTransfer')
+
+    const res = await request(adminApp)
+      .post(`/api/admin/directory/org-transfers/${transferId}/apply?dryRun=true`)
+      .send({ corp_id: 'evil-dryrun-smuggle' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+    expect(dryRunSpy).not.toHaveBeenCalled()
+    expect(applySpy).not.toHaveBeenCalled()
+    expect(await transferRow(transferId)).toEqual(before)
+    expect(await auditRowFor('dry_run', transferId)).toBe(0)
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+    dryRunSpy.mockRestore()
+    applySpy.mockRestore()
+  })
+
+  it('real apply rejects a smuggled body field — 400 UNKNOWN_FIELDS, zero state/audit, never reaches service', async () => {
+    // Distinct field. Remove the apply-route body guard → this test reds (would apply).
+    enableNoopAdapter()
+    const { source, target } = await seedPair('body-apply')
+    const transferId = await createTransfer(source, target)
+    await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
+    await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply?dryRun=true`).expect(200)
+    const auditBefore = await orgTransferAuditCount()
+    const before = await transferRow(transferId)
+    const applySpy = vi.spyOn(orgTransferService, 'applyOrgTransfer')
+
+    const res = await request(adminApp)
+      .post(`/api/admin/directory/org-transfers/${transferId}/apply`)
+      .send({ force: true })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+    expect(applySpy).not.toHaveBeenCalled()
+    expect(await transferRow(transferId)).toEqual(before)
+    expect(await auditRowFor('apply', transferId)).toBe(0)
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+    applySpy.mockRestore()
+  })
+
+  it('cancel rejects a smuggled body field — 400 UNKNOWN_FIELDS, zero state/audit, never reaches service', async () => {
+    // Distinct field. Remove the cancel-route body guard → this test reds (status → cancelled).
+    const { source, target } = await seedPair('body-cancel')
+    const transferId = await createTransfer(source, target)
+    const auditBefore = await orgTransferAuditCount()
+    const before = await transferRow(transferId)
+    const cancelSpy = vi.spyOn(orgTransferService, 'cancelOrgTransfer')
+
+    const res = await request(adminApp)
+      .post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
+      .send({ reason: 'evil-cancel-smuggle' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+    expect(cancelSpy).not.toHaveBeenCalled()
+    expect(await transferRow(transferId)).toEqual(before)
+    expect(await auditRowFor('cancel', transferId)).toBe(0)
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+    cancelSpy.mockRestore()
+  })
+
+  it('lifecycle empty body / empty object remain allowed; arrays cannot bypass the contract', async () => {
+    // express.json({strict:true}) (default) rejects primitive JSON (number/null/string/bool)
+    // before the route — those never reach our body contract. Arrays DO reach the handler and
+    // are the load-bearing non-plain bypass: Object.keys([]) === [] would look like "empty".
+    enableNoopAdapter()
+    const { source, target } = await seedPair('body-empty')
+    const transferId = await createTransfer(source, target)
+    const cancelSpy = vi.spyOn(orgTransferService, 'cancelOrgTransfer')
+
+    // Omitted body + explicit {} are the only allowed lifecycle payloads.
+    await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
+    await request(adminApp)
+      .post(`/api/admin/directory/org-transfers/${transferId}/apply?dryRun=true`)
+      .send({})
+      .expect(200)
+
+    // Empty array would look keyless under Object.keys — must still 400 before service.
+    const emptyArray = await request(adminApp)
+      .post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
+      .set('Content-Type', 'application/json')
+      .send('[]')
+    expect(emptyArray.status).toBe(400)
+    expect(emptyArray.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+
+    const nonEmptyArray = await request(adminApp)
+      .post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
+      .send([{ reason: 'nope' }])
+    expect(nonEmptyArray.status).toBe(400)
+    expect(nonEmptyArray.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+
+    expect(cancelSpy).not.toHaveBeenCalled()
+    // Transfer still scanned (cancel never applied); not cancelled.
+    expect((await transferRow(transferId)).status).toBe('scanned')
+    cancelSpy.mockRestore()
+  })
+
+  it('CREATE rejects arrays with ORG_TRANSFER_UNKNOWN_FIELDS (zero rows, zero audit, never reaches service)', async () => {
+    // Feasible through the real Express parser: JSON arrays reach the route. Primitive JSON
+    // bodies are rejected by express.json strict mode before our handler (not ORG_TRANSFER_*).
+    const { source, target } = await seedPair('body-create')
+    const auditBefore = await orgTransferAuditCount()
+    const createSpy = vi.spyOn(orgTransferService, 'createOrgTransfer')
+
+    const arrayBody = await request(adminApp)
+      .post('/api/admin/directory/org-transfers')
+      .send([{ provider: 'dingtalk', sourceIntegrationId: source, targetIntegrationId: target }])
+    expect(arrayBody.status).toBe(400)
+    expect(arrayBody.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+
+    const emptyArray = await request(adminApp)
+      .post('/api/admin/directory/org-transfers')
+      .set('Content-Type', 'application/json')
+      .send('[]')
+    expect(emptyArray.status).toBe(400)
+    expect(emptyArray.body.error.code).toBe('ORG_TRANSFER_UNKNOWN_FIELDS')
+
+    expect(createSpy).not.toHaveBeenCalled()
+    const rows = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM provider_org_transfers WHERE source_integration_id = $1`,
+      [source]
+    )
+    expect(rows.rows[0].n).toBe('0')
+    expect(await orgTransferAuditCount()).toBe(auditBefore)
+    createSpy.mockRestore()
+  })
+
+  // -------------------------------------------------------------------------------------------
+  // Log boundary — unexpected + audit failure are values-free fixed metadata only
+  // -------------------------------------------------------------------------------------------
+
+  it('unexpected errors log fixed metadata only (no Error.message/name/SQL/body/provider/directory values)', async () => {
+    // Restore raw `error: readErrorMessage(error)` into handleOrgTransferError → this test reds.
+    const nameSentinel = `SENSITIVE_ORG_TRANSFER_ERR_NAME_${STAMP}_corp_secret_token`
+    const relationNeedle = 'provider_org_transfers'
+    const forced = new Error(`relation "${relationNeedle}" does not exist — corp=dingtalk-corp-xyz url=https://evil.example/sync`)
+    forced.name = nameSentinel
+
+    const getSpy = vi.spyOn(orgTransferService, 'getOrgTransfer').mockRejectedValue(forced)
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+    try {
+      const res = await request(adminApp).get(`/api/admin/directory/org-transfers/${randomUUID()}`)
+      expect(res.status).toBe(500)
+      expect(res.body.error.code).toBe('ORG_TRANSFER_INTERNAL_ERROR')
+      // Client HTTP message stays the server-authored fixed fallback — not the raw exception.
+      expect(res.body.error.message).toBe('Failed to read org transfer')
+      expect(JSON.stringify(res.body)).not.toContain(nameSentinel)
+      expect(JSON.stringify(res.body)).not.toContain(relationNeedle)
+      expect(JSON.stringify(res.body)).not.toContain('evil.example')
+
+      const unexpectedWarns = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0] === 'Failed to read org transfer'
+      )
+      expect(unexpectedWarns.length).toBeGreaterThanOrEqual(1)
+      const [message, meta] = unexpectedWarns[0] as [string, Record<string, unknown>]
+      const serialized = JSON.stringify({ message, meta })
+      expect(serialized).not.toContain(nameSentinel)
+      expect(serialized).not.toContain(relationNeedle)
+      expect(serialized).not.toContain('evil.example')
+      expect(serialized).not.toContain('dingtalk-corp-xyz')
+      expect(serialized.toLowerCase()).not.toContain('does not exist')
+      expect(meta).toEqual({ reason: 'unexpected_error' })
+      expect(meta).not.toHaveProperty('error')
+      expect(meta).not.toHaveProperty('errorClass')
+      expect(meta).not.toHaveProperty('stack')
+      expect(meta).not.toHaveProperty('code')
+      expect(meta).not.toHaveProperty('provider')
+      expect(meta).not.toHaveProperty('body')
+    } finally {
+      warnSpy.mockRestore()
+      getSpy.mockRestore()
+    }
+  })
+
+  it('audit-write failures log fixed metadata only (no raw Error text); mutation still succeeds', async () => {
+    // Restore raw `error: readErrorMessage(error)` into auditTransfer's catch → this test reds.
+    enableNoopAdapter()
+    const { source, target } = await seedPair('audit-log')
+    const nameSentinel = `SENSITIVE_AUDIT_ERR_NAME_${STAMP}_tenant_key_leak`
+    const forced = new Error(`insert into audit_logs failed: detail=provider=dingtalk corp_id=SECRET_CORP`)
+    forced.name = nameSentinel
+
+    const auditSpy = vi.spyOn(auditModule, 'auditLog').mockRejectedValue(forced)
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+    try {
+      const transferId = await createTransfer(source, target)
+      // createTransfer expects 200 — audit is best-effort and must not fail the mutation.
+      expect(transferId).toBeTruthy()
+
+      const auditWarns = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0] === 'org-transfer audit write failed'
+      )
+      expect(auditWarns.length).toBeGreaterThanOrEqual(1)
+      const [message, meta] = auditWarns[0] as [string, Record<string, unknown>]
+      const serialized = JSON.stringify({ message, meta })
+      expect(serialized).not.toContain(nameSentinel)
+      expect(serialized).not.toContain('SECRET_CORP')
+      expect(serialized).not.toContain('audit_logs')
+      expect(serialized.toLowerCase()).not.toContain('insert into')
+      expect(meta).toEqual({ action: 'create', reason: 'audit_write_failed' })
+      expect(meta).not.toHaveProperty('error')
+      expect(meta).not.toHaveProperty('errorClass')
+      expect(meta).not.toHaveProperty('stack')
+      expect(meta).not.toHaveProperty('provider')
+    } finally {
+      warnSpy.mockRestore()
+      auditSpy.mockRestore()
+    }
   })
 })

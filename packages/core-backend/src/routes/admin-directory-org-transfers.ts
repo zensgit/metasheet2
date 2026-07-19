@@ -1,18 +1,13 @@
 import type { Request, Response } from 'express'
 import { Router } from 'express'
-import { auditLog } from '../audit/audit'
+import * as auditModule from '../audit/audit'
 import { Logger } from '../core/logger'
 import { ensurePlatformAdmin } from './admin-directory'
+import * as orgTransferService from '../directory/org-transfer-service'
 import {
   OrgTransferConflictError,
   OrgTransferNotFoundError,
   OrgTransferValidationError,
-  applyOrgTransfer,
-  cancelOrgTransfer,
-  createOrgTransfer,
-  dryRunOrgTransfer,
-  getOrgTransfer,
-  scanOrgTransfer,
 } from '../directory/org-transfer-service'
 import { jsonError, jsonOk } from '../util/response'
 
@@ -28,13 +23,20 @@ import { jsonError, jsonOk } from '../util/response'
  * identity is never read from the request: the service derives `org_id` from the two integration
  * rows, and the schema's composite FKs make cross-org/provider-mismatched rows impossible.
  * Every successful lifecycle mutation writes ONE values-free audit row (ids/status/counters only —
- * no names, no tenant/corp keys, no URLs). Rejected mutations (including adapter-unavailable)
- * write no success audit.
+ * no names, no tenant/corp keys, no URLs). Rejected mutations (including adapter-unavailable and
+ * unknown body fields) write no success audit.
+ *
+ * Lifecycle body contract: scan / apply (dry-run + real) / cancel accept NO body fields. Any key,
+ * array, or non-plain payload is 400 ORG_TRANSFER_UNKNOWN_FIELDS before service + audit. Empty
+ * object / omitted body remains allowed. CREATE uses the same plain-object gate with its field
+ * allowlist.
  */
 
 const logger = new Logger('AdminDirectoryOrgTransferRoutes')
 
 const CREATE_FIELDS = ['provider', 'sourceIntegrationId', 'targetIntegrationId'] as const
+/** scan / apply / cancel — no request-body fields are accepted. */
+const LIFECYCLE_BODY_FIELDS = [] as const
 
 const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -50,20 +52,31 @@ function rejectNonUuidParam(res: Response, paramName: string, value: string): bo
 }
 
 /**
+ * JSON plain object only (not array, null, primitive). Omitted body (`undefined`) is treated as
+ * "no body" and allowed — empty-object semantics without inventing keys.
+ */
+function isPlainObjectBody(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
  * Fail-closed field allowlist (B2 owner hard-requirement pattern): any key outside the
  * endpoint's allowlist — org_id/orgId/corp_id most of all — 400s the whole request rather than
- * being silently dropped.
+ * being silently dropped. Arrays and non-plain payloads cannot bypass via Object.keys([]) === []
+ * (empty array would otherwise look like an empty object).
  */
 function rejectUnlistedFields(req: Request, res: Response, allowed: readonly string[]): boolean {
-  const body = (req.body ?? {}) as Record<string, unknown>
-  const unknown = Object.keys(body).filter((key) => !allowed.includes(key))
+  const raw = req.body
+  // Omitted body (no JSON): allowed empty contract.
+  if (raw === undefined) return false
+  if (!isPlainObjectBody(raw)) {
+    jsonError(res, 400, 'ORG_TRANSFER_UNKNOWN_FIELDS', 'Request body contains fields not accepted by this endpoint')
+    return true
+  }
+  const unknown = Object.keys(raw).filter((key) => !allowed.includes(key))
   if (unknown.length === 0) return false
   jsonError(res, 400, 'ORG_TRANSFER_UNKNOWN_FIELDS', 'Request body contains fields not accepted by this endpoint')
   return true
-}
-
-function readErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback
 }
 
 /**
@@ -71,6 +84,11 @@ function readErrorMessage(error: unknown, fallback: string): string {
  * server-side tokens interpolated (status words; for adapter-unavailable, the transfer row's
  * stored provider label). No request body / caller-supplied free text is echoed, so surfacing
  * them stays values-free relative to operator input and directory payload content.
+ *
+ * Unexpected errors log FIXED metadata only (`reason: 'unexpected_error'`) — never
+ * Error.message / Error.name, SQL detail, request body, provider label, corp/tenant keys, URLs,
+ * or directory values. Typed client errors keep their existing bounded server-authored HTTP
+ * messages and do not log raw exception text.
  */
 function handleOrgTransferError(res: Response, error: unknown, fallbackMessage: string): void {
   if (error instanceof OrgTransferValidationError) {
@@ -85,7 +103,7 @@ function handleOrgTransferError(res: Response, error: unknown, fallbackMessage: 
     jsonError(res, 409, error.code, error.message)
     return
   }
-  logger.warn(fallbackMessage, { error: readErrorMessage(error, 'unknown error') })
+  logger.warn(fallbackMessage, { reason: 'unexpected_error' })
   jsonError(res, 500, 'ORG_TRANSFER_INTERNAL_ERROR', fallbackMessage)
 }
 
@@ -99,7 +117,7 @@ async function auditTransfer(
   meta: Record<string, unknown>
 ): Promise<void> {
   try {
-    await auditLog({
+    await auditModule.auditLog({
       actorId: adminUserId,
       actorType: 'user',
       action: `directory.org_transfer.${action}`,
@@ -107,11 +125,9 @@ async function auditTransfer(
       resourceId: transferId,
       meta,
     })
-  } catch (error) {
-    logger.warn('org-transfer audit write failed', {
-      action,
-      error: readErrorMessage(error, 'unknown error'),
-    })
+  } catch {
+    // Fixed metadata only — never Error.message/name, SQL detail, body, provider, or directory values.
+    logger.warn('org-transfer audit write failed', { action, reason: 'audit_write_failed' })
   }
 }
 
@@ -141,7 +157,7 @@ export function adminDirectoryOrgTransfersRouter(): Router {
     }
 
     try {
-      const transfer = await createOrgTransfer({
+      const transfer = await orgTransferService.createOrgTransfer({
         provider,
         sourceIntegrationId,
         targetIntegrationId,
@@ -165,7 +181,7 @@ export function adminDirectoryOrgTransfersRouter(): Router {
     if (rejectNonUuidParam(res, 'transferId', req.params.transferId)) return
 
     try {
-      const detail = await getOrgTransfer(req.params.transferId)
+      const detail = await orgTransferService.getOrgTransfer(req.params.transferId)
       jsonOk(res, detail)
     } catch (error) {
       handleOrgTransferError(res, error, 'Failed to read org transfer')
@@ -176,9 +192,11 @@ export function adminDirectoryOrgTransfersRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
     if (rejectNonUuidParam(res, 'transferId', req.params.transferId)) return
+    // Lifecycle body contract: zero accepted fields. Remove this guard → body-smuggle scan test reds.
+    if (rejectUnlistedFields(req, res, LIFECYCLE_BODY_FIELDS)) return
 
     try {
-      const result = await scanOrgTransfer(req.params.transferId)
+      const result = await orgTransferService.scanOrgTransfer(req.params.transferId)
       await auditTransfer(adminUserId, 'scan', result.transfer.id, {
         provider: result.transfer.provider,
         status: result.transfer.status,
@@ -197,6 +215,9 @@ export function adminDirectoryOrgTransfersRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
     if (rejectNonUuidParam(res, 'transferId', req.params.transferId)) return
+    // Lifecycle body contract: zero accepted fields (dry-run is query-only). Remove this guard →
+    // body-smuggle apply tests red.
+    if (rejectUnlistedFields(req, res, LIFECYCLE_BODY_FIELDS)) return
 
     const rawDryRun = req.query.dryRun
     const wantsDryRun = rawDryRun === 'true'
@@ -207,7 +228,7 @@ export function adminDirectoryOrgTransfersRouter(): Router {
 
     try {
       if (wantsDryRun) {
-        const result = await dryRunOrgTransfer(req.params.transferId)
+        const result = await orgTransferService.dryRunOrgTransfer(req.params.transferId)
         await auditTransfer(adminUserId, 'dry_run', result.transfer.id, {
           provider: result.transfer.provider,
           status: result.transfer.status,
@@ -217,7 +238,7 @@ export function adminDirectoryOrgTransfersRouter(): Router {
         jsonOk(res, result)
         return
       }
-      const transfer = await applyOrgTransfer(req.params.transferId)
+      const transfer = await orgTransferService.applyOrgTransfer(req.params.transferId)
       await auditTransfer(adminUserId, 'apply', transfer.id, {
         provider: transfer.provider,
         status: transfer.status,
@@ -232,9 +253,11 @@ export function adminDirectoryOrgTransfersRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
     if (rejectNonUuidParam(res, 'transferId', req.params.transferId)) return
+    // Lifecycle body contract: zero accepted fields. Remove this guard → body-smuggle cancel test reds.
+    if (rejectUnlistedFields(req, res, LIFECYCLE_BODY_FIELDS)) return
 
     try {
-      const transfer = await cancelOrgTransfer(req.params.transferId)
+      const transfer = await orgTransferService.cancelOrgTransfer(req.params.transferId)
       await auditTransfer(adminUserId, 'cancel', transfer.id, {
         provider: transfer.provider,
         status: transfer.status,
