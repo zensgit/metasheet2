@@ -3873,8 +3873,8 @@ export async function syncDirectoryIntegration(
     // B7 Q6 (owner ruling): after a SUCCESSFUL sync commit, reflect remote-department liveness
     // onto this integration's bindings — NARROWED to the integration that just synced. Strictly
     // best-effort BY RULING: the sync above already succeeded and committed, so a sweep failure
-    // must never fail (or fail-mark) it — it logs values-free and the admin sweep endpoint
-    // (`POST /api/admin/directory/department-bindings/sweep`) is the retry path.
+    // must never fail (or fail-mark) it — it logs VALUES-FREE BY CONSTRUCTION and the admin sweep
+    // endpoint (`POST /api/admin/directory/department-bindings/sweep`) is the retry path.
     try {
       const sweep = await sweepStaleDepartmentBindings(updatedIntegration.org_id, {
         remoteIntegrationId: integrationId,
@@ -3885,9 +3885,15 @@ export async function syncDirectoryIntegration(
         })
       }
     } catch (error) {
+      // Values-free: bounded reason code + Error.name only. Never interpolate error.message /
+      // readErrorMessage — raw DB/adapter text can carry relation names, SQL fragments, values.
+      const errorClass =
+        error instanceof Error && typeof error.name === 'string' && error.name.length > 0
+          ? error.name
+          : 'sweep_failed'
       logger.warn(
-        `Department-binding sweep after successful sync failed (the sync itself is unaffected; retry via the admin sweep endpoint): ${readErrorMessage(error, 'unknown error')}`,
-        { integrationId },
+        'Department-binding sweep after successful sync failed (sync unaffected; retry via admin sweep endpoint)',
+        { integrationId, reason: 'sweep_failed', errorClass },
       )
     }
 

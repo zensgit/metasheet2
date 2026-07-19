@@ -17,6 +17,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
   getDingTalkUserDetail: clientMocks.getDingTalkUserDetail,
 }))
 
+import { Logger } from '../../src/core/logger'
 import { query } from '../../src/db/pg'
 import { createDirectoryIntegration, getOrCreateLocalIntegration, syncDirectoryIntegration } from '../../src/directory/directory-sync'
 import { createLocalDepartment } from '../../src/directory/local-directory-org'
@@ -29,10 +30,12 @@ import { createLocalDepartment } from '../../src/directory/local-directory-org'
  *      the binding is `stale` — with NO admin action. NARROWING: a second dingtalk integration's
  *      binding (whose remote dept is also archived) is left untouched by THIS integration's sync —
  *      the hook is scoped by `remoteIntegrationId` exactly as ruled.
- *   B. FAILURE ISOLATION: with the bindings table renamed away, the SAME sync still SUCCEEDS
- *      (returns a completed run; last_success stamped) — a sweep failure must never fail (or
- *      fail-mark) the sync that just committed. The admin `POST /department-bindings/sweep`
- *      endpoint is the retry path (proven in directory-binding-admin-routes.db.test.ts).
+ *   B. FAILURE ISOLATION + VALUES-FREE WARN: with the bindings table renamed away, the SAME sync
+ *      still SUCCEEDS (completed run; last_error NULL) AND the post-sync catch emits a bounded
+ *      Logger.warn (reason/errorClass + integrationId only) — raw relation/error.message text
+ *      must not appear. Restoring readErrorMessage interpolation in the catch reds this pin.
+ *      The admin `POST /department-bindings/sweep` endpoint is the retry path
+ *      (proven in directory-binding-admin-routes.db.test.ts).
  *
  *   Note on the table-rename seam (gate P3): this deliberately breaks the sweep at the SQL
  *   catalog, not via a production test-only injection point. A narrower production seam would
@@ -141,7 +144,7 @@ describeIfDatabase('B7 Q6 — post-sync auto-sweep hook (real sync, mocked provi
     expect(await bindingStatus(bindingB)).toBe('active')
   })
 
-  it('B. failure isolation: a broken sweep never fails the sync that just committed', async () => {
+  it('B. failure isolation + values-free warn: a broken sweep never fails the sync and logs no raw error text', async () => {
     const intC = await createDirectoryIntegration({
       name: `b7q6-C-${TS}`,
       corpId: `b7q6-corpC-${TS}`,
@@ -151,7 +154,9 @@ describeIfDatabase('B7 Q6 — post-sync auto-sweep hook (real sync, mocked provi
     })
     cleanupIntegrationIds.push(intC.id)
 
-    await query(`ALTER TABLE directory_department_bindings RENAME TO directory_department_bindings_hidden_${TS}`)
+    const hidden = `directory_department_bindings_hidden_${TS}`
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+    await query(`ALTER TABLE directory_department_bindings RENAME TO ${hidden}`)
     try {
       const result = await syncDirectoryIntegration(intC.id, `system:b7q6c-${TS}`)
       expect(result.run.status).toBe('completed') // the sync is UNAFFECTED by the sweep failure
@@ -160,8 +165,31 @@ describeIfDatabase('B7 Q6 — post-sync auto-sweep hook (real sync, mocked provi
         [intC.id],
       )
       expect(row.rows[0].last_error).toBeNull() // not fail-marked either
+
+      // Values-free warn: bounded reason/errorClass + integrationId only. Raw relation names and
+      // adapter message text (e.g. "relation ... does not exist") must not appear. Mutating the
+      // catch to interpolate readErrorMessage(error) reds the content pins below first.
+      const sweepWarns = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('Department-binding sweep after successful sync failed'),
+      )
+      expect(sweepWarns.length).toBeGreaterThanOrEqual(1)
+      const [message, meta] = sweepWarns[0] as [string, Record<string, unknown>]
+      const serialized = JSON.stringify({ message, meta })
+      // Content pins first: raw DB/adapter text must never reach the log surface.
+      expect(serialized).not.toContain('directory_department_bindings')
+      expect(serialized).not.toContain(hidden)
+      expect(serialized.toLowerCase()).not.toContain('does not exist')
+      expect(message).not.toMatch(/relation|undefined_table|42P01/i)
+      // Shape pin: bounded meta only (integrationId + reason + errorClass).
+      expect(meta).toMatchObject({
+        integrationId: intC.id,
+        reason: 'sweep_failed',
+      })
+      expect(typeof meta.errorClass).toBe('string')
+      expect(String(meta.errorClass).length).toBeGreaterThan(0)
     } finally {
-      await query(`ALTER TABLE directory_department_bindings_hidden_${TS} RENAME TO directory_department_bindings`)
+      warnSpy.mockRestore()
+      await query(`ALTER TABLE ${hidden} RENAME TO directory_department_bindings`)
     }
   })
 })
