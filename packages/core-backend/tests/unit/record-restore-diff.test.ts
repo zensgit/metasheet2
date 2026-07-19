@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { computeRecordRestoreDiff } from '../../src/multitable/record-restore-diff'
+import { computeRecordRestoreDiff, projectRestorableOntoLive } from '../../src/multitable/record-restore-diff'
 
 // Minimal stand-in for the route's normalizeLinkIds (array → string[]; the helper only needs the parse contract).
 const nlz = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v ? [v] : [])
@@ -54,5 +54,86 @@ describe('computeRecordRestoreDiff — canonical shared restore diff', () => {
     expect(byField.f).toBeUndefined()
     expect(byField.b).toBeUndefined()
     expect(byField.same).toBeUndefined()
+  })
+})
+
+describe('projectRestorableOntoLive — canonical restorable projection for L8 apply', () => {
+  it('preserves formula/lookup/rollup/autoNumber (and other non-restorable) live values while projecting restorable scalars', () => {
+    const out = projectRestorableOntoLive({
+      fieldById: new Map<string, { type: string }>([
+        ['s', { type: 'string' }],
+        ['f', { type: 'formula' }],
+        ['lk', { type: 'lookup' }],
+        ['r', { type: 'rollup' }],
+        ['an', { type: 'autoNumber' }],
+      ]),
+      rawTypeById: new Map(),
+      targetSnapshot: { s: 'at-anchor', f: 'stale-formula', lk: 'stale-lk', r: 99, an: 7 },
+      currentData: { s: 'live', f: 'live-formula', lk: 'live-lk', r: 1, an: 42 },
+      recordId: 'r1',
+      currentVersion: 3,
+      normalizeLinkIds: nlz,
+    })
+    expect(out.isNoOp).toBe(false)
+    expect(out.changedFieldIds).toEqual(['s'])
+    expect(out.patch).toEqual({ s: 'at-anchor' })
+    // Non-restorable materializations stay at LIVE values — never overwritten from the snapshot.
+    expect(out.data).toEqual({ s: 'at-anchor', f: 'live-formula', lk: 'live-lk', r: 1, an: 42 })
+    expect(out.linkUpdates).toEqual([])
+  })
+
+  it('derived-only difference is a no-op (no version/revision/link write surface)', () => {
+    const out = projectRestorableOntoLive({
+      fieldById: new Map<string, { type: string }>([
+        ['s', { type: 'string' }],
+        ['f', { type: 'formula' }],
+      ]),
+      rawTypeById: new Map(),
+      targetSnapshot: { s: 'same', f: 'old-formula' },
+      currentData: { s: 'same', f: 'new-formula' },
+      recordId: 'r1',
+      currentVersion: 2,
+      normalizeLinkIds: nlz,
+    })
+    expect(out.isNoOp).toBe(true)
+    expect(out.changedFieldIds).toEqual([])
+    expect(out.patch).toEqual({})
+    expect(out.linkUpdates).toEqual([])
+    expect(out.data).toEqual({ s: 'same', f: 'new-formula' })
+  })
+
+  it('link set change emits linkUpdates (for meta_links sync) and keeps non-link restorable fields', () => {
+    const out = projectRestorableOntoLive({
+      fieldById: new Map<string, { type: string }>([
+        ['s', { type: 'string' }],
+        ['rel', { type: 'link' }],
+      ]),
+      rawTypeById: new Map(),
+      targetSnapshot: { s: 'x', rel: ['A'] },
+      currentData: { s: 'x', rel: ['B'] },
+      recordId: 'r1',
+      currentVersion: 2,
+      normalizeLinkIds: nlz,
+    })
+    expect(out.isNoOp).toBe(false)
+    expect(out.changedFieldIds).toEqual(['rel'])
+    expect(out.data.rel).toEqual(['A'])
+    expect(out.linkUpdates).toEqual([{ fieldId: 'rel', targetIds: ['A'] }])
+  })
+
+  it('unset restorable field drops the key from projected data and records null in patch', () => {
+    const out = projectRestorableOntoLive({
+      fieldById: new Map([['gone', { type: 'string' }]]),
+      rawTypeById: new Map(),
+      targetSnapshot: {},
+      currentData: { gone: 'still-here', f: 'keep-me' },
+      recordId: 'r1',
+      currentVersion: 1,
+      normalizeLinkIds: nlz,
+    })
+    expect(out.isNoOp).toBe(false)
+    expect(out.patch).toEqual({ gone: null })
+    expect(out.data).toEqual({ f: 'keep-me' })
+    expect(Object.prototype.hasOwnProperty.call(out.data, 'gone')).toBe(false)
   })
 })
