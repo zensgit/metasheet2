@@ -21,7 +21,8 @@ import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directo
  * What this suite pins, per the T1 row of the MVP sequencing plan:
  *   - platform-admin gating on every route (403 leg per endpoint);
  *   - create validations fail closed with ZERO rows and ZERO audit rows (audit-zero assertions
- *     are scoped to this suite's unique actor id — never global counts);
+ *     are action-namespace scoped on `directory.org_transfer.%` — never global audit counts,
+ *     never actor-id scoped);
  *   - the SCHEMA backstops (not just service validation): cross-org and provider-mismatched
  *     transfers are FK-impossible to INSERT even bypassing the service; provider='local' is
  *     CHECK-impossible;
@@ -34,11 +35,16 @@ import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directo
  *   - at-most-one-ACTIVE-transfer-per-source (both halves: cap while active, free after cancel);
  *   - terminal states reject every further mutation;
  *   - apply/apply concurrency linearizes on the row lock (exactly one 200);
- *   - the registered no-op apply writes NOTHING to any directory_* table (fingerprint equality);
+ *   - the registered no-op apply writes NOTHING to directory accounts/departments/memberships/
+ *     identities owned by this test's source/target integrations + uniquely seeded identity
+ *     keys (scoped fingerprint — NOT global table counts/max timestamps, so it stays correct
+ *     when this file runs in the same Vitest invocation as B1–B7 directory suites); a positive
+ *     scoped write proves the fingerprint is non-vacuous;
  *   - lifecycle body contract: scan / apply (dry-run + real) / cancel reject ANY smuggled field
  *     with 400 ORG_TRANSFER_UNKNOWN_FIELDS, zero state change, zero success audit, and never
  *     reach the service seam (independent mutations: remove each endpoint's body guard → its
- *     own test reds); CREATE rejects arrays/non-plain objects the same way;
+ *     own test reds); CREATE rejects arrays the same way. Primitive JSON never reaches the route
+ *     under production express.json({strict:true}) — generic parser 400 only, not our code;
  *   - unexpected-error and audit-failure logs are values-free fixed metadata only (never
  *     Error.message/name, SQL detail, body, provider, corp/tenant, URLs, directory values) —
  *     restoring raw error logging reds the log-boundary tests.
@@ -84,10 +90,10 @@ async function seedIntegration(org: string, provider: string, tag: string): Prom
 }
 
 /**
- * The `directory.org_transfer.%` action namespace is written by NOTHING but the T1 routes, and
- * audit_logs has no text actor column (auditLog only maps numeric actor ids into user_id), so
- * the zero-audit assertions scope on the action prefix — unique to this feature, race-free
- * against every other suite sharing the CI database.
+ * The `directory.org_transfer.%` action namespace is written by NOTHING but the T1 routes, so
+ * zero-audit assertions scope on that action prefix (action-namespace scoped) — race-free
+ * against every other suite sharing the CI database. Not actor-id scoped: auditLog maps only
+ * numeric actor ids into user_id, so our string admin ids never land as a reliable actor key.
  */
 async function orgTransferAuditCount(): Promise<number> {
   const result = await query<{ n: string }>(
@@ -104,15 +110,51 @@ async function auditRowFor(action: string, transferId: string): Promise<number> 
   return Number(result.rows[0].n)
 }
 
-/** Row-count + latest-updated fingerprint over every table the no-op apply must not touch. */
-async function directoryFingerprint(): Promise<string> {
+/**
+ * Concurrency-safe fingerprint of directory substrate rows this test owns.
+ *
+ * Scoped strictly to:
+ *   - directory_accounts / directory_departments for the given integration ids (source+target)
+ *   - memberships whose account belongs to those integrations
+ *   - user_external_identities whose external_key is in the test-seeded key set
+ *
+ * Deliberately NOT global counts / max(updated_at) over whole tables — those race with B1–B7
+ * directory suites in the same Vitest invocation (required CI runs this file alongside them).
+ * Content includes id + business anchors + is_active + updated_at so an UPDATE (not only INSERT)
+ * to a owned row still moves the fingerprint.
+ */
+async function scopedDirectoryFingerprint(integrationIds: string[], identityExternalKeys: string[]): Promise<string> {
   const result = await query<{ fp: string }>(
     `SELECT concat_ws('|',
-        (SELECT concat(count(*), ':', coalesce(max(updated_at)::text, '-')) FROM directory_accounts),
-        (SELECT concat(count(*), ':', coalesce(max(updated_at)::text, '-')) FROM directory_departments),
-        (SELECT concat(count(*), ':', coalesce(max(created_at)::text, '-')) FROM directory_account_departments),
-        (SELECT count(*)::text FROM user_external_identities)
-      ) AS fp`
+        (SELECT coalesce(string_agg(sig, ',' ORDER BY sig), '-')
+           FROM (
+             SELECT concat_ws(':', id::text, external_user_id, name, is_active::text, updated_at::text) AS sig
+               FROM directory_accounts
+              WHERE integration_id = ANY($1::uuid[])
+           ) a),
+        (SELECT coalesce(string_agg(sig, ',' ORDER BY sig), '-')
+           FROM (
+             SELECT concat_ws(':', id::text, external_department_id, name, is_active::text, updated_at::text) AS sig
+               FROM directory_departments
+              WHERE integration_id = ANY($1::uuid[])
+           ) d),
+        (SELECT coalesce(string_agg(sig, ',' ORDER BY sig), '-')
+           FROM (
+             SELECT concat_ws(':', ad.directory_account_id::text, ad.directory_department_id::text,
+                             ad.is_primary::text, ad.is_manager::text, ad.created_at::text) AS sig
+               FROM directory_account_departments ad
+               JOIN directory_accounts a ON a.id = ad.directory_account_id
+              WHERE a.integration_id = ANY($1::uuid[])
+           ) m),
+        (SELECT coalesce(string_agg(sig, ',' ORDER BY sig), '-')
+           FROM (
+             SELECT concat_ws(':', id::text, provider, external_key, local_user_id,
+                             coalesce(corp_id, ''), updated_at::text) AS sig
+               FROM user_external_identities
+              WHERE external_key = ANY($2::text[])
+           ) i)
+      ) AS fp`,
+    [integrationIds, identityExternalKeys]
   )
   return result.rows[0].fp
 }
@@ -120,15 +162,40 @@ async function directoryFingerprint(): Promise<string> {
 describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API skeleton (real DB, HTTP)', () => {
   const createdTransferIds: string[] = []
   const createdIntegrationIds: string[] = []
+  const createdUserIds: string[] = []
+  const createdIdentityKeys: string[] = []
+  /** Restored in afterEach even if a test assertion fails mid-flight (mutation hygiene). */
+  const activeSpies: Array<{ mockRestore: () => void }> = []
+
+  function trackSpy<T extends { mockRestore: () => void }>(spy: T): T {
+    activeSpies.push(spy)
+    return spy
+  }
 
   afterEach(async () => {
+    // Spies first: a red assertion must never leave a mock binding for the next case.
+    while (activeSpies.length > 0) {
+      const spy = activeSpies.pop()
+      try {
+        spy?.mockRestore()
+      } catch {
+        // already restored
+      }
+    }
     // Deterministic registry cleanup: happy-path tests register the no-op for 'dingtalk';
     // production-no-adapter tests leave it unregistered. Never leak either state across cases.
     unregisterOrgTransferAdapter('dingtalk')
     const transfers = createdTransferIds.splice(0)
     for (const id of transfers) await query(`DELETE FROM provider_org_transfers WHERE id = $1`, [id]) // decisions cascade
+    // Identities before users (FK); accounts/depts/memberships cascade with integrations.
+    const identityKeys = createdIdentityKeys.splice(0)
+    if (identityKeys.length > 0) {
+      await query(`DELETE FROM user_external_identities WHERE external_key = ANY($1::text[])`, [identityKeys])
+    }
     const integrations = createdIntegrationIds.splice(0)
     for (const id of integrations) await query(`DELETE FROM directory_integrations WHERE id = $1`, [id])
+    const users = createdUserIds.splice(0)
+    for (const id of users) await query(`DELETE FROM users WHERE id = $1`, [id])
   })
 
   /** Explicit test-only registration — production has no silent no-op fallback. */
@@ -182,6 +249,75 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     return Number(result.rows[0].n)
   }
 
+  /**
+   * Seed unique directory anchors under source+target integrations (plus one identity key) so the
+   * no-op apply fingerprint is non-empty and concurrency-safe against parallel B1–B7 traffic.
+   */
+  async function seedScopedDirectoryAnchors(
+    sourceIntegrationId: string,
+    targetIntegrationId: string,
+    tag: string
+  ): Promise<{ identityExternalKeys: string[]; sourceAccountId: string }> {
+    const suffix = `${STAMP}-${tag}-${randomUUID().slice(0, 8)}`
+    const localUserId = `t1-fp-user-${suffix}`
+    const identityKey = `dingtalk:t1-fp-${suffix}`
+    const sourceExtUser = `t1-src-user-${suffix}`
+    const targetExtUser = `t1-dst-user-${suffix}`
+    const sourceExtDept = `t1-src-dept-${suffix}`
+    const targetExtDept = `t1-dst-dept-${suffix}`
+
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, role)
+       VALUES ($1, $2, $3, 't1-fp-hash', 'user')`,
+      [localUserId, `${localUserId}@t1.example.test`, `T1 FP ${tag}`]
+    )
+    createdUserIds.push(localUserId)
+
+    const sourceAccount = await query<{ id: string }>(
+      `INSERT INTO directory_accounts
+         (integration_id, provider, external_user_id, external_key, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $2, $3, true, '{}'::jsonb)
+       RETURNING id`,
+      [sourceIntegrationId, sourceExtUser, `T1 source account ${tag}`]
+    )
+    const targetAccount = await query<{ id: string }>(
+      `INSERT INTO directory_accounts
+         (integration_id, provider, external_user_id, external_key, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $2, $3, true, '{}'::jsonb)
+       RETURNING id`,
+      [targetIntegrationId, targetExtUser, `T1 target account ${tag}`]
+    )
+    const sourceDept = await query<{ id: string }>(
+      `INSERT INTO directory_departments
+         (integration_id, provider, external_department_id, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $3, true, '{}'::jsonb)
+       RETURNING id`,
+      [sourceIntegrationId, sourceExtDept, `T1 source dept ${tag}`]
+    )
+    const targetDept = await query<{ id: string }>(
+      `INSERT INTO directory_departments
+         (integration_id, provider, external_department_id, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $3, true, '{}'::jsonb)
+       RETURNING id`,
+      [targetIntegrationId, targetExtDept, `T1 target dept ${tag}`]
+    )
+    await query(
+      `INSERT INTO directory_account_departments
+         (directory_account_id, directory_department_id, is_primary, is_manager)
+       VALUES ($1, $2, true, false), ($3, $4, true, false)`,
+      [sourceAccount.rows[0].id, sourceDept.rows[0].id, targetAccount.rows[0].id, targetDept.rows[0].id]
+    )
+    await query(
+      `INSERT INTO user_external_identities
+         (provider, external_key, provider_user_id, corp_id, local_user_id, profile)
+       VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+      [identityKey, sourceExtUser, `t1-corp-${suffix}`, localUserId]
+    )
+    createdIdentityKeys.push(identityKey)
+
+    return { identityExternalKeys: [identityKey], sourceAccountId: sourceAccount.rows[0].id }
+  }
+
   it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
@@ -213,7 +349,7 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(after.rows[0].n).toBe(before.rows[0].n)
   })
 
-  it('fails create closed on every invalid input — zero rows, zero audit rows (actor-scoped)', async () => {
+  it('fails create closed on every invalid input — zero rows, zero audit rows (action-namespace scoped)', async () => {
     const { org, source, target } = await seedPair('valid')
     const otherOrgIntegration = await seedIntegration(uniqueOrg('valid-other'), 'dingtalk', 'valid-other')
     const wecomIntegration = await seedIntegration(org, 'wecom', 'valid-wecom')
@@ -379,11 +515,16 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(await orgTransferAuditCount()).toBe(auditBefore)
   })
 
-  it('walks the happy lifecycle with one values-free audit row per mutation and an untouched directory fingerprint', async () => {
+  it('walks the happy lifecycle with one values-free audit row per mutation and an untouched scoped directory fingerprint', async () => {
     enableNoopAdapter()
     const { source, target } = await seedPair('happy')
     const transferId = await createTransfer(source, target)
     expect(await auditRowFor('create', transferId)).toBe(1)
+
+    // Seed unique anchors under THIS transfer's source+target only — fingerprint never reads
+    // global directory counts (those race with B1–B7 in the same Vitest process).
+    const anchors = await seedScopedDirectoryAnchors(source, target, 'happy')
+    const ownedIntegrations = [source, target]
 
     const read = await request(adminApp).get(`/api/admin/directory/org-transfers/${transferId}`)
     expect(read.status).toBe(200)
@@ -412,15 +553,44 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(dryRun.body.data.transfer.dryRunAt).not.toBeNull()
     expect(await auditRowFor('dry_run', transferId)).toBe(1)
 
-    const fingerprintBefore = await directoryFingerprint()
+    const fingerprintBefore = await scopedDirectoryFingerprint(ownedIntegrations, anchors.identityExternalKeys)
+    // Non-vacuous: fingerprint must include the seeded substrate (not an empty sentinel that
+    // would stay equal even if apply wrote unrelated rows elsewhere).
+    expect(fingerprintBefore).not.toBe('-|-|-|-')
+    expect(fingerprintBefore.includes(anchors.sourceAccountId)).toBe(true)
+
+    // Positive mutation control: one scoped directory write MUST move this fingerprint.
+    // Removing the sensitivity of scopedDirectoryFingerprint (or scoping to the wrong ids)
+    // reds this — proving the no-op equality below is load-bearing, not skip-green.
+    const positiveExt = `t1-fp-positive-${STAMP}-${randomUUID().slice(0, 8)}`
+    const positive = await query<{ id: string }>(
+      `INSERT INTO directory_accounts
+         (integration_id, provider, external_user_id, external_key, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $2, 'T1 positive-control write', true, '{}'::jsonb)
+       RETURNING id`,
+      [source, positiveExt]
+    )
+    const fingerprintAfterPositiveWrite = await scopedDirectoryFingerprint(
+      ownedIntegrations,
+      anchors.identityExternalKeys
+    )
+    expect(fingerprintAfterPositiveWrite).not.toBe(fingerprintBefore)
+    expect(fingerprintAfterPositiveWrite.includes(positive.rows[0].id)).toBe(true)
+    // Restore the pre-apply substrate so the no-op proof is against a clean, known set.
+    await query(`DELETE FROM directory_accounts WHERE id = $1`, [positive.rows[0].id])
+    const fingerprintStable = await scopedDirectoryFingerprint(ownedIntegrations, anchors.identityExternalKeys)
+    expect(fingerprintStable).toBe(fingerprintBefore)
+
     const apply = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply`)
     expect(apply.status).toBe(200)
     expect(apply.body.data.transfer.status).toBe('applied')
     expect(apply.body.data.transfer.appliedAt).not.toBeNull()
     expect(await auditRowFor('apply', transferId)).toBe(1)
 
-    // Registered no-op apply is a no-op by contract: nothing in the directory substrate moved.
-    expect(await directoryFingerprint()).toBe(fingerprintBefore)
+    // Registered no-op apply writes nothing to owned accounts/depts/memberships/identities.
+    expect(await scopedDirectoryFingerprint(ownedIntegrations, anchors.identityExternalKeys)).toBe(
+      fingerprintStable
+    )
 
     // Terminal: every further mutation is refused.
     for (const path of ['scan', 'apply', 'cancel']) {
@@ -575,7 +745,7 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     const transferId = await createTransfer(source, target)
     const auditBefore = await orgTransferAuditCount()
     const before = await transferRow(transferId)
-    const scanSpy = vi.spyOn(orgTransferService, 'scanOrgTransfer')
+    const scanSpy = trackSpy(vi.spyOn(orgTransferService, 'scanOrgTransfer'))
 
     const res = await request(adminApp)
       .post(`/api/admin/directory/org-transfers/${transferId}/scan`)
@@ -588,7 +758,6 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(await decisionCount(transferId)).toBe(0)
     expect(await auditRowFor('scan', transferId)).toBe(0)
     expect(await orgTransferAuditCount()).toBe(auditBefore)
-    scanSpy.mockRestore()
   })
 
   it('dry-run apply rejects a smuggled body field — 400 UNKNOWN_FIELDS, zero state/audit, never reaches service', async () => {
@@ -599,8 +768,8 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
     const auditBefore = await orgTransferAuditCount()
     const before = await transferRow(transferId)
-    const dryRunSpy = vi.spyOn(orgTransferService, 'dryRunOrgTransfer')
-    const applySpy = vi.spyOn(orgTransferService, 'applyOrgTransfer')
+    const dryRunSpy = trackSpy(vi.spyOn(orgTransferService, 'dryRunOrgTransfer'))
+    const applySpy = trackSpy(vi.spyOn(orgTransferService, 'applyOrgTransfer'))
 
     const res = await request(adminApp)
       .post(`/api/admin/directory/org-transfers/${transferId}/apply?dryRun=true`)
@@ -613,8 +782,6 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(await transferRow(transferId)).toEqual(before)
     expect(await auditRowFor('dry_run', transferId)).toBe(0)
     expect(await orgTransferAuditCount()).toBe(auditBefore)
-    dryRunSpy.mockRestore()
-    applySpy.mockRestore()
   })
 
   it('real apply rejects a smuggled body field — 400 UNKNOWN_FIELDS, zero state/audit, never reaches service', async () => {
@@ -626,7 +793,7 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply?dryRun=true`).expect(200)
     const auditBefore = await orgTransferAuditCount()
     const before = await transferRow(transferId)
-    const applySpy = vi.spyOn(orgTransferService, 'applyOrgTransfer')
+    const applySpy = trackSpy(vi.spyOn(orgTransferService, 'applyOrgTransfer'))
 
     const res = await request(adminApp)
       .post(`/api/admin/directory/org-transfers/${transferId}/apply`)
@@ -638,7 +805,6 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(await transferRow(transferId)).toEqual(before)
     expect(await auditRowFor('apply', transferId)).toBe(0)
     expect(await orgTransferAuditCount()).toBe(auditBefore)
-    applySpy.mockRestore()
   })
 
   it('cancel rejects a smuggled body field — 400 UNKNOWN_FIELDS, zero state/audit, never reaches service', async () => {
@@ -647,7 +813,7 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     const transferId = await createTransfer(source, target)
     const auditBefore = await orgTransferAuditCount()
     const before = await transferRow(transferId)
-    const cancelSpy = vi.spyOn(orgTransferService, 'cancelOrgTransfer')
+    const cancelSpy = trackSpy(vi.spyOn(orgTransferService, 'cancelOrgTransfer'))
 
     const res = await request(adminApp)
       .post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
@@ -659,17 +825,17 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(await transferRow(transferId)).toEqual(before)
     expect(await auditRowFor('cancel', transferId)).toBe(0)
     expect(await orgTransferAuditCount()).toBe(auditBefore)
-    cancelSpy.mockRestore()
   })
 
   it('lifecycle empty body / empty object remain allowed; arrays cannot bypass the contract', async () => {
-    // express.json({strict:true}) (default) rejects primitive JSON (number/null/string/bool)
-    // before the route — those never reach our body contract. Arrays DO reach the handler and
-    // are the load-bearing non-plain bypass: Object.keys([]) === [] would look like "empty".
+    // Production express.json({strict:true}) rejects primitive JSON (number/null/string/bool)
+    // at the parser with a generic 400 before the route — we do NOT claim ORG_TRANSFER_UNKNOWN_FIELDS
+    // for those. Arrays DO reach the handler and are the load-bearing non-plain bypass:
+    // Object.keys([]) === [] would look like "empty" without the plain-object gate.
     enableNoopAdapter()
     const { source, target } = await seedPair('body-empty')
     const transferId = await createTransfer(source, target)
-    const cancelSpy = vi.spyOn(orgTransferService, 'cancelOrgTransfer')
+    const cancelSpy = trackSpy(vi.spyOn(orgTransferService, 'cancelOrgTransfer'))
 
     // Omitted body + explicit {} are the only allowed lifecycle payloads.
     await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
@@ -695,15 +861,15 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(cancelSpy).not.toHaveBeenCalled()
     // Transfer still scanned (cancel never applied); not cancelled.
     expect((await transferRow(transferId)).status).toBe('scanned')
-    cancelSpy.mockRestore()
   })
 
   it('CREATE rejects arrays with ORG_TRANSFER_UNKNOWN_FIELDS (zero rows, zero audit, never reaches service)', async () => {
-    // Feasible through the real Express parser: JSON arrays reach the route. Primitive JSON
-    // bodies are rejected by express.json strict mode before our handler (not ORG_TRANSFER_*).
+    // Arrays reach the route through production express.json. Primitive JSON is rejected by
+    // express.json strict mode with a generic parser 400 — not ORG_TRANSFER_UNKNOWN_FIELDS —
+    // and is intentionally not asserted here.
     const { source, target } = await seedPair('body-create')
     const auditBefore = await orgTransferAuditCount()
-    const createSpy = vi.spyOn(orgTransferService, 'createOrgTransfer')
+    const createSpy = trackSpy(vi.spyOn(orgTransferService, 'createOrgTransfer'))
 
     const arrayBody = await request(adminApp)
       .post('/api/admin/directory/org-transfers')
@@ -725,7 +891,6 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     )
     expect(rows.rows[0].n).toBe('0')
     expect(await orgTransferAuditCount()).toBe(auditBefore)
-    createSpy.mockRestore()
   })
 
   // -------------------------------------------------------------------------------------------
@@ -739,40 +904,36 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     const forced = new Error(`relation "${relationNeedle}" does not exist — corp=dingtalk-corp-xyz url=https://evil.example/sync`)
     forced.name = nameSentinel
 
-    const getSpy = vi.spyOn(orgTransferService, 'getOrgTransfer').mockRejectedValue(forced)
-    const warnSpy = vi.spyOn(Logger.prototype, 'warn')
-    try {
-      const res = await request(adminApp).get(`/api/admin/directory/org-transfers/${randomUUID()}`)
-      expect(res.status).toBe(500)
-      expect(res.body.error.code).toBe('ORG_TRANSFER_INTERNAL_ERROR')
-      // Client HTTP message stays the server-authored fixed fallback — not the raw exception.
-      expect(res.body.error.message).toBe('Failed to read org transfer')
-      expect(JSON.stringify(res.body)).not.toContain(nameSentinel)
-      expect(JSON.stringify(res.body)).not.toContain(relationNeedle)
-      expect(JSON.stringify(res.body)).not.toContain('evil.example')
+    const getSpy = trackSpy(vi.spyOn(orgTransferService, 'getOrgTransfer').mockRejectedValue(forced))
+    const warnSpy = trackSpy(vi.spyOn(Logger.prototype, 'warn'))
 
-      const unexpectedWarns = warnSpy.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0] === 'Failed to read org transfer'
-      )
-      expect(unexpectedWarns.length).toBeGreaterThanOrEqual(1)
-      const [message, meta] = unexpectedWarns[0] as [string, Record<string, unknown>]
-      const serialized = JSON.stringify({ message, meta })
-      expect(serialized).not.toContain(nameSentinel)
-      expect(serialized).not.toContain(relationNeedle)
-      expect(serialized).not.toContain('evil.example')
-      expect(serialized).not.toContain('dingtalk-corp-xyz')
-      expect(serialized.toLowerCase()).not.toContain('does not exist')
-      expect(meta).toEqual({ reason: 'unexpected_error' })
-      expect(meta).not.toHaveProperty('error')
-      expect(meta).not.toHaveProperty('errorClass')
-      expect(meta).not.toHaveProperty('stack')
-      expect(meta).not.toHaveProperty('code')
-      expect(meta).not.toHaveProperty('provider')
-      expect(meta).not.toHaveProperty('body')
-    } finally {
-      warnSpy.mockRestore()
-      getSpy.mockRestore()
-    }
+    const res = await request(adminApp).get(`/api/admin/directory/org-transfers/${randomUUID()}`)
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('ORG_TRANSFER_INTERNAL_ERROR')
+    // Client HTTP message stays the server-authored fixed fallback — not the raw exception.
+    expect(res.body.error.message).toBe('Failed to read org transfer')
+    expect(JSON.stringify(res.body)).not.toContain(nameSentinel)
+    expect(JSON.stringify(res.body)).not.toContain(relationNeedle)
+    expect(JSON.stringify(res.body)).not.toContain('evil.example')
+
+    const unexpectedWarns = warnSpy.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0] === 'Failed to read org transfer'
+    )
+    expect(unexpectedWarns.length).toBeGreaterThanOrEqual(1)
+    const [message, meta] = unexpectedWarns[0] as [string, Record<string, unknown>]
+    const serialized = JSON.stringify({ message, meta })
+    expect(serialized).not.toContain(nameSentinel)
+    expect(serialized).not.toContain(relationNeedle)
+    expect(serialized).not.toContain('evil.example')
+    expect(serialized).not.toContain('dingtalk-corp-xyz')
+    expect(serialized.toLowerCase()).not.toContain('does not exist')
+    expect(meta).toEqual({ reason: 'unexpected_error' })
+    expect(meta).not.toHaveProperty('error')
+    expect(meta).not.toHaveProperty('errorClass')
+    expect(meta).not.toHaveProperty('stack')
+    expect(meta).not.toHaveProperty('code')
+    expect(meta).not.toHaveProperty('provider')
+    expect(meta).not.toHaveProperty('body')
   })
 
   it('audit-write failures log fixed metadata only (no raw Error text); mutation still succeeds', async () => {
@@ -783,31 +944,28 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     const forced = new Error(`insert into audit_logs failed: detail=provider=dingtalk corp_id=SECRET_CORP`)
     forced.name = nameSentinel
 
-    const auditSpy = vi.spyOn(auditModule, 'auditLog').mockRejectedValue(forced)
-    const warnSpy = vi.spyOn(Logger.prototype, 'warn')
-    try {
-      const transferId = await createTransfer(source, target)
-      // createTransfer expects 200 — audit is best-effort and must not fail the mutation.
-      expect(transferId).toBeTruthy()
+    const auditSpy = trackSpy(vi.spyOn(auditModule, 'auditLog').mockRejectedValue(forced))
+    const warnSpy = trackSpy(vi.spyOn(Logger.prototype, 'warn'))
 
-      const auditWarns = warnSpy.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0] === 'org-transfer audit write failed'
-      )
-      expect(auditWarns.length).toBeGreaterThanOrEqual(1)
-      const [message, meta] = auditWarns[0] as [string, Record<string, unknown>]
-      const serialized = JSON.stringify({ message, meta })
-      expect(serialized).not.toContain(nameSentinel)
-      expect(serialized).not.toContain('SECRET_CORP')
-      expect(serialized).not.toContain('audit_logs')
-      expect(serialized.toLowerCase()).not.toContain('insert into')
-      expect(meta).toEqual({ action: 'create', reason: 'audit_write_failed' })
-      expect(meta).not.toHaveProperty('error')
-      expect(meta).not.toHaveProperty('errorClass')
-      expect(meta).not.toHaveProperty('stack')
-      expect(meta).not.toHaveProperty('provider')
-    } finally {
-      warnSpy.mockRestore()
-      auditSpy.mockRestore()
-    }
+    const transferId = await createTransfer(source, target)
+    // createTransfer expects 200 — audit is best-effort and must not fail the mutation.
+    expect(transferId).toBeTruthy()
+
+    const auditWarns = warnSpy.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0] === 'org-transfer audit write failed'
+    )
+    expect(auditWarns.length).toBeGreaterThanOrEqual(1)
+    const [message, meta] = auditWarns[0] as [string, Record<string, unknown>]
+    const serialized = JSON.stringify({ message, meta })
+    expect(serialized).not.toContain(nameSentinel)
+    expect(serialized).not.toContain('SECRET_CORP')
+    expect(serialized).not.toContain('audit_logs')
+    expect(serialized.toLowerCase()).not.toContain('insert into')
+    expect(meta).toEqual({ action: 'create', reason: 'audit_write_failed' })
+    expect(meta).not.toHaveProperty('error')
+    expect(meta).not.toHaveProperty('errorClass')
+    expect(meta).not.toHaveProperty('stack')
+    expect(meta).not.toHaveProperty('provider')
+    void auditSpy
   })
 })
