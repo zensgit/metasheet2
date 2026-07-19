@@ -1,11 +1,9 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-// Bumped for T2-1+2 admin handover: the action CHECK constraint now also
-// permits 'reassign' (mirrors migration
-// zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts). The version
-// marker re-runs the DDL on an already-bootstrapped test DB.
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260702-admin-reassign'
+// Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
+// idempotent DDL. The current bump adds approval-template restore provenance.
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260717-template-version-restore'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -258,6 +256,11 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         UNIQUE (template_id, version)
       )
+    `)
+    await client.query(`
+      ALTER TABLE approval_template_versions
+      ADD COLUMN IF NOT EXISTS restored_from_version_id UUID
+        REFERENCES approval_template_versions(id) ON DELETE SET NULL
     `)
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_published_definitions (
