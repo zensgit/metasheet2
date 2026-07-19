@@ -16,6 +16,11 @@
 | **PB4-3** | #4397 | `80f4aceae` | 部门环检测：事务内递归祖先 walk（child 命中新父祖先链→409、`path[]` 终止守卫）+ 每-integration `pg_advisory_xact_lock` 串行 reparent（防 disjoint cross-mount 4-环）+ 钉 READ COMMITTED | opus gate APPROVE（P3 = RC 钉线机制证已补）+ owner 审后落地 |
 | **PB4-4** | #4401 | `987bdc5e0` | 本地 integration 重激活：`getOrCreateLocalIntegration` 条件 UPDATE 就地复活同一稳定锚（`name=$2 AND status<>'active'` 竞态安全闩 → 同 id、子表存活、单 `directory.local_integration.reactivate` 审计）| 1（**owner 抓 P2**：并发 mutation 假绿 → 改 `pg_blocking_pids()` 确定性 barrier，删 latch 稳定多审计）|
 | **B4** | #4419 | `b94dcd644` | `directory_department_bindings` buildable FK chain：单 `org_id` 列 + 双 integration `(id, org_id)` 复合 FK → **跨 org binding FK-impossible**；全 FK 列 NOT NULL（封 MATCH SIMPLE NULL 绕过）；provider-role 冗余 FK+CHECK 无 trigger；**部门 FK 三列 `(dept_id, integration_id, provider)`**（owner P2：钉住部门行自身 provider，拒 provider-mislabeled 部门占位）；`status active\|stale` 供 B7；迁移 replay 幂等 + down/up 往返 | 1（**owner 抓 P2**：dept FK 无 provider leg，两种 mislabeled binding 可插入 → 三列 FK + I/J 测试 + 双腿 mutation）|
+| **B5-a** | #4429 | `81aff8203` | `(org_id, purpose)` routing policy schema；同 org canonical FK；fallback `ON DELETE RESTRICT` | Grok 实现 + Codex 独立复核、mutation 重放 |
+| **B5-b** | #4430 | `05dcd5282` | policy-authoritative resolver；未配置/坏配置 fail-close；legacy 无策略 SQL 保持；审批 create/preview 区分持久配置错误与暂时读取失败 | Grok 实现 + Codex fresh-DB/语义 mutation 复核 |
+| **B5-c** | #4431 | `5e55b549d` | platform-admin list/set/clear/read-only preview；canonical target 同 org且 active；写点 `FOR SHARE` 关闭 disable-vs-set 竞态；values-free audit | Grok 实现 + Codex 双连接 barrier 复核 |
+| **B6** | #4434 | `50cbfcfea` | local/DingTalk 审批路由真库等价与 in-flight 不变证明；`deptHead` 的 provider-specific 非等价被显式钉住 | 证明票；Grok 构造 + Codex fresh-DB/语义 mutation 复核 |
+| **B7** | #4436 | `b004c5797` | 外部部门 suggest-only 对账；active/stale 只改 binding；本地部门零写；歧义不自动匹配；Q6 sync hook 失败隔离且日志 values-free | Grok 实现 + Codex 五项独立 mutation 重放；exact-head CI 16 pass/0 fail |
 
 ## 2. 遗留限制（诚实清单，按归属批次）
 
@@ -26,24 +31,19 @@
 - ✅ B1 停用后同名重建撞 `UNIQUE(org_id, provider, name)` → **getOrCreate 就地重激活同一稳定锚**（PB4-4 `987bdc5e0`）。
 - ✅ primary-switch 存在性检查移入事务并合成单 UPDATE（PB4-1/PB4-2 已含）。
 
-### routing 加固批（B5/B6 期间处理）
-- resolver **读侧**不过滤 integration `status`：active 期间设置的 `is_manager` 在 integration
-  停用后仍参与解析（写侧门已在 B3 关闭；读侧为既有设计属性，B3 未宣称覆盖）。
-- 主管**链**（chain hop）与**部门负责人**（dept head）仍走 legacy 源（B3 只泛化 direct-manager 步）。
+### routing 加固批（B5/B6 已处理或定界）
+- ✅ 审批 routing policy 读侧会验证 canonical integration 为 `active`；坏配置 fail-close，不再静默选取任意 integration（B5-b）。
+- ✅ direct-manager 的 local/DingTalk 等价已由真库 B6 证明。
+- **已知且刻意保留的边界**：manager chain 与 `deptHead` 仍保留 provider-specific/legacy 数据源；B6 测试显式钉住该非等价，Canonical Org MVP 不宣称迁移全部消费者。
 
-## 3. B5–B7：已开发并完成返工/gate（栈内 OPEN，未合并）
+## 3. Canonical Org 收官与 Transfer 顺序
 
-> **B5/B6 门控（owner 2026-07-17，B4 落地时重申）**：B4 已落地（§1 `b94dcd644`）。routing-core 的
-> design lock 已完成 owner Q1–Q6 裁决（`canonical-org-b5-b6-routing-core-design-lock-20260717.md`，
-> 状态=已裁决—锁定）；B5-a..B7 **代码已在 stacked PR 栈上开发完毕**（#4429→#4430→#4431→#4434→
-> #4436，全 OPEN/unarmed），owner CHANGES 已修闭且 fresh gate 无 P1/P2；等待按「逐张 retarget/rebase→
-> 重放承重 mutation→全套 required CI→串行落地」协议合并。
-
-- **B5** 显式 `(org, purpose)` routing policy + 只读切换预览 → **B6** local/DingTalk 审批路由真库
-  等价证明（首个真实消费者）→ **B7** 外部部门 suggest-only 对账（消失只标 `stale`，不得停用本地
-  部门）。B5/B6 同碰 routing core，开发期**未并行**；落地亦串行。
-- Canonical Org **单独收官门**：真库 done-gate、迁移 replay、mutation 表、真实 merge SHA 全入库后，
-  才解锁 Transfer。
+- ✅ **B1-B7 开发侧全部落地**；真实 merge SHA 见 §1。
+- ✅ Canonical Org 单独收官证据见
+  `canonical-org-mvp-done-gate-20260719.md`：合并后 main 上 fresh migration、第二次 replay、
+  18 文件/227 个真库测试、typecheck、CI wiring 守卫与 mutation 来源均已入库。
+- **Canonical Org 开发侧 DONE；生产发布仍由 §4 owner/ops 门控制。** Transfer 工程序列现已解锁，
+  但这不替代真实企业 UAT。
 - **Transfer**：T1 → T2 → T2-Gate → **条件式 T2.5** → T3 → T4 → T5。**T2.5 为显式决策分支**（owner
   裁定）：两 corp 实证若确认 `(provider, external_key)` 冲突，必须先落 tenant-scoped key migration
   （`(provider, tenant_key, external_key)`），**不得直接进入 T3**。
