@@ -379,20 +379,21 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:100,459',
     // P3-2 FLAG-ON PRECONDITION (design lock §3/§9; L5). This flag — and later Revert/Reset enablement — MUST
     // NOT be relied upon for a sheet unless BOTH: (a) an ACTIVE trust checkpoint exists for the sheet, AND
-    // (b) reconstruction causality is satisfied. Condition (b) is NOT yet satisfiable: the reconstructor still
-    // selects by created_at<=T (non-causal) until Lane L6 lands the exact event-anchor resolver, so this
-    // precondition CURRENTLY FAILS CLOSED for every checkpoint-bearing sheet — which is CORRECT ("migration/
-    // backfill presence alone never enables recovery"). WIRED (L5 P2): enforced by
-    // checkStrictEnablementPrecondition, CALLED from precheckSheetHistoryIntegrity's strict branch (the
-    // authoritative strict-mode entry the Revert/Reset routes traverse). A checkpoint-bearing sheet with the
-    // strict flag on is refused fail-closed (`strict_enablement_unmet`) until L6; the single L6 seam is the
-    // RECONSTRUCTION_CAUSALITY_LANDED constant. The refusal is UNCONDITIONAL on !canEnable (owner P2,
-    // 2026-07-16 — an earlier scope-seam exemption for no-checkpoint sheets was a production bypass and is
-    // REMOVED); goldens that need the comparator call the exported precheckSheetHistoryIntegrityStrict
-    // directly. Do not weaken it to pass. (Not modeled as a cross-flag rule: conditions (a)/(b) are runtime
-    // STATE, not other flag env values.)
+    // (b) reconstruction causality is satisfied. The MECHANISM for (b) landed with Lane L6-b (the causal
+    // reconstructRecordsAtSeq, seq-anchored), but RECONSTRUCTION_CAUSALITY_LANDED is DELIBERATELY HELD false
+    // (owner ruling 2026-07-17): the seam flips only in the PR that wires legacy Revert/Reset onto the L8
+    // exact-anchor apply. Until then strict-on refuses EVERY sheet — checkpoint-bearing included
+    // (`reconstruction_non_causal`) — the last code-level fail-closed backstop is RETAINED. Gating the strict
+    // flag ON remains the operator's default-OFF decision ("migration/backfill presence alone never enables
+    // recovery"). WIRED
+    // (L5 P2): enforced by checkStrictEnablementPrecondition, CALLED from precheckSheetHistoryIntegrity's
+    // strict branch (the authoritative strict-mode entry the Revert/Reset routes traverse). The refusal is
+    // UNCONDITIONAL on !canEnable (owner P2, 2026-07-16 — an earlier scope-seam exemption for no-checkpoint
+    // sheets was a production bypass and is REMOVED); goldens that need the comparator call the exported
+    // precheckSheetHistoryIntegrityStrict directly. Do not weaken it to pass. (Not modeled as a cross-flag
+    // rule: conditions (a)/(b) are runtime STATE, not other flag env values.)
     enablementPrecondition:
-      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED (L6). Fails closed until L6.',
+      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED — DELIBERATELY HELD false (owner ruling 2026-07-17): the causal reconstructor mechanism landed with L6-b, but the seam flips only in the PR that wires legacy Revert/Reset onto the L8 exact-anchor apply. Until then strict-on refuses EVERY sheet (checkpoint-bearing included, reason reconstruction_non_causal) — the fail-closed backstop is retained. The flag itself stays the operator decision (default OFF).',
     enablementPreconditionSource:
       'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
     enablementEnforcedVia:
