@@ -519,6 +519,7 @@ jobs:
             tests/integration/multitable-history-trust-checkpoint-realdb.test.ts \
             tests/integration/multitable-l5wire-checkpoint-activation-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \
