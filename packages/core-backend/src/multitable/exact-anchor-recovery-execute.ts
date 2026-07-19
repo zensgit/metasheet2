@@ -29,8 +29,8 @@ import {
   precheckSheetHistoryIntegrityStrict,
 } from './history-integrity-precheck'
 import type { MultitableField } from './field-codecs'
-import { validateLongTextValue } from './field-codecs'
 import {
+  assertExactRestorableRecordValid,
   assertExactRestorableScalarValue,
   ExactRestoreValueError,
 } from './exact-anchor-restore-validate'
@@ -141,7 +141,8 @@ export type ExactAnchorApplyRefusal =
   | 'schema-drift' // plan.driftCount > 0 ⇒ WHOLE apply refused, zero writes
   | 'inbound-unprovable' // plan.resurrects.length > 0 — at-anchor inbound relations cannot be proven (D1c)
   | 'link-integrity' // missing/ambiguous foreign sheet, missing/wrong-sheet target, same-op delete target, or mirror
-  | 'value-invalid' // current-schema validation rejects the historical scalar OR would sanitize/coerce it
+  | 'value-invalid' // current-schema scalar exactness OR whole-record validateRecord fails
+  | 'record-locked' // in-fence lock check: record locked by another actor (values-free)
   | 'recovery-trust-required' // fence+strict substrate missing or HISTORY_INCOMPLETE under the fence
 
 export interface ExactAnchorApplySuccess {
@@ -369,13 +370,14 @@ export async function applyExactAnchorRecovery(
           normalizeLinkIds,
         })
         if (projection.isNoOp) continue
-        for (const fid of projection.changedFieldIds) {
-          const field = fieldById.get(fid)
-          if (!field) continue
-          if (field.type === 'link') continue // dedicated link path
-          const hist = projection.patch[fid]
-          if (hist === null || hist === undefined) continue // unset
-          try {
+        try {
+          // Per-scalar exactness under CURRENT codecs (delegates longText → validateLongTextValue).
+          for (const fid of projection.changedFieldIds) {
+            const field = fieldById.get(fid)
+            if (!field) continue
+            if (field.type === 'link') continue // dedicated link path
+            const hist = projection.patch[fid]
+            if (hist === null || hist === undefined) continue // unset of this key; whole-record check covers required
             assertExactRestorableScalarValue(
               {
                 id: field.id,
@@ -385,14 +387,21 @@ export async function applyExactAnchorRecovery(
               },
               hist,
             )
-            // Chokepoint pin: rich longText must go through validateLongTextValue (structural guard).
-            if (field.type === 'longText') {
-              validateLongTextValue(hist, field.id, field.property)
-            }
-          } catch (e) {
-            if (e instanceof ExactRestoreValueError) throw new ApplyRefusalError('value-invalid')
-            throw e
           }
+          // Whole projected record: explicit property.validation ?? getDefaultValidationRules
+          // (same precedence as record-service buildDirectValidationFields).
+          assertExactRestorableRecordValid(
+            fields.map((f) => ({
+              id: f.id,
+              name: f.name,
+              type: f.type,
+              property: f.property as Record<string, unknown> | undefined,
+            })),
+            projection.data,
+          )
+        } catch (e) {
+          if (e instanceof ExactRestoreValueError) throw new ApplyRefusalError('value-invalid')
+          throw e
         }
         revertWrites.push({
           recordId: r.recordId,
@@ -467,7 +476,7 @@ export async function applyExactAnchorRecovery(
           ensureRecordNotLocked(
             input.actorId,
             live,
-            () => new Error(`exact-anchor apply refused: record ${recordId} is locked`),
+            () => new ApplyRefusalError('record-locked'),
           )
           pending.push({ recordId, live, revisionId: randomUUID() })
         }
@@ -539,7 +548,7 @@ export async function applyExactAnchorRecovery(
           ensureRecordNotLocked(
             input.actorId,
             liveRow,
-            () => new Error(`exact-anchor apply refused: record ${rw.recordId} is locked`),
+            () => new ApplyRefusalError('record-locked'),
           )
         }
         // lock-guarded: L8 revert apply — ensureRecordNotLocked just above, same txn.

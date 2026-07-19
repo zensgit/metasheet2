@@ -383,11 +383,11 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(await burnCount()).toBe(0)
   })
 
-  test('LOCKED record: a lock held by ANOTHER actor aborts the whole all-or-nothing apply (rank-8 discipline); unlocking lets it through', async () => {
+  test('LOCKED record: a lock held by ANOTHER actor ⇒ record-locked (values-free), zero writes; unlocking lets it through', async () => {
     const { R_REV, anchorOp } = await seedWorld()
     await q('UPDATE meta_records SET locked = true, locked_by = $1 WHERE id = $2 AND sheet_id = $3', ['someone-else', R_REV, SHEET])
     const pv = await preview(anchorOp) // lock columns are not part of the live {id, version} fingerprint
-    await expect(applyExactAnchorRecovery(txn, applyArgs(pv.token))).rejects.toThrow(/locked/i)
+    expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'record-locked' })
     expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-now' }) // nothing applied (all-or-nothing)
     expect(await burnCount()).toBe(0)
     // unlock ⇒ the SAME token applies (the refusal wrote nothing).
@@ -871,6 +871,87 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       expect(await burnCount()).toBe(0)
     } finally {
       await q('DELETE FROM meta_fields WHERE id = $1', [F_LT]).catch(() => {})
+    }
+  })
+
+  test('VALUE-INVALID required: historical snapshot omits a field that is NOW required ⇒ value-invalid, zero writes', async () => {
+    const F_REQ = `fld_eaa_req_${TS}`
+    // CURRENT schema: F_REQ is required. Historical at-anchor data only has F_STR (F_REQ omitted).
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
+      [F_REQ, SHEET, 'Required', 'string', JSON.stringify({ validation: [{ type: 'required' }] }), 12],
+    )
+    try {
+      const R = `rec_req_${TS}`
+      const [sCreate, sUpdate] = await seqBand(2)
+      const op = await sealAnchorOp(R, [
+        { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'at-anchor' } },
+      ])
+      await revSeq(R, 2, 'update', { [F_STR]: 'live-now', [F_REQ]: 'filled' }, sUpdate)
+      await live(R, { [F_STR]: 'live-now', [F_REQ]: 'filled' }, 2)
+      const before = await liveRow(R)
+      const pv = await preview(op, 'revert')
+      // Projection restores at-anchor data without F_REQ (unset/omit) while CURRENT requires it.
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'value-invalid' })
+      expect(await liveRow(R)).toEqual(before)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_fields WHERE id = $1', [F_REQ]).catch(() => {})
+    }
+  })
+
+  test('VALUE-INVALID maxLength: historical value exceeds CURRENT property.validation maxLength ⇒ value-invalid', async () => {
+    const F_MAX = `fld_eaa_max_${TS}`
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
+      [F_MAX, SHEET, 'Short', 'string', JSON.stringify({ validation: [{ type: 'maxLength', params: { value: 3 } }] }), 13],
+    )
+    try {
+      const R = `rec_max_${TS}`
+      const [sCreate, sUpdate] = await seqBand(2)
+      const op = await sealAnchorOp(R, [
+        { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'x', [F_MAX]: 'toolong' } },
+      ])
+      await revSeq(R, 2, 'update', { [F_STR]: 'x', [F_MAX]: 'ok' }, sUpdate)
+      await live(R, { [F_STR]: 'x', [F_MAX]: 'ok' }, 2)
+      const before = await liveRow(R)
+      const pv = await preview(op, 'revert')
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'value-invalid' })
+      expect(await liveRow(R)).toEqual(before)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_fields WHERE id = $1', [F_MAX]).catch(() => {})
+    }
+  })
+
+  test('VALUE-INVALID pattern: historical value fails CURRENT property.validation pattern ⇒ value-invalid', async () => {
+    const F_PAT = `fld_eaa_pat_${TS}`
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING',
+      [
+        F_PAT,
+        SHEET,
+        'Code',
+        'string',
+        JSON.stringify({ validation: [{ type: 'pattern', params: { regex: '^[A-Z]+$' } }] }),
+        14,
+      ],
+    )
+    try {
+      const R = `rec_pat_${TS}`
+      const [sCreate, sUpdate] = await seqBand(2)
+      const op = await sealAnchorOp(R, [
+        { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'x', [F_PAT]: 'not-upper' } },
+      ])
+      await revSeq(R, 2, 'update', { [F_STR]: 'x', [F_PAT]: 'ABC' }, sUpdate)
+      await live(R, { [F_STR]: 'x', [F_PAT]: 'ABC' }, 2)
+      const before = await liveRow(R)
+      const pv = await preview(op, 'revert')
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'value-invalid' })
+      expect(await liveRow(R)).toEqual(before)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_fields WHERE id = $1', [F_PAT]).catch(() => {})
     }
   })
 

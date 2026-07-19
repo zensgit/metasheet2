@@ -10,7 +10,11 @@ import {
   projectRestorableOntoLive,
   canonicalDedupeLinkIds,
 } from '../../src/multitable/record-restore-diff'
-import { assertExactRestorableScalarValue, ExactRestoreValueError } from '../../src/multitable/exact-anchor-restore-validate'
+import {
+  assertExactRestorableRecordValid,
+  assertExactRestorableScalarValue,
+  ExactRestoreValueError,
+} from '../../src/multitable/exact-anchor-restore-validate'
 
 // Minimal stand-in for the route's normalizeLinkIds (array → string[]; the helper only needs the parse contract).
 const nlz = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v ? [v] : [])
@@ -188,6 +192,88 @@ describe('assertExactRestorableScalarValue — exact-anchor current-schema fail-
   it('identical valid string scalar passes', () => {
     expect(() =>
       assertExactRestorableScalarValue({ id: 's', type: 'string' }, 'hello'),
+    ).not.toThrow()
+  })
+})
+
+describe('assertExactRestorableRecordValid — whole projected record under CURRENT rules', () => {
+  it('newly-required field omitted/unset on projected data ⇒ ExactRestoreValueError', () => {
+    expect(() =>
+      assertExactRestorableRecordValid(
+        [
+          {
+            id: 'req',
+            name: 'Required',
+            type: 'string',
+            property: { validation: [{ type: 'required' }] },
+          },
+          { id: 'note', name: 'Note', type: 'string', property: {} },
+        ],
+        { note: 'present' }, // req omitted
+      ),
+    ).toThrow(ExactRestoreValueError)
+  })
+
+  it('explicit maxLength violation on projected data ⇒ ExactRestoreValueError', () => {
+    expect(() =>
+      assertExactRestorableRecordValid(
+        [
+          {
+            id: 's',
+            name: 'Short',
+            type: 'string',
+            property: { validation: [{ type: 'maxLength', params: { value: 3 } }] },
+          },
+        ],
+        { s: 'toolong' },
+      ),
+    ).toThrow(ExactRestoreValueError)
+  })
+
+  it('explicit pattern violation on projected data ⇒ ExactRestoreValueError', () => {
+    expect(() =>
+      assertExactRestorableRecordValid(
+        [
+          {
+            id: 'code',
+            name: 'Code',
+            type: 'string',
+            property: { validation: [{ type: 'pattern', params: { regex: '^[A-Z]+$' } }] },
+          },
+        ],
+        { code: 'not-upper' },
+      ),
+    ).toThrow(ExactRestoreValueError)
+  })
+
+  it('valid projected record under explicit required + pattern passes', () => {
+    expect(() =>
+      assertExactRestorableRecordValid(
+        [
+          {
+            id: 'code',
+            name: 'Code',
+            type: 'string',
+            property: {
+              validation: [
+                { type: 'required' },
+                { type: 'pattern', params: { regex: '^[A-Z]+$' } },
+              ],
+            },
+          },
+        ],
+        { code: 'ABC' },
+      ),
+    ).not.toThrow()
+  })
+
+  it('explicit property.validation replaces defaults (record-service ?? precedence)', () => {
+    // Default string maxLength is 10000; explicit empty validation list means NO rules.
+    expect(() =>
+      assertExactRestorableRecordValid(
+        [{ id: 's', name: 'S', type: 'string', property: { validation: [] } }],
+        { s: 'x'.repeat(20000) },
+      ),
     ).not.toThrow()
   })
 })

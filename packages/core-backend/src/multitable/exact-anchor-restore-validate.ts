@@ -1,27 +1,29 @@
 /**
- * Exact-anchor restorable scalar validation under the CURRENT schema (W0 L8).
+ * Exact-anchor restorable validation under the CURRENT schema (W0 L8).
  *
- * Re-runs the same field-codecs validators/coercers the normal write path uses
- * (`validateLongTextValue`, select/multiSelect option membership, numeric/boolean/string/date
- * shape, Batch-1 types, person shape). Exact-anchor semantics FAIL CLOSED when:
- *   - validation/coercion throws, OR
- *   - the canonicalized result differs from the signed historical value
- *     (e.g. rich longText sanitizer would strip XSS; `"5"` coerces to `5`).
+ * 1) Per-scalar exactness: re-run write-path codecs (`validateLongTextValue`, select/multiSelect,
+ *    numeric/boolean/string/date shape, Batch-1, person shape). FAIL CLOSED when validation/coercion
+ *    throws OR the canonicalized result differs from the signed historical value (no silent sanitize).
+ * 2) Whole projected record: `validateRecord` with the same rule precedence as record-service
+ *    (`property.validation` explicit list ?? `getDefaultValidationRules`). A newly-required field
+ *    omitted/unset by the at-anchor projection ⇒ value-invalid before mint/write.
  *
- * Never silently transforms history and still claims an exact restore. Links, attachment,
- * and derived/system types are out of scope here (handled by projection / dedicated paths).
+ * Links / attachment / derived / system are out of scope for (1) (projection / dedicated paths).
  */
 import {
   BATCH1_FIELD_TYPES,
   coerceBatch1Value,
   coerceNumericValue,
   isPersonSingleRecord,
+  mapFieldType,
   normalizeMultiSelectValue,
   validateDateTimeValue,
   validateLongTextValue,
   validateLocationValue,
   validatePersonValue,
 } from './field-codecs'
+import type { FieldValidationConfig } from './field-validation'
+import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 
 export class ExactRestoreValueError extends Error {
   readonly code = 'value-invalid' as const
@@ -130,6 +132,44 @@ export function assertExactRestorableScalarValue(field: ExactRestoreField, histo
   if (!sameValue(canonical, historicalValue)) {
     throw new ExactRestoreValueError(
       `Exact restore refused: current-schema validation would alter historical value for ${field.id}`,
+    )
+  }
+}
+
+/**
+ * Whole projected-record validation under CURRENT field definitions (record-service precedence):
+ * `explicit property.validation[] ?? getDefaultValidationRules(type, property)`.
+ * Call with the FULL projected data (not just the patch) so newly-required fields that the historical
+ * snapshot omits/unsets are still checked.
+ */
+export function assertExactRestorableRecordValid(
+  fields: Array<{
+    id: string
+    name: string
+    type: string
+    property?: Record<string, unknown>
+  }>,
+  projectedData: Record<string, unknown>,
+): void {
+  const validationFields = fields.map((f) => {
+    const fieldType = String(mapFieldType(f.type))
+    const property = f.property ?? {}
+    const explicitRules = Array.isArray(property.validation)
+      ? (property.validation as FieldValidationConfig)
+      : undefined
+    const defaultRules = getDefaultValidationRules(fieldType, property)
+    const mergedRules = explicitRules ?? defaultRules
+    return {
+      id: f.id,
+      name: f.name || f.id,
+      type: fieldType,
+      config: mergedRules.length > 0 ? { validation: mergedRules } : undefined,
+    }
+  })
+  const result = validateRecord(validationFields, projectedData)
+  if (!result.valid) {
+    throw new ExactRestoreValueError(
+      `Exact restore refused: projected record fails CURRENT validation (${result.errors.map((e) => e.rule).join(',')})`,
     )
   }
 }
