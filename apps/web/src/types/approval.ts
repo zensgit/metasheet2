@@ -294,6 +294,11 @@ export interface ApprovalActionRequest {
   addSignMode?: 'before' | 'parallel'
   /** P1-B reduce_sign — assignee_id of the add-signed row to remove. */
   targetAssignmentUserId?: string
+  /**
+   * FWB-3: approver-confirmed decision field values for the current node's `decisionFieldIds`.
+   * Server freezes inside the dispatchAction FOR UPDATE transaction; never reused after re-entry.
+   */
+  decisionData?: Record<string, unknown>
 }
 
 export interface ApprovalTemplateListItemDTO {

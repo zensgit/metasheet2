@@ -2499,17 +2499,33 @@ export class MultitableApiClient {
     await this.parseJson(res)
   }
 
-  /** FWB Q6: server-generated confirmation challenge (identifiers only). */
+  /**
+   * FWB Q6: server-generated confirmation challenge.
+   * Server resolves active_version_id + record-link target binding + ACL.
+   * Client supplies templateId, mode, mapping identifiers (from selectors), optional recordLinkFieldId.
+   * Never pass templateVersionId as authority.
+   */
   async createFwbConfirmationChallenge(
     sheetId: string,
     body: {
       templateId: string
-      templateVersionId: string
-      targetSheetId: string
-      targetBaseId?: string | null
+      mode: 'create' | 'update' | 'decision'
       mappings: Array<{ formFieldId: string; targetFieldId: string }>
+      recordLinkFieldId?: string | null
+      targetSheetId?: string | null
     },
-  ): Promise<{ confirmationId: string; fingerprint: string; challengeNonce: string }> {
+  ): Promise<{
+    confirmationId: string
+    fingerprint: string
+    challengeNonce: string
+    subject?: {
+      templateId: string
+      templateVersionId: string
+      targetBaseId: string | null
+      targetSheetId: string
+      mappings: Array<{ formFieldId: string; targetFieldId: string }>
+    }
+  }> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/fwb-confirmation/challenge`,
       {
