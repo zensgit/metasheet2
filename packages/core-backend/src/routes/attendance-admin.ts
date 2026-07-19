@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { query } from '../db/pg'
+import { MAX_MANAGER_CHAIN_LEVELS } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
 import { ensurePlatformAdmin } from './admin-users'
@@ -313,12 +314,102 @@ async function resolveBatchUsers(userIds: string[]): Promise<{
   return { items, missingUserIds, inactiveUserIds }
 }
 
+function getAttendanceAdminRequestUserId(req: Request): string {
+  const raw = req.user as Record<string, unknown> | undefined
+  const userId = raw?.id ?? raw?.userId ?? raw?.sub
+  return typeof userId === 'string' ? userId.trim() : ''
+}
+
+function hasLegacyAdminClaim(req: Request): boolean {
+  const raw = req.user as Record<string, unknown> | undefined
+  if (!raw) return false
+  if (raw.role === 'admin') return true
+  if (Array.isArray(raw.roles) && raw.roles.includes('admin')) return true
+  if (Array.isArray(raw.perms) && (raw.perms.includes('*:*') || raw.perms.includes('admin:all'))) return true
+  return false
+}
+
+/**
+ * S7-5 / OD-S7-6: values-free org readiness for dynamic approval-step authoring.
+ * Pure query helper so unit tests can assert the SQL is org-anchored and returns no PII.
+ */
+export async function readOrgDirectoryReadiness(
+  orgId: string,
+  runQuery: typeof query = query,
+): Promise<{ hasLinkedDirectoryAccounts: boolean; maxManagerChainLevels: number }> {
+  // EXISTS only — never SELECT account ids, names, phones, or raw payloads.
+  // Mirrors the runtime resolver's minimum usable-account predicate
+  // (ApprovalDirectoryOrg: linked + a.is_active = true).
+  const result = await runQuery<{ ready: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+         JOIN directory_integrations i ON i.id = a.integration_id
+        WHERE i.org_id = $1
+          AND l.link_status = 'linked'
+          AND a.is_active = true
+        LIMIT 1
+     ) AS ready`,
+    [orgId],
+  )
+  return {
+    hasLinkedDirectoryAccounts: Boolean(result.rows[0]?.ready),
+    maxManagerChainLevels: MAX_MANAGER_CHAIN_LEVELS,
+  }
+}
+
+/**
+ * S7-5: can this attendance:admin read directory readiness for `orgId`?
+ * Platform admins may; delegated attendance admins must be active members of that org
+ * (strict org anchor — never a global directory probe).
+ */
+export async function canReadAttendanceDirectoryReadiness(
+  req: Request,
+  userId: string,
+  orgId: string,
+  runQuery: typeof query = query,
+): Promise<boolean> {
+  if (hasLegacyAdminClaim(req) || await isRbacAdmin(userId)) return true
+  const member = await runQuery(
+    'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+    [userId, orgId],
+  )
+  return member.rows.length > 0
+}
+
 export function attendanceAdminRouter(): Router {
   const r = Router()
 
   // NOTE: This is an attendance-scoped admin surface. Guard by attendance:admin (not global admin),
   // so tenants can delegate attendance administration without exposing the whole platform.
   r.use('/api/attendance-admin', rbacGuard('attendance', 'admin'))
+
+  // S7-5 / OD-S7-6: smallest values-free, org-anchored readiness read for the approval-flow
+  // authoring warning. Delegated attendance admins MUST NOT call platform-admin directory
+  // endpoints; this seam is the only authoring path. Response carries ONLY a boolean + the
+  // host-authoritative manager-chain max (no account/user/integration payload).
+  r.get('/api/attendance-admin/directory-readiness', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      const userId = getAttendanceAdminRequestUserId(req)
+      if (!userId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for directory readiness')
+      }
+      const readiness = await readOrgDirectoryReadiness(orgId)
+      return jsonOk(res, readiness)
+    } catch (_error) {
+      // Values-free seam: never leak raw DB / driver messages to the client.
+      return jsonError(res, 500, 'DIRECTORY_READINESS_FAILED', 'Failed to load directory readiness')
+    }
+  })
 
   r.get('/api/attendance-admin/role-templates', async (_req: Request, res: Response) => {
     try {

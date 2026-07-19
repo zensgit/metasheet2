@@ -25,7 +25,44 @@
           />
         </label>
 
-        <div class="approval-steps__approvers">
+        <label class="attendance__field" :for="`approval-step-kind-${index}`">
+          <span>{{ tr('Approver source', '审批人来源') }}</span>
+          <select
+            :id="`approval-step-kind-${index}`"
+            class="approval-steps__kind"
+            data-testid="attendance-approval-step-kind"
+            :value="kindSelectValue(step)"
+            @change="onKindChange(index, ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="static">{{ tr('Static approvers', '指定审批人') }}</option>
+            <option value="direct_manager">{{ tr('Direct manager', '直属上级') }}</option>
+            <option value="dept_head">{{ tr('Department head', '部门主管') }}</option>
+            <option value="manager_at_level" :disabled="!hostMaxKnown">
+              {{ tr('Manager at level', '指定层级上级') }}{{ hostMaxKnown ? '' : tr(' (waiting for host max…)', '（等待主机上限…）') }}
+            </option>
+            <option
+              v-if="isUnsupportedDynamicStep(step)"
+              :value="`unsupported:${String(step.kind)}`"
+              disabled
+            >
+              {{ tr('Unsupported source', '不支持的来源') }}: {{ formatUnsupportedKind(step) }}
+            </option>
+          </select>
+        </label>
+
+        <p
+          v-if="isUnsupportedDynamicStep(step)"
+          class="approval-steps__warn"
+          data-testid="attendance-approval-step-unsupported"
+        >
+          {{ tr(
+            'This step uses an unsupported or malformed approver source and will be preserved as-is until you change it. It is not silently rewritten.',
+            '本步骤使用了不支持或畸形的审批人来源，在您主动更改前将原样保留，不会被静默改写。',
+          ) }}
+        </p>
+
+        <!-- Static approver pickers — only for true kind-less static steps -->
+        <div v-if="isEditableStaticStep(step)" class="approval-steps__approvers">
           <div class="approval-steps__col">
             <AttendanceUserPickerField
               :model-value="''"
@@ -65,11 +102,40 @@
           </div>
         </div>
 
-        <p v-if="stepHasNoApprover(step)" class="approval-steps__warn" data-testid="attendance-approval-step-warning">
+        <!-- manager_at_level: show persisted level even when max is unknown (read-only until host max arrives) -->
+        <label
+          v-if="kindSelectValue(step) === 'manager_at_level'"
+          class="attendance__field"
+          :for="`approval-step-level-${index}`"
+        >
+          <span>{{ tr('Manager level (1 = direct manager)', '上级层级（1 = 直属上级）') }}</span>
+          <input
+            :id="`approval-step-level-${index}`"
+            type="number"
+            min="1"
+            :max="levelInputMax"
+            step="any"
+            data-testid="attendance-approval-step-level"
+            :disabled="!hostMaxKnown"
+            :value="step.level === undefined || step.level === null ? '' : step.level"
+            @input="onLevel(index, ($event.target as HTMLInputElement).value)"
+          />
+          <span v-if="hostMaxKnown" class="approval-steps__hint">
+            {{ tr('Allowed range', '允许范围') }}: 1 … {{ hostMax }}
+          </span>
+          <span v-else class="approval-steps__hint" data-testid="attendance-approval-step-level-waiting">
+            {{ tr('Level editing waits for the host max from directory readiness.', '层级编辑需等待主机返回的目录就绪上限。') }}
+          </span>
+        </label>
+
+        <p v-if="isEditableStaticStep(step) && stepHasNoApprover(step)" class="approval-steps__warn" data-testid="attendance-approval-step-warning">
           {{ tr('This step has no approver — it may auto-pass or fall back to admin.', '本步骤未配置审批人——可能自动通过或兜底到管理员。') }}
         </p>
       </li>
     </ol>
+
+    <!-- Directory warning lives only on the parent (AttendanceView) via collectAuthoringWarnings
+         so the same OD-S7-6 message is not shown twice (review P3). -->
 
     <button type="button" class="attendance__btn" data-testid="attendance-approval-add-step" @click="onAdd">
       + {{ tr('Add step', '添加步骤') }}
@@ -84,13 +150,20 @@ import {
   addApproverRoles,
   addApproverUser,
   addStep,
+  getApprovalStepKind,
+  getStepKindSelection,
+  isEditableStaticStep,
+  isUnsupportedDynamicStep,
   moveStep,
   removeApproverRole,
   removeApproverUser,
   removeStep,
+  setManagerLevel,
   setStepField,
+  setStepKind,
   stepHasNoApprover,
   type AttendanceApprovalStep,
+  type AttendanceStepKindSelection,
 } from './attendanceApprovalSteps'
 
 type Translate = (en: string, zh: string) => string
@@ -98,6 +171,12 @@ type Translate = (en: string, zh: string) => string
 const props = defineProps<{
   modelValue: AttendanceApprovalStep[]
   tr: Translate
+  /**
+   * Host-authoritative chain cap from the readiness seam.
+   * null/undefined = unknown — manager_at_level creation/editing is disabled;
+   * existing persisted manager_at_level content remains visible and unchanged.
+   */
+  maxManagerChainLevels?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -106,6 +185,28 @@ const emit = defineEmits<{
 
 const steps = computed<AttendanceApprovalStep[]>(() => props.modelValue ?? [])
 const roleDraft = reactive<Record<number, string>>({})
+
+const hostMax = computed((): number | null => {
+  const max = props.maxManagerChainLevels
+  return typeof max === 'number' && Number.isInteger(max) && max >= 1 ? max : null
+})
+const hostMaxKnown = computed(() => hostMax.value !== null)
+/** HTML max attr: number | undefined only (null is not valid for Numberish). */
+const levelInputMax = computed((): number | undefined => hostMax.value ?? undefined)
+
+function kindSelectValue(step: AttendanceApprovalStep): string {
+  const selection = getStepKindSelection(step)
+  if (selection) return selection
+  if (isUnsupportedDynamicStep(step)) return `unsupported:${String(step.kind)}`
+  return 'static'
+}
+
+function formatUnsupportedKind(step: AttendanceApprovalStep): string {
+  const kind = getApprovalStepKind(step)
+  if (kind) return kind
+  if (typeof step.kind === 'string') return step.kind.length === 0 ? '(blank)' : step.kind
+  return String(step.kind)
+}
 
 function commit(next: AttendanceApprovalStep[]): void {
   emit('update:modelValue', next)
@@ -131,6 +232,26 @@ function onAddRoles(index: number): void {
   roleDraft[index] = ''
 }
 function onRemoveRole(index: number, rid: string): void { commit(removeApproverRole(props.modelValue, index, rid)) }
+
+function onKindChange(index: number, raw: string): void {
+  if (raw.startsWith('unsupported:')) return
+  const allowed: AttendanceStepKindSelection[] = ['static', 'direct_manager', 'dept_head', 'manager_at_level']
+  if (!(allowed as string[]).includes(raw)) return
+  // continuous_managers is never offered (OD-S7-2).
+  // manager_at_level is no-op while host max is unknown (setStepKind fail-closed).
+  commit(setStepKind(props.modelValue, index, raw as AttendanceStepKindSelection, {
+    maxManagerChainLevels: hostMax.value,
+  }))
+}
+
+function onLevel(index: number, raw: string): void {
+  // Fail-closed: store the exact number the user typed (including fractional / 0 /
+  // out-of-range). No Math.trunc, no clamp. Empty input does not invent a default.
+  if (raw.trim() === '') return
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) return
+  commit(setManagerLevel(props.modelValue, index, parsed, hostMax.value))
+}
 </script>
 
 <style scoped>
@@ -165,6 +286,10 @@ function onRemoveRole(index: number, rid: string): void { commit(removeApproverR
 .approval-steps__reorder {
   display: flex;
   gap: var(--ms-space-1);
+}
+
+.approval-steps__kind {
+  width: 100%;
 }
 
 .approval-steps__approvers {
@@ -207,6 +332,13 @@ function onRemoveRole(index: number, rid: string): void { commit(removeApproverR
 .approval-steps__warn {
   margin: var(--ms-space-2) 0 0;
   color: var(--ms-color-warning);
+  font-size: 12px;
+}
+
+.approval-steps__hint {
+  display: block;
+  margin-top: var(--ms-space-1);
+  color: var(--ms-text-3);
   font-size: 12px;
 }
 

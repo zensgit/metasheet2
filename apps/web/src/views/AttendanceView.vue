@@ -7667,9 +7667,14 @@
                 </label>
                 <div class="attendance__field attendance__field--full">
                   <span>{{ tr('Approval steps', '审批步骤') }}</span>
-                  <AttendanceApprovalFlowStepsEditor v-model="approvalFlowSteps" :tr="tr" />
+                  <AttendanceApprovalFlowStepsEditor
+                    v-model="approvalFlowSteps"
+                    :tr="tr"
+                    :max-manager-chain-levels="approvalMaxManagerChainLevels"
+                  />
                   <p v-for="(warn, i) in approvalFlowStepWarnings" :key="i" class="attendance__hint attendance__hint--warning" data-testid="attendance-approval-flow-warning">
                     <template v-if="warn.code === 'no_steps'">{{ tr('No steps configured — requests of this type may auto-pass.', '未配置任何步骤——该类型申请可能自动通过。') }}</template>
+                    <template v-else-if="warn.code === 'directory_not_ready'">{{ tr('Dynamic approver steps need a linked directory for this org (non-blocking).', '动态审批人步骤需要本组织已关联目录（非阻断警告）。') }}</template>
                     <template v-else>{{ tr(`Step ${(warn.stepIndex ?? 0) + 1} has no approver.`, `第 ${(warn.stepIndex ?? 0) + 1} 级未配置审批人。`) }}</template>
                   </p>
                   <details class="attendance__approval-preview" data-testid="attendance-approval-steps-preview">
@@ -9928,6 +9933,7 @@ import {
   toPayloadSteps as toApprovalPayloadSteps,
   type AttendanceApprovalStep as AttendanceApprovalStepModel,
 } from './attendance/attendanceApprovalSteps'
+import { useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -15548,7 +15554,16 @@ const approvalFlowForm = reactive({
 const approvalFlowSteps = ref<AttendanceApprovalStepModel[]>([])
 const approvalFlowStepsPreview = computed(() => stepsPreviewJson(approvalFlowSteps.value))
 const approvalFlowRequestTypeOptions = ATTENDANCE_APPROVAL_REQUEST_TYPES
-const approvalFlowStepWarnings = computed(() => collectAuthoringWarnings(approvalFlowSteps.value))
+// S7-5 / OD-S7-6: org-scoped directory readiness for the non-blocking dynamic-kind warning.
+// Loaded via attendance:admin only — never platform-admin directory endpoints.
+const {
+  hasLinkedDirectoryAccounts: approvalDirectoryHasLinked,
+  maxManagerChainLevels: approvalMaxManagerChainLevels,
+  loadReadiness: loadApprovalDirectoryReadiness,
+} = useAttendanceApprovalDirectoryReadiness()
+const approvalFlowStepWarnings = computed(() => collectAuthoringWarnings(approvalFlowSteps.value, {
+  hasLinkedDirectoryAccounts: approvalDirectoryHasLinked.value,
+}))
 
 const rotationRuleForm = reactive({
   name: '',
@@ -24862,6 +24877,10 @@ async function loadApprovalFlows() {
     }
     adminForbidden.value = false
     approvalFlows.value = data.data.items || []
+    // OD-S7-6 readiness is independent of the flows list; best-effort so a readiness
+    // 403/network blip never blocks listing flows. Blank org → plugin DEFAULT_ORG_ID
+    // is resolved inside the composable so the common default-org path still loads.
+    void loadApprovalDirectoryReadiness(normalizedOrgId())
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load approval flows', '加载审批流程失败')), 'error')
   } finally {
@@ -24876,9 +24895,9 @@ async function saveApprovalFlow() {
     if (!approvalFlowForm.name.trim()) {
       throw new Error(tr('Name is required', '名称为必填项'))
     }
-    // A1: steps now come from the structured editor's working model (payload
-    // shape unchanged — same {name,approverUserIds,approverRoleIds}, unknown
-    // keys on existing flows preserved via toApprovalPayloadSteps).
+    // A1+S7-5: steps come from the structured editor. Top-level payload shape is
+    // unchanged ({name,requestType,steps,isActive,orgId}); step items are the
+    // discriminated union (static OR dynamic kind) via toApprovalPayloadSteps.
     const steps = toApprovalPayloadSteps(approvalFlowSteps.value)
     const payload = {
       name: approvalFlowForm.name.trim(),
