@@ -244,6 +244,7 @@ import {
 } from '../multitable/canonical-sheet-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
+import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
 import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
   createYjsInvalidationPostCommitHook,
@@ -2949,6 +2950,11 @@ async function recalculateFormulaFields(
   )
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
+  // W0-1 L4-cov follow-up: once a durable recovery writer-block refuses one relation-agg
+  // materialization on this sheet, skip the remaining records' relation-agg compute+write round
+  // trips too (the block is sheet-scoped; pure-formula materialization keeps its own engine-side
+  // fence posture per record).
+  let derivedWriteBlocked = false
   for (const recordId of updatedRecordIds) {
     const hydrated = hydratedDataByRecord?.get(recordId)
     const formulaData: Record<string, unknown> = {}
@@ -2962,7 +2968,7 @@ async function recalculateFormulaFields(
         }
       }
     }
-    if (relationAggByField.size > 0 || cliffFieldIds.size > 0) {
+    if ((relationAggByField.size > 0 || cliffFieldIds.size > 0) && !derivedWriteBlocked) {
       const recData = hydrated ?? (await loadRecordDataById(query, sheetId, recordId))
       if (recData) {
         const updates: Record<string, unknown> = {}
@@ -2972,14 +2978,27 @@ async function recalculateFormulaFields(
         for (const fieldId of cliffFieldIds) {
           updates[fieldId] = '#ERROR!' // composition deferred (Slice A is sole-call) — fail loud, never silent-wrong
         }
+        // W0-1 L4-cov follow-up (post-merge review of #4438): the relation-agg materialization joins the
+        // canonical fence via the SHARED derived-write seam (flag-gated; flag-OFF = byte-identical legacy
+        // write on the caller's query). A durable recovery block on this sheet is an EXPECTED operational
+        // condition, not an error — the primary user write (if any) already committed, so refusal here
+        // must NOT fail the request or kill the remaining post-commit steps: skip the materialization AND
+        // its echo (the DB did not change; receivers only consume invalidation ids and refetch — carrying
+        // a value the DB refused would display data that reverts on reload), latch the sheet so remaining
+        // records skip their compute+fence round trips. Values-free log. Any OTHER error keeps today's
+        // propagation semantics.
         if (Object.keys(updates).length > 0) {
-          // lock-exempt: system relation-aggregation materialization — derived value, no user actor (same posture as recalculateRecordFromData; a record lock is read-only to users, not system recompute).
-          // revision-exempt: relation-aggregation same-record materialization, no version bump — derived value.
-          await query(
-            'UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3',
-            [JSON.stringify(updates), recordId, sheetId],
-          )
-          Object.assign(formulaData, updates)
+          try {
+            await applyFencedDerivedDataMerge(query as unknown as DerivedMergeQueryFn, sheetId, recordId, updates)
+            Object.assign(formulaData, updates)
+          } catch (err) {
+            if (err instanceof SheetWriterBlockedError) {
+              derivedWriteBlocked = true
+              console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+            } else {
+              throw err
+            }
+          }
         }
       }
     }
@@ -3869,11 +3888,25 @@ async function computeDependentLookupRollupRecords(
           if (!call) continue
           updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
         }
+        // W0-1 L4-cov follow-up (post-merge review of #4438): the fan-out materialization joins the
+        // canonical fence via the SHARED derived-write seam, keyed on the DEPENDENT sheet being written
+        // (this loop's `sheetId` — NOT `sourceSheetId`; the primary write's fence covered only the source
+        // sheet, so a recovery block here is the COMMON refusal case, not a race). Refusal is expected
+        // during a recovery on this dependent sheet: skip this sheet's remaining materializations and
+        // their echo/invalidation ids (the DB did not change ⇒ nothing to invalidate), let OTHER
+        // dependent sheets and the rest of the post-commit pipeline continue. Values-free log. Any other
+        // error keeps today's propagation semantics.
         if (Object.keys(updates).length > 0) {
-          // lock-exempt: system relation-aggregation fan-out materialization — derived value, no user actor (same posture as the same-record recompute write).
-          // revision-exempt: relation-aggregation fan-out materialization, no version bump — derived value.
-          await query('UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3', [JSON.stringify(updates), recordId, sheetId])
-          formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
+          try {
+            await applyFencedDerivedDataMerge(query as unknown as DerivedMergeQueryFn, sheetId, recordId, updates)
+            formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
+          } catch (err) {
+            if (err instanceof SheetWriterBlockedError) {
+              console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              break
+            }
+            throw err
+          }
         }
       }
     }
@@ -17329,6 +17362,13 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      // W0-1 L4-cov follow-up: the PRIMARY fenced write (record-write-service txn entry) observed a
+      // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape the
+      // reset/revert/config-restore routes use, instead of falling through to a 500. (Derived-value
+      // materialization refusals never reach here — they are caught + skipped at their sites.)
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof ConflictError) {
         return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
       }
