@@ -30,6 +30,12 @@
  * write-point enforcement, not check-then-write (the PB4-2 doctrine): a concurrent
  * apply/apply or apply/cancel pair linearizes on the row lock and the loser gets a clean 409.
  *
+ * T2 source freeze is linearized across processes with a shared transaction-scoped advisory
+ * lock keyed by source integration (`directory:source-sync-freeze:${sourceId}`). Create and
+ * freeze=true/refreeze acquire that lock before writing freeze-affecting state; the sync
+ * local-apply transaction acquires the same lock and re-checks active freeze before any
+ * local directory mutation. See `source-sync-freeze-lock.ts`.
+ *
  * Like `local-directory-org.ts`, every function takes explicit ids; org identity is NEVER a
  * caller input — the transfer's `org_id` is derived server-side from the two integration rows
  * (which must agree), and the schema's composite FKs make a cross-org or provider-mismatched
@@ -37,6 +43,7 @@
  */
 
 import { query, transaction } from '../db/pg'
+import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 
 export class OrgTransferValidationError extends Error {
   constructor(message: string) {
@@ -260,14 +267,20 @@ export async function createOrgTransfer(input: CreateOrgTransferInput): Promise<
   }
 
   try {
-    const inserted = await query<OrgTransferRow>(
-      `INSERT INTO provider_org_transfers
-         (org_id, provider, source_integration_id, target_integration_id, source_tenant_key, target_tenant_key, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING ${TRANSFER_COLUMNS}`,
-      [source.org_id, provider, source.id, target.id, source.corp_id, target.corp_id, input.createdBy]
-    )
-    return toSummary(inserted.rows[0])
+    // T2: take the source freeze lock BEFORE INSERT so a concurrent sync local-apply cannot
+    // pass its apply-time recheck and commit directory writes after this freeze becomes active.
+    // Default freeze_source_sync=true on the row makes create itself a freeze activation.
+    return await transaction(async (client) => {
+      await acquireSourceSyncFreezeLock(client, source.id)
+      const inserted = await client.query(
+        `INSERT INTO provider_org_transfers
+           (org_id, provider, source_integration_id, target_integration_id, source_tenant_key, target_tenant_key, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING ${TRANSFER_COLUMNS}`,
+        [source.org_id, provider, source.id, target.id, source.corp_id, target.corp_id, input.createdBy]
+      )
+      return toSummary((inserted.rows as OrgTransferRow[])[0])
+    })
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new OrgTransferConflictError(
@@ -470,17 +483,42 @@ export async function cancelOrgTransfer(transferId: string): Promise<OrgTransfer
 /**
  * T2 platform-admin override for §12.2 source-sync freeze.
  *
- * Locks the transfer row transactionally, allows only non-terminal statuses, and sets
- * `freeze_source_sync`. Org identity is never a caller input — it is already on the transfer
+ * Derives the immutable source integration id, acquires the shared source freeze lock, then
+ * locks/revalidates the transfer row and writes `freeze_source_sync`. Only non-terminal
+ * statuses are mutable. Org identity is never a caller input — it is already on the transfer
  * row (derived at create from the two integrations). Routes emit one values-free post-commit
  * audit; rejected mutations write none.
+ *
+ * Order is load-bearing: source lock BEFORE transfer-row FOR UPDATE so create/refreeze and the
+ * sync local-apply path share one linearization key. Taking the transfer row first would leave
+ * a window where sync can still recheck-miss and commit local directory writes.
  */
 export async function setOrgTransferSourceSyncFreeze(
   transferId: string,
   freezeSourceSync: boolean
 ): Promise<OrgTransferSummary> {
   return transaction(async (client) => {
+    // Derive immutable source id first (no row lock yet) so the shared freeze lock is keyed
+    // correctly before we serialize on the transfer row.
+    const sourceProbe = await client.query(
+      `SELECT source_integration_id FROM provider_org_transfers WHERE id = $1`,
+      [transferId]
+    )
+    const sourceRows = sourceProbe.rows as Array<{ source_integration_id: string }>
+    if (sourceRows.length === 0) throw new OrgTransferNotFoundError('transfer not found')
+    const sourceIntegrationId = sourceRows[0].source_integration_id
+
+    await acquireSourceSyncFreezeLock(client, sourceIntegrationId)
+
     const row = await lockTransfer(client, transferId)
+    // Defensive: source_integration_id is immutable post-create; mismatch would mean a
+    // concurrent impossible rewrite, not a supported state.
+    if (row.source_integration_id !== sourceIntegrationId) {
+      throw new OrgTransferConflictError(
+        'ORG_TRANSFER_INVALID_STATE',
+        'transfer source integration changed during freeze update'
+      )
+    }
     if (!NON_TERMINAL_STATUSES.includes(row.status)) {
       throw new OrgTransferConflictError(
         'ORG_TRANSFER_INVALID_STATE',

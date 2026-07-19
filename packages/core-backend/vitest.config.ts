@@ -187,12 +187,13 @@ export default defineConfig({
       // points asserted by t1-org-transfer-ci-wiring.test.mjs).
       'tests/integration/provider-org-transfer-t1.api.test.ts',
       // Transfer MVP T2 (§12.2): an ACTIVE org transfer freezes its source integration's sync —
-      // typed 409 before the lease claim, zero run rows, the destructive absence sweep provably
-      // blocked (freeze_source_sync=false override = positive control), scheduler/route mapping.
-      // Drives the REAL syncDirectoryIntegration with a mocked DingTalk client against real
-      // Postgres. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and
-      // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (both points
-      // asserted by t2-source-freeze-ci-wiring.test.mjs).
+      // typed 409 before the lease claim, zero run rows on entry freeze, the destructive absence
+      // sweep provably blocked (freeze_source_sync=false override = positive control),
+      // scheduler/route mapping, plus two-connection advisory-lock barriers for create/refreeze
+      // vs sync-apply linearization. Drives the REAL syncDirectoryIntegration with a mocked
+      // DingTalk client against real Postgres. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
+      // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
       'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,

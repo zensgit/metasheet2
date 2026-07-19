@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import express from 'express'
+import { Client } from 'pg'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
@@ -15,6 +16,18 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 // Also hosts the composed T1+T2 proof: an unavailable-adapter scan failure must leave the
 // transfer non-terminal and the source freeze intact (no sync run, no absence sweep). And the
 // freeze-API contract surface (auth, allowlist, terminal/missing, refreeze, no audit on reject).
+//
+// P1 race closeout: two-connection barrier tests for create-vs-sync-apply and refreeze-vs-
+// sync-apply in both linearizations. A shared `pg_advisory_xact_lock` keyed by source
+// integration serializes freeze writers with the sync local-apply transaction; apply re-checks
+// active freeze under that lock before ANY local directory mutation. Barriers use
+// pg_blocking_pids / pg_stat_activity (no fixed race sleeps).
+//
+// Mutation proofs (independently red the race suite):
+//   - remove acquireSourceSyncFreezeLock from sync apply / create / refreeze → waiter never
+//     parks on the holder's advisory lock → waitUntilBlockedOnHolder times out
+//   - remove the apply-time assertDirectorySyncNotFrozenByTransfer recheck → freeze-wins
+//     races commit the absence sweep and deactivate the seeded live account
 //
 // DATABASE_URL-gated (describeIfDatabase): excluded from the no-DB vitest job so it cannot
 // skip-green, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml
@@ -41,7 +54,12 @@ import {
   DirectorySyncFrozenByTransferError,
   syncDirectoryIntegration,
 } from '../../src/directory/directory-sync'
-import { unregisterOrgTransferAdapter } from '../../src/directory/org-transfer-service'
+import {
+  createOrgTransfer,
+  setOrgTransferSourceSyncFreeze,
+  unregisterOrgTransferAdapter,
+} from '../../src/directory/org-transfer-service'
+import { sourceSyncFreezeLockKey } from '../../src/directory/source-sync-freeze-lock'
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
 import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directory-org-transfers'
 
@@ -66,6 +84,52 @@ nonAdminApp.use((req, _res, next) => {
   next()
 })
 nonAdminApp.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())
+
+/** Dedicated raw connection for barrier lock-holders — never from the service pool. */
+async function withHolder(fn: (holder: Client, holderPid: number) => Promise<void>): Promise<void> {
+  const holder = new Client({ connectionString: process.env.DATABASE_URL })
+  await holder.connect()
+  try {
+    const pidRow = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+    await fn(holder, pidRow.rows[0].pid)
+  } finally {
+    try {
+      await holder.query('ROLLBACK')
+    } catch {
+      /* already closed / idle */
+    }
+    await holder.end()
+  }
+}
+
+/**
+ * Deterministic barrier: poll until at least one backend is blocked by the holder's pid
+ * (pg_blocking_pids). Proves the waiter is parked on the holder's lock — not a fixed sleep.
+ */
+async function waitUntilBlockedOnHolder(holderPid: number, timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const r = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE state = 'active'
+          AND wait_event_type = 'Lock'
+          AND $1 = ANY(pg_blocking_pids(pid))`,
+      [holderPid],
+    )
+    if ((r.rows[0]?.n ?? 0) >= 1) return
+    await new Promise((res) => setTimeout(res, 20))
+  }
+  throw new Error(
+    `timed out waiting for a backend blocked by holder pid ${holderPid} (source freeze lock never engaged)`,
+  )
+}
+
+function settled<T>(p: Promise<T>): Promise<T | unknown> {
+  return p.then(
+    (v) => v,
+    (e) => e,
+  )
+}
 
 describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active org transfer (real sync, mocked pull)', () => {
   const cleanupTransferIds: string[] = []
@@ -374,5 +438,175 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
     await expect(syncDirectoryIntegration(liveSource.integrationId, `t2-admin-${TS}`)).rejects.toBeInstanceOf(
       DirectorySyncFrozenByTransferError
     )
+  })
+
+  // -------------------------------------------------------------------------------------------
+  // P1 race closeout — shared source freeze lock + apply-time recheck, both linearizations.
+  // -------------------------------------------------------------------------------------------
+
+  it('RACE create-wins: freeze INSERT holds source lock uncommitted → real sync parks → after commit apply rolls back (account stays live)', async () => {
+    const source = await seedIntegrationWithLiveAccount('race-cwin-src')
+    const target = await seedIntegrationWithLiveAccount('race-cwin-dst')
+
+    let transferId = ''
+    await withHolder(async (holder, holderPid) => {
+      // SQL STAND-IN for createOrgTransfer mid-flight: same advisory key + freeze-active INSERT,
+      // held open so the real sync's apply-time lock acquisition parks (entry check still sees
+      // no freeze under READ COMMITTED — the late-race window the lock closes).
+      await holder.query('BEGIN')
+      await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        sourceSyncFreezeLockKey(source.integrationId),
+      ])
+      const ins = await holder.query<{ id: string }>(
+        `INSERT INTO provider_org_transfers
+           (org_id, provider, source_integration_id, target_integration_id, status, freeze_source_sync)
+         SELECT org_id, provider, $1, $2, 'draft', true
+           FROM directory_integrations WHERE id = $1
+         RETURNING id`,
+        [source.integrationId, target.integrationId],
+      )
+      transferId = ins.rows[0].id
+      cleanupTransferIds.push(transferId)
+
+      const syncOutcome = settled(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`))
+      await waitUntilBlockedOnHolder(holderPid)
+
+      await holder.query('COMMIT')
+
+      const outcome = await syncOutcome
+      expect(outcome).toBeInstanceOf(DirectorySyncFrozenByTransferError)
+      expect((outcome as DirectorySyncFrozenByTransferError).transferId).toBe(transferId)
+    })
+
+    // Local directory mutation must not commit after freeze linearized first.
+    expect(await accountActive(source.accountId)).toBe(true)
+    // Late-race honesty: lease was claimed after the entry check, so a failed run row may exist.
+    const runs = await query<{ status: string; n: string }>(
+      `SELECT status, count(*)::text AS n FROM directory_sync_runs
+        WHERE integration_id = $1 GROUP BY status`,
+      [source.integrationId],
+    )
+    const completed = runs.rows.find((r) => r.status === 'completed')
+    expect(completed).toBeUndefined()
+  })
+
+  it('RACE sync-wins vs create: apply stand-in holds source lock → real create parks → after release create freezes', async () => {
+    const source = await seedIntegrationWithLiveAccount('race-swin-c-src')
+    const target = await seedIntegrationWithLiveAccount('race-swin-c-dst')
+
+    await withHolder(async (holder, holderPid) => {
+      // SQL STAND-IN for sync local-apply mid-flight after lock acquisition (no freeze yet).
+      await holder.query('BEGIN')
+      await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        sourceSyncFreezeLockKey(source.integrationId),
+      ])
+
+      const createOutcome = settled(
+        createOrgTransfer({
+          provider: 'dingtalk',
+          sourceIntegrationId: source.integrationId,
+          targetIntegrationId: target.integrationId,
+          createdBy: FREEZE_ADMIN_ID,
+        }),
+      )
+      await waitUntilBlockedOnHolder(holderPid)
+
+      await holder.query('COMMIT')
+
+      const created = await createOutcome
+      expect(created).not.toBeInstanceOf(Error)
+      const transfer = created as Awaited<ReturnType<typeof createOrgTransfer>>
+      cleanupTransferIds.push(transfer.id)
+      expect(transfer.freezeSourceSync).toBe(true)
+      expect(transfer.sourceIntegrationId).toBe(source.integrationId)
+    })
+
+    // After create commits, the source is frozen for subsequent syncs.
+    await expect(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)).rejects.toBeInstanceOf(
+      DirectorySyncFrozenByTransferError,
+    )
+    expect(await accountActive(source.accountId)).toBe(true)
+  })
+
+  it('RACE refreeze-wins: freeze=true UPDATE holds source lock uncommitted → real sync parks → after commit apply rolls back', async () => {
+    const source = await seedIntegrationWithLiveAccount('race-rwin-src')
+    const target = await seedIntegrationWithLiveAccount('race-rwin-dst')
+    // Unfrozen active transfer: entry check passes; apply-time recheck must catch the refreeze.
+    const transferId = await createTransferRow(source.integrationId, target.integrationId)
+    await query(`UPDATE provider_org_transfers SET freeze_source_sync = false WHERE id = $1`, [transferId])
+
+    await withHolder(async (holder, holderPid) => {
+      await holder.query('BEGIN')
+      await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        sourceSyncFreezeLockKey(source.integrationId),
+      ])
+      await holder.query(
+        `UPDATE provider_org_transfers SET freeze_source_sync = true, updated_at = now() WHERE id = $1`,
+        [transferId],
+      )
+
+      const syncOutcome = settled(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`))
+      await waitUntilBlockedOnHolder(holderPid)
+
+      await holder.query('COMMIT')
+
+      const outcome = await syncOutcome
+      expect(outcome).toBeInstanceOf(DirectorySyncFrozenByTransferError)
+      expect((outcome as DirectorySyncFrozenByTransferError).transferId).toBe(transferId)
+    })
+
+    expect(await accountActive(source.accountId)).toBe(true)
+    const flag = await query<{ freeze_source_sync: boolean }>(
+      `SELECT freeze_source_sync FROM provider_org_transfers WHERE id = $1`,
+      [transferId],
+    )
+    expect(flag.rows[0].freeze_source_sync).toBe(true)
+  })
+
+  it('RACE sync-wins vs refreeze: apply stand-in holds source lock → real refreeze parks → after release freeze is set', async () => {
+    const source = await seedIntegrationWithLiveAccount('race-swin-r-src')
+    const target = await seedIntegrationWithLiveAccount('race-swin-r-dst')
+    const transferId = await createTransferRow(source.integrationId, target.integrationId)
+    await query(`UPDATE provider_org_transfers SET freeze_source_sync = false WHERE id = $1`, [transferId])
+
+    await withHolder(async (holder, holderPid) => {
+      await holder.query('BEGIN')
+      await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        sourceSyncFreezeLockKey(source.integrationId),
+      ])
+
+      const refreezeOutcome = settled(setOrgTransferSourceSyncFreeze(transferId, true))
+      await waitUntilBlockedOnHolder(holderPid)
+
+      await holder.query('COMMIT')
+
+      const updated = await refreezeOutcome
+      expect(updated).not.toBeInstanceOf(Error)
+      expect((updated as Awaited<ReturnType<typeof setOrgTransferSourceSyncFreeze>>).freezeSourceSync).toBe(
+        true,
+      )
+    })
+
+    await expect(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)).rejects.toBeInstanceOf(
+      DirectorySyncFrozenByTransferError,
+    )
+    expect(await accountActive(source.accountId)).toBe(true)
+  })
+
+  it('positive control (unfrozen empty tenant): absence sweep deactivates a seeded live account when freeze is off', async () => {
+    // Standalone positive control for the race suite: empty mocked pull + unfrozen source must
+    // actually be destructive. Independent of the admin PATCH path covered in test B.
+    const source = await seedIntegrationWithLiveAccount('race-pos-src')
+    const target = await seedIntegrationWithLiveAccount('race-pos-dst')
+    const transferId = await createTransferRow(source.integrationId, target.integrationId)
+    await query(`UPDATE provider_org_transfers SET freeze_source_sync = false WHERE id = $1`, [transferId])
+
+    const result = await syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)
+    expect(result.run.status).toBe('completed')
+    expect(await accountActive(source.accountId)).toBe(false)
   })
 })
