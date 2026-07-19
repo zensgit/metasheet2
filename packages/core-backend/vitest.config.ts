@@ -48,6 +48,9 @@ export default defineConfig({
       // Approval/automation closeout acceptance (A1–A8 pins + composed A1/A2 real-DB). Two-point
       // wiring: exclude here so no-DB cannot skip-green; whole-file in plugin-tests real-DB step.
       'tests/integration/approval-automation-closeout-acceptance.realdb.test.ts',
+      // Wave-2 WP1 parallel-gateway real HTTP/DB (join all/any + dynamic conflict). DATABASE_URL-
+      // gated; excluded here so the no-DB job cannot skip-green it; whole-file in approval real-DB.
+      'tests/integration/approval-wp1-parallel-gateway.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job

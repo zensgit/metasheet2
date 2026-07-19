@@ -219,6 +219,51 @@ function readPinBody(relFromCoreBackend: string): string {
   return readFileSync(abs, 'utf8')
 }
 
+/** Unique primary + supporting paths from the closeout manifest (order-stable). */
+export function closeoutManifestPinnedFiles(): string[] {
+  const seen = new Set<string>()
+  const ordered: string[] = []
+  for (const scenario of CLOSEOUT_SCENARIO_MANIFEST) {
+    for (const file of [scenario.primaryFile, ...(scenario.supportingFiles ?? [])]) {
+      if (seen.has(file)) continue
+      seen.add(file)
+      ordered.push(file)
+    }
+  }
+  return ordered
+}
+
+/**
+ * Fail-closed two-point wiring: each pinned real-DB file must appear as
+ * (1) an exact quoted exclude entry in packages/core-backend/vitest.config.ts, and
+ * (2) an executable run-list line in .github/workflows/plugin-tests.yml.
+ *
+ * Comment-only occurrences and bare substring matches do NOT count.
+ */
+function hasExactQuotedExcludeEntry(vitestConfigSource: string, file: string): boolean {
+  const single = `'${file}'`
+  const double = `"${file}"`
+  for (const rawLine of vitestConfigSource.split('\n')) {
+    // Strip // line comments so a commented-out exclude cannot keep this green.
+    const code = rawLine.replace(/\/\/.*$/, '')
+    // Exact quoted token only — rejects longer paths that merely contain `file` as a prefix.
+    if (code.includes(single) || code.includes(double)) return true
+  }
+  return false
+}
+
+function hasExecutablePluginTestsRunListLine(pluginTestsYml: string, file: string): boolean {
+  // Executable run-list lines look like: `            tests/integration/foo.test.ts \`
+  // (optional trailing backslash). Reject: leading `#`, empty, or any extra tokens/substrings.
+  const exactLine = new RegExp(`^\\s+${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s*\\\\)?\\s*$`)
+  for (const rawLine of pluginTestsYml.split('\n')) {
+    const trimmed = rawLine.trim()
+    if (trimmed.length === 0 || trimmed.startsWith('#')) continue
+    if (exactLine.test(rawLine)) return true
+  }
+  return false
+}
+
 // ── Static pin catalog (no production side effects) ───────────────────────────
 describe('Approval/automation closeout acceptance — static scenario pins (A1–A8)', () => {
   it('manifest covers A1–A8 exactly once each', () => {
@@ -245,6 +290,30 @@ describe('Approval/automation closeout acceptance — static scenario pins (A1�
           `${scenario.id} missing negative/invariant marker ${JSON.stringify(marker)} across ${bodies.map((b) => b.file).join(', ')}`,
         ).toBe(true)
       }
+    }
+  })
+
+  it('two-point CI wiring: every manifest file is no-DB-excluded AND on an executable real-DB run list', () => {
+    // HERE = packages/core-backend/tests/integration
+    // package root = ../.. ; repo root = ../../../..
+    const packageRoot = join(HERE, '..', '..')
+    const repoRoot = join(packageRoot, '..', '..')
+    const vitestConfig = readFileSync(join(packageRoot, 'vitest.config.ts'), 'utf8')
+    const pluginTestsYml = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+    const pinned = closeoutManifestPinnedFiles()
+    expect(pinned.length).toBeGreaterThanOrEqual(8)
+    // Self must be in the set (closeout file is A1 primary + A2 supporting).
+    expect(pinned).toContain('tests/integration/approval-automation-closeout-acceptance.realdb.test.ts')
+
+    for (const file of pinned) {
+      expect(
+        hasExactQuotedExcludeEntry(vitestConfig, file),
+        `missing exact quoted exclude for ${file} in packages/core-backend/vitest.config.ts (comment-only does not count)`,
+      ).toBe(true)
+      expect(
+        hasExecutablePluginTestsRunListLine(pluginTestsYml, file),
+        `missing executable plugin-tests.yml run-list line for ${file} (comment-only / substring does not count)`,
+      ).toBe(true)
     }
   })
 
@@ -301,6 +370,19 @@ function closeoutFormSchema() {
     ],
   }
 }
+
+/** Critical topology edges for A1 — order-normalized equality kills flatten/rewire regressions. */
+const A1_CRITICAL_EDGES: ReadonlyArray<{ key: string; source: string; target: string }> = [
+  { key: 'edge-start-route', source: 'start', target: 'route' },
+  { key: 'edge-high', source: 'route', target: 'parallel_fork' },
+  { key: 'edge-low', source: 'route', target: 'low_review' },
+  { key: 'edge-fork-a', source: 'parallel_fork', target: 'branch_a' },
+  { key: 'edge-fork-b', source: 'parallel_fork', target: 'branch_b' },
+  { key: 'edge-a-join', source: 'branch_a', target: 'join_review' },
+  { key: 'edge-b-join', source: 'branch_b', target: 'join_review' },
+  { key: 'edge-join-end', source: 'join_review', target: 'end' },
+  { key: 'edge-low-end', source: 'low_review', target: 'end' },
+]
 
 /** Condition gate + parallel high path + linear default path (tree-authoring complex shape). */
 function conditionPlusParallelGraph(opts?: { emptyRules?: boolean }) {
@@ -371,18 +453,49 @@ function conditionPlusParallelGraph(opts?: { emptyRules?: boolean }) {
       },
       { key: 'end', type: 'end', name: 'End', config: {} },
     ],
-    edges: [
-      { key: 'edge-start-route', source: 'start', target: 'route' },
-      { key: 'edge-high', source: 'route', target: 'parallel_fork' },
-      { key: 'edge-low', source: 'route', target: 'low_review' },
-      { key: 'edge-fork-a', source: 'parallel_fork', target: 'branch_a' },
-      { key: 'edge-fork-b', source: 'parallel_fork', target: 'branch_b' },
-      { key: 'edge-a-join', source: 'branch_a', target: 'join_review' },
-      { key: 'edge-b-join', source: 'branch_b', target: 'join_review' },
-      { key: 'edge-join-end', source: 'join_review', target: 'end' },
-      { key: 'edge-low-end', source: 'low_review', target: 'end' },
-    ],
+    edges: A1_CRITICAL_EDGES.map((e) => ({ ...e })),
   }
+}
+
+type GraphShape = {
+  nodes: Array<{ key: string; type: string; config: Record<string, unknown> }>
+  edges: Array<{ key: string; source: string; target: string }>
+}
+
+/**
+ * A1 topology round-trip contract — stronger than "condition+parallel nodes exist".
+ * Node presence alone can stay green after rule/edge flatten; this pins:
+ *   - condition branch edge-high + amount gte 1000 + defaultEdgeKey edge-low
+ *   - parallel branch/join config
+ *   - full critical edge set (key/source/target), order-normalized
+ */
+function assertA1TopologyRoundTrip(graph: GraphShape, label: string): void {
+  const condition = graph.nodes.find((n) => n.type === 'condition')
+  expect(condition, `${label}: missing condition node`).toBeTruthy()
+  expect(condition!.key).toBe('route')
+  expect(condition!.config.defaultEdgeKey, `${label}: defaultEdgeKey`).toBe('edge-low')
+  const branches = condition!.config.branches as Array<{
+    edgeKey?: string
+    rules?: Array<{ fieldId?: string; operator?: string; value?: unknown }>
+  }>
+  expect(Array.isArray(branches), `${label}: branches array`).toBe(true)
+  expect(branches).toHaveLength(1)
+  expect(branches[0].edgeKey).toBe('edge-high')
+  expect(branches[0].rules).toEqual([{ fieldId: 'amount', operator: 'gte', value: 1000 }])
+
+  const parallel = graph.nodes.find((n) => n.type === 'parallel')
+  expect(parallel, `${label}: missing parallel node`).toBeTruthy()
+  expect(parallel!.config).toMatchObject({
+    joinMode: 'all',
+    joinNodeKey: 'join_review',
+  })
+  expect(parallel!.config.branches).toEqual(['edge-fork-a', 'edge-fork-b'])
+
+  const actualEdges = graph.edges
+    .map((e) => ({ key: e.key, source: e.source, target: e.target }))
+    .sort((a, b) => a.key.localeCompare(b.key))
+  const expectedEdges = [...A1_CRITICAL_EDGES].sort((a, b) => a.key.localeCompare(b.key))
+  expect(actualEdges, `${label}: critical edge set`).toEqual(expectedEdges)
 }
 
 describeIfDatabase('Approval/automation closeout acceptance — composed real-DB (A1/A2)', () => {
@@ -437,18 +550,10 @@ describeIfDatabase('Approval/automation closeout acceptance — composed real-DB
     const created = (await createResp.json()) as {
       id: string
       latestVersionId: string
-      approvalGraph: { nodes: Array<{ key: string; type: string; config: Record<string, unknown> }> }
+      approvalGraph: GraphShape
     }
     createdTemplateIds.add(created.id)
-
-    const condition = created.approvalGraph.nodes.find((n) => n.type === 'condition')
-    const parallel = created.approvalGraph.nodes.find((n) => n.type === 'parallel')
-    expect(condition?.key).toBe('route')
-    expect(parallel?.config).toMatchObject({
-      joinMode: 'all',
-      joinNodeKey: 'join_review',
-    })
-    expect(parallel?.config.branches).toEqual(['edge-fork-a', 'edge-fork-b'])
+    assertA1TopologyRoundTrip(created.approvalGraph, 'create response')
 
     const publishResp = await jsonRequest(baseUrl, `/api/approval-templates/${created.id}/publish`, adminToken, {
       method: 'POST',
@@ -462,11 +567,8 @@ describeIfDatabase('Approval/automation closeout acceptance — composed real-DB
       adminToken,
     )
     expect(detailResp.status).toBe(200)
-    const detail = (await detailResp.json()) as {
-      approvalGraph: { nodes: Array<{ type: string; config: Record<string, unknown> }> }
-    }
-    expect(detail.approvalGraph.nodes.some((n) => n.type === 'condition')).toBe(true)
-    expect(detail.approvalGraph.nodes.some((n) => n.type === 'parallel')).toBe(true)
+    const detail = (await detailResp.json()) as { approvalGraph: GraphShape }
+    assertA1TopologyRoundTrip(detail.approvalGraph, 'GET version response')
   })
 
   it('A1 composed: empty-rules condition branch is rejected at create (no template write)', async () => {

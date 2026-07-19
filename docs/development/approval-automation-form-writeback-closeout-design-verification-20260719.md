@@ -100,7 +100,7 @@
 
 | ID | 场景 | 本文件角色 | 既有 real-DB 整文件钉（CI 真跑） | 正控 / 负控要点 |
 |---|---|---|---|---|
-| **A1** | 复杂 authoring 接受并 round-trip 条件+并行 | **composed** create→publish→GET + empty-rules create 拒绝 | + `approval-wp1-parallel-gateway.api.test.ts` · `approval-common-template-presets.api.test.ts` | + 拓扑回读 · − 空 rules 400 / parallel dynamic conflict |
+| **A1** | 复杂 authoring 接受并 round-trip 条件+并行 | **composed** create→publish→GET + empty-rules create 拒绝 | + `approval-wp1-parallel-gateway.api.test.ts` · `approval-common-template-presets.api.test.ts` | + condition rules/defaultEdgeKey + 全量 critical edges（order-normalized）+ parallel branch/join · − 空 rules 400 零写 |
 | **A2** | 版本 restore 新 draft、保 active、拒非法历史快照 | **composed** 复杂图 restore + empty-rules restore 拒绝 | + `approval-template-authoring-uat.api.test.ts`（含 decisionFieldId / 合约漂移 / 并发 / lock-order） | + draft+active 不变 · − 400 零写 |
 | **A3** | 通过 `write_approval_form_values` 建记录 + claim/record/revision/outbox 原子 | **static pin only** | `multitable-fwb-write-action-realdb.test.ts` · `multitable-fwb-production-e2e-realdb.test.ts` | + 同事务提交 · − rollback 擦除 / flag OFF / gate-fail 无 claim |
 | **A4** | record-link 更新已有记录；权限/锁 fail-closed | **static pin only** | `multitable-fwb-runtime-modes-realdb.test.ts` · production-e2e record-link | + 可读正控 · − 权限撤销 / FOR UPDATE 竞态 |
@@ -109,25 +109,48 @@
 | **A7** | 清洁附件 upload/submit bind/download；hidden/outsider 拒绝 | **static pin only** | `approval-attachment-create-bind-realdb.test.ts` · `approval-attachment-participant-realdb.test.ts` · bind-reconcile | + clean bind · − outsider / hidden admin |
 | **A8** | infected/foreign/stale-GC 不挂 instance、不泄字节/存在 | **static pin only** | create-bind infected/foreign · bind-reconcile foreign/GC race · `approval-attachment-gc-realdb.test.ts` | + clean 仍成功 · − 无 instance / 整单回滚 / live blob 不删 |
 
-**诚实声明**：closeout 文件的 pin **不会** `vitest run` 其它文件；它只静态断言路径存在且标题仍在。CI 通过 **two-point wiring**（`vitest.config.ts` exclude + `plugin-tests.yml` whole-file list）分别执行各钉文件与本文件。
+**诚实声明**：closeout 文件的 pin **不会** `vitest run` 其它文件；它只静态断言路径存在、标题仍在、且 **two-point CI wiring 未回退**。CI 通过 `vitest.config.ts` exclude + `plugin-tests.yml` whole-file list 分别执行各钉文件与本文件。
 
-### 3.1 本 composite 额外 mutation / 闸证据（已存在，不重跑编造）
+### 3.1 本 composite 已独立观测的验证数字（AS-BUILT · 非 full CI / 非 main merge）
+
+下列数字来自本 composite 工作树上**已独立跑过**的证据；**不**声称 GitHub required full CI 全绿，**不**声称已 merge 到 `main`。
+
+| 证据 | 结果 |
+|---|---|
+| Fresh full migrations（CI `MIGRATION_EXCLUDE` 纪律） | **pass** |
+| Real-DB 相关套件（本 closeout 地图覆盖面） | **9 files / 53 tests** |
+| 变更面 backend units | **31 files / 346 tests** |
+| 变更面 web specs | **17 files / 255 tests** |
+| `packages/core-backend` `tsc --noEmit` | **clean** |
+| `apps/web` `vue-tsc --noEmit` | **clean** |
+
+### 3.2 精确 mutation 证据（fail-closed · 已观测 RED）
+
+| Mutation | 预期 RED | 说明 |
+|---|---|---|
+| 从 `restoreTemplateVersion` 去掉 shared `validateAuthoringDefinition` 调用 | **3 restore negatives RED** | empty-rules / invalid decisionFieldId / 合约漂移 revalidation 不再 fail-closed |
+| 将 S3 `AccessDenied` 错误分类成 `not_found` | **3 S3 tests RED** | 附件存储错误语义被冲淡 → 值自由/安全断言失败 |
+| 关掉 create-time attachment bind（`createApproval` 路径） | **3 production real-DB tests RED** | clean bind 正控 + infected/foreign 负控依赖生产 bind 调用 |
+
+### 3.3 其它闸证据（既有 suite · 不重编造）
 
 - Tree：empty-rules create/publish unit · parallel dynamic conflict publish unit · FE topology/preserve specs。  
 - Restore：UAT real-DB revalidation / IDOR / lock-order · routes unit · **shared `validateAuthoringDefinition`** follow-up。  
 - FWB：mapping/gates/decision/runtime unit · 三份 real-DB · production-e2e flag-OFF 负控。  
-- Attachment：schema invariants · create-bind · participant matrix · bind-reconcile · GC · 源码 mutation 点（create 路径 bind 调用）。
+- Attachment：schema invariants · create-bind · participant matrix · bind-reconcile · GC。  
+- Closeout pin：**two-point wiring 静态断言**（exact quoted exclude + executable run-list line；comment-only / substring 不绿）。
 
 ---
 
 ## 4. CI two-point wiring（本 deliverable）
 
-| 点 | 位置 | 条目 |
+| 点 | 位置 | 要求 |
 |---|---|---|
-| no-DB exclude | `packages/core-backend/vitest.config.ts` | `tests/integration/approval-automation-closeout-acceptance.realdb.test.ts` |
-| real-DB run | `.github/workflows/plugin-tests.yml`（approval real-DB step） | 同上 whole-file |
+| no-DB exclude | `packages/core-backend/vitest.config.ts` | 每个 manifest primary/supporting 文件必须有 **exact quoted** exclude 条目 |
+| real-DB run | `.github/workflows/plugin-tests.yml` | 每个文件必须有 **executable run-list line**（非注释、非子串） |
+| 机器断言 | closeout acceptance static suite | `two-point CI wiring: every manifest file is no-DB-excluded AND on an executable real-DB run list` |
 
-既有 FWB/附件 real-DB 文件保持原 two-point wiring（multitable real-DB step）。
+FWB/附件 real-DB 文件仍在 multitable real-DB step；authoring UAT / closeout / parallel-gateway 在 approval real-DB step。从 manifest 删掉某个 pin 文件的 CI 行 → closeout 静态 suite **必红**。
 
 ---
 
@@ -148,11 +171,12 @@
 
 | 缺口 | 说明 |
 |---|---|
-| A3–A8 未在 closeout 文件内重跑全套 fixture | 有意 pin；依赖 CI whole-file 列表不回退 |
+| A3–A8 未在 closeout 文件内重跑全套 fixture | 有意 pin；two-point wiring 测试挡住「从 CI 列表删文件仍绿」 |
 | 单进程端到端「author complex → restore → FWB writeback → attachment」长链 | 未做（成本高、与 flag 隔离测试冲突）；交叉缝靠 shared validator + 分文件 real-DB |
 | 生产 flag ON 实网 UAT | owner-only |
 | Fan-out / authorability | 未实现 / 未打开 |
 | 本文件 pin 标题漂移 | 静态 pin 会红；需同步改 manifest |
+| Full GitHub required CI / main merge | **未声称** — 本文只记 composite 本地独立观测 |
 
 ---
 
