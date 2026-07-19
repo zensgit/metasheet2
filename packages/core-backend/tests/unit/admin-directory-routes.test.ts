@@ -68,6 +68,13 @@ vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
   // failure modes neuter exactly the mapping the 409 tests below pin.
   DirectorySyncInProgressError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
     .DirectorySyncInProgressError,
+  // T2 (§12.2): the same route catch also discriminates
+  // `error instanceof DirectorySyncFrozenByTransferError`. Re-export the REAL class
+  // (constructor identity) for the same factory-trap reason — a local stand-in would
+  // make production freeze errors fall through to 500, and omitting it throws on
+  // every error path that reaches the catch (including the async pre-run-row failure).
+  DirectorySyncFrozenByTransferError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectorySyncFrozenByTransferError,
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers: directoryMocks.batchAdmitDirectoryAccountUsers,

@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import {
+  DirectorySyncFrozenByTransferError,
   DirectorySyncInProgressError,
   DirectoryTenantChangeBlockedError,
   acknowledgeDirectorySyncAlert,
@@ -549,6 +550,12 @@ export function adminDirectoryRouter(): Router {
           jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
           return
         }
+        // T2 (§12.2): an active org transfer freezes this source integration's sync — a
+        // deliberate admin-visible state, not a failure. 409 + the transfer id.
+        if (error instanceof DirectorySyncFrozenByTransferError) {
+          jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
+          return
+        }
         const message = readErrorMessage(error, 'Failed to start directory sync')
         jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
         return
@@ -563,6 +570,11 @@ export function adminDirectoryRouter(): Router {
       // admin UI can jump straight to it instead of re-triggering a duplicate API pull.
       if (error instanceof DirectorySyncInProgressError) {
         jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+        return
+      }
+      // T2 (§12.2): same deliberate frozen state as the async branch above.
+      if (error instanceof DirectorySyncFrozenByTransferError) {
+        jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
         return
       }
       const message = readErrorMessage(error, 'Failed to sync directory integration')

@@ -39,6 +39,7 @@ import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
+import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -3101,6 +3102,94 @@ export class DirectorySyncInProgressError extends Error {
 }
 
 /**
+ * Transfer MVP T2 (§12.2): an ACTIVE org transfer freezes its SOURCE integration's sync. The
+ * dangerous write a mid-transfer sync performs is the unconditional absence sweep — a source
+ * tenant being emptied/migrated looks exactly like "everyone left", and the sweep would mark the
+ * whole directory inactive. The cheap entry check runs BEFORE the run lease is claimed, so a
+ * freeze already active at trigger time creates no run row and leaves nothing to reclaim. The
+ * admin override (§12.2 "unless an explicit admin override is supplied") is the transfer row's
+ * `freeze_source_sync` flag; the supported operator mutation surface is the platform-admin
+ * PATCH .../source-sync-freeze API — flipping it to false un-freezes THIS transfer without
+ * cancelling it.
+ *
+ * Linearization (P1 closeout): create / freeze=true refreeze and the sync local-apply
+ * transaction share a transaction-scoped advisory lock keyed by source integration
+ * (`directory:source-sync-freeze:${id}`). Inside the apply transaction the lock is acquired
+ * FIRST and the active-freeze recheck runs before ANY local directory mutation (department
+ * upsert, absence sweep, membership rewrite, identity/link write, local-user admission, group
+ * projection, deprovision, integration completion write, run completion write). If freeze
+ * linearized first, the apply rolls back and this error is thrown; if apply owns the lock
+ * first, its local writes may commit before freeze becomes active.
+ *
+ * Honest late-race window: the entry check is still one-shot, so a transfer create / refreeze
+ * that commits after entry may still allow the provider pull to run and a `failed` run row to
+ * exist (lease already claimed). What must never happen is a local directory mutation
+ * committing after a freeze that linearized first — that is what the shared lock + apply-time
+ * recheck close. T1 fail-closed unregistered-adapter scan/apply and the DT-OPS-01 mass-
+ * departure breaker remain independent safety nets; the runbook still orders the transfer
+ * record BEFORE any provider-side draining.
+ */
+export class DirectorySyncFrozenByTransferError extends Error {
+  readonly statusCode = 409
+  readonly code = 'DIRECTORY_SYNC_FROZEN_BY_TRANSFER'
+  readonly transferId: string
+
+  constructor(transferId: string) {
+    super(`Directory sync is frozen by an active org transfer for this integration (transfer ${transferId})`)
+    this.name = 'DirectorySyncFrozenByTransferError'
+    this.transferId = transferId
+  }
+}
+
+type FreezeCheckClient = {
+  query: <T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: T[] }>
+}
+
+/**
+ * T2 freeze gate. `to_regclass` first: environments whose schema predates the T1 migration have
+ * no transfer table and therefore no transfers — proceeding unfrozen is the semantically correct
+ * outcome there (logged loudly so a mis-deployed production schema cannot stay silent), while a
+ * bare query would brick every sync with a relation-not-found error.
+ *
+ * Used at entry (pool `query`) and again inside the local-apply transaction (transaction
+ * client) after the shared source freeze lock is held. Removing the apply-time recheck
+ * re-opens the create/refreeze-vs-sync race: the barrier suite must go red.
+ */
+async function assertDirectorySyncNotFrozenByTransfer(
+  integrationId: string,
+  /**
+   * Optional transaction client. Entry uses the pool `query` helper (a bare function);
+   * apply-time recheck must pass the transaction client so it observes freeze commits that
+   * linearized under the shared source lock.
+   */
+  client?: FreezeCheckClient,
+): Promise<void> {
+  // Pool `query` is a bare function; transaction clients are `{ query }`. Normalize once.
+  const q: FreezeCheckClient = client ?? { query: (sql, params) => query(sql, params) }
+  const tableProbe = await q.query<{ reg: string | null }>(
+    `SELECT to_regclass('provider_org_transfers')::text AS reg`,
+  )
+  if (!tableProbe.rows[0]?.reg) {
+    logger.warn('provider_org_transfers table absent — T2 sync-freeze gate inert (schema predates the T1 migration?)')
+    return
+  }
+  const frozen = await q.query<{ id: string }>(
+    `SELECT id FROM provider_org_transfers
+      WHERE source_integration_id = $1
+        AND status NOT IN ('applied', 'cancelled')
+        AND freeze_source_sync = true
+      LIMIT 1`,
+    [integrationId],
+  )
+  if (frozen.rows.length > 0) {
+    throw new DirectorySyncFrozenByTransferError(frozen.rows[0].id)
+  }
+}
+
+/**
  * Thrown when a run reaches its completion write only to find its row is no longer
  * `running` — the lease was reclaimed as stale while this process was still alive
  * (heartbeat starved: event-loop stall, saturated pool, network partition). Thrown
@@ -3212,6 +3301,11 @@ export async function syncDirectoryIntegration(
   if (!integration) throw new Error('Directory integration not found')
 
   const config = parseIntegrationConfig(integration)
+  // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
+  // must not create a run row, consume provider quota, or reach local apply. The apply
+  // transaction re-checks under the shared source freeze lock (see below) so a freeze that
+  // commits after this entry check cannot still land directory mutations.
+  await assertDirectorySyncNotFrozenByTransfer(integrationId)
   let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
   // DT-HARDEN-05: claim the run lease BEFORE the first DingTalk call. The API pull that
   // follows is the expensive, quota-consuming part; a transaction-scoped lock around the
@@ -3291,6 +3385,15 @@ export async function syncDirectoryIntegration(
     const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
 
     await transaction(async (client) => {
+      // T2 P1: shared source freeze lock is the FIRST operation of the local-apply transaction.
+      // Transfer create / freeze=true refreeze take the same key before writing freeze state.
+      // Re-check under the lock before ANY directory upsert, absence sweep, membership rewrite,
+      // identity/link write, local-user admission, group projection, deprovision, integration
+      // completion write, or run completion write. Bypass/remove either the lock or the recheck
+      // → the two-connection create/refreeze-vs-sync barrier suite reds.
+      await acquireSourceSyncFreezeLock(client, integrationId)
+      await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)
+
       // R5: created-vs-updated split for the run summary. `departmentsSynced`/`accountsSynced`
       // conflate "0 new" and "500 new"; the discriminator is `(xmax = 0)` on the upserted row —
       // a freshly INSERTed tuple has xmax 0, an ON CONFLICT DO UPDATE tuple carries the updating

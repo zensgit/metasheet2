@@ -34,11 +34,15 @@ vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
   // DT-HARDEN-05 guard in this file was unfalsifiable.
   DirectorySyncInProgressError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
     .DirectorySyncInProgressError,
+  // T2 (§12.2): runScheduledSync discriminates the frozen-source skip the same way — the REAL
+  // class again, for the same factory-trap reason.
+  DirectorySyncFrozenByTransferError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectorySyncFrozenByTransferError,
   syncDirectoryIntegration: directoryMocks.syncDirectoryIntegration,
   reclaimStaleDirectorySyncRuns: directoryMocks.reclaimStaleDirectorySyncRuns,
 }))
 
-import { DirectorySyncInProgressError } from '../../src/directory/directory-sync'
+import { DirectorySyncFrozenByTransferError, DirectorySyncInProgressError } from '../../src/directory/directory-sync'
 import {
   refreshDirectoryIntegrationSchedule,
   resetDirectorySyncSchedulerForTests,
@@ -213,6 +217,13 @@ describe('directory-sync-scheduler', () => {
     const scheduleHandler = scheduler.schedule.mock.calls[0][2] as () => Promise<void>
 
     directoryMocks.syncDirectoryIntegration.mockRejectedValueOnce(new DirectorySyncInProgressError('run-held'))
+    await expect(scheduleHandler()).resolves.toBeUndefined()
+    expect(alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert).not.toHaveBeenCalled()
+
+    // T2 (§12.2, gate P2): a frozen source is the multi-day steady state of an active transfer —
+    // every nightly tick must be a quiet skip, never a job:failed the alerting pages on. Removing
+    // the frozen-skip branch in runScheduledSync turns this leg into a rejection.
+    directoryMocks.syncDirectoryIntegration.mockRejectedValueOnce(new DirectorySyncFrozenByTransferError('transfer-held'))
     await expect(scheduleHandler()).resolves.toBeUndefined()
     expect(alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert).not.toHaveBeenCalled()
 

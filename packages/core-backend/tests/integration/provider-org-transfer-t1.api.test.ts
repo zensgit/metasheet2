@@ -339,6 +339,9 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
       request(nonAdminApp).post(`/api/admin/directory/org-transfers/${probeId}/apply?dryRun=true`),
       request(nonAdminApp).post(`/api/admin/directory/org-transfers/${probeId}/apply`),
       request(nonAdminApp).post(`/api/admin/directory/org-transfers/${probeId}/cancel`),
+      request(nonAdminApp)
+        .patch(`/api/admin/directory/org-transfers/${probeId}/source-sync-freeze`)
+        .send({ freezeSourceSync: false }),
     ]) {
       const res = await probe
       expect(res.status).toBeGreaterThanOrEqual(401)

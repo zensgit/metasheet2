@@ -12,16 +12,18 @@ import {
 import { jsonError, jsonOk } from '../util/response'
 
 /**
- * Transfer MVP — T1 (routes), API per `provider-org-transfer-development-plan-20260709.md` §6.3:
- * create / read / scan / dry-run apply / apply / cancel. The decisions PATCH endpoint of §6.3 is
- * deliberately NOT here — without a registered adapter scan yields zero bindings only when tests
- * explicitly register the no-op; production scan/apply fail closed with
- * ORG_TRANSFER_ADAPTER_UNAVAILABLE. The decision surface (and its secret-handling rules) lands
- * with the first real adapter (T3/T4).
+ * Transfer MVP — T1 + T2 freeze override routes, API per
+ * `provider-org-transfer-development-plan-20260709.md` §6.3 / §12.2:
+ * create / read / scan / dry-run apply / apply / cancel / source-sync-freeze.
+ * The decisions PATCH endpoint of §6.3 is deliberately NOT here — without a registered adapter
+ * scan yields zero bindings only when tests explicitly register the no-op; production scan/apply
+ * fail closed with ORG_TRANSFER_ADAPTER_UNAVAILABLE. The decision surface (and its secret-handling
+ * rules) lands with the first real adapter (T3/T4).
  *
  * Platform-admin only (`ensurePlatformAdmin`, the single source in admin-directory.ts). Org
  * identity is never read from the request: the service derives `org_id` from the two integration
- * rows, and the schema's composite FKs make cross-org/provider-mismatched rows impossible.
+ * rows (create) or from the transfer row (freeze override), and the schema's composite FKs make
+ * cross-org/provider-mismatched rows impossible.
  * Every successful lifecycle mutation writes ONE values-free audit row (ids/status/counters only —
  * no names, no tenant/corp keys, no URLs). Rejected mutations (including adapter-unavailable and
  * unknown body fields) write no success audit.
@@ -29,7 +31,8 @@ import { jsonError, jsonOk } from '../util/response'
  * Lifecycle body contract: scan / apply (dry-run + real) / cancel accept NO body fields. Any key,
  * array, or non-plain payload is 400 ORG_TRANSFER_UNKNOWN_FIELDS before service + audit. Empty
  * object / omitted body remains allowed. CREATE uses the same plain-object gate with its field
- * allowlist.
+ * allowlist. T2 source-sync-freeze accepts exactly `{ freezeSourceSync: boolean }` via the same
+ * plain-object gate.
  */
 
 const logger = new Logger('AdminDirectoryOrgTransferRoutes')
@@ -37,6 +40,7 @@ const logger = new Logger('AdminDirectoryOrgTransferRoutes')
 const CREATE_FIELDS = ['provider', 'sourceIntegrationId', 'targetIntegrationId'] as const
 /** scan / apply / cancel — no request-body fields are accepted. */
 const LIFECYCLE_BODY_FIELDS = [] as const
+const SOURCE_SYNC_FREEZE_FIELDS = ['freezeSourceSync'] as const
 
 const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -107,7 +111,7 @@ function handleOrgTransferError(res: Response, error: unknown, fallbackMessage: 
   jsonError(res, 500, 'ORG_TRANSFER_INTERNAL_ERROR', fallbackMessage)
 }
 
-type TransferAuditAction = 'create' | 'scan' | 'dry_run' | 'apply' | 'cancel'
+type TransferAuditAction = 'create' | 'scan' | 'dry_run' | 'apply' | 'cancel' | 'source_sync_freeze'
 
 /** Values-free lifecycle audit row; best-effort per the directory route precedent. */
 async function auditTransfer(
@@ -265,6 +269,38 @@ export function adminDirectoryOrgTransfersRouter(): Router {
       jsonOk(res, { transfer })
     } catch (error) {
       handleOrgTransferError(res, error, 'Failed to cancel org transfer')
+    }
+  })
+
+  /**
+   * T2 §12.2 admin override: PATCH body allowlist is exactly `{ freezeSourceSync: boolean }`.
+   * Org is derived from the transfer row (never from the body). Non-terminal transfers only.
+   */
+  router.patch('/:transferId/source-sync-freeze', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (rejectNonUuidParam(res, 'transferId', req.params.transferId)) return
+    if (rejectUnlistedFields(req, res, SOURCE_SYNC_FREEZE_FIELDS)) return
+
+    const body = (req.body ?? {}) as Record<string, unknown>
+    if (typeof body.freezeSourceSync !== 'boolean') {
+      jsonError(res, 400, 'ORG_TRANSFER_INVALID_INPUT', 'freezeSourceSync must be a boolean')
+      return
+    }
+
+    try {
+      const transfer = await orgTransferService.setOrgTransferSourceSyncFreeze(
+        req.params.transferId,
+        body.freezeSourceSync,
+      )
+      await auditTransfer(adminUserId, 'source_sync_freeze', transfer.id, {
+        provider: transfer.provider,
+        status: transfer.status,
+        freezeSourceSync: transfer.freezeSourceSync,
+      })
+      jsonOk(res, { transfer })
+    } catch (error) {
+      handleOrgTransferError(res, error, 'Failed to update org-transfer source-sync freeze')
     }
   })
 

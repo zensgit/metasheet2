@@ -1,7 +1,7 @@
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
 import { SchedulerServiceImpl } from '../services/SchedulerService'
-import { DirectorySyncInProgressError, reclaimStaleDirectorySyncRuns, syncDirectoryIntegration } from './directory-sync'
+import { DirectorySyncFrozenByTransferError, DirectorySyncInProgressError, reclaimStaleDirectorySyncRuns, syncDirectoryIntegration } from './directory-sync'
 import { deliverDirectoryInactiveLinkedAlert } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 
@@ -82,6 +82,13 @@ async function runScheduledSync(integrationId: string, integrationName: string):
     // lease. Skipping is the correct outcome — the directory is being refreshed. Any
     // other failure stays an error so the job reports it.
     if (error instanceof DirectorySyncInProgressError) {
+      logger.info(`Skipped scheduled directory sync for ${integrationId}: ${error.message}`)
+      return
+    }
+    // T2 (§12.2): a frozen source is a deliberate transfer state, not a sync failure — skip
+    // quietly each tick until the transfer reaches a terminal status (or its freeze flag is
+    // cleared), exactly like the lease skip above.
+    if (error instanceof DirectorySyncFrozenByTransferError) {
       logger.info(`Skipped scheduled directory sync for ${integrationId}: ${error.message}`)
       return
     }

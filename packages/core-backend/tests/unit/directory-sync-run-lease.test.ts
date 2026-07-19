@@ -160,6 +160,9 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
     pgMocks.query
       // getIntegrationRow
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      // T2 freeze gate (migrated schema present, no active frozen transfer)
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] }) // to_regclass
+      .mockResolvedValueOnce({ rows: [] }) // active frozen-transfer SELECT
       // reclaimStaleDirectorySyncRuns → nothing stale
       .mockResolvedValueOnce({ rows: [] })
       // claimDirectorySyncRun → another run holds the lease
@@ -178,6 +181,8 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
   it('carries the active run id so the caller can observe the run in flight', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockRejectedValueOnce(uniqueViolation())
       .mockResolvedValueOnce({ rows: [{ id: 'run-active' }] })
@@ -191,23 +196,36 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
   it('reclaims the lease before claiming it, so a crashed run cannot wedge an integration', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      // T2 freeze gate: migrated schema present, no active freeze — both queries must
+      // precede reclaim, which must precede claim (indexes below pin that order).
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'stale-run' }] }) // reclaim
       .mockRejectedValueOnce(uniqueViolation())
       .mockResolvedValueOnce({ rows: [{ id: 'run-active' }] })
 
     await expect(syncDirectoryIntegration('dir-1', 'admin-1', 'manual')).rejects.toBeInstanceOf(DirectorySyncInProgressError)
 
-    const reclaimCall = pgMocks.query.mock.calls[1]
+    // Freeze-gate SQL shapes: to_regclass then active frozen-transfer SELECT.
+    expect(String(pgMocks.query.mock.calls[1][0])).toContain("to_regclass('provider_org_transfers')")
+    expect(String(pgMocks.query.mock.calls[2][0])).toContain('FROM provider_org_transfers')
+    expect(String(pgMocks.query.mock.calls[2][0])).toContain('freeze_source_sync')
+
+    const reclaimCall = pgMocks.query.mock.calls[3]
     expect(String(reclaimCall[0])).toContain('UPDATE directory_sync_runs')
     expect(String(reclaimCall[0])).toContain("status = 'running'")
-    // Reclaim strictly precedes the claim.
-    expect(String(pgMocks.query.mock.calls[2][0])).toContain('INSERT INTO directory_sync_runs')
+    // Reclaim strictly precedes the claim (and freeze-gate strictly precedes reclaim).
+    expect(String(pgMocks.query.mock.calls[4][0])).toContain('INSERT INTO directory_sync_runs')
   })
 
   it('propagates a non-unique-violation insert error unchanged', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      // Same migrated-schema freeze gate as the lease-conflict path above so this rejection
+      // still lands on claim/INSERT rather than the freeze SELECT or reclaim.
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] }) // reclaim
       .mockRejectedValueOnce(new Error('connection reset'))
 
     await expect(syncDirectoryIntegration('dir-1', 'admin-1', 'manual')).rejects.toThrow('connection reset')
