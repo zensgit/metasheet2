@@ -482,6 +482,8 @@ export default defineConfig({
       'tests/integration/approval-attachment-participant-realdb.test.ts',
       // attachment DB invariants (UNIQUE storage_key, purge lease biconditional) — real-DB.
       'tests/integration/approval-attachment-schema-invariants-realdb.test.ts',
+      // createApproval production-path bind golden (clean/infected/foreign) — real-DB.
+      'tests/integration/approval-attachment-create-bind-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

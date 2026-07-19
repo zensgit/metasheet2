@@ -107,21 +107,22 @@ function normalizeApprovalText(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null
 }
 
-function resolveApprovalActorId(req: Request): string | null {
+/** Exported for attachment upload actor parity with createApproval (no parallel parsing). */
+export function resolveApprovalActorId(req: Request): string | null {
   const candidate = req.user?.id ?? req.user?.userId ?? req.user?.sub
   if (typeof candidate !== 'string') return null
   const normalized = candidate.trim()
   return normalized.length > 0 ? normalized : null
 }
 
-function resolveApprovalActorName(req: Request, fallbackId: string): string {
+export function resolveApprovalActorName(req: Request, fallbackId: string): string {
   const candidate = req.user?.name ?? req.user?.email ?? fallbackId
   if (typeof candidate !== 'string') return fallbackId
   const normalized = candidate.trim()
   return normalized.length > 0 ? normalized : fallbackId
 }
 
-function resolveApprovalActorRoles(req: Request): string[] {
+export function resolveApprovalActorRoles(req: Request): string[] {
   const role = typeof req.user?.role === 'string' && req.user.role.trim().length > 0
     ? [req.user.role.trim()]
     : []
@@ -131,7 +132,7 @@ function resolveApprovalActorRoles(req: Request): string[] {
   return Array.from(new Set([...role, ...roles]))
 }
 
-function resolveApprovalActorPermissions(req: Request): string[] {
+export function resolveApprovalActorPermissions(req: Request): string[] {
   const permissions = Array.isArray(req.user?.permissions)
     ? req.user!.permissions.filter((permission): permission is string => typeof permission === 'string')
     : []
@@ -141,7 +142,11 @@ function resolveApprovalActorPermissions(req: Request): string[] {
   return Array.from(new Set([...permissions, ...tokenPerms].map((permission) => permission.trim()).filter(Boolean)))
 }
 
-function resolveApprovalActorDepartmentIds(req: Request): string[] {
+/**
+ * Department ids used by createApproval + template visibility (department, departmentId,
+ * deptId, dept scalars AND departmentIds/departments arrays). Export for attachment upload parity.
+ */
+export function resolveApprovalActorDepartmentIds(req: Request): string[] {
   const user = req.user as Record<string, unknown> | undefined
   const candidates = [
     user?.department,
@@ -159,14 +164,65 @@ function resolveApprovalActorDepartmentIds(req: Request): string[] {
   return Array.from(new Set([...fromScalars, ...fromArrays]))
 }
 
-function resolveApprovalTenantId(req: Request): string | undefined {
+export function resolveApprovalTenantId(req: Request): string | undefined {
   const candidate = req.user?.tenantId
   if (typeof candidate !== 'string') return undefined
   const normalized = candidate.trim()
   return normalized.length > 0 ? normalized : undefined
 }
 
-function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
+/**
+ * EXACT isTemplateManager predicate used by createApproval's assembleCreationContext
+ * (ApprovalProductService). Does NOT treat `approvals:admin` alone as a visibility bypass —
+ * that permission is operational admin, not template-manager. Keep this formula the single
+ * source for upload authorizeUploadTarget parity.
+ */
+export function isCreateApprovalTemplateManager(actor: {
+  roles?: readonly string[]
+  permissions?: readonly string[]
+}): boolean {
+  const permissions = actor.permissions ?? []
+  const roles = actor.roles ?? []
+  return permissions.includes('approval-templates:manage')
+    || permissions.includes('approvals:admin-templates')
+    || permissions.includes('approvals:*')
+    || permissions.includes('*:*')
+    || roles.includes('admin')
+}
+
+/**
+ * Actor shape for createApproval / upload target visibility — same fields createApproval passes
+ * into assembleCreationContext (departmentIds via resolveApprovalActorDepartmentIds).
+ */
+export function resolveCreateApprovalActorFromRequest(req: Request): {
+  userId: string
+  userName: string
+  email?: string
+  tenantId?: string
+  department?: string
+  departmentIds: string[]
+  roles: string[]
+  permissions: string[]
+  isTemplateManager: boolean
+} | null {
+  const userId = resolveApprovalActorId(req)
+  if (!userId) return null
+  const roles = resolveApprovalActorRoles(req)
+  const permissions = resolveApprovalActorPermissions(req)
+  return {
+    userId,
+    userName: resolveApprovalActorName(req, userId),
+    email: typeof req.user?.email === 'string' ? req.user.email : undefined,
+    tenantId: resolveApprovalTenantId(req),
+    department: typeof req.user?.department === 'string' ? req.user.department : undefined,
+    departmentIds: resolveApprovalActorDepartmentIds(req),
+    roles,
+    permissions,
+    isTemplateManager: isCreateApprovalTemplateManager({ roles, permissions }),
+  }
+}
+
+export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
   const userId = resolveApprovalActorId(req)
   if (!userId) return undefined
   const roles = resolveApprovalActorRoles(req)
@@ -176,6 +232,8 @@ function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateV
     departmentIds: resolveApprovalActorDepartmentIds(req),
     roles,
     permissions,
+    // List/detail template visibility uses a slightly broader admin set (role === admin on req.user).
+    // createApproval / upload use isCreateApprovalTemplateManager — keep that for create-path parity.
     isTemplateManager: req.user?.role === 'admin'
       || roles.includes('admin')
       || permissions.includes('*:*')

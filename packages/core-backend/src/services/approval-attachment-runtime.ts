@@ -136,7 +136,8 @@ export interface UploadVisibilityActor {
   userId: string
   departmentIds?: readonly string[]
   roles?: readonly string[]
-  /** template managers bypass visibility scope (same as createApproval). */
+  permissions?: readonly string[]
+  /** template managers bypass visibility scope — MUST match createApproval's isTemplateManager. */
   isTemplateManager?: boolean
 }
 

@@ -4047,11 +4047,20 @@ export class ApprovalProductService {
           const idsByField = extractAttachmentIdsByField(formSchema, normalizedFormData)
           await bindAttachmentsOnSubmit(client, actor.userId, instanceId, idsByField)
         } catch (bindErr) {
+          // Values-free: never echo raw bindErr.message (host/port/user/SQL). RangeError =
+          // validation (foreign/infected/cap) → 400; unknown/DB/storage → 503 so the client
+          // does not treat infra faults as "bad form data".
+          if (bindErr instanceof RangeError) {
+            throw new ServiceError(
+              'Approval attachment bind rejected',
+              400,
+              'APPROVAL_ATTACHMENT_BIND_FAILED',
+            )
+          }
           throw new ServiceError(
-            'Approval attachment bind failed',
-            400,
-            'APPROVAL_ATTACHMENT_BIND_FAILED',
-            { reason: bindErr instanceof Error ? bindErr.message.replace(/[^A-Za-z0-9_ /.-]/g, '').slice(0, 120) : 'bind_failed' },
+            'Approval attachment bind unavailable',
+            503,
+            'APPROVAL_ATTACHMENT_BIND_UNAVAILABLE',
           )
         }
       }

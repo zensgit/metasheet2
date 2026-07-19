@@ -84,6 +84,12 @@ import { startMetaRevisionRetention } from './multitable/meta-revision-retention
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from './routes/approval-attachments'
 import {
+  resolveApprovalActorId,
+  resolveApprovalActorRoles,
+  resolveApprovalTenantId,
+  resolveCreateApprovalActorFromRequest,
+} from './routes/approvals'
+import {
   authorizeUploadTarget,
   createDownloadAuthChecks,
   startApprovalAttachmentLifecycle,
@@ -1237,27 +1243,19 @@ export class MetaSheetServer {
       // Exact create-approval capability stack: authenticate + rbacGuard('approvals','write').
       // Mounted BEFORE multer inside the router factory so denials never parse/store.
       const authorizeCreate = [authenticate, rbacGuard('approvals', 'write')]
+      // Viewer + upload actor: REUSE exported createApproval resolvers (no parallel parsing).
       const viewerContext = (req: import('express').Request) => {
-        const u = req.user as Record<string, unknown> | undefined
-        if (!u) return null
-        const id = typeof u.id === 'string' ? u.id
-          : typeof u.userId === 'string' ? u.userId
-          : typeof u.sub === 'string' ? u.sub
-          : null
-        if (!id?.trim()) return null
-        const roles = [
-          ...(typeof u.role === 'string' && u.role.trim() ? [u.role.trim()] : []),
-          ...(Array.isArray(u.roles) ? u.roles.filter((r): r is string => typeof r === 'string' && r.trim().length > 0) : []),
-        ]
-        const permissions = [
-          ...(Array.isArray(u.permissions) ? u.permissions.filter((p): p is string => typeof p === 'string') : []),
-          ...(Array.isArray(u.perms) ? u.perms.filter((p): p is string => typeof p === 'string') : []),
-        ]
+        const id = resolveApprovalActorId(req)
+        if (!id) return null
+        const roles = resolveApprovalActorRoles(req)
+        const actor = resolveCreateApprovalActorFromRequest(req)
+        // isAdmin for download participation only — NOT for template visibility bypass.
+        // Mirror operational admin (role admin / *:* / approvals:*) used elsewhere; does not
+        // expand isTemplateManager (that stays isCreateApprovalTemplateManager).
         const isAdmin = roles.includes('admin')
-          || permissions.includes('*:*')
-          || permissions.includes('approvals:*')
-          || permissions.includes('approvals:admin')
-        return { id: id.trim(), roles, isAdmin }
+          || (actor?.permissions ?? []).includes('*:*')
+          || (actor?.permissions ?? []).includes('approvals:*')
+        return { id, roles, isAdmin }
       }
       const attachmentRouter = createApprovalAttachmentRouter({
         db: approvalAttachmentPool,
@@ -1269,26 +1267,24 @@ export class MetaSheetServer {
         authChecks: createDownloadAuthChecks(approvalAttachmentPool),
         viewerContext,
         orgId: (req) => {
+          // Prefer tenant from the same resolver createApproval uses (tenantId).
+          const tenant = resolveApprovalTenantId(req)
+          if (tenant) return tenant
           const u = req.user as Record<string, unknown> | undefined
-          const candidate = u?.orgId ?? u?.org_id ?? u?.tenantId ?? u?.tenant_id
+          const candidate = u?.orgId ?? u?.org_id
           return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
         },
         uploadActor: (req) => {
-          const ctx = viewerContext(req)
-          if (!ctx) return null
-          const u = req.user as Record<string, unknown> | undefined
-          const permissions = [
-            ...(Array.isArray(u?.permissions) ? u!.permissions.filter((p): p is string => typeof p === 'string') : []),
-            ...(Array.isArray(u?.perms) ? (u!.perms as unknown[]).filter((p): p is string => typeof p === 'string') : []),
-          ]
-          const deptRaw = [u?.department, u?.departmentId, u?.deptId]
-          const departmentIds = deptRaw
-            .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
-            .map((v) => v.trim())
-          const isTemplateManager = ctx.isAdmin
-            || permissions.includes('approvals:admin-templates')
-            || permissions.includes('approval-templates:manage')
-          return { userId: ctx.id, departmentIds, roles: ctx.roles, isTemplateManager }
+          // Exact createApproval actor fields (departmentIds includes departments/dept arrays).
+          const actor = resolveCreateApprovalActorFromRequest(req)
+          if (!actor) return null
+          return {
+            userId: actor.userId,
+            departmentIds: actor.departmentIds,
+            roles: actor.roles,
+            // Same predicate as assembleCreationContext — approvals:admin alone does NOT bypass.
+            isTemplateManager: actor.isTemplateManager,
+          }
         },
         authorizeUploadTarget: (templateId, fieldId, actor) =>
           authorizeUploadTarget(approvalAttachmentPool!, templateId, fieldId, actor),

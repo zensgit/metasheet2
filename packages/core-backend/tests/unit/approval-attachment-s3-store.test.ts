@@ -140,4 +140,100 @@ describe('S3ApprovalAttachmentStore', () => {
     expect(isProvenNotFound({ $metadata: { httpStatusCode: 500 } })).toBe(false)
     expect(isProvenNotFound(new Error('timeout'))).toBe(false)
   })
+
+  test('get: proven 404 → not_found; AccessDenied/5xx/network → storage_unavailable', async () => {
+    const nf = new S3ApprovalAttachmentStore({
+      bucket: 'b',
+      client: fakeClient({
+        get: async () => {
+          const err = new Error('nf') as Error & { name: string }
+          err.name = 'NoSuchKey'
+          throw err
+        },
+      }) as never,
+    })
+    // Override send for GetObject only via head path unused
+    const nf2 = new S3ApprovalAttachmentStore({
+      bucket: 'b',
+      client: {
+        send: async (cmd: { constructor: { name: string } }) => {
+          if (cmd.constructor.name === 'GetObjectCommand') {
+            const err = new Error('nf') as Error & { name: string }
+            err.name = 'NoSuchKey'
+            throw err
+          }
+          throw new Error('unexpected')
+        },
+      } as never,
+    })
+    await expect(nf2.get(KEY)).rejects.toMatchObject({ code: 'not_found' })
+
+    const denied = new S3ApprovalAttachmentStore({
+      bucket: 'b',
+      client: {
+        send: async (cmd: { constructor: { name: string } }) => {
+          if (cmd.constructor.name === 'GetObjectCommand') {
+            const err = new Error('AccessDenied: secret') as Error & { name: string }
+            err.name = 'AccessDenied'
+            throw err
+          }
+          throw new Error('unexpected')
+        },
+      } as never,
+    })
+    await expect(denied.get(KEY)).rejects.toMatchObject({ code: 'storage_unavailable' })
+
+    const server = new S3ApprovalAttachmentStore({
+      bucket: 'b',
+      client: {
+        send: async () => {
+          const err = new Error('boom') as Error & { $metadata: { httpStatusCode: number } }
+          err.$metadata = { httpStatusCode: 500 }
+          throw err
+        },
+      } as never,
+    })
+    await expect(server.get(KEY)).rejects.toMatchObject({ code: 'storage_unavailable' })
+
+    const net = new S3ApprovalAttachmentStore({
+      bucket: 'b',
+      client: {
+        send: async () => {
+          throw new Error('ECONNRESET')
+        },
+      } as never,
+    })
+    await expect(net.get(KEY)).rejects.toMatchObject({ code: 'storage_unavailable' })
+  })
+
+  test('get: oversized ContentLength and stream abort above 20MiB; positive under cap', async () => {
+    const {
+      APPROVAL_ATTACHMENT_MAX_GET_BYTES,
+      streamToBufferCapped,
+      ApprovalAttachmentStorageError,
+    } = await import('../../src/services/approval-attachment-s3-store')
+
+    await expect(streamToBufferCapped(Buffer.alloc(10), APPROVAL_ATTACHMENT_MAX_GET_BYTES, APPROVAL_ATTACHMENT_MAX_GET_BYTES + 1))
+      .rejects.toMatchObject({ code: 'storage_unavailable' })
+
+    async function* bigStream() {
+      yield Buffer.alloc(APPROVAL_ATTACHMENT_MAX_GET_BYTES - 10)
+      yield Buffer.alloc(20) // tips over the cap mid-stream
+    }
+    await expect(streamToBufferCapped(bigStream(), APPROVAL_ATTACHMENT_MAX_GET_BYTES))
+      .rejects.toBeInstanceOf(ApprovalAttachmentStorageError)
+
+    // Positive under cap
+    const ok = await streamToBufferCapped(Buffer.from('hello'), APPROVAL_ATTACHMENT_MAX_GET_BYTES, 5)
+    expect(ok.toString()).toBe('hello')
+
+    // Full get path with ContentLength over cap
+    const oversized = new S3ApprovalAttachmentStore({
+      bucket: 'b',
+      client: {
+        send: async () => ({ Body: Buffer.alloc(100), ContentLength: APPROVAL_ATTACHMENT_MAX_GET_BYTES + 1 }),
+      } as never,
+    })
+    await expect(oversized.get(KEY)).rejects.toMatchObject({ code: 'storage_unavailable' })
+  })
 })

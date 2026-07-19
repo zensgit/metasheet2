@@ -68,18 +68,42 @@ export function isProvenNotFound(err: unknown): boolean {
   return false
 }
 
-async function streamToBuffer(body: unknown): Promise<Buffer> {
+/** Ratified O1 per-file cap — reject oversized GetObject bodies (defense in depth under route multer). */
+export const APPROVAL_ATTACHMENT_MAX_GET_BYTES = 20 * 1024 * 1024
+
+/**
+ * Accumulate a GetObject body with a hard byte cap. Throws `storage_unavailable` (values-free)
+ * if ContentLength or accumulated bytes exceed the ratified 20 MiB cap.
+ */
+export async function streamToBufferCapped(
+  body: unknown,
+  maxBytes: number = APPROVAL_ATTACHMENT_MAX_GET_BYTES,
+  contentLength?: number | null,
+): Promise<Buffer> {
+  if (typeof contentLength === 'number' && Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new ApprovalAttachmentStorageError('storage_unavailable')
+  }
   if (!body) throw new ApprovalAttachmentStorageError('empty_body')
-  if (Buffer.isBuffer(body)) return body
-  if (body instanceof Uint8Array) return Buffer.from(body)
-  // AWS SDK v3 body is a Readable / ReadableStream-like async iterable
+  if (Buffer.isBuffer(body)) {
+    if (body.length > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
+    return body
+  }
+  if (body instanceof Uint8Array) {
+    if (body.byteLength > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
+    return Buffer.from(body)
+  }
   if (typeof (body as { transformToByteArray?: () => Promise<Uint8Array> }).transformToByteArray === 'function') {
     const bytes = await (body as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray()
+    if (bytes.byteLength > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
     return Buffer.from(bytes)
   }
   const chunks: Buffer[] = []
+  let total = 0
   for await (const chunk of body as AsyncIterable<Uint8Array | string>) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    total += buf.length
+    if (total > maxBytes) throw new ApprovalAttachmentStorageError('storage_unavailable')
+    chunks.push(buf)
   }
   return Buffer.concat(chunks)
 }
@@ -149,9 +173,13 @@ export class S3ApprovalAttachmentStore implements ApprovalAttachmentStore, Appro
     assertSafeKey(storageKey, this.keyPrefix)
     try {
       const out = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: storageKey }))
-      return streamToBuffer(out.Body)
-    } catch {
-      throw new ApprovalAttachmentStorageError('not_found')
+      return await streamToBufferCapped(out.Body, APPROVAL_ATTACHMENT_MAX_GET_BYTES, out.ContentLength)
+    } catch (err) {
+      if (err instanceof ApprovalAttachmentStorageError) throw err
+      // Proven missing only → not_found; AccessDenied / 5xx / network → storage_unavailable
+      // so callers never treat infra denial as a soft 404 oracle.
+      if (isProvenNotFound(err)) throw new ApprovalAttachmentStorageError('not_found')
+      throw new ApprovalAttachmentStorageError('storage_unavailable')
     }
   }
 
