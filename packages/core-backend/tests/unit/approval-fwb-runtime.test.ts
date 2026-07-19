@@ -40,7 +40,7 @@ describe('FWB runtime — config parse + record-link shape + activation', () => 
     expect(extractApprovalInstanceId({ instanceId: 'nope' })).toBeNull()
   })
 
-  test('activation OFF by default; positive control both flags ON', () => {
+  test('activation OFF by default; positive control both flags ON; execution always gated', () => {
     expect(assertFwbRuntimeActivatable({})).toBeTruthy()
     expect(assertFwbRuntimeActivatable({
       APPROVAL_FWB_RUNTIME_ENABLED: 'true',

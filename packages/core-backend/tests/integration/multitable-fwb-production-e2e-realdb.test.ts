@@ -185,7 +185,7 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER]]).catch(() => {})
   })
 
-  test('negative control: FWB flag OFF rejects without write', async () => {
+  test('negative control: FWB flag OFF rejects execution without write', async () => {
     const off = await runWriteApprovalFormValues(
       {
         queryFn,
@@ -208,6 +208,75 @@ describeIfDatabase('FWB production E2E — flag-gated durable writeback create',
     )
     expect(off.status).toBe('failed')
     expect(off.error).toMatch(/disabled|APPROVAL_FWB/i)
+  })
+
+  test('staging: disabled FWB draft save allowed while flags OFF; enabled save rejected', async () => {
+    const savedFwb = process.env.APPROVAL_FWB_RUNTIME_ENABLED
+    const savedDurable = process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+    delete process.env.APPROVAL_FWB_RUNTIME_ENABLED
+    delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+    try {
+      const challenge = await createFwbConfirmationChallenge(queryFn, {
+        sheetId: SHEET_ID,
+        configurerUserId: CREATOR,
+        subject: {
+          templateId,
+          templateVersionId,
+          targetBaseId: null,
+          targetSheetId: SHEET_ID,
+          mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_ID }],
+        },
+      })
+      await acknowledgeFwbConfirmation(queryFn, {
+        confirmationId: challenge.id,
+        configurerUserId: CREATOR,
+        challengeNonce: challenge.challengeNonce,
+      })
+
+      // disabled draft — must succeed with flags OFF (operator staging)
+      const draft = await svc.createRule(SHEET_ID, {
+        name: `fwbe-draft-${RUN}`,
+        triggerType: 'approval.completed',
+        triggerConfig: { templateId, outcomes: ['approved'] },
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mode: 'create',
+          mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_ID }],
+          confirmationId: challenge.id,
+        },
+        createdBy: CREATOR,
+        enabled: false,
+      })
+      expect(draft.enabled).toBe(false)
+      expect(draft.action_type).toBe('write_approval_form_values')
+
+      // enabled create — fail closed with flags OFF
+      await expect(
+        svc.createRule(SHEET_ID, {
+          name: `fwbe-enabled-${RUN}`,
+          triggerType: 'approval.completed',
+          triggerConfig: { templateId, outcomes: ['approved'] },
+          actionType: 'write_approval_form_values',
+          actionConfig: {
+            mode: 'create',
+            mappings: [{ formFieldId: 'summary', targetFieldId: FIELD_ID }],
+            confirmationId: challenge.id,
+          },
+          createdBy: CREATOR,
+          enabled: true,
+        }),
+      ).rejects.toThrow(/APPROVAL_FWB|DURABLE|disabled/i)
+
+      // enabling an existing disabled draft — also fail closed
+      await expect(svc.setRuleEnabled(draft.id, true)).rejects.toThrow(/APPROVAL_FWB|DURABLE|disabled/i)
+
+      await q('DELETE FROM automation_rules WHERE id=$1', [draft.id]).catch(() => {})
+    } finally {
+      if (savedFwb === undefined) delete process.env.APPROVAL_FWB_RUNTIME_ENABLED
+      else process.env.APPROVAL_FWB_RUNTIME_ENABLED = savedFwb
+      if (savedDurable === undefined) delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+      else process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = savedDurable
+    }
   })
 
   test('approve → writeback creates record + claim + durable outbox (same-txn path)', async () => {

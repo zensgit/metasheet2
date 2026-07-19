@@ -3,14 +3,14 @@
  */
 import { describe, expect, test } from 'vitest'
 
-import { isFwbRuntimeEnabled } from '../../src/multitable/approval-fwb-flags'
+import { isFwbRuntimeEnabled, requireFwbActivationForEnabledRule } from '../../src/multitable/approval-fwb-flags'
 import { isDurableDeliveryEnabled } from '../../src/multitable/automation-durable-delivery'
 import { assertFwbRuntimeActivatable, parseWriteApprovalFormValuesConfig } from '../../src/multitable/approval-fwb-runtime'
 import { computeFwbConfigFingerprint } from '../../src/multitable/approval-fwb-confirmation'
 import { coerceExactDecimal } from '../../src/multitable/approval-fwb-target-fields'
 import { mapApprovalFormValues } from '../../src/multitable/approval-form-value-mapping'
 
-describe('FWB activation flags (default OFF)', () => {
+describe('FWB activation flags (default OFF) + staging nuance', () => {
   test('FWB and durable are OFF by default; FWB cannot activate without both', () => {
     const env = {} as NodeJS.ProcessEnv
     expect(isFwbRuntimeEnabled(env)).toBe(false)
@@ -26,6 +26,39 @@ describe('FWB activation flags (default OFF)', () => {
         AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true',
       } as NodeJS.ProcessEnv),
     ).toBeNull()
+  })
+
+  test('disabled-save staging: flags OFF is allowed for enabled=false drafts', () => {
+    const envOff = {} as NodeJS.ProcessEnv
+    expect(requireFwbActivationForEnabledRule(false, envOff)).toBeNull()
+    // Even with FWB ON but durable OFF, a disabled draft is still stageable.
+    expect(
+      requireFwbActivationForEnabledRule(false, {
+        APPROVAL_FWB_RUNTIME_ENABLED: 'true',
+      } as NodeJS.ProcessEnv),
+    ).toBeNull()
+  })
+
+  test('enabled-save rejected when flags OFF; allowed only when both ON', () => {
+    expect(requireFwbActivationForEnabledRule(true, {} as NodeJS.ProcessEnv)).toMatch(/disabled|APPROVAL_FWB/i)
+    expect(
+      requireFwbActivationForEnabledRule(true, {
+        APPROVAL_FWB_RUNTIME_ENABLED: 'true',
+      } as NodeJS.ProcessEnv),
+    ).toMatch(/DURABLE/i)
+    expect(
+      requireFwbActivationForEnabledRule(true, {
+        APPROVAL_FWB_RUNTIME_ENABLED: 'true',
+        AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true',
+      } as NodeJS.ProcessEnv),
+    ).toBeNull()
+  })
+
+  test('execution gate matches enabled-save (always requires both flags)', () => {
+    const envOff = {} as NodeJS.ProcessEnv
+    expect(assertFwbRuntimeActivatable(envOff)).toEqual(
+      requireFwbActivationForEnabledRule(true, envOff),
+    )
   })
 })
 
