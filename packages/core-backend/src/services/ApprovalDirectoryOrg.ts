@@ -186,14 +186,17 @@ export class ApprovalRoutingPolicyError extends Error {
  * `query` is injected (defaults to the shared pool) so the unit path can drive it
  * against an in-memory fixture without a database.
  *
- * `options.orgId` (S7 §3.3, optional / backward compatible): when supplied AND no
- * `approval_routing` policy governs, the requester-account pick is anchored to
- * `directory_integrations.org_id` BEFORE the `ORDER BY ... LIMIT 1` tie-break, so a
- * local user linked into two orgs cannot have the wrong org's account selected.
- * Callers that omit `orgId` retain today's unscoped (most-recently-updated) pick —
- * kernel `ApprovalProductService` callers included. Attendance-facing paths MUST
- * pass `orgId`. When an `approval_routing` policy DOES govern (B5-b), the policy's
- * canonical integration is authoritative over the org-anchor/legacy pick.
+ * `options.orgId` (S7 §3.3, optional / backward compatible) is a TENANT BOUNDARY:
+ * when supplied, every step of resolution is confined to that org — including the
+ * B5-b `approval_routing` policy probe (foreign-org policies must neither steer the
+ * pick nor trigger multi-org ambiguity). Within that org:
+ *   - a same-org policy is AUTHORITATIVE (canonical-integration pick);
+ *   - no same-org policy → org-anchored requester SELECT (`directory_integrations.org_id`
+ *     before ORDER BY/LIMIT 1) so a local user linked into two orgs cannot have the
+ *     wrong org's account selected.
+ * Callers that omit `orgId` retain the unscoped kernel path (B5-b Q4 across all
+ * linked orgs) — kernel `ApprovalProductService` callers included. Attendance-facing
+ * paths MUST pass `orgId`.
  */
 export async function resolveApprovalRequesterOrgRelations(
   localUserId: string,
@@ -205,7 +208,8 @@ export async function resolveApprovalRequesterOrgRelations(
 
   // Optional org anchor (S7 §3.3). Trim + non-empty only — an empty string must NOT
   // accidentally join against `org_id = ''` and force every row out of scope.
-  // Applied only on the no-policy path below (policy is authoritative when present).
+  // When present this is a tenant boundary: it SCOPES the B5-b policy probe first,
+  // then (if no same-org policy) the requester-account pick.
   const orgId =
     typeof options.orgId === 'string' && options.orgId.trim().length > 0
       ? options.orgId.trim()
@@ -214,11 +218,16 @@ export async function resolveApprovalRequesterOrgRelations(
   // 0) B5-b (design lock Lock 2 + Q4): explicit `(org, purpose='approval_routing')` routing policy.
   //    Since B1 an org can hold MULTIPLE directory integrations (DingTalk + local), and the legacy
   //    requester pick below guesses among them by `ORDER BY a.updated_at DESC` — the exact
-  //    "latest integration wins" behavior the §6 owner ruling forbids. The probe finds any policy
-  //    governing an org this user is linked in:
-  //      - NO policy row  → the LEGACY / S7-org-anchor path below runs (Q1: zero behavior change
-  //        until a policy is explicitly set — staged opt-in). With `orgId`, the S7 join applies;
-  //        without it, the pick is byte-identical to pre-B5/pre-S7 unscoped.
+  //    "latest integration wins" behavior the §6 owner ruling forbids.
+  //
+  //    TENANT BOUNDARY: when `orgId` is set, the probe is restricted to
+  //    `p.org_id = $2` for that exact org. A foreign-org policy is invisible here —
+  //    it must neither select a canonical integration nor inflate multi-org ambiguity.
+  //
+  //    When `orgId` is OMITTED (kernel path), the probe considers every org the user
+  //    is linked in (B5-b Q4, unchanged):
+  //      - NO policy row  → LEGACY unscoped pick below (Q1: zero behavior change until a
+  //        policy is explicitly set — staged opt-in).
   //      - ONE policy     → the policy is AUTHORITATIVE: the requester pick is restricted to the
   //        canonical integration. A policy whose canonical target is missing or not 'active' is a
   //        CONFIG error → fail-closed typed throw (operator must fix the policy; silently falling
@@ -229,8 +238,31 @@ export async function resolveApprovalRequesterOrgRelations(
   //        fail-closed typed throw (multi-org users need explicit resolution, Q4). A user linked in
   //        one policy-governed org AND one policy-less org follows the single governed policy —
   //        deterministic, never a guess.
+  //
+  //    When `orgId` IS set:
+  //      - NO same-org policy → fall through to the S7 org-anchored requester SELECT.
+  //      - ONE same-org policy → AUTHORITATIVE canonical-integration pick (within the tenant).
+  //      - (multi-org ambiguity cannot fire: foreign policies are filtered out by p.org_id = $2.)
   const policyRows = await query<RoutingPolicyProbeRow>(
-    `SELECT DISTINCT p.org_id                            AS org_id,
+    orgId
+      ? `SELECT DISTINCT p.org_id                            AS org_id,
+            p.canonical_integration_id::text             AS canonical_integration_id,
+            ci.status                                    AS canonical_status
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+       JOIN directory_integrations ai
+         ON ai.id = a.integration_id
+       JOIN org_directory_routing_policy p
+         ON p.org_id = ai.org_id
+        AND p.purpose = 'approval_routing'
+       LEFT JOIN directory_integrations ci
+         ON ci.id = p.canonical_integration_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'
+        AND p.org_id = $2`
+      : `SELECT DISTINCT p.org_id                            AS org_id,
             p.canonical_integration_id::text             AS canonical_integration_id,
             ci.status                                    AS canonical_status
        FROM directory_account_links l
@@ -246,12 +278,13 @@ export async function resolveApprovalRequesterOrgRelations(
          ON ci.id = p.canonical_integration_id
       WHERE l.local_user_id = $1
         AND l.link_status = 'linked'`,
-    [userId],
+    orgId ? [userId, orgId] : [userId],
   )
   let canonicalIntegrationId: string | null = null
   if (policyRows.rows.length > 0) {
     const orgs = new Set(policyRows.rows.map((r) => r.org_id))
     if (orgs.size > 1) {
+      // Only reachable on the no-orgId (kernel) path: org-scoped probe binds p.org_id = $2.
       throw new ApprovalRoutingPolicyError(
         `approval routing is policy-managed in ${orgs.size} orgs this user is linked in; multi-org routing requires explicit resolution`,
       )
@@ -266,12 +299,12 @@ export async function resolveApprovalRequesterOrgRelations(
   }
 
   // 1) Requester's linked directory account + its primary department's raw.
-  //    Precedence (preserve both B5-b and S7 §3.3):
-  //      a) POLICY-SCOPED when a policy governs — restricted to the canonical integration
-  //         (identical projection, so every consumer below is source-agnostic).
-  //      b) ORG-ANCHORED when no policy and `orgId` is set — join directory_integrations so
-  //         ORDER BY/LIMIT 1 only competes among accounts inside the calling org (S7).
-  //      c) LEGACY unscoped otherwise — byte-identical pre-B5/pre-S7 pick.
+  //    Precedence (tenant-scoped policy first, then S7 org anchor, then legacy):
+  //      a) POLICY-SCOPED when a (tenant-visible) policy governs — restricted to the
+  //         canonical integration (identical projection; consumers below are source-agnostic).
+  //      b) ORG-ANCHORED when no same-org/no-orgId policy and `orgId` is set — join
+  //         directory_integrations so ORDER BY/LIMIT 1 only competes inside the calling org (S7).
+  //      c) LEGACY unscoped otherwise — byte-identical pre-B5/pre-S7 pick (no-orgId + no policy).
   const requesterRows = canonicalIntegrationId
     ? await query<RequesterDirectoryRow>(
         `SELECT a.integration_id::text       AS integration_id,
