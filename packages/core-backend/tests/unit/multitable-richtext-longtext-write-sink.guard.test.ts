@@ -64,6 +64,11 @@ function listRuntimeTsFiles(): string[] {
  *   SAFE       — writes only non-user-content columns; a rich-`longText` value can never appear.
  */
 const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: string }> = {
+  'multitable/exact-anchor-recovery-execute.ts': {
+    disposition: 'SAFE',
+    reason:
+      'L8 destructive apply writes ONLY previously-persisted at-anchor snapshots (revision-chain / checkpoint-baseline data, validated at their ORIGINAL write through the chokepoints above); no new user payload enters this module',
+  },
   'multitable/records.ts': {
     disposition: 'CHOKEPOINT',
     reason: 'plugin-SDK createRecord/patchRecord → normalizeFieldValue routes longText through validateLongTextValue',
