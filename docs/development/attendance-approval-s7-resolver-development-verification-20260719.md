@@ -80,14 +80,28 @@ account 与 org membership 约束；重复/泄漏式错误提示；以及 app-mo
 
 最终代码 verdict：APPROVE，0 P1 / 0 P2。
 
+### 5.1 Post-merge compensating adversarial review（2026-07-20）
+
+S7-2..S7-5 的代码 PR 已合入后，针对 design-lock §7 每片完成条第 (8) 项原本要求的
+pre-merge 对抗审，另在 `origin/main` `698997cf8` 上完成一次补偿性深审。该审阅以全新
+detached worktree 和 PostgreSQL 15.17 真库执行：四片 DB 套件按 CI 命令合跑 72/72，
+S7-0 授权矩阵 14/14，S7-5 FE 58/58；并以五组 mutation 分别验证 org 锚、逐类型授权、
+role 独立分支、创建时冻结 block 与 `continuous_managers` 排除均为承重守卫。最终判定为
+APPROVE，0 P1 / 0 P2 / 0 P3，仅两条措辞/累计计数 NIT。
+
+这是 **post-merge compensating control**：它补足当前主线代码的独立审阅可信度，但不追溯改写
+历史事实，也不声称 S7-2..S7-5 当时已经满足“合并前完成对抗审”的流程时序。该 sequencing
+exception 保留在记录中，后续切片仍必须在合并前通过独立门禁。详细审阅证据与 mutation 结果见
+[#4483 review comment](https://github.com/zensgit/metasheet2/pull/4483#issuecomment-5022477313)。
+本补偿审不改变默认 OFF flag，不构成部署、staging smoke、生产 opt-in 或客户 UAT。
+
 ## 6. 收口与剩余
 
-S7-5 已合入，本设计锁内的自主代码开发量为零。剩余只有：
+S7-5 与本验证报告均已合入，本设计锁内的自主代码开发量为零。剩余只有 owner/operator 项：
 
-1. 把本验证报告合入主线。
-2. 在部署到目标环境后，由 owner/operator 单独决定是否启用
+1. 在部署到目标环境后，由 owner/operator 单独决定是否启用
    `ATTENDANCE_APPROVAL_DYNAMIC_ASSIGNEE_SOURCES_ENABLED`；默认 OFF 不变。
-3. 启用前做 values-free readiness 与三种 kind 的受控 staging smoke；这不是客户 UAT，
+2. 启用前做 values-free readiness 与三种 kind 的受控 staging smoke；这不是客户 UAT，
    也不能由本文代替生产授权。
 
 仓库仍有 #4353/#4354/#4355 三条 task-first UI 改善线；它们属于 vNext 体验优化，既不阻断
