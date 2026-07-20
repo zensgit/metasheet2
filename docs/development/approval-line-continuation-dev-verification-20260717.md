@@ -5,9 +5,10 @@
 > （明确标注 MERGED 者除外）。模型分工：机械/规格化实现→sonnet 或 fable 子代理；同事务/幂等等精细切片与
 > 全部对抗审阅→opus；集成、冲突解决、变异验证、收口→主循环（fable）。
 >
-> **状态：FINAL（2026-07-20 终版）。** 收尾序列全部完成：#4337 activation 与 FWB 栈三刀全 MERGED main，
-> #4439 解冲+重构复审 APPROVE，8 场景正式验收矩阵 **8/8**（§1.7，PR #4489）。§5 双栏对账=工程侧已清零，
-> 剩余全为 owner 门（此表述至此才成立——2026-07-18 的 LIVING 降级即因当时说早了）。
+> **状态：REV-3（2026-07-20 修复轮收口，待 owner 终审后 FINAL）。** 前一版的 FINAL 与「工程侧清零」被
+> owner 复审驳回（六项发现：FWB 无生产调用链 / #4489 验证虚高 / 附件非完整 runtime + poison 失效 /
+> #4433 遍历漏报 / #4439 组合缺口 / #4450 claim 文字），本版为修复轮如实记录（§6）。工程侧修复已全部
+> 交付待审；「剩余全为 owner 门」的判定权在 owner 终审。
 > CI 状态以各 PR 当前 head 的 checks 为权威（本文数字绑定文中注明的 SHA）。
 
 ## 0. 接手时的权威状态
@@ -111,11 +112,17 @@ owner 已追认的演进，断言零改动：①`form.submitted`→`multitable.f
 恰是这三项硬化各自的正控证明**（幽灵事件名/死路由/非事务 handle 全被 fail-closed 拒绝）。矩阵已两点接线
 进 CI（PR #4489，待 owner 审）。
 
-## 2. #4342 附件 runtime — 闭合审计（review-ready，owner 门）
-- opus 审计对 head 23e090807：**REVIEW-READY**。两 P1（G7 下载字节路径隐藏字段红线 / G15 reconciler 误删
-  活 blob）在真码上变异证明 CLOSED（中和守卫→指定测试 RED，正控 12+4 绿）；17 个可识别 findings 全闭；
-  本地 80/80。诚实边界：真库套件本地未跑（无迁移 PG，两点接线已核）；~8 个 P3 因原清单未公开不可复原;
-  整链 boot 仍未接（flag OFF）。PR 标题已改为诚实全 7 切片表述。**合并形态（整包 vs 按锁拆）=owner 裁决**。
+## 2. #4342 附件 runtime — 从闭合审计到生产管线（2026-07-20 修复轮更新）
+- 2026-07-17 闭合审计（REVIEW-READY，两 P1 变异证闭）后，owner 2026-07-20 复审指出其**并非完整
+  runtime**（无 boot 挂载 / bind 不在提交事务 / 无定时器 / 存储不满足 O3 / FE detached）且 **purge
+  poison-at-claim 实际失效**（到顶仍调 deleter；crash-at-claim 无终态）+ 15 个 app-mode supertest 站点
+  红 required CI。
+- **修复轮全部落地**（f071076fc/148fbe627/b2125b51e/323421eae，CI 全绿）：pinned 迁移 ×15；
+  poison-at-claim=claim 语句内到顶即 dead_letter、deleter 永不调、crash 循环有终态；生产管线=flag-gated
+  `bootApprovalAttachmentRuntime`（路由挂载+GC+purge+reconciler 定时器+stop 注册）、
+  `bindAttachmentsOnSubmit` 入提交事务（失败整单回滚）、**O3 按锁实施**（production S3-required→
+  values-free 503 fail-close；S3 adapter 显式命名 follow-up）、上传模板访问 seam、FE 上传控件接入
+  ApprovalNewView（同 flag）。真库 29/29 主循环独立复验。**剩 owner 审合（合并形态裁决仍在）**。
 
 ## 3. #4450 fan-out 设计锁 — 审阅 + rev 2（ratify-ready，owner 门）
 - opus 审阅：NEEDS-CHANGES（3 P2+2 P3），已贴 PR。rev 2（c3f7cb827）全部吸收：person key 补 integrationId
@@ -163,11 +170,29 @@ owner 已追认的演进，断言零改动：①`form.submitted`→`multitable.f
   ⑤**node-config 级 diff 深度**（版本 diff 目前只到节点增删改名级）；⑥版本 retention 策略（需先定
   产品口径=owner 决策）；⑦画布 UX（拖连/缩放）与用户文档（量大、放最后）。
 
-## 5. 剩余事项（2026-07-20 终版对账）
-**工程侧：已清零。** ~~#4337~~ MERGED `dfc9318fc`（§1.6）· ~~FWB 栈~~ 三刀全 MERGED（#4341 测试漂移修复
-后落地→#4343→#4344 串行,champion-lander）· ~~#4439 冲突~~ 解毕（run-list token 级并集）+owner 会话重构
-+pinned-transport 迁移后复审 **APPROVE**（16/19 blob-identical）· ~~#4433~~ 重构后复审 **APPROVE**
-（interdiff 仅 3 行 hunk-header=纯历史改写）· #4342/#4450 rebase 复绿 · ~~8 场景~~ **8/8**（§1.7,#4489）。
-**owner 门（唯一剩余）**：#4433/#4439/#4342/#4450/#4489 与本 MD（#4457）审合、#4450 ratify；3 个 runtime
-flag（durable/CLASSA/CLASSB）全 OFF→UAT→按 durable→Class A→Class B 分级开启；功能缺口切片菜单（§4）按
-staged-opt-in 逐片点名；飞书《审批管理员手册》对标分析待落 docs/research（画布增强排序在其 §二）。
+## 5. 剩余事项（2026-07-20 修复轮后对账）
+**工程侧（修复轮交付，全部待 owner 审）**：
+- **#4491（新）FWB activation 生产接线**——owner P1「FWB 无生产调用链」的正面修复：action 注册（D11
+  allowlist 重构防 task_created 泄漏）+ save gate（11 负例+Q6 G1）+ executor case（全 fail-closed 前置+
+  生产四门绑定+REPLACE 链式事件+structuralPath 身份）。realdb 8/8+变异 3/3+全量单测 6911/0+结构守卫
+  disposition 补标。
+- **#4489（重写，stacked 于 #4491）**——S6-S8 弃 helper 直调/假权限/临时表，全真链：S6 真规则真实例
+  net-once；S7 纯 PG 触发器注入（零 seam）四行同灭；S8 完成事件→真 durable adapters→生产 action→链式行
+  （depth 恰 +1、恰 1 行、fan-out pending→第二 tick done）。9/9+变异 2/2。
+- **#4433**（遍历修复 8ef543af1）→ **#4439**（stacked 组合回归 e78649428）串行对；**#4342** 生产管线
+  （§2）；**#4450 rev-3**（Tx-A 原子返回 claimed_target_keys，预读永不授权）。
+**owner 门**：审合序列建议 #4491→#4489（stacked）→#4433→#4439（stacked）→#4342（合并形态裁决）→
+#4450 ratify→本 MD（#4457）终审；3 个 runtime flag（durable/CLASSA/CLASSB/FWB 皆 OFF）→UAT→按
+durable→Class A→Class B→FWB 分级开启；切片菜单（§4）点名；飞书对标分析落 docs/research。
+
+## 6. 修复轮记录（owner 2026-07-20 REQUEST CHANGES 六项 → 处置）
+| # | 发现 | 处置 |
+|---|---|---|
+| P1 | FWB 无生产调用链；#4489 绕开真缺口 | #4491 全三层接线；#4489 重写真链（均待审） |
+| P1 | #4342 非完整 runtime；O3 未满足 | 生产管线四件+O3 fail-close 全落（§2） |
+| P1 | purge crash-at-claim 上限失效 | poison-at-claim 修复+golden+变异 |
+| P2 | #4433 嵌套条件并行漏报 | 双侧全路径遍历+owner 反例 golden+变异 |
+| P2 | #4439 未组合新 authoring contract | stacked 组合回归（rules:[] 快照 restore→400） |
+| P2 | #4450 批量 claim 所有权不精确 | rev-3 原子返回集唯一授权 |
+过程自纠：FWB lane 一次 piped-tail 假绿判定（已更正）；结构守卫两次正确拦截新写点（补 disposition
+标记，守卫零弱化）；三次 agent 死亡（2 限额 1 auth）全部按「checkpoint 提交→主循环接管/复活」预案处置。
