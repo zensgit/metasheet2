@@ -2237,6 +2237,148 @@ describe('ApprovalProductService', () => {
       )
       expect(result.publishedDefinitionId).toBe('pub-par')
     })
+
+    // ── Owner P2 (review #4433): a CONDITION nested inside a parallel branch must not hide its
+    // alternative paths from the publish gate. The old walk followed each node's FIRST outgoing
+    // edge only, so a conflict behind a condition's default (or any non-first) edge published
+    // green and then 409'd every matching request at runtime. The fixed walk enumerates ALL
+    // condition paths up to the join and intersects the per-branch source SETS across branches.
+    // FE mirror goldens: apps/web/tests/approval-template-authoring-parallel-edit.test.ts
+    // ('condition paths inside a parallel branch (owner P2)') — keep in lockstep. ──
+
+    // Owner's constructed case: branch A = condition (rules path → <highPathSource>, DEFAULT path →
+    // requester — rules edge declared FIRST so the old walk never reached the requester),
+    // branch B = <branchBSource>.
+    function conditionDefaultPathGraph(branchBSource: unknown, highPathSource: unknown = { kind: 'dept_head' }) {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeSources: [highPathSource], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_low', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [branchBSource], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          // Rules edge FIRST, default edge SECOND — first-edge-only traversal missed approval_low.
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    it('GOLDEN (owner case): condition DEFAULT path resolves to requester, branch B is requester → publish rejects naming requester', async () => {
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester', conflictingNodeKeys: ['approval_low', 'branch_b'] },
+      })
+    })
+
+    it('publishes clean when every condition path yields a DIFFERENT source than branch B (negative control)', async () => {
+      // Paths yield dept_head / requester; branch B is direct_manager — nothing provably identical.
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'direct_manager' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+
+    it('rejects a conflict hidden behind the RULES edge when the default edge is declared first', async () => {
+      // Default edge (→ approval_low, requester) declared FIRST; the dept_head conflict sits behind
+      // the RULES edge, which a first-edge-only walk would never enter. Branch B = dept_head.
+      const graph = conditionDefaultPathGraph({ kind: 'dept_head' })
+      const condEdgeKeys = new Set(['e-cond-high', 'e-cond-low'])
+      const [highEdge, lowEdge] = graph.edges.filter((edge) => condEdgeKeys.has(edge.key))
+      graph.edges = graph.edges.map((edge) => (edge.key === 'e-cond-high' ? lowEdge : edge.key === 'e-cond-low' ? highEdge : edge))
+      mockParallelPublish(graph)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'dept_head' },
+      })
+    })
+
+    it('rejects a conflict reachable only through a DEEP condition chain (condition → condition, default → default)', async () => {
+      const deepChain = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'e-c1-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 10000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c1-c2' },
+          },
+          {
+            key: 'cond_2',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'e-c2-mid', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c2-low' },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_mid', type: 'approval', config: { assigneeSources: [{ kind: 'manager_at_level', level: 1 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_low', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          // Rules edges declared first at BOTH levels — the conflicting requester sits two default
+          // hops deep (cond_1 default → cond_2 default → approval_low).
+          { key: 'e-c1-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-c1-c2', source: 'cond_1', target: 'cond_2' },
+          { key: 'e-c2-mid', source: 'cond_2', target: 'approval_mid' },
+          { key: 'e-c2-low', source: 'cond_2', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-mid-join', source: 'approval_mid', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      mockParallelPublish(deepChain)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester', conflictingNodeKeys: ['approval_low', 'branch_b'] },
+      })
+    })
+
+    it('does NOT reject the same source on two ALTERNATIVE paths of ONE branch alone (within-branch union, not a conflict)', async () => {
+      // Both cond_1 paths resolve to requester but branch B is a STATIC role — alternative paths of
+      // one branch never run simultaneously, so publish must stay green.
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'static_role', roleIds: ['legal'] }, { kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
   })
 
   it('rejects empty assigneeSources and invalid form field sources before hitting the database', async () => {

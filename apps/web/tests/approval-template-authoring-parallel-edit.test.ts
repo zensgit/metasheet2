@@ -452,3 +452,135 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     expect(parallelDynamicAssigneeConflicts(conflicted)).toHaveLength(1)
   })
 })
+
+// ── Owner P2 (review #4433): a CONDITION nested inside a parallel branch must not hide its
+// alternative paths from the preflight. The old walk followed each node's FIRST outgoing edge only,
+// so a conflict sitting behind a condition's default (or any non-first) edge published green and
+// then 409'd EVERY matching request at runtime. The fixed walk enumerates ALL condition paths up to
+// the join and intersects the per-branch assignee-source SETS across branches. Mirror of the
+// backend `assertNoParallelDynamicAssigneeConflicts` goldens — keep in lockstep. ──
+describe('parallelDynamicAssigneeConflicts — condition paths inside a parallel branch (owner P2)', () => {
+  // Owner's constructed case: branch A = condition (rules path → dept_head, DEFAULT path →
+  // requester), branch B = <branchB>. The rules edge is declared FIRST in the edge list, so a
+  // first-edge-only walk sees only dept_head and never reaches approval_low.
+  const conditionDefaultPathGraph = (branchB: ApprovalAssigneeSource[]): ApprovalGraph => ({
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'fork_1', type: 'parallel', name: '并行', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+      {
+        key: 'cond_1',
+        type: 'condition',
+        name: '金额判断',
+        config: {
+          branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+          defaultEdgeKey: 'e-cond-low',
+        },
+      },
+      { key: 'approval_high', type: 'approval', name: '大额', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'approval_low', type: 'approval', name: '小额', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'approval_b', type: 'approval', name: 'B支', config: { assigneeSources: branchB, approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['final'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-fork', source: 'start', target: 'fork_1' },
+      { key: 'e-fork-cond', source: 'fork_1', target: 'cond_1' },
+      { key: 'e-fork-b', source: 'fork_1', target: 'approval_b' },
+      // Rules edge FIRST, default edge SECOND — the first-edge-only walk never saw approval_low.
+      { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+      { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+      { key: 'e-high-join', source: 'approval_high', target: 'join_1' },
+      { key: 'e-low-join', source: 'approval_low', target: 'join_1' },
+      { key: 'e-b-join', source: 'approval_b', target: 'join_1' },
+      { key: 'e-join-end', source: 'join_1', target: 'end' },
+    ],
+  })
+
+  it('GOLDEN (owner case): condition DEFAULT path resolves to requester, branch B is requester → 1 conflict naming requester', () => {
+    const errors = parallelDynamicAssigneeConflicts(conditionDefaultPathGraph([{ kind: 'requester' }]))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('fork_1')
+    expect(errors[0]).toContain('requester')
+  })
+
+  it('does NOT flag when every condition path yields a DIFFERENT source than branch B (negative control)', () => {
+    // Paths yield dept_head / requester; branch B is direct_manager — nothing provably identical.
+    expect(parallelDynamicAssigneeConflicts(conditionDefaultPathGraph([{ kind: 'direct_manager' }]))).toEqual([])
+    // Parameterized near-miss: manager_at_level 2 vs nothing in the condition paths.
+    expect(parallelDynamicAssigneeConflicts(conditionDefaultPathGraph([{ kind: 'manager_at_level', level: 2 }]))).toEqual([])
+  })
+
+  it('flags a conflict hidden behind the RULES edge when the default edge happens to be declared first', () => {
+    // Reorder: default edge (→ approval_low, requester) declared FIRST; the dept_head conflict sits
+    // behind the RULES edge, which a first-edge-only walk would never enter. Branch B = dept_head.
+    const base = conditionDefaultPathGraph([{ kind: 'dept_head' }])
+    const swap = (key: string): string => (key === 'e-cond-high' ? 'e-cond-low' : key === 'e-cond-low' ? 'e-cond-high' : key)
+    const defaultEdgeFirst: ApprovalGraph = {
+      ...base,
+      edges: base.edges.map((edge) => (edge.source === 'cond_1'
+        ? base.edges.find((candidate) => candidate.key === swap(edge.key))!
+        : edge)),
+    }
+    const errors = parallelDynamicAssigneeConflicts(defaultEdgeFirst)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('dept_head')
+  })
+
+  it('flags a conflict reachable only through a DEEP condition chain (condition → condition, default → default)', () => {
+    const deepChain: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'fork_1', type: 'parallel', name: '并行', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+        {
+          key: 'cond_1',
+          type: 'condition',
+          name: '一级判断',
+          config: { branches: [{ edgeKey: 'e-c1-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 10000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c1-c2' },
+        },
+        {
+          key: 'cond_2',
+          type: 'condition',
+          name: '二级判断',
+          config: { branches: [{ edgeKey: 'e-c2-mid', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c2-low' },
+        },
+        { key: 'approval_high', type: 'approval', name: '特大额', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_mid', type: 'approval', name: '中额', config: { assigneeSources: [{ kind: 'manager_at_level', level: 1 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_low', type: 'approval', name: '小额', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_b', type: 'approval', name: 'B支', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['final'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-fork', source: 'start', target: 'fork_1' },
+        { key: 'e-fork-cond', source: 'fork_1', target: 'cond_1' },
+        { key: 'e-fork-b', source: 'fork_1', target: 'approval_b' },
+        // Rules edges declared first at BOTH levels — the conflicting requester sits two default
+        // hops deep (cond_1 default → cond_2 default → approval_low).
+        { key: 'e-c1-high', source: 'cond_1', target: 'approval_high' },
+        { key: 'e-c1-c2', source: 'cond_1', target: 'cond_2' },
+        { key: 'e-c2-mid', source: 'cond_2', target: 'approval_mid' },
+        { key: 'e-c2-low', source: 'cond_2', target: 'approval_low' },
+        { key: 'e-high-join', source: 'approval_high', target: 'join_1' },
+        { key: 'e-mid-join', source: 'approval_mid', target: 'join_1' },
+        { key: 'e-low-join', source: 'approval_low', target: 'join_1' },
+        { key: 'e-b-join', source: 'approval_b', target: 'join_1' },
+        { key: 'e-join-end', source: 'join_1', target: 'end' },
+      ],
+    }
+    const errors = parallelDynamicAssigneeConflicts(deepChain)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('requester')
+  })
+
+  it('does NOT double-flag the same source on two ALTERNATIVE paths of ONE branch (within-branch union, not multiset)', () => {
+    // Both cond_1 paths resolve to requester; branch B is requester → exactly ONE conflict, not two.
+    const base = conditionDefaultPathGraph([{ kind: 'requester' }])
+    const bothPathsRequester: ApprovalGraph = {
+      ...base,
+      nodes: base.nodes.map((node) => (node.key === 'approval_high'
+        ? { ...node, config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } as never }
+        : node)),
+    }
+    expect(parallelDynamicAssigneeConflicts(bothPathsRequester)).toHaveLength(1)
+  })
+})
