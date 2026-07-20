@@ -136,6 +136,7 @@ import { authRouter } from '../../src/routes/auth'
 import express from 'express'
 import request from 'supertest'
 import { jwtAuthMiddleware, isWhitelisted } from '../../src/auth/jwt-middleware'
+import { usePinnedServer } from '../utils/pinned-server'
 
 function createMockResponse() {
   return {
@@ -1553,6 +1554,7 @@ describe('auth login routes', () => {
 // because every other E1 test invokes the router handler directly, bypassing the
 // app-level whitelist. This exercises the seam end to end.
 describe('E1 container login — full HTTP wire (whitelist + route mount)', () => {
+  const pinned = usePinnedServer()
   function buildWireApp() {
     const app = express()
     app.use(express.json())
@@ -1573,7 +1575,8 @@ describe('E1 container login — full HTTP wire (whitelist + route mount)', () =
 
   it('admits POST /api/auth/login/dingtalk/container without a JWT and reaches the handler (default-off → 404)', async () => {
     vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', '')
-    const res = await request(buildWireApp())
+    pinned.setApp(buildWireApp())
+    const res = await request(pinned.url())
       .post('/api/auth/login/dingtalk/container')
       .send({ authCode: 'x' })
     // 404 from OUR handler (body.code), not a JWT 401 and not an express not-found:
@@ -1584,7 +1587,8 @@ describe('E1 container login — full HTTP wire (whitelist + route mount)', () =
 
   it('with the flag on, missing authCode → 400 without requiring a JWT', async () => {
     vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
-    const res = await request(buildWireApp())
+    pinned.setApp(buildWireApp())
+    const res = await request(pinned.url())
       .post('/api/auth/login/dingtalk/container')
       .send({})
     expect(res.status).toBe(400)
@@ -1592,7 +1596,8 @@ describe('E1 container login — full HTTP wire (whitelist + route mount)', () =
 
   it('the pre-fix path /api/auth/dingtalk/container is JWT-gated (401 before the handler)', async () => {
     vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
-    const res = await request(buildWireApp())
+    pinned.setApp(buildWireApp())
+    const res = await request(pinned.url())
       .post('/api/auth/dingtalk/container')
       .send({ authCode: 'x' })
     // Not whitelisted → global gate returns 401 before any container handler runs.

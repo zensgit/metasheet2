@@ -1,9 +1,7 @@
 {
-  "approval-history-routing.test.ts": 2,
   "approval-metrics-router.test.ts": 13,
   "approvals-bridge-routes.test.ts": 32,
   "approvals-routes.test.ts": 12,
-  "auth-login-routes.test.ts": 3,
   "automation-routes-wiring.test.ts": 10,
   "automation-runs-api.test.ts": 30,
   "automation-testrun-gate.test.ts": 4,
@@ -13,7 +11,6 @@
   "data-source-result-boundary.test.ts": 13,
   "data-source-scope.test.ts": 16,
   "data-source-test-ephemeral.test.ts": 10,
-  "data-source-test-error-fidelity.test.ts": 1,
   "federation.contract.test.ts": 20,
   "field-validation-wiring.test.ts": 11,
   "files-delete-tombstone-order.test.ts": 10,
