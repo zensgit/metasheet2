@@ -1,6 +1,6 @@
 # Class-B fan-out actions — per-target outbound intent key (design lock, PROPOSED)
 
-**Status: PROPOSED 2026-07-17, rev 2 (zero runtime code; awaiting owner ratify).** This document has NO ratify authority of its own. It extends the RATIFIED classification lock
+**Status: PROPOSED 2026-07-17, rev 3 (zero runtime code; awaiting owner ratify).** This document has NO ratify authority of its own. It extends the RATIFIED classification lock
 `approval-automation-retry-action-classification-designlock-20260712.md` (§3 two-phase intent/outcome) to the two Class-B actions that FAN OUT to N recipients. It changes nothing for the already-landed single-send actions.
 
 > **Rev 2 (2026-07-17, adversarial review round — 3 P2 + 2 P3, all incorporated):** (P2-1) person
@@ -15,6 +15,11 @@
 > per-BATCH claim + batch-level outcome stamped onto every target in that batch (§2.3a); unbatching was
 > rejected as a flag-ON behavior change with rate-limit consequences. (P3) §2.2 now states the
 > migration↔primitive lockstep obligation; §2.3 adds an explicit named fan-out bound.
+>
+> **Rev 3 (2026-07-20, owner ratify-review P2):** §2.3a batch-claim ownership made precise — Tx-A
+> atomically RETURNS `claimed_target_keys`; the batched send may contain ONLY that returned set; the
+> per-target pre-read is an optimization and never authorizes a send (closes the two-worker /
+> mixed-state-batch race the rev-2 prose left open).
 
 ## 1. Problem (found while wiring #4443)
 
@@ -69,14 +74,21 @@ Rev 1's per-target send loop mis-described this surface; unbatching was REJECTED
 change: ~100× more API calls, rate-limit exposure, and a semantics change line-item this lock has no
 authority to make). The reconciliation is **per-target rows, per-BATCH claim + outcome**:
 
-1. **Resolve targets first** (existing code), then FILTER by intent state: for each target, the claim
-   decision (`skip_sent` / `skip_unknown` / `retry_failed` / fresh) is read per-target; only fresh +
-   `retry_failed` targets enter the send set. Chunk the send set exactly as today.
-2. **Per batch, immediately before its send**: ONE Tx-A claims that batch's per-target intents
-   (INSERT pending, all rows in one transaction — the batch's claim is atomic). Then the ONE batched
-   `asyncsend_v2` call. Then `classifyOutboundResult` on the batch-level transport result, and ONE
-   Tx-B stamps the SAME outcome onto every `pending` row of that batch (same `status='pending'`
-   single-writer guard).
+1. **Resolve targets first** (existing code), then pre-read intent state per target to ASSEMBLE the
+   candidate send set (fresh + `retry_failed` targets; `skip_sent`/`skip_unknown` excluded). **This
+   pre-read is an OPTIMIZATION only — it never authorizes a send** (rev-3 ratify fix: two workers
+   racing, or a batch whose states change between pre-read and claim, would otherwise both "own" the
+   same target). Chunk the candidate set exactly as today.
+2. **Per batch, immediately before its send**: ONE Tx-A **atomically claims and RETURNS the exact set
+   of target_keys THIS worker now owns** — per-target `INSERT … ON CONFLICT DO NOTHING RETURNING
+   target_key` (+ the `retry_failed → pending` CAS flips, each `RETURNING target_key`), all in one
+   transaction. **The batched `asyncsend_v2` call MUST be built from Tx-A's RETURNED
+   `claimed_target_keys` set and nothing else** — a target the pre-read suggested but Tx-A did not
+   return (lost race: another worker claimed it, or its state moved) is DROPPED from this worker's
+   batch, never sent. An empty returned set ⇒ no send at all. Then `classifyOutboundResult` on the
+   batch-level transport result, and ONE Tx-B stamps the SAME outcome onto every `pending` row of
+   **that returned set** (same `status='pending'` single-writer guard, keyed by the claimed keys).
+   Ownership is therefore always Tx-A's return value — never the pre-read, never the chunk plan.
 3. **Outcome granularity is honestly batch-level**: one `task_id` = one transport verdict for the
    whole chunk. Per-recipient async task results are OUT of v1 scope (the existing per-target
    telemetry ledgers keep the operator drill-down role). The intent rows are per-target so that
