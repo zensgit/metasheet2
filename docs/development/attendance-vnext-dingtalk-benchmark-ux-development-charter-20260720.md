@@ -54,13 +54,18 @@ vNext 的正确目标不是复制钉钉皮肤，而是吸收其“按任务进�
 | #4371 focused admin rail guard | OPEN / BEHIND，head `1a88e7aa5`；历史 required checks 绿 | 先刷新、复核并合入，作为后续 admin 改造测试前置 |
 | #4359 group setup workflow | OPEN / BEHIND，head `2eff10bc9`；历史 required checks 绿 | 保留四阶段列表-详情实现，禁止另造第二套考勤组编辑器 |
 | #4370 employee overview lock | OPEN / draft / PROPOSED / BEHIND，head `6a01ec630` | 作为员工 task-first 权威设计输入；owner ratify 后才实现 |
-| #4414 admin task home | OPEN / stacked draft / CLEAN，head `8a10cdea5`，base=`codex/issue-4354-attendance-group-workspace` | 只保存实现意图；当前仅 stacked-base 检查绿，不等同 main required gate；在 #4355 后从新 main 重新移植并全量 re-gate |
+| #4414 admin task home | OPEN / stacked draft / CLEAN，head `8a10cdea5`，base=`codex/issue-4354-attendance-group-workspace` | 只保存实现意图；当前仅 stacked-base 检查绿，不等同 main required gate；在 issue #4355 runtime 后从新 main 重新移植并全量 re-gate |
+
+编号图例：#4353（管理中心）、#4354（考勤组）、#4355（员工总览）是需求 issue；#4359 是
+考勤组 runtime PR，#4370 是员工总览 design-lock PR，#4414 是管理中心旧 stacked runtime draft。
+员工总览 runtime PR 尚未创建；管理中心最终 re-port 也可能使用新的 PR，不能把需求 issue 写成可合并对象。
 
 上述状态在 `2026-07-20` 通过 GitHub 实时读取；`BEHIND` 分支不得仅做 update-branch 后直接合并，必须先证明
 旧 patch 没有覆盖主线新增行为。任何后续状态变化仍以 GitHub/main 为准。
 
-`#4359 -> #4355 -> #4353/#4414` 是产品落地顺序；`AttendanceView.vue` 是单一热文件车道，
-不得让这三条 runtime 并行修改同一模板。#4371 是独立 test/workflow 前置，可先落。
+产品落地顺序是：#4359（issue #4354）-> issue #4355 的 post-#4370 runtime PR ->
+issue #4353 的 #4414 re-port PR。`AttendanceView.vue` 是单一热文件车道，不得让这三条 runtime
+并行修改同一模板。#4371 是独立 test/workflow 前置，可先落。
 
 ## 2. 对标结论与产品边界
 
@@ -70,7 +75,7 @@ vNext 的正确目标不是复制钉钉皮肤，而是吸收其“按任务进�
 |---|---|---|---|
 | 考勤组、班次、固定/排班/自由工时 | 已有组、班次、轮班、固定排班和有效日历 | 路径清楚、模板化强 | 能力可对标，主要补交互路径 |
 | 高级排班 | 多班次、草稿/发布、临时班次、自动对班、换班、调度均已闭环 | 自动对班与排班操作成熟 | 治理与可追溯性可局部超越 |
-| 假期、加班、调休 | 计提、余额、有效期、批量调整、加班分段和 bank 已有 | 配置入口成熟、场景文案充分 | 能力强，补场景化说明与结果解释 |
+| 假期、加班、调休 | 计提、余额、有效期、批量调整、加班分段和 bank 已有；计提与 overtime bank 依赖显式 policy/scheduler opt-in，默认不执行 | 配置入口成熟、场景文案充分 | 能力强，补场景化说明与结果解释 |
 | 审批 | A1 结构化编辑器 + S7 三类动态审批人；S7 默认 OFF | 与钉钉审批生态天然一体 | 能力接近，体验和启用路径仍弱 |
 | 报表、导入、审计 | CSV/XLSX、字段选择、识别回显、同步、审计与分级报表已在 | 报表模板、移动统计、导出路径清楚 | 数据能力强，产品化与移动入口需补 |
 | 通知 | DingTalk/WeCom、outbox、重试和状态观测已在 | 默认通知链路更自然 | 可靠性可对标，配置易用性落后 |
@@ -253,9 +258,9 @@ DOM 与视觉顺序固定为：
 
 | 波次 | 抽取目标 | 首版职责 | 暂留父层 |
 |---|---|---|---|
-| #4355 | `AttendanceEmployeeWorkspace.vue` | Today/attention/tools 布局、展示 props、emit 真实动作 | API、route sync、punch/request handler |
-| #4353 | `AttendanceAdminTaskHome.vue` | 四任务组、status、入口与返回首页 | section 权限过滤、active id、数据加载 |
-| #4354 | `AttendanceGroupWorkspace.vue` | 列表-详情、四阶段导航、响应式布局 | group/member/owner/save/delete handler |
+| Wave 1 / issue #4354 | `AttendanceGroupWorkspace.vue` | 列表-详情、四阶段导航、响应式布局 | group/member/owner/save/delete handler |
+| Wave 2 / issue #4355 | `AttendanceEmployeeWorkspace.vue` | Today/attention/tools 布局、展示 props、emit 真实动作 | API、route sync、punch/request handler |
+| Wave 3 / issue #4353 | `AttendanceAdminTaskHome.vue` | 四任务组、status、入口与返回首页 | section 权限过滤、active id、数据加载 |
 | onboarding | `AttendanceSetupReadiness.vue` | 七步状态、缺口与导航 | readiness API 聚合、实际保存/启用 |
 | explainability | `AttendanceDecisionTrace.vue` | 规则依据与审计时间线展示 | 权威数据加载与字段脱敏 |
 
@@ -372,13 +377,16 @@ org bucket change 均有 mounted 测试；移动端不显示竞争性的长配�
 1. 受影响纯模块 spec。
 2. 真实挂载的 attendance self-service/admin regression spec。
 3. `attendance-web-guard` current-head required check。
-4. `pnpm --filter @metasheet/web exec vue-tsc -b`。
-5. `pnpm --filter @metasheet/web build`。
-6. 至少两刀针对承重分支的 mutation；必须记录变异、红测试和还原后结果。
-7. 1440x900、1024x768、390x844 浏览器验证与截图。
-8. `document.documentElement.scrollWidth <= document.documentElement.clientWidth`。
-9. 关键元素非零尺寸、无重叠、长中文/英文可换行、按钮文案不溢出。
-10. existing selector/deep-link/API call-count compatibility 回归。
+4. 本波新增或重命名的 spec 必须同时加入 `attendance-web-guard` 的实际 Vitest run-list，以及
+   `pull_request`、`push` 两套 path filter；current-head CI 日志必须证明该 spec 被收集并执行，
+   且承重 mutation 在同一条 targeted command 下使它变红。只有 workflow 状态绿不算完成。
+5. `pnpm --filter @metasheet/web exec vue-tsc -b`。
+6. `pnpm --filter @metasheet/web build`。
+7. 至少两刀针对承重分支的 mutation；必须记录变异、红测试和还原后结果。
+8. 1440x900、1024x768、390x844 浏览器验证与截图。
+9. `document.documentElement.scrollWidth <= document.documentElement.clientWidth`。
+10. 关键元素非零尺寸、无重叠、长中文/英文可换行、按钮文案不溢出。
+11. existing selector/deep-link/API call-count compatibility 回归。
 
 测试使用 synthetic fixture。不得在 UI PR 中连接客户数据、真实通知或生产环境。
 
@@ -490,8 +498,8 @@ owner 已采用以下推荐值：
 
 | 决策 | 已裁决内容 | 影响 |
 |---|---|---|
-| OD-VX1 顺序 | #4371 -> #4359 -> #4355 -> #4353/#4414 -> onboarding -> explainability | 保持单热文件串行，先员工后管理首页 |
-| OD-VX2 员工总览 | 接受 #4370 OD-O1..OD-O4 推荐项 | 解锁 Wave 2，无 feature flag 双模板 |
+| OD-VX1 顺序 | Wave 0 #4371 -> Wave 1 #4359（issue #4354）-> Wave 2 issue #4355 runtime -> Wave 3 issue #4353/#4414 re-port -> onboarding -> explainability | 保持单热文件串行，先员工后管理首页 |
+| OD-VX2 员工总览 | 接受 #4370 OD-O1..OD-O4 推荐项 | 批准 Wave 2 产品方向；runtime 仍 gated 于 #4359 合入与 #4370 状态同步，无 feature flag 双模板 |
 | OD-VX3 首次模板 | 办公室、门店、工厂、销售/外勤四模板，只预填不提交 | 解锁 onboarding design-lock |
 | OD-VX4 帮助策略 | 页面内上下文帮助，不复制完整钉钉手册 | 减少维护漂移与版权风险 |
 | OD-VX5 组件收敛 | 随产品波次渐进拆分，不单开大重写 | 控制 `AttendanceView.vue` 风险 |
@@ -508,7 +516,8 @@ owner 已采用以下推荐值：
 本 vNext 体验线只有同时满足以下条件才可收口：
 
 1. 本总纲 `RATIFIED`，所有 OD 有记录。
-2. #4371、#4359、#4355、#4353/#4414 均基于正确主线顺序合入并 fresh-green。
+2. #4371 与 #4359 已合入并 fresh-green；#4370 已从 post-#4359 main 刷新、RATIFIED 并合入；
+   issue #4355 的 runtime PR 与 issue #4353 的 post-Wave-2 #4414 re-port PR 均按顺序合入并 fresh-green。
 3. 首次启用向导完成独立 design-lock、实现和验证，不自动改 operator flag。
 4. 员工、主管、HR 三角色的高频任务均达到 §9 指标。
 5. 三视口视觉与 DOM/状态证据完整。
@@ -522,8 +531,8 @@ owner 已采用以下推荐值：
 1. 只读刷新 #4371 与 #4359 到最新 main，输出 range-diff 和 stale-test 结论。
 2. #4371 current-head gate 通过后先合。
 3. #4359 完成 re-port、三视口和对抗复核后合。
-4. 复核 #4370 与 post-#4359 main；若无语义漂移，按 OD-VX2 开 #4355 runtime。
-5. #4355 合后再 reclaim #4414 的业务意图，禁止直接合旧 stacked head。
+4. 复核 #4370 与 post-#4359 main；若无语义漂移，按 OD-VX2 为 issue #4355 新开 runtime PR。
+5. issue #4355 的 runtime 合入后再 reclaim #4414 的业务意图，禁止直接合旧 stacked head。
 
 在上述五步完成前，不开 onboarding runtime、不追加新的 `AttendanceView.vue` 功能块、不启动原生/硬件
 或飞书线。
@@ -539,8 +548,8 @@ owner 已采用以下推荐值：
 | 本总纲 | 本文 | N/A | `git diff --check` + 引用核对 | RATIFIED；OD-VX1..6 于 2026-07-20 接受推荐值 |
 | Wave 0 / #4371 | 既有测试意图 | test/workflow only，head `1a88e7aa5` | 历史 checks 绿，需 current-head 重跑 | OPEN / BEHIND |
 | Wave 1 / #4359 | issue #4354 | 已有实现分支，head `2eff10bc9` | 历史 required checks 绿，需 re-port 后重跑 | OPEN / BEHIND |
-| Wave 2 / #4355 | #4370 PROPOSED，head `6a01ec630` | 未授权 | 未开始 | OWNER-GATED |
-| Wave 3 / #4353 | issue + #4414 stacked draft，head `8a10cdea5` | 旧基线实现存在，不可直接合 | 仅 stacked-base checks；无 main current-base required gate | RE-PORT-GATED |
+| Wave 2 / issue #4355 | #4370 PROPOSED，head `6a01ec630`；产品方向已由 OD-VX2 接受 | 未开始 | 未开始 | PREDECESSOR / DOC-SYNC-GATED |
+| Wave 3 / issue #4353 | #4414 stacked draft，head `8a10cdea5` | 旧基线实现存在，不可直接合 | 仅 stacked-base checks；无 main current-base required gate | RE-PORT-GATED |
 | Wave 4 onboarding | 本总纲仅定义范围 | 未开始 | 未开始 | DESIGN-LOCK-GATED |
 | Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |
 | S7 runtime flag | 已交付并验证 | main 已有，默认 OFF | #4483 verification 已合且为刷新基线祖先 | OPERATOR-OPT-IN，非本线完成项 |
