@@ -97,6 +97,40 @@ vi.mock('../src/approvals/api', async () => {
   }
 })
 
+// B3-07 — mutable so the flag-ON attachment-uploader suite can enable the feature per-test; every
+// PRE-EXISTING test never touches it, so the default `false` keeps the B2-28 placeholder path
+// byte-identical for them (they double as the flag-OFF control).
+let approvalAttachmentsFlag = false
+vi.mock('../src/stores/featureFlags', () => ({
+  useFeatureFlags: () => ({
+    features: {
+      get value() {
+        return {
+          attendance: false,
+          workflow: false,
+          attendanceAdmin: false,
+          attendanceImport: false,
+          plm: false,
+          approvalMobile: false,
+          approvalAttachments: approvalAttachmentsFlag,
+          mode: 'platform',
+        }
+      },
+    },
+  }),
+}))
+
+// B3-07 — the upload client is spied (network-free); preValidateAttachments stays REAL so the
+// client-mirror reject path is the actual predicate, not a stub.
+const uploadApprovalAttachmentSpy = vi.fn()
+vi.mock('../src/approvals/attachmentUpload', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/attachmentUpload')>('../src/approvals/attachmentUpload')
+  return {
+    ...actual,
+    uploadApprovalAttachment: (...args: unknown[]) => uploadApprovalAttachmentSpy(...args),
+  }
+})
+
 const mockActiveTemplate = ref<any>(null)
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -434,6 +468,87 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     await mountView()
 
     expect(container!.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+  })
+
+  // -------------------------------------------------------------------------
+  // B3-07 (#4195/#4342) — flag ON: the real uploader replaces the B2-28 placeholder; the submit
+  // payload carries the uploaded id ARRAY (the §4.4 bind contract). Flag OFF stays proven by every
+  // pre-existing test above (approvalAttachmentsFlag defaults false).
+  // -------------------------------------------------------------------------
+  describe('B3-07 flag-ON attachment uploader', () => {
+    beforeEach(() => {
+      approvalAttachmentsFlag = true
+      uploadApprovalAttachmentSpy.mockReset()
+    })
+
+    afterEach(() => {
+      approvalAttachmentsFlag = false
+    })
+
+    function attachmentInput(): HTMLInputElement {
+      const input = container!.querySelector('[data-testid="approval-attachment-input-proof"]') as HTMLInputElement
+      expect(input).toBeTruthy()
+      return input
+    }
+
+    async function pickFile(file: File): Promise<void> {
+      const input = attachmentInput()
+      Object.defineProperty(input, 'files', { value: [file], configurable: true })
+      input.dispatchEvent(new Event('change'))
+      await flushUi()
+    }
+
+    it('replaces the disabled placeholder with the uploader control', async () => {
+      await mountView()
+      expect(container!.querySelector('[data-testid="approval-attachment-upload"]')).toBeTruthy()
+      expect(container!.querySelector('[data-testid="approval-attachment-disabled"]')).toBeNull()
+    })
+
+    it('a picked file uploads through the client and the submit payload carries the id array', async () => {
+      uploadApprovalAttachmentSpy.mockResolvedValue({ id: 'att_up_1', sizeBytes: 8 })
+      await mountView()
+      await pickFile(new File(['%PDF-1.4'], 'evidence.pdf', { type: 'application/pdf' }))
+
+      expect(uploadApprovalAttachmentSpy).toHaveBeenCalledTimes(1)
+      const [file, templateId, fieldId] = uploadApprovalAttachmentSpy.mock.calls[0]
+      expect((file as File).name).toBe('evidence.pdf')
+      expect(templateId).toBe('tpl_numfields')
+      expect(fieldId).toBe('proof')
+      expect(container!.textContent).toContain('evidence.pdf') // rendered in the uploaded list
+
+      submitButton().click()
+      await flushUi()
+      expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof).toEqual(['att_up_1']) // the id ARRAY — never a raw File
+    })
+
+    it('client mirror rejects a disallowed type BEFORE any upload — values-free code surfaced', async () => {
+      await mountView()
+      await pickFile(new File(['MZ'], 'x.exe', { type: 'application/x-msdownload' }))
+
+      expect(uploadApprovalAttachmentSpy).not.toHaveBeenCalled()
+      expect(messageErrorSpy).toHaveBeenCalledWith(expect.stringContaining('mime_not_allowed'))
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData).not.toHaveProperty('proof') // nothing staged, nothing submitted
+    })
+
+    it('removing an uploaded file drops its id from the submit payload', async () => {
+      uploadApprovalAttachmentSpy.mockResolvedValue({ id: 'att_up_2', sizeBytes: 8 })
+      await mountView()
+      await pickFile(new File(['%PDF-1.4'], 'toremove.pdf', { type: 'application/pdf' }))
+      const removeBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('移除'))
+      expect(removeBtn).toBeTruthy()
+      removeBtn!.click()
+      await flushUi()
+
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof ?? []).toEqual([]) // removed before submit
+    })
   })
 })
 

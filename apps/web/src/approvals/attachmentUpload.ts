@@ -7,9 +7,10 @@
  * files in the same change or the parity spec goes red.
  *
  * Ratified v1: 20 MB/file · 10 files/field · 50 MB/submission; MIME allowlist PDF/JPEG/PNG/TXT/CSV with
- * extension⇄MIME agreement. The UPLOAD CONTROL stays detached from ApprovalNewView until the backend
- * pipeline (#4342) lands and `APPROVAL_ATTACHMENTS_ENABLED` exists — B2-28's honest-disable stopgap is
- * removed only in that wiring change.
+ * extension⇄MIME agreement. WIRED (#4342): `ApprovalNewView` consumes this client behind the
+ * `approvalAttachments` feature flag (the backend's `APPROVAL_ATTACHMENTS_ENABLED`, D5 default OFF) —
+ * flag ON replaces the B2-28 honest-disable placeholder with the real uploader; flag OFF keeps the
+ * placeholder + submit-time strip byte-identical.
  */
 export const CLIENT_ATTACHMENT_RULES_VERSION = 'v1-20-10-50-pdf-jpeg-png-txt-csv'
 

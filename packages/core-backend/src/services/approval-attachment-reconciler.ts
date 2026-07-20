@@ -13,13 +13,38 @@
  *       (b) live row WITHOUT a blob (store lost data) → surfaced values-free for alerting, NEVER auto-deleted
  *           (losing the row too would destroy the evidence that data was lost).
  *
- * No callers yet — wired behind the attachment flag with the boot slice.
+ * WIRED: bindAttachmentsOnSubmit runs inside ApprovalProductService.createApproval's transaction
+ * (flag-gated); reconcileBucket runs on the boot runtime's flag-gated timer (dedicated-root scope).
  */
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { APPROVAL_ATTACHMENT_LIMITS } from './approval-attachment-validation'
 
 export interface BindResult {
   bound: number
+}
+
+/**
+ * Extract the attachment-id arrays from a submission's normalized form data, keyed by the schema's
+ * `attachment`-typed field ids (§4.4: the frozen snapshot value IS the id array). Fail-closed on shape:
+ * a present value that is not an array of non-blank strings throws (the whole create must fail — a
+ * malformed value must never freeze into `form_snapshot` half-interpreted). Absent/empty values skip.
+ */
+export function collectAttachmentIdsByField(
+  formSchema: { fields?: ReadonlyArray<{ id?: unknown; type?: unknown } | null | undefined> | null },
+  formData: Readonly<Record<string, unknown>>,
+): Record<string, string[]> {
+  const byField: Record<string, string[]> = {}
+  for (const field of formSchema.fields ?? []) {
+    if (!field || field.type !== 'attachment' || typeof field.id !== 'string' || field.id.length === 0) continue
+    const value = formData[field.id]
+    if (value === undefined || value === null) continue
+    if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !/[!-~]/.test(id))) {
+      throw new RangeError(`attachment field ${field.id}: value must be an array of attachment ids`)
+    }
+    if (value.length === 0) continue
+    byField[field.id] = value as string[]
+  }
+  return byField
 }
 
 /** Form-freeze: bind the submitter's unbound uploads to the instance inside the submission transaction. */

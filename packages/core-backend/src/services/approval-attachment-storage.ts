@@ -11,10 +11,11 @@
  *     download (uploader while unbound; instance participant once bound; deleted → gone), fail-closed on
  *     error. The route slice streams the blob only after this returns ok — no signed public URLs in v1.
  *
- * No callers yet — routes + form-freeze land in the next slice behind the attachment flag.
+ * WIRED (approval-attachment-runtime.ts): the flag-gated routes consume the store + download gate;
+ * production resolves NO local store (O3 fail-close 503) — local-FS is dev/test only.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
 
 const MIME_EXT: Readonly<Record<string, string>> = Object.freeze({
@@ -78,6 +79,37 @@ export class LocalFsApprovalAttachmentStore implements ApprovalAttachmentStore {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
       throw err
     }
+  }
+
+  /**
+   * Enumerate every blob under the root WITH its age (mtime-based) — the reconciler's `listBlobs` seam
+   * (§7/G15). Scope containment is structural: the walk starts at (and can never leave) this store's
+   * root, which the boot wiring dedicates to approval attachments — the reconciler therefore can never
+   * see (let alone enqueue) another product's blobs. A missing root lists as empty (nothing uploaded yet).
+   */
+  async list(now: () => number = () => Date.now()): Promise<Array<{ key: string; ageMs: number }>> {
+    const root = path.resolve(this.rootDir)
+    const out: Array<{ key: string; ageMs: number }> = []
+    const walk = async (dir: string): Promise<void> => {
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw err
+      }
+      for (const entry of entries) {
+        const p = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          await walk(p)
+        } else if (entry.isFile()) {
+          const s = await stat(p)
+          out.push({ key: path.relative(root, p).split(path.sep).join('/'), ageMs: Math.max(0, now() - s.mtimeMs) })
+        }
+      }
+    }
+    await walk(root)
+    return out
   }
 }
 

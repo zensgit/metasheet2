@@ -20,9 +20,10 @@ function serve(app: express.Express) {
   return request(pinned.url())
 }
 
-function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean; org?: string | null; attachmentField?: boolean } = {}) {
+function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean; org?: string | null; attachmentField?: boolean; templateVisible?: boolean; storageAvailable?: boolean } = {}) {
   const blobs = new Map<string, Buffer>()
   const inserted: unknown[][] = []
+  const fieldResolutions: string[] = []
   const store: ApprovalAttachmentStore = {
     put: async (k, b) => void blobs.set(k, b),
     get: async (k) => {
@@ -50,12 +51,17 @@ function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?:
     },
     viewerId: () => (over.viewer === undefined ? 'u1' : over.viewer),
     orgId: () => (over.org === undefined ? 'org1' : over.org),
-    resolveAttachmentField: async () => over.attachmentField ?? true,
+    resolveAttachmentField: async (templateId, fieldId) => {
+      fieldResolutions.push(`${templateId}:${fieldId}`)
+      return over.attachmentField ?? true
+    },
+    templateVisible: async () => over.templateVisible ?? true,
+    ...(over.storageAvailable === undefined ? {} : { storageAvailable: over.storageAvailable }),
     env: FLAG_ON,
   })
   const app = express()
   if (router) app.use(router)
-  return { app, blobs, inserted, router }
+  return { app, blobs, inserted, router, fieldResolutions }
 }
 
 describe('approval attachment routes (flag-gated)', () => {
@@ -69,6 +75,7 @@ describe('approval attachment routes (flag-gated)', () => {
         viewerId: () => 'u1',
         orgId: () => 'org1',
         resolveAttachmentField: async () => true,
+        templateVisible: async () => true,
         env: {} as NodeJS.ProcessEnv,
       })
       return { router: r }
@@ -145,6 +152,43 @@ describe('approval attachment routes (flag-gated)', () => {
     expect(r.body.error).toBe('not_an_attachment_field')
     expect(inserted.length).toBe(0) // rejected before the durable row
     expect(blobs.size).toBe(0) // and before any blob write
+  })
+
+  // §4.1 template-access gate: an uploader who cannot SEE the target template (visibility_scope) gets a
+  // values-free 404 — indistinguishable from a non-existent template — BEFORE the field-type resolve.
+  test('upload template-access: invisible template → 404 values-free; nothing written; field type not probed', async () => {
+    const { app, inserted, blobs, fieldResolutions } = makeApp({ templateVisible: false })
+    const r = await serve(app)
+      .post('/api/approval/attachments')
+      .field('fieldId', 'fld1')
+      .field('templateId', 'tpl-hidden')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(r.status).toBe(404)
+    expect(r.body).toEqual({ error: 'not_found' }) // values-free, no template/field detail
+    expect(inserted.length).toBe(0)
+    expect(blobs.size).toBe(0)
+    expect(fieldResolutions.length).toBe(0) // the visibility gate ran FIRST — schema never probed
+  })
+
+  // O3 prod fail-close: storageAvailable=false (production without an S3-compatible provider) ⇒ upload 503
+  // values-free; no blob write, no row insert. Download for an AUTHORIZED viewer also 503.
+  test('O3 storage fail-close: upload → 503 values-free, nothing persisted; authorized download → 503', async () => {
+    const up = makeApp({ storageAvailable: false })
+    const r = await serve(up.app)
+      .post('/api/approval/attachments')
+      .field('fieldId', 'fld1')
+      .field('templateId', 'tpl1')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(r.status).toBe(503)
+    expect(r.body).toEqual({ error: 'storage_unavailable' }) // values-free
+    expect(up.inserted.length).toBe(0)
+    expect(up.blobs.size).toBe(0)
+    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
+    const down = makeApp({ rows: [row], participant: true, storageAvailable: false })
+    expect((await serve(down.app).get('/api/approval/attachments/att_1/download')).status).toBe(503)
+    // an OUTSIDER still gets the authorization 404 — the storage posture is never an oracle for them
+    const outsider = makeApp({ rows: [row], participant: false, storageAvailable: false })
+    expect((await serve(outsider.app).get('/api/approval/attachments/att_1/download')).status).toBe(404)
   })
 
   test('download: participant streams bound blob; non-participant gets 404 (no oracle); deleted → 410', async () => {
