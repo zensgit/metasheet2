@@ -5,9 +5,9 @@
 > （明确标注 MERGED 者除外）。模型分工：机械/规格化实现→sonnet 或 fable 子代理；同事务/幂等等精细切片与
 > 全部对抗审阅→opus；集成、冲突解决、变异验证、收口→主循环（fable）。
 >
-> **状态：LIVING（2026-07-18 收尾轮进行中）。** 「剩余全为 owner 门」的旧表述经 owner 复核**不成立**
-> （FWB 栈测试漂移红检 / #4439 冲突 / 多 PR 落后 main 均为工程侧事项），§5 已改为「工程侧 vs owner 门」
-> 双栏对账。本文在收尾序列（FWB 栈落地→#4439 解冲→8 场景→本 MD 终版）完成后才转 FINAL。
+> **状态：FINAL（2026-07-20 终版）。** 收尾序列全部完成：#4337 activation 与 FWB 栈三刀全 MERGED main，
+> #4439 解冲+重构复审 APPROVE，8 场景正式验收矩阵 **8/8**（§1.7，PR #4489）。§5 双栏对账=工程侧已清零，
+> 剩余全为 owner 门（此表述至此才成立——2026-07-18 的 LIVING 降级即因当时说早了）。
 > CI 状态以各 PR 当前 head 的 checks 为权威（本文数字绑定文中注明的 SHA）。
 
 ## 0. 接手时的权威状态
@@ -102,6 +102,15 @@ armed auto-merge → **MERGED main**。非阻塞 P3 备忘：程序化 start() �
 仍存活（生产入口立即退出进程）。线剩余=flag 全 OFF→UAT→分级 ON（owner 门）；8 场景正式验收（S6/S8 依赖
 FWB 栈合入，S1-S5/S7 可先行）；family-6 comment producer + manifest v2（菜单）。
 
+### 1.7 正式验收：8 场景矩阵 8/8 on merged main（2026-07-20，PR #4489）
+FWB 栈三刀落 main 后按预案「预演 spec 原样重跑=正式验收」：spec 自预演分支 5a14986db 经 `git show` 取出，
+fresh 全迁移 DB 实跑 **8/8**（S1 预提交崩溃零行 / S2 重启投递 / S3 reclaim 重投+S4 zombie fence 单写者 /
+S5 N-1 未知键 pending+告警 / S6 FWB 净一次 / S7 中途回滚三者同灭 / S8 全链 depth 传播）。三处适配均跟随
+owner 已追认的演进，断言零改动：①`form.submitted`→`multitable.form.submitted`（manifest 字面量修正）
+②S2 的 comment.created→routed 族（v1 路由已移除）③enqueue 包真事务（xid 探针机器强制）。**首轮三个失败
+恰是这三项硬化各自的正控证明**（幽灵事件名/死路由/非事务 handle 全被 fail-closed 拒绝）。矩阵已两点接线
+进 CI（PR #4489，待 owner 审）。
+
 ## 2. #4342 附件 runtime — 闭合审计（review-ready，owner 门）
 - opus 审计对 head 23e090807：**REVIEW-READY**。两 P1（G7 下载字节路径隐藏字段红线 / G15 reconciler 误删
   活 blob）在真码上变异证明 CLOSED（中和守卫→指定测试 RED，正控 12+4 绿）；17 个可识别 findings 全闭；
@@ -154,13 +163,11 @@ FWB 栈合入，S1-S5/S7 可先行）；family-6 comment producer + manifest v2�
   ⑤**node-config 级 diff 深度**（版本 diff 目前只到节点增删改名级）；⑥版本 retention 策略（需先定
   产品口径=owner 决策）；⑦画布 UX（拖连/缩放）与用户文档（量大、放最后）。
 
-## 5. 剩余事项（与 §1.6 及 GitHub 实况对账；owner 2026-07-18 inline review 更正后重写）
-**工程侧（非 owner-only，2026-07-18 收尾轮处理中）**：
-- ~~#4337 合并~~（**已 MERGED main `dfc9318fc`**，见 §1.6）。
-- FWB 栈：#4341 曾有 required 红检（测试仍查 #4340 拆分前的旧 ledger 表名→42703；已修=四处引用改
-  `meta_fwb_action_applied`，真库 4/4 复绿）→ rebase 落地后依次 #4343 → #4344。
-- #4439 曾 CONFLICTING/DIRTY：需解冲突+重验证后才可复核（处理中）；#4433/#4342/#4450 落后 main，
-  需 rebase/re-green（处理中）。
-- 8 场景验收矩阵**拆分**：S1-S5/S7 现在即可跑（#4337 已落）；S6/S8 阻塞于 FWB 栈合入。
-**owner 门**：#4342 合并形态裁决+合并；#4450 ratify；#4433/#4439 复核审合；3 个 runtime flag
-（durable/CLASSA/CLASSB）全 OFF→UAT→按 durable→Class A→Class B 分级开启。
+## 5. 剩余事项（2026-07-20 终版对账）
+**工程侧：已清零。** ~~#4337~~ MERGED `dfc9318fc`（§1.6）· ~~FWB 栈~~ 三刀全 MERGED（#4341 测试漂移修复
+后落地→#4343→#4344 串行,champion-lander）· ~~#4439 冲突~~ 解毕（run-list token 级并集）+owner 会话重构
++pinned-transport 迁移后复审 **APPROVE**（16/19 blob-identical）· ~~#4433~~ 重构后复审 **APPROVE**
+（interdiff 仅 3 行 hunk-header=纯历史改写）· #4342/#4450 rebase 复绿 · ~~8 场景~~ **8/8**（§1.7,#4489）。
+**owner 门（唯一剩余）**：#4433/#4439/#4342/#4450/#4489 与本 MD（#4457）审合、#4450 ratify；3 个 runtime
+flag（durable/CLASSA/CLASSB）全 OFF→UAT→按 durable→Class A→Class B 分级开启；功能缺口切片菜单（§4）按
+staged-opt-in 逐片点名；飞书《审批管理员手册》对标分析待落 docs/research（画布增强排序在其 §二）。
