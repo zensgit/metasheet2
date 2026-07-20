@@ -63,10 +63,11 @@ rendered block is additionally scanned for the auth token and scrubbed fail-clos
 STOCK_PREPARATION_RCA_ABORT_PROVENANCE
 executionState=DIAGNOSTIC_COMPLETE|DIAGNOSTIC_BLOCKED
 diagnosticAction=RUNTIME_ABORT_PROVENANCE
-blockedReasonClass=NONE|USAGE|IMPORT|INTERNAL
+blockedReasonClass=NONE|USAGE|HELPER_MISMATCH|IMPORT|NO_REQUEST|INTERNAL
 runtimeIdentity=NODE|BUN|DENO|OTHER|UNAVAILABLE
 nodeMajorClass=18|20|22|24|OTHER|UNAVAILABLE
 timerProbeResult=NORMAL|ABORT_EARLY|CLOCK_ANOMALY|UNAVAILABLE
+helperContentVerified=PASS|FAIL|UNAVAILABLE
 fileUrlImport=PASS|FAIL|UNAVAILABLE
 timeoutArgumentMs=15000
 networkRequestCount=0|1|OTHER
@@ -142,6 +143,32 @@ Mutation battery (commit `04f6f5401`; apply -> expect RED -> restore -> clean re
 | M6 elapsed boundary `<` -> `<=` at 1s | RED (1) — bucket boundary test |
 | M7 remove closed-vocabulary validation throw | RED (1) — out-of-registry refusal test |
 | M8 skip token-scrub scan (always return tentative) | RED (1) — collision-scrub test |
+
+## 4b. Round-2 review absorption (2026-07-20)
+
+Owner round-2 identified two false protections in the first cut; both are closed:
+
+1. **Basename allowlist was not an exact-SHA binding.** Any file renamed to an allowlisted
+   basename would have been dynamically imported and executed. Now `HELPER_CONTENT_SHA256` pins
+   the SHA-256 of both smoke harnesses as of the RC-A exact package SHA
+   `d87e086fd1218b4cfb150177d43f2c52904b1d6d`, and `verifyHelperContent` byte-checks the target
+   file AND its statically-imported sibling (the extended smoke imports its sanitizing layer from
+   the W6 smoke) BEFORE any dynamic import. Any mismatch, unreadable file, or missing sibling ->
+   `DIAGNOSTIC_BLOCKED` / `HELPER_MISMATCH` with zero imports and zero requests (exit 2). A
+   repo-parity tripwire test fails loudly if the frozen smokes ever drift from the pinned digests
+   without a new diagnostic release.
+2. **Zero-request runs could read as COMPLETE.** A runtime without `fetch` (or any skipped
+   request phase) previously fell through to `DIAGNOSTIC_COMPLETE` with `UNAVAILABLE` request
+   fields. `DIAGNOSTIC_COMPLETE` is now a contract: content verified + import passed + exactly
+   the intended request dispatched and classified; otherwise `DIAGNOSTIC_BLOCKED` /
+   `NO_REQUEST`. Precedence: `HELPER_MISMATCH` > `IMPORT` > `NO_REQUEST`.
+
+Added verification: suite grew to 35/35 (constants shape + sibling map closure, repo-parity
+tripwire, fixture-based verify PASS/FAIL/missing-sibling/tamper cases, mismatch end-to-end with
+zero import/fetch spies, fetch-less NO_REQUEST closure); CLI end-to-end for the verified path and
+a tampered-copy path (BLOCKED, exit 2). Mutations M9-M12 (import-despite-mismatch,
+zero-request-complete, digest-drift, sibling-dropped) each RED with the intended discriminating
+test first; clean rerun 35/35.
 
 ## 5. Operating notes (entity machine, owner-authorized runs only)
 
