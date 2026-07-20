@@ -433,8 +433,15 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     )
     // A live foreign target so the outbound-link rebuild has something to point at is unnecessary here (no
     // link field on this fixture); this golden pins the trash-lifecycle invariant.
+    // PROBE: a SECOND trash vintage for the same id (reachable when a resurrect path left one behind — the
+    // very class of bug this fix closes, e.g. the legacy PIT resurrect). The cleanup must restore the
+    // mutual-exclusion invariant regardless of how many vintages exist.
+    await q(
+      'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)',
+      [R_G2, SHEET, JSON.stringify({ [F_STR]: 'g2-older-vintage' }), 1],
+    )
     const trashBefore = await trashCount(R_G2)
-    expect(trashBefore).toBe(1) // precondition: the record IS in the recycle bin
+    expect(trashBefore).toBe(2) // precondition: TWO vintages in the recycle bin
     const pv = await preview(anchorOp, 'revert')
     const out = await applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(out.ok).toBe(true)
