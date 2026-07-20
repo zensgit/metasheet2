@@ -48,6 +48,13 @@
 > （§4.4/§5/§8.2b-13..14，P2）；③§3 全清单补 `reconciliation_run_identity_claim` claim 表;
 > ④`canonicalRowDigest` 确定性契约（字段序、类型标签、null·空·缺省三分、数字规范化不经浮点、
 > NFC）列为 D1 必冻 + mutation 承重（§4.6/§8.2b-15b，P2）。
+>
+> **rev-6（2026-07-20，owner rev-5 复审 1×P2 全量吸收）：** claim-first 的「有界等待」从文字
+> 承诺升级为**数据库强制硬边界**——claim insert 前 `SET LOCAL lock_timeout = <bounded>`,对手持
+> 未提交 claim 且不推进(idle-in-transaction / 长写)时,败者的 insert 在上限内抛 `55P03`、commit
+> 事务中止(claim 为首写 ⇒ 零 snapshot/diff)、以 `RUN_IDENTITY_CLAIM_BUSY`（retryable,§5 闭词表）
+> 收束、由新 attempt 重试,绝不无限行锁等待。测试矩阵加「对手持未提交 claim」场景（§4.4/§5/
+> §8.2b-14b，P2）。
 > **上位规划：**
 > `stock-preparation-generalization-and-scenario-packaging-proposal-20260717.md`。
 > **相邻但独立的操作线：** RC-A `#4437` 保持既有 flag-OFF、values-free、操作侧门；本 Charter
@@ -260,16 +267,25 @@ D1 必须把**绑定对象与数据对象一次列全**，并冻结字段、唯�
   由 `UNIQUE (tenant_id, run_identity_key) WHERE run_identity_key IS NOT NULL` 部分唯一索引
   承重（058 先例的精确用法）。不另拆 attempt / 语义 run 两对象——单对象 + set-once 已闭合
   时序，拆表变体不采用；
-- **重放与并发去重是同一机制：claim-first + 有界等待（rev-5 冻结，PostgreSQL 语义已核实）**：
-  唯一索引违例（23505）会废掉整个事务，「撞索引后同事务标记 dedup」不可实现；「另开事务标记」
-  又在崩溃时留下永久停在 `compared` 的非终态窗口。owner rev-4 复审进一步指出：
-  `INSERT ... ON CONFLICT DO NOTHING` 遇**并发未提交**的同键行会**阻塞等待**该事务提交或回滚，
+- **重放与并发去重是同一机制：claim-first + 数据库强制的有界等待（rev-6 冻结，PostgreSQL 语义
+  已核实）**：唯一索引违例（23505）会废掉整个事务，「撞索引后同事务标记 dedup」不可实现；
+  「另开事务标记」又在崩溃时留下永久停在 `compared` 的非终态窗口。owner rev-4 复审指出
+  `INSERT ... ON CONFLICT DO NOTHING` 遇**并发未提交**同键行会**阻塞等待**该事务提交或回滚，
   并非「不等待」；且 claim 与 `complete` 同事务提交 ⇒ 败者永远看不到「已提交但非终态」的持有
-  者，故原 `RUN_IDENTITY_CLAIM_PENDING` 分支不可达。rev-5 据此**接受有界等待、删除该分支**，
-  冻结如下（**事务隔离级别 READ COMMITTED**，使冲突后的持有者读取看到已提交数据）：
+  者，故原 `RUN_IDENTITY_CLAIM_PENDING` 分支不可达（rev-5 删除该分支）。**owner rev-5 复审
+  进一步指出：仅靠「对方 commit 事务时延」并不是有界——胜者在 claim 后 idle-in-transaction 或
+  被长写拖住时,败者会在行锁上被无限吊住。rev-6 因此把「有界」从文字承诺升级为数据库强制的
+  硬边界**（**事务隔离级别 READ COMMITTED**）：
+  - **claim insert 前必设事务局部等待上限** `SET LOCAL lock_timeout = <bounded>`（有界值由实现
+    锁冻结,秒级;可另设 `SET LOCAL statement_timeout` 作整段兜底）——这使行锁等待由**数据库**
+    强制封顶,不依赖对手事务的自律;
   - commit 事务内、**写任何 snapshot / diff 行之前**，`INSERT ... ON CONFLICT DO NOTHING` 抢
-    租户级 claim 表的语义键（claim 行引用 `attemptId`）；遇并发未提交同键行时该语句**有界
-    阻塞**——等待受对方 commit-事务自身的提交/回滚时延约束（对方也只写行、快、有界），可接受；
+    租户级 claim 表的语义键（claim 行引用 `attemptId`）；
+  - **锁等待超过 `lock_timeout`**（对手持未提交 claim 且不推进）：PostgreSQL 抛 `55P03`
+    (lock_not_available) 使该 commit 事务中止——因 claim 是事务内**第一个写**,中止时**零
+    snapshot / diff 行**已写；回滚后在独立小事务把本 attempt 记为 `failed`、reason
+    `RUN_IDENTITY_CLAIM_BUSY`（**retryable 类**,闭词表,见 §5）,调用方以**新 attempt** 重试,
+    绝不无限等待;
   - **胜者**（本语句插入成功）：同一事务内继续写全部 immutable 行、set-once 落
     `runIdentityKey`、置 `complete`，随事务原子提交；
   - **败者**（插入 0 行，键已被占）：因胜者的 claim 与 `complete` 原子同提交,败者解除阻塞时
@@ -442,7 +458,11 @@ planned -> reading_sources -> snapshots_complete -> compared -> complete
   保持 NULL,仅记录胜者 run 的不透明句柄;这是 §4.4 exact-noop 重放与并发同内容去重的落点,
   默认查询不把它呈现为独立结果。**不存在「已提交但非终态持有者」状态**（rev-5 删除原
   PENDING 分支）:胜者回滚/`failed` 会在其事务内释放 claim,阻塞解除的败者转为胜者继续;
-- `failed` 记录固定 family / reason / phase / counts，不保存原始异常；
+- `failed` 记录固定 family / reason / phase / counts，不保存原始异常；reason 闭词表含
+  **retryable 类** `RUN_IDENTITY_CLAIM_BUSY`（§4.4 claim insert 触 `lock_timeout`/`55P03`：
+  对手持未提交 claim 且不推进,数据库强制封顶等待后败者以此 retryable 终态收束、零 immutable
+  写、调用方以新 attempt 重试）与既有的 `READ_UNPROVABLE` /
+  `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` 等；retryable 与永久失败在 reason 层区分；
 - 进程崩溃留下的非终态运行不可被查询面当成 complete；重试只能 exact-resume 或创建新 run，
   具体策略在实现锁中冻结；
 - 差异词表第一版冻结为 §2.2 六桶：`only_in_engineering`、`only_in_enterprise`、
@@ -559,6 +579,12 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
     败者阻塞解除后、落 `deduplicated` 前崩溃 -> 恢复后不存在停在 `compared` 的永久非终态，
     claim 不被死 attempt 永久占据（`failed` 同事务释放 claim 的正控 + 负控）-> 真库红；胜者
     回滚后并发败者未能转正继续 -> 红；
+14b. **有界等待硬边界（P2 rev-6）**：构造对手事务持**未提交** claim 且不推进（模拟
+    idle-in-transaction / 长写），败者的 claim insert 必须在 `lock_timeout` 上限内以
+    `RUN_IDENTITY_CLAIM_BUSY`（retryable）失败、**零 snapshot / diff 写入**，而非无限等待
+    -> 真库红；缺 `SET LOCAL lock_timeout`（回落到无限行锁等待）-> 红；超时路径写了任何
+    immutable 行 -> 红；`RUN_IDENTITY_CLAIM_BUSY` 未标 retryable / 未被新 attempt 重试路径消费
+    -> 红；
 15. 排序元组以裸拼接编码（可构造跨分量拼接碰撞的两快照同摘要）-> 红；`identity_invalid`
     sentinel 与真实键同域可碰撞 -> 红；multiplicity 溢出未由读上界排除 -> 红；
 15b. **`canonicalRowDigest` 确定性（P2 rev-5）**：字段序改动 / 缺类型标签使 `"1"` 与 `1` 或
@@ -592,7 +618,7 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
 | OD-V2-2 | 身份匹配 | **V1 仅 owner 配置的 exact key；§2.2 六桶键级分类；重复/无效键 = 桶级 fail-closed（非整跑失败，两套语义不并存）；不做 fuzzy；候选/置信度/人工确认 = V2.1 独立设计门** | 解锁 comparator contract |
 | OD-V2-3 | 权限 | **独立 `material-reconciliation:read/operate/admin`；不复用 `integration:write` 作为长期权限** | 解锁 manifest / route RBAC 设计 |
 | OD-V2-4 | 数据面 | **V1 values-free；值面另开 gated + audited read** | 解锁 evidence UI，值面继续 barred |
-| OD-V2-5 | 持久模型 | **run 仅允许 §5 单向迁移（含 `deduplicated` 终态）；`attemptId` 建行即有、`runIdentityKey` NULL→commit 事务内 claim-first 抢占后 set-once（READ COMMITTED + 有界等待；败者永远 NULL；索引为背书非控制流；claim 与 complete 原子同提交 ⇒ 无「已提交非终态持有者」，不设 PENDING 分支；`failed` 同事务释放 claim）；含 `reconciliation_run_identity_claim` 表；`canonicalRowDigest` 确定性契约（字段序/类型标签/null·空·缺省三分/数字规范化/NFC）D1 必冻；冲突分支崩溃注入承重；snapshot/row/diff create-only；不建 decision 表** | 解锁 templates / migration 设计 |
+| OD-V2-5 | 持久模型 | **run 仅允许 §5 单向迁移（含 `deduplicated` 终态）；`attemptId` 建行即有、`runIdentityKey` NULL→commit 事务内 claim-first 抢占后 set-once（READ COMMITTED；claim insert 前 `SET LOCAL lock_timeout` 数据库强制封顶等待,超时→ `RUN_IDENTITY_CLAIM_BUSY` retryable、零 immutable 写、新 attempt 重试；败者永远 NULL；索引为背书非控制流；claim 与 complete 原子同提交 ⇒ 无「已提交非终态持有者」，不设 PENDING 分支；`failed` 同事务释放 claim）；含 `reconciliation_run_identity_claim` 表；`canonicalRowDigest` 确定性契约（字段序/类型标签/null·空·缺省三分/数字规范化/NFC）D1 必冻；冲突分支崩溃注入 + 有界等待硬边界承重；snapshot/row/diff create-only；不建 decision 表** | 解锁 templates / migration 设计 |
 | OD-V2-6 | 发布姿态 | **独立 default-OFF flag；仅内部写；`externalWrite=false`** | 解锁 D1，仍不授权 ON rollout |
 | OD-V2-7 | 场景绑定与换绑 | **§2.3/§4.5/§4.6 模型整体冻结：绑定版本生命周期（supersede/revoke 拆分；`active` 为指针派生谓词非存储状态）+ 指针权威唯一 active（复合 FK；revoke 清指针同事务，切换预选替代版本 = 同事务完整 Activate 重验；partial-unique 变体不采用）+ 外部系统身份 pin（内容键单轨：`systemContentKey` 进绑定成员、bindingFingerprint、run-start pin 与 activate/commit 重验；不引入无权威来源的版本 ID）+ 四层重验 + commit 漂移拆分 + 血缘/运行双键 + 双指纹（业务摘要不裸 SHA 外显；排序元组编码 rev-4 冻结）+ 运行请求仅 scenarioInstanceId + V1 双源不 N** | 解锁 D2 绑定底座设计 |
 
@@ -756,3 +782,18 @@ owner 两轮 REQUEST_CHANGES 的全部裁决已落入本 rev：
   固定大小写策略;列为 **D1 必冻 + §8.2b-15b mutation 承重**。外层长度前缀不救内层不确定性。
 - **Ratify 影响**：本轮修正续对 owner 暂缓的 OD-V2-1/5/7；OD-V2-3/4/6 维持可接受。claim 有界
   等待属正常行锁竞争、非并发缺陷,不改 D3a「对抗审压并发面」的定性,排期口径不变。
+
+### 12.8 rev-6 吸收记录（2026-07-20，owner rev-5 复审 1×P2）
+
+- **P2（有界等待只是文字承诺,不是机制）**：owner 指出 rev-5 的「等待受对方 commit 事务时延
+  约束」在胜者 claim 后 idle-in-transaction 或被长写拖住时并不成立——败者会在行锁上被无限
+  吊住,设计上不 bounded。处方采纳:把有界从文字升级为**数据库强制**——claim insert 前
+  `SET LOCAL lock_timeout = <bounded>`（有界值实现锁冻结,秒级;可另设 `statement_timeout`
+  兜底）,锁等待超限 ⇒ PostgreSQL `55P03` 中止 commit 事务;因 claim 是事务首写,中止时零
+  snapshot/diff 已写;回滚后独立小事务记 `failed` reason `RUN_IDENTITY_CLAIM_BUSY`（§5 闭词表
+  retryable 类）,调用方以新 attempt 重试。§8.2b-14b 加「对手持未提交 claim 且不推进」场景:
+  败者必须在上限内 busy 失败/重试、零 immutable 写,缺 `lock_timeout`（回落无限等待）判红。
+  claim+complete 原子性与三路(胜者/败者见 complete/胜者回滚转正)不变——本轮只补「等待封顶」
+  这一条硬边界。
+- **Ratify 影响**：本轮为 OD-V2-5 的机制补强,不改其推荐方向;OD-V2-1/7 续暂缓待整体复审,
+  OD-V2-3/4/6 维持可接受。排期与 D3a 对抗审定性不变（lock_timeout 是标准行锁纪律,非新并发面）。
