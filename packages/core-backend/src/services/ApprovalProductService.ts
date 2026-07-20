@@ -3111,6 +3111,7 @@ export class ApprovalProductService {
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateConditionBranchRules(approvalGraph)
 
       const maxVersionResult = await client.query<{ max_version: string }>(
         `SELECT COALESCE(MAX(version), 0)::text AS max_version

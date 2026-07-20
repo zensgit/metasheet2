@@ -371,6 +371,116 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     expect(templateRow.rows[0].latest_version_id).toBe(v1Id)
   })
 
+  // Combined regression (#4433 x #4439, owner P2): restore's revalidation list must include the
+  // #4433 empty-rules gate. A pre-#4433 historical snapshot can legitimately carry a rules-mode
+  // condition branch with `rules: []` — at runtime `[].every(...)` is vacuously TRUE, so that
+  // branch captures ALL traffic and dead-codes the default edge. Restoring it into a new draft
+  // would resurrect exactly the shape #4433 banned at create/update/publish. Minimal pair: the
+  // positive-control snapshot below is byte-identical except its branch carries ONE rule, so a
+  // 400 here discriminates the empty-rules gate itself, not SQL-inserted rows in general.
+  it('rejects restoring a pre-#4433 snapshot whose condition branch has empty rules; the minimal-pair valid snapshot still restores (real DB)', async () => {
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `uat-restore-emptyrules-${Date.now()}`,
+        name: 'UAT Restore Empty Rules',
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: authoringFormSchema(),
+        approvalGraph: authoringApprovalGraph(),
+      },
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+    const v1Id = created.latestVersionId
+
+    // The pre-#4433 authoring shape (same fixture family as #4433's unit gate): a rules-mode
+    // branch with `rules: []`. Today's create/update APIs refuse this, so only a historical row
+    // can carry it — inserted via SQL, exactly how it would sit in a pre-#4433 database.
+    const conditionGraph = (branchRules: Array<Record<string, unknown>>) => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: { branches: [{ edgeKey: 'edge-high', rules: branchRules }], defaultEdgeKey: 'edge-low' },
+        },
+        { key: 'high', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-high', source: 'route', target: 'high' },
+        { key: 'edge-low', source: 'route', target: 'low' },
+        { key: 'edge-high-end', source: 'high', target: 'end' },
+        { key: 'edge-low-end', source: 'low', target: 'end' },
+      ],
+    })
+    const pool = poolManager.get()
+    const insertVersion = async (version: number, graph: unknown): Promise<string> => {
+      const result = await pool.query<{ id: string }>(
+        `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+         VALUES ($1, $2, 'draft', $3, $4)
+         RETURNING id`,
+        [created.id, version, JSON.stringify(authoringFormSchema()), JSON.stringify(graph)],
+      )
+      return result.rows[0].id
+    }
+    const emptyRulesVersionId = await insertVersion(2, conditionGraph([]))
+    const validRulesVersionId = await insertVersion(
+      3,
+      conditionGraph([{ fieldId: 'amount', operator: 'gt', value: 1000 }]),
+    )
+
+    // NEGATIVE: the empty-rules snapshot must NOT be restorable into a new draft.
+    const rejectedResp = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/versions/${emptyRulesVersionId}/restore`,
+      adminToken,
+      { method: 'POST', body: { expectedLatestVersionId: v1Id } },
+    )
+    expect(rejectedResp.status).toBe(400)
+    const rejected = await rejectedResp.json() as { error: { code: string; details?: Record<string, unknown> } }
+    expect(rejected.error.code).toBe('APPROVAL_CONDITION_BRANCH_RULES_EMPTY')
+    // Typed + values-free: the envelope stays structural; details carry node/branch identifiers only.
+    expect(Object.keys(rejected)).toEqual(['error'])
+    expect(rejected.error.details).toEqual({ nodeKey: 'route', branchIndex: 0 })
+
+    // Fail-closed: zero draft rows created, latest pointer untouched.
+    const afterReject = await pool.query<{ version: number }>(
+      `SELECT version FROM approval_template_versions WHERE template_id = $1 ORDER BY version`,
+      [created.id],
+    )
+    expect(afterReject.rows.map((row) => row.version)).toEqual([1, 2, 3])
+    const pointerAfterReject = await pool.query<{ latest_version_id: string }>(
+      `SELECT latest_version_id FROM approval_templates WHERE id = $1`,
+      [created.id],
+    )
+    expect(pointerAfterReject.rows[0].latest_version_id).toBe(v1Id)
+
+    // POSITIVE CONTROL (minimal pair): the same snapshot with ONE rule restores 201 as a new draft.
+    const acceptedResp = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/versions/${validRulesVersionId}/restore`,
+      adminToken,
+      { method: 'POST', body: { expectedLatestVersionId: v1Id } },
+    )
+    expect(acceptedResp.status).toBe(201)
+    const accepted = await acceptedResp.json() as {
+      id: string
+      version: number
+      status: string
+      restoredFromVersionId: string
+    }
+    expect(accepted).toMatchObject({ version: 4, status: 'draft', restoredFromVersionId: validRulesVersionId })
+    const pointerAfterAccept = await pool.query<{ latest_version_id: string }>(
+      `SELECT latest_version_id FROM approval_templates WHERE id = $1`,
+      [created.id],
+    )
+    expect(pointerAfterAccept.rows[0].latest_version_id).toBe(accepted.id)
+  })
+
   // P3-2 (review 20260717c): the belongs-to-template (IDOR) guard was only discriminated in the
   // mocked unit lane; this is the real-DB negative — a version id that exists but belongs to a
   // DIFFERENT template must 404 without writing anything.
