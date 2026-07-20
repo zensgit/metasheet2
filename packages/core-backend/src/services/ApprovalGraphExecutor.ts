@@ -334,8 +334,16 @@ function validateFieldType(field: FormField, value: unknown): string | null {
     case 'text':
     case 'textarea':
     case 'user':
-    case 'attachment':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'attachment':
+      // #4195 §4.4/§8: an attachment field's submitted value IS the ordered array of staged
+      // approval_attachments.id strings (frozen verbatim into form_snapshot at create; the create
+      // txn then binds exactly these ids or fails whole). Anything else is rejected fail-closed —
+      // the legacy string/record acceptance predated the ratified array-of-ids contract and could
+      // freeze an uninterpretable value into the immutable snapshot.
+      return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
+        ? null
+        : `${field.id} must be an array of attachment ids`
     case 'number':
       return typeof value === 'number' && Number.isFinite(value) ? null : `${field.id} must be a number`
     case 'date':

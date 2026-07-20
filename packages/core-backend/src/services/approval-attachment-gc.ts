@@ -14,7 +14,8 @@
  *     `approval_attachments` row still references its storage_key — a still-referenced blob is skipped and
  *     surfaced via the result for the reconciler to inspect (never silently deleted).
  *
- * No callers yet — the worker is wired behind the attachment flag with the provider/routes slice.
+ * WIRED at boot (approval-attachment-runtime.ts): flag-gated timers run the sweep + drain; stop()
+ * is registered in MetaSheetServer.stop(). Flag OFF ⇒ never invoked.
  */
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 

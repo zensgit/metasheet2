@@ -19,6 +19,14 @@ export interface ProductFeatures {
    * byte-identical for every tenant that has not opted in.
    */
   approvalMobile: boolean
+  /**
+   * B3-07 (#4195) — approval attachment upload pipeline gate. Mirrors the backend's
+   * APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF): the fill view replaces the B2-28
+   * honest-disabled placeholder with the real uploader ONLY when the backend session payload (or an
+   * authorized dev override) explicitly enables it. No role/mode inference — flag OFF keeps the
+   * placeholder + submit-time strip byte-identical.
+   */
+  approvalAttachments: boolean
   mode: ProductMode
 }
 
@@ -50,6 +58,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   attendanceImport: false,
   plm: false,
   approvalMobile: false,
+  approvalAttachments: false,
   mode: 'platform',
 }
 
@@ -173,6 +182,12 @@ function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
         : typeof featuresNode.approval_mobile === 'boolean'
           ? featuresNode.approval_mobile
           : undefined,
+    approvalAttachments:
+      typeof featuresNode.approvalAttachments === 'boolean'
+        ? featuresNode.approvalAttachments
+        : typeof featuresNode.approval_attachments === 'boolean'
+          ? featuresNode.approval_attachments
+          : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -275,6 +290,12 @@ function resolveFeatures(
     backend.approvalMobile,
   )
 
+  // B3-07: same default-OFF discipline — only an explicit backend/override boolean enables it.
+  const approvalAttachments = boolOrDefault(
+    override.approvalAttachments,
+    backend.approvalAttachments,
+  )
+
   return {
     attendance,
     workflow,
@@ -282,6 +303,7 @@ function resolveFeatures(
     attendanceImport,
     plm,
     approvalMobile,
+    approvalAttachments,
     mode,
   }
 }

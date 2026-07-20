@@ -45,6 +45,21 @@ export interface ApprovalAttachmentRouteDeps {
    * an upload can never land against a non-attachment (or non-existent) field.
    */
   resolveAttachmentField(templateId: string, fieldId: string): Promise<boolean>
+  /**
+   * Template-access gate (§4.1 authorization): can the AUTHENTICATED requester SEE/INITIATE the template
+   * the upload targets? The production wiring evaluates the SAME `applyTemplateVisibilityFilter`
+   * predicate the template list/detail/create paths enforce (visibility_scope all/user/dept/role +
+   * template-manager bypass) — never a re-derived rule. `false` (or a throw — fail-closed) yields a
+   * values-free 404, indistinguishable from a non-existent template (no template-enumeration oracle).
+   * Checked BEFORE `resolveAttachmentField`, so an outsider cannot probe a hidden template's field types.
+   */
+  templateVisible(req: Request, templateId: string): Promise<boolean>
+  /**
+   * O3 storage disposition (§7/§9): `false` = no usable blob store is configured (production without an
+   * S3-compatible provider — the ratified prod fail-close). Upload AND download then return a values-free
+   * 503 instead of ever touching a local-FS path in production. Default `true` (a store was injected).
+   */
+  storageAvailable?: boolean
   env?: NodeJS.ProcessEnv
 }
 
@@ -100,11 +115,19 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     if (!uploaderId) return res.status(401).json({ error: 'unauthenticated' })
     const orgId = deps.orgId(req) // server-derived from the principal — never the body (no cross-tenant forgery)
     if (!orgId) return res.status(403).json({ error: 'no_org' })
+    // O3 prod fail-close: no S3-compatible store configured in production ⇒ 503, values-free, BEFORE any
+    // validation/blob work — an upload never lands on the deploy host's local filesystem (§7/§9).
+    if (deps.storageAvailable === false) return res.status(503).json({ error: 'storage_unavailable' })
     const f = (req as Request & { file?: { originalname: string; mimetype: string; size: number; buffer: Buffer } }).file
     if (!f) return res.status(400).json({ error: 'file_required' })
     const fieldId = typeof req.body?.fieldId === 'string' && /[!-~]/.test(req.body.fieldId) ? req.body.fieldId : null
     const templateId = typeof req.body?.templateId === 'string' && /[!-~]/.test(req.body.templateId) ? req.body.templateId : null
     if (!fieldId || !templateId) return res.status(400).json({ error: 'template_and_field_required' })
+    // §4.1 authorization: the uploader must be able to SEE the target template (the same visibility_scope
+    // predicate the create path enforces). Fail-closed to a values-free 404 (no template-existence oracle),
+    // and BEFORE the field-type resolve so an outsider cannot probe a hidden template's schema.
+    const visible = await deps.templateVisible(req, templateId).catch(() => false)
+    if (!visible) return res.status(404).json({ error: 'not_found' })
     // G2: the target field MUST be an attachment-typed field in the template's form schema — else 400.
     if (!(await deps.resolveAttachmentField(templateId, fieldId))) {
       return res.status(400).json({ error: 'not_an_attachment_field' })
@@ -144,6 +167,9 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
       // gone → 410; authorization failures → 404 (no existence oracle for outsiders)
       return auth.code === 'gone' ? res.status(410).json({ error: 'gone' }) : res.status(404).json({ error: 'not_found' })
     }
+    // O3: with no usable store (prod without S3) the byte path is honestly unavailable — 503, values-free.
+    // Emitted only after the viewer authorized (no storage-posture oracle for outsiders).
+    if (deps.storageAvailable === false) return res.status(503).json({ error: 'storage_unavailable' })
     const blob = await deps.store.get(row.storage_key)
     res.setHeader('Content-Type', row.mime_type)
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(row.file_name)}"`)

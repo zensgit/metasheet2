@@ -489,6 +489,9 @@ export default defineConfig({
       'tests/integration/approval-attachment-gc-realdb.test.ts',
       // attachment bind (form-freeze) + bucket reconciler — real-DB. Two-point wiring.
       'tests/integration/approval-attachment-bind-reconcile-realdb.test.ts',
+      // attachment PRODUCTION pipeline (flag-gated boot mount + submit-txn bind + template-access +
+      // auth-proxied download) over a booted server — real-DB. Two-point wiring (approval real-DB lane).
+      'tests/integration/approval-attachment-pipeline-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

@@ -29,6 +29,7 @@ import { createUserSession, getUserSession, listUserSessions, revokeUserSession,
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
+import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { query } from '../db/pg'
 import { listUserPermissions } from '../rbac/service'
@@ -281,6 +282,9 @@ function buildFeaturePayload(authUser: User) {
     attendanceAdmin,
     attendanceImport,
     plm,
+    // B3-07 (#4195): surfaces the APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF) to the
+    // web client so the fill view swaps the B2-28 placeholder for the real uploader ONLY flag-ON.
+    approvalAttachments: isApprovalAttachmentsEnabled(),
     mode,
   }
 }
