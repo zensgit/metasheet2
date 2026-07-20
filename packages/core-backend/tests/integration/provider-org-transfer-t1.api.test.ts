@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import express from 'express'
+import { Client } from 'pg'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as auditModule from '../../src/audit/audit'
@@ -34,7 +35,21 @@ import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directo
  *   - the undecided-decisions apply guard (seeded directly — the registered no-op scans zero);
  *   - at-most-one-ACTIVE-transfer-per-source (both halves: cap while active, free after cancel);
  *   - terminal states reject every further mutation;
- *   - apply/apply concurrency linearizes on the row lock (exactly one 200);
+ *   - apply/apply concurrency linearizes on the row lock, proven with a GENUINE overlap: a
+ *     two-connection barrier (withHolder / waitUntilBlockedOnHolder over pg_blocking_pids, the
+ *     idiom the T2 source-freeze suite uses) holds an uncommitted apply-#1 stand-in on the
+ *     transfer row while a real HTTP apply runs. `Promise.all([apply, apply])` at natural speed
+ *     never overlaps — both supertest requests complete serially — so it could not distinguish a
+ *     locked read from an unlocked one. The barrier can: delete `FOR UPDATE` from `lockTransfer`
+ *     and the overlapped apply reads the stale 'scanned' row, passes all three guards, calls
+ *     `applyDecisions` (duplicate provider-side rebind) and answers 200 instead of 409. A
+ *     rollback leg is the positive control (the parked apply resumes and really does apply);
+ *   - cancel is reachable from EVERY non-terminal status — 'draft' and 'applying' (recovery-edge
+ *     test) plus 'scanned' (the normal resting state between scan and apply) and 'failed'
+ *     (seeded directly) — and each cancel frees the `uq_pot_active_source` slot so a new
+ *     transfer on the same source is creatable. Dropping either conjunct from
+ *     NON_TERMINAL_STATUSES would wedge a transfer permanently (slot + T2 source freeze held
+ *     forever with no operator escape); the two cancel legs red on exactly that;
  *   - the registered no-op apply writes NOTHING to directory accounts/departments/memberships/
  *     identities owned by this test's source/target integrations + uniquely seeded identity
  *     keys (scoped fingerprint — NOT global table counts/max timestamps, so it stays correct
@@ -159,6 +174,63 @@ async function scopedDirectoryFingerprint(integrationIds: string[], identityExte
   return result.rows[0].fp
 }
 
+// ---------------------------------------------------------------------------------------------
+// Two-connection barrier (same shape as the T2 source-freeze suite; copied, not imported —
+// importing a `.test.ts` would re-register that whole suite into this run).
+// ---------------------------------------------------------------------------------------------
+
+/** Dedicated raw connection for barrier lock-holders — never from the service pool. */
+async function withHolder(fn: (holder: Client, holderPid: number) => Promise<void>): Promise<void> {
+  const holder = new Client({ connectionString: process.env.DATABASE_URL })
+  await holder.connect()
+  try {
+    const pidRow = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+    await fn(holder, pidRow.rows[0].pid)
+  } finally {
+    try {
+      await holder.query('ROLLBACK')
+    } catch {
+      /* already committed / closed / idle */
+    }
+    await holder.end()
+  }
+}
+
+/**
+ * Deterministic barrier: poll until at least one backend is blocked by the holder's pid
+ * (pg_blocking_pids). Proves the waiter is genuinely parked on the holder's row lock — not a
+ * fixed sleep, and not the natural-speed non-overlap the audit called out.
+ */
+async function waitUntilBlockedOnHolder(holderPid: number, timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const r = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE state = 'active'
+          AND wait_event_type = 'Lock'
+          AND $1 = ANY(pg_blocking_pids(pid))`,
+      [holderPid]
+    )
+    if ((r.rows[0]?.n ?? 0) >= 1) return
+    await new Promise((res) => setTimeout(res, 20))
+  }
+  throw new Error(
+    `timed out waiting for a backend blocked by holder pid ${holderPid} (transfer row lock never engaged)`
+  )
+}
+
+function settled<T>(p: Promise<T>): Promise<T | unknown> {
+  return p.then(
+    (v) => v,
+    (e) => e
+  )
+}
+
+interface BarrierApplyOutcome {
+  status: number
+  body: { error?: { code?: string } }
+}
+
 describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API skeleton (real DB, HTTP)', () => {
   const createdTransferIds: string[] = []
   const createdIntegrationIds: string[] = []
@@ -201,6 +273,36 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
   /** Explicit test-only registration — production has no silent no-op fallback. */
   function enableNoopAdapter(): void {
     registerOrgTransferAdapter('dingtalk', noopOrgTransferAdapter)
+  }
+
+  /**
+   * Same no-op semantics, but counts `applyDecisions` invocations. The count is the assertion
+   * that maps to the finding's real harm: a lost row lock lets a second apply call the provider
+   * adapter for a transfer that is already applied (duplicate provider-side rebind once T3/T4
+   * register a real adapter). Cleared by the shared afterEach unregister.
+   */
+  function enableCountingAdapter(): { applyCalls: () => number } {
+    let applyCalls = 0
+    registerOrgTransferAdapter('dingtalk', {
+      async scanBindings() {
+        return []
+      },
+      async applyDecisions() {
+        applyCalls += 1
+        return { applied: 0 }
+      },
+    })
+    return { applyCalls: () => applyCalls }
+  }
+
+  /** Count of transfers still occupying the `uq_pot_active_source` slot for a source. */
+  async function activeTransferCount(sourceIntegrationId: string): Promise<number> {
+    const result = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM provider_org_transfers
+        WHERE source_integration_id = $1 AND status NOT IN ('applied', 'cancelled')`,
+      [sourceIntegrationId]
+    )
+    return Number(result.rows[0].n)
   }
 
   async function seedPair(tag: string, org = uniqueOrg(tag)): Promise<{ org: string; source: string; target: string }> {
@@ -666,29 +768,115 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     expect(applyAfter.body.data.transfer.status).toBe('applied')
   })
 
-  it('linearizes concurrent applies on the row lock — exactly one 200, one clean 409, one applied_at', async () => {
-    enableNoopAdapter()
+  it('linearizes concurrent applies on the row lock — a GENUINELY overlapped apply parks on the holder, 409s, and never reaches applyDecisions', async () => {
+    // Replaces a `Promise.all([apply, apply])` version that was VACUOUS: at natural speed the two
+    // supertest requests complete serially, so deleting `FOR UPDATE` from lockTransfer left it
+    // green. This forces the overlap with the two-connection barrier instead.
+    const adapter = enableCountingAdapter()
     const { source, target } = await seedPair('race')
     const transferId = await createTransfer(source, target)
     await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
     await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply?dryRun=true`).expect(200)
 
-    const [first, second] = await Promise.all([
-      request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply`),
-      request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply`),
-    ])
-    const statuses = [first.status, second.status].sort()
-    expect(statuses).toEqual([200, 409])
-    const loser = first.status === 409 ? first : second
-    expect(loser.body.error.code).toBe('ORG_TRANSFER_INVALID_STATE')
+    // Fully apply-ready: status='scanned', dry_run_at set, zero pending decisions. Every apply
+    // guard except the row lock is already satisfied, so the lock is the ONLY thing under test.
+    const ready = await transferRow(transferId)
+    expect(ready.status).toBe('scanned')
+    expect(ready.dry_run_at).not.toBeNull()
+    expect(adapter.applyCalls()).toBe(0)
+    expect(await auditRowFor('apply', transferId)).toBe(0)
 
-    const row = await query<{ status: string; applied_at: string | null }>(
-      `SELECT status, applied_at::text FROM provider_org_transfers WHERE id = $1`,
-      [transferId]
-    )
-    expect(row.rows[0].status).toBe('applied')
-    expect(row.rows[0].applied_at).not.toBeNull()
-    // Exactly one apply audit row — the 409 loser never audits.
+    const overlap: { outcome: Promise<unknown> } = { outcome: Promise.resolve(undefined) }
+    try {
+      await withHolder(async (holder, holderPid) => {
+        // SQL STAND-IN for apply #1 mid-transaction: it holds the transfer row lock and has
+        // already written the terminal flip, but has NOT committed. This is precisely the window
+        // two natural-speed HTTP applies never enter.
+        await holder.query('BEGIN')
+        await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        await holder.query(`SELECT id FROM provider_org_transfers WHERE id = $1 FOR UPDATE`, [transferId])
+        await holder.query(
+          `UPDATE provider_org_transfers
+              SET status = 'applied', applied_at = now(), updated_at = now()
+            WHERE id = $1`,
+          [transferId]
+        )
+
+        overlap.outcome = settled(
+          request(adminApp)
+            .post(`/api/admin/directory/org-transfers/${transferId}/apply`)
+            .then((res) => res)
+        )
+        await waitUntilBlockedOnHolder(holderPid)
+
+        // THE mutation witness. Correct code: apply #2 is parked at lockTransfer's SELECT …
+        // FOR UPDATE, before any provider-side work, so the counter is still 0. Delete FOR UPDATE
+        // and apply #2 instead reads the pre-flip 'scanned' snapshot, sails through all three
+        // guards, calls applyDecisions (counter 1) and only THEN parks on its own UPDATE.
+        expect(adapter.applyCalls()).toBe(0)
+
+        await holder.query('COMMIT')
+      })
+    } finally {
+      // Drain the in-flight request even if an assertion above threw — nothing may outlive the test.
+      await overlap.outcome
+    }
+
+    const loser = (await overlap.outcome) as BarrierApplyOutcome
+    expect(loser.status).toBe(409)
+    expect(loser.body.error?.code).toBe('ORG_TRANSFER_INVALID_STATE')
+    // The loser did no provider-side work and wrote no apply audit.
+    expect(adapter.applyCalls()).toBe(0)
+    expect(await auditRowFor('apply', transferId)).toBe(0)
+
+    const row = await transferRow(transferId)
+    expect(row.status).toBe('applied')
+    expect(row.applied_at).not.toBeNull()
+  })
+
+  it('positive control for the apply barrier: when the holder ROLLS BACK, the parked apply resumes and really does apply', async () => {
+    // Without this leg the barrier test could pass by simply never letting apply through. Same
+    // barrier, holder aborts instead of committing: the parked apply must resume, observe the
+    // restored 'scanned' row, call applyDecisions exactly once and answer 200.
+    const adapter = enableCountingAdapter()
+    const { source, target } = await seedPair('race-pos')
+    const transferId = await createTransfer(source, target)
+    await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
+    await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/apply?dryRun=true`).expect(200)
+
+    const overlap: { outcome: Promise<unknown> } = { outcome: Promise.resolve(undefined) }
+    try {
+      await withHolder(async (holder, holderPid) => {
+        await holder.query('BEGIN')
+        await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        await holder.query(`SELECT id FROM provider_org_transfers WHERE id = $1 FOR UPDATE`, [transferId])
+        await holder.query(
+          `UPDATE provider_org_transfers
+              SET status = 'applied', applied_at = now(), updated_at = now()
+            WHERE id = $1`,
+          [transferId]
+        )
+
+        overlap.outcome = settled(
+          request(adminApp)
+            .post(`/api/admin/directory/org-transfers/${transferId}/apply`)
+            .then((res) => res)
+        )
+        await waitUntilBlockedOnHolder(holderPid)
+        expect(adapter.applyCalls()).toBe(0)
+
+        await holder.query('ROLLBACK')
+      })
+    } finally {
+      await overlap.outcome
+    }
+
+    const resumed = (await overlap.outcome) as BarrierApplyOutcome & {
+      body: { data?: { transfer?: { status?: string } } }
+    }
+    expect(resumed.status).toBe(200)
+    expect(resumed.body.data?.transfer?.status).toBe('applied')
+    expect(adapter.applyCalls()).toBe(1)
     expect(await auditRowFor('apply', transferId)).toBe(1)
   })
 
@@ -713,6 +901,55 @@ describeIfDatabase('Transfer MVP T1 — provider org-transfer schema + admin API
     const cancelled = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
     expect(cancelled.status).toBe(200)
     expect(cancelled.body.data.transfer.status).toBe('cancelled')
+  })
+
+  it("cancel from 'scanned' — the normal resting state between scan and apply — frees the source slot (no permanent wedge)", async () => {
+    // 'scanned' was in NON_TERMINAL_STATUSES but untested: no committed case cancelled from it,
+    // so dropping the conjunct stayed green. Consequence of that gap: a transfer resting in the
+    // ORDINARY post-scan state could never be cancelled — uq_pot_active_source keeps the source
+    // slot occupied and the T2 freeze predicate keeps the source frozen, forever, with no
+    // operator escape. Dropping 'scanned' from NON_TERMINAL_STATUSES now reds here.
+    enableNoopAdapter()
+    const { source, target } = await seedPair('cancel-scanned')
+    const transferId = await createTransfer(source, target)
+    await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/scan`).expect(200)
+    expect((await transferRow(transferId)).status).toBe('scanned')
+    expect(await activeTransferCount(source)).toBe(1)
+
+    const cancelled = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
+    expect(cancelled.status).toBe(200)
+    expect(cancelled.body.data.transfer.status).toBe('cancelled')
+    expect(cancelled.body.data.transfer.cancelledAt).not.toBeNull()
+    expect(await auditRowFor('cancel', transferId)).toBe(1)
+
+    // Wedge cannot form: nothing occupies the active slot (the same predicate T2's source freeze
+    // reads), and a brand-new transfer on the SAME source is creatable.
+    expect(await activeTransferCount(source)).toBe(0)
+    const replacementId = await createTransfer(source, target)
+    expect(replacementId).not.toBe(transferId)
+  })
+
+  it("cancel from 'failed' (seeded directly) frees the source slot — 'failed' is an operator escape, not a dead end", async () => {
+    // The recovery-edge test proves failed→scan; this proves failed→cancel, the OTHER escape.
+    // No T1 producer reaches 'failed' (it is a T3/T4 real-adapter state), so it is seeded
+    // directly, exactly as that test does. Dropping 'failed' from NON_TERMINAL_STATUSES reds here.
+    const { source, target } = await seedPair('cancel-failed')
+    const transferId = await createTransfer(source, target)
+    await query(
+      `UPDATE provider_org_transfers SET status = 'failed', last_error = 'seeded', updated_at = now() WHERE id = $1`,
+      [transferId]
+    )
+    expect(await activeTransferCount(source)).toBe(1)
+
+    const cancelled = await request(adminApp).post(`/api/admin/directory/org-transfers/${transferId}/cancel`)
+    expect(cancelled.status).toBe(200)
+    expect(cancelled.body.data.transfer.status).toBe('cancelled')
+    expect(cancelled.body.data.transfer.cancelledAt).not.toBeNull()
+    expect(await auditRowFor('cancel', transferId)).toBe(1)
+
+    expect(await activeTransferCount(source)).toBe(0)
+    const replacementId = await createTransfer(source, target)
+    expect(replacementId).not.toBe(transferId)
   })
 
   it('rejects a dryRun query value other than exactly "true" instead of coercing it into a REAL apply', async () => {
