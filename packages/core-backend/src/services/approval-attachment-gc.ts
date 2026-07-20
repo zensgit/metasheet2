@@ -75,10 +75,16 @@ function safeErrCode(err: unknown): string {
  * single blob's failure. The claim is a SINGLE atomic `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP
  * LOCKED)` — the row lock and the state transition commit together, so it is a REAL claim even on an
  * autocommit pool (the prior separate SELECT…FOR UPDATE then UPDATE released the lock at statement end
- * = vacuous). `attempts`/`fence` are bumped AT the claim, so an always-crash-after-claim poison still
- * reaches `dead_letter`; every terminal write is a fence-CAS so a reclaimed zombie's late write is a
- * no-op. Still-referenced intents are EXCLUDED from the claim (never consume a batch slot), so a
- * permanently-stuck intent can never starve younger ones (head-of-queue starvation break).
+ * = vacuous). `attempts`/`fence` are bumped AT the claim, AND the claim itself enforces the poison
+ * ceiling (§3-bis "on exhaustion the claim transitions to dead_letter instead of in_progress", the
+ * same CASE shape as automation-durable-dispatcher): a reclaimable row whose persisted `attempts` is
+ * already >= the cap is moved to terminal `dead_letter` IN the claim statement — the deleter is NEVER
+ * invoked for it. This is what terminates an always-crash-after-claim poison: each crashed claim
+ * consumed an attempt, so the loop is bounded even though no worker ever lived to record an outcome
+ * (dead-lettering only in the deleter's catch would loop such a row forever). Every terminal write is
+ * a fence-CAS so a reclaimed zombie's late write is a no-op. Still-referenced intents are EXCLUDED
+ * from the claim (never consume a batch slot), so a permanently-stuck intent can never starve younger
+ * ones (head-of-queue starvation break).
  */
 export async function drainPurgeIntents(
   db: Queryable,
@@ -105,12 +111,17 @@ export async function drainPurgeIntents(
   }
   // CLAIM: one atomic statement. Claims pending OR lease-expired in_progress intents whose blob is NOT
   // still-referenced by a live row, oldest first; bumps attempts + fence and stamps a fresh lease.
+  // POISON AT CLAIM (§3-bis): a row that already consumed its bounded attempts (e.g. a worker crashed
+  // after every claim, before any outcome write) transitions to terminal `dead_letter` right here —
+  // attempts/fence unchanged, lease cleared — and is returned for reporting, never for the deleter.
   const { rows: claimed } = await db.query(
     `UPDATE approval_attachment_purge_intents i
-        SET status = 'in_progress',
-            attempts = i.attempts + 1,
-            fence = i.fence + 1,
-            lease_expires_at = now() + ($2::bigint * interval '1 millisecond')
+        SET status = CASE WHEN i.attempts >= $3::int THEN 'dead_letter' ELSE 'in_progress' END,
+            attempts = CASE WHEN i.attempts >= $3::int THEN i.attempts ELSE i.attempts + 1 END,
+            fence = CASE WHEN i.attempts >= $3::int THEN i.fence ELSE i.fence + 1 END,
+            lease_expires_at = CASE WHEN i.attempts >= $3::int THEN NULL
+                                    ELSE now() + ($2::bigint * interval '1 millisecond') END,
+            last_error = CASE WHEN i.attempts >= $3::int THEN 'max_attempts_exhausted' ELSE i.last_error END
       WHERE i.id IN (
         SELECT c.id FROM approval_attachment_purge_intents c
          WHERE (c.status = 'pending' OR (c.status = 'in_progress' AND c.lease_expires_at < now()))
@@ -120,11 +131,21 @@ export async function drainPurgeIntents(
          LIMIT $1::int
          FOR UPDATE SKIP LOCKED
       )
-      RETURNING i.id, i.storage_key, i.attempts, i.fence`,
-    [batchSize, leaseMs],
+      RETURNING i.id, i.storage_key, i.attempts, i.fence, i.status`,
+    [batchSize, leaseMs, maxAttempts],
   )
   const result: PurgeDrainResult = { purged: 0, skippedStillReferenced: [], failed: 0, deadLettered: 0 }
-  for (const r of claimed as Array<{ id: string; storage_key: string; attempts: number; fence: string | number }>) {
+  for (const r of claimed as Array<{ id: string; storage_key: string; attempts: number; fence: string | number; status: string }>) {
+    if (r.status === 'dead_letter') {
+      // Poisoned AT claim (attempts already >= cap) — terminal; the blob deleter is NOT invoked.
+      result.deadLettered += 1
+      try {
+        opts.onDeadLetter?.(r.id, r.storage_key, 'max_attempts_exhausted')
+      } catch {
+        /* alert seam must never break the drain */
+      }
+      continue
+    }
     try {
       // The store's delete is idempotent (missing-is-ok, returns false, never throws) — so not-found is
       // TERMINAL-SUCCESS by contract; only a real (permission/network) error THROWS.
