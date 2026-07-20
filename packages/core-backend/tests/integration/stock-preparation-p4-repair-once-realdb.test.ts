@@ -346,8 +346,10 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
   // #4473 P3-1 (owner review): the three CORRUPTING-prevention refusal branches — non_suffix_gap
   // (a middle gap that a broken guard would double-append), advanced_history and ambiguous_history
   // (pointer-repair proofs) — were executed only by the path-filtered, NON-required .cjs suite.
-  // These real-DB cases put them in the required gate: each asserts a 409 refusal, ZERO rows added,
-  // and a refused audit row, so deleting a guard turns a required check red instead of an advisory.
+  // These real-DB cases put them in the required gate: each asserts a 409 refusal and that the state
+  // is untouched (ZERO rows added, and — for the pointer cases — the live pointer unchanged), so
+  // deleting a guard turns a required check red instead of an advisory. The gap case additionally
+  // asserts the refused audit row; the audit path is already covered elsewhere for the other two.
 
   test('a middle line gap is refused as non_suffix_gap and adds no rows (a broken guard would double-append)', async () => {
     const input = persistInput(multitable, 'gap')
@@ -397,6 +399,13 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
     })
     await seedLegacyPartial(multitable, v2, { lineCount: 2, includeRun: true })
     const before = await q('SELECT count(*)::int AS count FROM meta_records WHERE sheet_id = ANY($1::text[])', [sheetIds])
+    // Capture the live pointer row's full data blob so a "patch-then-throw" bug (rows count would
+    // stay equal but the pointer would already point at v2) is caught directly, not just by count.
+    const pointerBefore = await q(
+      "SELECT data FROM meta_records WHERE sheet_id = $1 AND data::text LIKE '%' || $2 || '%'",
+      [sheetIds[0], v2.projectId],
+    )
+    expect(pointerBefore.rows).toHaveLength(1)
 
     // Repairing V2 would patch the pointer (v1 < v2), but history's max version is 3 > 2 → refused.
     await expect(repairStockPreparationSyncRunOnce({
@@ -411,6 +420,12 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
     })
     const after = await q('SELECT count(*)::int AS count FROM meta_records WHERE sheet_id = ANY($1::text[])', [sheetIds])
     expect(after.rows).toEqual(before.rows)
+    const pointerAfter = await q(
+      "SELECT data FROM meta_records WHERE sheet_id = $1 AND data::text LIKE '%' || $2 || '%'",
+      [sheetIds[0], v2.projectId],
+    )
+    // The live pointer still names run_v1 — unchanged blob proves no partial patch preceded the throw.
+    expect(pointerAfter.rows).toEqual(pointerBefore.rows)
   }, 30_000)
 
   test('a project pointer is not created when the top history version is tied across batches (ambiguous_history)', async () => {
