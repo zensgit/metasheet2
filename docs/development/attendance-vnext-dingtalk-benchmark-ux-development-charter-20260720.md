@@ -1,10 +1,11 @@
 # 考勤 vNext：钉钉对标、易用性提升与前端收敛开发总纲 — 2026-07-20
 
-> **Status: PROPOSED（owner ratification required）**
+> **Status: RATIFIED（owner accepted OD-VX1..OD-VX6 on 2026-07-20）**
 >
 > 本文是考勤 vNext 体验线的单一开发总纲，用于约束信息架构、实现顺序、组件拆分、测试门禁、
-> 模型分工与收口口径。本文形成和合入不等于授权运行时代码开工；在 owner 裁决本文 §12 的
-> OD-VX1..OD-VX6 并把状态改为 `RATIFIED` 前，只允许做只读核对、PR 刷新和 docs/test-only 前置。
+> 模型分工与收口口径。owner 已接受本文 §12 的全部推荐裁决；该裁决立即授权按顺序推进 Wave 0
+> 与 Wave 1，不等于一次性授权后续所有 runtime。Wave 2 及以后仍必须满足各波硬前置、独立设计锁
+> 和逐片审阅门禁。
 >
 > **不得用本文重开已归档的 attendance v1 或 S7。** v1 staging acceptance、DingTalk E1-E4、
 > S7-0..S7-5 均是已交付基线；vNext 只改“用户如何找到、理解和完成工作”，除非另有独立
@@ -485,9 +486,9 @@ org bucket change 均有 mounted 测试；移动端不显示竞争性的长配�
 
 ## 12. Owner 决策菜单
 
-本文 ratify 建议采用以下默认值：
+owner 已采用以下推荐值：
 
-| 决策 | 推荐裁决 | 影响 |
+| 决策 | 已裁决内容 | 影响 |
 |---|---|---|
 | OD-VX1 顺序 | #4371 -> #4359 -> #4355 -> #4353/#4414 -> onboarding -> explainability | 保持单热文件串行，先员工后管理首页 |
 | OD-VX2 员工总览 | 接受 #4370 OD-O1..OD-O4 推荐项 | 解锁 Wave 2，无 feature flag 双模板 |
@@ -496,8 +497,11 @@ org bucket change 均有 mounted 测试；移动端不显示竞争性的长配�
 | OD-VX5 组件收敛 | 随产品波次渐进拆分，不单开大重写 | 控制 `AttendanceView.vue` 风险 |
 | OD-VX6 对标边界 | 只宣称核心治理可对标、局部可超越；原生/硬件保持 OUT | 防止路线和市场口径过度扩张 |
 
-owner 可在本文 PR 直接记录：`OD-VX1..6 = ACCEPT RECOMMENDED`，或逐项给出替代裁决。
-只有六项都有明确裁决，本文才可改为 `RATIFIED`。
+**Owner decision record（2026-07-20）**：`OD-VX1..6 = ACCEPT RECOMMENDED`。
+
+该记录授权总纲顺序与边界，并立即解锁 Wave 0/1。OD-VX2 同时接受 #4370 的 OD-O1..OD-O4
+产品方向，但 #4370 文档仍需在 #4359 合入后刷新到新 main 并完成自身 `PROPOSED -> RATIFIED`
+状态同步，才可开启 Wave 2 runtime。
 
 ## 13. Definition of Done
 
@@ -532,7 +536,7 @@ owner 可在本文 PR 直接记录：`OD-VX1..6 = ACCEPT RECOMMENDED`，或逐�
 
 | 波次/资产 | 设计 | Runtime | 验证 | 当前权威状态 |
 |---|---|---|---|---|
-| 本总纲 | 本文 | N/A | `git diff --check` + 引用核对 | PROPOSED，等待 OD-VX1..6 |
+| 本总纲 | 本文 | N/A | `git diff --check` + 引用核对 | RATIFIED；OD-VX1..6 于 2026-07-20 接受推荐值 |
 | Wave 0 / #4371 | 既有测试意图 | test/workflow only，head `1a88e7aa5` | 历史 checks 绿，需 current-head 重跑 | OPEN / BEHIND |
 | Wave 1 / #4359 | issue #4354 | 已有实现分支，head `2eff10bc9` | 历史 required checks 绿，需 re-port 后重跑 | OPEN / BEHIND |
 | Wave 2 / #4355 | #4370 PROPOSED，head `6a01ec630` | 未授权 | 未开始 | OWNER-GATED |
