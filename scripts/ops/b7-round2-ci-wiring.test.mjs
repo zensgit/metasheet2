@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -126,4 +126,15 @@ test('plugin-tests.yml runs the B7 sync-hook suite as a whole file in the approv
   )
   const multi = namedStepBody(wf, 'Run multitable real-DB integration')
   assert.doesNotMatch(multi, wholeFileRunRe(SYNC_HOOK_FILE), `${SYNC_HOOK_FILE} must not be in multitable real-DB`)
+})
+
+test('both B7 round-2 suite files exist on disk', () => {
+  // Third point: both wiring texts can stay intact while a suite is renamed/deleted — vitest
+  // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
+  for (const f of [ADMIN_FILE, SYNC_HOOK_FILE]) {
+    assert.ok(
+      existsSync(join(repoRoot, 'packages/core-backend', f)),
+      `wired suite packages/core-backend/${f} must exist on disk`,
+    )
+  }
 })

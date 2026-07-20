@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -539,4 +539,13 @@ test('synthetic positive: file inside named approval real-DB step with env.DATAB
   assert.equal(isWholeFileInApprovalRealDbStep(wf, FILE), true)
   assert.equal(stepHasEnvDatabaseUrl(namedStepBody(wf, REAL_DB_STEP)), true)
   assert.equal(stepInvokesVitestIntegrationConfig(namedStepBody(wf, REAL_DB_STEP)), true)
+})
+
+test('the T2-Gate collision-mechanism suite file exists on disk', () => {
+  // Third point: both wiring texts can stay intact while the suite is renamed/deleted — vitest
+  // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
+  assert.ok(
+    existsSync(join(repoRoot, 'packages/core-backend', FILE)),
+    `wired suite packages/core-backend/${FILE} must exist on disk`,
+  )
 })

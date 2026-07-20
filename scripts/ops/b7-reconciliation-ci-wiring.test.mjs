@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -70,5 +70,14 @@ test('plugin-tests.yml runs the B7 reconciliation suite as a whole file in the d
     multi,
     wholeFileRunRe(FILE),
     `${FILE} must not be wired into the multitable real-DB step`,
+  )
+})
+
+test('the B7 reconciliation suite file exists on disk', () => {
+  // Third point: both wiring texts can stay intact while the suite is renamed/deleted — vitest
+  // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
+  assert.ok(
+    existsSync(join(repoRoot, 'packages/core-backend', FILE)),
+    `wired suite packages/core-backend/${FILE} must exist on disk`,
   )
 })

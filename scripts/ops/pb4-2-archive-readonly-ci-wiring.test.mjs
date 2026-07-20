@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -24,4 +24,13 @@ test('plugin-tests.yml runs the PB4-2 archive-read-only suite as a whole file in
   const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
   // it must appear on its own line in the vitest run list (mirrors the other directory db files)
   assert.match(wf, new RegExp(`\\n\\s*${FILE.replace(/[.]/g, '\\.')} \\\\`), `plugin-tests.yml must run ${FILE} in the directory real-DB step`)
+})
+
+test('the PB4-2 archive-read-only suite file exists on disk', () => {
+  // Third point: both wiring texts can stay intact while the suite is renamed/deleted — vitest
+  // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
+  assert.ok(
+    existsSync(join(repoRoot, 'packages/core-backend', FILE)),
+    `wired suite packages/core-backend/${FILE} must exist on disk`,
+  )
 })
