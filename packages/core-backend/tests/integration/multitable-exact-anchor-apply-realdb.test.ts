@@ -454,6 +454,44 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(await trashCount(R_G2)).toBe(0)
   })
 
+  test('G2c RESURRECT-LINK-REBUILD: the at-anchor snapshot rebuilds WRITABLE outbound meta_links, is NOT-EXISTS idempotent, and skips the mirror side', async () => {
+    const { anchorOp } = await seedWorld()
+    const R_SRC = `rec_g2c_src_${TS}` // resurrected; its snapshot carries link + mirror cells
+    const R_TGT = `rec_g2c_tgt_${TS}` // live foreign target
+    const F_LINK = `fld_g2c_link_${TS}`
+    const F_MIRROR = `fld_g2c_mirror_${TS}`
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_LINK, SHEET, 'Link', 'link', JSON.stringify({ foreignSheetId: SHEET }), 10])
+    // The MIRROR side of a twoWay link (property.mirrorOf) is ALWAYS read-only — it must never own a
+    // meta_links row (the spine invariant), so the rebuild must skip it structurally.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_MIRROR, SHEET, 'Mirror', 'link', JSON.stringify({ foreignSheetId: SHEET, mirrorOf: F_LINK }), 11])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [R_TGT, SHEET, JSON.stringify({ [F_STR]: 'target' })])
+    // at-anchor: R_SRC exists with BOTH a writable link cell and a mirror cell pointing at R_TGT.
+    const snap = { [F_STR]: 'g2c', [F_LINK]: [R_TGT], [F_MIRROR]: [R_TGT] }
+    await revSeq(R_SRC, 1, 'create', snap, '9000870')
+    await revSeq(R_SRC, 1, 'delete', snap, '9002260') // deleted after the anchor (links cascade-dropped)
+    await q('INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)', [R_SRC, SHEET, JSON.stringify(snap), 1])
+
+    const pv = await preview(anchorOp, 'revert')
+    expect((await applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })).ok).toBe(true)
+
+    const links = (await q('SELECT field_id FROM meta_links WHERE record_id = $1 AND foreign_record_id = $2', [R_SRC, R_TGT])).rows as Array<{ field_id: string }>
+    // Exactly ONE row: the writable link. The mirror side is skipped (isFieldAlwaysReadOnly) — a mirror row
+    // here would break the twoWay spine invariant.
+    expect(links.length).toBe(1)
+    expect(links[0].field_id).toBe(F_LINK)
+
+    // NOT-EXISTS idempotence: re-running the same rebuild statement must not duplicate the edge. (ON CONFLICT
+    // DO NOTHING could never have caught this — meta_links has no unique on the edge triple, only on `id`.)
+    await q(
+      `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+       SELECT $1, $2, $3, $4 WHERE NOT EXISTS (
+         SELECT 1 FROM meta_links ml WHERE ml.field_id = $2 AND ml.record_id = $3 AND ml.foreign_record_id = $4)`,
+      [`lnk_dup_${TS}`, F_LINK, R_SRC, R_TGT],
+    )
+    const after = (await q('SELECT count(*)::int c FROM meta_links WHERE record_id = $1 AND field_id = $2 AND foreign_record_id = $3', [R_SRC, F_LINK, R_TGT])).rows[0] as { c: number }
+    expect(Number(after.c)).toBe(1) // still exactly one — the guard held
+  })
+
   test('G2b RESURRECT-TRASH-ROLLBACK: an injected failure AFTER the resurrect rolls the live row, its revision AND the trash deletion back together (all-or-nothing)', async () => {
     const { anchorOp } = await seedWorld()
     const R_G2B = `rec_g2b_${TS}`

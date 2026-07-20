@@ -289,13 +289,24 @@ export async function applyExactAnchorRecovery(
           'INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)',
           [s.recordId, input.sheetId, JSON.stringify(s.snapshot), input.actorId],
         )
-        // Rebuild outbound meta_links from the at-anchor snapshot (writable/forward links only) — same insert
-        // shape as create/patch/restoreRecord; `loadLinkValuesByRecord` reads meta_links, not `data`.
+        // Rebuild outbound meta_links from the at-anchor snapshot (writable/forward links only) —
+        // `loadLinkValuesByRecord` reads meta_links, not `data`, so without this the resurrected record's
+        // link cells read empty. IDEMPOTENCE VIA `NOT EXISTS`, NOT `ON CONFLICT`: meta_links has NO unique
+        // constraint on the edge triple (only `meta_links_pkey` on the synthetic `id`), so an
+        // `ON CONFLICT DO NOTHING` with a freshly-minted uuid can NEVER fire — it reads as a guard while
+        // guaranteeing nothing. This is the same discipline 4c-3's inbound replay carries
+        // (`inbound-link-replay.ts` ~:154). Today no duplicate is reachable anyway (the record's outbound
+        // rows were dropped by `meta_links_record_id_fkey ON DELETE CASCADE` when it was deleted), but the
+        // guard makes that a property of THIS statement instead of a precondition inherited from elsewhere.
         for (const fieldId of resurrectLinkFieldIds) {
           for (const foreignId of normalizeLinkIds((s.snapshot as Record<string, unknown>)[fieldId])) {
             await query(
               `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-               VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+               SELECT $1, $2, $3, $4
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM meta_links ml
+                   WHERE ml.field_id = $2 AND ml.record_id = $3 AND ml.foreign_record_id = $4
+                )`,
               [`lnk_${randomUUID()}`.slice(0, 50), fieldId, s.recordId, foreignId],
             )
           }
