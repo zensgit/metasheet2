@@ -440,8 +440,19 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)',
       [R_G2, SHEET, JSON.stringify({ [F_STR]: 'g2-older-vintage' }), 1],
     )
+    // SHEET-SCOPING PROBE (gate F6): a trash row with the SAME record_id but a DIFFERENT sheet must SURVIVE
+    // — the cleanup is scoped by (record_id, sheet_id), and dropping the sheet_id predicate would reach
+    // across sheets. (meta_records_trash has no FK to meta_sheets, so a foreign-sheet row is constructible.)
+    const OTHER_SHEET = `${SHEET}_other`
+    await q(
+      'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)',
+      [R_G2, OTHER_SHEET, JSON.stringify({ [F_STR]: 'other-sheet-vintage' }), 1],
+    )
+    const foreignTrash = async () => Number(((await q('SELECT count(*)::int c FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2', [R_G2, OTHER_SHEET])).rows[0] as { c: number }).c)
+    expect(await foreignTrash()).toBe(1)
+
     const trashBefore = await trashCount(R_G2)
-    expect(trashBefore).toBe(2) // precondition: TWO vintages in the recycle bin
+    expect(trashBefore).toBe(2) // precondition: TWO vintages in the recycle bin (this sheet)
     const pv = await preview(anchorOp, 'revert')
     const out = await applyExactAnchorRecovery(txn, { token: pv.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(out.ok).toBe(true)
@@ -451,7 +462,11 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     // OWNER P1 (2026-07-17): live/trash MUTUAL EXCLUSION — the resurrect must have removed the trash row.
     // Without the trash cleanup the record is live AND still in the recycle bin (future restore 23505,
     // mis-pinned tombstone/retention). Mutation: drop the `DELETE FROM meta_records_trash` ⇒ this reds.
+    // BOTH vintages go (mutating to restoreRecord's single-PK semantics reds this — gate-verified).
     expect(await trashCount(R_G2)).toBe(0)
+    // ...but the SAME record_id on ANOTHER sheet is untouched — dropping the `sheet_id` predicate reds this.
+    expect(await foreignTrash()).toBe(1)
+    await q('DELETE FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2', [R_G2, OTHER_SHEET])
   })
 
   test('G2c RESURRECT-LINK-REBUILD: the at-anchor snapshot rebuilds WRITABLE outbound meta_links, is NOT-EXISTS idempotent, and skips the mirror side', async () => {
@@ -480,16 +495,16 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(links.length).toBe(1)
     expect(links[0].field_id).toBe(F_LINK)
 
-    // NOT-EXISTS idempotence: re-running the same rebuild statement must not duplicate the edge. (ON CONFLICT
-    // DO NOTHING could never have caught this — meta_links has no unique on the edge triple, only on `id`.)
-    await q(
-      `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-       SELECT $1, $2, $3, $4 WHERE NOT EXISTS (
-         SELECT 1 FROM meta_links ml WHERE ml.field_id = $2 AND ml.record_id = $3 AND ml.foreign_record_id = $4)`,
-      [`lnk_dup_${TS}`, F_LINK, R_SRC, R_TGT],
-    )
-    const after = (await q('SELECT count(*)::int c FROM meta_links WHERE record_id = $1 AND field_id = $2 AND foreign_record_id = $3', [R_SRC, F_LINK, R_TGT])).rows[0] as { c: number }
-    expect(Number(after.c)).toBe(1) // still exactly one — the guard held
+    // HONEST SCOPE (gate F5, 2026-07-17): there is deliberately NO assertion here for the rebuild's
+    // `NOT EXISTS` idempotence. An earlier draft re-executed a hand-written copy of the INSERT in this test
+    // body and asserted the count stayed 1 — that proves a Postgres property, not the production path, and
+    // NO production mutation could red it (a tautology, the exact fake-green class this suite exists to
+    // reject). The guard is genuinely UNREACHABLE end-to-end today: `meta_links_record_id_fkey` is
+    // ON DELETE CASCADE, so a deleted record has zero outbound rows and a resurrect always starts from
+    // empty — a duplicate cannot be constructed without first breaking that FK. It is therefore
+    // defense-in-depth verified by code reading (meta_links has no unique on the edge triple — only
+    // `meta_links_pkey` on `id` — so the previous `ON CONFLICT DO NOTHING` could never fire), and it is
+    // NOT claimed to be covered by a golden.
   })
 
   test('G2b RESURRECT-TRASH-ROLLBACK: an injected failure AFTER the resurrect rolls the live row, its revision AND the trash deletion back together (all-or-nothing)', async () => {

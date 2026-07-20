@@ -277,10 +277,17 @@ export async function applyExactAnchorRecovery(
             .map((f) => f.id)
         : []
       for (const s of plan.resurrects) {
-        // Lock this record's trash vintage(s) FIRST (4c-3 C4 discipline): a concurrent restore/resurrect of
-        // the same id serializes here; the loser sees the rows gone and the whole apply aborts, never racing
-        // to a duplicate insert. A resurrect whose post-anchor delete was a hard delete (no trash row) locks
-        // zero rows — harmless.
+        // Lock this record's trash vintage(s) FIRST (4c-3 C4 discipline): a concurrent restoreRecord on the
+        // same id serializes here rather than racing the INSERT below. A resurrect whose post-anchor delete
+        // was a hard delete (no trash row) locks zero rows — harmless.
+        // HONEST COVERAGE (gate F1, 2026-07-17): this lock is DEFENSE-IN-DEPTH BENEATH the canonical fence,
+        // and it is NOT independently covered — neutering it leaves the suite green, because the apply only
+        // ever runs with the writer fence ON (`fenceWriterEntry` is a no-op when the flag is off,
+        // canonical-sheet-fence.ts:185) and that fence already serializes apply-vs-apply. What the lock adds
+        // is protection against a NON-fenced concurrent writer of the same trash row (today: restoreRecord).
+        // Correctness of the race itself is settled by construction rather than by a golden — a second
+        // resurrect of the same id conflicts on the burn PK (23505) and rolls back cleanly — but the
+        // independent coverage for this lock is deliberately DEFERRED to the wiring rung, not claimed here.
         await query('SELECT id FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2 FOR UPDATE', [s.recordId, input.sheetId])
         // New generation: version resets to 1 (the MULTI-GEN delete→recreate convention). No lock can exist
         // on a row being created; the snapshot is previously-persisted at-anchor data (no new user payload).
