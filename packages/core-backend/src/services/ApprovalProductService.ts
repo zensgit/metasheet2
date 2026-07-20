@@ -1319,16 +1319,31 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
  * — the same exemption `allowParallelDuplicateAssignees` grants the static check, because the
  * merge machinery legitimately absorbs same-approver overlap.
  *
- * Walk mirrors `collectBranchAssignees`' conservative first-outgoing-edge walk; the graph is
- * already normalized (`asApprovalGraph`) so structural failure modes were rejected earlier.
- * Fingerprints are deduped WITHIN a branch first (sequential same-source nodes in one branch are
- * not a parallel conflict) and then compared across branches.
+ * Traversal (review #4433 owner P2): the walk enumerates EVERY runtime-reachable path inside a
+ * branch — NOT just the first-outgoing-edge chain. A condition node fans out over ALL of its
+ * outgoing edges (every rules-branch edge AND the default edge: which path fires is
+ * form-data-dependent, so publish must treat each as possible); every other node type follows its
+ * first outgoing edge (linear in a normalized graph). The branch's fingerprint set is therefore
+ * the UNION over all condition paths up to the join node, and a conflict is flagged when SOME
+ * path through one branch and SOME path through another carry the identical dynamic source —
+ * exactly the pairings for which the runtime 409 is reachable. Cycles are cut with a per-branch
+ * visited set. A nested parallel node (normalize rejects it on the first-edge path and the canvas
+ * F4 guard cannot author one, but a non-first condition path of a legacy graph could carry one)
+ * is treated defensively as a PASS-THROUGH fan-out over all its outgoing edges: its sub-branches
+ * are all simultaneously active, so every source reachable through it belongs to this outer
+ * branch's set.
+ * Fingerprints are deduped WITHIN a branch first (sequential same-source nodes — or the same
+ * source on two ALTERNATIVE paths of one branch — are not a parallel conflict) and then compared
+ * across branches. FE mirror: apps/web/src/approvals/parallelEdit.ts
+ * `parallelDynamicAssigneeConflicts` — SAME traversal, keep in lockstep.
  */
 function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph): void {
   const edgeByKey = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
-  const firstOutgoing = new Map<string, string>()
+  const outgoingTargets = new Map<string, string[]>()
   for (const edge of approvalGraph.edges) {
-    if (!firstOutgoing.has(edge.source)) firstOutgoing.set(edge.source, edge.target)
+    const targets = outgoingTargets.get(edge.source)
+    if (targets) targets.push(edge.target)
+    else outgoingTargets.set(edge.source, [edge.target])
   }
   const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
   for (const node of approvalGraph.nodes) {
@@ -1337,12 +1352,17 @@ function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph):
     const seenAcrossBranches = new Map<string, string>()
     for (const branchEdgeKey of parallelConfig.branches) {
       const branchFingerprints = new Map<string, string>()
-      let currentKey: string | undefined = edgeByKey.get(branchEdgeKey)?.target
+      const entryKey = edgeByKey.get(branchEdgeKey)?.target
+      // FIFO worklist in edge-declaration order (deterministic carrier node per fingerprint); the
+      // visited set both cuts cycles and bounds the walk to each node at most once per branch.
+      const queue: string[] = entryKey === undefined ? [] : [entryKey]
       const visited = new Set<string>()
-      while (currentKey && currentKey !== parallelConfig.joinNodeKey && !visited.has(currentKey)) {
+      for (let head = 0; head < queue.length; head += 1) {
+        const currentKey = queue[head]
+        if (currentKey === parallelConfig.joinNodeKey || visited.has(currentKey)) continue
         visited.add(currentKey)
         const current = nodeByKey.get(currentKey)
-        if (!current) break
+        if (!current) continue
         if (current.type === 'approval') {
           const sources = (current.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
           for (const source of sources) {
@@ -1350,7 +1370,15 @@ function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph):
             if (fingerprint && !branchFingerprints.has(fingerprint)) branchFingerprints.set(fingerprint, current.key)
           }
         }
-        currentKey = firstOutgoing.get(currentKey)
+        const targets = outgoingTargets.get(currentKey) ?? []
+        if (current.type === 'condition' || current.type === 'parallel') {
+          // Condition: EVERY outgoing edge (each rules branch + the default) is a possible runtime
+          // path. Parallel (defensive — see doc above): pass-through fan-out over all sub-branches.
+          for (const target of targets) queue.push(target)
+        } else if (targets.length > 0) {
+          // Linear node — follow its first outgoing edge, as before.
+          queue.push(targets[0])
+        }
       }
       for (const [fingerprint, carrierNodeKey] of branchFingerprints) {
         const priorNodeKey = seenAcrossBranches.get(fingerprint)
