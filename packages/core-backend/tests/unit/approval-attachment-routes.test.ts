@@ -3,11 +3,22 @@ import express from 'express'
 import request from 'supertest'
 import { describe, expect, test } from 'vitest'
 
+import { usePinnedServer } from '../utils/pinned-server'
+
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from '../../src/routes/approval-attachments'
 import { APPROVAL_ATTACHMENT_LIMITS } from '../../src/services/approval-attachment-validation'
 import type { ApprovalAttachmentStore } from '../../src/services/approval-attachment-storage'
 
 const FLAG_ON = { APPROVAL_ATTACHMENTS_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
+
+// #4154 pinned-server transport: one listener for the whole suite; per-call apps stay swappable.
+// serve(app) installs the app on the pinned listener and returns the URL-mode supertest transport —
+// requests in this suite are strictly awaited, so swapping between sequential calls is race-free.
+const pinned = usePinnedServer()
+function serve(app: express.Express) {
+  pinned.setApp(app)
+  return request(pinned.url())
+}
 
 function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean; org?: string | null; attachmentField?: boolean } = {}) {
   const blobs = new Map<string, Buffer>()
@@ -67,7 +78,7 @@ describe('approval attachment routes (flag-gated)', () => {
 
   test('upload happy path: 201, server-derived key + server-derived org persisted, client filename not used as path', async () => {
     const { app, inserted, blobs } = makeApp()
-    const r = await request(app)
+    const r = await serve(app)
       .post('/api/approval/attachments')
       .field('fieldId', 'fld1')
       .field('templateId', 'tpl1')
@@ -84,13 +95,13 @@ describe('approval attachment routes (flag-gated)', () => {
 
   test('upload rejects: unauthenticated 401; principal without org 403; missing template/field 400; disallowed MIME 422', async () => {
     const anon = makeApp({ viewer: null })
-    expect((await request(anon.app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(401)
+    expect((await serve(anon.app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(401)
     const noOrg = makeApp({ org: null })
-    expect((await request(noOrg.app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(403)
+    expect((await serve(noOrg.app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(403)
     const { app } = makeApp()
     // missing file → 400; and a missing template/field also 400
-    expect((await request(app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(400)
-    const bad = await request(app)
+    expect((await serve(app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(400)
+    const bad = await serve(app)
       .post('/api/approval/attachments')
       .field('fieldId', 'f')
       .field('templateId', 't')
@@ -103,7 +114,7 @@ describe('approval attachment routes (flag-gated)', () => {
   test('upload over the multer byte cap → 413 values-free reject (no stack, no limit echo)', async () => {
     const { app, blobs } = makeApp()
     const tooBig = Buffer.alloc(APPROVAL_ATTACHMENT_LIMITS.maxFileBytes + 1)
-    const r = await request(app)
+    const r = await serve(app)
       .post('/api/approval/attachments')
       .field('fieldId', 'fld1')
       .field('templateId', 'tpl1')
@@ -117,7 +128,7 @@ describe('approval attachment routes (flag-gated)', () => {
   test('download whose blob store rejects → 500 (handled), not a hang', async () => {
     const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'gone', file_name: 'a.pdf', mime_type: 'application/pdf' }
     const app = makeApp({ rows: [row], participant: true }) // blob 'gone' is never seeded → store.get throws
-    const r = await request(app.app).get('/api/approval/attachments/att_1/download')
+    const r = await serve(app.app).get('/api/approval/attachments/att_1/download')
     expect(r.status).toBe(500)
     expect(r.body).toEqual({ error: 'internal_error' }) // values-free
   })
@@ -125,7 +136,7 @@ describe('approval attachment routes (flag-gated)', () => {
   // G2: a fieldId that is NOT an attachment-typed field in the template schema is rejected (400).
   test('upload G2: a non-attachment fieldId is rejected 400; the blob is never written', async () => {
     const { app, inserted, blobs } = makeApp({ attachmentField: false })
-    const r = await request(app)
+    const r = await serve(app)
       .post('/api/approval/attachments')
       .field('fieldId', 'not_an_attachment')
       .field('templateId', 'tpl1')
@@ -140,22 +151,22 @@ describe('approval attachment routes (flag-gated)', () => {
     const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
     const ok = makeApp({ rows: [row], participant: true })
     ok.blobs.set('k1', Buffer.from('%PDF'))
-    const good = await request(ok.app).get('/api/approval/attachments/att_1/download')
+    const good = await serve(ok.app).get('/api/approval/attachments/att_1/download')
     expect(good.status).toBe(200)
     expect(good.headers['content-type']).toContain('application/pdf')
     const deny = makeApp({ rows: [row], participant: false })
-    expect((await request(deny.app).get('/api/approval/attachments/att_1/download')).status).toBe(404)
+    expect((await serve(deny.app).get('/api/approval/attachments/att_1/download')).status).toBe(404)
     const missing = makeApp({ rows: [] })
-    expect((await request(missing.app).get('/api/approval/attachments/att_x/download')).status).toBe(404)
+    expect((await serve(missing.app).get('/api/approval/attachments/att_x/download')).status).toBe(404)
   })
 
   // G6 (no deleted-row oracle): the deleted lifecycle signal is emitted ONLY to an authorized viewer.
   test('download of a deleted row: participant sees 410 (tombstone); NON-participant sees 404 (no oracle)', async () => {
     const deleted = { status: 'deleted', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
     const authed = makeApp({ rows: [deleted], participant: true })
-    expect((await request(authed.app).get('/api/approval/attachments/att_1/download')).status).toBe(410)
+    expect((await serve(authed.app).get('/api/approval/attachments/att_1/download')).status).toBe(410)
     const outsider = makeApp({ rows: [deleted], participant: false })
-    expect((await request(outsider.app).get('/api/approval/attachments/att_1/download')).status).toBe(404) // NOT 410 — no 404→410 existence oracle
+    expect((await serve(outsider.app).get('/api/approval/attachments/att_1/download')).status).toBe(404) // NOT 410 — no 404→410 existence oracle
   })
 
   // approval-attachment-hidden-redaction (lock G7 / §4.2 gate 2 / test 6): a field hidden at the
@@ -165,11 +176,11 @@ describe('approval attachment routes (flag-gated)', () => {
     const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'secret', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
     const hidden = makeApp({ rows: [row], participant: true, hidden: true })
     hidden.blobs.set('k1', Buffer.from('%PDF'))
-    const refused = await request(hidden.app).get('/api/approval/attachments/att_1/download')
+    const refused = await serve(hidden.app).get('/api/approval/attachments/att_1/download')
     expect(refused.status).toBe(404) // hidden ⇒ same "not found" shape the snapshot redaction produces
     const visible = makeApp({ rows: [row], participant: true, hidden: false })
     visible.blobs.set('k1', Buffer.from('%PDF'))
-    const served = await request(visible.app).get('/api/approval/attachments/att_1/download')
+    const served = await serve(visible.app).get('/api/approval/attachments/att_1/download')
     expect(served.status).toBe(200) // positive control: an identical NON-hidden field still serves bytes
   })
 })
