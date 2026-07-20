@@ -73,18 +73,26 @@ export function countAppModeSites(fileName: string, content: string): number {
   return count
 }
 
+// Recursive by design (owner P2): a top-level-only readdir would let a future test placed in a
+// subdirectory bypass the zero-tolerance ban. Keys are root-relative POSIX paths.
 export function scanAppModeSites(rootDir: string): AppModeScanResult {
   const counts: Record<string, number> = {}
   let totalSites = 0
-  const entries = fs
-    .readdirSync(rootDir)
-    .filter((name) => name.endsWith('.test.ts') || name.endsWith('.spec.ts'))
-    .sort()
-  for (const name of entries) {
-    const filePath = path.join(rootDir, name)
-    const fileCount = countAppModeSites(name, fs.readFileSync(filePath, 'utf8'))
+  const files: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.isFile() && (entry.name.endsWith('.test.ts') || entry.name.endsWith('.spec.ts'))) files.push(full)
+    }
+  }
+  walk(rootDir)
+  files.sort()
+  for (const filePath of files) {
+    const rel = path.relative(rootDir, filePath).split(path.sep).join('/')
+    const fileCount = countAppModeSites(rel, fs.readFileSync(filePath, 'utf8'))
     if (fileCount > 0) {
-      counts[name] = fileCount
+      counts[rel] = fileCount
       totalSites += fileCount
     }
   }
