@@ -814,6 +814,7 @@ jobs:
             tests/integration/multitable-automation-producer-emit-realdb.test.ts \
             tests/integration/multitable-automation-producer-family2-realdb.test.ts \
             tests/integration/multitable-durable-startup-failclosed.db.test.ts \
+            tests/integration/multitable-p2-fwb-eight-scenario-matrix.test.ts \
             tests/integration/multitable-automation-producer-family5-realdb.test.ts \
             tests/integration/multitable-automation-producer-family4-realdb.test.ts \
             tests/integration/multitable-automation-producer-family1-realdb.test.ts \

@@ -339,6 +339,9 @@ export default defineConfig({
       'tests/integration/multitable-automation-producer-emit-realdb.test.ts',
       // P1#2c producer family 2 (executor Class-A record events) REPLACE site goldens: real DB, same shape.
       'tests/integration/multitable-automation-producer-family2-realdb.test.ts',
+      // The formal P2×ledger×FWB eight-scenario acceptance matrix (S1-S8, real DB, constructed crash/
+      // concurrency) — the month plan's gate for flag enablement. Runs on merged main content.
+      'tests/integration/multitable-p2-fwb-eight-scenario-matrix.test.ts',
       // Owner P1s (head 5afe30f26): REAL MetaSheetServer.start() fail-closed matrix — flag ON + missing
       // AutomationService / disabled retry scheduler must ABORT startup; flag OFF keeps legacy degrade.
       'tests/integration/multitable-durable-startup-failclosed.db.test.ts',
