@@ -23,8 +23,11 @@ vNext 的正确目标不是复制钉钉皮肤，而是吸收其“按任务进�
 
 ### 1.1 仓库基线
 
-- `origin/main`: `a98996ee2e0269b22801a6b87d2b8d5b5f076025`
-  (`docs(attendance): verify S7 dynamic approver delivery (#4483)`)。
+- 本文刷新基线 `origin/main`: `86838c11f314c950ac32c394deabd37f8cd19990`
+  (`feat(approval): FWB-3 — decision-value freeze + node-scoped writeback executor (#4344)`)。
+- S7 交付锚点 `a98996ee2e0269b22801a6b87d2b8d5b5f076025`
+  (`docs(attendance): verify S7 dynamic approver delivery (#4483)`) 已确认是该基线祖先；后续主线提交未重开
+  S7 业务范围。
 - attendance v1：五窗口 staging acceptance 与 DingTalk E1-E4 已闭环；不得因 UI 改造重跑或改写其业务结论。
 - S7：`direct_manager`、`dept_head`、`manager_at_level` 已完成代码与验证；
   `ATTENDANCE_APPROVAL_DYNAMIC_ASSIGNEE_SOURCES_ENABLED` 仍默认 OFF，启用属于 operator/owner opt-in，
@@ -47,10 +50,13 @@ vNext 的正确目标不是复制钉钉皮肤，而是吸收其“按任务进�
 
 | 资产 | 当前状态（2026-07-20） | 本总纲处置 |
 |---|---|---|
-| #4371 focused admin rail guard | OPEN / BEHIND，历史 required checks 绿 | 先刷新、复核并合入，作为后续 admin 改造测试前置 |
-| #4359 group setup workflow | OPEN / BEHIND，required checks 绿 | 保留四阶段列表-详情实现，禁止另造第二套考勤组编辑器 |
-| #4370 employee overview lock | OPEN / draft / PROPOSED / BEHIND | 作为员工 task-first 权威设计输入；owner ratify 后才实现 |
-| #4414 admin task home | OPEN / stacked draft，base=#4359 | 保存实现意图；在 #4355 后从新 main 重新移植并全量 re-gate |
+| #4371 focused admin rail guard | OPEN / BEHIND，head `1a88e7aa5`；历史 required checks 绿 | 先刷新、复核并合入，作为后续 admin 改造测试前置 |
+| #4359 group setup workflow | OPEN / BEHIND，head `2eff10bc9`；历史 required checks 绿 | 保留四阶段列表-详情实现，禁止另造第二套考勤组编辑器 |
+| #4370 employee overview lock | OPEN / draft / PROPOSED / BEHIND，head `6a01ec630` | 作为员工 task-first 权威设计输入；owner ratify 后才实现 |
+| #4414 admin task home | OPEN / stacked draft / CLEAN，head `8a10cdea5`，base=`codex/issue-4354-attendance-group-workspace` | 只保存实现意图；当前仅 stacked-base 检查绿，不等同 main required gate；在 #4355 后从新 main 重新移植并全量 re-gate |
+
+上述状态在 `2026-07-20` 通过 GitHub 实时读取；`BEHIND` 分支不得仅做 update-branch 后直接合并，必须先证明
+旧 patch 没有覆盖主线新增行为。任何后续状态变化仍以 GitHub/main 为准。
 
 `#4359 -> #4355 -> #4353/#4414` 是产品落地顺序；`AttendanceView.vue` 是单一热文件车道，
 不得让这三条 runtime 并行修改同一模板。#4371 是独立 test/workflow 前置，可先落。
@@ -527,13 +533,13 @@ owner 可在本文 PR 直接记录：`OD-VX1..6 = ACCEPT RECOMMENDED`，或逐�
 | 波次/资产 | 设计 | Runtime | 验证 | 当前权威状态 |
 |---|---|---|---|---|
 | 本总纲 | 本文 | N/A | `git diff --check` + 引用核对 | PROPOSED，等待 OD-VX1..6 |
-| Wave 0 / #4371 | 既有测试意图 | test/workflow only | 历史 checks 绿，需 current-head 重跑 | OPEN / BEHIND |
-| Wave 1 / #4359 | issue #4354 | 已有实现分支 | 历史 required checks 绿，需 re-port 后重跑 | OPEN / BEHIND |
-| Wave 2 / #4355 | #4370 PROPOSED | 未授权 | 未开始 | OWNER-GATED |
-| Wave 3 / #4353 | issue + #4414 stacked draft | 旧基线实现存在，不可直接合 | 无 current-base required gate | RE-PORT-GATED |
+| Wave 0 / #4371 | 既有测试意图 | test/workflow only，head `1a88e7aa5` | 历史 checks 绿，需 current-head 重跑 | OPEN / BEHIND |
+| Wave 1 / #4359 | issue #4354 | 已有实现分支，head `2eff10bc9` | 历史 required checks 绿，需 re-port 后重跑 | OPEN / BEHIND |
+| Wave 2 / #4355 | #4370 PROPOSED，head `6a01ec630` | 未授权 | 未开始 | OWNER-GATED |
+| Wave 3 / #4353 | issue + #4414 stacked draft，head `8a10cdea5` | 旧基线实现存在，不可直接合 | 仅 stacked-base checks；无 main current-base required gate | RE-PORT-GATED |
 | Wave 4 onboarding | 本总纲仅定义范围 | 未开始 | 未开始 | DESIGN-LOCK-GATED |
 | Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |
-| S7 runtime flag | 已交付并验证 | main 已有，默认 OFF | S7 verification 已合 | OPERATOR-OPT-IN，非本线完成项 |
+| S7 runtime flag | 已交付并验证 | main 已有，默认 OFF | #4483 verification 已合且为刷新基线祖先 | OPERATOR-OPT-IN，非本线完成项 |
 | 原生/硬件/飞书/多午夜 | 不在本总纲 | 未授权 | N/A | OUT / 独立立项 |
 
 ## 16. 参考
