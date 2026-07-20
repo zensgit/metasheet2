@@ -1,13 +1,15 @@
 # B5/B6 Routing-Core Design Lock（Q1–Q6 已裁决 — 锁定）
 
-Date: 2026-07-17 · Status: **Q1–Q6 已由 owner 裁决（2026-07-17）— 锁定；实现返工与 fresh gate 已完成，待逐窗落地**
+Date: 2026-07-17 · Last verified: 2026-07-21 · Status: **Q1–Q6 已由 owner 裁决（2026-07-17）— 锁定；
+B5-a..B7 全栈已 as-landed 合并 origin/main（真实 merge SHA 见 §5）**
 Basis: #4215 §6/§7/§10.1（已 ratify-by-merge `66c7459a8`）+ B4 落地形态（#4419 `b94dcd644`）。
 本文件不重新设计 §6 —— 只把 §6 的 owner ruling 固化为可实现、可 mutation 验证的锁。§3 记录
-owner 对 Q1–Q6 的最终裁决；§5 记录当前真实开发状态（B5-a..B7 已开发、返工与独立 gate 已完成，仍未合并）。
+owner 对 Q1–Q6 的最终裁决；§5 记录 as-landed 落地账（B5-a..B7 五张实现 PR + 本设计锁本身全部
+已合并 main），并明示**仍被门控的部分**（T2-Gate 双 corp staging 实证未执行）。
 
 ## 0. B5 关闭的具体缺陷（现状实证）
 
-`ApprovalDirectoryOrg.resolveApprovalRequesterOrgRelations`（`services/ApprovalDirectoryOrg.ts:197`）
+`ApprovalDirectoryOrg.resolveApprovalRequesterOrgRelations`（`services/ApprovalDirectoryOrg.ts:201`）
 选取申请人 directory account 的方式是跨**所有** integration 的
 `ORDER BY a.updated_at DESC, a.id ASC LIMIT 1` —— 即「最近更新的 integration 赢」。
 单 provider 时代无害；B1-B4 之后一个 org 可同时有 DingTalk 与 local integration，同一用户可在两边
@@ -129,17 +131,49 @@ purpose=`approval_routing` 的解析顺序：
   B7（suggest-only 对账）——全部串行、全部由主循环（Opus 级）实现并配独立对抗 gate
   （计划原文写 B5-c 可 Sonnet 跑量，实际因 routing-core 敏感统一主循环实现——as-built 修正）。
 - 每段：真库测试 → mutation → 对抗 gate → CI → owner 复审落地。
-  **CI 事实修正（owner 抓）**：stacked PR（base≠main）只触发 pr-validate，**不构成 required CI
+  **CI 事实修正（owner 抓）**：base≠main 的 PR 只触发 pr-validate，**不构成 required CI
   全绿**；落地时逐张 retarget→rebase→重放 mutation→全套 required CI→owner 复审。
+  本栈五张实现 PR 均已按该顺序逐张落地 main（as-landed 账见 §5）。
 
-## 5. 当前真实开发状态（2026-07-19 落地前）
+## 5. As-landed 落地账（2026-07-19 全部合并 main；2026-07-21 复核）
 
-| 票 | PR | 状态 |
-|---|---|---|
-| B5-a schema | #4429 · `71e4a3319` | 返工后 gate APPROVE，无 P1/P2；base=main，旧 head required CI 曾全绿，落地窗仍须对齐 main 后重跑 |
-| B5-b resolver | #4430 · `3312cf6d1` | P1 fail-open 已按 §3 修闭；fresh gate 无 P1/P2；stacked/unarmed |
-| B5-c routes | #4431 · `605b0498a` | unsupported-purpose、local 启用保护与 env 严格解析测试已修闭；fresh gate 无 P1/P2；stacked/unarmed |
-| B6 等价 | #4434 · `8f0ad9429` | 真 pending instance + assignment 的在途不变证明已补；fresh gate 无 P1/P2；stacked/unarmed |
-| B7 对账 | #4436 · `56e0b03ad` | 两条 SQL 守卫、管理入口、Q6 hook 与 heal 方向测试已补；fresh gate 无 P1/P2；stacked/unarmed |
+**本表只记 `origin/main` 上的真实 merge SHA。** 早前版本曾登记若干 PR 的中间 head，那些 head
+**不是 main 的祖先**、已被下面的 merge commit 取代，故一律删除——不得据以开分支或推断落地形态。
 
-Transfer T1 继续冻结；Canonical Org 收官门待五 PR 按顺序 retarget/rebase、重放 mutation、跑 required CI、逐张落地后再定稿。
+| 票 | PR | Merge SHA（main 祖先） | 状态 |
+|---|---|---|---|
+| 设计锁本体 | #4425 | `d9f56a8c2` | ✅ 已合并 main（本文件随该 PR 落地） |
+| B5-a schema | #4429 | `81aff8203` | ✅ 已合并 main；迁移 `zzzz20260717110000` 已在库（**勿再新建同表迁移**） |
+| B5-b resolver | #4430 | `05dcd5282` | ✅ 已合并 main；§3 的 P1 fail-open 修闭随该 PR 落地 |
+| B5-c routes | #4431 | `5e55b549d` | ✅ 已合并 main；unsupported-purpose、canonical=local 默认关闭保护、env 严格解析均在库 |
+| B6 等价 | #4434 | `50cbfcfea` | ✅ 已合并 main；真 pending instance + assignment 的在途不变证明在库 |
+| B7 对账 | #4436 | `b004c5797` | ✅ 已合并 main；两条 SQL 守卫、binding 管理入口、Q6 hook、heal 方向守卫在库 |
+
+Canonical Org 开发侧收官证据（合并后 main 上的 fresh migration + replay、18 文件/227 真库测试、
+typecheck、CI wiring 守卫、mutation 来源）见 `canonical-org-mvp-done-gate-20260719.md`；
+逐步 merge SHA 台账见 `canonical-org-mvp-progress-ledger-20260716.md`。
+
+### 5.1 Transfer 现状与仍被门控的部分（勿读成「Transfer 已过 T2」）
+
+- **已合并 main（工程实现，非验收）**：T1 `b9b354a38`（#4458）、T2 `85ef8b7ab`（#4464）、
+  T2-Gate 收官 `2b4324650`（#4465）、goal-round as-landed 收账 `622f09544`（#4466）。
+  T1 **不再冻结**——冻结叙述已由这些落地取代。
+- **仍未执行（owner/ops `_TBD_`，不可模拟）**：**T2-Gate 的真实两 DingTalk corp staging 实证**。
+  CI 里的碰撞机制证明**不等于** collision CONFIRMED/DISPROVED。协议见
+  `canonical-org-t2-gate-two-corp-staging-runbook-20260717.md` §4。
+- **T2.5 仍为条件分支**：collision **CONFIRMED** ⇒ 必须先实现并落地 tenant-scoped key migration
+  （`(provider, tenant_key, external_key)`）才能进 T3（仅有裁决不解锁）；owner 接受的
+  **DISPROVED** ⇒ 可跳过 T2.5 解锁 T3；**INCONCLUSIVE** ⇒ T3/T4/T5 继续冻结。
+- **T3 / T4 / T5 仍冻结**，等待上述 staging 裁决被 owner 接受。
+- 完整 Transfer 收账与解锁纪律见
+  `canonical-org-transfer-goal-round-design-and-verification-20260717.md`。
+
+### 5.2 本文规范条款对 as-built 代码的复核（2026-07-21）
+
+对 main 逐条核对，全部 PASS，本轮未改动任何规范条款：无 `mode` 列、
+`UNIQUE (org_id, purpose)`（`orp_org_purpose_uniq`）、五值 `purpose` CHECK（`orp_purpose_chk`）、
+两条 FK 均 `ON DELETE RESTRICT`（`orp_canonical_int_org_fk` / `orp_fallback_int_org_fk`）——
+均见 `packages/core-backend/src/db/migrations/zzzz20260717110000_create_org_directory_routing_policy.ts`；
+preview 为纯 GET **不审计**、canonical=local 走默认关闭的
+`DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED` 严格开关——均见
+`packages/core-backend/src/routes/admin-directory-routing-policy.ts`。
