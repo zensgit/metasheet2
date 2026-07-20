@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { drainPurgeIntents, sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
+import { drainPurgeIntents, PURGE_MAX_ATTEMPTS, sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
@@ -113,6 +113,88 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
     expect(after).toBe(before)
     await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`]).catch(() => {})
     void deadRow
+  })
+
+  // §3-bis POISON AT CLAIM golden: an expired in_progress intent already AT the attempts ceiling (the
+  // durable footprint of a worker that crashed after claim, before any outcome write) is transitioned to
+  // terminal dead_letter BY THE CLAIM ITSELF — the blob deleter is never invoked for it. Removing the
+  // claim's poison CASE turns this RED (the row would be re-claimed, the deleter called, the intent done).
+  test('poison-at-claim: expired in_progress at the attempts cap → dead_letter WITHOUT invoking the deleter; terminal', async () => {
+    const key = `key_att_${RUN}_poison`
+    await seed({ status: 'deleted', key }) // deleted ⇒ unreferenced ⇒ inside the claimable set
+    await db().query(
+      `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason, status, attempts, fence, lease_expires_at)
+       VALUES ($1,$2,'reconciler_orphan','in_progress',$3,7, now() - interval '1 hour')`,
+      [`pi_poison_${RUN}`, key, PURGE_MAX_ATTEMPTS],
+    )
+    const deleterKeys: string[] = []
+    const alerts: Array<[string, string, string]> = []
+    const r = await drainPurgeIntents(db(), async (k) => (deleterKeys.push(k), true), {
+      onDeadLetter: (id, k, code) => alerts.push([id, k, code]),
+    })
+    expect(r.deadLettered).toBeGreaterThanOrEqual(1)
+    expect(deleterKeys).not.toContain(key) // the deleter was NEVER called for the poisoned intent
+    expect(alerts.some(([id, , code]) => id === `pi_poison_${RUN}` && code === 'max_attempts_exhausted')).toBe(true)
+    const row = (await db().query(
+      'SELECT status, attempts, fence::text AS fence, last_error, lease_expires_at FROM approval_attachment_purge_intents WHERE id=$1',
+      [`pi_poison_${RUN}`],
+    )).rows[0]
+    expect(row.status).toBe('dead_letter')
+    expect(Number(row.attempts)).toBe(PURGE_MAX_ATTEMPTS) // NOT bumped by the poison transition
+    expect(Number(row.fence)).toBe(7) // fence unchanged — no live claim was handed out
+    expect(row.last_error).toBe('max_attempts_exhausted')
+    expect(row.lease_expires_at).toBeNull()
+    // terminal: a later drain never re-claims a dead_letter intent
+    const again = await drainPurgeIntents(db(), async (k) => (deleterKeys.push(k), true))
+    void again
+    expect(deleterKeys).not.toContain(key)
+    expect((await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [`pi_poison_${RUN}`])).rows[0].status).toBe('dead_letter')
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [`pi_poison_${RUN}`]).catch(() => {})
+  })
+
+  // CONSTRUCTED crash-at-claim loop (the P1 scenario): a worker that dies after EVERY claim — before the
+  // deleter or any outcome write — still terminates. Each crashed claim consumed an attempt (attempts is
+  // bumped IN the claim statement), so after PURGE_MAX_ATTEMPTS crashes the next claim poisons the intent
+  // to dead_letter instead of handing it out again. Without claim-time poison this loop never ends
+  // (attempts rise forever, no terminal state — dead-letter only lived in the deleter's catch).
+  test('crash-at-claim loop terminates: repeated claims with NO outcome → attempts rise → claim poisons at the cap', async () => {
+    const key = `key_att_${RUN}_crash`
+    await seed({ status: 'deleted', key })
+    await db().query(
+      `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason) VALUES ($1,$2,'reconciler_orphan')`,
+      [`pi_crash_${RUN}`, key],
+    )
+    // A db wrapper that dies on any post-claim outcome write (SET status='…' — the claim's SET is a
+    // spaced CASE, so only the three fence-CAS outcome writes match): the claim COMMITS (autocommit
+    // statement), then the "process" is gone before recording anything — exactly the crash window.
+    const crashingDb = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes("SET status='")) throw new Error('simulated worker death after claim')
+        return db().query(sql, params)
+      },
+    }
+    for (let i = 1; i <= PURGE_MAX_ATTEMPTS; i++) {
+      await expect(
+        drainPurgeIntents(crashingDb, async () => {
+          throw new Error('simulated worker death before the deleter ran to completion')
+        }),
+      ).rejects.toThrow(/simulated worker death/)
+      const st = (await db().query('SELECT status, attempts FROM approval_attachment_purge_intents WHERE id=$1', [`pi_crash_${RUN}`])).rows[0]
+      expect(st.status).toBe('in_progress') // the crashed claim left no outcome…
+      expect(Number(st.attempts)).toBe(i) // …but DID durably consume an attempt (bumped at claim)
+      // the crashed worker's lease eventually expires
+      await db().query(`UPDATE approval_attachment_purge_intents SET lease_expires_at = now() - interval '1 second' WHERE id=$1`, [`pi_crash_${RUN}`])
+    }
+    // next (healthy) drain: the claim poisons the at-ceiling row — the deleter is NOT called for it
+    const deleterKeys: string[] = []
+    const r = await drainPurgeIntents(db(), async (k) => (deleterKeys.push(k), true))
+    expect(r.deadLettered).toBeGreaterThanOrEqual(1)
+    expect(deleterKeys).not.toContain(key)
+    const final = (await db().query('SELECT status, attempts, last_error FROM approval_attachment_purge_intents WHERE id=$1', [`pi_crash_${RUN}`])).rows[0]
+    expect(final.status).toBe('dead_letter') // the loop TERMINATED in a surfaced terminal state
+    expect(Number(final.attempts)).toBe(PURGE_MAX_ATTEMPTS)
+    expect(final.last_error).toBe('max_attempts_exhausted')
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [`pi_crash_${RUN}`]).catch(() => {})
   })
 
   test('SAFETY: a blob still referenced by a live row is NEVER deleted — skipped and surfaced', async () => {
