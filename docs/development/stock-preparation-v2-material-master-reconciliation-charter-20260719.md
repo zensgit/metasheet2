@@ -4,9 +4,10 @@
 > 第二场景：**PLM <-> ERP 物料主数据对账**。本文不授权运行时代码、迁移、路由、开关、
 > 实体机重跑或外部写；运行时实现须等 §10 的 owner 决策与 Charter ratify。
 >
-> **代码锚：** `origin/main` `698997cf86dc7742a370ce29f74fe39faa63cc0e`（rev-3 刷新；rev-2 锚
-> `2590704f1…`，两锚间受检面唯一变更为 `approval-fwb-decision-values.ts` 新增（审批 FWB 线、
-> 非 stock-prep），stock-prep 面零变动，claims 逐条仍成立；rev-1 锚 `e20907b64…`）。
+> **代码锚：** `origin/main` `d83cf5875f517c3046eb43b37ab83da9e9d2fef9`（rev-5 刷新；较 rev-3 锚
+> `698997cf8…` 仅多一笔 attendance 文档提交 `#4492`,stock-prep / integration-core 面零变动;
+> rev-2 锚 `2590704f1…` 的唯一受检面变更为 `approval-fwb-decision-values.ts`（审批 FWB 线、非
+> stock-prep）;claims 逐条仍成立；rev-1 锚 `e20907b64…`）。
 >
 > **rev-2（2026-07-19，owner 两轮 REQUEST_CHANGES 全量吸收）：** ①角色化来源 + 场景绑定版本 +
 > 受控换绑（§2.3/§4.5）；②六桶身份分类替换初稿 diff 词表，重复键语义统一为「桶级 fail-closed、
@@ -30,12 +31,23 @@
 > （源侧快照事务 / 不可变快照 token / 全投影字段单调无 ABA 版本 pin），皆不合格的源 V1 不可用
 > （§2.2/§4.6/§8.2-7，P1）；②dedup 冲突收束改 **claim-first 无抛错抢占**（23505 会废事务、
 > 另开事务有卡死窗口）：写行前抢键，胜者独占 `runIdentityKey`，败者同事务落 `deduplicated`
-> 且键永远 NULL，claim 持有者非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败，`failed`
-> 同事务释放 claim，冲突分支崩溃注入承重（§4.4/§5/§8.2b-12..14，P2）；③外部系统身份定为
+> 且键永远 NULL，claim 持有者非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败（**rev-5 已删除
+> 该分支——见下 rev-5 ②**），`failed` 同事务释放 claim，冲突分支崩溃注入承重（§4.4/§5/§8.2b，P2）；
+> ③外部系统身份定为
 > **内容键单轨**：不引入无权威来源的 `externalSystemVersionId`（迁移 057 现实为可变行），
 > 各层重验 = 当前重算 `systemContentKey` 对 pinned 值（§2.3/§3/§4.5，P2）；④确定性与换绑
 > 边界冻结：排序元组长度前缀 + class 域分隔编码、invalid sentinel、multiplicity 读上界；
 > revoke 切换预选替代版本 = 同事务完整 Activate 重验（§4.1/§4.6/§8.2b-15..16，P2）。
+>
+> **rev-5（2026-07-20，owner rev-4 复审 1×P1 + 3×P2 全量吸收）：** ①一致性证明**标记与页数据
+> 原子绑定**：逐页回显不够,标记须为承载该页数据的同一次源读取的内在属性,旁路另取即不合格
+> fail-closed（§2.2/§4.6/§8.2-7/§8.2b-17，P1）；②claim-first 的 PG 语义订正——`ON CONFLICT
+> DO NOTHING` 遇并发未提交同键会**阻塞**（非「不等待」）,且 claim+complete 原子同提交使
+> `RUN_IDENTITY_CLAIM_PENDING` 分支不可达;rev-5 **接受有界等待、删除 PENDING**,冻结 READ
+> COMMITTED 下「胜者独占 / 败者见已提交 complete 持有者落 dedup / 胜者回滚则败者转正」三路
+> （§4.4/§5/§8.2b-13..14，P2）；③§3 全清单补 `reconciliation_run_identity_claim` claim 表;
+> ④`canonicalRowDigest` 确定性契约（字段序、类型标签、null·空·缺省三分、数字规范化不经浮点、
+> NFC）列为 D1 必冻 + mutation 承重（§4.6/§8.2b-15b，P2）。
 > **上位规划：**
 > `stock-preparation-generalization-and-scenario-packaging-proposal-20260717.md`。
 > **相邻但独立的操作线：** RC-A `#4437` 保持既有 flag-OFF、values-free、操作侧门；本 Charter
@@ -166,6 +178,7 @@ scenarioInstance（active 指针，§4.1 指针权威）
 | `material_reconciliation_binding_version` | 一次绑定版本（角色 → approvedConfigVersionId + contractVersion）；status 词表不含 `active`——「active」是被场景指针指向的**派生谓词**（§4.1/§4.5） | 行 create-only；status 仅 §4.5 单向迁移 |
 | `material_reconciliation_binding_member` | 绑定版本内的角色成员：role → approvedConfigVersionId + pinned `systemContentKey`（§4.6；rev-4 内容键单轨，无版本 ID） | create-only |
 | `material_reconciliation_binding_audit` | 绑定生命周期审计 | append-only、values-free |
+| `reconciliation_run_identity_claim` | 语义键抢占表（§4.4 claim-first）：`(tenant_id, run_identity_key)` 主键 + 引用胜者 `attemptId`；`complete` 保留、`failed` 同事务删除 | claim-only；仅胜者写、`failed` 释放；不存业务值 |
 
 D1 必须把**绑定对象与数据对象一次列全**，并冻结字段、唯一键、写入纪律与保留策略。
 人工决议表和值面明细不进入第一版（V1 不新增 mapping / decision 表；`reconciliation_diff`
@@ -247,24 +260,30 @@ D1 必须把**绑定对象与数据对象一次列全**，并冻结字段、唯�
   由 `UNIQUE (tenant_id, run_identity_key) WHERE run_identity_key IS NOT NULL` 部分唯一索引
   承重（058 先例的精确用法）。不另拆 attempt / 语义 run 两对象——单对象 + set-once 已闭合
   时序，拆表变体不采用；
-- **重放与并发去重是同一机制，且冲突收束必须无抛错闭合（rev-4 冻结）**：唯一索引违例
-  （PostgreSQL 23505）会使当前事务整体失败——「撞索引后同事务标记 dedup」不可实现，「另开
-  事务标记」则在崩溃时留下永久停在 `compared` 的非终态窗口。因此冻结 **claim-first** 机制：
-  - commit 事务内、**写任何 snapshot / diff 行之前**，以无抛错声明抢占语义键
-    （`INSERT ... ON CONFLICT DO NOTHING` 到租户级 claim 表，claim 行引用 `attemptId`）；
-  - **胜者**（claim 成功）：同一事务内继续写全部 immutable 行、set-once 落 `runIdentityKey`、
-    置 `complete`；
-  - **败者**（claim 已存在）：读取 claim 持有者——持有者已 `complete` ⇒ 同一（仍可用的）
-    事务内落 `deduplicated` 终态（§5，引用胜者不透明句柄），**零 immutable 行**；持有者仍
-    非终态（胜者提交中）⇒ 以可重试的 `RUN_IDENTITY_CLAIM_PENDING` 家族失败收束，不等待、
-    不轮询；
+- **重放与并发去重是同一机制：claim-first + 有界等待（rev-5 冻结，PostgreSQL 语义已核实）**：
+  唯一索引违例（23505）会废掉整个事务，「撞索引后同事务标记 dedup」不可实现；「另开事务标记」
+  又在崩溃时留下永久停在 `compared` 的非终态窗口。owner rev-4 复审进一步指出：
+  `INSERT ... ON CONFLICT DO NOTHING` 遇**并发未提交**的同键行会**阻塞等待**该事务提交或回滚，
+  并非「不等待」；且 claim 与 `complete` 同事务提交 ⇒ 败者永远看不到「已提交但非终态」的持有
+  者，故原 `RUN_IDENTITY_CLAIM_PENDING` 分支不可达。rev-5 据此**接受有界等待、删除该分支**，
+  冻结如下（**事务隔离级别 READ COMMITTED**，使冲突后的持有者读取看到已提交数据）：
+  - commit 事务内、**写任何 snapshot / diff 行之前**，`INSERT ... ON CONFLICT DO NOTHING` 抢
+    租户级 claim 表的语义键（claim 行引用 `attemptId`）；遇并发未提交同键行时该语句**有界
+    阻塞**——等待受对方 commit-事务自身的提交/回滚时延约束（对方也只写行、快、有界），可接受；
+  - **胜者**（本语句插入成功）：同一事务内继续写全部 immutable 行、set-once 落
+    `runIdentityKey`、置 `complete`，随事务原子提交；
+  - **败者**（插入 0 行，键已被占）：因胜者的 claim 与 `complete` 原子同提交,败者解除阻塞时
+    看到的**已提交** claim 必属于一个已 `complete` 的 run；败者 `SELECT` 该持有者、同一（仍
+    可用的）事务内落 `deduplicated` 终态（§5，引用胜者不透明句柄），**零 immutable 行**。
+    若胜者事务回滚 / `failed`（在其事务内删除了 claim 行,见下），阻塞解除后本 `INSERT` 成功
+    ⇒ 败者转为胜者继续。**故不存在「已提交但非终态持有者」状态,无 PENDING 分支**；
   - **败者的 `runIdentityKey` 永远保持 NULL**——语义键只属于胜者，部分唯一索引因此只在
     逻辑缺陷时触发，是不变量背书而非控制流；
   - `failed` 终态在同一事务内**释放 claim**（删除 claim 行），`complete` 永不释放——崩溃
     留下的非终态胜者按 §5 崩溃规则 exact-resume 或被管理面置 `failed`（随事务释放 claim），
     语义键因此不会被死 attempt 永久占据；
   - 迁移 058 仅是 partial-unique-index 的仓内先例，**不是**本冲突收束机制的先例；冲突分支
-    必须有崩溃注入测试承重（§8.2b）。
+    （胜者/败者/回滚转正 三路）必须有崩溃注入测试承重（§8.2b）。
   相同输入重放与并发同内容 attempt 都由此收敛为 exact-noop，计数和 immutable rows 不增长；
   内容 / contract 不同 ⇒ `runIdentityKey` 天然不同 ⇒ 各自独立 run，历史不可覆盖；
 - 分页读取有界；达到上界但无法证明下一页为空时返回 `READ_UNPROVABLE` 家族错误，不提交 run；
@@ -319,7 +338,23 @@ draft_candidate -> preflight_passed -> approved ──┬-> superseded（被后�
 - `multiplicity` 为固定宽度大端无符号整数，上界即读取有界上界（页上限 × 页数上限），
   由构造不可溢出。
 
-**双指纹（用途不同，不可互替）：**
+**`canonicalRowDigest` 确定性契约（P2，rev-5 冻结；外层长度前缀救不了内层不确定性）：**
+排序元组的长度前缀只防跨分量碰撞，`canonicalRowDigest` 自身的字节必须逐位确定,否则同一行在
+两次运行/两侧可得不同摘要,连带毁掉 `snapshotContentDigest`、双指纹与 dedup。该摘要为对**冻结
+投影字段集**规范化后的行编码,以下规则列为 **D1 必冻契约、且每条以 mutation 承重**（§8.2b）：
+
+- **字段序**：按 contractVersion 冻结的字段顺序编码（非源返回序、非字母序自选）；字段名与值
+  各自长度前缀,字段间不裸拼接；
+- **类型标签**：每个值前置单字节类型标签（null / bool / int / decimal / string / 缺省），
+  使 `"1"`(string) 与 `1`(int)、`""` 与 null 不可互相碰撞；
+- **null 与空**：`NULL`、空串、字段缺省(missing)为**三个不同**编码,不得折叠;
+- **数字规范化**：整数与定点小数以规范十进制文本编码(无前导零、无正号、负零折叠为零、无
+  科学计数法、小数尾零裁剪到冻结精度),不经 IEEE754 浮点中转;超出安全范围的数值走冻结的
+  大十进制表示;
+- **Unicode 规范化**：字符串先 **NFC** 归一再 UTF-8 编码,固定大小写策略(默认**不**折叠大小写,
+  身份键的大小写敏感性由 owner 冻结键规则决定,不在摘要层猜测);禁止去空白/全半角等隐式改写。
+
+任一规则缺省或由实现自选 ⇒ 摘要不确定性 mutation 红(§8.2b-15b)。
 
 ```text
 sourceReadEvidenceDigest = 页回显、分页参数（cursor/pageIndex）、原始页指纹、
@@ -335,15 +370,24 @@ snapshotContentDigest    = contractVersion 下冻结投影的规范化多重集�
 包含 {a1,b1}；摘要相等仍接受了撕裂快照。双扫本质是「装配产物稳定性」证据，对 ABA 型撕裂
 不设防，因此**从证明机制中移除**，至多作为可选的稳定性辅助证据记录，不解锁 compare。
 
+**证明标记与页数据必须原子绑定（P1，rev-5 收紧）：** 逐页回显一个 token/version 还不够——若
+标记与该页数据来自**两次独立读取**，实现仍可能把旧标记配到新数据上，重新制造撕裂快照。因此
+每种机制都要求**证明标记是承载该页数据的同一次源读取的内在属性**（同一响应、同一游标推进、
+同一事务可见性），而非旁路另取。标记与数据不能证明同源 ⇒ 该机制不合格、该侧
+`SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` fail-closed。
+
 证明机制词表冻结为三种，源能力声明其一（连接器能力矩阵扩展一项 `consistencyProof`）：
 
 - `SOURCE_SNAPSHOT_TXN` — 源侧在单个快照隔离事务（或等价读一致性会话）内完成全部页读取；
-- `IMMUTABLE_SNAPSHOT_TOKEN` — 源先物化一份不可变快照并返回其 token，全部页只从该 token
-  读取，逐页回显 token；
-- `MONOTONIC_VERSION_PIN` — 源暴露**覆盖全部投影字段、单调递增且无 ABA 语义**的数据集版本
-  标记，逐页回显；任一页回显漂移 ⇒ 该侧读取失败重来（有界重试次数由实现锁冻结），重试耗尽
-  ⇒ `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE`。仅覆盖部分字段、可回绕或可重置的版本标记
-  **不合格**。
+  原子绑定天然成立：所有页共享该事务的同一可见性快照，无独立标记可错配；
+- `IMMUTABLE_SNAPSHOT_TOKEN` — 源先物化一份不可变快照并返回其 token，**全部页只经由该
+  token 作为读句柄取得**（token 是取数的入参、非取数后另取的旁路标记），逐页回显 token 供
+  校验；页数据若可不经 token 取得，则该机制不合格；
+- `MONOTONIC_VERSION_PIN` — 源在**返回页数据的同一响应**里内联该页对应的、**覆盖全部投影
+  字段、单调递增且无 ABA 语义**的数据集版本标记（非独立端点另查）；逐页回显，任一页回显
+  漂移 ⇒ 该侧读取失败重来（有界重试次数由实现锁冻结），重试耗尽 ⇒
+  `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE`。仅覆盖部分字段、可回绕、可重置，或标记与页数据
+  分两次取的版本 pin **均不合格**。
 
 三种机制皆不可用、能力未声明或证明失败一律 fail-closed（§2.2），**不得**以「分页读全」或
 「双扫相等」冒充时点一致，也不得静默降级为无证明快照——无法提供任一合格证明的源在 V1 即
@@ -392,11 +436,12 @@ planned -> reading_sources -> snapshots_complete -> compared -> complete
 - `complete` 只允许在两侧完整性可证、统一身份分析完成、快照持久化和 diff 原子提交全部成立后
   出现（**不要求身份全局唯一**——重复 / 无效键按 §4.6 落入 `ambiguous` / `identity_invalid`
   桶后运行照常 complete；complete 的 run 可携带 `supersededAtCommit` 标记，§4.5）；
-- `deduplicated`（P2-2 新增终态）：commit 事务内语义键 claim 已被某个 **complete** run 持有
-  时的收束态（§4.4 claim-first，无抛错路径）——本 attempt 不写任何 snapshot / diff 行、
-  `runIdentityKey` 保持 NULL，仅记录胜者 run 的不透明句柄；这是 §4.4 exact-noop 重放与并发
-  同内容去重的落点，默认查询不把它呈现为独立结果；claim 持有者尚非终态时不落此态，而以
-  可重试的 `RUN_IDENTITY_CLAIM_PENDING` 家族 `failed` 收束；
+- `deduplicated`（终态）：commit 事务内语义键 claim 被某个 run 占用、且阻塞解除后看到的是
+  **已提交**持有者时的收束态（§4.4 claim-first + 有界等待）——因 claim 与 `complete` 原子
+  同提交,已提交持有者必已 `complete`;本 attempt 不写任何 snapshot / diff 行、`runIdentityKey`
+  保持 NULL,仅记录胜者 run 的不透明句柄;这是 §4.4 exact-noop 重放与并发同内容去重的落点,
+  默认查询不把它呈现为独立结果。**不存在「已提交但非终态持有者」状态**（rev-5 删除原
+  PENDING 分支）:胜者回滚/`failed` 会在其事务内释放 claim,阻塞解除的败者转为胜者继续;
 - `failed` 记录固定 family / reason / phase / counts，不保存原始异常；
 - 进程崩溃留下的非终态运行不可被查询面当成 complete；重试只能 exact-resume 或创建新 run，
   具体策略在实现锁中冻结；
@@ -433,7 +478,7 @@ missingChildBom、设计数量 / 单位规则、material mapping、issueQty 数�
 | 切片 | 内容 | 建议执行 / 审阅 | 退出条件 | 预估 |
 |---|---|---|---|---|
 | D0 | 本 Charter 修订 + ratify（即本文 rev-2） | Codex/Claude 起草；owner exact-head 短复审 | code-vs-doc、边界审阅 | 0.5–1 天 |
-| D1（≈V2-a） | 独立 manifest、**绑定对象 + 数据对象全清单**的 frozen templates、闭词表、flag/permissions contract | Kimi K3 设计审计；Codex 定稿 | schema tests + forbidden-content tests；无 routes/runtime | D0–D2 合计 7–11 天 |
+| D1（≈V2-a） | 独立 manifest、**绑定对象 + 数据对象 + `reconciliation_run_identity_claim` 全清单**的 frozen templates、闭词表、flag/permissions contract、**`canonicalRowDigest` 确定性契约冻结**（字段序/类型标签/null·空·缺省/数字/NFC） | Kimi K3 设计审计；Codex 定稿 | schema tests + forbidden-content tests + 摘要确定性 mutation；无 routes/runtime | D0–D2 合计 7–11 天 |
 | D2 | 场景实例与绑定版本库（§3 绑定对象 + §4.1 指针权威 active + §4.5 生命周期 + `systemContentKey` 内容键派生与钉住） | Grok 实现；Codex 事务/权限复核 | 真库事务、指针 CAS + 复合 FK 负控、revoke 清指针同事务测（含替代版本全量 Activate 重验）、跨租户负控、supersede/revoke 拆分测、系统身份就地变更判别测 | （含于上） |
 | D3a（≈V2-b/V2-c） | **一致性证明选型 spike（0.5–1 天，逐源评估 §4.6 三机制合格性并冻结）** + 双源采集、完整性 + 时点一致证明、不可变快照、统一身份分析（含 rev-4 冻结的排序元组编码）、双指纹、run pin、claim-first dedup + `runIdentityKey` set-once | Grok 实现；Kimi 跨模块审计；Codex 安全复核 | OFF inert；steering pre-I/O；分页边界 + 一致性漂移 mutation；真 PG rollback/replay/并发 dedup + 冲突分支崩溃注入；meta_fields 物理 id | spike 后回写：三机制内选型 4–6 天；任一源三机制皆不合格 ⇒ 该源 V1 不可用（范围裁剪，非加时） |
 | D3b | 跨源 exact-key reconciliation（六桶分类）——**独立设计门后实现** | Kimi 设计；Grok 实现；Codex 行为审计 | 六桶正反序判别；桶泄漏 mutation；空侧正控 | 4–7 天 |
@@ -507,15 +552,21 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
 12. `runIdentityKey` 由 NULL 落定后被二次改写 -> set-once 红；绕过 claim 写入同租户同键第二个
     complete run -> claim/索引数据库红；`deduplicated` attempt 的 `runIdentityKey` 非 NULL
     -> 红；
-13. 并发同内容双 attempt -> 恰一 complete + 恰一收束（`deduplicated` 或
-    `RUN_IDENTITY_CLAIM_PENDING` 失败，构造并发测，无抛错路径）；`deduplicated` attempt 写入
-    任何 snapshot / diff 行 -> 红；
-14. **冲突分支崩溃注入**：claim 后、immutable 行前崩溃 / 行后、终态前崩溃 / 败者落
-    `deduplicated` 前崩溃 -> 恢复后不存在停在 `compared` 的永久非终态，claim 不被死 attempt
-    永久占据（`failed` 同事务释放 claim 的正控 + 负控）-> 真库红；
+13. 并发同内容双 attempt（构造并发测）-> 恰一 `complete` + 恰一 `deduplicated`；败者不写任何
+    snapshot / diff 行、`runIdentityKey` 保持 NULL -> 否则红；引入不可达的「已提交非终态持有
+    者」处理分支 -> 契约红（rev-5 删除 PENDING）；
+14. **冲突分支崩溃注入（三路）**：胜者 claim 后、immutable 行前崩溃 / 胜者行后、终态前崩溃 /
+    败者阻塞解除后、落 `deduplicated` 前崩溃 -> 恢复后不存在停在 `compared` 的永久非终态，
+    claim 不被死 attempt 永久占据（`failed` 同事务释放 claim 的正控 + 负控）-> 真库红；胜者
+    回滚后并发败者未能转正继续 -> 红；
 15. 排序元组以裸拼接编码（可构造跨分量拼接碰撞的两快照同摘要）-> 红；`identity_invalid`
     sentinel 与真实键同域可碰撞 -> 红；multiplicity 溢出未由读上界排除 -> 红；
-16. revoke 切换预选替代版本时跳过替代版本的全量 Activate 校验（仅查指针不悬空）-> 红。
+15b. **`canonicalRowDigest` 确定性（P2 rev-5）**：字段序改动 / 缺类型标签使 `"1"` 与 `1` 或
+    `""` 与 null 同摘要 / null·空·缺省折叠 / 数字经浮点中转或保留科学计数法 / 字符串未 NFC
+    归一 -> 同一行两次摘要不同或异行同摘要，判别测试红；
+16. revoke 切换预选替代版本时跳过替代版本的全量 Activate 校验（仅查指针不悬空）-> 红；
+17. **一致性证明标记与页数据非同源**（旁路另取 token/version 后配到另一次读的页数据）仍被
+    当成合格证明 -> 红（P1 rev-5，原子绑定）。
 
 ### 8.3 抽取与兼容
 
@@ -541,7 +592,7 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
 | OD-V2-2 | 身份匹配 | **V1 仅 owner 配置的 exact key；§2.2 六桶键级分类；重复/无效键 = 桶级 fail-closed（非整跑失败，两套语义不并存）；不做 fuzzy；候选/置信度/人工确认 = V2.1 独立设计门** | 解锁 comparator contract |
 | OD-V2-3 | 权限 | **独立 `material-reconciliation:read/operate/admin`；不复用 `integration:write` 作为长期权限** | 解锁 manifest / route RBAC 设计 |
 | OD-V2-4 | 数据面 | **V1 values-free；值面另开 gated + audited read** | 解锁 evidence UI，值面继续 barred |
-| OD-V2-5 | 持久模型 | **run 仅允许 §5 单向迁移（含 `deduplicated` 终态）；`attemptId` 建行即有、`runIdentityKey` NULL→commit 事务内 claim-first 抢占后 set-once（败者永远 NULL；索引为背书非控制流；claim 持有者非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败；`failed` 同事务释放 claim）；冲突分支崩溃注入承重；snapshot/row/diff create-only；不建 decision 表** | 解锁 templates / migration 设计 |
+| OD-V2-5 | 持久模型 | **run 仅允许 §5 单向迁移（含 `deduplicated` 终态）；`attemptId` 建行即有、`runIdentityKey` NULL→commit 事务内 claim-first 抢占后 set-once（READ COMMITTED + 有界等待；败者永远 NULL；索引为背书非控制流；claim 与 complete 原子同提交 ⇒ 无「已提交非终态持有者」，不设 PENDING 分支；`failed` 同事务释放 claim）；含 `reconciliation_run_identity_claim` 表；`canonicalRowDigest` 确定性契约（字段序/类型标签/null·空·缺省三分/数字规范化/NFC）D1 必冻；冲突分支崩溃注入承重；snapshot/row/diff create-only；不建 decision 表** | 解锁 templates / migration 设计 |
 | OD-V2-6 | 发布姿态 | **独立 default-OFF flag；仅内部写；`externalWrite=false`** | 解锁 D1，仍不授权 ON rollout |
 | OD-V2-7 | 场景绑定与换绑 | **§2.3/§4.5/§4.6 模型整体冻结：绑定版本生命周期（supersede/revoke 拆分；`active` 为指针派生谓词非存储状态）+ 指针权威唯一 active（复合 FK；revoke 清指针同事务，切换预选替代版本 = 同事务完整 Activate 重验；partial-unique 变体不采用）+ 外部系统身份 pin（内容键单轨：`systemContentKey` 进绑定成员、bindingFingerprint、run-start pin 与 activate/commit 重验；不引入无权威来源的版本 ID）+ 四层重验 + commit 漂移拆分 + 血缘/运行双键 + 双指纹（业务摘要不裸 SHA 外显；排序元组编码 rev-4 冻结）+ 运行请求仅 scenarioInstanceId + V1 双源不 N** | 解锁 D2 绑定底座设计 |
 
@@ -665,9 +716,10 @@ owner 两轮 REQUEST_CHANGES 的全部裁决已落入本 rev：
   不可实现（23505 废事务），另开事务补标记则有停在 `compared` 的崩溃卡死窗口。rev-4 冻结
   claim-first：写任何 immutable 行之前 `ON CONFLICT DO NOTHING` 抢租户级语义键 claim；
   胜者同事务写行 + set-once + `complete`；败者读 claim 持有者——complete ⇒ 同事务
-  `deduplicated`（键永远 NULL、零行）、非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败；
-  `failed` 同事务释放 claim（complete 永不释放），死 attempt 不永久占键；索引降为不变量
-  背书。冲突分支崩溃注入入 §8.2b-14。058 仅为 partial-index 先例的表述已订正。
+  `deduplicated`（键永远 NULL、零行）、非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败
+  （**该 PENDING 分支 rev-5 已删除,见 §12.7**）；`failed` 同事务释放 claim（complete 永不
+  释放），死 attempt 不永久占键；索引降为不变量背书。冲突分支崩溃注入入 §8.2b-14。058 仅为
+  partial-index 先例的表述已订正。
 - **P2（externalSystemVersionId 无权威来源）**：迁移 057 的 `integration_external_systems`
   为可变行、无版本记录，rev-3 引入的版本 ID 是虚悬概念且各层实际只比内容键。rev-4 按
   owner 处方二选一取**内容键单轨**：删除 `externalSystemVersionId`，`systemContentKey`
@@ -680,3 +732,27 @@ owner 两轮 REQUEST_CHANGES 的全部裁决已落入本 rev：
   版本重跑完整 Activate 校验（§4.1 收紧 + §8.2b-16 变异）。
 - **Ratify 影响**：本轮修正对应 owner 暂缓的 OD-V2-1/5/7 三项；OD-V2-3/4/6 维持可接受判定
   不变。D3a spike 语义更新为「三机制合格性评估」，不合格源=范围裁剪非加时（§7）。
+
+### 12.7 rev-5 吸收记录（2026-07-20，owner rev-4 复审 1×P1 + 3×P2）
+
+- **P1（一致性证明缺原子绑定）**：owner 指出逐页回显 token/version 仍可「旧标记配新数据」——
+  若标记与页数据来自两次独立读取,ABA 撕裂重现。rev-5 要求**标记是承载该页数据的同一次源
+  读取的内在属性**（同一响应/游标推进/事务可见性）,非旁路另取:`SOURCE_SNAPSHOT_TXN` 靠共享
+  事务快照天然成立;`IMMUTABLE_SNAPSHOT_TOKEN` 要求页只经 token 作读句柄取得;
+  `MONOTONIC_VERSION_PIN` 要求版本标记在返回页数据的同一响应内联。标记与数据不能证同源 ⇒
+  该机制不合格 fail-closed（§2.2/§4.6,§8.2-7/§8.2b-17 变异）。
+- **P2（claim-first 的 PG 语义不成立）**：owner 指出两点——(a)`INSERT ... ON CONFLICT DO
+  NOTHING` 遇并发**未提交**同键会**阻塞等待**对方提交/回滚,并非「不等待」;(b)claim 与
+  `complete` 原子同提交 ⇒ 败者永远看不到「已提交但非终态」持有者,`RUN_IDENTITY_CLAIM_PENDING`
+  分支不可达。二者均成立。rev-5 处方二选一取**「接受有界等待 + 删除 PENDING 分支」**（比
+  advisory-lock 更契合单事务模型）,冻结 READ COMMITTED 下三路:胜者独占;败者阻塞解除后见
+  **已提交**的 claim（必属已 complete 的 run,因原子同提交）⇒ SELECT 持有者落 `deduplicated`;
+  胜者回滚/`failed` 释放 claim ⇒ 败者 INSERT 成功转正继续。有界等待受对方 commit-事务自身
+  时延约束、可接受。§5/§8.2b-13 删除 PENDING,§8.2b-14 崩溃注入扩为三路（含胜者回滚败者转正）。
+- **P2（持久/摘要契约不完整）**：§3 全清单补 `reconciliation_run_identity_claim`（
+  `(tenant_id, run_identity_key)` 主键 + 胜者 attemptId 引用,claim-only,`failed` 释放）;
+  `canonicalRowDigest` 新增确定性契约——字段序按 contractVersion 冻结、每值单字节类型标签
+  （`"1"`≠`1`、`""`≠null）、null·空·缺省三分不折叠、数字规范十进制不经浮点、字符串 NFC 归一 +
+  固定大小写策略;列为 **D1 必冻 + §8.2b-15b mutation 承重**。外层长度前缀不救内层不确定性。
+- **Ratify 影响**：本轮修正续对 owner 暂缓的 OD-V2-1/5/7；OD-V2-3/4/6 维持可接受。claim 有界
+  等待属正常行锁竞争、非并发缺陷,不改 D3a「对抗审压并发面」的定性,排期口径不变。
