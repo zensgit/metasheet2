@@ -24,6 +24,18 @@
 > 时间冲突：`attemptId` 建行即有，`runIdentityKey` NULL→commit 事务内一次落定 + 部分唯一索引，
 > 并发同内容 attempt 落 `deduplicated` 终态 = exact-noop 机制（§3/§4.4/§4.6/§5，P2-2）；
 > ⑤D3a 排期改为一致性证明选型后重估（§7）。
+>
+> **rev-4（2026-07-20，owner rev-3 复审 1×P1 + 3×P2 全量吸收）：** ①双扫摘要相等**不构成**
+> 时点一致证明（ABA 撕裂反例入文），从证明机制移除、降为可选稳定性证据；闭机制收为三种
+> （源侧快照事务 / 不可变快照 token / 全投影字段单调无 ABA 版本 pin），皆不合格的源 V1 不可用
+> （§2.2/§4.6/§8.2-7，P1）；②dedup 冲突收束改 **claim-first 无抛错抢占**（23505 会废事务、
+> 另开事务有卡死窗口）：写行前抢键，胜者独占 `runIdentityKey`，败者同事务落 `deduplicated`
+> 且键永远 NULL，claim 持有者非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败，`failed`
+> 同事务释放 claim，冲突分支崩溃注入承重（§4.4/§5/§8.2b-12..14，P2）；③外部系统身份定为
+> **内容键单轨**：不引入无权威来源的 `externalSystemVersionId`（迁移 057 现实为可变行），
+> 各层重验 = 当前重算 `systemContentKey` 对 pinned 值（§2.3/§3/§4.5，P2）；④确定性与换绑
+> 边界冻结：排序元组长度前缀 + class 域分隔编码、invalid sentinel、multiplicity 读上界；
+> revoke 切换预选替代版本 = 同事务完整 Activate 重验（§4.1/§4.6/§8.2b-15..16，P2）。
 > **上位规划：**
 > `stock-preparation-generalization-and-scenario-packaging-proposal-20260717.md`。
 > **相邻但独立的操作线：** RC-A `#4437` 保持既有 flag-OFF、values-free、操作侧门；本 Charter
@@ -65,8 +77,10 @@ V2 不面向备料计划员，不展示 BOM 展开、issueQty、备料异常或�
 
 **分页完整 ≠ 时点一致（P1-1）：** 逐页读全只证明「读窗口内源给出的所有页都收到了」，不证明
 这些页对应源的同一时点状态——页间的插入 / 更新 / 删除会把快照抹成时间涂层。因此每侧快照还须
-携带 §4.6 的 `sourceConsistencyProof`（闭机制集）；两种机制都不可用或证明失败时，该侧读取以
-`SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` 家族 fail-closed，不产出快照、不进入 compare。
+携带 §4.6 的 `sourceConsistencyProof`（rev-4 三机制闭集：源侧快照事务 / 不可变快照 token /
+全投影字段单调无 ABA 版本 pin；双扫相等只是稳定性证据、不构成证明）；三机制皆不可用或证明
+失败时，该侧读取以 `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` 家族 fail-closed，不产出快照、
+不进入 compare。
 两侧各自时点一致后，**跨侧时间偏移是产品语义而非缺陷**：V1 比较的是「两份各自一致、读窗口
 相近但不同时」的快照，run 记录双侧读窗口证据，不假装存在跨系统全局事务。
 
@@ -94,21 +108,26 @@ V1 不做模糊匹配、别名推断、自动合并或域规则补值；候选�
 ```text
 scenarioInstance（active 指针，§4.1 指针权威）
 ├── bindingVersion（含 contractVersion）
-├── engineering_material_master -> approvedConfigVersionId + externalSystemVersionId
-└── enterprise_material_master  -> approvedConfigVersionId + externalSystemVersionId
+├── engineering_material_master -> approvedConfigVersionId + pinned systemContentKey
+└── enterprise_material_master  -> approvedConfigVersionId + pinned systemContentKey
 ```
 
 - 每个角色指向**一个租户内、已注册系统上、已审批、能力兼容的只读配置版本**——客户可用
   Yuantus、其他 PLM、K3、其他 ERP，乃至符合契约的 PDM / 只读数据库源，无须改对账业务本身；
-- **外部系统注册身份必须被 pin（P1-2）**：系统注册行的身份承载字段（连接器 / 源类别、端点
-  身份、认证主体引用）可被就地修改，仅 pin `approvedConfigVersionId` 不足以证明「还在对同一个
-  外部系统说话」。绑定成员因此同时钉住 `externalSystemVersionId` 与其 `systemContentKey`
-  （§4.6）；身份承载字段任何就地变更 ⇒ 新 systemContentKey ⇒ 激活 / run-start / commit 各层
-  重验 fail-closed（§4.5）；
+- **外部系统注册身份必须被 pin（P1-2；rev-4 定为内容键单轨）**：系统注册行的身份承载字段
+  （连接器 / 源类别、端点身份、认证主体引用）可被就地修改（现表
+  `integration_external_systems`，迁移 057，即为可变行、无版本 ID），仅 pin
+  `approvedConfigVersionId` 不足以证明「还在对同一个外部系统说话」。权威取**有明确定义的
+  `systemContentKey`**（§4.6 确定性内容键）：绑定成员钉住其值，激活 / run-start / commit
+  各层以「当前重算值 = pinned 值」重验，任何身份承载字段就地变更 ⇒ 键漂移 ⇒ fail-closed
+  （§4.5）。**不引入** `externalSystemVersionId`——现有注册表没有不可变版本记录可作其权威
+  来源，虚悬的版本 ID 不如诚实的内容键；若未来把注册表升级为 create-only 版本化，属独立
+  迁移设计门，不在 V1；
 - **运行请求只传 `scenarioInstanceId`**：服务端解析当前 active bindingVersion；业务用户不能在
   单次运行请求中临时指定 systemId、配置 ID、URL 或 SQL；
 - **换绑受控**（生命周期与重验见 §4.5）：新建候选绑定 → preflight（连通性 / 分页完整性 /
-  字段投影 / 身份键 / 权限）→ 新基线预览 → 场景管理员审批 → **原子切换**为新 bindingVersion；
+  一致性证明能力 / 字段投影 / 身份键 / 权限）→ 新基线预览 → 场景管理员审批 →
+  **原子切换**为新 bindingVersion；
   旧绑定保留，回滚 = 产生新的激活版本，绝不改写历史；
 - **权限分层**：平台管理员（安装 / 注册连接器类型）→ 租户集成顾问（选系统、配映射、探测、
   提交换绑申请）→ 场景管理员（审批 / 激活 / 回滚绑定）→ 业务操作员（运行对账、看结果，
@@ -139,13 +158,13 @@ scenarioInstance（active 指针，§4.1 指针权威）
 
 | 角色 | V2 语义 | 写入纪律 |
 |---|---|---|
-| `reconciliation_run` | 一次运行 attempt 及闭词表状态；`attemptId` 建行即有（服务端生成、不透明），`runIdentityKey` 建行时为 NULL、仅在 commit 事务内一次落定（§4.4/§4.6） | 仅允许 §5 的单向状态迁移；`runIdentityKey` NULL→值仅一次、部分唯一索引承重；禁止回退或改写身份 |
+| `reconciliation_run` | 一次运行 attempt 及闭词表状态；`attemptId` 建行即有（服务端生成、不透明），`runIdentityKey` 建行时为 NULL、仅在 commit 事务内 claim-first 抢占成功后一次落定（§4.4/§4.6；败者永远 NULL） | 仅允许 §5 的单向状态迁移；`runIdentityKey` NULL→值仅一次（claim 为控制流、索引为背书）；禁止回退或改写身份 |
 | `source_snapshot` | PLM 或 ERP 一侧的不可变快照头 | create-only |
 | `source_snapshot_row` | 经冻结投影规范化后的快照行 | create-only |
 | `reconciliation_diff` | 两个完整快照间的确定性差异 | create-only；仅引用快照句柄 |
 | `material_reconciliation_scenario` | 场景实例；`active_binding_version_id` 单指针 = active 的唯一权威（§4.1 指针权威，复合 FK 限定本场景） | 仅 active 指针可变（CAS 切换）；其余字段冻结 |
 | `material_reconciliation_binding_version` | 一次绑定版本（角色 → approvedConfigVersionId + contractVersion）；status 词表不含 `active`——「active」是被场景指针指向的**派生谓词**（§4.1/§4.5） | 行 create-only；status 仅 §4.5 单向迁移 |
-| `material_reconciliation_binding_member` | 绑定版本内的角色成员：role → approvedConfigVersionId + `externalSystemVersionId`（+ 其 `systemContentKey` 快照，§4.6） | create-only |
+| `material_reconciliation_binding_member` | 绑定版本内的角色成员：role → approvedConfigVersionId + pinned `systemContentKey`（§4.6；rev-4 内容键单轨，无版本 ID） | create-only |
 | `material_reconciliation_binding_audit` | 绑定生命周期审计 | append-only、values-free |
 
 D1 必须把**绑定对象与数据对象一次列全**，并冻结字段、唯一键、写入纪律与保留策略。
@@ -175,6 +194,9 @@ D1 必须把**绑定对象与数据对象一次列全**，并冻结字段、唯�
     权威选择（指针）彻底分离；
   - **revoke 与清指针同事务**：撤销当前被指向的绑定版本时，置 `revoked` 与指针清空（或切至
     预选替代版本）必须在同一事务内完成，不允许出现「已 revoked 却仍被指针引用」的窗口；
+    **切至预选替代版本 = 一次完整激活**（rev-4 收紧）：替代版本必须在同一事务内重新通过
+    §4.5 第 2 层 Activate 全量校验（config / 系统身份 / 租户 / approved / 能力契约），
+    仅保证指针不悬空不合格；
   - status-authoritative 变体（`UNIQUE ... WHERE status = 'active'` 部分唯一索引，
     058 先例）**明确不采用**，两套权威语义不得并存；058 精确形态仍是
     `runIdentityKey` 部分唯一索引（§4.4）的仓内先例。
@@ -225,10 +247,26 @@ D1 必须把**绑定对象与数据对象一次列全**，并冻结字段、唯�
   由 `UNIQUE (tenant_id, run_identity_key) WHERE run_identity_key IS NOT NULL` 部分唯一索引
   承重（058 先例的精确用法）。不另拆 attempt / 语义 run 两对象——单对象 + set-once 已闭合
   时序，拆表变体不采用；
-- **重放与并发去重是同一机制**：commit 事务内落 `runIdentityKey` 撞部分唯一索引 ⇒ 本 attempt
-  以 `deduplicated` 终态收束（§5，携带既有 complete run 的不透明句柄），不写入任何 snapshot /
-  diff 行——相同输入重放与并发同内容 attempt 都由此收敛为 exact-noop，计数和 immutable rows
-  不增长；内容 / contract 不同 ⇒ `runIdentityKey` 天然不同 ⇒ 各自独立 run，历史不可覆盖；
+- **重放与并发去重是同一机制，且冲突收束必须无抛错闭合（rev-4 冻结）**：唯一索引违例
+  （PostgreSQL 23505）会使当前事务整体失败——「撞索引后同事务标记 dedup」不可实现，「另开
+  事务标记」则在崩溃时留下永久停在 `compared` 的非终态窗口。因此冻结 **claim-first** 机制：
+  - commit 事务内、**写任何 snapshot / diff 行之前**，以无抛错声明抢占语义键
+    （`INSERT ... ON CONFLICT DO NOTHING` 到租户级 claim 表，claim 行引用 `attemptId`）；
+  - **胜者**（claim 成功）：同一事务内继续写全部 immutable 行、set-once 落 `runIdentityKey`、
+    置 `complete`；
+  - **败者**（claim 已存在）：读取 claim 持有者——持有者已 `complete` ⇒ 同一（仍可用的）
+    事务内落 `deduplicated` 终态（§5，引用胜者不透明句柄），**零 immutable 行**；持有者仍
+    非终态（胜者提交中）⇒ 以可重试的 `RUN_IDENTITY_CLAIM_PENDING` 家族失败收束，不等待、
+    不轮询；
+  - **败者的 `runIdentityKey` 永远保持 NULL**——语义键只属于胜者，部分唯一索引因此只在
+    逻辑缺陷时触发，是不变量背书而非控制流；
+  - `failed` 终态在同一事务内**释放 claim**（删除 claim 行），`complete` 永不释放——崩溃
+    留下的非终态胜者按 §5 崩溃规则 exact-resume 或被管理面置 `failed`（随事务释放 claim），
+    语义键因此不会被死 attempt 永久占据；
+  - 迁移 058 仅是 partial-unique-index 的仓内先例，**不是**本冲突收束机制的先例；冲突分支
+    必须有崩溃注入测试承重（§8.2b）。
+  相同输入重放与并发同内容 attempt 都由此收敛为 exact-noop，计数和 immutable rows 不增长；
+  内容 / contract 不同 ⇒ `runIdentityKey` 天然不同 ⇒ 各自独立 run，历史不可覆盖；
 - 分页读取有界；达到上界但无法证明下一页为空时返回 `READ_UNPROVABLE` 家族错误，不提交 run；
   时点一致性不可证时返回 `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` 家族错误，同样不提交 run。
 
@@ -245,17 +283,17 @@ draft_candidate -> preflight_passed -> approved ──┬-> superseded（被后�
 
 四层校验，各层职责不同、不可互相替代：
 
-1. **Preflight（候选阶段）：** 允许外部连通性、分页完整性、字段投影、身份键与权限探测——
-   **外部网络探测只发生在这一层，绝不进入数据库事务**；
+1. **Preflight（候选阶段）：** 允许外部连通性、分页完整性、一致性证明能力（§4.6 三机制之一
+   的合格性）、字段投影、身份键与权限探测——**外部网络探测只发生在这一层，绝不进入数据库
+   事务**；
 2. **Activate（激活事务内）：** 重新读取两个 config、**外部系统注册（当前 systemContentKey
    须等于绑定成员钉住值，P1-2）**、tenant、approved 状态与 capability contract——**信当下，
    不信 preflight 的旧结论**（存量 approved 也可能已失效；运行读取面本就 fail-closed 只接受
    approved，先例见 `read-source-config-store.cjs` `getForRuntime` 的 approved-only 拒绝）；
    指针 CAS 切换（旧值→新值）、旧版本置 `superseded` 与审计同事务；
 3. **Run-start：** 再次重验并 **pin 全元组**（bindingVersion、两个 configContentKey、
-   两个 `externalSystemVersionId` + `systemContentKey`、contractVersion 与各源
-   consistency-proof 能力声明，见 §4.6），防止激活后、运行前发生 retire 或系统身份变更；
-   运行全程只读 pinned 的不可变输入；
+   两个 `systemContentKey`、contractVersion 与各源 consistency-proof 能力声明，见 §4.6），
+   防止激活后、运行前发生 retire 或系统身份变更；运行全程只读 pinned 的不可变输入；
 4. **Commit（漂移裁决，P2-2）：** **绑定选择漂移可记录，输入可信性漂移必须中止**——
    - active 指针已被**后续版本正常替代**（superseded）：允许提交，记录
      `supersededAtCommit=true`，默认查询不得把该 run 呈现为「当前」结果；
@@ -270,7 +308,16 @@ draft_candidate -> preflight_passed -> approved ──┬-> superseded（被后�
 **统一身份分析（共享阶段，非拒绝式门）：** D3a 保存**完整**快照（不因重复键丢行），并执行一次
 统一 identity analysis——按冻结规则规范化每行身份键、计算键级 multiplicity。该分析同时供给：
 ①`snapshotContentDigest`（确定性排序）；②D3b 的键级分类（§2.2 六桶）。重复键**不破坏**摘要
-确定性：排序键为 `identityKey + canonicalRowDigest + multiplicity`。
+确定性——排序元组编码 rev-4 冻结如下（影响摘要、双指纹与 dedup，不得由实现自选）：
+
+- 排序元组 = `(identityKeyClass, identityKeyBytes, canonicalRowDigest, multiplicity)`，逐分量
+  **长度前缀编码**（`len(bytes) || bytes`，长度为固定宽度大端整数）后拼接——禁止裸拼接，
+  杜绝跨分量拼接碰撞；
+- `identityKeyClass` 为单字节域分隔符：`0x01` = 可规范化键，`0x00` = `identity_invalid`；
+  invalid 行的 `identityKeyBytes` 使用**固定空 sentinel**（零长度），排序回退到
+  `canonicalRowDigest`——sentinel 与任何真实键处于不同 class 域，不可能碰撞；
+- `multiplicity` 为固定宽度大端无符号整数，上界即读取有界上界（页上限 × 页数上限），
+  由构造不可溢出。
 
 **双指纹（用途不同，不可互替）：**
 
@@ -282,20 +329,28 @@ snapshotContentDigest    = contractVersion 下冻结投影的规范化多重集�
                                                         —— 语义幂等
 ```
 
-**sourceConsistencyProof（P1-1，闭机制集）：** 每侧快照必须证明「所有页对应源的同一时点状态」，
-机制词表冻结为两种，源能力声明其一（连接器能力矩阵扩展一项 `consistencyProof`）：
+**sourceConsistencyProof（P1-1，闭机制集；rev-4 收紧）：** 每侧快照必须证明「所有页对应源的
+同一时点状态」。**双扫摘要相等不构成该证明**（rev-4 裁决）：反例——两页 A、B，每轮扫读都在
+读完 A 后源先改 A 再改 B、下一轮前恢复，两轮均装配出 {A=a1,B=b1}，而源的真实状态序列从未
+包含 {a1,b1}；摘要相等仍接受了撕裂快照。双扫本质是「装配产物稳定性」证据，对 ABA 型撕裂
+不设防，因此**从证明机制中移除**，至多作为可选的稳定性辅助证据记录，不解锁 compare。
 
-- `SOURCE_VERSION_PIN` — 源暴露稳定的数据集版本 / 变更游标 / 事务标记，逐页回显；任一页
-  回显值漂移 ⇒ 该侧读取失败重来（有界重试次数由实现锁冻结），重试耗尽 ⇒
-  `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE`；
-- `DUAL_SWEEP_DIGEST_MATCH` — 同会话内对该侧执行两次全量扫读，两次
-  `snapshotContentDigest` 必须相等（行为学一致性证明）；不等 ⇒ 源在读窗口内不稳定，
-  有界重试后仍不等 ⇒ `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE`。
+证明机制词表冻结为三种，源能力声明其一（连接器能力矩阵扩展一项 `consistencyProof`）：
 
-机制不可用、能力未声明或证明失败一律 fail-closed（§2.2），**不得**以「分页读全」冒充时点
-一致，也不得静默降级为无证明快照。每侧实际采用的机制与其证据（版本标记回显序列 hash 或
-双扫摘要对）计入该侧 `sourceReadEvidenceDigest`。各源类别实际选型在 D3a 设计 spike 内
-逐源冻结（§7），选型改变排期须回写。
+- `SOURCE_SNAPSHOT_TXN` — 源侧在单个快照隔离事务（或等价读一致性会话）内完成全部页读取；
+- `IMMUTABLE_SNAPSHOT_TOKEN` — 源先物化一份不可变快照并返回其 token，全部页只从该 token
+  读取，逐页回显 token；
+- `MONOTONIC_VERSION_PIN` — 源暴露**覆盖全部投影字段、单调递增且无 ABA 语义**的数据集版本
+  标记，逐页回显；任一页回显漂移 ⇒ 该侧读取失败重来（有界重试次数由实现锁冻结），重试耗尽
+  ⇒ `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE`。仅覆盖部分字段、可回绕或可重置的版本标记
+  **不合格**。
+
+三种机制皆不可用、能力未声明或证明失败一律 fail-closed（§2.2），**不得**以「分页读全」或
+「双扫相等」冒充时点一致，也不得静默降级为无证明快照——无法提供任一合格证明的源在 V1 即
+不可作为对账输入（这本身是 D3a spike 的合格性评估结论之一）。每侧实际采用的机制与其证据
+（事务/快照 token 回显序列或版本标记回显序列的 hash）计入该侧 `sourceReadEvidenceDigest`；
+可选的双扫稳定性证据若记录，亦入该摘要但不参与证明判定。各源类别实际选型与合格性在 D3a
+设计 spike 内逐源冻结（§7），选型改变排期须回写。
 
 现有 feeder 的逐页 SHA-256 + seenPages 去重 + 页回显校验只是**页级防重证据、不返回也不持久化**
 ——D3a 须新增上述两个摘要，**不得**拿原始页序 hash 直接充当语义快照 hash。业务数据摘要不得以
@@ -319,9 +374,10 @@ runIdentityKey     = hash(baselineLineageKey
 新旧 baseline 血缘下的快照直接当作业务差异比较。
 
 **runIdentityKey 落定时序（P2-2）：** 该键在读完双源、算出两侧 `snapshotContentDigest` 之前
-不存在，因此 run 行以 `attemptId` 建行、`runIdentityKey` 为 NULL；键仅在 commit 事务内随
-快照 / diff / 终态一次性落定（§4.4 set-once + 部分唯一索引）。`runIdentityKey` 含业务数据
-摘要，遵循本节裸 SHA 纪律：内部保存或域隔离 HMAC，不进入公开表面。
+不存在，因此 run 行以 `attemptId` 建行、`runIdentityKey` 为 NULL；键仅在 commit 事务内、
+claim-first 抢占成功后随快照 / diff / 终态一次性落定（§4.4：胜者独占，败者永远 NULL；部分
+唯一索引为不变量背书而非控制流）。`runIdentityKey` 含业务数据摘要，遵循本节裸 SHA 纪律：
+内部保存或域隔离 HMAC，不进入公开表面。
 
 ## 5. 场景状态与闭词表（提案）
 
@@ -336,9 +392,11 @@ planned -> reading_sources -> snapshots_complete -> compared -> complete
 - `complete` 只允许在两侧完整性可证、统一身份分析完成、快照持久化和 diff 原子提交全部成立后
   出现（**不要求身份全局唯一**——重复 / 无效键按 §4.6 落入 `ambiguous` / `identity_invalid`
   桶后运行照常 complete；complete 的 run 可携带 `supersededAtCommit` 标记，§4.5）；
-- `deduplicated`（P2-2 新增终态）：commit 事务内 `runIdentityKey` 撞部分唯一索引时的收束态
-  ——本 attempt 不写任何 snapshot / diff 行，仅记录既有 complete run 的不透明句柄；这是
-  §4.4 exact-noop 重放与并发同内容去重的落点，默认查询不把它呈现为独立结果；
+- `deduplicated`（P2-2 新增终态）：commit 事务内语义键 claim 已被某个 **complete** run 持有
+  时的收束态（§4.4 claim-first，无抛错路径）——本 attempt 不写任何 snapshot / diff 行、
+  `runIdentityKey` 保持 NULL，仅记录胜者 run 的不透明句柄；这是 §4.4 exact-noop 重放与并发
+  同内容去重的落点，默认查询不把它呈现为独立结果；claim 持有者尚非终态时不落此态，而以
+  可重试的 `RUN_IDENTITY_CLAIM_PENDING` 家族 `failed` 收束；
 - `failed` 记录固定 family / reason / phase / counts，不保存原始异常；
 - 进程崩溃留下的非终态运行不可被查询面当成 complete；重试只能 exact-resume 或创建新 run，
   具体策略在实现锁中冻结；
@@ -376,8 +434,8 @@ missingChildBom、设计数量 / 单位规则、material mapping、issueQty 数�
 |---|---|---|---|---|
 | D0 | 本 Charter 修订 + ratify（即本文 rev-2） | Codex/Claude 起草；owner exact-head 短复审 | code-vs-doc、边界审阅 | 0.5–1 天 |
 | D1（≈V2-a） | 独立 manifest、**绑定对象 + 数据对象全清单**的 frozen templates、闭词表、flag/permissions contract | Kimi K3 设计审计；Codex 定稿 | schema tests + forbidden-content tests；无 routes/runtime | D0–D2 合计 7–11 天 |
-| D2 | 场景实例与绑定版本库（§3 绑定对象 + §4.1 指针权威 active + §4.5 生命周期 + 外部系统身份版本化 `externalSystemVersionId`/`systemContentKey`） | Grok 实现；Codex 事务/权限复核 | 真库事务、指针 CAS + 复合 FK 负控、revoke 清指针同事务测、跨租户负控、supersede/revoke 拆分测、系统身份就地变更判别测 | （含于上） |
-| D3a（≈V2-b/V2-c） | **一致性证明选型 spike（0.5–1 天，逐源冻结 §4.6 闭机制）** + 双源采集、完整性 + 时点一致证明、不可变快照、统一身份分析、双指纹、run pin、`runIdentityKey` set-once + `deduplicated` 收束 | Grok 实现；Kimi 跨模块审计；Codex 安全复核 | OFF inert；steering pre-I/O；分页边界 + 一致性漂移 mutation；真 PG rollback/replay/并发 dedup；meta_fields 物理 id | spike 后回写：`SOURCE_VERSION_PIN` 全覆盖 4–6 天；任一源走 `DUAL_SWEEP_DIGEST_MATCH` 加 1–2 天 |
+| D2 | 场景实例与绑定版本库（§3 绑定对象 + §4.1 指针权威 active + §4.5 生命周期 + `systemContentKey` 内容键派生与钉住） | Grok 实现；Codex 事务/权限复核 | 真库事务、指针 CAS + 复合 FK 负控、revoke 清指针同事务测（含替代版本全量 Activate 重验）、跨租户负控、supersede/revoke 拆分测、系统身份就地变更判别测 | （含于上） |
+| D3a（≈V2-b/V2-c） | **一致性证明选型 spike（0.5–1 天，逐源评估 §4.6 三机制合格性并冻结）** + 双源采集、完整性 + 时点一致证明、不可变快照、统一身份分析（含 rev-4 冻结的排序元组编码）、双指纹、run pin、claim-first dedup + `runIdentityKey` set-once | Grok 实现；Kimi 跨模块审计；Codex 安全复核 | OFF inert；steering pre-I/O；分页边界 + 一致性漂移 mutation；真 PG rollback/replay/并发 dedup + 冲突分支崩溃注入；meta_fields 物理 id | spike 后回写：三机制内选型 4–6 天；任一源三机制皆不合格 ⇒ 该源 V1 不可用（范围裁剪，非加时） |
 | D3b | 跨源 exact-key reconciliation（六桶分类）——**独立设计门后实现** | Kimi 设计；Grok 实现；Codex 行为审计 | 六桶正反序判别；桶泄漏 mutation；空侧正控 | 4–7 天 |
 | D4 | 基础自助 UI（§2.3 四步） | Grok FE；Codex 浏览器与权限复核 | 浏览器流程、权限、响应式 | UI+真库+浏览器+收口合计 9–15 天 |
 | D5 | 高级配置与换绑管理（§2.3 高级面） | Grok FE；Codex 复核 | 版本历史、基线、回滚测试 | （含于上） |
@@ -422,8 +480,10 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
 5. 同内容重放未收束为 `deduplicated`、或使 snapshot / diff 行增长 -> 红；内容变化却收束为
    `deduplicated` / 返回 noop -> 红；
 6. snapshot 行写入后、diff 或 run 终态前注入崩溃仍留下可见成功数据 -> 真库红；
-7. 页间版本回显漂移或双扫摘要不等仍被当成一致快照提交 -> 红；一致性机制不可用 / 证明失败未走
-   `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` fail-closed、或静默降级为无证明快照 -> 红。
+7. 页间事务 / 快照 token / 版本标记回显漂移仍被当成一致快照提交 -> 红；**双扫摘要相等被当作
+   时点一致证明接受**（构造 ABA 撕裂：读 A 后改 A、改 B、再恢复，双扫装配结果相同但源从未
+   处于该状态）-> 红；三机制皆不可用 / 证明失败未走 `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE`
+   fail-closed、或静默降级为无证明快照 -> 红。
 
 ### 8.2b 绑定、生命周期与指纹（rev-2/rev-3 新增）
 
@@ -444,10 +504,18 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
     后 `bindingFingerprint` / `baselineLineageKey` 不变 -> 红；
 11. 绑定版本 status 出现 `active` 存储值 -> 契约红（active 只能是指针派生谓词）；revoke 提交
     后指针仍引用该版本（撤销与清指针不同事务）-> 真库红；
-12. `runIdentityKey` 由 NULL 落定后被二次改写 -> set-once 红；绕过部分唯一索引写入同租户同键
-    第二个 complete run -> 数据库红；
-13. 并发同内容双 attempt -> 恰一 complete + 恰一 `deduplicated`（构造并发测）；`deduplicated`
-    attempt 写入任何 snapshot / diff 行 -> 红。
+12. `runIdentityKey` 由 NULL 落定后被二次改写 -> set-once 红；绕过 claim 写入同租户同键第二个
+    complete run -> claim/索引数据库红；`deduplicated` attempt 的 `runIdentityKey` 非 NULL
+    -> 红；
+13. 并发同内容双 attempt -> 恰一 complete + 恰一收束（`deduplicated` 或
+    `RUN_IDENTITY_CLAIM_PENDING` 失败，构造并发测，无抛错路径）；`deduplicated` attempt 写入
+    任何 snapshot / diff 行 -> 红；
+14. **冲突分支崩溃注入**：claim 后、immutable 行前崩溃 / 行后、终态前崩溃 / 败者落
+    `deduplicated` 前崩溃 -> 恢复后不存在停在 `compared` 的永久非终态，claim 不被死 attempt
+    永久占据（`failed` 同事务释放 claim 的正控 + 负控）-> 真库红；
+15. 排序元组以裸拼接编码（可构造跨分量拼接碰撞的两快照同摘要）-> 红；`identity_invalid`
+    sentinel 与真实键同域可碰撞 -> 红；multiplicity 溢出未由读上界排除 -> 红；
+16. revoke 切换预选替代版本时跳过替代版本的全量 Activate 校验（仅查指针不悬空）-> 红。
 
 ### 8.3 抽取与兼容
 
@@ -469,13 +537,13 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
 
 | # | 决策 | 推荐 | ratify 后影响 |
 |---|---|---|---|
-| OD-V2-1 | 两个源的产品边界 | **V1 固定两个语义角色 `engineering_material_master` / `enterprise_material_master`，不固定厂商品牌；「PLM ↔ ERP」仅为默认产品模板；每角色绑定租户内已注册、已审批、能力兼容的只读配置版本；不读 stock-prep cache；源能力含 `sourceConsistencyProof` 闭机制集（§4.6），不可证 = `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` fail-closed，跨侧时间偏移为披露的产品语义** | 冻结 V2 输入、角色模型与独立性 |
+| OD-V2-1 | 两个源的产品边界 | **V1 固定两个语义角色 `engineering_material_master` / `enterprise_material_master`，不固定厂商品牌；「PLM ↔ ERP」仅为默认产品模板；每角色绑定租户内已注册、已审批、能力兼容的只读配置版本；不读 stock-prep cache；源能力含 `sourceConsistencyProof` 三机制闭集（源侧快照事务 / 不可变快照 token / 全投影字段单调无 ABA 版本 pin，§4.6；双扫相等只是稳定性证据、不构成时点证明），不可证 = `SOURCE_SNAPSHOT_CONSISTENCY_UNPROVABLE` fail-closed（该源 V1 不可用），跨侧时间偏移为披露的产品语义** | 冻结 V2 输入、角色模型与独立性 |
 | OD-V2-2 | 身份匹配 | **V1 仅 owner 配置的 exact key；§2.2 六桶键级分类；重复/无效键 = 桶级 fail-closed（非整跑失败，两套语义不并存）；不做 fuzzy；候选/置信度/人工确认 = V2.1 独立设计门** | 解锁 comparator contract |
 | OD-V2-3 | 权限 | **独立 `material-reconciliation:read/operate/admin`；不复用 `integration:write` 作为长期权限** | 解锁 manifest / route RBAC 设计 |
 | OD-V2-4 | 数据面 | **V1 values-free；值面另开 gated + audited read** | 解锁 evidence UI，值面继续 barred |
-| OD-V2-5 | 持久模型 | **run 仅允许 §5 单向迁移（含 `deduplicated` 终态）；`attemptId` 建行即有、`runIdentityKey` NULL→commit 事务内 set-once + 部分唯一索引；snapshot/row/diff create-only；不建 decision 表** | 解锁 templates / migration 设计 |
+| OD-V2-5 | 持久模型 | **run 仅允许 §5 单向迁移（含 `deduplicated` 终态）；`attemptId` 建行即有、`runIdentityKey` NULL→commit 事务内 claim-first 抢占后 set-once（败者永远 NULL；索引为背书非控制流；claim 持有者非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败；`failed` 同事务释放 claim）；冲突分支崩溃注入承重；snapshot/row/diff create-only；不建 decision 表** | 解锁 templates / migration 设计 |
 | OD-V2-6 | 发布姿态 | **独立 default-OFF flag；仅内部写；`externalWrite=false`** | 解锁 D1，仍不授权 ON rollout |
-| OD-V2-7 | 场景绑定与换绑 | **§2.3/§4.5/§4.6 模型整体冻结：绑定版本生命周期（supersede/revoke 拆分；`active` 为指针派生谓词非存储状态）+ 指针权威唯一 active（复合 FK；revoke 清指针同事务；partial-unique 变体不采用）+ 外部系统身份 pin（`externalSystemVersionId`/`systemContentKey` 进绑定成员、bindingFingerprint、run-start pin 与 commit 重验）+ 四层重验 + commit 漂移拆分 + 血缘/运行双键 + 双指纹（业务摘要不裸 SHA 外显）+ 运行请求仅 scenarioInstanceId + V1 双源不 N** | 解锁 D2 绑定底座设计 |
+| OD-V2-7 | 场景绑定与换绑 | **§2.3/§4.5/§4.6 模型整体冻结：绑定版本生命周期（supersede/revoke 拆分；`active` 为指针派生谓词非存储状态）+ 指针权威唯一 active（复合 FK；revoke 清指针同事务，切换预选替代版本 = 同事务完整 Activate 重验；partial-unique 变体不采用）+ 外部系统身份 pin（内容键单轨：`systemContentKey` 进绑定成员、bindingFingerprint、run-start pin 与 activate/commit 重验；不引入无权威来源的版本 ID）+ 四层重验 + commit 漂移拆分 + 血缘/运行双键 + 双指纹（业务摘要不裸 SHA 外显；排序元组编码 rev-4 冻结）+ 运行请求仅 scenarioInstanceId + V1 双源不 N** | 解锁 D2 绑定底座设计 |
 
 **建议裁决：七项全部按推荐 ratify。** 该裁决只解锁 D1；D2 及以后仍按 §7 逐刀过门，
 不会自动触发运行时开发、发布或实体机执行。
@@ -585,3 +653,30 @@ owner 两轮 REQUEST_CHANGES 的全部裁决已落入本 rev：
   `698997cf8`（两锚间 stock-prep 面零变动，唯一受检面变更为 approval FWB 新文件）。
 - 变异矩阵同步：§8.2-5/-7 与 §8.2b-1/-10..13（一致性漂移、系统身份漂移各层判别、指针权威
   约束、set-once 与并发 dedup）。
+
+### 12.6 rev-4 吸收记录（2026-07-20，owner rev-3 复审 1×P1 + 3×P2）
+
+- **P1（双扫不能证时点一致）**：owner 反例成立——双扫相等只证「装配产物稳定」，对 ABA 型
+  撕裂（页间改后复原）不设防；rev-3 把它列为证明机制属于错误。rev-4 从证明词表移除双扫、
+  降为可选稳定性证据；证明闭集收为 `SOURCE_SNAPSHOT_TXN` / `IMMUTABLE_SNAPSHOT_TOKEN` /
+  `MONOTONIC_VERSION_PIN`（全投影字段覆盖、单调、无 ABA 才合格）；三者皆不可用的源 V1
+  不可作对账输入（范围裁剪而非降级）。反例与「把双扫当证明」均入 §8.2-7 变异。
+- **P2（dedup 收束未闭合）**：rev-3 的「撞部分唯一索引 ⇒ 同事务落 deduplicated」在 PG 下
+  不可实现（23505 废事务），另开事务补标记则有停在 `compared` 的崩溃卡死窗口。rev-4 冻结
+  claim-first：写任何 immutable 行之前 `ON CONFLICT DO NOTHING` 抢租户级语义键 claim；
+  胜者同事务写行 + set-once + `complete`；败者读 claim 持有者——complete ⇒ 同事务
+  `deduplicated`（键永远 NULL、零行）、非终态 ⇒ `RUN_IDENTITY_CLAIM_PENDING` 可重试失败；
+  `failed` 同事务释放 claim（complete 永不释放），死 attempt 不永久占键；索引降为不变量
+  背书。冲突分支崩溃注入入 §8.2b-14。058 仅为 partial-index 先例的表述已订正。
+- **P2（externalSystemVersionId 无权威来源）**：迁移 057 的 `integration_external_systems`
+  为可变行、无版本记录，rev-3 引入的版本 ID 是虚悬概念且各层实际只比内容键。rev-4 按
+  owner 处方二选一取**内容键单轨**：删除 `externalSystemVersionId`，`systemContentKey`
+  （闭字段清单确定性派生、内部保存）为唯一权威，activate / run-start / commit 三层均以
+  「当前重算 = pinned」重验；注册表 create-only 版本化留作独立未来设计门。
+- **P2（确定性/换绑边界未冻结）**：排序元组编码冻结为逐分量长度前缀 + 单字节
+  `identityKeyClass` 域分隔（`0x01` 有效 / `0x00` invalid），invalid 行键位为空 sentinel、
+  按 `canonicalRowDigest` 定序，multiplicity 固定宽度、上界=读取有界上界；裸拼接碰撞、
+  sentinel 同域碰撞、溢出均入 §8.2b-15 变异。revoke 切换预选替代版本 = 同一事务内对替代
+  版本重跑完整 Activate 校验（§4.1 收紧 + §8.2b-16 变异）。
+- **Ratify 影响**：本轮修正对应 owner 暂缓的 OD-V2-1/5/7 三项；OD-V2-3/4/6 维持可接受判定
+  不变。D3a spike 语义更新为「三机制合格性评估」，不合格源=范围裁剪非加时（§7）。
