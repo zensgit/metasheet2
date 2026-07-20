@@ -1,5 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, writeFile, copyFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Contract tests for the RC-A (#4437) abort-provenance diagnostic client. No live server, no DB.
 // Owner-required coverage: HTTP 2xx, helper-signal abort, outside-signal abort, anomalous runtime,
@@ -10,6 +15,8 @@ import {
   AUTH_READ_PATHNAME,
   DIAGNOSTIC_HEADER,
   HELPER_BASENAME_ALLOWLIST,
+  HELPER_CONTENT_SHA256,
+  HELPER_SIBLING_REQUIREMENTS,
   RESULT_FIELD_ORDER,
   RESULT_VOCABULARY,
   TIMEOUT_MS,
@@ -32,6 +39,7 @@ import {
   parseArgs,
   runDiagnostic,
   runTimerProbe,
+  verifyHelperContent,
 } from './stock-preparation-rca-abort-provenance.mjs'
 
 import { requestJson as realRequestJson } from './stock-preparation-prep-line-extended-smoke.mjs'
@@ -351,9 +359,99 @@ test('provenance shim latches networkTarget=OTHER once any non-internal target i
   assert.equal(state.networkTarget, 'OTHER')
 })
 
+// ── Exact-SHA content binding (basename allowlist alone is not a binding) ────────────────────────
+
+const OPS_DIR = path.dirname(fileURLToPath(import.meta.url))
+const EXTENDED_BASENAME = 'stock-preparation-prep-line-extended-smoke.mjs'
+const MVP_BASENAME = 'stock-preparation-mvp-postdeploy-smoke.mjs'
+
+test('pinned digest constants: exactly the allowlisted basenames, 64-hex values, sibling map closed', () => {
+  assert.deepEqual(Object.keys(HELPER_CONTENT_SHA256).sort(), [...HELPER_BASENAME_ALLOWLIST].sort())
+  for (const digest of Object.values(HELPER_CONTENT_SHA256)) {
+    assert.match(digest, /^[0-9a-f]{64}$/)
+  }
+  assert.deepEqual([...HELPER_SIBLING_REQUIREMENTS[EXTENDED_BASENAME]], [MVP_BASENAME])
+  assert.deepEqual([...HELPER_SIBLING_REQUIREMENTS[MVP_BASENAME]], [])
+})
+
+test('repo-parity tripwire: the frozen smoke harnesses still hash to the release-pinned digests', async () => {
+  for (const name of HELPER_BASENAME_ALLOWLIST) {
+    const bytes = await readFile(path.join(OPS_DIR, name))
+    const actual = createHash('sha256').update(bytes).digest('hex')
+    assert.equal(
+      actual,
+      HELPER_CONTENT_SHA256[name],
+      `${name} drifted from the RC-A exact-SHA content — editing the frozen smokes requires cutting a new pinned diagnostic release`,
+    )
+  }
+})
+
+async function makeHelperFixtureDir() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rca-probe-fixture-'))
+  await copyFile(path.join(OPS_DIR, EXTENDED_BASENAME), path.join(dir, EXTENDED_BASENAME))
+  await copyFile(path.join(OPS_DIR, MVP_BASENAME), path.join(dir, MVP_BASENAME))
+  return dir
+}
+
+test('verifyHelperContent: byte-exact copies PASS; any tamper of target or sibling FAILs closed', async () => {
+  const dir = await makeHelperFixtureDir()
+  assert.equal(await verifyHelperContent(path.join(dir, EXTENDED_BASENAME)), 'PASS')
+  assert.equal(await verifyHelperContent(path.join(dir, MVP_BASENAME)), 'PASS')
+
+  const sibling = path.join(dir, MVP_BASENAME)
+  await writeFile(sibling, `${await readFile(sibling, 'utf8')}\n// tampered`)
+  assert.equal(await verifyHelperContent(path.join(dir, EXTENDED_BASENAME)), 'FAIL', 'tampered sibling in the static import chain must FAIL')
+  assert.equal(await verifyHelperContent(sibling), 'FAIL', 'tampered target must FAIL')
+
+  const lonely = await mkdtemp(path.join(os.tmpdir(), 'rca-probe-lonely-'))
+  await copyFile(path.join(OPS_DIR, EXTENDED_BASENAME), path.join(lonely, EXTENDED_BASENAME))
+  assert.equal(await verifyHelperContent(path.join(lonely, EXTENDED_BASENAME)), 'FAIL', 'missing required sibling must FAIL')
+  assert.equal(await verifyHelperContent(path.join(dir, 'evil-module.mjs')), 'FAIL', 'non-allowlisted basename must FAIL')
+})
+
+test('runDiagnostic on a content mismatch: BLOCKED/HELPER_MISMATCH, zero imports, zero requests', async () => {
+  let importCalls = 0
+  let fetchCalls = 0
+  const fields = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: async () => 'FAIL',
+    importImpl: async () => {
+      importCalls += 1
+      return { requestJson: async () => jsonResponse(200) }
+    },
+    fetchDelegate: async () => {
+      fetchCalls += 1
+      return jsonResponse(200)
+    },
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(fields.helperContentVerified, 'FAIL')
+  assert.equal(fields.executionState, 'DIAGNOSTIC_BLOCKED')
+  assert.equal(fields.blockedReasonClass, 'HELPER_MISMATCH')
+  assert.equal(fields.fileUrlImport, 'UNAVAILABLE', 'no dynamic import may run on unverified content')
+  assert.equal(fields.networkRequestCount, '0')
+  assert.equal(importCalls, 0)
+  assert.equal(fetchCalls, 0)
+})
+
+test('runDiagnostic zero-request closure: verified + imported but no dispatch is BLOCKED/NO_REQUEST, never COMPLETE', async () => {
+  const fields = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: async () => 'PASS',
+    importImpl: () => import('./stock-preparation-prep-line-extended-smoke.mjs'),
+    fetchDelegate: null, // a runtime without fetch: request phase must not silently pass as COMPLETE
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(fields.fileUrlImport, 'PASS')
+  assert.equal(fields.networkRequestCount, '0')
+  assert.equal(fields.executionState, 'DIAGNOSTIC_BLOCKED')
+  assert.equal(fields.blockedReasonClass, 'NO_REQUEST')
+})
+
 // ── End-to-end runDiagnostic ─────────────────────────────────────────────────────────────────────
 
 const REAL_HELPER_IMPORT = () => import('./stock-preparation-prep-line-extended-smoke.mjs')
+const VERIFY_PASS = async () => 'PASS'
 
 test('runDiagnostic 2xx end-to-end: fixed 15000 reaches the real helper call site', async () => {
   let seenOptions = null
@@ -369,6 +467,7 @@ test('runDiagnostic 2xx end-to-end: fixed 15000 reaches the real helper call sit
   const fields = await runDiagnostic({
     args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: 't1' },
     token: 'tok_secret_1',
+    verifyImpl: VERIFY_PASS,
     importImpl,
     fetchDelegate: async (url) => {
       assert.ok(String(url).includes('tenantId=t1'), 'tenant scope rides the query like the smoke AUTH shape')
@@ -394,6 +493,7 @@ test('runDiagnostic 2xx end-to-end: fixed 15000 reaches the real helper call sit
 test('runDiagnostic outside-signal abort end-to-end classifies ABORT_ERROR + OUTSIDE_HELPER_SIGNAL', async () => {
   const fields = await runDiagnostic({
     args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
     importImpl: REAL_HELPER_IMPORT,
     fetchDelegate: async () => {
       throw makeDomError('AbortError')
@@ -411,6 +511,7 @@ test('runDiagnostic import failure blocks the request phase entirely', async () 
   let delegateCalls = 0
   const fields = await runDiagnostic({
     args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
     importImpl: async () => {
       throw new Error('module not found')
     },
@@ -430,6 +531,7 @@ test('runDiagnostic import failure blocks the request phase entirely', async () 
 test('runDiagnostic import of a module without requestJson is also an import failure', async () => {
   const fields = await runDiagnostic({
     args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
     importImpl: async () => ({ somethingElse: true }),
     fetchDelegate: async () => jsonResponse(200),
     timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
@@ -442,6 +544,7 @@ test('runDiagnostic on an anomalous runtime surface still completes with identit
   const fields = await runDiagnostic({
     args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
     runtimeSurface: { versions: { node: '21.7.0', bun: '1.1.0' }, bunGlobal: true, denoGlobal: false },
+    verifyImpl: VERIFY_PASS,
     importImpl: REAL_HELPER_IMPORT,
     fetchDelegate: async () => jsonResponse(200),
     timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
@@ -455,6 +558,7 @@ test('runDiagnostic classifies 4xx/5xx and TypeError CONNECT outcomes', async ()
   const run = (fetchDelegate) =>
     runDiagnostic({
       args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+      verifyImpl: VERIFY_PASS,
       importImpl: REAL_HELPER_IMPORT,
       fetchDelegate,
       timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },

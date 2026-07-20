@@ -35,6 +35,8 @@
 //     in the failure path (the helper's mechanism produces plain AbortError), but it is reported
 //     as an observation, not as sole attribution.
 
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
@@ -52,15 +54,33 @@ export const HELPER_BASENAME_ALLOWLIST = Object.freeze([
   'stock-preparation-mvp-postdeploy-smoke.mjs',
 ])
 
+// A basename allowlist alone does not bind the probe to the exact-SHA helper: any file renamed to
+// an allowlisted basename would be dynamically imported and executed. Before ANY import, the
+// target file — and, because the extended smoke statically imports its sanitizing layer from the
+// W6 smoke, that sibling too — must byte-match the release-pinned SHA-256 digests below, computed
+// from the RC-A exact package SHA d87e086fd1218b4cfb150177d43f2c52904b1d6d. Any mismatch blocks
+// the diagnostic (HELPER_MISMATCH) with zero imports and zero network requests. Editing the
+// frozen smoke harnesses requires cutting a new pinned diagnostic release (a repo-parity test
+// fails loudly otherwise).
+export const HELPER_CONTENT_SHA256 = Object.freeze({
+  'stock-preparation-prep-line-extended-smoke.mjs': '912f3ef75c4487dbdd946486d4cb7374f1c3ea1eb126c3b68381ad11963f0049',
+  'stock-preparation-mvp-postdeploy-smoke.mjs': 'e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4',
+})
+export const HELPER_SIBLING_REQUIREMENTS = Object.freeze({
+  'stock-preparation-prep-line-extended-smoke.mjs': Object.freeze(['stock-preparation-mvp-postdeploy-smoke.mjs']),
+  'stock-preparation-mvp-postdeploy-smoke.mjs': Object.freeze([]),
+})
+
 // Closed vocabulary per field, in fixed render order. composeResultBlock refuses any value
 // outside its field's registry, so the printed surface is values-free by construction.
 export const RESULT_VOCABULARY = Object.freeze({
   executionState: Object.freeze(['DIAGNOSTIC_COMPLETE', 'DIAGNOSTIC_BLOCKED']),
   diagnosticAction: Object.freeze([DIAGNOSTIC_ACTION]),
-  blockedReasonClass: Object.freeze(['NONE', 'USAGE', 'IMPORT', 'INTERNAL']),
+  blockedReasonClass: Object.freeze(['NONE', 'USAGE', 'HELPER_MISMATCH', 'IMPORT', 'NO_REQUEST', 'INTERNAL']),
   runtimeIdentity: Object.freeze(['NODE', 'BUN', 'DENO', 'OTHER', 'UNAVAILABLE']),
   nodeMajorClass: Object.freeze(['18', '20', '22', '24', 'OTHER', 'UNAVAILABLE']),
   timerProbeResult: Object.freeze(['NORMAL', 'ABORT_EARLY', 'CLOCK_ANOMALY', 'UNAVAILABLE']),
+  helperContentVerified: Object.freeze(['PASS', 'FAIL', 'UNAVAILABLE']),
   fileUrlImport: Object.freeze(['PASS', 'FAIL', 'UNAVAILABLE']),
   timeoutArgumentMs: Object.freeze(['15000']),
   networkRequestCount: Object.freeze(['0', '1', 'OTHER']),
@@ -333,7 +353,30 @@ export function buildAuthReadPathname(tenantId) {
   return `${AUTH_READ_PATHNAME}?${params.toString()}`
 }
 
-// ── Helper import (pathToFileURL only) ───────────────────────────────────────────────────────────
+// ── Helper content verification + import (pathToFileURL only) ────────────────────────────────────
+
+// Byte-binds the probe to the exact-SHA helper before any dynamic import: the target file and its
+// required sibling(s) must hash to the release-pinned digests. Returns 'PASS' | 'FAIL' only —
+// unreadable files, unknown basenames, and digest mismatches all FAIL closed.
+export async function verifyHelperContent(helperPath, { readFileImpl = readFile } = {}) {
+  const base = path.basename(helperPath)
+  const siblings = HELPER_SIBLING_REQUIREMENTS[base]
+  if (!Array.isArray(siblings)) return 'FAIL'
+  const dir = path.dirname(path.resolve(helperPath))
+  for (const name of [base, ...siblings]) {
+    const expected = HELPER_CONTENT_SHA256[name]
+    if (typeof expected !== 'string') return 'FAIL'
+    let bytes
+    try {
+      bytes = await readFileImpl(path.join(dir, name))
+    } catch {
+      return 'FAIL'
+    }
+    const actual = createHash('sha256').update(bytes).digest('hex')
+    if (actual !== expected) return 'FAIL'
+  }
+  return 'PASS'
+}
 
 export async function importHelperModule(helperPath, { importImpl } = {}) {
   const href = pathToFileURL(path.resolve(helperPath)).href
@@ -354,6 +397,7 @@ export function baselineFields() {
     runtimeIdentity: 'UNAVAILABLE',
     nodeMajorClass: 'UNAVAILABLE',
     timerProbeResult: 'UNAVAILABLE',
+    helperContentVerified: 'UNAVAILABLE',
     fileUrlImport: 'UNAVAILABLE',
     timeoutArgumentMs: '15000',
     networkRequestCount: '0',
@@ -376,6 +420,7 @@ export async function runDiagnostic({
   nowNs = defaultNowNs,
   timerHooks = defaultTimerHooks(),
   timerProbeOverrides = {},
+  verifyImpl = verifyHelperContent,
   importImpl,
   fetchDelegate = globalThis.fetch,
 } = {}) {
@@ -387,12 +432,21 @@ export async function runDiagnostic({
   const timerProbe = await runTimerProbe({ nowNs, timerHooks, ...timerProbeOverrides })
   fields.timerProbeResult = timerProbe.timerProbeResult
 
+  // Content verification gates the dynamic import: a FAIL means the exact-SHA binding could not
+  // be proven, so nothing is imported and no request is dispatched.
   let helper = null
   try {
-    helper = await importHelperModule(args.helperPath, importImpl ? { importImpl } : {})
-    fields.fileUrlImport = 'PASS'
+    fields.helperContentVerified = (await verifyImpl(args.helperPath)) === 'PASS' ? 'PASS' : 'FAIL'
   } catch {
-    fields.fileUrlImport = 'FAIL'
+    fields.helperContentVerified = 'FAIL'
+  }
+  if (fields.helperContentVerified === 'PASS') {
+    try {
+      helper = await importHelperModule(args.helperPath, importImpl ? { importImpl } : {})
+      fields.fileUrlImport = 'PASS'
+    } catch {
+      fields.fileUrlImport = 'FAIL'
+    }
   }
 
   if (helper && typeof fetchDelegate === 'function') {
@@ -434,9 +488,19 @@ export async function runDiagnostic({
     fields.externalWrite = deriveExternalWrite({ requestCount: state.requestCount, networkTarget: state.networkTarget })
   }
 
-  if (fields.fileUrlImport === 'FAIL') {
+  // DIAGNOSTIC_COMPLETE is a contract, not a default: the exact-SHA binding must be proven, the
+  // import must succeed, and exactly the intended request must actually have been dispatched and
+  // classified. A run that never fired its one request (missing fetch, skipped phase) is BLOCKED
+  // — zero-request outcomes must never read as a completed diagnostic.
+  if (fields.helperContentVerified !== 'PASS') {
+    fields.executionState = 'DIAGNOSTIC_BLOCKED'
+    fields.blockedReasonClass = 'HELPER_MISMATCH'
+  } else if (fields.fileUrlImport !== 'PASS') {
     fields.executionState = 'DIAGNOSTIC_BLOCKED'
     fields.blockedReasonClass = 'IMPORT'
+  } else if (fields.networkRequestCount === '0' || fields.authReadResult === 'UNAVAILABLE') {
+    fields.executionState = 'DIAGNOSTIC_BLOCKED'
+    fields.blockedReasonClass = 'NO_REQUEST'
   }
 
   return fields
