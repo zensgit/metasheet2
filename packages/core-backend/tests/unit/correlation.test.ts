@@ -16,6 +16,7 @@ import {
   isValidCorrelationId,
   resolveCorrelationId,
 } from '../../src/middleware/correlation'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -31,6 +32,8 @@ function buildApp() {
   })
   return app
 }
+
+const pinned = usePinnedServer()
 
 describe('resolveCorrelationId', () => {
   it('accepts a well-formed header value', () => {
@@ -83,7 +86,8 @@ describe('request-context AsyncLocalStorage', () => {
 describe('correlationIdMiddleware (express integration)', () => {
   it('generates a uuid when the header is missing and echoes it on the response', async () => {
     const app = buildApp()
-    const res = await request(app).get('/probe')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/probe')
     expect(res.status).toBe(200)
     expect(res.headers['x-correlation-id']).toMatch(UUID_PATTERN)
     expect(res.body.reqCorrelationId).toBe(res.headers['x-correlation-id'])
@@ -92,7 +96,8 @@ describe('correlationIdMiddleware (express integration)', () => {
 
   it('preserves a valid inbound X-Correlation-ID header', async () => {
     const app = buildApp()
-    const res = await request(app).get('/probe').set('X-Correlation-ID', 'trace_abc-123')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/probe').set('X-Correlation-ID', 'trace_abc-123')
     expect(res.headers['x-correlation-id']).toBe('trace_abc-123')
     expect(res.body.reqCorrelationId).toBe('trace_abc-123')
     expect(res.body.context.correlationId).toBe('trace_abc-123')
@@ -100,16 +105,18 @@ describe('correlationIdMiddleware (express integration)', () => {
 
   it('replaces an invalid inbound header with a generated uuid', async () => {
     const app = buildApp()
-    const res = await request(app).get('/probe').set('X-Correlation-ID', 'not valid!')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/probe').set('X-Correlation-ID', 'not valid!')
     expect(res.headers['x-correlation-id']).toMatch(UUID_PATTERN)
     expect(res.body.reqCorrelationId).not.toBe('not valid!')
   })
 
   it('keeps each request isolated across concurrent invocations', async () => {
     const app = buildApp()
+    pinned.setApp(app)
     const [a, b] = await Promise.all([
-      request(app).get('/probe').set('X-Correlation-ID', 'aaa-111'),
-      request(app).get('/probe').set('X-Correlation-ID', 'bbb-222')
+      request(pinned.url()).get('/probe').set('X-Correlation-ID', 'aaa-111'),
+      request(pinned.url()).get('/probe').set('X-Correlation-ID', 'bbb-222')
     ])
     expect(a.headers['x-correlation-id']).toBe('aaa-111')
     expect(b.headers['x-correlation-id']).toBe('bbb-222')
@@ -122,7 +129,8 @@ describe('correlationIdMiddleware (express integration)', () => {
     app.use(correlationIdMiddleware)
     app.use(cors({ exposedHeaders: ['X-Correlation-ID'] }))
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .options('/probe')
       .set('Origin', 'https://example.test')
       .set('Access-Control-Request-Method', 'GET')
@@ -136,7 +144,8 @@ describe('correlationIdMiddleware (express integration)', () => {
     app.use(cors({ exposedHeaders: ['X-Correlation-ID'] }))
     app.get('/probe', (_req, res) => res.json({ ok: true }))
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .get('/probe')
       .set('Origin', 'https://example.test')
 
@@ -156,7 +165,8 @@ describe('correlationIdMiddleware (express integration)', () => {
     app.use(correlationContextEnrichmentMiddleware)
     app.get('/probe', (_req, res) => res.json({ context: getRequestContext() }))
 
-    const res = await request(app).get('/probe').set('X-Correlation-ID', 'trace-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/probe').set('X-Correlation-ID', 'trace-1')
 
     expect(res.body.context).toEqual({
       correlationId: 'trace-1',
@@ -178,7 +188,8 @@ describe('correlationErrorHandler', () => {
     })
     app.use(correlationErrorHandler(logger, 'test'))
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .get('/boom')
       .set('X-Correlation-ID', 'err-trace-1')
 

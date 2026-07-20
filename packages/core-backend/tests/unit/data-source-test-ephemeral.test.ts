@@ -17,6 +17,7 @@ import type {
 } from '../../src/data-adapters/BaseAdapter'
 import { dataSourcesRouter, getDataSourceManager } from '../../src/routes/data-sources'
 import { auditLog } from '../../src/audit/audit'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const SECRET = 'EphemeralSecretPw!2026'
 
@@ -113,6 +114,8 @@ function cfg(id: string, type: string, extra?: Partial<DataSourceConfig>): DataS
   } as DataSourceConfig
 }
 
+const pinned = usePinnedServer()
+
 beforeEach(() => { disconnectCalls.length = 0; removeAllListenerCalls.length = 0 })
 afterEach(() => { vi.restoreAllMocks() })
 
@@ -179,7 +182,8 @@ describe('DataSourceManager.testEphemeralConnection (helper)', () => {
 
 describe('POST /api/data-sources/test (route)', () => {
   it('400s on an unsupported type (create allowlist)', async () => {
-    const res = await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    const res = await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'x', name: 'x', type: 'mongodb', connection: { host: 'h' },
     })
     expect(res.status).toBe(400)
@@ -187,7 +191,8 @@ describe('POST /api/data-sources/test (route)', () => {
   })
 
   it('400s on a malformed payload (missing required fields)', async () => {
-    const res = await request(appAs('tester')).post('/api/data-sources/test').send({ type: 'postgres' })
+    pinned.setApp(appAs('tester'))
+    const res = await request(pinned.url()).post('/api/data-sources/test').send({ type: 'postgres' })
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('VALIDATION_ERROR')
   })
@@ -195,7 +200,8 @@ describe('POST /api/data-sources/test (route)', () => {
   it('returns a RESULT-ONLY success body — never echoes config / connection / credentials', async () => {
     const manager = getDataSourceManager()
     manager.registerAdapterType('postgres', OkAdapter as never) // override real PG with a fake for this unit
-    const res = await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    const res = await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'eph_echo', name: 'Echo Probe', type: 'postgres',
       connection: { host: 'secret-host.internal' },
       credentials: { username: 'admin_user', password: SECRET },
@@ -215,7 +221,8 @@ describe('POST /api/data-sources/test (route)', () => {
   it('failure body is result-only and echoes back NO submitted host / username / password', async () => {
     const manager = getDataSourceManager()
     manager.registerAdapterType('postgres', FailAdapter as never)
-    const res = await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    const res = await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'eph_echo_fail', name: 'x', type: 'postgres',
       connection: { host: 'secret-host.internal' },
       credentials: { username: 'admin_user', password: SECRET },
@@ -235,7 +242,8 @@ describe('POST /api/data-sources/test (route)', () => {
     const manager = getDataSourceManager()
     manager.registerAdapterType('http', UrlFailAdapter as never)
     const submittedUrl = 'https://submitted-endpoint.example/internal/probe'
-    const res = await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    const res = await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'eph_http_fail',
       name: 'x',
       type: 'http',
@@ -259,14 +267,16 @@ describe('POST /api/data-sources/test (route)', () => {
     // control source so the list is non-empty — proves the absence below is real, not vacuous.
     await manager.addDataSource(cfg('ctrl_keep', 'postgres'), { ownerId: 'tester', persist: false })
 
-    await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'eph_nopersist', name: 'x', type: 'postgres', connection: { host: 'h' },
     }).expect(200)
 
     const ids = manager.listDataSources({ ownerId: 'tester' }).map(s => s.id)
     expect(ids).toContain('ctrl_keep')
     expect(ids).not.toContain('eph_nopersist')
-    const got = await request(appAs('tester')).get('/api/data-sources/eph_nopersist')
+    pinned.setApp(appAs('tester'))
+    const got = await request(pinned.url()).get('/api/data-sources/eph_nopersist')
     expect(got.status).toBe(404)
   })
 
@@ -274,7 +284,8 @@ describe('POST /api/data-sources/test (route)', () => {
     const manager = getDataSourceManager()
     manager.registerAdapterType('postgres', CapturingAdapter as never)
     capturedConfig = null
-    await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'eph_timeout', name: 'x', type: 'postgres', connection: { host: 'h' },
     }).expect(200)
     // pg reads poolConfig.acquireTimeout; mysql2 options.connectTimeout; mssql connection.connectionTimeoutMs.
@@ -304,7 +315,8 @@ describe('POST /api/data-sources/test (route)', () => {
     const manager = getDataSourceManager()
     manager.registerAdapterType('postgres', OkAdapter as never)
     ;(auditLog as unknown as { mockClear?: () => void }).mockClear?.()
-    await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'eph_audit', name: 'Audit Probe', type: 'postgres',
       connection: { host: 'secret-host.internal' }, credentials: { username: 'admin_user', password: SECRET },
     }).expect(200)
@@ -323,7 +335,8 @@ describe('POST /api/data-sources/test (route)', () => {
     const manager = getDataSourceManager()
     manager.registerAdapterType('postgres', FailAdapter as never)
     ;(auditLog as unknown as { mockClear?: () => void }).mockClear?.()
-    await request(appAs('tester')).post('/api/data-sources/test').send({
+    pinned.setApp(appAs('tester'))
+    await request(pinned.url()).post('/api/data-sources/test').send({
       id: 'eph_audit_fail', name: 'x', type: 'postgres',
       connection: { host: 'secret-host.internal' }, credentials: { username: 'admin_user', password: SECRET },
     }).expect(200)

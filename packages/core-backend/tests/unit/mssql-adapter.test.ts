@@ -7,6 +7,9 @@ vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
 import { MSSQLAdapter } from '../../src/data-adapters/MSSQLAdapter'
 import { dataSourcesRouter } from '../../src/routes/data-sources'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 type PoolConfig = {
   server: string
@@ -352,22 +355,25 @@ describe('data-sources route — sqlserver type', () => {
 
   it('accepts type=sqlserver on create', async () => {
     currentUser = admin('alice')
-    const res = await request(app).post('/api/data-sources').send(body('sql-prod'))
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post('/api/data-sources').send(body('sql-prod'))
     expect(res.status).toBe(201)
   })
 
   it('a read-only sqlserver source rejects write SQL on /query (A-RO)', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send(body('sql-ro'))
-    const res = await request(app).post('/api/data-sources/sql-ro/query').send({ sql: 'DELETE FROM t' })
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/data-sources').send(body('sql-ro'))
+    const res = await request(pinned.url()).post('/api/data-sources/sql-ro/query').send({ sql: 'DELETE FROM t' })
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('READ_ONLY')
   })
 
   it('a non-owner gets 404 on a sqlserver source (A0.1)', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send(body('sql-own'))
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/data-sources').send(body('sql-own'))
     currentUser = admin('bob')
-    expect((await request(app).get('/api/data-sources/sql-own')).status).toBe(404)
+    expect((await request(pinned.url()).get('/api/data-sources/sql-own')).status).toBe(404)
   })
 })

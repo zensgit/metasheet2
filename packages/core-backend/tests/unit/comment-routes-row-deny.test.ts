@@ -1,6 +1,7 @@
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const mocks = vi.hoisted(() => {
   const query = vi.fn()
@@ -89,6 +90,8 @@ function buildApp(commentService: ReturnType<typeof buildCommentService>): Expre
   return app
 }
 
+const pinned = usePinnedServer()
+
 describe('comments routes row-deny gate', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -102,7 +105,8 @@ describe('comments routes row-deny gate', () => {
 
   it('returns an empty comment page for a denied target row without calling the service reader', async () => {
     const commentService = buildCommentService()
-    const res = await request(buildApp(commentService))
+    pinned.setApp(buildApp(commentService))
+    const res = await request(pinned.url())
       .get('/api/comments')
       .query({ spreadsheetId: 'sheet-1', rowId: 'row-denied' })
 
@@ -116,7 +120,8 @@ describe('comments routes row-deny gate', () => {
     const commentService = buildCommentService()
     const app = buildApp(commentService)
 
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .get('/api/comments/summary')
       .query({ spreadsheetId: 'sheet-1', rowIds: ['row-visible', 'row-denied'] })
       .expect(200)
@@ -127,7 +132,7 @@ describe('comments routes row-deny gate', () => {
       ['row-denied'],
     )
 
-    await request(app)
+    await request(pinned.url())
       .get('/api/comments/mention-summary')
       .query({ spreadsheetId: 'sheet-1' })
       .expect(200)
@@ -143,7 +148,8 @@ describe('comments routes row-deny gate', () => {
     commentService.markAllCommentsRead.mockResolvedValue(2)
     const app = buildApp(commentService)
 
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .post('/api/comments/mention-summary/mark-read')
       .send({ spreadsheetId: 'sheet-1' })
       .expect(204)
@@ -153,7 +159,7 @@ describe('comments routes row-deny gate', () => {
       ['row-denied'],
     )
 
-    await request(app)
+    await request(pinned.url())
       .post('/api/multitable/sheet-1/comments/mark-all-read')
       .send({})
       .expect(200)
@@ -166,7 +172,8 @@ describe('comments routes row-deny gate', () => {
 
   it('rejects comment creation on a denied target row before service create', async () => {
     const commentService = buildCommentService()
-    const res = await request(buildApp(commentService))
+    pinned.setApp(buildApp(commentService))
+    const res = await request(pinned.url())
       .post('/api/comments')
       .send({ spreadsheetId: 'sheet-1', rowId: 'row-denied', content: 'secret write' })
 

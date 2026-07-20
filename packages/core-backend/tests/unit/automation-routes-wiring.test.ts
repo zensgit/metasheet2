@@ -15,6 +15,7 @@ import { describe, it, expect, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // G8: the /test route now enforces canManageAutomation on the sheet. These wiring tests exercise
 // the AUTHORIZED path (they assert response redaction/shape, not the auth gate — that gate has its
@@ -45,6 +46,8 @@ function makeMockService() {
   }
 }
 
+const pinned = usePinnedServer()
+
 describe('createAutomationRoutes HTTP mounting', () => {
   it('POST /test returns flat AutomationExecution (not envelope)', async () => {
     const svc = makeMockService()
@@ -57,7 +60,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
       steps: [],
     })
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .expect(200)
 
@@ -79,7 +83,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
     })
     svc.logs.getById.mockResolvedValue(undefined) // not persisted → response-level redaction fallback
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .expect(200)
 
@@ -102,7 +107,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
       steps: [],
     })
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .expect(200)
 
@@ -121,7 +127,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
     })
     svc.logs.getById.mockRejectedValue(new Error('db down')) // log read fails
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .expect(200) // NOT 500 — the test run completed; only the log read failed
     expect(res.body.id).toBe('exec-4') // flat shape via redacted fallback
@@ -137,7 +144,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
       { id: 'exec-b', ruleId: 'rule-1', status: 'failed' },
     ])
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/logs')
       .expect(200)
 
@@ -156,7 +164,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
     const svc = makeMockService()
     svc.logs.getByRule.mockResolvedValue([])
 
-    await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/logs?limit=5000')
       .expect(200)
 
@@ -171,7 +180,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
       failed: 2,
     })
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/stats')
       .expect(200)
 
@@ -186,7 +196,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
     app.use(express.json())
     app.use('/api/multitable', createAutomationRoutes(() => undefined))
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/logs')
       .expect(503)
 
@@ -200,14 +211,15 @@ describe('createAutomationRoutes HTTP mounting', () => {
     app.use('/api/multitable', createAutomationRoutes(() => late))
 
     // Pre-init: 503
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/stats')
       .expect(503)
 
     // Simulate post-init
     late = { testRun: vi.fn(), logs: { getByRule: vi.fn(), getStats: vi.fn().mockResolvedValue({ total: 0 }) } }
 
-    await request(app)
+    await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/stats')
       .expect(200)
   })

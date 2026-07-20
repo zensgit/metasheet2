@@ -10,6 +10,7 @@ import { createAutomationRoutes } from '../../src/routes/automation'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 import { requireAdminRole } from '../../src/guards/audit-integration'
 import { resolveExecutionNameMaps } from '../../src/multitable/automation-execution-names'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // In prod the runs routes are gated by requireAdminRole() (platform-admin only).
 // Pass it through so the handler logic is testable — and separately assert the guard
@@ -78,6 +79,8 @@ function makeMockService(logsOverrides: Record<string, unknown> = {}, svcOverrid
   }
 }
 
+const pinned = usePinnedServer()
+
 // B3-11 default: no names resolved (every existing test that doesn't care about
 // ruleName/sheetName gets the honest id-fallback, never an undefined-map throw).
 // mockReset (not just a fresh mockResolvedValue) also clears call history AND any
@@ -91,7 +94,8 @@ beforeEach(() => {
 describe('A2 runs API — GET /automation-executions (list)', () => {
   it('returns { executions }; status emitted as C1 (success → resolved); snapshot omitted in list', async () => {
     const svc = makeMockService()
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .get('/api/multitable/automation-executions?sheetId=sheet-a')
       .expect(200)
 
@@ -123,7 +127,8 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
       sheetNames: new Map([['sheet-a', 'Orders']]),
     })
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions').expect(200)
     const run = res.body.executions[0]
     // pre-existing bare ids are untouched (backward compatible)
     expect(run.ruleId).toBe('rule-1')
@@ -144,7 +149,8 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
   it('B3-11: DEGRADES ruleName/sheetName to the raw id when the rule/sheet was deleted (honest fallback, no throw)', async () => {
     vi.mocked(resolveExecutionNameMaps).mockResolvedValue({ ruleNames: new Map(), sheetNames: new Map() })
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions').expect(200)
     const run = res.body.executions[0]
     expect(run.ruleName).toBe('rule-1') // falls back to the raw ruleId
     expect(run.sheetName).toBe('sheet-a') // falls back to the raw sheetId
@@ -155,7 +161,8 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
   it('B3-11: a name-lookup FAILURE never 500s the list — every row falls back to its raw id', async () => {
     vi.mocked(resolveExecutionNameMaps).mockRejectedValue(new Error('automation_rules temporarily unavailable'))
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions').expect(200)
     const run = res.body.executions[0]
     expect(run.ruleName).toBe('rule-1')
     expect(run.sheetName).toBe('sheet-a')
@@ -163,7 +170,8 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
 
   it('every step view passes the C1 normalizeWorkflowJob contract (error string-or-absent, never null)', async () => {
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions').expect(200)
     for (const step of res.body.executions[0].steps) {
       expect(() => normalizeWorkflowJob(step)).not.toThrow()
     }
@@ -174,32 +182,36 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
 
   it('status filter accepts BOTH C1 and legacy (resolved & success → stored legacy "success")', async () => {
     const svc = makeMockService()
-    await request(buildApp(svc)).get('/api/multitable/automation-executions?status=resolved').expect(200)
+    pinned.setApp(buildApp(svc))
+    await request(pinned.url()).get('/api/multitable/automation-executions?status=resolved').expect(200)
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'success' }))
-    await request(buildApp(svc)).get('/api/multitable/automation-executions?status=success').expect(200)
+    await request(pinned.url()).get('/api/multitable/automation-executions?status=success').expect(200)
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'success' }))
   })
 
   it('future-state C1 filter (suspended) is legal but returns empty WITHOUT querying', async () => {
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions?status=suspended').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions?status=suspended').expect(200)
     expect(res.body.executions).toEqual([])
     expect(svc.logs.listExecutions).not.toHaveBeenCalled()
   })
 
   it('invalid status filter → 400 (no silent fallback)', async () => {
     const svc = makeMockService()
-    await request(buildApp(svc)).get('/api/multitable/automation-executions?status=bogus').expect(400)
+    pinned.setApp(buildApp(svc))
+    await request(pinned.url()).get('/api/multitable/automation-executions?status=bogus').expect(400)
     expect(svc.logs.listExecutions).not.toHaveBeenCalled()
   })
 
   it('limit clamps to [1,200] — including the limit=0 corner (→ 1, not the 50 default)', async () => {
     const svc = makeMockService()
-    await request(buildApp(svc)).get('/api/multitable/automation-executions?limit=5000').expect(200)
+    pinned.setApp(buildApp(svc))
+    await request(pinned.url()).get('/api/multitable/automation-executions?limit=5000').expect(200)
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 200 }))
-    await request(buildApp(svc)).get('/api/multitable/automation-executions?limit=0').expect(200)
+    await request(pinned.url()).get('/api/multitable/automation-executions?limit=0').expect(200)
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 1 }))
-    await request(buildApp(svc)).get('/api/multitable/automation-executions?limit=-5').expect(200)
+    await request(pinned.url()).get('/api/multitable/automation-executions?limit=-5').expect(200)
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 1 }))
   })
 
@@ -214,7 +226,8 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
 describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
   it('returns the run WITH snapshot blobs (detail view)', async () => {
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions/axe_1').expect(200)
     expect(res.body.id).toBe('axe_1')
     expect(res.body.status).toBe('resolved')
     expect(res.body.triggerEvent).toEqual({ recordId: 'rec1' }) // detail includes snapshot
@@ -238,7 +251,8 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
       { getById: vi.fn().mockResolvedValue(suspendedExec) },
       { jobs: { listByExecution: vi.fn().mockResolvedValue(suspendedJobs) } },
     )
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_susp').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions/axe_susp').expect(200)
     expect(res.body.statusLegacy).toBe('running') // execution stays running (D2)
     expect(res.body.status).toBe('running')        // legacy bridge: running → running
     // prefer-jobs: the valid C1 `suspended` job (with descriptor) is surfaced as-is, no throw.
@@ -248,19 +262,22 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
 
   it('404 when the execution is missing', async () => {
     const svc = makeMockService({ getById: vi.fn().mockResolvedValue(undefined) })
-    await request(buildApp(svc)).get('/api/multitable/automation-executions/nope').expect(404)
+    pinned.setApp(buildApp(svc))
+    await request(pinned.url()).get('/api/multitable/automation-executions/nope').expect(404)
   })
 
   it('503 when the service is not initialized', async () => {
     const app = express()
     app.use(express.json())
     app.use('/api/multitable', createAutomationRoutes(() => undefined))
-    await request(app).get('/api/multitable/automation-executions').expect(503)
+    pinned.setApp(app)
+    await request(pinned.url()).get('/api/multitable/automation-executions').expect(503)
   })
 
   it('detail view surfaces retry provenance fields (null for a normal run)', async () => {
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions/axe_1').expect(200)
     expect(res.body).toHaveProperty('rerunOfExecutionId', null)
     expect(res.body).toHaveProperty('initiatedBy', null)
   })
@@ -275,13 +292,15 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
         ]),
       },
     })
-    const r1 = await request(buildApp(withJobs)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    pinned.setApp(buildApp(withJobs))
+    const r1 = await request(pinned.url()).get('/api/multitable/automation-executions/axe_1').expect(200)
     expect(r1.body.steps[0].id).toBe('axe_1:job:0') // from persisted jobs
     expect(withJobs.jobs.listByExecution).toHaveBeenCalledWith('axe_1')
 
     // no jobs → legacy steps fallback (synthesized `:step:` ids)
     const noJobs = makeMockService() // default jobs.listByExecution → []
-    const r2 = await request(buildApp(noJobs)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    pinned.setApp(buildApp(noJobs))
+    const r2 = await request(pinned.url()).get('/api/multitable/automation-executions/axe_1').expect(200)
     expect(r2.body.steps[0].id).toBe('axe_1:step:0') // legacy synth
   })
 
@@ -304,7 +323,8 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
         },
       },
     )
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions/axe_1').expect(200)
     expect(res.body.status).toBe('failed')
     expect(res.body.steps[0].id).toBe('axe_1:step:0')
     expect(res.body.steps[0].status).toBe('resolved')
@@ -320,7 +340,8 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
         },
       },
     )
-    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).get('/api/multitable/automation-executions/axe_1').expect(200)
     expect(res.body.steps[0].id).toBe('axe_1:step:0')
     expect(res.body.steps[0].status).toBe('resolved')
   })
@@ -329,7 +350,8 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
 describe('A5 runs API — POST /automation-executions/:id/retry', () => {
   it('400 CONFIRM_SIDE_EFFECTS_REQUIRED when confirmSideEffects is not true (no run)', async () => {
     const svc = makeMockService()
-    const res = await request(buildApp(svc)).post('/api/multitable/automation-executions/axe_1/retry').send({}).expect(400)
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).post('/api/multitable/automation-executions/axe_1/retry').send({}).expect(400)
     expect(res.body.error.code).toBe('CONFIRM_SIDE_EFFECTS_REQUIRED')
     expect(svc.retryExecution).not.toHaveBeenCalled()
   })
@@ -338,7 +360,8 @@ describe('A5 runs API — POST /automation-executions/:id/retry', () => {
     const svc = makeMockService({}, {
       retryExecution: vi.fn().mockResolvedValue({ status: 409, code: 'NOT_RETRYABLE', message: 'only failed/skipped' }),
     })
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/automation-executions/axe_1/retry')
       .send({ confirmSideEffects: true })
       .expect(409)
@@ -365,7 +388,8 @@ describe('A5 runs API — POST /automation-executions/:id/retry', () => {
       { getById: vi.fn().mockResolvedValue(redactedNew) },
       { retryExecution: vi.fn().mockResolvedValue({ execution: rawNew }) },
     )
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/automation-executions/axe_1/retry')
       .send({ confirmSideEffects: true })
       .expect(200)
@@ -393,7 +417,8 @@ describe('A5 runs API — POST /automation-executions/:id/retry', () => {
       { getById: vi.fn().mockResolvedValue(undefined) }, // record() swallowed → not found
       { retryExecution: vi.fn().mockResolvedValue({ execution: rawNew }) },
     )
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/automation-executions/axe_1/retry')
       .send({ confirmSideEffects: true })
       .expect(200)
@@ -419,7 +444,8 @@ describe('A5 runs API — POST /automation-executions/:id/retry', () => {
       { getById: vi.fn().mockRejectedValue(new Error('db down')) }, // log READ throws
       { retryExecution: vi.fn().mockResolvedValue({ execution: rawNew }) },
     )
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/automation-executions/axe_1/retry')
       .send({ confirmSideEffects: true })
       .expect(200) // NOT 500 — the retry ran; only the log read failed
@@ -435,12 +461,14 @@ describe('A5 runs API — POST /automation-executions/:id/retry', () => {
 
 describe('A6-2 — POST /automation/resume (admin-gated)', () => {
   it('400 when confirmSideEffects is not true (resume runs the tail\'s real side effects)', async () => {
-    await request(buildApp(makeMockService())).post('/api/multitable/automation/resume')
+    pinned.setApp(buildApp(makeMockService()))
+    await request(pinned.url()).post('/api/multitable/automation/resume')
       .send({ resumeToken: 'tok' }).expect(400)
   })
 
   it('400 when resumeToken is missing', async () => {
-    await request(buildApp(makeMockService())).post('/api/multitable/automation/resume')
+    pinned.setApp(buildApp(makeMockService()))
+    await request(pinned.url()).post('/api/multitable/automation/resume')
       .send({ confirmSideEffects: true }).expect(400)
   })
 
@@ -448,7 +476,8 @@ describe('A6-2 — POST /automation/resume (admin-gated)', () => {
     const svc = makeMockService({}, {
       resumeExecution: vi.fn().mockResolvedValue({ status: 404, code: 'NOT_FOUND', message: 'Unknown resume token' }),
     })
-    const res = await request(buildApp(svc)).post('/api/multitable/automation/resume')
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).post('/api/multitable/automation/resume')
       .send({ resumeToken: 'nope', confirmSideEffects: true }).expect(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
   })
@@ -459,7 +488,8 @@ describe('A6-2 — POST /automation/resume (admin-gated)', () => {
       { getById: vi.fn().mockResolvedValue(resumed) },
       { resumeExecution: vi.fn().mockResolvedValue({ execution: resumed }) },
     )
-    const res = await request(buildApp(svc)).post('/api/multitable/automation/resume')
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url()).post('/api/multitable/automation/resume')
       .send({ resumeToken: 'tok', confirmSideEffects: true }).expect(200)
     expect(res.body.statusLegacy).toBe('success')
     expect(res.body.initiatedBy).toBe('admin1')
