@@ -63,7 +63,7 @@ rendered block is additionally scanned for the auth token and scrubbed fail-clos
 STOCK_PREPARATION_RCA_ABORT_PROVENANCE
 executionState=DIAGNOSTIC_COMPLETE|DIAGNOSTIC_BLOCKED
 diagnosticAction=RUNTIME_ABORT_PROVENANCE
-blockedReasonClass=NONE|USAGE|HELPER_MISMATCH|IMPORT|NO_REQUEST|INTERNAL
+blockedReasonClass=NONE|USAGE|HELPER_MISMATCH|IMPORT|NO_REQUEST|REQUEST_ANOMALY|INTERNAL
 runtimeIdentity=NODE|BUN|DENO|OTHER|UNAVAILABLE
 nodeMajorClass=18|20|22|24|OTHER|UNAVAILABLE
 timerProbeResult=NORMAL|ABORT_EARLY|CLOCK_ANOMALY|UNAVAILABLE
@@ -169,6 +169,37 @@ zero import/fetch spies, fetch-less NO_REQUEST closure); CLI end-to-end for the 
 a tampered-copy path (BLOCKED, exit 2). Mutations M9-M12 (import-despite-mismatch,
 zero-request-complete, digest-drift, sibling-dropped) each RED with the intended discriminating
 test first; clean rerun 35/35.
+
+## 4c. Round-3 review absorption (2026-07-20)
+
+Owner round-3 reproduced two more false-PASSes; both closed:
+
+1. **Symlink bypassed the exact-SHA binding.** Verification derived the sibling directory from
+   `path.dirname(path.resolve(helperPath))`, which normalises `..` but does NOT follow symlinks,
+   while the Node loader imports a symlinked module by its real path and resolves that module's
+   static sibling import relative to the real directory. An attacker holding a byte-correct sibling
+   copy beside a symlink could make an UNVERIFIED real sibling execute. Fix: `resolveRealHelperFiles`
+   `realpath`s the target and each sibling, requires each real basename to equal its logical name
+   and each sibling to reside in the target's real directory, and both verification and import
+   operate on those real paths. Reproduced end-to-end: a tampered real sibling behind a clean
+   link-dir copy now yields `HELPER_MISMATCH` / exit 2. (Import via the caller path vs the resolved
+   real target is behaviourally equivalent — Node realpaths either to the same module — so that
+   mutation is an intentional equivalent; the residence and content guards are the load-bearing ones.)
+2. **Multiple / non-internal requests could read as COMPLETE.** The closure only blocked zero
+   requests. `DIAGNOSTIC_COMPLETE` now requires exactly one dispatch to the internal origin with
+   `externalWrite=false`; anything else (two dispatches, non-internal target, external-write guard
+   tripped) is `DIAGNOSTIC_BLOCKED` / `REQUEST_ANOMALY` / exit 2.
+
+Also fixed the P3: internal-target classification moved from `startsWith(baseUrl)` (which called
+`http://internal.example.evil` internal) to a same-origin `URL` comparison with an optional base
+path-prefix check; unparseable targets fail closed to non-internal.
+
+Verification grew to 42/42: `isInternalTarget` origin cases incl. the evil-suffix host, symlink
+repro (resolve into the real dir, tampered real sibling caught, differently-named target refused,
+sibling escaping the pinned dir refused), and two `REQUEST_ANOMALY` end-to-end cases (two internal
+dispatches, one external dispatch). Mutations M13/M15/M16/M17 (drop realpath, startsWith
+regression, drop anomaly guard, count-only anomaly check) each RED with the intended test first;
+M14 (drop sibling residence guard) RED via the escape test; clean rerun 42/42.
 
 ## 5. Operating notes (entity machine, owner-authorized runs only)
 
