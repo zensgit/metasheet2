@@ -1,8 +1,17 @@
 # Employee attendance overview task-first design lock - 2026-07-16
 
-> **Status: PROPOSED.** Docs-only design lock for issue #4355. It does not
-> authorize runtime work, change any API, or claim the issue complete. Owner
-> ratification is required before implementation.
+> **Status: RATIFIED (owner 2026-07-21).** Owner review verdict: 设计层面
+> APPROVE, 0 P1 / 0 P2 — OD-O1 through OD-O4 all accepted at their recommended
+> values (ruling date 2026-07-21; recorded in §10). Ratification basis: the
+> independent post-#4359 doc-sync recheck returned **NO-DRIFT** against landed
+> main (`962fff55f` — every surface this lock references survives unchanged;
+> verdict re-verified on the landed squash; record at PR #4370 review comment,
+> 2026-07-21) and the owner independently confirmed Wave 0 `426ea624c` /
+> Wave 1 `962fff55f` are ancestors of current `origin/main`. Per charter §14
+> step 4 / §15, this ratification authorizes opening the Wave 2 runtime PR for
+> issue #4355 from post-#4370-merge main — runtime work still lands through its
+> own PR with the full charter §8.1 gate battery; this document itself changes
+> no runtime.
 
 ## 1. Grounded problem statement
 
@@ -300,8 +309,11 @@ Ratification records these defaults unless the owner explicitly changes one:
   guard, typecheck, and two-viewport visual proof; no parallel legacy template
   and no feature flag (**recommended**).
 
-Until OD-O1 through OD-O4 are ratified, this document remains PROPOSED and no
-runtime work is authorized.
+**Ratified 2026-07-21**: the owner accepted OD-O1, OD-O2, OD-O3, and OD-O4 at
+their recommended values, with no modifications ("OD-O1～O4 的推荐裁决可接受",
+owner review 2026-07-21). Runtime work for issue #4355 (charter Wave 2) is
+authorized from post-#4370-merge main onward, subject to the charter §8.1 gate
+battery on the runtime PR itself.
 
 ## 11. Completion definition
 
