@@ -196,6 +196,27 @@ describe('useAttendanceAdminRailNavigation', () => {
     expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
   })
 
+  // Positive control for the focused-mode suppression guard above: with focused mode OFF the observer
+  // callback MUST assign the reported section — proving the suppressed scroll-spy logic is real logic
+  // (not vacuously dead) and that the guard leg's green comes from the guard, not a broken observer.
+  it('lets the observer drive the active section when focused mode is OFF (positive control)', async () => {
+    const observer = installIntersectionObserver()
+    const vm = mountHost({ focused: false })
+    await flushUi()
+
+    const approval = document.getElementById('attendance-admin-approval-flows')
+    expect(approval).toBeTruthy()
+    observer.trigger([{
+      target: approval!,
+      isIntersecting: true,
+      intersectionRatio: 0.9,
+      boundingClientRect: approval!.getBoundingClientRect(),
+    } as IntersectionObserverEntry])
+    await flushUi()
+
+    expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+  })
+
   it('closes compact nav after selecting a section', async () => {
     setViewportWidth(640)
     const vm = mountHost()

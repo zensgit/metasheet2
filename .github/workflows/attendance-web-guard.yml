@@ -9,6 +9,8 @@
 # attendance-admin-regressions.spec.ts (overview admin-only-preload guard + AE-3
 # result-edit modal matrix), attendance-admin-anchor-nav.spec.ts (member resolve / nav
 # guards), useAttendanceAdminRail.spec.ts (org-scoped memory + retired all-sections-mode
+# guard), useAttendanceAdminRailNavigation.spec.ts (focused-mode scroll-spy suppression guard
+# + observer positive control — #4359 Wave 1, charter §8.1.4 declared wiring),
 # guard), AttendanceRequestCenterSection.result-edit.spec.ts (request-center parity
 # for the shared AE-3 result-edit callback), attendance-selfservice-dashboard.spec.ts,
 # attendance-caliber-transparency.spec.ts (display-only 口径透明 slice — #3575 design-lock:
@@ -70,6 +72,7 @@ on:
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRail.spec.ts'
+      - 'apps/web/tests/useAttendanceAdminRailNavigation.spec.ts'
       - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
       - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
       - 'apps/web/tests/attendance-caliber-transparency.spec.ts'
@@ -107,6 +110,7 @@ on:
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRail.spec.ts'
+      - 'apps/web/tests/useAttendanceAdminRailNavigation.spec.ts'
       - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
       - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
       - 'apps/web/tests/attendance-caliber-transparency.spec.ts'
@@ -177,4 +181,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust --reporter=dot
