@@ -3158,6 +3158,55 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   await deliverDirectorySyncFailureAlert({ integrationId, integrationName, runId, message })
 }
 
+/**
+ * Terminal run state for a DELIBERATE abort: the apply-time freeze recheck found an active
+ * org transfer and rolled the apply back (see `DirectorySyncFrozenByTransferError`).
+ *
+ * A frozen source is a deliberate transfer state, not an outage — every other surface in this
+ * lane already says so (the scheduler skips quietly, the route answers a deliberate 409 that
+ * must never page monitoring). Routing this through `markSyncFailure` contradicted all of them
+ * and, worse, was not self-healing: `directory_integrations.last_error` is only cleared inside
+ * the SUCCESSFUL apply transaction, and the freeze is exactly what prevents a successful apply —
+ * so a multi-day transfer (the designed steady state) left the integration reading "errored"
+ * for its whole duration and fed `countConsecutiveFailedRuns` escalation.
+ *
+ * What this leaves behind instead:
+ *  - the run reaches a TERMINAL, non-'running' state, so the partial unique index frees the
+ *    lease immediately and nothing has to wait for stale-lease reclaim;
+ *  - status is 'aborted', a distinct value: `countConsecutiveFailedRuns` filters
+ *    `status IN ('completed','failed')`, so a deliberate abort can never drive failure
+ *    escalation, and no migration is needed (the column is bare `text`, no CHECK constraint);
+ *  - `error_message` stays NULL — the admin run panel styles that field as an error;
+ *    the reason lives in `meta` (which no summary/toast surface reads);
+ *  - `directory_integrations` is NOT touched at all: no `last_error`, no `last_sync_at` bump
+ *    (nothing was synced);
+ *  - no `directory_sync_alerts` 'sync_failed' row and therefore no failure-alert delivery.
+ *
+ * Unlike `markSyncFailure` this UPDATE IS guarded on `status = 'running'`: if the lease was
+ * reclaimed while this run was alive, the row already carries the reclaimer's truthful
+ * `failed`/orphaned record and this run no longer owns it — overwriting it with a softer
+ * 'aborted' would erase a real liveness incident. Either way the row is terminal and the
+ * lease is free.
+ */
+async function markSyncAbortedByFreeze(runId: string, transferId: string): Promise<void> {
+  await query(
+    `UPDATE directory_sync_runs
+        SET status = 'aborted',
+            finished_at = NOW(),
+            meta = COALESCE(meta, '{}'::jsonb) || jsonb_build_object(
+              'abortReason', 'frozen_by_org_transfer',
+              'transferId', $2::text
+            ),
+            updated_at = NOW()
+      WHERE id = $1
+        AND status = 'running'`,
+    [runId, transferId],
+  )
+  logger.info(
+    `Directory sync run ${runId} aborted: source frozen by active org transfer ${transferId} (deliberate state, not a failure)`,
+  )
+}
+
 export function buildUniqueLocalUserMatchMap(
   rows: LocalUserRow[],
   readKey: (row: LocalUserRow) => string,
@@ -4298,6 +4347,14 @@ export async function syncDirectoryIntegration(
       autoAdmissionOnboardingPackets,
     }
   } catch (error) {
+    // A freeze that linearized first is a DELIBERATE abort, not an integration failure —
+    // the apply already rolled back, so there is nothing to alert on. Take the terminal
+    // abort path (see `markSyncAbortedByFreeze`) and re-throw the error UNCHANGED, so the
+    // route's deliberate 409 mapping and the scheduler's quiet info-skip are untouched.
+    if (error instanceof DirectorySyncFrozenByTransferError) {
+      await markSyncAbortedByFreeze(runId, error.transferId)
+      throw error
+    }
     const message = readErrorMessage(error, 'Directory sync failed')
     await markSyncFailure(integrationId, runId, message)
     throw error
