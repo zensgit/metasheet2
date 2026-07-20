@@ -36,7 +36,7 @@
 //     as an observation, not as sole attribution.
 
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
@@ -76,7 +76,7 @@ export const HELPER_SIBLING_REQUIREMENTS = Object.freeze({
 export const RESULT_VOCABULARY = Object.freeze({
   executionState: Object.freeze(['DIAGNOSTIC_COMPLETE', 'DIAGNOSTIC_BLOCKED']),
   diagnosticAction: Object.freeze([DIAGNOSTIC_ACTION]),
-  blockedReasonClass: Object.freeze(['NONE', 'USAGE', 'HELPER_MISMATCH', 'IMPORT', 'NO_REQUEST', 'INTERNAL']),
+  blockedReasonClass: Object.freeze(['NONE', 'USAGE', 'HELPER_MISMATCH', 'IMPORT', 'NO_REQUEST', 'REQUEST_ANOMALY', 'INTERNAL']),
   runtimeIdentity: Object.freeze(['NODE', 'BUN', 'DENO', 'OTHER', 'UNAVAILABLE']),
   nodeMajorClass: Object.freeze(['18', '20', '22', '24', 'OTHER', 'UNAVAILABLE']),
   timerProbeResult: Object.freeze(['NORMAL', 'ABORT_EARLY', 'CLOCK_ANOMALY', 'UNAVAILABLE']),
@@ -219,6 +219,26 @@ export async function runTimerProbe({
 
 // ── Abort-provenance fetchImpl (observe-only shim over the helper's existing seam) ───────────────
 
+// Same-origin test, not a string prefix: `startsWith(baseUrl)` classifies
+// `http://internal.example.evil/…` as internal against base `http://internal.example` (owner
+// round-3 P3). Parse both and require identical origin (protocol + host + port); when the base
+// carries a path prefix, require the target path to sit under it. Unparseable targets fail closed
+// to non-internal.
+export function isInternalTarget(url, baseUrl) {
+  let target
+  let base
+  try {
+    target = new URL(String(url))
+    base = new URL(String(baseUrl))
+  } catch {
+    return false
+  }
+  if (target.origin !== base.origin) return false
+  const basePath = base.pathname === '/' ? '' : base.pathname.replace(/\/$/, '')
+  if (!basePath) return true
+  return target.pathname === basePath || target.pathname.startsWith(`${basePath}/`)
+}
+
 // Records, without altering behavior: how many requests the helper dispatched, whether every
 // target stayed under the supplied base URL, and whether the helper's own AbortSignal ever fired.
 // helperSignalObserved: UNAVAILABLE until a request carrying a signal is seen, then FALSE, then
@@ -234,7 +254,7 @@ export function buildProvenanceFetchImpl({ baseUrl, nowNs = defaultNowNs, fetchD
   const fetchImpl = (url, init) => {
     state.requestCount += 1
     if (state.startedNs === null) state.startedNs = nowNs()
-    const internal = String(url).startsWith(baseUrl)
+    const internal = isInternalTarget(url, baseUrl)
     state.networkTarget = state.networkTarget === 'OTHER' ? 'OTHER' : internal ? 'INTERNAL_API_ONLY' : 'OTHER'
     const signal = init ? init.signal : undefined
     if (signal && typeof signal.addEventListener === 'function') {
@@ -353,22 +373,56 @@ export function buildAuthReadPathname(tenantId) {
   return `${AUTH_READ_PATHNAME}?${params.toString()}`
 }
 
-// ── Helper content verification + import (pathToFileURL only) ────────────────────────────────────
+// ── Helper content verification + import (realpath-bound) ────────────────────────────────────────
 
-// Byte-binds the probe to the exact-SHA helper before any dynamic import: the target file and its
-// required sibling(s) must hash to the release-pinned digests. Returns 'PASS' | 'FAIL' only —
-// unreadable files, unknown basenames, and digest mismatches all FAIL closed.
-export async function verifyHelperContent(helperPath, { readFileImpl = readFile } = {}) {
+// Resolve the exact real files the Node loader will execute. A basename allowlist plus
+// `path.resolve` (which normalises `..` but does NOT follow symlinks) is not enough: Node imports
+// a symlinked module by its REAL path and resolves that module's static sibling import relative to
+// the real directory, so a symlink in a directory holding a byte-correct sibling copy would let an
+// UNVERIFIED real sibling execute (owner round-3 repro). `realpath` every file so verification and
+// import operate on identical bytes. Also require each real file's basename to equal its logical
+// name — a symlink pointing at a differently-named target is refused rather than silently accepted.
+export async function resolveRealHelperFiles(helperPath, { realpathImpl = realpath } = {}) {
   const base = path.basename(helperPath)
   const siblings = HELPER_SIBLING_REQUIREMENTS[base]
-  if (!Array.isArray(siblings)) return 'FAIL'
-  const dir = path.dirname(path.resolve(helperPath))
-  for (const name of [base, ...siblings]) {
+  if (!Array.isArray(siblings)) return null
+  let realTarget
+  try {
+    realTarget = await realpathImpl(helperPath)
+  } catch {
+    return null
+  }
+  if (path.basename(realTarget) !== base) return null
+  const dir = path.dirname(realTarget)
+  const files = [{ name: base, realPath: realTarget }]
+  for (const name of siblings) {
+    let realSibling
+    try {
+      realSibling = await realpathImpl(path.join(dir, name))
+    } catch {
+      return null
+    }
+    // The sibling Node will import must live in the target's real directory under its own name;
+    // a sibling that realpaths elsewhere (a nested symlink) is refused.
+    if (path.dirname(realSibling) !== dir || path.basename(realSibling) !== name) return null
+    files.push({ name, realPath: realSibling })
+  }
+  return { realTarget, dir, files }
+}
+
+// Byte-binds the probe to the exact-SHA helper before any dynamic import: every real file the
+// loader will execute (target + required sibling(s)) must hash to the release-pinned digests.
+// Returns 'PASS' | 'FAIL' only — unresolvable paths, symlink redirection, unknown basenames, and
+// digest mismatches all FAIL closed.
+export async function verifyHelperContent(helperPath, { readFileImpl = readFile, realpathImpl = realpath } = {}) {
+  const resolved = await resolveRealHelperFiles(helperPath, { realpathImpl })
+  if (!resolved) return 'FAIL'
+  for (const { name, realPath } of resolved.files) {
     const expected = HELPER_CONTENT_SHA256[name]
     if (typeof expected !== 'string') return 'FAIL'
     let bytes
     try {
-      bytes = await readFileImpl(path.join(dir, name))
+      bytes = await readFileImpl(realPath)
     } catch {
       return 'FAIL'
     }
@@ -378,8 +432,18 @@ export async function verifyHelperContent(helperPath, { readFileImpl = readFile 
   return 'PASS'
 }
 
-export async function importHelperModule(helperPath, { importImpl } = {}) {
-  const href = pathToFileURL(path.resolve(helperPath)).href
+// Import the verified real target (not the caller-supplied, possibly-symlinked path) so the module
+// that executes is exactly the one whose bytes were hashed. When importImpl is injected (tests),
+// realpath resolution is skipped and the caller-supplied path is used directly.
+export async function importHelperModule(helperPath, { importImpl, realpathImpl = realpath } = {}) {
+  let href
+  if (importImpl) {
+    href = pathToFileURL(path.resolve(helperPath)).href
+  } else {
+    const resolved = await resolveRealHelperFiles(helperPath, { realpathImpl })
+    if (!resolved) throw new Error('helper path could not be resolved to verified real files')
+    href = pathToFileURL(resolved.realTarget).href
+  }
   const mod = importImpl ? await importImpl(href) : await import(href)
   if (!mod || typeof mod.requestJson !== 'function') {
     throw new Error('helper module missing requestJson export')
@@ -489,9 +553,11 @@ export async function runDiagnostic({
   }
 
   // DIAGNOSTIC_COMPLETE is a contract, not a default: the exact-SHA binding must be proven, the
-  // import must succeed, and exactly the intended request must actually have been dispatched and
-  // classified. A run that never fired its one request (missing fetch, skipped phase) is BLOCKED
-  // — zero-request outcomes must never read as a completed diagnostic.
+  // import must succeed, and EXACTLY ONE request must have been dispatched to the internal target
+  // with externalWrite=false. A run that never fired its request (missing fetch, skipped phase) is
+  // NO_REQUEST; a run that fired more than one, hit a non-internal target, or tripped the
+  // external-write guard is REQUEST_ANOMALY — neither may read as a completed diagnostic (owner
+  // round-3: two dispatches / networkRequestCount=OTHER / externalWrite=true must exit 2).
   if (fields.helperContentVerified !== 'PASS') {
     fields.executionState = 'DIAGNOSTIC_BLOCKED'
     fields.blockedReasonClass = 'HELPER_MISMATCH'
@@ -501,6 +567,13 @@ export async function runDiagnostic({
   } else if (fields.networkRequestCount === '0' || fields.authReadResult === 'UNAVAILABLE') {
     fields.executionState = 'DIAGNOSTIC_BLOCKED'
     fields.blockedReasonClass = 'NO_REQUEST'
+  } else if (
+    fields.networkRequestCount !== '1' ||
+    fields.networkTarget !== 'INTERNAL_API_ONLY' ||
+    fields.externalWrite !== 'false'
+  ) {
+    fields.executionState = 'DIAGNOSTIC_BLOCKED'
+    fields.blockedReasonClass = 'REQUEST_ANOMALY'
   }
 
   return fields

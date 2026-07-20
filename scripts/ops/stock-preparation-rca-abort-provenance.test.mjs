@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, writeFile, copyFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, copyFile, symlink, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,7 +36,9 @@ import {
   deriveAbortProvenance,
   deriveExternalWrite,
   detectRuntime,
+  isInternalTarget,
   parseArgs,
+  resolveRealHelperFiles,
   runDiagnostic,
   runTimerProbe,
   verifyHelperContent,
@@ -409,6 +411,84 @@ test('verifyHelperContent: byte-exact copies PASS; any tamper of target or sibli
   assert.equal(await verifyHelperContent(path.join(dir, 'evil-module.mjs')), 'FAIL', 'non-allowlisted basename must FAIL')
 })
 
+test('symlink bypass (owner round-3 repro): verify+import must resolve the SAME real files', async () => {
+  // Real dir holds the genuine, byte-correct helper + sibling.
+  const realDir = await makeHelperFixtureDir()
+  // Attack dir: a byte-correct sibling copy, but the TARGET is a symlink into the real dir. The
+  // pre-fix code verified the sibling from the symlink's own directory while Node would import the
+  // sibling that lives beside the symlink's REAL target — a different file could execute unverified.
+  const linkDir = await mkdtemp(path.join(os.tmpdir(), 'rca-probe-link-'))
+  await symlink(path.join(realDir, EXTENDED_BASENAME), path.join(linkDir, EXTENDED_BASENAME))
+  await copyFile(path.join(OPS_DIR, MVP_BASENAME), path.join(linkDir, MVP_BASENAME))
+
+  const realDirCanonical = await realpath(realDir) // macOS /var -> /private/var
+  const resolved = await resolveRealHelperFiles(path.join(linkDir, EXTENDED_BASENAME))
+  assert.ok(resolved, 'symlink to a same-named real target resolves')
+  assert.equal(resolved.realTarget, path.join(realDirCanonical, EXTENDED_BASENAME), 'target resolves into the REAL dir')
+  assert.equal(resolved.dir, realDirCanonical, 'sibling verification directory is the real dir, not the link dir')
+  for (const f of resolved.files) {
+    assert.equal(path.dirname(f.realPath), realDirCanonical, `${f.name} is verified from the real dir Node will import from`)
+  }
+  // Byte-correct real files => PASS, and it is the real sibling that was hashed.
+  assert.equal(await verifyHelperContent(path.join(linkDir, EXTENDED_BASENAME)), 'PASS')
+
+  // Now tamper the REAL sibling: verification must FAIL even though the link-dir sibling is clean.
+  const realSibling = path.join(realDir, MVP_BASENAME)
+  await writeFile(realSibling, `${await readFile(realSibling, 'utf8')}\n// tampered real sibling`)
+  assert.equal(
+    await verifyHelperContent(path.join(linkDir, EXTENDED_BASENAME)),
+    'FAIL',
+    'the real sibling Node imports is tampered — a clean link-dir copy must not mask it',
+  )
+})
+
+test('resolveRealHelperFiles refuses a symlink whose real target has a different logical name', async () => {
+  const realDir = await makeHelperFixtureDir()
+  const linkDir = await mkdtemp(path.join(os.tmpdir(), 'rca-probe-link2-'))
+  // extended.mjs -> real mvp.mjs: logical name and real basename disagree; must refuse.
+  await symlink(path.join(realDir, MVP_BASENAME), path.join(linkDir, EXTENDED_BASENAME))
+  assert.equal(await resolveRealHelperFiles(path.join(linkDir, EXTENDED_BASENAME)), null)
+  assert.equal(await verifyHelperContent(path.join(linkDir, EXTENDED_BASENAME)), 'FAIL')
+})
+
+test('resolveRealHelperFiles refuses a sibling that realpaths OUT of the target real directory', async () => {
+  // Real target dir; its sibling is a symlink to a byte-correct copy in a DIFFERENT directory.
+  // Node would import that escaped sibling; a content-only check would pass it. The residence guard
+  // requires the executed sibling to live in the target's real dir under its own name, so it FAILs.
+  const realDir = await mkdtemp(path.join(os.tmpdir(), 'rca-probe-escape-'))
+  await copyFile(path.join(OPS_DIR, EXTENDED_BASENAME), path.join(realDir, EXTENDED_BASENAME))
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'rca-probe-elsewhere-'))
+  await copyFile(path.join(OPS_DIR, MVP_BASENAME), path.join(elsewhere, MVP_BASENAME)) // byte-correct
+  await symlink(path.join(elsewhere, MVP_BASENAME), path.join(realDir, MVP_BASENAME))
+  assert.equal(
+    await resolveRealHelperFiles(path.join(realDir, EXTENDED_BASENAME)),
+    null,
+    'a byte-correct sibling that escapes the pinned directory is still refused',
+  )
+  assert.equal(await verifyHelperContent(path.join(realDir, EXTENDED_BASENAME)), 'FAIL')
+})
+
+// ── Internal-target classification (origin, not string prefix) ───────────────────────────────────
+
+test('isInternalTarget: same-origin only — the evil-suffix host is external', () => {
+  assert.equal(isInternalTarget('http://internal.example/api/integration/status', 'http://internal.example'), true)
+  assert.equal(isInternalTarget('http://internal.example:8081/api/x', 'http://internal.example:8081'), true)
+  // The bug: startsWith would call this internal; origin comparison rejects it.
+  assert.equal(isInternalTarget('http://internal.example.evil/api/x', 'http://internal.example'), false)
+  assert.equal(isInternalTarget('http://internal.example:9999/api/x', 'http://internal.example:8081'), false)
+  assert.equal(isInternalTarget('https://internal.example/api/x', 'http://internal.example'), false)
+  assert.equal(isInternalTarget('not a url', 'http://internal.example'), false)
+  // Base with a path prefix: only true subpaths are internal.
+  assert.equal(isInternalTarget('http://h/base/api', 'http://h/base'), true)
+  assert.equal(isInternalTarget('http://h/baseevil/api', 'http://h/base'), false)
+})
+
+test('provenance shim uses origin classification: evil-suffix target latches OTHER', async () => {
+  const { fetchImpl, state } = buildProvenanceFetchImpl({ baseUrl: 'http://internal.example', fetchDelegate: async () => jsonResponse(200) })
+  await fetchImpl('http://internal.example.evil/api/x', {})
+  assert.equal(state.networkTarget, 'OTHER')
+})
+
 test('runDiagnostic on a content mismatch: BLOCKED/HELPER_MISMATCH, zero imports, zero requests', async () => {
   let importCalls = 0
   let fetchCalls = 0
@@ -446,6 +526,49 @@ test('runDiagnostic zero-request closure: verified + imported but no dispatch is
   assert.equal(fields.networkRequestCount, '0')
   assert.equal(fields.executionState, 'DIAGNOSTIC_BLOCKED')
   assert.equal(fields.blockedReasonClass, 'NO_REQUEST')
+})
+
+// A stand-in helper whose requestJson dispatches through the provided fetchImpl N times to whichever
+// targets — used to prove the closure rejects anything but exactly one clean internal request.
+function multiDispatchHelperImport(targets) {
+  return async () => ({
+    requestJson: async (baseUrl, pathname, opts) => {
+      let last
+      for (const t of targets) {
+        last = await opts.fetchImpl(t === 'INTERNAL' ? `${baseUrl}${pathname}` : t, { signal: new AbortController().signal })
+      }
+      return last
+    },
+  })
+}
+
+test('runDiagnostic REQUEST_ANOMALY: two dispatches never read as COMPLETE (externalWrite=true, exit-2 posture)', async () => {
+  const fields = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: async () => 'PASS',
+    importImpl: multiDispatchHelperImport(['INTERNAL', 'INTERNAL']),
+    fetchDelegate: async () => jsonResponse(200),
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(fields.networkRequestCount, 'OTHER')
+  assert.equal(fields.externalWrite, 'true')
+  assert.equal(fields.executionState, 'DIAGNOSTIC_BLOCKED')
+  assert.equal(fields.blockedReasonClass, 'REQUEST_ANOMALY')
+})
+
+test('runDiagnostic REQUEST_ANOMALY: one dispatch to a non-internal target is not COMPLETE', async () => {
+  const fields = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: async () => 'PASS',
+    importImpl: multiDispatchHelperImport(['http://exfil.example/x']),
+    fetchDelegate: async () => jsonResponse(200),
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(fields.networkRequestCount, '1')
+  assert.equal(fields.networkTarget, 'OTHER')
+  assert.equal(fields.externalWrite, 'true')
+  assert.equal(fields.executionState, 'DIAGNOSTIC_BLOCKED')
+  assert.equal(fields.blockedReasonClass, 'REQUEST_ANOMALY')
 })
 
 // ── End-to-end runDiagnostic ─────────────────────────────────────────────────────────────────────
