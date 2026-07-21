@@ -12,7 +12,11 @@
 
 ## 0. Owner 四条红线（一等公民，覆盖本锁一切条款）
 
-owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切片的完成门必须含对应负向断言：
+owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切片的完成门必须含对应负向断言。
+**裁决出处锚定（预审 P3-1）**：该裁决于 2026-07-21 在 owner 工作会话（「考勤开通-260717」）中作出，
+本节为其首次入仓转写——仓内此前无该裁决记录（章程 owner record 为 2026-07-20）。**owner 审阅本锁时
+请首先核对本节四条红线与授权范围（只读侦察 + docs-only 锁、Wave 5 不并开、operator 项不计完成度）
+对裁决原意的转写无失真、无扩权**；确认即构成该裁决的 durable 记录。
 
 | # | 红线 | 本锁的落地形态 |
 |---|---|---|
@@ -64,7 +68,7 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 
 ## 3. 七步合同（章程 §4.5 L202-208 逐字继承）与信号派生矩阵
 
-七步 = ①同步/创建组织人员 → ②创建考勤组并选择人员 → ③选择班制与班次模板 → ④配置允许的打卡方式
+七步 = ①同步或创建组织人员 → ②创建考勤组并选择人员 → ③选择班制与班次模板 → ④配置允许的打卡方式
 → ⑤关联审批流程 → ⑥配置通知渠道与接收范围 → ⑦预览影响范围并启用。
 每步必须显示：完成状态、缺失项、影响人数、计划生效时间、预览入口、修复动作（L210）。
 
@@ -119,9 +123,11 @@ multiShiftDay/annualLeavePolicy/attendanceResultEditPolicy`）——向导对 se
 ## 6. 入口与导航合同（R2）
 
 **6.1 注册形态（OD-W4-2 推荐 =(a)+(c)）**：新增 admin section `attendance-admin-setup`（canonical 注册，
-自动获得 `?section=attendance-admin-setup` 深链/rail/快速跳转）+ 任务首页「基础配置」组新增首位 action
-「启用准备」（button 型 sectionId action，`adminTaskHomeGroups:14452` 内加一项——**不加第 5 组**，避免
-4 列栅格改动 `AttendanceAdminTaskHome.vue:175-179`）。不做首次进入自动拦截（现状无 first-run 逻辑，
+自动获得 `?section=attendance-admin-setup` 深链/rail/快速跳转）+ 任务首页 **`people-groups`（人员与
+考勤组）组**新增首位 action「启用准备」（button 型 sectionId action，`adminTaskHomeGroups:14452` 内
+加一项——**不加第 5 组**，避免 4 列栅格改动 `AttendanceAdminTaskHome.vue:175-179`；任务首页实有四组
+= daily-operations / people-groups / work-time-policies / reporting-payroll，归组位置 owner 可在
+ratify 时调整）。不做首次进入自动拦截（现状无 first-run 逻辑，
 强拦截违背「不与日常混首屏」的克制姿态；localStorage 首访信号仅用于任务首页 action 上的轻量「未完成」
 提示，OD-W4-2(c)）。
 **6.2 深链纪律**：向导内七步「去配置/修复」全部 = `selectAdminSection` 或 `?section=` query 深链
@@ -162,6 +168,11 @@ multiShiftDay/annualLeavePolicy/attendanceResultEditPolicy`）——向导对 se
   英文错误串）；(b) 记 deferred 继续留已知项。
 - **OD-W4-6 影响人数口径**：(a) `memberCount`/`groupsWithMembers` 派生的计数（**recommended**）；
   (b) 逐用户名单预览（不推荐，与 values-free 及只读面冲突）。
+- **OD-W4-7 中途退出恢复口径**（章程 L358「中途退出后状态可恢复」的读法，预审 P3-3 要求显式）：
+  (a) **无状态重派生**（**recommended**）——向导无持久向导态，readiness 重进即重算；用户已填内容
+  落在 canonical form 各自的既有状态里，不存在会丢失的「向导中间态」；W4-1 完成门补可验证断言：
+  中途退出→重进 ⇒ 判别矩阵输出与直接重算逐项一致；(b) 持久向导态（不推荐——引入新状态真源，
+  与 R1 只读面和「向导本身无流程状态机」的设计相悖）。
 
 ## 9. 切片（严格串行，全部 RATIFY 后开工；每片完成门 = 章程 §8.1 十一门 + 本锁红线负向断言 + Opus 对抗审 0 P1/P2 + PR 门禁记录）
 
