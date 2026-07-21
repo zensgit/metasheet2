@@ -97,6 +97,10 @@ jobs:
         run: |
           node --test scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs
 
+      - name: Run DingTalk OAuth-stability ARG_MAX payload-handoff test (DT-CLOSE-01C)
+        run: |
+          node --test scripts/ops/dingtalk-oauth-stability-argmax-payload.test.mjs
+
       - name: Run DingTalk OAuth-stability summary + workflow contract tests (DT-CLOSE-01B)
         run: |
           node --test \
