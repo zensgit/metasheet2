@@ -5860,9 +5860,13 @@ describe('ApprovalProductService', () => {
         ],
         policy: { allowRevoke: true },
       }
-      await expect(createTemplate(baseRequest(graph))).rejects.toMatchObject({
+      const rejection = createTemplate(baseRequest(graph))
+      await expect(rejection).rejects.toMatchObject({
         code: 'VALIDATION_ERROR',
         statusCode: 400,
+      })
+      await expect(rejection).rejects.not.toMatchObject({
+        message: expect.stringMatching(/fork|empty|end/),
       })
     })
 

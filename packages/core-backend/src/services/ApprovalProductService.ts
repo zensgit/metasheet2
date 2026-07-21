@@ -1397,7 +1397,7 @@ function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph):
         const priorNodeKey = seenAcrossBranches.get(fingerprint)
         if (priorNodeKey !== undefined) {
           throw new ServiceError(
-            `approvalGraph parallel node ${node.key} has branches whose approvers provably resolve identically (${fingerprint}) — every request would fail with a parallel assignment conflict`,
+            'approvalGraph parallel branches must not resolve to the same approver set',
             400,
             'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
             { nodeKey: node.key, source: fingerprint, conflictingNodeKeys: [priorNodeKey, carrierNodeKey] },
@@ -1701,13 +1701,13 @@ function normalizeApprovalGraph(
       if (!edge || edge.source !== node.key) {
         failValidation(
           context,
-          `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`,
+          'approvalGraph parallel gateway references an invalid branch edge',
         )
       }
       if (edge.target === parallelConfig.joinNodeKey) {
         failValidation(
           context,
-          `approvalGraph parallel node ${node.key} has an empty branch`,
+          'approvalGraph parallel branch must contain at least one body node',
         )
       }
     }
@@ -1715,7 +1715,7 @@ function normalizeApprovalGraph(
     if (!joinNode) {
       failValidation(
         context,
-        `approvalGraph parallel node ${node.key} references unknown join node ${parallelConfig.joinNodeKey}`,
+        'approvalGraph parallel gateway references an invalid join node',
       )
     }
 
@@ -1742,7 +1742,7 @@ function normalizeApprovalGraph(
           if (seen.has(assignee)) {
             failValidation(
               context,
-              `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+              'approvalGraph parallel branches must not contain the same approver',
             )
           }
           seen.add(assignee)
@@ -1774,20 +1774,20 @@ function collectBranchAssignees(
   while (currentKey) {
     if (currentKey === joinNodeKey) return assignees
     if (visited.has(currentKey)) {
-      failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
+      failValidation(context, 'approvalGraph parallel branch contains a cycle')
     }
     visited.add(currentKey)
     const node = nodeByKey.get(currentKey)
     if (!node) {
-      failValidation(context, `approvalGraph parallel branch references unknown node ${currentKey}`)
+      failValidation(context, 'approvalGraph parallel branch references an invalid node')
     }
     if (node.type === 'parallel') {
-      failValidation(context, `approvalGraph parallel branch cannot contain nested parallel node ${node.key}`)
+      failValidation(context, 'approvalGraph parallel branches cannot contain a nested parallel gateway')
     }
     if (node.type === 'end') {
       failValidation(
         context,
-        `approvalGraph parallel branch must reach join before end (at ${node.key})`,
+        'approvalGraph parallel branch must reach its join before the end node',
       )
     }
     if (node.type === 'approval') {
@@ -1800,7 +1800,7 @@ function collectBranchAssignees(
       // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
       if (approvalConfig.approvalMode === 'threshold') {
         throw new ServiceError(
-          `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
+          "approvalGraph approvalMode 'threshold' is not supported inside a parallel region",
           400,
           'APPROVAL_THRESHOLD_IN_PARALLEL',
         )
@@ -1827,7 +1827,7 @@ function collectBranchAssignees(
   }
   failValidation(
     context,
-    `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
+    'approvalGraph parallel branch never reaches its configured join',
   )
 }
 

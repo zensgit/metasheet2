@@ -153,16 +153,13 @@ function hasRetryableFwbFailure(execution: AutomationExecution): boolean {
   return execution.steps.some((step) => {
     if (step.actionType !== FWB_ACTION_TYPE || step.status !== 'failed') return false
     const error = typeof step.error === 'string' ? step.error : ''
-    // These are deterministic config/authorization refusals. Retrying the same event cannot change
-    // their meaning without an operator edit, so the execution log is the terminal evidence.
-    if (
-      error.startsWith('fwb_rejected:permission_gates')
-      || error.startsWith('fwb_rejected:mapping')
-      || error.startsWith('fwb_rejected:source_template_version')
-      || error.startsWith('write_approval_form_values requires')
-    ) return false
-    // Infrastructure/transaction failures and missing restore-dependent state remain retryable. The
-    // durable event-fires lease must not be marked done until a later execution succeeds.
+    // `fwb_rejected:*` is the closed deterministic-refusal namespace (config, authority, frozen
+    // source identity, or absent source row). Retrying the same immutable completion event cannot
+    // change it; only an operator edit/new event can. Infrastructure failures use the separate
+    // `fwb_execution_failed` value and remain reclaimable.
+    if (error.startsWith('fwb_rejected:') || error.startsWith('write_approval_form_values requires')) return false
+    // Infrastructure/transaction failures remain retryable. The durable event-fires lease must not
+    // be marked done until a later execution succeeds.
     return true
   })
 }
@@ -1089,6 +1086,7 @@ export class AutomationService {
       (input.actionConfig ?? null) as Record<string, unknown> | null,
       actionsForValidation,
       input.createdBy ?? null,
+      input.createdBy ?? null,
     )
     if (fwbSaveError) throw new AutomationRuleValidationError(fwbSaveError)
 
@@ -1419,7 +1417,7 @@ export class AutomationService {
         (nextActionConfig ?? null) as Record<string, unknown> | null,
         approvalActions,
         existingForApproval.created_by,
-        authoringActorId ?? existingForApproval.created_by,
+        authoringActorId,
       )
       if (fwbUpdateError) throw new AutomationRuleValidationError(fwbUpdateError)
     }
@@ -1959,7 +1957,7 @@ export class AutomationService {
     actionConfig: Record<string, unknown> | null,
     nestedActions: AutomationAction[],
     createdBy: string | null,
-    authoringActorId: string | null = createdBy,
+    authoringActorId: string | null | undefined,
   ): Promise<string | null> {
     const configs = collectFwbActionConfigs(actionType, actionConfig, nestedActions)
     if (configs.length === 0) return null

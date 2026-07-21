@@ -83,6 +83,30 @@ describe('graphValidityIssues (D-5 preview)', () => {
     expect(graphValidityIssues(stuck).some((i) => /没有后继连线/.test(i))).toBe(true)
   })
 
+  it('flags an empty parallel branch before save without exposing graph identifiers', () => {
+    const emptyBranch: ApprovalGraph = {
+      nodes: [
+        { key: 'start-secret', type: 'start', config: {} },
+        {
+          key: 'fork-secret',
+          type: 'parallel',
+          config: { branches: ['empty-secret', 'review-secret'], joinMode: 'any', joinNodeKey: 'end-secret' },
+        },
+        { key: 'reviewer-secret', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end-secret', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'start-fork-secret', source: 'start-secret', target: 'fork-secret' },
+        { key: 'empty-secret', source: 'fork-secret', target: 'end-secret' },
+        { key: 'review-secret', source: 'fork-secret', target: 'reviewer-secret' },
+        { key: 'review-end-secret', source: 'reviewer-secret', target: 'end-secret' },
+      ],
+    }
+    const issues = graphValidityIssues(emptyBranch)
+    expect(issues.some((issue) => /并行分支至少需要一个审批节点/.test(issue))).toBe(true)
+    expect(issues.join(' ')).not.toMatch(/fork-secret|empty-secret|end-secret/)
+  })
+
   it('D-5: flags duplicate node keys and duplicate edge keys (a canvas key collision)', () => {
     const dupNode: ApprovalGraph = {
       nodes: [...LINEAR.nodes, { key: 'a1', type: 'approval', config: {} }], // 'a1' duplicated

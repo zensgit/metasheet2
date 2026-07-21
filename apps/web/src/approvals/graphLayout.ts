@@ -1,4 +1,5 @@
 import type { ApprovalGraph } from '../types/approval'
+import { hasEmptyParallelBranch } from './graphTopologyEdit'
 
 // D-1/D-5 canvas foundation — PURE, fully unit-testable (no .vue, no DOM): a longest-path layered
 // layout (node → {x,y,layer}) and a structural validity check (dangling edges / unreachable nodes /
@@ -80,6 +81,10 @@ export function computeLayout(graph: ApprovalGraph): GraphLayout {
 export function graphValidityIssues(graph: ApprovalGraph): string[] {
   const issues: string[] = []
   const keys = new Set(graph.nodes.map((n) => n.key))
+
+  if (hasEmptyParallelBranch(graph)) {
+    issues.push('并行分支至少需要一个审批节点')
+  }
 
   // D-5: duplicate node / edge keys (a canvas add could collide a key; the backend rejects it on save).
   if (keys.size !== graph.nodes.length) {

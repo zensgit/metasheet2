@@ -353,6 +353,8 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     // REQUESTER can be admitted to the generic PATCH route by canManageAutomation in another deployment,
     // but lacks Q6's stronger admin/canManageSheetAccess authority. An enabled-only patch must still run
     // the resulting-shape gate and bind THIS actor, not silently reuse created_by.
+    await expect(svc.updateRule(tempId, SHEET_ID, { enabled: false }))
+      .rejects.toThrow(/authenticated authoring actor/)
     await expect(svc.updateRule(tempId, SHEET_ID, { enabled: false }, REQUESTER))
       .rejects.toThrow(/creator, modifier, or enabler/)
     const ownerUpdate = await svc.updateRule(tempId, SHEET_ID, { enabled: false }, CREATOR)
@@ -500,6 +502,72 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     }
   })
 
+  test('execute-time canonical target-field gate rejects a field made read-only after save, with zero writes', async () => {
+    const ruleId = ruleIds[0]
+    const instanceId = await startInstance({ summary: 'field revoked', amount: 4 })
+    await approveInstance(instanceId)
+    const beforeExecutions = await waitForExecutionCount(ruleId, 0)
+    const beforeRecords = Number(((await q(
+      'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
+      [SHEET_ID],
+    )).rows[0] as { c: number }).c)
+    await q(
+      `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+       VALUES ($1,$2,'user',$3,true,true)`,
+      [SHEET_ID, F_AMOUNT, CREATOR],
+    )
+    try {
+      setFlags(true, true)
+      await svc.handleApprovalCompletionTrigger(completionEvent(instanceId, `evt_fwbact_${TS}_field_revoked`))
+      await waitForExecutionCount(ruleId, beforeExecutions + 1)
+      const exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('failed')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toMatch(/fwb_rejected:permission_gates/)
+      expect((await stateFor(instanceId, ruleId)).claims).toBe(0)
+      const afterRecords = Number(((await q(
+        'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
+        [SHEET_ID],
+      )).rows[0] as { c: number }).c)
+      expect(afterRecords).toBe(beforeRecords)
+    } finally {
+      setFlags(false, false)
+      await q(
+        `DELETE FROM field_permissions
+          WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'user' AND subject_id = $3`,
+        [SHEET_ID, F_AMOUNT, CREATOR],
+      )
+    }
+  })
+
+  test('execute-time number precision uses canonical field property.decimals and rejects excess scale', async () => {
+    const ruleId = ruleIds[0]
+    const instanceId = await startInstance({ summary: 'precision reject', amount: 12.345 })
+    await approveInstance(instanceId)
+    const beforeExecutions = await waitForExecutionCount(ruleId, 0)
+    const beforeRecords = Number(((await q(
+      'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
+      [SHEET_ID],
+    )).rows[0] as { c: number }).c)
+    await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', [JSON.stringify({ decimals: 2 }), F_AMOUNT])
+    try {
+      setFlags(true, true)
+      await svc.handleApprovalCompletionTrigger(completionEvent(instanceId, `evt_fwbact_${TS}_precision`))
+      await waitForExecutionCount(ruleId, beforeExecutions + 1)
+      const exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('failed')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:mapping')
+      expect((await stateFor(instanceId, ruleId)).claims).toBe(0)
+      const afterRecords = Number(((await q(
+        'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
+        [SHEET_ID],
+      )).rows[0] as { c: number }).c)
+      expect(afterRecords).toBe(beforeRecords)
+    } finally {
+      setFlags(false, false)
+      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', ['{}', F_AMOUNT])
+    }
+  })
+
   test('durable FWB infrastructure failure stays reclaimable instead of being marked done', async () => {
     const ruleId = ruleIds[0]
     const eventId = `evt_fwbact_${TS}_retryable`
@@ -527,6 +595,27 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       expect((fire.rows[0] as { status?: string } | undefined)?.status).toBe('in_progress')
     } finally {
       ;(svc as unknown as { executeRule: AutomationService['executeRule'] }).executeRule = originalExecuteRule
+      setFlags(false, false)
+    }
+  })
+
+  test('deterministic missing-instance refusal settles instead of retrying forever', async () => {
+    const ruleId = ruleIds[0]
+    const eventId = `evt_fwbact_${TS}_missing_instance`
+    setFlags(true, true)
+    try {
+      await expect(svc.handleApprovalCompletionTrigger(completionEvent(randomUUID(), eventId)))
+        .resolves.toBeUndefined()
+      const fire = await q(
+        `SELECT status FROM meta_automation_event_fires
+          WHERE rule_id = $1 AND dedup_key = $2`,
+        [ruleId, `approval.completed:${eventId}`],
+      )
+      expect((fire.rows[0] as { status?: string } | undefined)?.status).toBe('done')
+      const exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('failed')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:instance_not_found')
+    } finally {
       setFlags(false, false)
     }
   })

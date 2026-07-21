@@ -2930,7 +2930,10 @@ export class AutomationExecutor {
           const field = targetFields.get(mapping.targetFieldId)
           if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
           if (mapping.targetType !== 'number') return mapping
-          const precision = field.property.precision
+          // Number fields persist their decimal-place cap as `property.decimals` (the canonical
+          // field codec contract). Do not infer a second `precision` spelling here: doing so silently
+          // removes the execute-time cap from every normally authored number field.
+          const precision = field.property.decimals
           return {
             ...mapping,
             ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
