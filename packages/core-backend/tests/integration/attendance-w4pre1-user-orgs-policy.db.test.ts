@@ -16,9 +16,10 @@ import { readOrgDirectoryReadiness } from '../../src/routes/attendance-admin'
  *    production create-user call sites; this test proves their behavior matches the policy
  *    comments left at each site.
  *
- * 2. W4-0-G3's two positive controls (design lock §9), pre-run here per the lock's own
- *    instruction ("两正控在 SQL/服务层验证计数语义即可" — the setup-readiness HTTP endpoint is
- *    W4-0 scope, explicitly OUT of this ticket, and is NOT built by this PR):
+ * 2. W4-0-G3's two positive controls (design lock §9's exact words: "两正控在 W4-PRE-1 完成门先
+ *    跑一遍，W4-0 完成门复跑" — run once at the W4-PRE-1 completion gate, re-run at the W4-0
+ *    completion gate). Pre-run here at the SQL/service layer because the setup-readiness HTTP
+ *    endpoint itself is W4-0 scope, explicitly OUT of this ticket, and is NOT built by this PR:
  *      - a pure local org (>=1 active user_orgs member, zero directory_account_links) must
  *        compute orgActiveMemberCount>0 while directoryLinked stays false — i.e. the two signals
  *        are independent, never combined as `directoryLinked && count>0`.

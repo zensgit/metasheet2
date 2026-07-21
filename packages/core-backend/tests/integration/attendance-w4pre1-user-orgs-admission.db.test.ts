@@ -23,6 +23,12 @@ import { query } from '../../src/db/pg'
  *     in the same org.
  * …plus the org-unknowable negative control for THIS route (no attendanceGroupId/
  * defaultShiftId supplied): zero user_orgs rows, never a silent 'default' guess (§3.3 item 2).
+ * …plus item 4's is_active semantics: user_orgs.is_active is hardcoded TRUE at admission
+ * (never mirrors the created user's own isActive) — an admin-created-inactive user is excluded
+ * from the RD-3 dual-is_active count via users.is_active alone, and reactivating that user later
+ * (PATCH /api/admin/users/:userId/status, the only production writer of users.is_active) needs
+ * no separate user_orgs repair, because user_orgs.is_active was never set to false in the first
+ * place.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -242,6 +248,48 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
 
       const rows = await query(`SELECT org_id FROM user_orgs WHERE user_id = $1`, [userId])
       expect(rows.rows).toEqual([])
+    })
+  })
+
+  describe('user_orgs.is_active is hardcoded TRUE (never mirrors the created user\'s isActive)', () => {
+    it('isActive:false at creation still writes user_orgs.is_active=true, exclusion comes ONLY from users.is_active, and reactivation via PATCH status needs no membership repair', async () => {
+      const org = orgId('inactive')
+      const group = await seedGroup(org, 'inactive')
+
+      const { status, json } = await createUserViaRoute({
+        name: 'W4PRE1 Inactive',
+        email: emailFor('inactive'),
+        orgId: org,
+        attendanceGroupId: group.id,
+        isActive: false,
+      })
+
+      expect(status).toBe(200)
+      const userId = json.data.user.id as string
+
+      // The membership row exists and is_active=TRUE even though the user itself is inactive —
+      // this is the fix under test: is_active must NOT mirror the created user's isActive flag.
+      const row = await userOrgRow(userId, org)
+      expect(row).toEqual({ user_id: userId, org_id: org, is_active: true })
+
+      // Excluded from the RD-3 dual-is_active active-member count purely via users.is_active,
+      // never via user_orgs.is_active.
+      expect(await activeMemberCount(org)).toBe(0)
+
+      // Reactivate through the ONLY production write path that ever flips users.is_active
+      // (PATCH /api/admin/users/:userId/status — it never touches user_orgs).
+      const patchRes = await fetch(`${baseUrl}/api/admin/users/${userId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify({ isActive: true }),
+      })
+      expect(patchRes.status).toBe(200)
+
+      // No stuck-false membership to repair: user_orgs.is_active was TRUE all along, so the
+      // count now includes this member purely because users.is_active flipped.
+      expect(await activeMemberCount(org)).toBe(1)
+      const rowAfterReactivate = await userOrgRow(userId, org)
+      expect(rowAfterReactivate).toEqual({ user_id: userId, org_id: org, is_active: true })
     })
   })
 

@@ -3277,15 +3277,25 @@ export function adminUsersRouter(): Router {
 
         if (attendanceOrgId) {
           // W4-PRE-1 item 1 (first-priority site, §3.3): maintain user_orgs in the SAME
-          // transaction as the users row whenever the org is known-authoritative. `isActive`
-          // mirrors the created user's own active flag — an admin-created-but-deactivated user
-          // must not count as an active org member (RD-3 dual is_active precedent,
-          // plugins/plugin-attendance/index.cjs:15532-15541).
+          // transaction as the users row whenever the org is known-authoritative.
+          //
+          // user_orgs.is_active is hardcoded TRUE (mirrors directory-sync.ts's own admission
+          // write, ~L5097) — it deliberately does NOT mirror the created user's `isActive` flag.
+          // The RD-3 dual-is_active count (§3.3 item 4: user_orgs.is_active=true AND
+          // users.is_active=true) already excludes an admin-created-inactive user via
+          // users.is_active=false, so mirroring `isActive` here would add nothing to that count
+          // — but it WOULD create an unrecoverable stuck-false membership row: no production
+          // write path ever updates user_orgs.is_active after admission (PATCH
+          // /api/admin/users/:userId/status only touches users.is_active), so an
+          // admin-created-inactive user later reactivated via that endpoint would stay
+          // permanently excluded from the ① count with no repair surface. Hardcoding TRUE avoids
+          // the absorbing state entirely: membership existence is TRUE the moment it is known,
+          // and users.is_active alone gates the active-member-count filter.
           await client.query(
             `INSERT INTO user_orgs (user_id, org_id, is_active)
-             VALUES ($1, $2, $3)
+             VALUES ($1, $2, TRUE)
              ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
-            [userId, attendanceOrgId, isActive],
+            [userId, attendanceOrgId],
           )
         }
 

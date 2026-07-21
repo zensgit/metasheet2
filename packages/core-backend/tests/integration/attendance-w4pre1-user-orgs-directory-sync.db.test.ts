@@ -16,6 +16,11 @@ import { __directorySyncInternalsForTests } from '../../src/directory/directory-
  * This file drives the shared internals directly (matching the existing
  * directory-sync-admission-orphan-guard.db.test.ts precedent) rather than the full sync loop,
  * so each scenario is isolated and fast.
+ *
+ * Suites: fresh-DB (write + atomicity) / fail-closed org resolution / upgrade (a pre-existing
+ * zzzz20260114110000-style backfill row survives a later admission in the same org — this is
+ * the second production user_orgs writer, so it gets its own upgrade leg, not just the
+ * admin-users.ts route's) / two-org.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsForTests
@@ -212,6 +217,45 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: directory-sync 
       expect((caught as unknown as Error).message).toBe('Directory integration not found for admitted account org resolution')
       const userRow = await query(`SELECT id FROM users WHERE username = $1`, [username])
       expect(userRow.rows).toEqual([])
+    })
+  })
+
+  describe('upgrade', () => {
+    it('a pre-existing zzzz20260114110000-style backfill row survives a new directory-sync admission in the same org', async () => {
+      const org = `${NS}_org_upgrade`
+      const integrationId = await seedIntegration(org, 'upgrade')
+      const account = await seedAccount(integrationId, 'upgrade')
+      const username = `${NS}upgrade`
+      pendingUsernames.push(username)
+
+      const legacyUserId = crypto.randomUUID()
+      const legacyUsername = `${NS}dslegacy`
+      pendingUsernames.push(legacyUsername)
+      await query(
+        `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+         VALUES ($1, $2, $3, 'W4PRE1 DS Legacy', 'x', 'user', '[]'::jsonb, true, false, NOW(), NOW())`,
+        [legacyUserId, `${NS}-ds-legacy@example.com`, legacyUsername],
+      )
+      // Simulates the backfill migration's own INSERT shape exactly (user_id, org_id, is_active).
+      await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [legacyUserId, org])
+
+      let userId = ''
+      await transaction(async (client) => {
+        const created = await createDirectoryAdmittedUserInTransaction(client, admitOptions(account, username))
+        userId = created.userId
+      })
+
+      const newRow = await query<{ user_id: string; org_id: string; is_active: boolean }>(
+        `SELECT user_id, org_id, is_active FROM user_orgs WHERE user_id = $1`,
+        [userId],
+      )
+      expect(newRow.rows).toEqual([{ user_id: userId, org_id: org, is_active: true }])
+
+      const legacyRow = await query<{ user_id: string; org_id: string; is_active: boolean }>(
+        `SELECT user_id, org_id, is_active FROM user_orgs WHERE user_id = $1`,
+        [legacyUserId],
+      )
+      expect(legacyRow.rows).toEqual([{ user_id: legacyUserId, org_id: org, is_active: true }])
     })
   })
 
