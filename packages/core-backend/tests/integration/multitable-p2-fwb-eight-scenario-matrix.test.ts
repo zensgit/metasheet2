@@ -377,7 +377,7 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       expect(await sheetRecordCount()).toBe(1)
       expect(await claimsFor(instanceA)).toBe(1)
       const rec = await q('SELECT data FROM meta_records WHERE sheet_id = $1', [SHEET_ID])
-      expect((rec.rows[0] as { data: Record<string, unknown> }).data).toMatchObject({ [F_TITLE]: 'S6 net-once', [F_AMOUNT]: 42 })
+      expect((rec.rows[0] as { data: Record<string, unknown> }).data).toMatchObject({ [F_TITLE]: 'S6 net-once', [F_AMOUNT]: '42' }) // D7: canonical decimal STRING
       expect(await sheetRevisionCount()).toBe(1)
       expect(await outboxCountLike(`${evtA}::fwb::`)).toBe(1)
 

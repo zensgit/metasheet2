@@ -5,7 +5,7 @@ import { toExecutorMappings, validateFwbMappingConfig } from '../src/approvals/f
 
 const TPL = [{ id: 'f1', label: '金额' }, { id: 'f2', label: '等级' }]
 const TGT = [
-  { id: 't_text', label: 'T', type: 'text' },
+  { id: 't_text', label: 'T', type: 'string' },
   { id: 't_num', label: 'N', type: 'number' },
   { id: 't_sel', label: 'S', type: 'select', selectOptions: ['低', '高'] },
   { id: 't_sel_empty', label: 'SE', type: 'select', selectOptions: [] },
@@ -15,11 +15,13 @@ const TGT = [
 describe('FWB mapping config model', () => {
   test('valid draft → no issues; executor mappings carry types + select options', () => {
     const draft = [
+      { formFieldId: 'f1', targetFieldId: 't_text' },
       { formFieldId: 'f1', targetFieldId: 't_num' },
       { formFieldId: 'f2', targetFieldId: 't_sel' },
     ]
     expect(validateFwbMappingConfig(draft, TPL, TGT)).toEqual([])
     expect(toExecutorMappings(draft, TGT)).toEqual([
+      { formFieldId: 'f1', targetFieldId: 't_text', targetType: 'text' },
       { formFieldId: 'f1', targetFieldId: 't_num', targetType: 'number' },
       { formFieldId: 'f2', targetFieldId: 't_sel', targetType: 'select', selectOptions: ['低', '高'] },
     ])

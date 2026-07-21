@@ -27,7 +27,7 @@ import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automati
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { produceAutomationEvent } from './automation-durable-activation'
 import { isFwbWritebackEnabled, normalizeFwbMappings } from './approval-fwb-activation'
-import { executeWriteApprovalFormValues, type FwbRecordWriteSeam } from './approval-fwb-write-action'
+import { executeWriteApprovalFormValues, resolveFwbRuntimeMappings, type FwbRecordWriteSeam } from './approval-fwb-write-action'
 import type { FwbGateChecks } from './approval-fwb-permission-gates'
 import { redactString } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
@@ -2911,36 +2911,13 @@ export class AutomationExecutor {
       const automationDepth = (typeof trig._automationDepth === 'number' ? trig._automationDepth : 0) + 1
 
       const result = await this.withTransaction(context.sheetId, async (query) => {
-        const targetFieldResult = await query(
-          `SELECT id, type, property
-             FROM meta_fields
-            WHERE sheet_id = $1 AND id = ANY($2::text[])
-            FOR SHARE`,
-          [context.sheetId, normalized.mappings.map((mapping) => mapping.targetFieldId)],
-        )
-        const targetFields = new Map(
-          (targetFieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
-            .filter((row): row is { id: string; type: string; property?: unknown } => (
-              typeof row.id === 'string' && typeof row.type === 'string'
-            ))
-            .map((row) => [row.id, { type: row.type, property: normalizeJson(row.property) }] as const),
-        )
-        if (targetFields.size !== normalized.mappings.length) throw new Error('fwb_rejected:mapping_target_changed')
-        const runtimeMappings = normalized.mappings.map((mapping) => {
-          const field = targetFields.get(mapping.targetFieldId)
-          if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
-          if (mapping.targetType !== 'number') return mapping
-          // Number fields persist their decimal-place cap as `property.decimals` (the canonical
-          // field codec contract). Do not infer a second `precision` spelling here: doing so silently
-          // removes the execute-time cap from every normally authored number field.
-          const precision = field.property.decimals
-          return {
-            ...mapping,
-            ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
-              ? { numberPrecision: precision }
-              : {}),
-          }
-        })
+        // Execute-time target-field recheck (FWB0 §5 + D6/D7): current select option set and canonical
+        // number precision are re-derived from meta_fields INSIDE this transaction — fail closed on a
+        // missing/retyped field or absent select options; the saved mapping's stale metadata is never
+        // trusted for membership or scale.
+        const runtime = await resolveFwbRuntimeMappings(query, context.sheetId, normalized.mappings)
+        if (!runtime.ok) throw new Error('fwb_rejected:mapping_target_changed')
+        const runtimeMappings = runtime.mappings
         // D4: the immutable form snapshot is the ONLY value source, read server-side inside the txn.
         const snapRes = await query(
           `SELECT form_snapshot FROM approval_instances
