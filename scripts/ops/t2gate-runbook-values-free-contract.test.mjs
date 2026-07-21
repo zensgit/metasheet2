@@ -2230,6 +2230,20 @@ test('owner repro (round 3): identity projections are rejected in EVERY venue â€
       result.violations.some((v) => /outside the closed values-free allowlist/i.test(v) && /raw/.test(v)),
       `venue "${name}" must also report the un-named "raw" column, got: ${result.violations.join(' | ')}`,
     )
+    // The fenced samples must be READ AS a code block, not merely caught by the unfenced
+    // fallback: an info string the scanner cannot parse turns a real fence into loose text, which
+    // is a different (and much noisier) verdict than "this fence contains a forbidden projection".
+    const readAsCodeBlock = !result.violations.some((v) => /must live in a fenced code block/i.test(v))
+    assert.equal(
+      readAsCodeBlock,
+      !name.startsWith('(c)'),
+      `venue "${name}" was classified wrongly (fenced vs unfenced): ${result.violations.join(' | ')}`,
+    )
+    assert.equal(
+      scanCodeVenues(md).length,
+      name.startsWith('(c)') ? 0 : 1,
+      `venue "${name}" must resolve to exactly the code venues it has`,
+    )
   }
 })
 
