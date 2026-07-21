@@ -458,7 +458,11 @@ test('synthetic MUTATION 5: empty / whitespace-only / bare env.DATABASE_URL must
   // Owner repro (a) on the id-anchored contract: `DATABASE_URL: ''` is a PRESENT YAML key, so a
   // "key exists" pin greened it — but an empty DATABASE_URL makes every describeIfDatabase suite
   // skip, i.e. exactly the skip-green pin (b) exists to stop.
-  for (const value of ["''", '""', '"   "', "'  '", '']) {
+  //
+  // Round 5 adds the four EMPTY-VALUE SPELLINGS the owner named when ruling that spelling-chasing
+  // must end (`!!str`, `~`, `null`, `&a ""`), plus an alias to an anchored empty string: after a
+  // real YAML parse they are all just '' or null, so no per-spelling code exists to get wrong.
+  for (const value of ["''", '""', '"   "', "'  '", '', '!!str', '~', 'null', '&a ""']) {
     const wf = craftWorkflow({ envLines: ['        env:', `          DATABASE_URL: ${value}`] })
     assert.ok(wf.includes('DATABASE_URL'), 'the env key is still present — presence alone must not pass')
     assert.ok(wf.includes(FILE), 'the suite path is still listed')
@@ -471,12 +475,21 @@ test('synthetic MUTATION 5: empty / whitespace-only / bare env.DATABASE_URL must
       `DATABASE_URL: ${value} must not satisfy the contract`,
     )
   }
-  // Positive control: the pin is not "reject every env value" — a real URL, and an inline-commented
-  // real URL, both still pass.
+  // Alias spelling: the empty string arrives via an anchor on a SIBLING key. The parser resolves
+  // the alias, so the value is '' just the same.
+  const aliased = craftWorkflow({
+    envLines: ['        env:', "          DECOY: &empty ''", '          DATABASE_URL: *empty'],
+  })
+  assert.equal(stepHasEnvDatabaseUrl(extractStepById(aliased, STEP_ID)), false, 'aliased empty string')
+  assert.throws(() => isSuiteWiredInRealDbStep(aliased, STEP_ID, FILE), /env\.DATABASE_URL/)
+  // Positive control: the pin is not "reject every env value" — a real URL in any spelling still
+  // passes, including tagged (`!!str <url>`), anchored (`&db <url>`) and aliased non-empty forms.
   for (const value of [
     'postgresql://postgres@localhost:5432/metasheet_test',
     "'postgresql://postgres@localhost:5432/metasheet_test'",
     'postgresql://postgres@localhost:5432/metasheet_test # real DB',
+    '!!str postgresql://postgres@localhost:5432/metasheet_test',
+    '&db postgresql://postgres@localhost:5432/metasheet_test',
   ]) {
     const ok = craftWorkflow({ envLines: ['        env:', `          DATABASE_URL: ${value}`] })
     assert.equal(stepHasEnvDatabaseUrl(extractStepById(ok, STEP_ID)), true, `value ${value}`)
@@ -618,11 +631,12 @@ test('synthetic: comment-only env/config decoys inside the id step must RED', ()
 })
 
 test('synthetic MUTATION 7: an EMPTY block-scalar env.DATABASE_URL must RED', () => {
-  // Round-4 gate finding N1 (owner acceptance criterion (a)): `DATABASE_URL: |` / `>` is a PRESENT
-  // key whose VALUE is the empty string when the block body is empty or whitespace-only. A scalar
-  // reader that never resolves block scalars sees the literal indicator (`|`) as the value, calls it
-  // non-empty and greens — while at runtime DATABASE_URL is empty and every describeIfDatabase suite
-  // skips. Same skip-green class as `DATABASE_URL: ''`, reached through a different YAML spelling.
+  // Round-4 gate finding N1: `DATABASE_URL: |` / `>` is a PRESENT key whose VALUE is the empty
+  // string when the block body is empty or whitespace-only. A reader that does not resolve block
+  // scalars takes the literal indicator (`|`) for a non-empty value and greens — while at runtime
+  // DATABASE_URL is empty and every describeIfDatabase suite skips. Same skip-green class as
+  // `DATABASE_URL: ''`, reached through a different YAML spelling; the real parser resolves every
+  // header/chomping/indent combination to '' without per-spelling code.
   const headers = ['|', '>', '|-', '>-', '|+', '>2']
   for (const header of headers) {
     for (const bodyLines of [
@@ -666,15 +680,13 @@ test('synthetic MUTATION 7: an EMPTY block-scalar env.DATABASE_URL must RED', ()
 })
 
 test('synthetic MUTATION 8: a phantom `- name:`/`id:` step minted INSIDE a run script must not anchor', () => {
-  // Round-4 gate finding N2: step discovery scanned the RAW workflow for `^\s*-\s+\S`, and block
-  // scalars were masked only AFTER a candidate block had been carved out — so a `- name:` / `id:`
-  // pair written inside a shell heredoc (or any `run:` body) was minted as a real step. That
-  // resurrects the decoy class the id anchoring was introduced to end: the phantom carries every
-  // pin, the job runs nothing but `cat`.
-  //
-  // Three spellings of the SAME structural mistake are covered, because closing only the heredoc
-  // one leaves the class open: a `run:` value may be a block scalar, a bare multi-line PLAIN scalar,
-  // or a multi-line QUOTED scalar — in all three the following indented lines are scalar CONTENT.
+  // Round-4 gate finding N2, generalized by the round-5 owner ruling: text written inside a `run:`
+  // VALUE is scalar content, never YAML structure — so a `- name:` / `id:` pair spelled there must
+  // not be discovered as a step, IN ANY SPELLING OF THE `run` KEY OR VALUE. The hand-rolled masker
+  // was defeated by one new spelling per round (`"run": |`, `'run': |`, `run : |`, bare `- |`);
+  // after a real YAML parse every spelling collapses to "the value is a string", so the phantom
+  // class is closed structurally rather than per spelling. Every carrier below is VALID YAML that
+  // once minted (or would have minted) a phantom step.
   const phantomBody = [
     '          - name: phantom real-DB step',
     `            id: ${STEP_ID}`,
@@ -686,8 +698,10 @@ test('synthetic MUTATION 8: a phantom `- name:`/`id:` step minted INSIDE a run s
   ]
   const carriers = {
     'block scalar heredoc': ['        run: |', '          cat <<EOS > /dev/null', ...phantomBody, '          EOS'],
-    'multi-line plain scalar': ['        run: echo', ...phantomBody],
     'multi-line double-quoted scalar': ['        run: "echo', ...phantomBody, '          "'],
+    'double-quoted run key (`"run": |`)': ['        "run": |', ...phantomBody],
+    "single-quoted run key (`'run': |`)": ["        'run': |", ...phantomBody],
+    'spaced run key (`run : |`)': ['        run : |', ...phantomBody],
   }
   let phantom = null
   for (const [label, carrierLines] of Object.entries(carriers)) {
@@ -715,9 +729,60 @@ test('synthetic MUTATION 8: a phantom `- name:`/`id:` step minted INSIDE a run s
     )
   }
 
-  // Positive control: masking scalar bodies BEFORE sequence detection must not swallow the REAL
-  // steps that follow such a script. The genuine id step declared after the heredoc still resolves
-  // and satisfies all four pins — the fix is "don't parse shell as YAML", not "stop finding steps".
+  // Bare sequence-item block scalar (`- |`): the steps LIST ITEM is itself a scalar whose content
+  // spells a phantom step. The parser yields a string item — not a mapping — so it can never carry
+  // an id. (GitHub would reject such a step anyway; the point is the guard must not GREEN on it.)
+  const bareItem = [
+    'jobs:',
+    '  test:',
+    '    steps:',
+    '      - |',
+    '        - name: phantom real-DB step',
+    `          id: ${STEP_ID}`,
+    "          if: matrix.node-version == '20.x'",
+    '          env:',
+    '            DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
+    '          run: |',
+    `            pnpm exec vitest --config vitest.integration.config.ts run ${FILE}`,
+    '      - name: Next step',
+    '        run: echo ok',
+  ].join('\n')
+  assert.ok(bareItem.includes(`id: ${STEP_ID}`) && bareItem.includes(FILE))
+  assert.equal(
+    extractStepById(bareItem, STEP_ID),
+    null,
+    'a bare `- |` list item is a string, not a step — its content must not anchor',
+  )
+  assert.throws(
+    () => isSuiteWiredInRealDbStep(bareItem, STEP_ID, FILE),
+    /not found in plugin-tests\.yml|located by exact/,
+  )
+
+  // Multi-line PLAIN scalar (`run: echo` + indented phantom lines): NOT valid YAML — PyYAML rejects
+  // it ("mapping values are not allowed here"), and GitHub's own parser rejects the same file, so
+  // this spelling cannot even reach a runner. The guard must fail CLOSED on it, never green: under
+  // the round-4 masker this exact text minted a phantom step and PASSED.
+  const invalidPlain = [
+    'jobs:',
+    '  test:',
+    '    steps:',
+    '      - name: Innocuous prep step',
+    '        run: echo',
+    ...phantomBody,
+    '      - name: Next step',
+    '        run: echo ok',
+  ].join('\n')
+  assert.ok(invalidPlain.includes(`id: ${STEP_ID}`) && invalidPlain.includes(FILE))
+  assert.throws(
+    () => extractStepById(invalidPlain, STEP_ID),
+    /failing CLOSED.*YAML_PARSE_ERROR/s,
+    'invalid YAML must fail the guard closed, not green it',
+  )
+  assert.throws(() => isSuiteWiredInRealDbStep(invalidPlain, STEP_ID, FILE), /failing CLOSED/)
+
+  // Positive control 1: parsing scalars as scalars must not swallow the REAL steps around them.
+  // The genuine id step declared after the heredoc still resolves and satisfies all four pins —
+  // the fix is "don't parse shell as YAML", not "stop finding steps".
   const withReal = [
     phantom.split('\n').slice(0, -2).join('\n'),
     ...craftWorkflow().split('\n').slice(3),
@@ -729,10 +794,36 @@ test('synthetic MUTATION 8: a phantom `- name:`/`id:` step minted INSIDE a run s
   assert.equal(stepHasEnvDatabaseUrl(step), true)
   assert.equal(stepInvokesVitestIntegrationConfig(step), true)
   assert.equal(isSuiteWiredInRealDbStep(withReal, STEP_ID, FILE), true)
+
+  // Positive control 2: the quoted/spaced KEY spellings are legitimate YAML for a REAL step too.
+  // A genuine step written entirely with quoted keys must still satisfy all four pins — the parser
+  // reads structure, so key spelling neither mints phantoms nor hides real steps.
+  const quotedKeysReal = [
+    'jobs:',
+    '  test:',
+    '    steps:',
+    '      - "name": Run approval real-DB integration (directory endpoints)',
+    `        'id': ${STEP_ID}`,
+    '        "if": matrix.node-version == \'20.x\'',
+    '        env :',
+    '          "DATABASE_URL": postgresql://postgres@localhost:5432/metasheet_test',
+    '        "run": |',
+    `          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\`,
+    `            ${FILE} \\`,
+    '            --reporter=dot',
+    '      - name: Next step',
+    '        run: echo ok',
+  ].join('\n')
+  const quotedStep = extractStepById(quotedKeysReal, STEP_ID)
+  assert.notEqual(quotedStep, null, 'quoted-key spelling of a real step is still located by id')
+  assert.equal(stepRunsOnNode20Matrix(quotedStep), true)
+  assert.equal(stepHasEnvDatabaseUrl(quotedStep), true)
+  assert.equal(stepInvokesVitestIntegrationConfig(quotedStep), true)
+  assert.equal(isSuiteWiredInRealDbStep(quotedKeysReal, STEP_ID, FILE), true)
 })
 
 test('synthetic: an `id:` token inside a run script cannot anchor the helper', () => {
-  // Block-scalar masking: shell text must never be read as YAML keys.
+  // Shell text is scalar content after the YAML parse — it must never be read as YAML keys.
   const wf = [
     'jobs:',
     '  test:',

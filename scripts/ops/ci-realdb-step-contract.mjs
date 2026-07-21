@@ -15,28 +15,49 @@
  *      (`- name: Run approval real-DB integration (decoy prep)`) carrying the payload while the
  *      real step is gutted — title-prefix anchoring binds to the decoy.
  *
- * Two further skip-green bypasses were reproduced by the owner against the id-anchored contract
- * and are closed here (round 3):
- *
- *   4. `DATABASE_URL: ''` — an empty (or whitespace-only, or empty-quoted) value is a PRESENT YAML
- *      key, so a "key exists" pin greened it, yet an empty DATABASE_URL makes every
- *      `describeIfDatabase` suite skip: exactly the skip-green pin (b) exists to stop.
- *   5. a DECOY COMMAND LINE inside the same `run:` script (`echo vitest --config
- *      vitest.integration.config.ts`) satisfying the config pin while the REAL suite invocation
- *      runs under the default config — because the config token and the file arguments were
- *      matched across the whole step body rather than within ONE actual vitest command.
- *
- * THE OWNER CONTRACT this module implements: locate the step by its EXACT stable `id:` (never by
- * title), and for the located step pin ALL FOUR of
+ * THE OWNER CONTRACT: locate the step by its EXACT stable `id:` (never by title), and for the
+ * located step pin ALL FOUR of
  *
  *   (a) `if: matrix.node-version == '20.x'`   — it runs in the required 20.x leg
  *   (b) an `env.DATABASE_URL` key on the step with a NON-EMPTY value — the DB-gated suites do not
- *       skip-green (`''`, `""`, `"   "` and a bare key are all rejected)
+ *       skip-green. Empty in ANY spelling is rejected: `''`, `""`, `"   "`, a bare key, `~`,
+ *       `null`, `!!str` with no content, an anchored/aliased empty string (`&a ""` / `*a`), and a
+ *       block scalar (`|` / `>` + chomping/indent indicators) with an empty or whitespace-only
+ *       body — the parser resolves them all to the empty string or null.
  *   (c) a REAL vitest invocation in the run script uses `--config vitest.integration.config.ts`
  *       (not the default config); the executed binary is resolved per command, so `echo vitest …`
  *       or any other non-vitest binary is not an invocation
  *   (d) the named suite file is a WHOLE-FILE argument of THAT SAME invocation — (c) and (d) are
  *       joint, so a config flag in one command and the file in another cannot combine
+ *
+ * HOW THE YAML IS READ (owner ruling, round 5 — 2026-07-21, binding)
+ * ------------------------------------------------------------------
+ * Rounds 1–4 read the workflow with a hand-rolled text masker (regex step discovery over a
+ * blanked-scalar view of the raw lines). Successive gates kept finding NEW YAML SPELLINGS that
+ * defeated it — `"run": |` / `'run': |` (quoted keys), `run : |` (spaced key), bare sequence-item
+ * block scalars (`- |`), `!!str` / `~` / `null` / `&a ""` empty values — because a text masker
+ * re-implements the YAML grammar one spelling at a time. The owner ruled that chasing spellings is
+ * the wrong shape: this module now feeds the workflow to a REAL YAML parser and reads the four
+ * pins off the parsed structure (`jobs` → job → `steps[]` → step keys). There is no masking, no
+ * regex step discovery, and no per-spelling special case left: any spelling of a scalar is just a
+ * scalar value after parsing, so shell text can never be read as YAML structure, and any spelling
+ * of an empty value is just `''`/`null`.
+ *
+ * WHY python3 + PyYAML AND NOT js-yaml: these guards execute in the required no-DB `test` job
+ * BEFORE `pnpm install` (deliberately — see the "fails the required `test` check fast, before the
+ * pnpm install/build" comment in plugin-tests.yml), so no npm package is importable at that point.
+ * The GitHub `ubuntu-latest` runner's system `python3` ships PyYAML (the `test` job does not use
+ * setup-python, so `python3` is the distro interpreter); the bridge is FAIL-CLOSED regardless: a
+ * missing interpreter, a missing PyYAML, or a YAML parse error all throw — with distinguishable
+ * `PYYAML_MISSING:` / `YAML_PARSE_ERROR:` prefixes — and every guard goes red. A workflow PyYAML
+ * cannot parse is also a workflow GitHub will not run, so a parse failure is never a green path.
+ *
+ * PyYAML notes, both fail-closed or irrelevant here:
+ *   - duplicate mapping keys: PyYAML keeps the LAST one. GitHub rejects a workflow file with
+ *     duplicate keys outright (the run errors before any job starts), so a duplicate-key spelling
+ *     cannot pass CI at all — whichever copy the bridge reports is moot.
+ *   - YAML 1.1 booleans (`on:` parses as `true`): only `jobs` is read; keys are stringified in the
+ *     bridge so the JSON hand-off never drops them.
  *
  * By owner ruling this SHARED module supersedes the earlier per-file-duplication house style: the
  * `*-ci-wiring.test.mjs` guards import it instead of each carrying a private `namedStepBody()`.
@@ -44,28 +65,9 @@
  * fifteen sibling guards (each already wired to its own `node --test` step), and its mutation
  * (synthetic) coverage lives in `t2gate-collision-mechanism-ci-wiring.test.mjs`, which is likewise
  * already wired. No workflow step was added or modified for it.
- *
- * Round 4 closed two more holes found by the gate against the round-3 module:
- *
- *   6. `DATABASE_URL: |` / `DATABASE_URL: >` with an EMPTY (or whitespace-only) block body — a
- *      block scalar carries no value on the key line, so a reader that does not resolve the body
- *      took the literal indicator `|` for the value and called it non-empty. At runtime the
- *      variable is empty: the same skip-green as (4), reached through a different YAML spelling.
- *   7. a PHANTOM step minted from inside a `run:` script — sequence items were detected on the raw
- *      workflow text and block scalars were masked only afterwards, so a `- name:` / `id:` pair
- *      written inside a shell heredoc was carved out as a real step and could satisfy every pin
- *      while the job executed nothing but `cat`. That resurrected the decoy class (3) had ended.
- *
- * Parsing note (ordering is load-bearing): the whole workflow is masked FIRST — every block-scalar
- * body (`run: |`, `run: >`, …) is blanked, line-for-line — and sequence-item detection, step
- * boundaries, `id:` / `if:` / `env:` anchoring and the `DATABASE_URL` key lookup all run on that
- * masked view, so no shell text can be read as YAML structure. The raw lines are kept index-aligned
- * with the masked ones, which is what lets pin (b) resolve a block scalar's actual content and lets
- * pins (c)/(d) parse ONLY the real `run:` script text — split into individual shell commands, with
- * the binary each command executes resolved — so YAML titles, comments and non-vitest commands are
- * inert. One shared `BLOCK_SCALAR_HEADER` pattern serves all three readers: a masker that knew a
- * spelling (`|-`, `>2`) the value reader did not would itself be a bypass.
  */
+
+import { spawnSync } from 'node:child_process'
 
 /** Stable `id:` values of the two real-DB steps in .github/workflows/plugin-tests.yml. */
 export const REAL_DB_STEP_IDS = Object.freeze({
@@ -73,260 +75,170 @@ export const REAL_DB_STEP_IDS = Object.freeze({
   multitable: 'multitable-real-db-integration',
 })
 
+// ---------------------------------------------------------------------------
+// YAML parse bridge (python3 + PyYAML → JSON), fail-closed
+// ---------------------------------------------------------------------------
+
 /**
- * A YAML block-scalar HEADER value: `|` or `>` with any chomping (`-`/`+`) and explicit-indentation
- * digits, in either order, plus an optional trailing comment. ONE definition, used by the masker,
- * by the `run:` script extractor and by the env-value resolver — if they disagreed on a spelling
- * (e.g. the masker knowing `|-` while the value reader did not), the disagreement itself would be a
- * bypass: the reader would take the literal indicator `|-` for a non-empty value.
+ * The whole bridge: stdin = YAML text, stdout = JSON document. Distinguishable failures:
+ * exit 3 `PYYAML_MISSING:` (interpreter has no yaml module), exit 4 `YAML_PARSE_ERROR:`
+ * (the text is not valid YAML). Keys are stringified because YAML 1.1 scalars like `on`
+ * parse to booleans, which json.dump would otherwise coerce ambiguously; values json.dump
+ * cannot encode (e.g. timestamps) fall back to str().
  */
-const BLOCK_SCALAR_HEADER = /^[|>][0-9+-]*\s*(?:#.*)?$/
+const PY_YAML_TO_JSON = [
+  'import json, sys',
+  'try:',
+  '    import yaml',
+  'except Exception as exc:',
+  "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
+  '    sys.exit(3)',
+  'try:',
+  '    doc = yaml.safe_load(sys.stdin.read())',
+  'except Exception as exc:',
+  "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
+  '    sys.exit(4)',
+  'def jsonable(node):',
+  '    if isinstance(node, dict):',
+  '        return {str(key): jsonable(value) for key, value in node.items()}',
+  '    if isinstance(node, list):',
+  '        return [jsonable(value) for value in node]',
+  '    return node',
+  'json.dump(jsonable(doc), sys.stdout, default=str)',
+].join('\n')
 
-/** @param {string} rawValue text after `key:` (leading space included) */
-function isBlockScalarHeader(rawValue) {
-  return BLOCK_SCALAR_HEADER.test(rawValue.trim())
-}
-
-/**
- * Blank out every line that is CONTENT of a scalar value rather than YAML structure, so text a step
- * merely carries (shell script, log messages) can never be mistaken for YAML keys or sequence
- * items. Line count — and therefore INDEX ALIGNMENT with the raw lines — is preserved, which is
- * what lets callers detect structure on the masked view and still read literal content from raw.
- *
- * A mapping key opens a scalar body whenever it is NOT followed by a nested collection, i.e.:
- *   - `key: |` / `key: >` (+ chomping/indent indicators) — a block scalar; the body is the indented
- *     block below;
- *   - `key: <anything non-empty>` — a plain or quoted scalar, which in YAML MAY continue onto the
- *     following more-indented lines (`run: "echo` … `"`, or a bare multi-line plain scalar). Round 4
- *     found that masking only the `|`/`>` form left this second spelling open: a `- name:` / `id:`
- *     pair written on the continuation lines of a quoted or plain `run:` value was still minted as a
- *     step. Structurally these lines are scalar content exactly like a heredoc, so they are masked
- *     the same way.
- * Only `key:` with an EMPTY value (or a value that is just a `#` comment) introduces nested
- * structure, so only then does the following indented block stay visible.
- *
- * The direction of any residual imprecision is fail-CLOSED: over-masking hides a step, and every
- * caller throws when the id-located step is missing.
- *
- * @param {string[]} lines
- * @returns {string[]}
- */
-function maskBlockScalars(lines) {
-  const out = []
-  let scalarIndent = null
-  for (const line of lines) {
-    if (scalarIndent !== null) {
-      const lead = (line.match(/^(\s*)/) || ['', ''])[1].length
-      if (/^\s*$/.test(line) || lead > scalarIndent) {
-        out.push('')
-        continue
-      }
-      scalarIndent = null
-    }
-    // `- run: |` (a scalar under an inline sequence item) counts too: the KEY's own column is what
-    // the body must out-indent, so the dash prefix is part of the measured indent.
-    const m = line.match(/^(\s*(?:-\s+)?)[\w.-]+:(.*)$/)
-    if (m) {
-      const value = m[2].trim()
-      const opensScalar = isBlockScalarHeader(value) || (value !== '' && !value.startsWith('#'))
-      if (opensScalar) scalarIndent = m[1].length
-    }
-    out.push(line)
-  }
-  return out
-}
+/** One parse per distinct workflow text per process (guards re-read the same file repeatedly). */
+const parseCache = new Map()
 
 /**
- * Split a workflow into YAML sequence-item blocks (candidate steps).
- * Each block runs from its `- ` line through (not including) the next line at the same or
- * shallower indent that starts a new sequence item or a new mapping key.
- *
- * Block scalars are masked BEFORE sequence detection (round-4 gate finding N2). Masking after the
- * carve-up was too late: a `- name:` / `id:` pair written inside a `run:` heredoc was minted as a
- * real sequence item, so a PHANTOM step defined in shell text could carry every pin while the job
- * executed nothing but `cat` — the exact decoy class id-anchoring exists to end. Detection and
- * boundaries therefore run on the masked view; the RAW body is still returned (index-aligned) so
- * pins (c)/(d) can parse the real script text.
+ * Parse YAML text into a plain JS document via the PyYAML bridge. Throws — fails CLOSED — when
+ * python3 cannot be spawned, PyYAML is absent, or the text is not valid YAML. A guard that cannot
+ * parse the workflow must go red, never silently green.
  *
  * @param {string} wf
- * @returns {{ indent: number, start: number, lines: string[], maskedLines: string[] }[]}
+ * @returns {unknown}
  */
-function sequenceItemBlocks(wf) {
-  const raw = wf.split('\n')
-  const masked = maskBlockScalars(raw)
-  const blocks = []
-  for (let i = 0; i < masked.length; i++) {
-    const m = masked[i].match(/^(\s*)-\s+\S/)
-    if (!m) continue
-    const indent = m[1].length
-    let j = i + 1
-    for (; j < masked.length; j++) {
-      const line = masked[j]
-      if (/^\s*$/.test(line)) continue
-      const lead = (line.match(/^(\s*)/) || ['', ''])[1].length
-      if (lead <= indent) break
-    }
-    blocks.push({
-      indent,
-      start: i,
-      lines: raw.slice(i + 1, j),
-      maskedLines: masked.slice(i + 1, j),
-    })
+function parseYamlDocument(wf) {
+  if (parseCache.has(wf)) return parseCache.get(wf)
+  const res = spawnSync('python3', ['-c', PY_YAML_TO_JSON], {
+    input: wf,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 120_000,
+  })
+  if (res.error) {
+    throw new Error(
+      `real-DB step contract: failing CLOSED — python3 could not be spawned for the YAML parse ` +
+        `(${res.error.message}). These guards run before pnpm install in the required test job, ` +
+        `so the system python3 + PyYAML is the YAML parser they depend on.`,
+    )
   }
-  return blocks
+  if (res.status !== 0) {
+    throw new Error(
+      `real-DB step contract: failing CLOSED — the PyYAML bridge exited ${res.status}: ` +
+        `${(res.stderr || '').trim() || '(no stderr)'}`,
+    )
+  }
+  let doc
+  try {
+    doc = JSON.parse(res.stdout)
+  } catch (err) {
+    throw new Error(
+      `real-DB step contract: failing CLOSED — the PyYAML bridge emitted unparseable JSON: ${err.message}`,
+    )
+  }
+  parseCache.set(wf, doc)
+  return doc
 }
 
+/** @param {unknown} value */
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// ---------------------------------------------------------------------------
+// Step location + pins (a)/(b), read off the parsed structure
+// ---------------------------------------------------------------------------
+
 /**
- * Extract the workflow step carrying the EXACT `id: <stepId>` key, as a step child key
- * (indent === item indent + 2) outside any block scalar. Title text is never consulted, so a
- * name-prefix decoy cannot anchor here; and because block scalars are masked before sequence
- * detection, neither can a step minted inside a `run:` script.
+ * The workflow step carrying the EXACT `id: <stepId>` key. Jobs are scanned in document order and
+ * within each job the `steps` array in order; the FIRST match wins (the "same id in an EARLIER
+ * job" residual is accepted by owner stop-line). Title text is never consulted, so a name-prefix
+ * decoy cannot anchor here; and because the lookup walks PARSED structure, text inside any scalar
+ * value — a `run:` script in any spelling, a heredoc, a bare `- |` list item — is just a string
+ * and can never be discovered as a step.
  *
  * @param {string} wf raw workflow YAML
  * @param {string} stepId exact id value
- * @returns {{ id: string, body: string, yamlBody: string } | null} null when no such step exists
+ * @returns {Record<string, unknown> | null} the parsed step mapping, or null when no such step
+ *   exists. Throws (fail-closed) when the text is not valid YAML at all.
  */
 export function extractStepById(wf, stepId) {
-  for (const block of sequenceItemBlocks(wf)) {
-    const childIndent = block.indent + 2
-    const idRe = new RegExp(`^\\s{${childIndent}}id:\\s*['"]?${escapeRe(stepId)}['"]?\\s*$`)
-    if (!block.maskedLines.some((line) => idRe.test(line))) continue
-    return { id: stepId, body: block.lines.join('\n'), yamlBody: block.maskedLines.join('\n') }
+  const doc = parseYamlDocument(wf)
+  if (!isPlainObject(doc) || !isPlainObject(doc.jobs)) return null
+  for (const jobName of Object.keys(doc.jobs)) {
+    const job = doc.jobs[jobName]
+    if (!isPlainObject(job) || !Array.isArray(job.steps)) continue
+    for (const step of job.steps) {
+      if (isPlainObject(step) && step.id === stepId) return step
+    }
   }
   return null
 }
 
-/** @param {string} s */
-function escapeRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 /**
- * Pin (a): the step is conditioned on the required 20.x matrix leg. `if: false`, `'18.x'`, or a
- * missing `if:` all return false. Comment lines and `run:` script text do not count.
+ * Pin (a): the step is conditioned on the required 20.x matrix leg. A missing `if:`, `if: false`
+ * (a YAML boolean, not a string), `'18.x'`, or any other expression all return false.
  *
- * @param {{ yamlBody: string }} step
+ * @param {Record<string, unknown>} step parsed step mapping
  */
 export function stepRunsOnNode20Matrix(step) {
-  return step.yamlBody
-    .split('\n')
-    .some((line) => /^\s*if:\s*matrix\.node-version\s*==\s*['"]20\.x['"]\s*$/.test(line))
+  const cond = isPlainObject(step) ? step.if : undefined
+  if (typeof cond !== 'string') return false
+  return /^matrix\.node-version\s*==\s*['"]20\.x['"]$/.test(cond.trim())
 }
 
 /**
- * Strip one layer of matching surrounding quotes and trailing inline comment from a scalar YAML
- * value, then trim. `''` / `""` / `"   "` all collapse to the empty string.
+ * Pin (b): the step has a real `env` mapping with a `DATABASE_URL` key whose PARSED value is a
+ * non-empty string. The parser has already resolved every spelling: quoted/plain scalars, block
+ * scalars (`|`/`>` + chomping/indent, empty or whitespace-only body → `''`), `!!str` with no
+ * content (→ `''`), `~` / `null` / bare key (→ null), anchors and aliases (`&a ""` / `*a` → `''`).
+ * Comment lines and free-text mentions were never structure to begin with. Whitespace-only values
+ * are rejected the same as before (`"   "` is as skip-green-adjacent as `''`). A non-string
+ * non-null value (e.g. a number) stringifies non-empty — at runtime GitHub renders it non-empty
+ * too, so the suites would fail LOUDLY rather than skip-green, which is not this pin's bypass.
  *
- * @param {string} raw
- * @returns {string}
- */
-function scalarYamlValue(raw) {
-  let v = raw.trim()
-  const quoted = /^(['"])([\s\S]*)\1\s*(?:#.*)?$/.exec(v)
-  if (quoted) return quoted[2].trim()
-  // Unquoted scalar: an inline `# ...` comment needs a preceding space to start a comment.
-  v = v.replace(/\s+#.*$/, '')
-  return v.trim()
-}
-
-/**
- * Does the value written after `DATABASE_URL:` resolve to a NON-EMPTY string?
- *
- * Plain scalars are read directly. A BLOCK SCALAR (`|` / `>` and friends) has no value on the key
- * line at all — its value is the indented body below, which the masked view has blanked out — so
- * the body is resolved from the RAW, index-aligned lines. Round-4 gate finding N1: without this,
- * `DATABASE_URL: |` with an empty (or whitespace-only) body read back as the literal `"|"`, i.e.
- * "non-empty", and greened a step whose DATABASE_URL is empty at runtime — the identical skip-green
- * to `DATABASE_URL: ''`, spelled differently.
- *
- * @param {string} rawValue text following `DATABASE_URL:` on the key line
- * @param {string[]} rawLines raw step body lines (index-aligned with the masked view)
- * @param {number} keyIndex index of the key line within those lines
- * @param {number} keyIndent column of the `DATABASE_URL` key
- * @returns {boolean}
- */
-function envValueIsNonEmpty(rawValue, rawLines, keyIndex, keyIndent) {
-  if (!isBlockScalarHeader(rawValue)) return scalarYamlValue(rawValue) !== ''
-  for (let k = keyIndex + 1; k < rawLines.length; k++) {
-    const line = rawLines[k]
-    if (/^\s*$/.test(line)) continue // blank / whitespace-only body lines are not content
-    const lead = (line.match(/^(\s*)/) || ['', ''])[1].length
-    if (lead <= keyIndent) break // dedented out of the block: the body ended
-    return true // first non-blank, deeper-indented line IS the scalar's content
-  }
-  return false
-}
-
-/**
- * Pin (b): the step has a real YAML `env:` mapping child with a `DATABASE_URL:` key carrying a
- * NON-EMPTY value. Comment lines and free-text mentions do not count, and neither does an empty
- * value in ANY spelling: `DATABASE_URL: ''` (owner repro), `""`, `"   "`, a bare `DATABASE_URL:`,
- * or an empty/whitespace-only block scalar `DATABASE_URL: |` / `>` (round-4 gate finding N1) all
- * leave the variable empty at runtime, so every describeIfDatabase suite skips green — the very
- * bypass this pin exists to stop. Structure is read from the MASKED view (so an `env:` /
- * `DATABASE_URL:` line inside a shell script is inert); block-scalar CONTENT is read from the raw,
- * index-aligned view.
- *
- * @param {{ body: string, yamlBody: string }} step
+ * @param {Record<string, unknown>} step parsed step mapping
  */
 export function stepHasEnvDatabaseUrl(step) {
-  const lines = step.yamlBody.split('\n')
-  const rawLines = step.body.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const envM = /^(\s*)env:\s*$/.exec(lines[i])
-    if (!envM) continue
-    const envIndent = envM[1].length
-    for (let j = i + 1; j < lines.length; j++) {
-      const line = lines[j]
-      if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
-      const indent = (line.match(/^(\s*)/) || ['', ''])[1].length
-      if (indent <= envIndent) break
-      const dbM = /^(\s*)DATABASE_URL:(.*)$/.exec(line)
-      if (dbM && envValueIsNonEmpty(dbM[2], rawLines, j, dbM[1].length)) return true
-    }
-  }
-  return false
+  const env = isPlainObject(step) ? step.env : undefined
+  if (!isPlainObject(env)) return false
+  if (!Object.prototype.hasOwnProperty.call(env, 'DATABASE_URL')) return false
+  const value = env.DATABASE_URL
+  if (value === null || value === undefined) return false
+  return String(value).trim() !== ''
 }
 
 // ---------------------------------------------------------------------------
 // Run-script command parsing (pins (c)+(d) are checked on ONE real vitest command)
+//
+// This half parses SHELL, not YAML: the parsed step's `run` value is the exact script text a
+// runner would hand to bash. Bash-exact comment/continuation handling and per-command binary
+// resolution below are unchanged from round 4 — the owner ruling replaced the YAML reading, and
+// shell-semantics gaps (`true || vitest …` never executing) remain accepted residuals.
 // ---------------------------------------------------------------------------
 
 /**
- * Concatenated shell text of the step's `run:` values (block scalar `run: |` content, or an inline
- * `run: <cmd>`). Everything outside `run:` (names, comments, other YAML keys) is dropped, so only
- * text that a runner would actually execute is parsed.
+ * The step's `run:` script text, line by line. After the YAML parse this is the scalar's actual
+ * content whatever its spelling was (block scalar, folded, quoted, plain — quoted/spaced key
+ * forms included). A step without a string `run` has no script.
  *
- * @param {string[]} bodyLines raw (unmasked) step body lines
+ * @param {Record<string, unknown>} step parsed step mapping
  * @returns {string[]}
  */
-function runScriptLines(bodyLines) {
-  const out = []
-  for (let i = 0; i < bodyLines.length; i++) {
-    const runKey = /^(\s*)run:(.*)$/.exec(bodyLines[i])
-    const block = runKey && isBlockScalarHeader(runKey[2]) ? runKey : null
-    if (block) {
-      const keyIndent = block[1].length
-      for (let j = i + 1; j < bodyLines.length; j++) {
-        const line = bodyLines[j]
-        if (/^\s*$/.test(line)) {
-          out.push('')
-          continue
-        }
-        const indent = (line.match(/^(\s*)/) || ['', ''])[1].length
-        if (indent <= keyIndent) {
-          i = j - 1
-          break
-        }
-        out.push(line)
-        i = j
-      }
-      continue
-    }
-    const inline = /^\s*run:\s+(\S.*)$/.exec(bodyLines[i])
-    if (inline) out.push(inline[1])
-  }
-  return out
+function runScriptLines(step) {
+  const run = isPlainObject(step) ? step.run : undefined
+  return typeof run === 'string' ? run.split('\n') : []
 }
 
 /**
@@ -475,11 +387,11 @@ function argsUseIntegrationConfig(args) {
  * Each logical line is then split on `;` / `&&` / `||` / `|` / `&`, and every command is judged by
  * the binary IT executes.
  *
- * @param {{ body: string }} step
+ * @param {Record<string, unknown>} step parsed step mapping
  * @returns {{ args: string[], usesIntegrationConfig: boolean, wholeFileArgs: string[] }[]}
  */
 export function vitestInvocations(step) {
-  const script = runScriptLines(step.body.split('\n'))
+  const script = runScriptLines(step)
   const logical = []
   let pending = null
   for (const line of script) {
@@ -527,7 +439,7 @@ export function vitestInvocations(step) {
  * `echo vitest --config vitest.integration.config.ts` executes `echo`, not vitest, so it does not
  * satisfy the pin (owner repro).
  *
- * @param {{ body: string }} step
+ * @param {Record<string, unknown>} step parsed step mapping
  */
 export function stepInvokesVitestIntegrationConfig(step) {
   return vitestInvocations(step).some((inv) => inv.usesIntegrationConfig)
@@ -539,7 +451,7 @@ export function stepInvokesVitestIntegrationConfig(step) {
  * config, `echo`, a comment) are not reported, which makes pins (c) and (d) joint: the config flag
  * and the suite argument must belong to the same real vitest command.
  *
- * @param {{ body: string }} step
+ * @param {Record<string, unknown>} step parsed step mapping
  * @returns {string[]}
  */
 export function wholeFileVitestArgs(step) {
@@ -554,7 +466,7 @@ export function wholeFileVitestArgs(step) {
  *
  * @param {string} wf
  * @param {string} stepId
- * @returns {{ id: string, body: string, yamlBody: string }}
+ * @returns {Record<string, unknown>} the parsed step mapping
  */
 export function requireExecutableRealDbStep(wf, stepId) {
   const step = extractStepById(wf, stepId)
@@ -573,8 +485,9 @@ export function requireExecutableRealDbStep(wf, stepId) {
   if (!stepHasEnvDatabaseUrl(step)) {
     throw new Error(
       `real-DB step id "${stepId}" must have env.DATABASE_URL as a real YAML key (not a comment) ` +
-        `with a NON-EMPTY value ('' / "" / whitespace-only do not count) — otherwise every ` +
-        `describeIfDatabase suite in it skips green`,
+        `with a NON-EMPTY value ('' / "" / whitespace-only / ~ / null / !!str / an aliased empty ` +
+        `string / an empty block scalar do not count) — otherwise every describeIfDatabase suite ` +
+        `in it skips green`,
     )
   }
   if (!stepInvokesVitestIntegrationConfig(step)) {
