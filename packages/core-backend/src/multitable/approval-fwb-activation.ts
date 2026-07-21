@@ -46,6 +46,20 @@ export function isFwbWritebackEnabled(env: NodeJS.ProcessEnv = process.env): boo
 const V1_TARGET_TYPES = new Set(['text', 'number', 'date', 'select'])
 const NON_BLANK = /[!-~]/
 
+/**
+ * FWB uses the lock's conceptual `text` mapping type while multitable persists ordinary text fields
+ * as `string`. Keep the alias explicit at both save and execute time; never broaden it to longText or
+ * another writable-looking field type without a separate product decision.
+ */
+export function isFwbTargetFieldTypeCompatible(
+  storedFieldType: string,
+  targetType: FwbFieldMapping['targetType'],
+): boolean {
+  return targetType === 'text'
+    ? storedFieldType === 'string' || storedFieldType === 'text'
+    : storedFieldType === targetType
+}
+
 export type FwbConfigStructuralIssue =
   | 'empty_config'
   | 'invalid_mapping_entry'
