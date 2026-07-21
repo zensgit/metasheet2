@@ -138,10 +138,20 @@ function main() {
   assert.deepStrictEqual([...MR_WRITE_DISCIPLINES], [
     'state_machine_only',
     'create_only',
+    'create_only_status_one_way',
     'pointer_cas_only',
     'append_only_values_free',
     'claim_only',
   ])
+  // Deep-review rulings: retention is a frozen per-object attribute; fail_phase
+  // is the CLOSED state-machine-derived phase vocabulary.
+  assert.deepStrictEqual([...mod.MR_RETENTION_POLICIES], ['permanent', 'released_on_failed'])
+  assert.deepStrictEqual([...mod.MR_RUN_PHASES], ['planned', 'reading_sources', 'snapshots_complete', 'compared'])
+  assert.deepStrictEqual(
+    [...mod.MR_RUN_PHASES],
+    MR_RUN_STATES.filter((state) => MR_RUN_TRANSITIONS[state].includes('failed')),
+    'phases are EXACTLY the states with an X->failed transition (no invented phases)',
+  )
   assert.deepStrictEqual([...MR_BINDING_AUDIT_ACTIONS], [
     'candidate_created',
     'preflight_passed',
@@ -223,21 +233,22 @@ function main() {
   // --- Per-template family/discipline/keys/select/internalOnly -------------
   const byObjectId = Object.fromEntries(MATERIAL_RECONCILIATION_TEMPLATES.map((t) => [t.objectId, t]))
   const EXPECTED_SHAPE = {
-    material_reconciliation_run: { family: 'data', writeDiscipline: 'state_machine_only', keyFields: ['attempt_id'] },
-    material_reconciliation_source_snapshot: { family: 'data', writeDiscipline: 'create_only', keyFields: ['snapshot_id'] },
-    material_reconciliation_source_snapshot_row: { family: 'data', writeDiscipline: 'create_only', keyFields: ['row_id'] },
-    material_reconciliation_diff: { family: 'data', writeDiscipline: 'create_only', keyFields: ['diff_id'] },
-    material_reconciliation_scenario: { family: 'binding', writeDiscipline: 'pointer_cas_only', keyFields: ['scenario_id'] },
-    material_reconciliation_binding_version: { family: 'binding', writeDiscipline: 'create_only', keyFields: ['binding_version_id'] },
-    material_reconciliation_binding_member: { family: 'binding', writeDiscipline: 'create_only', keyFields: ['member_id'] },
-    material_reconciliation_binding_audit: { family: 'binding', writeDiscipline: 'append_only_values_free', keyFields: ['audit_id'] },
-    material_reconciliation_run_identity_claim: { family: 'claim', writeDiscipline: 'claim_only', keyFields: ['tenant_id', 'run_identity_key'] },
+    material_reconciliation_run: { family: 'data', writeDiscipline: 'state_machine_only', retention: 'permanent', keyFields: ['attempt_id'] },
+    material_reconciliation_source_snapshot: { family: 'data', writeDiscipline: 'create_only', retention: 'permanent', keyFields: ['snapshot_id'] },
+    material_reconciliation_source_snapshot_row: { family: 'data', writeDiscipline: 'create_only', retention: 'permanent', keyFields: ['row_id'] },
+    material_reconciliation_diff: { family: 'data', writeDiscipline: 'create_only', retention: 'permanent', keyFields: ['diff_id'] },
+    material_reconciliation_scenario: { family: 'binding', writeDiscipline: 'pointer_cas_only', retention: 'permanent', keyFields: ['scenario_id'] },
+    material_reconciliation_binding_version: { family: 'binding', writeDiscipline: 'create_only_status_one_way', retention: 'permanent', keyFields: ['binding_version_id'] },
+    material_reconciliation_binding_member: { family: 'binding', writeDiscipline: 'create_only', retention: 'permanent', keyFields: ['member_id'] },
+    material_reconciliation_binding_audit: { family: 'binding', writeDiscipline: 'append_only_values_free', retention: 'permanent', keyFields: ['audit_id'] },
+    material_reconciliation_run_identity_claim: { family: 'claim', writeDiscipline: 'claim_only', retention: 'released_on_failed', keyFields: ['tenant_id', 'run_identity_key'] },
   }
   for (const [objectId, expected] of Object.entries(EXPECTED_SHAPE)) {
     const template = byObjectId[objectId]
     assert.ok(template, `template exists: ${objectId}`)
     assert.equal(template.family, expected.family, `${objectId} family`)
     assert.equal(template.writeDiscipline, expected.writeDiscipline, `${objectId} write discipline`)
+    assert.equal(template.retention, expected.retention, `${objectId} retention policy`)
     assert.deepStrictEqual([...template.keyFields], expected.keyFields, `${objectId} key fields`)
     const fieldById = Object.fromEntries(template.fields.map((field) => [field.id, field]))
     for (const keyField of template.keyFields) {
@@ -280,8 +291,15 @@ function main() {
   assert.ok(run.uniqueness[0].partial.includes('IS NOT NULL'), 'partial unique excludes NULL identity keys')
   const runFieldById = Object.fromEntries(run.fields.map((field) => [field.id, field]))
   assert.equal(runFieldById.state.select.vocab, 'MR_RUN_STATES')
-  assert.equal(runFieldById.fail_class.select.vocab, 'MR_FAILURE_CLASSES')
+  // Deep review: fail_class is NOT stored (reason->class binding lives in
+  // MR_FAILURE_REASONS; a stored class could contradict the reason).
+  assert.equal(runFieldById.fail_class, undefined, 'run must NOT store fail_class')
   assert.equal(runFieldById.fail_reason.select.vocab, 'MR_FAILURE_REASON_CODES')
+  assert.equal(runFieldById.fail_phase.select.vocab, 'MR_RUN_PHASES', 'fail_phase is the closed phase vocabulary')
+  // §5 failed-record contract: values-free per-side read-progress counts.
+  for (const countField of ['engineering_pages_read', 'enterprise_pages_read', 'engineering_rows_read', 'enterprise_rows_read']) {
+    assert.equal(runFieldById[countField].type, 'number', `run carries ${countField}`)
+  }
   assert.equal(runFieldById.run_identity_key.internalOnly, true)
   assert.equal(runFieldById.run_identity_key.required, undefined, 'run identity key is NULL until claim-winning commit')
   assert.equal(runFieldById.superseded_at_commit.type, 'boolean')
@@ -592,6 +610,84 @@ function main() {
     () => normalizeMaterialReconciliationTemplate(selectInjection),
     'forbidden key inside select descriptor rejected',
   )
+
+  // --- Deep-review round: template-contract pins ---------------------------
+  // Diff carries NO key material (ruling: DROP identity_key_normalized — keys
+  // are recoverable via the stored row handles; handles-only per §3).
+  const diffTemplate = byObjectId.material_reconciliation_diff
+  for (const forbiddenFieldId of ['value', 'content', 'projection_normalized', 'identity_key_normalized']) {
+    assert.ok(
+      !diffTemplate.fields.some((field) => field.id === forbiddenFieldId),
+      `diff must not carry ${forbiddenFieldId} (handles only)`,
+    )
+  }
+
+  // Frozen uniqueness set (deep-review P2/P3): member one-per-role, snapshot
+  // one-per-side-per-attempt, binding_version pair backing the composite FK.
+  assert.deepStrictEqual(clone(byObjectId.material_reconciliation_binding_member.uniqueness), [
+    { fields: ['binding_version_id', 'role'] },
+  ])
+  assert.deepStrictEqual(clone(byObjectId.material_reconciliation_source_snapshot.uniqueness), [
+    { fields: ['attempt_id', 'role'] },
+  ])
+  assert.deepStrictEqual(clone(byObjectId.material_reconciliation_binding_version.uniqueness), [
+    { fields: ['scenario_id', 'binding_version_id'] },
+  ])
+
+  // Charter-unconditional fields are required (deep-review P3).
+  const requiredPins = [
+    ['material_reconciliation_source_snapshot', 'snapshot_content_digest'],
+    ['material_reconciliation_source_snapshot', 'source_read_evidence_digest'],
+    ['material_reconciliation_source_snapshot_row', 'canonical_row_digest'],
+    ['material_reconciliation_source_snapshot_row', 'projection_normalized'],
+    ['material_reconciliation_source_snapshot_row', 'identity_key_class'],
+    ['material_reconciliation_binding_version', 'binding_fingerprint'],
+    ['material_reconciliation_binding_version', 'baseline_lineage_key'],
+  ]
+  for (const [objectId, fieldId] of requiredPins) {
+    const pinned = byObjectId[objectId].fields.find((field) => field.id === fieldId)
+    assert.equal(pinned.required, true, `${objectId}.${fieldId} must be required`)
+  }
+  // identity_key_normalized on the ROW stays optional: NULL exactly for
+  // identity_invalid rows (the empty sentinel).
+  assert.equal(
+    byObjectId.material_reconciliation_source_snapshot_row.fields.find((f) => f.id === 'identity_key_normalized').required,
+    undefined,
+  )
+
+  // Mutation-killing negatives (deep-review survived mutants T1/T2):
+  // composite-FK arity mismatch must throw…
+  const arityMismatch = clone(byObjectId.material_reconciliation_scenario)
+  arityMismatch.references = [
+    {
+      fields: ['scenario_id', 'active_binding_version_id'],
+      targetObjectId: 'material_reconciliation_binding_version',
+      targetFields: ['scenario_id'],
+      composite: true,
+    },
+  ]
+  assertThrowsTemplateError(
+    () => normalizeMaterialReconciliationTemplate(arityMismatch),
+    'composite reference arity mismatch rejected',
+  )
+  // …and the uniqueness scope vocabulary is closed (only 'tenant').
+  const badScope = clone(byObjectId.material_reconciliation_run)
+  badScope.uniqueness = [{ scope: 'global', fields: ['run_identity_key'], partial: 'run_identity_key IS NOT NULL' }]
+  assertThrowsTemplateError(
+    () => normalizeMaterialReconciliationTemplate(badScope),
+    'uniqueness scope outside the closed set rejected',
+  )
+  // Retention is required and closed.
+  const noRetention = clone(byObjectId.material_reconciliation_run)
+  delete noRetention.retention
+  assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(noRetention), 'missing retention rejected')
+  const badRetention = { ...clone(byObjectId.material_reconciliation_run), retention: 'forever' }
+  assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(badRetention), 'unknown retention rejected')
+
+  // Set-mirror parity for the new vocabularies.
+  assert.deepStrictEqual([...mod.MR_RETENTION_POLICY_SET].sort(), [...mod.MR_RETENTION_POLICIES].sort())
+  assert.deepStrictEqual([...mod.MR_RUN_PHASE_SET].sort(), [...mod.MR_RUN_PHASES].sort())
+  assert.ok(Object.isFrozen(mod.MR_RETENTION_POLICIES) && Object.isFrozen(mod.MR_RUN_PHASES))
 
   console.log('material-reconciliation-templates.test.cjs OK')
 }

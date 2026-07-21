@@ -22,6 +22,20 @@
 // - identityKeyClass is a single-byte domain separator: the identity_invalid
 //   empty sentinel lives in class 0x00 and can never collide with a real key.
 
+// Deep-review recorded rulings (owner focus 2/5):
+// - Kind classification is TRANSIT-TYPED by design: integer 5, {decimal:'5'}
+//   and '5' occupy distinct tag domains. The UPSTREAM projection layer (D3a
+//   design gate) owns coercion to the contractVersion-frozen per-field kind;
+//   classifyValue is not a type-inference feature. D3a must also freeze a
+//   per-source decimalTransit capability (decimal fields carried as text
+//   end-to-end) and expand exponent notation before {decimal} wrapping
+//   (String(1e-7) === '1e-7' would be DECIMAL_MALFORMED here, by design).
+// - computeSnapshotContentDigest([]) is LEGAL: a complete, consistency-proven
+//   EMPTY snapshot is a chartered positive control (§8.2-4); its digest is the
+//   deterministic sha256 of zero tuples.
+// - The returned {buffer, hex} object is frozen but Buffer CONTENTS are
+//   inherently mutable; hex is the authoritative immutable form.
+
 const crypto = require('node:crypto')
 
 const MR_DIGEST_ERROR_REASONS = Object.freeze([
@@ -33,6 +47,11 @@ const MR_DIGEST_ERROR_REASONS = Object.freeze([
   'FIELD_ORDER_MISMATCH',
   'UNSUPPORTED_KIND',
   'LENGTH_OVERFLOW',
+  // Deep-review P1: ill-formed UTF-16 (lone surrogates) silently folded to
+  // U+FFFD by Buffer.from(...,'utf8'), colliding distinct inputs — rejected.
+  'STRING_ILL_FORMED',
+  // Deep-review P3: canonicalRowDigest must be exactly 32 bytes (sha256).
+  'DIGEST_WIDTH_INVALID',
 ])
 const MR_DIGEST_ERROR_REASON_SET = new Set(MR_DIGEST_ERROR_REASONS)
 
@@ -181,7 +200,7 @@ function encodeValueBytes(kind, value) {
     case 'decimal':
       return Buffer.from(normalizeDecimalText(value.decimal), 'utf8')
     case 'string':
-      return Buffer.from(value.normalize('NFC'), 'utf8')
+      return Buffer.from(assertWellFormedString(value, 'string value').normalize('NFC'), 'utf8')
     default:
       throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', `unknown value kind "${kind}"`)
   }
@@ -192,18 +211,25 @@ function assertFieldOrder(fieldOrder) {
     throw new MaterialReconciliationDigestError('FIELD_ORDER_MISMATCH', 'fieldOrder must be a non-empty array')
   }
   const seen = new Set()
+  const rawIds = new Set()
   for (const fieldId of fieldOrder) {
     if (typeof fieldId !== 'string' || fieldId.length === 0) {
       throw new MaterialReconciliationDigestError('FIELD_ORDER_MISMATCH', 'fieldOrder entries must be non-empty strings')
     }
-    if (seen.has(fieldId)) {
+    // Deep-review P2: ids are encoded in NFC form, so uniqueness must also be
+    // judged on NFC forms (['e\u0301','\u00e9'] is ONE logical field twice).
+    assertWellFormedString(fieldId, 'fieldOrder entry')
+    if (seen.has(fieldId.normalize('NFC'))) {
       throw new MaterialReconciliationDigestError('FIELD_ORDER_MISMATCH', 'fieldOrder entries must be unique', {
         fieldId,
       })
     }
-    seen.add(fieldId)
+    seen.add(fieldId.normalize('NFC'))
+    // Row values are looked up by the RAW id (row[fieldId]) \u2014 the outside-key
+    // guard must therefore accept the raw spellings the caller supplied.
+    rawIds.add(fieldId)
   }
-  return seen
+  return { seen, rawIds }
 }
 
 // canonicalRowDigest (frozen, §4.6 rev-5). fieldOrder is the contractVersion-
@@ -215,12 +241,12 @@ function computeCanonicalRowDigest(input) {
     throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'computeCanonicalRowDigest requires an options object')
   }
   const { fieldOrder, row } = input
-  const orderedIds = assertFieldOrder(fieldOrder)
+  const { rawIds: orderedRawIds } = assertFieldOrder(fieldOrder)
   if (!isPlainObject(row)) {
     throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'row must be a plain object')
   }
   for (const key of Object.keys(row)) {
-    if (!orderedIds.has(key)) {
+    if (!orderedRawIds.has(key)) {
       throw new MaterialReconciliationDigestError('FIELD_ORDER_MISMATCH', 'row carries a key outside fieldOrder', {
         fieldId: key,
       })
@@ -232,7 +258,7 @@ function computeCanonicalRowDigest(input) {
     const rawValue = hasKey ? row[fieldId] : undefined
     const kind = classifyValue(rawValue)
     const valueBytes = encodeValueBytes(kind, rawValue)
-    parts.push(lengthPrefix(Buffer.from(fieldId, 'utf8')))
+    parts.push(lengthPrefix(Buffer.from(fieldId.normalize('NFC'), 'utf8')))
     parts.push(Buffer.from([MR_TYPE_TAGS[kind]]))
     parts.push(lengthPrefix(valueBytes))
   }
@@ -240,9 +266,26 @@ function computeCanonicalRowDigest(input) {
   return Object.freeze({ buffer, hex: buffer.toString('hex') })
 }
 
+// Deep-review P1: Buffer.from(str,'utf8') folds lone surrogates to U+FFFD,
+// making distinct accepted inputs collide. Every string ingestion point must
+// reject ill-formed UTF-16 with a closed reason instead.
+function assertWellFormedString(value, context) {
+  const wellFormed = typeof value.isWellFormed === 'function' ? value.isWellFormed() : !/[\uD800-\uDFFF]/.test(value.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''))
+  if (!wellFormed) {
+    throw new MaterialReconciliationDigestError('STRING_ILL_FORMED', `${context} contains ill-formed UTF-16 (lone surrogate)`, {
+      context,
+    })
+  }
+  return value
+}
+
+// String convenience path: well-formed + NFC (the frozen string rules). Buffer
+// path passes through untouched — bytes are the caller-owned authority.
 function toKeyBytes(identityKeyBytes) {
   if (Buffer.isBuffer(identityKeyBytes)) return identityKeyBytes
-  if (typeof identityKeyBytes === 'string') return Buffer.from(identityKeyBytes, 'utf8')
+  if (typeof identityKeyBytes === 'string') {
+    return Buffer.from(assertWellFormedString(identityKeyBytes, 'identityKeyBytes').normalize('NFC'), 'utf8')
+  }
   throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'identityKeyBytes must be a Buffer or string')
 }
 
@@ -270,8 +313,10 @@ function encodeIdentitySortTuple(input) {
   if (identityKeyClass === 'identity_invalid' && keyBytes.length !== 0) {
     throw new MaterialReconciliationDigestError('INVALID_KEY_NONEMPTY', 'identity_invalid rows use the fixed empty sentinel key')
   }
-  if (!Buffer.isBuffer(canonicalRowDigest) || canonicalRowDigest.length === 0) {
-    throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'canonicalRowDigest must be a non-empty Buffer')
+  if (!Buffer.isBuffer(canonicalRowDigest) || canonicalRowDigest.length !== 32) {
+    throw new MaterialReconciliationDigestError('DIGEST_WIDTH_INVALID', 'canonicalRowDigest must be exactly 32 bytes (sha256)', {
+      length: Buffer.isBuffer(canonicalRowDigest) ? canonicalRowDigest.length : null,
+    })
   }
   if (
     !Number.isSafeInteger(multiplicityBound) ||

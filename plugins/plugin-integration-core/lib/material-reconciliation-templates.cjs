@@ -128,11 +128,29 @@ const MR_CONSISTENCY_PROOF_MECHANISM_SET = new Set(MR_CONSISTENCY_PROOF_MECHANIS
 const MR_WRITE_DISCIPLINES = Object.freeze([
   'state_machine_only',
   'create_only',
+  // Deep-review P1: binding versions are row-create-only BUT their status walks
+  // the one-way §4.5 lifecycle (plus superseded_at/revoked_at set at the same
+  // transitions) — plain 'create_only' froze an unimplementable contract.
+  'create_only_status_one_way',
   'pointer_cas_only',
   'append_only_values_free',
   'claim_only',
 ])
 const MR_WRITE_DISCIPLINE_SET = new Set(MR_WRITE_DISCIPLINES)
+
+// Deep-review P2 (charter §3: D1 freezes 字段、唯一键、写入纪律与保留策略 in one
+// pass): retention is part of the frozen per-object contract, machine-readable.
+// 'permanent' = rows are never deleted by the scenario itself;
+// 'released_on_failed' = the claim row is deleted in the same transaction that
+// lands a failed terminal state (complete NEVER releases, §4.4 rev-6).
+const MR_RETENTION_POLICIES = Object.freeze(['permanent', 'released_on_failed'])
+const MR_RETENTION_POLICY_SET = new Set(MR_RETENTION_POLICIES)
+
+// Deep-review ruling (owner focus 3): fail_phase is a CLOSED vocabulary frozen
+// in D1, derived mechanically from the §5 state machine — a run's failure
+// phase IS the source state of its X->failed transition. No invented phases.
+const MR_RUN_PHASES = Object.freeze(['planned', 'reading_sources', 'snapshots_complete', 'compared'])
+const MR_RUN_PHASE_SET = new Set(MR_RUN_PHASES)
 
 const MR_BINDING_AUDIT_ACTIONS = Object.freeze([
   'candidate_created',
@@ -155,6 +173,7 @@ const MR_IDENTITY_KEY_CLASS_SET = new Set(MR_IDENTITY_KEY_CLASSES)
 const MR_SELECT_VOCABULARIES = Object.freeze({
   MR_ROLES,
   MR_RUN_STATES,
+  MR_RUN_PHASES,
   MR_BINDING_STATUSES,
   MR_DIFF_BUCKETS,
   MR_FAILURE_CLASSES,
@@ -440,6 +459,13 @@ function normalizeMaterialReconciliationTemplate(input) {
       { field: 'writeDiscipline', value: writeDiscipline },
     )
   }
+  const retention = assertSafeSchemaString(input.retention, 'retention')
+  if (!MR_RETENTION_POLICY_SET.has(retention)) {
+    throw new MaterialReconciliationTemplateError(
+      `retention must be one of ${MR_RETENTION_POLICIES.join(', ')}`,
+      { field: 'retention', value: retention },
+    )
+  }
   const fields = Array.isArray(input.fields) ? input.fields.map(normalizeMaterialReconciliationField) : []
   if (fields.length === 0) {
     throw new MaterialReconciliationTemplateError('fields must be a non-empty array', { field: 'fields' })
@@ -477,6 +503,7 @@ function normalizeMaterialReconciliationTemplate(input) {
     version,
     family,
     writeDiscipline,
+    retention,
     keyFields,
     fields,
   }
@@ -571,6 +598,7 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'data',
     writeDiscipline: 'state_machine_only',
+    retention: 'permanent',
     keyFields: ['attempt_id'],
     fields: [
       field('attempt_id', 'Attempt ID', 'string', { required: true, key: true }),
@@ -579,13 +607,22 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
       field('binding_version_id', 'Binding Version ID', 'string', { required: true }),
       field('state', 'Run State', 'select', { required: true, select: { vocab: 'MR_RUN_STATES' } }),
       field('run_identity_key', 'Run Identity Key (NULL until claim-winning commit)', 'string', { internalOnly: true }),
-      field('fail_class', 'Failure Class', 'select', { select: { vocab: 'MR_FAILURE_CLASSES' } }),
+      // Deep review: fail_class is NOT stored — the reason->class binding is
+      // frozen in MR_FAILURE_REASONS and storing it separately would admit
+      // contradictory pairs. fail_phase is the CLOSED MR_RUN_PHASES vocabulary
+      // (the run state at the moment of the X->failed transition).
       field('fail_reason', 'Failure Reason', 'select', { select: { vocab: 'MR_FAILURE_REASON_CODES' } }),
-      field('fail_phase', 'Failure Phase', 'string'),
+      field('fail_phase', 'Failure Phase', 'select', { select: { vocab: 'MR_RUN_PHASES' } }),
       field('superseded_at_commit', 'Superseded At Commit', 'boolean'),
       field('winner_attempt_id', 'Winner Attempt ID (opaque handle)', 'string'),
       field('engineering_snapshot_id', 'Engineering Snapshot ID', 'string'),
       field('enterprise_snapshot_id', 'Enterprise Snapshot ID', 'string'),
+      // §5 failed-record contract: family/reason/phase/COUNTS — values-free
+      // read-progress counts per side, derived from the §4.4 bounded reads.
+      field('engineering_pages_read', 'Pages Read (Engineering)', 'number'),
+      field('enterprise_pages_read', 'Pages Read (Enterprise)', 'number'),
+      field('engineering_rows_read', 'Rows Read (Engineering)', 'number'),
+      field('enterprise_rows_read', 'Rows Read (Enterprise)', 'number'),
       field('created_at', 'Created At', 'date'),
       field('completed_at', 'Completed At', 'date'),
     ],
@@ -603,6 +640,7 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'data',
     writeDiscipline: 'create_only',
+    retention: 'permanent',
     keyFields: ['snapshot_id'],
     fields: [
       field('snapshot_id', 'Snapshot ID', 'string', { required: true, key: true }),
@@ -613,13 +651,15 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
         required: true,
         select: { vocab: 'MR_CONSISTENCY_PROOF_MECHANISMS' },
       }),
-      field('snapshot_content_digest', 'Snapshot Content Digest', 'string', { internalOnly: true }),
-      field('source_read_evidence_digest', 'Source Read Evidence Digest', 'string', { internalOnly: true }),
+      field('snapshot_content_digest', 'Snapshot Content Digest', 'string', { required: true, internalOnly: true }),
+      field('source_read_evidence_digest', 'Source Read Evidence Digest', 'string', { required: true, internalOnly: true }),
       field('row_count', 'Row Count', 'number'),
       field('page_count', 'Page Count', 'number'),
       field('read_started_at', 'Read Started At', 'date'),
       field('read_completed_at', 'Read Completed At', 'date'),
     ],
+    // One snapshot per side per attempt (§2.2/§4.4).
+    uniqueness: [{ fields: ['attempt_id', 'role'] }],
   }),
   // 3. Normalized snapshot row (frozen projection); digests internal only.
   normalizeMaterialReconciliationTemplate({
@@ -629,19 +669,29 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'data',
     writeDiscipline: 'create_only',
+    retention: 'permanent',
     keyFields: ['row_id'],
     fields: [
       field('row_id', 'Row ID', 'string', { required: true, key: true }),
       field('snapshot_id', 'Snapshot ID', 'string', { required: true }),
       field('row_index', 'Row Index', 'number', { required: true }),
-      field('identity_key_class', 'Identity Key Class', 'select', { select: { vocab: 'MR_IDENTITY_KEY_CLASSES' } }),
+      field('identity_key_class', 'Identity Key Class', 'select', { required: true, select: { vocab: 'MR_IDENTITY_KEY_CLASSES' } }),
+      // NULL exactly when identity_key_class = identity_invalid (empty sentinel).
       field('identity_key_normalized', 'Identity Key (Normalized)', 'string', { internalOnly: true }),
-      field('canonical_row_digest', 'Canonical Row Digest', 'string', { internalOnly: true }),
-      field('projection_normalized', 'Projection (Normalized)', 'string', { internalOnly: true }),
+      field('canonical_row_digest', 'Canonical Row Digest', 'string', { required: true, internalOnly: true }),
+      field('projection_normalized', 'Projection (Normalized)', 'string', { required: true, internalOnly: true }),
     ],
   }),
   // 4. Deterministic diff between the two complete snapshots — references
-  // snapshot/row HANDLES only (§3); no projected business values.
+  // snapshot/row HANDLES only (§3); no projected business values and NO key
+  // material (deep-review ruling: identity_key_normalized DROPPED — the key is
+  // recoverable via the stored row handles). Frozen per-bucket handle
+  // discipline: matched_* = both row handles set; only_in_* = exactly one set;
+  // ambiguous = per populated side the deterministic EXEMPLAR row handle (the
+  // row with the byte-lexicographically smallest canonical_row_digest among
+  // same-key rows on that side — NEVER row_index, which is replay-
+  // nondeterministic per §8.2b-7) plus per-side multiplicities (0 = absent);
+  // identity_invalid = the single row handle with identity_key_class set.
   normalizeMaterialReconciliationTemplate({
     id: 'material.reconciliation.diff.v1',
     objectId: 'material_reconciliation_diff',
@@ -649,6 +699,7 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'data',
     writeDiscipline: 'create_only',
+    retention: 'permanent',
     keyFields: ['diff_id'],
     fields: [
       field('diff_id', 'Diff ID', 'string', { required: true, key: true }),
@@ -656,7 +707,6 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
       field('attempt_id', 'Attempt ID', 'string', { required: true }),
       field('bucket', 'Diff Bucket', 'select', { required: true, select: { vocab: 'MR_DIFF_BUCKETS' } }),
       field('identity_key_class', 'Identity Key Class', 'select', { select: { vocab: 'MR_IDENTITY_KEY_CLASSES' } }),
-      field('identity_key_normalized', 'Identity Key (Normalized)', 'string', { internalOnly: true }),
       field('engineering_snapshot_id', 'Engineering Snapshot ID', 'string'),
       field('enterprise_snapshot_id', 'Enterprise Snapshot ID', 'string'),
       field('engineering_row_id', 'Engineering Row ID', 'string'),
@@ -675,6 +725,7 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'binding',
     writeDiscipline: 'pointer_cas_only',
+    retention: 'permanent',
     keyFields: ['scenario_id'],
     fields: [
       field('scenario_id', 'Scenario ID', 'string', { required: true, key: true }),
@@ -692,15 +743,18 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
       },
     ],
   }),
-  // 6. Binding version: rows create-only; status one-way per
-  // MR_BINDING_TRANSITIONS; no stored 'active' status (derived predicate).
+  // 6. Binding version: rows create-only EXCEPT status (one-way per
+  // MR_BINDING_TRANSITIONS) and the superseded_at/revoked_at stamps set at
+  // those transitions — hence 'create_only_status_one_way' (deep-review P1);
+  // no stored 'active' status (derived predicate).
   normalizeMaterialReconciliationTemplate({
     id: 'material.reconciliation.binding-version.v1',
     objectId: 'material_reconciliation_binding_version',
     label: 'Material Reconciliation Binding Version',
     version: 'v1',
     family: 'binding',
-    writeDiscipline: 'create_only',
+    writeDiscipline: 'create_only_status_one_way',
+    retention: 'permanent',
     keyFields: ['binding_version_id'],
     fields: [
       field('binding_version_id', 'Binding Version ID', 'string', { required: true, key: true }),
@@ -708,12 +762,15 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
       field('tenant_id', 'Tenant ID', 'string', { required: true }),
       field('status', 'Binding Status', 'select', { required: true, select: { vocab: 'MR_BINDING_STATUSES' } }),
       field('contract_version', 'Contract Version', 'string', { required: true }),
-      field('binding_fingerprint', 'Binding Fingerprint', 'string', { internalOnly: true }),
-      field('baseline_lineage_key', 'Baseline Lineage Key', 'string', { internalOnly: true }),
+      field('binding_fingerprint', 'Binding Fingerprint', 'string', { required: true, internalOnly: true }),
+      field('baseline_lineage_key', 'Baseline Lineage Key', 'string', { required: true, internalOnly: true }),
       field('created_at', 'Created At', 'date'),
       field('superseded_at', 'Superseded At', 'date'),
       field('revoked_at', 'Revoked At', 'date'),
     ],
+    // Backs the scenario composite FK target (§4.1): the referenced pair must
+    // itself be frozen unique.
+    uniqueness: [{ fields: ['scenario_id', 'binding_version_id'] }],
   }),
   // 7. Binding member: role -> approved config version + pinned content key
   // (rev-4 content-key single-track, no version id).
@@ -724,6 +781,7 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'binding',
     writeDiscipline: 'create_only',
+    retention: 'permanent',
     keyFields: ['member_id'],
     fields: [
       field('member_id', 'Member ID', 'string', { required: true, key: true }),
@@ -736,6 +794,9 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
         select: { vocab: 'MR_CONSISTENCY_PROOF_MECHANISMS' },
       }),
     ],
+    // Exactly one member per role per binding version (§2.3: each role binds
+    // ONE approved config version; V1 = exactly two roles).
+    uniqueness: [{ fields: ['binding_version_id', 'role'] }],
   }),
   // 8. Binding lifecycle audit: append-only and values-free by construction —
   // closed action vocabulary, opaque handles, NO free-text field.
@@ -746,6 +807,7 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'binding',
     writeDiscipline: 'append_only_values_free',
+    retention: 'permanent',
     keyFields: ['audit_id'],
     fields: [
       field('audit_id', 'Audit ID', 'string', { required: true, key: true }),
@@ -767,6 +829,7 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
     version: 'v1',
     family: 'claim',
     writeDiscipline: 'claim_only',
+    retention: 'released_on_failed',
     keyFields: ['tenant_id', 'run_identity_key'],
     fields: [
       field('tenant_id', 'Tenant ID', 'string', { required: true, key: true }),
@@ -813,6 +876,10 @@ module.exports = {
   MR_CONSISTENCY_PROOF_MECHANISM_SET,
   MR_WRITE_DISCIPLINES,
   MR_WRITE_DISCIPLINE_SET,
+  MR_RETENTION_POLICIES,
+  MR_RETENTION_POLICY_SET,
+  MR_RUN_PHASES,
+  MR_RUN_PHASE_SET,
   MR_BINDING_AUDIT_ACTIONS,
   MR_BINDING_AUDIT_ACTION_SET,
   MR_IDENTITY_KEY_CLASSES,

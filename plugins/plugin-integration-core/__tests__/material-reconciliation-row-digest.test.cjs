@@ -7,6 +7,7 @@
 // module source (no stock-preparation prefixes or requires).
 
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 
@@ -233,23 +234,39 @@ function lengthPrefixAntiCollision() {
     'field boundaries cannot be respliced'
   )
 
-  // Tuple level: key 'ab' + digest 'cd' vs key 'a' + digest 'bcd' bare-concat to
-  // the same bytes; length prefixes must keep them distinct.
+  // Tuple level: the deep-review DIGEST_WIDTH_INVALID rule retires the old
+  // short-digest splice fixture STRUCTURALLY — with every digest fixed at 32
+  // bytes, a key/digest boundary shift always changes total tuple length, so
+  // the splice class is excluded by construction. Pin the width rule instead.
+  const digest32 = crypto.createHash('sha256').update('anti-collision').digest()
+  for (const badWidth of [2, 31, 33]) {
+    assertThrowsReason(
+      () => encodeIdentitySortTuple({
+        identityKeyClass: 'valid',
+        identityKeyBytes: Buffer.from('ab', 'utf8'),
+        canonicalRowDigest: Buffer.alloc(badWidth, 0xab),
+        multiplicity: 1,
+        multiplicityBound: 4,
+      }),
+      'DIGEST_WIDTH_INVALID',
+      `digest width ${badWidth} rejected`
+    )
+  }
   const tupleA = encodeIdentitySortTuple({
     identityKeyClass: 'valid',
     identityKeyBytes: Buffer.from('ab', 'utf8'),
-    canonicalRowDigest: Buffer.from('cd', 'utf8'),
+    canonicalRowDigest: digest32,
     multiplicity: 1,
     multiplicityBound: 4,
   })
   const tupleB = encodeIdentitySortTuple({
     identityKeyClass: 'valid',
     identityKeyBytes: Buffer.from('a', 'utf8'),
-    canonicalRowDigest: Buffer.from('bcd', 'utf8'),
+    canonicalRowDigest: digest32,
     multiplicity: 1,
     multiplicityBound: 4,
   })
-  assert.ok(!tupleA.equals(tupleB), 'tuple key/digest splice collision prevented by length prefixes')
+  assert.ok(!tupleA.equals(tupleB), 'different keys with identical digests stay distinct')
   // 4-byte length prefix shape check via internals
   const prefixed = __internals.lengthPrefix(Buffer.from('ab', 'utf8'))
   assert.equal(prefixed.length, 6)
@@ -328,8 +345,8 @@ function sortTupleContract() {
 
   assertThrowsReason(
     () => encodeIdentitySortTuple({ ...base, canonicalRowDigest: Buffer.alloc(0) }),
-    'UNSUPPORTED_KIND',
-    'empty digest rejected'
+    'DIGEST_WIDTH_INVALID',
+    'empty digest rejected (width rule)'
   )
 }
 
@@ -455,6 +472,85 @@ function reviewHardening() {
   )
 }
 
+// Deep-review round 2 (owner focus 2/6): kill the independently-survived
+// mutants (interior-zero strip, boolean false byte, fieldId NFC, multiplicity
+// upper edge) and pin the P1 fix (ill-formed UTF-16 rejection) plus rulings
+// (empty-snapshot legality, digest width).
+function deepReviewRound() {
+  const fieldOrder = ['k1']
+  // P1: lone surrogates are REJECTED, never folded into U+FFFD collisions.
+  assertThrowsReason(() => digestHex(fieldOrder, { k1: '\uD800' }), 'STRING_ILL_FORMED', 'lone high surrogate value')
+  assertThrowsReason(() => digestHex(fieldOrder, { k1: '\uDFFF' }), 'STRING_ILL_FORMED', 'lone low surrogate value')
+  assertThrowsReason(() => digestHex(['\uD800'], { '\uD800': 't' }), 'STRING_ILL_FORMED', 'lone surrogate field id')
+  // U+FFFD itself is a LEGAL character and digests normally.
+  assert.equal(typeof digestHex(fieldOrder, { k1: '\uFFFD' }), 'string', 'U+FFFD is a legal value')
+  // Well-formed astral pairs stay legal.
+  assert.equal(typeof digestHex(fieldOrder, { k1: '\uD83D\uDE00' }), 'string', 'proper surrogate pair legal')
+  const digest32 = crypto.createHash('sha256').update('drr').digest()
+  assertThrowsReason(
+    () => encodeIdentitySortTuple({ identityKeyClass: 'valid', identityKeyBytes: '\uD800', canonicalRowDigest: digest32, multiplicity: 1, multiplicityBound: 4 }),
+    'STRING_ILL_FORMED',
+    'lone surrogate string identity key',
+  )
+
+  // fieldId NFC (survived M4): composed and decomposed ids are ONE logical id.
+  const composed = String.fromCharCode(0x00e9)
+  const decomposed = 'e' + String.fromCharCode(0x0301)
+  assert.notEqual(composed, decomposed, 'fixture sanity: raw forms differ')
+  assert.equal(
+    digestHex([composed], { [composed]: 'v' }),
+    digestHex([decomposed], { [decomposed]: 'v' }),
+    'field ids are NFC-normalized before encoding',
+  )
+  assertThrowsReason(
+    () => computeCanonicalRowDigest({ fieldOrder: [composed, decomposed], row: { [composed]: 'v', [decomposed]: 'v' } }),
+    'FIELD_ORDER_MISMATCH',
+    'NFC-equal ids are duplicates',
+  )
+  // String identity keys are NFC-normalized on the convenience path too.
+  const tupleComposedKey = encodeIdentitySortTuple({ identityKeyClass: 'valid', identityKeyBytes: composed, canonicalRowDigest: digest32, multiplicity: 1, multiplicityBound: 4 })
+  const tupleDecomposedKey = encodeIdentitySortTuple({ identityKeyClass: 'valid', identityKeyBytes: decomposed, canonicalRowDigest: digest32, multiplicity: 1, multiplicityBound: 4 })
+  assert.ok(tupleComposedKey.equals(tupleDecomposedKey), 'string keys NFC-normalize identically')
+  // Buffer keys are the caller-owned BYTE authority: raw NFD bytes stay raw.
+  const tupleNfdBufferKey = encodeIdentitySortTuple({ identityKeyClass: 'valid', identityKeyBytes: Buffer.from(decomposed, 'utf8'), canonicalRowDigest: digest32, multiplicity: 1, multiplicityBound: 4 })
+  assert.ok(!tupleNfdBufferKey.equals(tupleComposedKey), 'Buffer keys bypass normalization by design')
+
+  // Interior zero (survived M1): leading-zero strip must be anchored.
+  assert.equal(normalizeDecimalText('105'), '105')
+  assert.equal(normalizeDecimalText('1050'), '1050')
+  assert.equal(normalizeDecimalText('10.05'), '10.05')
+  assert.notEqual(
+    digestHex(fieldOrder, { k1: { decimal: '105' } }),
+    digestHex(fieldOrder, { k1: { decimal: '15' } }),
+    'interior zeros are value-bearing',
+  )
+
+  // Boolean false byte (survived M2).
+  assert.notEqual(digestHex(fieldOrder, { k1: false }), digestHex(fieldOrder, { k1: true }), 'false != true')
+  assert.notEqual(digestHex(fieldOrder, { k1: false }), digestHex(fieldOrder, { k1: 0 }), 'false != integer 0')
+
+  // Multiplicity bound upper edge (survived M3): 2^32 bound is rejected TYPED.
+  assertThrowsReason(
+    () => encodeIdentitySortTuple({ identityKeyClass: 'valid', identityKeyBytes: 'k', canonicalRowDigest: digest32, multiplicity: 1, multiplicityBound: 2 ** 32 }),
+    'MULTIPLICITY_OUT_OF_BOUNDS',
+    'bound above 2^32-1 rejected with the closed reason',
+  )
+
+  // Empty snapshot is LEGAL (charter §8.2-4 positive control): sha256 of zero tuples.
+  assert.equal(
+    computeSnapshotContentDigest([]).hex,
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    'empty snapshot digest pinned',
+  )
+
+  // Golden 2: interior-zero decimal + boolean false + composed unicode.
+  const golden2 = computeCanonicalRowDigest({
+    fieldOrder: ['a', 'b', 'c', 'd'],
+    row: { a: 105, b: { decimal: '10.50' }, c: false, d: 'Caf' + composed },
+  })
+  assert.equal(golden2.hex, '35785be424f326d567759cbf530f0c0a5cb85091ada133ec710833021e872296', 'golden 2 canonical row digest')
+}
+
 function main() {
   structuralIndependence()
   frozenVocabularies()
@@ -467,6 +563,7 @@ function main() {
   snapshotContentDigestContract()
   digestShape()
   reviewHardening()
+  deepReviewRound()
 }
 
 main()
