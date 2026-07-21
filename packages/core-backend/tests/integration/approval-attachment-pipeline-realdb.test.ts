@@ -90,6 +90,23 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
     }
   }
 
+  async function waitUntilAttachmentBindBlocksOnHolder(holderPid: number, timeoutMs = 8_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const blocked = await pool().query(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE state = 'active'
+            AND wait_event_type = 'Lock'
+            AND $1 = ANY(pg_blocking_pids(pid))
+            AND query ILIKE '%UPDATE approval_attachments%'`,
+        [holderPid],
+      )
+      if (Number(blocked.rows[0]?.n ?? 0) >= 1) return
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    throw new Error(`timed out waiting for an approval attachment bind to block on holder ${holderPid}`)
+  }
+
   async function publishAttachmentTemplate(adminToken: string, over: { visibilityScope?: unknown } = {}): Promise<string> {
     const templateKey = `aatt-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
     const create = await jsonRequest('/api/approval-templates', adminToken, {
@@ -298,6 +315,69 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
     expect(att.bound_at).not.toBeNull()
     const snap = (await pool().query(`SELECT form_snapshot->'files' AS files FROM approval_instances WHERE id=$1`, [inst.id])).rows[0]
     expect(snap.files).toEqual([attId]) // the frozen snapshot IS the bound id array (§8)
+  })
+
+  it('double-submit through POST /api/approvals: one staged attachment yields exactly one 201 and no loser instance', async () => {
+    const adminToken = await authToken(`aatt-admin-${RUN}`)
+    const requesterToken = await authToken(REQUESTER)
+    const templateId = await publishAttachmentTemplate(adminToken)
+    const upload = await uploadPdf(requesterToken, templateId, 'files')
+    expect(upload.status, await upload.clone().text()).toBe(201)
+    const attachmentId = ((await upload.json()) as { id: string }).id
+    createdAttachmentIds.add(attachmentId)
+
+    const before = new Set<string>((await pool().query(
+      'SELECT id FROM approval_instances WHERE template_id=$1',
+      [templateId],
+    )).rows.map((row: { id: string }) => row.id))
+    const raw = pool().getInternalPool()
+    const holder = await raw.connect()
+    let submissions: Array<Promise<Response>> = []
+    const settled = [false, false]
+    try {
+      await holder.query('BEGIN')
+      const pid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await holder.query('SELECT id FROM approval_attachments WHERE id=$1 FOR UPDATE', [attachmentId])
+
+      const body = { templateId, formData: { reason: 'same staged attachment race', files: [attachmentId] } }
+      submissions = [
+        jsonRequest('/api/approvals', requesterToken, { method: 'POST', body }),
+        jsonRequest('/api/approvals', requesterToken, { method: 'POST', body }),
+      ].map((submission, index) => submission.finally(() => {
+        settled[index] = true
+      }))
+      // PostgreSQL's second waiter may queue behind the first waiter rather than list the external
+      // holder as its direct blocker. Prove the bind SQL is genuinely parked, and both HTTP requests
+      // are still in flight before releasing the row, instead of over-specifying lock-queue topology.
+      await waitUntilAttachmentBindBlocksOnHolder(pid)
+      expect(settled).toEqual([false, false])
+      await holder.query('COMMIT')
+
+      const responses = await Promise.all(submissions)
+      expect(responses.map((response) => response.status).sort((a, b) => a - b)).toEqual([201, 400])
+      const winner = responses.find((response) => response.status === 201)
+      expect(winner).toBeDefined()
+      const winnerId = ((await winner!.json()) as { id: string }).id
+      createdApprovalIds.add(winnerId)
+
+      const afterRows = (await pool().query(
+        'SELECT id FROM approval_instances WHERE template_id=$1 ORDER BY id',
+        [templateId],
+      )).rows as Array<{ id: string }>
+      const createdByRace = afterRows.map((row) => row.id).filter((id) => !before.has(id))
+      expect(createdByRace).toEqual([winnerId])
+      const attachment = (await pool().query(
+        'SELECT status, instance_id FROM approval_attachments WHERE id=$1',
+        [attachmentId],
+      )).rows[0]
+      expect(attachment).toMatchObject({ status: 'bound', instance_id: winnerId })
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
+      await Promise.allSettled(submissions)
+      const raceRows = await pool().query('SELECT id FROM approval_instances WHERE template_id=$1', [templateId])
+      for (const row of raceRows.rows as Array<{ id: string }>) createdApprovalIds.add(row.id)
+    }
   })
 
   it('bind failure rolls back the WHOLE create: a foreign attachment id fails the submit; no instance row remains', async () => {

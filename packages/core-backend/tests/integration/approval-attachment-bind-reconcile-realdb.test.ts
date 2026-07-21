@@ -32,6 +32,42 @@ async function ensureInstance(id: string) {
   await db().query(`INSERT INTO approval_instances (id, status) VALUES ($1,'pending') ON CONFLICT (id) DO NOTHING`, [id])
 }
 
+async function waitUntilBlockedBy(waiterPid: number, blockerPid: number, timeoutMs = 8_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const blocked = await db().query(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE pid = $1
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND $2 = ANY(pg_blocking_pids(pid))`,
+      [waiterPid, blockerPid],
+    )
+    if (Number(blocked.rows[0]?.n ?? 0) === 1) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(`timed out waiting for backend ${waiterPid} to block on ${blockerPid}`)
+}
+
+async function findBackendBlockedBy(holderPid: number, queryFragment: string, timeoutMs = 8_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const blocked = await db().query(
+      `SELECT pid FROM pg_stat_activity
+        WHERE state = 'active'
+          AND wait_event_type = 'Lock'
+          AND $1 = ANY(pg_blocking_pids(pid))
+          AND query ILIKE $2
+        ORDER BY pid
+        LIMIT 1`,
+      [holderPid, `%${queryFragment}%`],
+    )
+    if (blocked.rows[0]?.pid) return Number(blocked.rows[0].pid)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(`timed out waiting for ${queryFragment} to block on holder ${holderPid}`)
+}
+
 async function seed(over: { uploader?: string; status?: string; key?: string; size?: number; ageHours?: number; scanState?: string } = {}) {
   const id = `att6_${RUN}_${ids.length}`
   ids.push(id)
@@ -264,19 +300,60 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const winIntent = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [`key_${winId}`])
     expect(Number(winIntent.rows[0].c)).toBe(0) // NO purge intent for the just-bound blob
 
-    // (ii) GC WINS: the sweep claims the row first (status='deleted' + intent). A subsequent bind sees no
-    //      unbound row → its whole submission fails closed → no "bound but blob gone".
+    // (ii) GC WINS: a test-only advisory-lock trigger parks the REAL sweep after it has acquired the
+    //      attachment row lock. The bind is then started and is proven blocked on the sweep backend.
+    //      Releasing the advisory barrier lets GC commit first; bind resumes and fails closed.
     const loseId = await seed({ ageHours: 200 })
     const loseInst = `apr_${RUN}_gcwins`
     await ensureInstance(loseInst)
-    await sweepUnboundAttachments(db(), 168) // claims loseId (old, unbound) → deleted + intent
+    const suffix = RUN.replace(/-/g, '')
+    const barrierFn = `aatt_gcw_fn_${suffix}`
+    const barrierTrigger = `aatt_gcw_trg_${suffix}`
+    const advisoryClass = 4195
+    const advisoryObject = 11
+    await db().query(
+      `CREATE FUNCTION ${barrierFn}() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         PERFORM pg_advisory_xact_lock(${advisoryClass}, ${advisoryObject});
+         RETURN NEW;
+       END $$`,
+    )
+    await db().query(
+      `CREATE TRIGGER ${barrierTrigger}
+         BEFORE UPDATE ON approval_attachments
+         FOR EACH ROW
+         WHEN (OLD.id = '${loseId}' AND OLD.status = 'unbound' AND NEW.status = 'deleted')
+         EXECUTE FUNCTION ${barrierFn}()`,
+    )
+    const holder = await raw.connect()
     const conn2 = await raw.connect()
+    let sweepPromise: Promise<unknown> | undefined
+    let bindPromise: Promise<unknown> | undefined
     try {
+      await holder.query('BEGIN')
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await holder.query('SELECT pg_advisory_xact_lock($1, $2)', [advisoryClass, advisoryObject])
+      sweepPromise = sweepUnboundAttachments(db(), 168)
+      const sweepPid = await findBackendBlockedBy(holderPid, 'UPDATE approval_attachments')
+
       await conn2.query('BEGIN')
-      await expect(bindAttachmentsOnSubmit(conn2, 'u1', 'org1', loseInst, { fldA: [loseId] })).rejects.toThrow(/bindable|rejected/)
+      const bindPid = Number((await conn2.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      bindPromise = bindAttachmentsOnSubmit(conn2, 'u1', 'org1', loseInst, { fldA: [loseId] })
+      await waitUntilBlockedBy(bindPid, sweepPid)
+
+      await holder.query('COMMIT')
+      await sweepPromise
+      await expect(bindPromise).rejects.toThrow(/bindable|rejected/)
       await conn2.query('ROLLBACK')
     } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
+      await sweepPromise?.catch(() => {})
+      await bindPromise?.catch(() => {})
+      await conn2.query('ROLLBACK').catch(() => {})
       conn2.release()
+      await db().query(`DROP TRIGGER IF EXISTS ${barrierTrigger} ON approval_attachments`).catch(() => {})
+      await db().query(`DROP FUNCTION IF EXISTS ${barrierFn}()`).catch(() => {})
     }
     const loseRow = await db().query('SELECT status, instance_id FROM approval_attachments WHERE id=$1', [loseId])
     expect(loseRow.rows[0].status).toBe('deleted') // GC won; the bind did NOT resurrect it

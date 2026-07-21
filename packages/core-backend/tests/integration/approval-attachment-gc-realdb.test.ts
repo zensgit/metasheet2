@@ -6,11 +6,15 @@
  * and NEVER deletes a blob a live row still references (skip + surface). Two-point wired.
  */
 import { randomUUID } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import * as path from 'node:path'
 
 import { afterAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { drainPurgeIntents, PURGE_MAX_ATTEMPTS, sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
+import { LocalFsApprovalAttachmentStore } from '../../src/services/approval-attachment-storage'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
@@ -225,26 +229,50 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
     void live
   })
 
-  // §12 item 14 / G12 — the §3-bis row-delete trigger fires on the instance ON DELETE CASCADE path, so
-  // an instance deletion enqueues a row_deleted purge intent per bound blob; a co-existing LIVE instance
-  // is untouched. (The worker then deletes the object-store blobs — proven by the drain tests above.)
-  test('cascade blob cleanup (G12): deleting an instance enqueues row_deleted intents for its bound blobs; a live instance is untouched', async () => {
-    const deadInst = `apr_${RUN}_dead`
-    const liveInst = `apr_${RUN}_live`
-    const deadAtt = await seed({ status: 'bound', instance: deadInst, key: `key_att_${RUN}_cascade_dead` })
-    const liveAtt = await seed({ status: 'bound', instance: liveInst, key: `key_att_${RUN}_cascade_live` })
-    // delete the instance → ON DELETE CASCADE drops the bound row → the trigger enqueues its purge intent
-    await db().query('DELETE FROM approval_instances WHERE id=$1', [deadInst])
-    const dead = await db().query(
-      `SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1 AND reason='row_deleted'`,
-      [`key_att_${RUN}_cascade_dead`],
-    )
-    expect(Number(dead.rows[0].c)).toBe(1) // enqueued by the cascade path, no application code involved
-    const deadRow = await db().query('SELECT count(*)::int AS c FROM approval_attachments WHERE id=$1', [deadAtt])
-    expect(Number(deadRow.rows[0].c)).toBe(0) // the row is gone (cascade)
-    // positive control: the LIVE instance's bound blob is NEVER enqueued/purged
-    const liveIntent = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [`key_att_${RUN}_cascade_live`])
-    expect(Number(liveIntent.rows[0].c)).toBe(0)
-    void liveAtt
+  // §12 item 14 / G12 — prove the whole path, not just the DB intent: cascade enqueues, the real local
+  // store deleter drains the intent, the dead blob disappears, and the live sibling blob remains.
+  test('cascade blob cleanup (G12): instance delete drains through LocalFs store; dead blob gone, live blob retained', async () => {
+    const storageRoot = mkdtempSync(path.join(tmpdir(), 'approval-attachment-gc-'))
+    const localStore = new LocalFsApprovalAttachmentStore(storageRoot)
+    try {
+      const deadInst = `apr_${RUN}_dead`
+      const liveInst = `apr_${RUN}_live`
+      const deadKey = `key_att_${RUN}_cascade_dead`
+      const liveKey = `key_att_${RUN}_cascade_live`
+      const deadBytes = Buffer.from('dead attachment blob')
+      const liveBytes = Buffer.from('live attachment blob')
+      await localStore.put(deadKey, deadBytes)
+      await localStore.put(liveKey, liveBytes)
+      const deadAtt = await seed({ status: 'bound', instance: deadInst, key: deadKey })
+      const liveAtt = await seed({ status: 'bound', instance: liveInst, key: liveKey })
+      expect(await localStore.get(deadKey)).toEqual(deadBytes)
+      expect(await localStore.get(liveKey)).toEqual(liveBytes)
+      // delete the instance → ON DELETE CASCADE drops the bound row → the trigger enqueues its purge intent
+      await db().query('DELETE FROM approval_instances WHERE id=$1', [deadInst])
+      const dead = await db().query(
+        `SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1 AND reason='row_deleted'`,
+        [deadKey],
+      )
+      expect(Number(dead.rows[0].c)).toBe(1) // enqueued by the cascade path, no application code involved
+      const deadRow = await db().query('SELECT count(*)::int AS c FROM approval_attachments WHERE id=$1', [deadAtt])
+      expect(Number(deadRow.rows[0].c)).toBe(0) // the row is gone (cascade)
+
+      const drained = await drainPurgeIntents(db(), (storageKey) => localStore.delete(storageKey), { batchSize: 10_000 })
+      expect(drained.purged).toBeGreaterThanOrEqual(1)
+      await expect(localStore.get(deadKey)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await localStore.get(liveKey)).toEqual(liveBytes)
+      const deadIntent = await db().query(
+        'SELECT status FROM approval_attachment_purge_intents WHERE storage_key=$1',
+        [deadKey],
+      )
+      expect(deadIntent.rows[0]?.status).toBe('done')
+
+      // positive control: the LIVE instance's bound blob is NEVER enqueued/purged
+      const liveIntent = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [liveKey])
+      expect(Number(liveIntent.rows[0].c)).toBe(0)
+      void liveAtt
+    } finally {
+      rmSync(storageRoot, { recursive: true, force: true })
+    }
   })
 })
