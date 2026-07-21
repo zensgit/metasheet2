@@ -417,20 +417,96 @@ export function reduceValuesFreeContexts(expr) {
 }
 
 /**
- * Validate that no fenced-SQL projection emits a raw provider-identity / PII column value.
+ * A bare `*` / `<alias>.*` projection selects EVERY column, identity ones included — naming no
+ * column, so a column-name allow/deny list can never see it. `count(*)` is unaffected: its
+ * projection text is `count(*)`, not `*`.
+ */
+const WILDCARD_PROJECTION_RE = /^(?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)?\*$/
+
+/**
+ * Whole-row serializers render every column of a raw row at once (`to_json(a)`), so they leak
+ * exactly what the per-column guard forbids while naming no column. The runbook has no
+ * values-free use for them — a reduction is always over a scalar, never a row.
+ */
+const WHOLE_ROW_SERIALIZER_RE = /\b(?:to_json|to_jsonb|row_to_json|json_agg|jsonb_agg)\s*\(/i
+
+/**
+ * Extract indented (4-space / tab) code blocks that read as SQL, OUTSIDE fenced blocks.
+ *
+ * Gate finding (audit follow-up): the projection guards only ever saw fenced blocks, so the same
+ * identity SELECT indented by four spaces passed untouched. Markdown renders both identically —
+ * the guard's visibility must not depend on which one an editor happens to use.
+ * @param {string} markdown
+ * @returns {string[]}
+ */
+export function extractIndentedSqlBlocks(markdown) {
+  const withoutFences = markdown.replace(/```[A-Za-z0-9_+-]*[ \t]*\n[\s\S]*?```/g, '\n')
+  const blocks = []
+  let current = []
+  for (const line of withoutFences.split('\n')) {
+    if (/^(?: {4,}|\t)\S/.test(line)) {
+      current.push(line.replace(/^(?: {4}|\t)/, ''))
+      continue
+    }
+    if (line.trim() === '' && current.length > 0) {
+      current.push('')
+      continue
+    }
+    if (current.length > 0) {
+      blocks.push(current.join('\n'))
+      current = []
+    }
+  }
+  if (current.length > 0) blocks.push(current.join('\n'))
+  return blocks.filter((b) => /\bSELECT\b[\s\S]*\bFROM\b/i.test(b))
+}
+
+/**
+ * Validate that no runbook SQL projection emits a raw provider-identity / PII column value.
+ *
+ * Covers rather than enumerates: besides the column-name list, a projection is rejected when it
+ * is a wildcard or a whole-row serializer (both leak every column while naming none), and SQL is
+ * required to live in a fenced block so it cannot hide from these checks by being indented.
  * @param {string} markdownOrSql
  * @param {{ bareSql?: boolean }} [opts]
  * @returns {{ ok: true } | { ok: false, violations: string[] }}
  */
 export function assertNoRawIdentityProjections(markdownOrSql, opts = {}) {
-  const blocks = opts.bareSql
-    ? [markdownOrSql]
-    : extractFencedCodeBlocks(markdownOrSql).filter((b) => /\bSELECT\b/i.test(b))
   const violations = []
+  let blocks
+  if (opts.bareSql) {
+    blocks = [markdownOrSql]
+  } else {
+    const indented = extractIndentedSqlBlocks(markdownOrSql)
+    for (const block of indented) {
+      violations.push(
+        `runbook SQL must live in a fenced code block so the values-free guards can read it — ` +
+          `found an indented SQL block: ${normalizeSqlWs(block).slice(0, 120)}`,
+      )
+    }
+    blocks = [...extractFencedCodeBlocks(markdownOrSql), ...indented].filter((b) =>
+      /\bSELECT\b/i.test(b),
+    )
+  }
 
   for (const block of blocks) {
     for (const selectList of extractSelectLists(block)) {
       for (const proj of splitTopLevelProjections(selectList)) {
+        const normalizedProj = normalizeSqlWs(proj)
+        if (WILDCARD_PROJECTION_RE.test(stripTrailingAlias(normalizedProj))) {
+          violations.push(
+            `wildcard projection selects every column, identity ones included ` +
+              `(values-free requires naming reduced expressions): ${normalizedProj}`,
+          )
+          continue
+        }
+        if (WHOLE_ROW_SERIALIZER_RE.test(normalizedProj)) {
+          violations.push(
+            `whole-row serializer emits every column of a raw row ` +
+              `(values-free requires length()/count()/boolean/equality output only): ${normalizedProj}`,
+          )
+          continue
+        }
         if (!RAW_IDENTITY_SQL_COLUMN_RE.test(proj)) continue
         const reduced = reduceValuesFreeContexts(proj)
         const leaked = RAW_IDENTITY_SQL_COLUMN_RE.exec(reduced)
@@ -512,7 +588,29 @@ export function assertNoRawIdentityPasteInstructions(markdown) {
 // §4 evidence-block verdict grounding (replaces the whole-file /_TBD_/ assert).
 // ---------------------------------------------------------------------------
 
-const EVIDENCE_PLACEHOLDER = /^_TBD_\b/
+/**
+ * "Still blank" as an operator would actually write it. The first cut recognised only the exact
+ * `_TBD_` token, so a dropped underscore (`TBD`) or an idiomatic blank (`n/a`, `see above`, `-`)
+ * read as FILLED evidence and could ground a fabricated verdict — the very invariant this block
+ * exists to enforce. Covering the blank vocabulary is what keeps that closed.
+ */
+const EVIDENCE_PLACEHOLDER =
+  /^(?:_{0,2}tbd_{0,2}|n\s*\/?\s*a|none|null|nil|nothing|pending|unknown|unset|todo|see\s+above|\.{2,}|[-—–?]+)$/i
+
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Shape a filled dependency must have before it can ground a verdict (junk is not evidence). */
+const EVIDENCE_VALUE_SHAPES = new Map([
+  ['staging sha', { re: /^[0-9a-f]{7,40}$/i, hint: 'a 7-40 character git SHA' }],
+  ['corp a integration id', { re: UUID_SHAPE_RE, hint: 'a UUID' }],
+  ['corp b integration id', { re: UUID_SHAPE_RE, hint: 'a UUID' }],
+  ['corp a run status', { re: /\b(?:completed|failed)\b/i, hint: 'completed or failed' }],
+  ['corp b run status', { re: /\b(?:completed|failed)\b/i, hint: 'completed or failed' }],
+  ['key comparison', { re: /\d/, hint: 'the numeric query output' }],
+  ['presence', { re: /\d|\b(?:true|false)\b/i, hint: 'the query output' }],
+  ['corp b duplicate_key_detected', { re: /^(?:true|false)$/i, hint: 'true or false' }],
+  ['corp b expected_constraint_detected', { re: /^(?:true|false)$/i, hint: 'true or false' }],
+])
 const RULED_VERDICTS = new Set(['CONFIRMED', 'DISPROVED', 'INCONCLUSIVE'])
 const VERDICT_LABEL = 'verdict'
 
@@ -537,8 +635,20 @@ function normalizeEvidenceLabel(label) {
   return label.replace(/[`*]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
+/**
+ * Normalize an evidence value for judging: drop markdown emphasis and the trailing "(hint)" the
+ * template carries on several rows (`_TBD_ (completed|failed|…)`), so the judgement is about the
+ * value the operator wrote, not about the template's own annotation.
+ */
+function normalizeEvidenceValue(value) {
+  return value
+    .replace(/[`*]/g, '')
+    .replace(/\s*\([^()]*\)\s*$/, '')
+    .trim()
+}
+
 function isEvidencePlaceholder(value) {
-  const v = value.trim()
+  const v = normalizeEvidenceValue(value)
   return v === '' || EVIDENCE_PLACEHOLDER.test(v)
 }
 
@@ -628,6 +738,21 @@ export function assertEvidenceVerdictIsGrounded(markdown) {
         `§4 verdict "${verdict.value}" is recorded while its evidence is still blank ` +
           `(${blank.join(', ')}) — a verdict may not be fabricated ahead of the evidence it depends on`,
       )
+    }
+    // Filled is not the same as evidence: a dependency that does not even have the SHAPE of the
+    // thing it records (a SHA that is not hex, an integration id that is not a UUID) cannot
+    // ground a verdict either.
+    for (const label of required) {
+      const f = byLabel.get(label)
+      if (!f || isEvidencePlaceholder(f.value)) continue
+      const shape = EVIDENCE_VALUE_SHAPES.get(label)
+      if (!shape) continue
+      if (!shape.re.test(normalizeEvidenceValue(f.value))) {
+        violations.push(
+          `§4 evidence field "${label}" does not have the shape of ${shape.hint} ` +
+            `("${f.value}") — a verdict may not rest on it`,
+        )
+      }
     }
   }
 
