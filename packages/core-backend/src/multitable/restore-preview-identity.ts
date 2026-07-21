@@ -7,9 +7,9 @@ import { resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
  * Global History — T6-1: the RECORD-VERSION restore preview-identity contract (mint + verify), per the T6
  * scoped-restore design-lock (SR-3). A record-version preview (T5-2) mints an identity that BINDS its
  * (record + targetVersion + strategy + the MASKED diff the actor saw + actor); the eventual restore execute
- * (T6-2) verifies it so "execution matches the preview". This module is the CONTRACT ONLY — it is NOT wired
- * into any route and writes nothing (the mint->preview and verify->execute wiring + the forward-revision write
- * are T6-2).
+ * (T6-2) verifies it so "execution matches the preview". This module owns the identity CONTRACT and writes
+ * nothing itself; the record-version and exact-anchor route adapters own mint/verify wiring and the eventual
+ * recovery writes.
  *
  * SCOPE LOCK (v1): this identity binds a SINGLE record-version restore — `{ sheetId, recordId, targetVersion }`.
  * A FIELD SUBSET of that record-version is NOT a separate scope — it is represented by the filtered `changesHash`:
@@ -660,7 +660,7 @@ export interface ExactAnchorRecoveryIdentityClaims {
   /**
    * G-SCHEMA-BEFORE-FENCE: SERVER-KEYED HMAC over CURRENT `{id,type,property}` field surface at preview
    * (`hashExactAnchorSchema`). Recomputed under the apply fence; mismatch ⇒ `schema-drift` before writes.
-   * Required (hard cutover: missing ⇒ `pre_contract_token` — module is unwired).
+   * Required (hard cutover: missing ⇒ `pre_contract_token`; callers must re-preview under the current contract).
    */
   schemaHash: string
   /** the actor the preview was minted for — a preview minted for A is unusable by B (no cross-actor replay). */
@@ -681,8 +681,8 @@ export interface ExactAnchorRecoveryVerifyResult {
   /**
    * Failure taxonomy (NIT-1 precision):
    * - `pre_contract_token` — missing/out-of-vocabulary `mode`, missing/empty `authorizedScopeHash`,
-   *   or missing/empty `schemaHash` (P1 / G-SCHEMA hard cutover; deliberate — module is unwired so no
-   *   live token predates the contract).
+   *   or missing/empty `schemaHash` (P1 / G-SCHEMA hard cutover; deliberate — an older-shape token must
+   *   never acquire destructive authority after deployment and instead requires a fresh preview).
    * - `malformed_anchorSeq` — `anchorSeq` is not a decimal bigint string (must never reach `::bigint`).
    * - `malformed_claims` — other required token-authority fields absent/empty (checkpointId /
    *   anchorOperationId / scopeHash / liveSetHash).
