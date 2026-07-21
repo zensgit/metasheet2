@@ -164,10 +164,13 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
 
   test('PIT-7: the revert path composes NO reveal grant (source-grep)', () => {
     const src = readFileSync(join(__dirname, '../../src/routes/univer-meta.ts'), 'utf8')
-    const start = src.indexOf('T8-1: Point-in-Time Revert')
-    const end = src.indexOf("records/:recordId/subscriptions'", start)
+    const start = src.indexOf('const handleExactAnchorPreview')
+    const end = src.indexOf("router.get('/sheets/:sheetId/records/:recordId/subscriptions'", start)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
     const block = src.slice(start, end)
-    expect(block.length).toBeGreaterThan(0)
+    expect(block).toContain('const handleExactAnchorExecute')
+    expect(block).toContain("router.post('/sheets/:sheetId/revert-execute'")
     expect(block).not.toMatch(/resolveActiveRevealGrant|loadRevealedFieldIds|loadActiveReveal/) // reveal never composes into the write
   })
 
