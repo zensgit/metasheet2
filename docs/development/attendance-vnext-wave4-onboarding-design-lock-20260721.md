@@ -20,6 +20,16 @@
 > （已保存=readiness 重算恢复 / 未保存不承诺+离开提示 / 模板选择只存 ID 且 key 含 userId+orgId /
 > 「未完成」提示来自 readiness 非访问史）。追加门禁五条入 §9。owner 核心判断维持：core-backend
 > 聚合 + user_orgs 门方向正确；①④⑥真源修正后 OD-W4-1..7 方可提交 ratify。
+>
+> **Amendment round-2（2026-07-21，owner 复审 + OD-W4-1..7 全套裁决，措辞取自 owner 原文）**：
+> ④再收紧为 values-free posture 枚举 `default / customized / unknown`（scope=deployment，default 显示
+> 「待确认」绝不伪装组织已配置）+ OD-W4-4 新增并裁定 (c)「后端内部语义检查、前端仅收 values-free
+> posture」；模板预填补**覆盖确认 + 原表单快照 + 取消完整恢复**合同（OD-W4-3 附加条件）；③补
+> `rotationRuleCount/hasRotationRules`（排班制信号闭合，原料 `attendance_rotation_rules`
+> `index.cjs:14192`）；每步「计划生效时间」入响应结构为 posture；⑦更名 **preview-ready + 人工
+> canonical activation checklist**（绝不暗示已启用）；模板时区禁硬编码（取组织显式时区，取不到要求
+> 用户选择）。OD 裁决全录 §8；两非阻断项（聚合单 CTE 或短 TTL org-scoped cache；§10 编号 1..7）
+> 已吸收。owner：修订完成并再次核对后方建议 PROPOSED → RATIFIED。
 
 ---
 
@@ -89,20 +99,21 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 |---|---|---|---|
 | ① | `directoryLinked`（S7-5 原样复用）+ `orgActiveMemberCount>0`（**真源 = `user_orgs` 该 org 的 active 成员数**，P2-1：绝不用考勤组成员数——那与步骤②循环依赖） | `attendance-admin.ts:336-360`；`user_orgs` 表（S7-5 门已查同表 `:367-379`） | `attendance-admin-user-access` |
 | ② | `groupCount>0 && groupsWithMembers>0` | `index.cjs:37718`（含 member_count 子查询） | `attendance-admin-groups` |
-| ③ | `shiftCount>0`（排班制另加 rotation 存在） | `index.cjs:39710` | `attendance-admin-shifts` |
-| ④ | **平台级打卡策略已显式确认**（`punchPolicyConfirmed`，**`scope=deployment` 显式标记**——`attendance.settings` 是部署级单键无 org 维度（`index.cjs:135`），任何保存写入完整 normalized defaults，「key 存在」≠本组织配置过（P2-2 跨组织假绿）；无法证明人工确认 ⇒ `manual_review_required`，**绝不 `ready`**） | `system_configs key='attendance.settings'`（`index.cjs:135,291-295,13733-13760`） | `attendance-admin-settings` |
+| ③ | `shiftCount>0`；排班制组存在时另需 `hasRotationRules`（`rotationRuleCount>0`，round-2 闭合项） | `index.cjs:39710`；`attendance_rotation_rules`（`index.cjs:14192`） | `attendance-admin-shifts` |
+| ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**——`attendance.settings` 为部署级单键（`index.cjs:135`），保存写入完整 normalized defaults，key 存在≠本组织配置过；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：与 normalized defaults 比对，前端只收枚举）；`default` 显示「待确认」**绝不伪装已配置**，`unknown` fail-closed） | `system_configs key='attendance.settings'`（`index.cjs:135,291-295,13733-13760`） | `attendance-admin-settings` |
 | ⑤ | `approvalFlowCount>0`（含 active 判定） | `index.cjs:30924` | `attendance-admin-approval-flows` |
 | ⑥ | 经 §4.5 runtime readiness port：`workerEnabled` + `defaultChannelAvailable` + `availableChannelCount` + `orgRecipientBindingReady`（P2-3：历史 delivery 行**不是**配置真源，settings 亦不注册渠道；port 缺失 ⇒ `unknown`） | `AttendanceNotificationDeliveryWorker.ts:370+`（渠道逐个 env-gated、worker 按名路由） | `attendance-admin-notification-deliveries` |
-| ⑦ | 前六步全 `ready` ⇒ `previewReady`；影响人数=①②计数派生 | 聚合派生 | （无——预览在向导内，只读） |
+| ⑦ | 前六步全绿 ⇒ `previewReady`；步名 = **「预览影响范围（preview-ready）」**——向导只做只读预览 + 展示**人工 canonical activation checklist**（逐项列出真人要去哪些 canonical 面完成启用），**绝不暗示已启用**（round-2）；影响人数=①②计数派生 | 聚合派生 | （无——预览在向导内，只读） |
 
 判别值域（纯模块判别矩阵的行）：`ready / missing / forbidden / unknown / manual_review_required / db_not_ready`，
 且每信号携带 `scope: 'org' | 'deployment'`（全局信号显式标 `deployment`，追加门禁 2）——
 `forbidden` 为 per-surface（§4.3），`unknown` fail-closed 显示为「未知，去核查」，绝不显示为已完成
 （章程 L232 未知态红线）；`manual_review_required` 显示为「需人工确认」并给出确认入口；`db_not_ready`
 对应各端点统一 503 `DB_NOT_READY` 档（`index.cjs:37752` 等）。
-**「计划生效时间」逐步来源规则（追加门禁 4）**：每步的生效时间必须有权威来源方可显示（如排班生效日、
-节假日同步窗口）；无权威来源的步骤显示「无法确定」，**不得省略、不得猜测**——各步来源在 W4-0 判别
-矩阵中逐行登记，缺来源即登记为「无法确定」档。
+**「计划生效时间」逐步来源规则（追加门禁 4 + round-2 结构闭合）**：生效时间入响应结构为逐步 posture
+`effectiveTime: {source: <权威来源标识>, posture: 'known'|'undeterminable'}`——有权威来源（如排班生效日、
+节假日同步窗口）才 `known`；否则 `undeterminable` 显示「无法确定」，**不得省略、不得猜测**；各步来源在
+W4-0 判别矩阵逐行登记。
 
 ## 4. Readiness 聚合契约（R1）
 
@@ -111,9 +122,11 @@ core-backend `attendance-admin.ts` router——继承 router 级 `rbacGuard('att
 `user_orgs` org-membership 门 + 平台 admin 直通（`:367-379` 先例逐字复用）。**不选** plugin 路由：
 那将继承「信任客户端 orgId」缺口（§1-5），对一个汇总全 org 配置面的端点不可接受。
 **4.2 响应形状（values-free by construction）**：仅布尔与非负整数计数，每信号带 `scope` 标记
-`{directoryLinked, orgActiveMemberCount, groupCount, groupsWithMembers, shiftCount, approvalFlowCount,
-punchPolicyConfirmed(scope=deployment), notify:{workerEnabled, defaultChannelAvailable,
-availableChannelCount, orgRecipientBindingReady}}` ——
+`{directoryLinked, orgActiveMemberCount, groupCount, groupsWithMembers, shiftCount, rotationRuleCount,
+hasRotationRules, approvalFlowCount, punchPolicyPosture(default|customized|unknown, scope=deployment),
+notify:{workerEnabled, defaultChannelAvailable, availableChannelCount, orgRecipientBindingReady},
+perStep.effectiveTime:{source, posture(known|undeterminable)}}` ——聚合实现采用**单条 CTE 或短 TTL
+org-scoped cache**（owner 非阻断项）——
 契约测试断言 SQL 文本不含任何标识列（S7-5 单测先例：`attendance-admin-directory-readiness-s7-5.test.ts:82-191`）,
 且响应键集合恒等锁定。错误档：400 `ORG_ID_REQUIRED` / 401 / 403 / 503 `DB_NOT_READY` / 500 泛化文案。
 **4.3 权限信号**：端点级 403 = 整面 `forbidden`；不复用 `adminForbidden` 全局 flag（§1-6）。FE 纯模块
@@ -133,13 +146,20 @@ env-gated、default-off、worker 按 `row.channel` 名路由）。port 只回
 **5.1 四模板 = FE 常量**（OD-W4-3 推荐）：办公室固定班 / 门店排班 / 工厂多班次 / 销售外勤（OD-VX3
 已裁），落 `attendanceSetupTemplates.ts` 纯常量模块——BE 零新增（现有 rule-templates/role-templates
 均非其载体，实证 `engine/template-library.cjs:288`；「只预填不提交」使 FE 常量即真源充分）。
-**5.2 预填机制**：向导与表单同宿主（AttendanceView），模板选择 = 写既有 reactive 表单
-（`shiftForm:15251` / `ruleSetForm:15484` / `attendanceGroupForm:15493` / `holidayForm:15329`）+
-`selectAdminSection(目标)` 跳转（`:14593-14601`）——先例 `prefillRequestFromAnomaly` 同型。保存仍走
-各表单既有保存路径与校验（group name 必填、timezone 过 `resolveExplicitTimeZoneOrThrow` 等，
+**5.2 预填机制（round-2 收紧：模板不得污染共享表单）**：向导与表单同宿主（AttendanceView），模板
+选择 = 写既有 reactive 表单（`shiftForm:15251` / `ruleSetForm:15484` / `attendanceGroupForm:15493` /
+`holidayForm:15329`）+ `selectAdminSection(目标)` 跳转（`:14593-14601`）——先例
+`prefillRequestFromAnomaly` 同型。**强制合同（OD-W4-3 附加条件，owner round-2）**：
+①应用模板**前**显示受影响字段清单并确认覆盖（表单已有未保存内容时尤其）；②应用前保存原表单
+**快照**，「取消」完整恢复快照；③只承诺恢复**已保存**的资源，未保存预填不承诺刷新后存活；
+④模板**时区禁硬编码**——取组织显式时区，取不到则要求用户在预填确认时选择（仍过
+`resolveExplicitTimeZoneOrThrow`）。保存仍走各表单既有保存路径与校验（group name 必填等，
 `index.cjs:37804-37856`）。**预填值域约束**：模板字段必须满足各表 NOT NULL/枚举（`attendance_type ∈
-fixed_shift/scheduled_shift/free_time` 等，migrations 实证）——锁附录 A 列四模板逐字段预填集。
-**5.3 preview 无副作用**：⑦步预览 = 聚合读 + 派生展示；完成门负向测试断言 preview 全程零写请求。
+fixed_shift/scheduled_shift/free_time` 等，migrations 实证）——锁附录 A 列四模板逐字段预填集
+（时区列为「组织时区/用户选择」占位，非常量）。
+**5.3 preview 无副作用**：⑦步 = 只读预览（聚合读 + 派生展示）+ **人工 canonical activation
+checklist**（列出真人逐项去 canonical 面完成的启用动作），UI 文案与状态**绝不暗示「已启用」**
+（round-2）；完成门负向测试断言 preview 全程零写请求 + 文案不含「已启用/enabled」类完成时态。
 **5.4 受禁开关全清单（R4 执行面）**：env 层（API 不可改，列举以供断言）：`ATTENDANCE_APPROVAL_DYNAMIC_ASSIGNEE_SOURCES_ENABLED`、
 `ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED`、`ATTENDANCE_SCHEDULER_ENABLED`、
 `ATTENDANCE_AUTO_SHIFT_*`、`ATTENDANCE_REPORT_*` 等（`AttendanceScheduler.ts:311-400`、
@@ -177,7 +197,19 @@ ratify 时调整）。不做首次进入自动拦截（现状无 first-run 逻�
   （S7-5 测试同型：状态码矩阵 + SQL values-free 断言 + 响应键集合锁定）。
 - guard 接线（§8.1.4）：新 spec 进 run-list 显式 pattern + 双 path filter + 收集证明 + 同命令 mutation。
 
-## 8. Open Decisions（OD-W4，含推荐值；ratify 即按推荐值锁定，除非 owner 明改）
+## 8. Open Decisions（OD-W4）——**owner 2026-07-21 round-2 已全部裁决（DECIDED）**
+
+| OD | 裁决 |
+|---|---|
+| OD-W4-1 | **(a)** core-backend + `user_orgs` 门；授权检查**先于任何聚合 SQL**；双组织伪造 orgId 真库测试 |
+| OD-W4-2 | **(a)**；拒绝 localStorage 首访提示——「未完成」徽标由 readiness 派生 |
+| OD-W4-3 | **(a)** + 附加条件：动态时区、覆盖确认、取消快照恢复合同（§5.2） |
+| OD-W4-4 | (a)/(b) 均拒；**新增并裁定 (c)**：后端内部语义检查（与 normalized defaults 比对），前端仅收 values-free posture `default/customized/unknown` |
+| OD-W4-5 | **(b)**：W2 英文错误串另开小刀，**不混入 W4-0 readiness 安全底座** |
+| OD-W4-6 | **(a)**：人员数取 active `user_orgs`；组覆盖数单独取 group membership |
+| OD-W4-7 | **修订后的 (a)**：只恢复已持久化进度；未保存预填必须确认、可撤销；不声称刷新后自动恢复 |
+
+原选项菜单保留于下供追溯（推荐值已被上表裁决覆盖）：
 
 - **OD-W4-1 readiness 聚合宿主与 org 门**：(a) core-backend router + `user_orgs` 门（S7-5 姿态）
   （**recommended**，理由 §1-5/§4.1）；(b) plugin 路由 + `withPermission`（与配置端点一致但继承 orgId
@@ -225,7 +257,7 @@ ratify 时调整）。不做首次进入自动拦截（现状无 first-run 逻�
 本锁不改变：S7 flag 默认 OFF、真实租户视觉复核等 operator 项（owner 裁决⑥，不计 UI 完成度）。
 
 **预写 ratify 收尾序**（#4370 先例逐字）：①锁分支刷新至最新 main（drift 复核）→ ②PROPOSED→RATIFIED
-（记录 OD-W4-1..6 裁决与日期）→ ③章程 §15 Wave 4 行同步（DESIGN-LOCK-GATED → RATIFIED / landing）
+（记录 OD-W4-1..7 裁决与日期）→ ③章程 §15 Wave 4 行同步（DESIGN-LOCK-GATED → RATIFIED / landing）
 → ④转 ready 等 fresh required checks 全绿合并 → ⑤从合并后 main 开 W4-0。
 
 ## §11.1 六项记录（章程 L459-468）
@@ -244,8 +276,8 @@ ratify 时调整）。不做首次进入自动拦截（现状无 first-run 逻�
 
 | 模板 | attendance_type | 预填示例字段（全部走既有表单校验） |
 |---|---|---|
-| 办公室固定班 | `fixed_shift` | 组名、时区 Asia/Shanghai、班次 09:00-18:00、working_days [1..5]、宽限 10/10 |
-| 门店排班 | `scheduled_shift` | 组名、时区、早/晚两班次模板、轮班提示 |
+| 办公室固定班 | `fixed_shift` | 组名、时区=组织时区/用户选择、班次 09:00-18:00、working_days [1..5]、宽限 10/10 |
+| 门店排班 | `scheduled_shift` | 组名、时区=组织时区/用户选择、早/晚两班次模板、轮班规则提示（③ hasRotationRules 信号联动） |
 | 工厂多班次 | `scheduled_shift` | 组名、时区、三班次模板、跨夜 is_overnight 示例 |
 | 销售/外勤 | `free_time` | 组名、时区、外勤打卡方式提示（深链 settings 表单，不代存） |
 
