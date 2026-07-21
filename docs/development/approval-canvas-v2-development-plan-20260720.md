@@ -236,7 +236,7 @@ flowchart TD
   D1 --> D3
   D2B --> D3
   D3 --> D4 --> D5 --> D6
-  D0 --> D3P["D3-p"] --> D5
+  O3P["O3-p owner gate"] --> D3P["D3-p"] --> D5
   D6F1["D6-f1"] --> D6F2["D6-f2"]
   D0 --> D6F2
   D6 --> D7B1["D7-b1"]
@@ -263,9 +263,10 @@ flowchart TD
 
 - Wave 0: D0, D1, D2-a, D2-c, D6-f1, and D8-a may run in parallel in separate worktrees.
 - Wave 0.5: D2-b follows D2-a; D6-f2 follows D0 plus D6-f1.
-- Wave 1: D3 and the type-only D3-p foundation may run in parallel on disjoint files. D3 owns the initial
-  canvas adapter/dependency surface. D3 and D6-f2 serialize if both
-  need `TemplateAuthoringView.vue`; the coordinator assigns the first owner before either starts.
+- Wave 1: D3-p runs first after O3-p and after R1 releases `apps/web/src/types/approval.ts`; D3 follows only
+  after G0. They are not parallel lanes because both own the Canvas adapter contract. D3 and D6-f2 also
+  serialize if both need `TemplateAuthoringView.vue`; the coordinator assigns the first owner before either
+  starts.
 - Wave 2: D4 then D5 are serial because both establish shared canvas component APIs.
 - Wave 3: D6, D7-d1, D8-b, and D9 runtime work may fan out only after their dependency is on main.
 - Wave 4: D7-b1/D7-c1 and D9-d1..d4 may run in parallel only when the hot-file rules below permit it.
