@@ -149,7 +149,9 @@ const requireHistoryVersion = (value: unknown, source: string): number => {
  * in-fence re-hash are computed over this COMPOSED map, the actor previews EXACTLY the set the apply will
  * plan over — a baseline-only record can no longer appear in the apply without having been shown at preview
  * (what-you-see-is-what-applies). Baseline rows are immutable post-activation and the token binds
- * `checkpointId`; the unwired L8 apply must re-resolve it in-fence before this seam can be enabled.
+ * `checkpointId`; the wired L8 apply re-resolves that checkpoint under the canonical fence before
+ * any destructive write. The reconstruction-causality seam is therefore landed, while the runtime
+ * Revert/Reset and trust flags remain independent, default-OFF operator gates.
  */
 export async function composeBaselineOverlay(
   query: QueryFn,
