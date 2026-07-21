@@ -407,6 +407,11 @@ export default defineConfig({
       // skip-green it, and whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       // Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-history-contiguity-realdb.test.ts',
+      // W0 L6-b exact-anchor authority goldens: DATABASE_URL-gated and meaningful only against real
+      // Postgres. Exclude from the no-DB default lane so it cannot skip-green, and keep the whole file
+      // wired into `Run multitable real-DB integration` in plugin-tests.yml. The no-DB wiring contract
+      // pins both points.
+      'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
