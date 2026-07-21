@@ -1179,7 +1179,7 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
-  it('FC-5 wiring: formula dry-run calls the dry-run endpoint and does not change the saved graph payload', async () => {
+  it('FC-5 wiring: formula dry-run calls the dry-run endpoint with typed 试运行 sample values and does not change the saved graph payload', async () => {
     routeParams = { id: 'tpl_formula_dry_run' }
     const graph = {
       nodes: [
@@ -1207,9 +1207,25 @@ describe('TemplateAuthoringView', () => {
     const expression = container!.querySelector('[data-testid="approval-condition-formula-expression"]') as HTMLInputElement
     expression.value = '{amount} >= 5000'
     expression.dispatchEvent(new Event('input'))
-    const sample = container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample"]') as HTMLInputElement
-    sample.value = '{"amount":6000}'
-    sample.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    // D1 values-first: no JSON sample textarea — typed 试运行 sampleFormData drives dry-run.
+    expect(container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample-hint"]')?.textContent).toContain('试运行样例值')
+    expect(container!.textContent || '').not.toMatch(/JSON/i)
+
+    // Fill the shared 试运行 sample amount via the review panel, then return to flow to dry-run.
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    const amountSample = container!.querySelector(
+      '[data-testid="approval-template-tryrun-panel"] input[type="number"]',
+    ) as HTMLInputElement
+    expect(amountSample).not.toBeNull()
+    amountSample.value = '6000'
+    amountSample.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
     await flushUi()
 
     ;(container!.querySelector('[data-testid="approval-condition-formula-dry-run-button"]') as HTMLButtonElement).click()
@@ -1638,4 +1654,280 @@ describe('TemplateAuthoringView', () => {
     expect(window.onbeforeunload).not.toBeNull()
     window.onbeforeunload = null
   })
-})
+
+  // ── Approval Canvas V2 D1: ordinary-user authoring hygiene ─────────────────
+  // Populated complex graph + multi-field form (incl. blank-label + legacy stored IDs).
+  // Negatives: no fixture raw IDs / 字段 ID / 子字段 ID / 手动输入 ID / any "JSON" in ordinary
+  // visible text (incl. formula dry-run). Positives: typed user, role, field, CC pickers + save.
+  function buildD1HygieneComplexGraph() {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'cond_1',
+          type: 'condition',
+          name: '金额判断',
+          config: {
+            branches: [{ edgeKey: 'edge-cond_1-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }], conjunction: 'and' }],
+            defaultEdgeKey: 'edge-cond_1-low',
+          },
+        },
+        {
+          key: 'approval_high',
+          type: 'approval',
+          name: '高额审批',
+          config: {
+            assigneeSources: [{ kind: 'static_user', userIds: ['legacy-user-1'] }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'parallel_1',
+          type: 'parallel',
+          name: '并行会签',
+          config: {
+            branches: ['edge-parallel_1-a', 'edge-parallel_1-b'],
+            joinMode: 'all',
+            joinNodeKey: 'join_1',
+          },
+        },
+        {
+          key: 'approval_a',
+          type: 'approval',
+          name: '财务审批',
+          config: {
+            assigneeSources: [{ kind: 'static_role', roleIds: ['legacy-role-finance'] }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'approval_b',
+          type: 'approval',
+          name: '法务审批',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'join_1',
+          type: 'approval',
+          name: '汇聚审批',
+          config: {
+            assigneeSources: [{ kind: 'direct_manager' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'cc_1',
+          type: 'cc',
+          name: '抄送归档',
+          config: { targetType: 'role', targetIds: ['finance-role-id'] },
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-cond', source: 'start', target: 'cond_1' },
+        { key: 'edge-cond_1-high', source: 'cond_1', target: 'approval_high' },
+        { key: 'edge-cond_1-low', source: 'cond_1', target: 'parallel_1' },
+        { key: 'edge-high-end', source: 'approval_high', target: 'end' },
+        { key: 'edge-parallel_1-a', source: 'parallel_1', target: 'approval_a' },
+        { key: 'edge-parallel_1-b', source: 'parallel_1', target: 'approval_b' },
+        { key: 'edge-a-join', source: 'approval_a', target: 'join_1' },
+        { key: 'edge-b-join', source: 'approval_b', target: 'join_1' },
+        { key: 'edge-join-cc', source: 'join_1', target: 'cc_1' },
+        { key: 'edge-cc-end', source: 'cc_1', target: 'end' },
+      ],
+    }
+  }
+
+  // Blank-label user field forces 未命名字段 in ordinary labels (negatives). Positives use a
+  // labeled variant so validateTemplateDraft allows save (name required for publish/save).
+  const d1HygieneFormSchemaBlank = {
+    fields: [
+      { id: 'amount', type: 'number', label: '报销金额', required: true },
+      { id: 'reviewer', type: 'user', label: '', required: false },
+      { id: 'reason', type: 'textarea', label: '事由', required: true },
+      {
+        id: 'expense_items',
+        type: 'detail',
+        label: '费用明细',
+        required: false,
+        columns: [
+          { id: 'line_amount', type: 'number', label: '', required: true },
+          { id: 'line_note', type: 'text', label: '备注', required: false },
+        ],
+      },
+    ],
+  }
+  const d1HygieneFormSchemaLabeled = {
+    fields: [
+      { id: 'amount', type: 'number', label: '报销金额', required: true },
+      { id: 'reviewer', type: 'user', label: '指定审批人', required: false },
+      { id: 'reason', type: 'textarea', label: '事由', required: true },
+      {
+        id: 'expense_items',
+        type: 'detail',
+        label: '费用明细',
+        required: false,
+        columns: [
+          { id: 'line_amount', type: 'number', label: '行金额', required: true },
+          { id: 'line_note', type: 'text', label: '备注', required: false },
+        ],
+      },
+    ],
+  }
+
+  const d1FixtureRawIds = [
+    'amount',
+    'reviewer',
+    'reason',
+    'expense_items',
+    'line_amount',
+    'line_note',
+    'legacy-user-1',
+    'legacy-role-finance',
+    'finance-role-id',
+    'edge-cond_1-high',
+    'edge-cond_1-low',
+    'edge-parallel_1-a',
+    'edge-parallel_1-b',
+    'join_1',
+    'cond_1',
+    'approval_high',
+    'approval_a',
+    'approval_b',
+    'cc_1',
+  ]
+
+  function ordinaryVisibleText(): string {
+    return container!.textContent || ''
+  }
+
+  it('D1 hygiene negatives: ordinary visible text has no fixture raw IDs, field-id editors, manual-ID, or JSON', async () => {
+    routeParams = { id: 'tpl_d1_hygiene' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: d1HygieneFormSchemaBlank as any,
+      approvalGraph: buildD1HygieneComplexGraph() as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
+    let visible = ordinaryVisibleText()
+    for (const raw of d1FixtureRawIds) {
+      expect(visible, `flow list must not show raw id ${raw}`).not.toContain(raw)
+    }
+    expect(visible).not.toContain('字段 ID')
+    expect(visible).not.toContain('子字段 ID')
+    expect(visible).not.toContain('手动输入 ID')
+    expect(visible).not.toMatch(/JSON/i)
+    expect(visible).toContain('报销金额')
+    expect(visible).toContain('未命名字段')
+    expect(visible).toContain('财务审批')
+    expect(visible).toContain('法务审批')
+
+    // Formula dry-run: no JSON textarea/wording; values-first hint only.
+    const formulaMode = container!.querySelector('[data-testid="approval-condition-predicate-mode"]') as HTMLSelectElement
+    expect(formulaMode).not.toBeNull()
+    formulaMode.value = 'formula'
+    formulaMode.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample"]')).toBeNull()
+    const dryRunHint = container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample-hint"]') as HTMLElement
+    expect(dryRunHint).not.toBeNull()
+    expect(dryRunHint.textContent || '').toContain('试运行样例值')
+    expect(dryRunHint.textContent || '').not.toMatch(/JSON/i)
+    const formulaPanel = container!.querySelector('[data-testid="approval-condition-formula"]') as HTMLElement
+    expect(formulaPanel).not.toBeNull()
+    // Ordinary dry-run surface itself must not mention JSON (expression tokens may use field paths).
+    expect((formulaPanel.querySelector('[data-testid="approval-condition-formula-dry-run-sample-hint"]')?.textContent || '')
+      + (formulaPanel.querySelector('.template-authoring__condition-formula-dryrun')?.textContent || '')).not.toMatch(/JSON/i)
+
+    // Return to rules so formula insert tokens do not pollute later full-DOM scans.
+    formulaMode.value = 'rules'
+    formulaMode.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    visible = ordinaryVisibleText()
+    expect(visible).not.toContain('字段 ID')
+    expect(visible).not.toContain('子字段 ID')
+    expect(visible).not.toMatch(/JSON/i)
+    for (const raw of ['amount', 'reviewer', 'reason', 'expense_items', 'line_amount', 'line_note']) {
+      expect(visible, `fields section must not show raw id ${raw}`).not.toContain(raw)
+    }
+    expect(container!.querySelector('[data-testid="approval-detail-config"]')).not.toBeNull()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-form-preview"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-template-graph-preview"]')).toBeNull()
+    visible = ordinaryVisibleText()
+    expect(visible).not.toMatch(/JSON/i)
+    expect(visible).not.toContain('手动输入 ID')
+    for (const raw of d1FixtureRawIds) {
+      expect(visible, `review must not show raw id ${raw}`).not.toContain(raw)
+    }
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-panel"]')).not.toBeNull()
+  })
+
+  it('D1 hygiene positives: typed user/role/field/CC pickers mounted; untouched save payload unchanged', async () => {
+    routeParams = { id: 'tpl_d1_hygiene_save' }
+    const graph = buildD1HygieneComplexGraph()
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: d1HygieneFormSchemaLabeled as any,
+      approvalGraph: graph as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-source-field"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-cc-editor"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-step-ids-text"]')).toBeNull()
+
+    const formFieldPicker = container!.querySelector('[data-testid="approval-node-source-field"]') as HTMLSelectElement
+    expect(formFieldPicker.value).toBe('reviewer')
+    const fieldLabels = Array.from(formFieldPicker.querySelectorAll('option')).map((opt) => opt.textContent || '')
+    expect(fieldLabels).toContain('指定审批人')
+    expect(fieldLabels.every((label) => !label.includes('reviewer'))).toBe(true)
+
+    const ccPicker = container!.querySelector('[data-testid="approval-cc-target-ids"]') as HTMLSelectElement
+    expect(ccPicker.tagName.toLowerCase()).toBe('select')
+    const ccOptionLabels = Array.from(ccPicker.querySelectorAll('option')).map((opt) => opt.textContent || '')
+    expect(ccOptionLabels.every((label) => !label.includes('finance-role-id'))).toBe(true)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.edges).toEqual(graph.edges)
+    expect(payload.approvalGraph.nodes).toEqual(graph.nodes)
+    expect(payload.formSchema.fields.map((f: any) => f.id)).toEqual([
+      'amount',
+      'reviewer',
+      'reason',
+      'expense_items',
+    ])
+    const detail = payload.formSchema.fields.find((f: any) => f.id === 'expense_items')
+    expect(detail.columns.map((c: any) => c.id)).toEqual(['line_amount', 'line_note'])
+    expect(detail.columns[0].label).toBe('行金额')
+    const high = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_high')
+    expect(high.config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['legacy-user-1'] }])
+    const finance = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_a')
+    expect(finance.config.assigneeSources).toEqual([{ kind: 'static_role', roleIds: ['legacy-role-finance'] }])
+    const legal = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_b')
+    expect(legal.config.assigneeSources).toEqual([{ kind: 'form_field_user', fieldId: 'reviewer' }])
+    const cc = payload.approvalGraph.nodes.find((n: any) => n.key === 'cc_1')
+    expect(cc.config).toEqual({ targetType: 'role', targetIds: ['finance-role-id'] })
+  })
+  })

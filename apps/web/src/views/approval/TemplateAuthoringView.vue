@@ -754,15 +754,13 @@
                     </template>
                   </div>
                   <div class="template-authoring__condition-formula-dryrun">
-                    <el-input
-                      :model-value="conditionFormulaDryRunSample(node.key, branch.edgeKey)"
-                      type="textarea"
-                      :rows="2"
-                      :disabled="readOnly"
-                      placeholder='样例数据 JSON，例如 {"amount": 5000}'
-                      data-testid="approval-condition-formula-dry-run-sample"
-                      @update:model-value="(text: string) => setConditionFormulaDryRunSample(node.key, branch.edgeKey, text)"
-                    />
+                    <!-- D1: values-first — reuse 试运行 sampleFormData; no ordinary JSON textarea. -->
+                    <p
+                      class="template-authoring__hint"
+                      data-testid="approval-condition-formula-dry-run-sample-hint"
+                    >
+                      使用「测试发布」页的试运行样例值进行测试
+                    </p>
                     <div class="template-authoring__condition-formula-dryrun-actions">
                       <el-button
                         size="small"
@@ -1660,7 +1658,6 @@ const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaselin
 function snapshotDraft() {
   draftBaseline.value = JSON.stringify(draft.value)
 }
-const conditionFormulaDryRunSamples = ref<Record<string, string>>({})
 const conditionFormulaDryRunResults = ref<Record<string, string>>({})
 const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
 
@@ -1864,15 +1861,6 @@ function insertConditionFormulaRoleMembership(branch: ConditionBranchEdit, roleI
 function conditionFormulaDryRunKey(nodeKey: string, edgeKey: string): string {
   return `${nodeKey}:${edgeKey}`
 }
-function conditionFormulaDryRunSample(nodeKey: string, edgeKey: string): string {
-  return conditionFormulaDryRunSamples.value[conditionFormulaDryRunKey(nodeKey, edgeKey)] ?? '{}'
-}
-function setConditionFormulaDryRunSample(nodeKey: string, edgeKey: string, text: string): void {
-  conditionFormulaDryRunSamples.value = {
-    ...conditionFormulaDryRunSamples.value,
-    [conditionFormulaDryRunKey(nodeKey, edgeKey)]: text,
-  }
-}
 function conditionFormulaDryRunResult(nodeKey: string, edgeKey: string): string {
   return conditionFormulaDryRunResults.value[conditionFormulaDryRunKey(nodeKey, edgeKey)] ?? ''
 }
@@ -1891,25 +1879,14 @@ function setConditionFormulaDryRunLoading(nodeKey: string, edgeKey: string, load
     [conditionFormulaDryRunKey(nodeKey, edgeKey)]: loadingValue,
   }
 }
+// D1 values-first: dry-run reads the same typed 试运行 sampleFormData (no per-branch JSON parse).
 async function dryRunConditionFormula(nodeKey: string, branch: ConditionBranchEdit): Promise<void> {
   const expression = branch.formulaExpression.trim()
-  const resultKey = conditionFormulaDryRunKey(nodeKey, branch.edgeKey)
   if (!expression) {
     setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, '请输入公式')
     return
   }
-  let formData: Record<string, unknown>
-  try {
-    const parsed = JSON.parse(conditionFormulaDryRunSamples.value[resultKey] ?? '{}') as unknown
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('样例数据必须是 JSON 对象')
-    }
-    formData = parsed as Record<string, unknown>
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '样例数据不是有效 JSON'
-    setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, `样例数据错误：${message}`)
-    return
-  }
+  const formData: Record<string, unknown> = { ...sampleFormData.value }
   setConditionFormulaDryRunLoading(nodeKey, branch.edgeKey, true)
   try {
     const result = await dryRunApprovalConditionFormula({
