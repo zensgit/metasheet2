@@ -9,6 +9,11 @@
 > **owner review round-1（2026-07-17）已吸收**：①K1 通用性按实际耦合面收窄（§2.2）；②实施
 > 顺序改为垂直推进（§4，owner 拍板五步序）；③App Center 前置条件明确、否决空壳插件（§5.3）；
 > ④措辞修正（2/3=启发式非度量；/stock-prep=integration:write；锚定 exact SHA）。
+>
+> **2026-07-19 执行更新（不改本文历史 grounding）：** V0 已由 #4468 与 follow-up #4469
+> 落入 main；P4 方案 A + bounded C 已由 #4470/#4473 落入 main。开发目标现进入 **V2 Charter**：
+> `stock-preparation-v2-material-master-reconciliation-charter-20260719.md`。V2 runtime 在该 Charter
+> ratify 前保持 NO-GO；RC-A #4437 继续作为独立操作线，不因本目标更新而重跑或改包。
 
 ## 1. 核心判断
 
@@ -76,9 +81,11 @@ issueQty 数学、8 异常类型、tri-XOR 语义、备料六视图业务语义�
   消费者的雏形；② 供应商/客户主数据对账；③ 价格表对账。建议 ①（代码距离最短、客户价值直接）；
 - **阶段序（round-1 改判：垂直推进，废除「先抽象后场景」的 S0→S3 序——那仍是平台先行重构，
   与本节自己的原则矛盾）。owner 拍板五步**：
-  - **V0（现在可做）**：只修 plm-workbench focus allowlist 补 `/stock-prep`（风险低、语义明确）；
-  - **V1（P4 先行）**：先落 P4 方案 A（host 组合事务 + in-tx key fence），再抽 persist 骨架——
-    避免同一写面改两次；
+  - **V0（已落 main）**：plm-workbench focus allowlist 补 `/stock-prep`，并由 #4469 把
+    route-guard 决策抽为行为承重的纯函数；
+  - **V1（P4 前置已落，通用抽取未启动）**：P4 方案 A（host 组合事务 + in-tx key fence）及
+    bounded C 已落；其 UOW 仍明确是 stock-preparation-specific。persist 骨架只能等 V2 第二消费者
+    出现后再抽，避免把 stock 专用边界误称为通用；
   - **V2（定义第二场景）**：「PLM ↔ ERP 物料主数据对账」，**必须拥有独立 manifest、路由、权限、
     字段词表（自己的 frozen templates + 自己的 intake 别名表）和契约测试**——不能只是给备料
     缓存换名字（`erp_material_master` 留在备料场景内不动，结构上排除该退化）；
@@ -157,6 +164,6 @@ after-sales 同构，因此天然不突兀：
 2. ~~第二场景选型~~ **已裁：PLM ↔ ERP 物料主数据对账**，独立 manifest/路由/权限/词表/契约测试
    为硬性要求（V2 charter 文本届时单独过门）；
 3. ~~P0 范围~~ **已裁：只修 focus allowlist**；App Center 卡等 P1 四前置齐备后再做；
-4. ~~V0 是否开工~~ **已实现、待审：PR #4468**（allowlist 一行 + required-gate 回归钉）；
+4. ~~V0 是否开工~~ **已完成：#4468 + #4469 已落 main**（allowlist + 可执行 route-guard policy）；
 5. **仍开放**：`stock-prep:read/operate/admin` 权限词表命名与迁移口径（V4 前置，影响现存
    integration:write 持有者的过渡方案）。

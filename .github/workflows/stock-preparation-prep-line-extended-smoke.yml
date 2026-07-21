@@ -21,6 +21,8 @@ on:
       - 'scripts/ops/stock-preparation-prep-line-extended-smoke.test.mjs'
       - 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs'
       - 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.test.mjs'
+      - 'scripts/ops/stock-preparation-rca-abort-provenance.mjs'
+      - 'scripts/ops/stock-preparation-rca-abort-provenance.test.mjs'
   workflow_dispatch:
     inputs:
       base_url:
@@ -65,6 +67,8 @@ jobs:
         run: node --test scripts/ops/stock-preparation-prep-line-extended-smoke.test.mjs
       - name: Run W6 harness contract tests (T4 imports its sanitizing layer)
         run: node --test scripts/ops/stock-preparation-mvp-postdeploy-smoke.test.mjs
+      - name: Run RC-A abort-provenance diagnostic contract tests (#4437, no server, no DB)
+        run: node --test scripts/ops/stock-preparation-rca-abort-provenance.test.mjs
 
   smoke:
     name: deployed prep-line extended smoke
