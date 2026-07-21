@@ -61,9 +61,23 @@ function listRuntimeTsFiles(): string[] {
 /**
  * FROZEN allowlist of every `src` file that writes `meta_records.data`, keyed by `src`-relative path.
  *   CHOKEPOINT — references `validateLongTextValue` / `sanitizeRichLongText` (this is asserted, not assumed).
+ *   DELEGATED  — does not call the sanitizer directly; routes user-content scalars through a named
+ *                helper file that IS a CHOKEPOINT (asserted: writer refs helper symbol + helper refs sanitizer).
  *   SAFE       — writes only non-user-content columns; a rich-`longText` value can never appear.
  */
-const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: string }> = {
+const ALLOWLIST: Record<
+  string,
+  { disposition: 'CHOKEPOINT' | 'DELEGATED' | 'SAFE'; reason: string; through?: string; throughSymbol?: string }
+> = {
+  'multitable/exact-anchor-recovery-execute.ts': {
+    disposition: 'DELEGATED',
+    through: 'multitable/exact-anchor-restore-validate.ts',
+    throughSymbol: 'assertExactRestorableScalarValue',
+    reason:
+      'L8 exact-anchor apply delegates changed restorable scalars through assertExactRestorableScalarValue ' +
+      '(exact-anchor-restore-validate.ts), which directly references validateLongTextValue for rich longText; ' +
+      'fail-closed value-invalid — no redundant production sanitizer call in execute just to satisfy a scanner',
+  },
   'multitable/records.ts': {
     disposition: 'CHOKEPOINT',
     reason: 'plugin-SDK createRecord/patchRecord → normalizeFieldValue routes longText through validateLongTextValue',
@@ -145,6 +159,44 @@ describe('rich-longText write-sink — durable structural guard', () => {
       `These files are marked CHOKEPOINT but do NOT reference validateLongTextValue/sanitizeRichLongText ` +
         `(the sanitizer was removed or never wired):\n` +
         lying.map((rel) => `  - ${rel}`).join('\n'),
+    ).toEqual([])
+  })
+
+  test('every DELEGATED writer routes through a named helper that itself references the sanitizer', () => {
+    const failures: string[] = []
+    for (const rel of writerFiles) {
+      const entry = ALLOWLIST[rel]
+      if (entry?.disposition !== 'DELEGATED') continue
+      const through = entry.through
+      const symbol = entry.throughSymbol
+      if (!through || !symbol) {
+        failures.push(`${rel}: DELEGATED entry missing through/throughSymbol`)
+        continue
+      }
+      const writerSrc = readFileSync(join(SRC, rel), 'utf8')
+      if (!new RegExp(`\\b${symbol}\\b`).test(writerSrc)) {
+        failures.push(`${rel}: does not reference delegated symbol ${symbol}`)
+      }
+      const helperPath = join(SRC, through)
+      let helperSrc: string
+      try {
+        helperSrc = readFileSync(helperPath, 'utf8')
+      } catch {
+        failures.push(`${rel}: delegated helper ${through} is missing`)
+        continue
+      }
+      if (!new RegExp(`\\b${symbol}\\b`).test(helperSrc)) {
+        failures.push(`${through}: does not define/export ${symbol}`)
+      }
+      if (!SANITIZER_REF.test(helperSrc)) {
+        failures.push(
+          `${through}: delegated helper does NOT reference validateLongTextValue/sanitizeRichLongText`,
+        )
+      }
+    }
+    expect(
+      failures,
+      `DELEGATED write-sink guard failures:\n` + failures.map((f) => `  - ${f}`).join('\n'),
     ).toEqual([])
   })
 

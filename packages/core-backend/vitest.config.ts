@@ -416,6 +416,11 @@ export default defineConfig({
       // Postgres. Exclude from the no-DB default lane so it cannot skip-green; the shared exact-anchor
       // CI wiring contract pins this entry and its whole-file multitable real-DB invocation.
       'tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts',
+      // W0 L8 exact-anchor destructive-apply goldens: DATABASE_URL-gated and meaningful only against real
+      // Postgres (constructed lock races, trigger-injected rollback, real advisory fence). Exclude from the
+      // no-DB default lane so it cannot skip-green; the shared exact-anchor CI wiring contract pins this
+      // entry and its whole-file multitable real-DB invocation.
+      'tests/integration/multitable-exact-anchor-apply-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

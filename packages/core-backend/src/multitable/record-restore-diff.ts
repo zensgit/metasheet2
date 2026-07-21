@@ -77,3 +77,79 @@ export function computeRecordRestoreDiff(input: RestoreDiffInput): RecordChange[
   }
   return diff
 }
+
+/**
+ * Canonical restorable projection for a live row (W0-1 v3.7 §2 non-restorable + T6 restore-diff unify).
+ *
+ * Applies ONLY the true restorable delta from `computeRecordRestoreDiff` onto a SHALLOW COPY of
+ * `currentData`. Formula/lookup/rollup/autoNumber/system/attachment/button materializations and any
+ * other non-restorable key present live are PRESERVED (never overwritten from the at-anchor snapshot).
+ * Link fields that actually change appear in `linkUpdates` so the caller can keep `meta_links` consistent
+ * with `data` (link reads use meta_links). A derived-only / restorable-no-op difference yields
+ * `isNoOp: true` with empty patch/changedFieldIds/linkUpdates — the caller must not version-bump,
+ * revise, or write links.
+ */
+export interface RestorableProjection {
+  /** live data with only restorable fields projected from the target snapshot. */
+  data: Record<string, unknown>
+  /** revision patch: set values or null for unset — ONLY true restorable delta keys. */
+  patch: Record<string, unknown>
+  /** field ids in `patch` order. */
+  changedFieldIds: string[]
+  /** changed writable-forward link fields → deduped target id arrays (for meta_links sync). */
+  linkUpdates: Array<{ fieldId: string; targetIds: string[] }>
+  /** true when no restorable field differs — no write should occur. */
+  isNoOp: boolean
+}
+
+/** Order-preserving dedupe of link target ids (shared by data / patch / meta_links). */
+export function canonicalDedupeLinkIds(ids: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of ids) {
+    if (typeof id !== 'string' || id.length === 0) continue
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+export function projectRestorableOntoLive(input: RestoreDiffInput): RestorableProjection {
+  const changes = computeRecordRestoreDiff(input)
+  if (changes.length === 0) {
+    return {
+      data: { ...input.currentData },
+      patch: {},
+      changedFieldIds: [],
+      linkUpdates: [],
+      isNoOp: true,
+    }
+  }
+  const data: Record<string, unknown> = { ...input.currentData }
+  const patch: Record<string, unknown> = {}
+  const changedFieldIds: string[] = []
+  const linkUpdates: Array<{ fieldId: string; targetIds: string[] }> = []
+  for (const c of changes) {
+    changedFieldIds.push(c.fieldId)
+    if (c.op === 'unset') {
+      delete data[c.fieldId]
+      patch[c.fieldId] = null
+      continue
+    }
+    if (input.fieldById.get(c.fieldId)?.type === 'link') {
+      const raw = Array.isArray(c.value)
+        ? (c.value as unknown[]).filter((v): v is string => typeof v === 'string' && v.length > 0)
+        : input.normalizeLinkIds(c.value)
+      // ONE canonical array for data, patch, and meta_links — no data/meta_links divergence.
+      const deduped = canonicalDedupeLinkIds(raw)
+      data[c.fieldId] = deduped
+      patch[c.fieldId] = deduped
+      linkUpdates.push({ fieldId: c.fieldId, targetIds: deduped })
+      continue
+    }
+    data[c.fieldId] = c.value
+    patch[c.fieldId] = c.value
+  }
+  return { data, patch, changedFieldIds, linkUpdates, isNoOp: false }
+}

@@ -12,6 +12,9 @@ const repoRoot = join(__dirname, '..', '..')
 const FILES = [
   'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts',
   'tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts',
+  // W0 L8 destructive-apply suite joins the same two-point contract: removing/relocating either its
+  // vitest.config.ts exclusion or its whole-file plugin-tests.yml invocation must red this guard.
+  'tests/integration/multitable-exact-anchor-apply-realdb.test.ts',
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
