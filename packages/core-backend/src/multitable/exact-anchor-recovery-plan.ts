@@ -1,7 +1,3 @@
-import type { QueryFn } from './permission-service'
-import { reconstructRecordsAtSeq } from './record-reconstructor'
-import { assertSeqString } from './history-trust-checkpoint'
-
 /**
  * W0-1 v3.7 Lane L7 — the EXACT-ANCHOR recovery PLAN (target-set classification for execute).
  *
@@ -39,12 +35,15 @@ import { assertSeqString } from './history-trust-checkpoint'
  * (b) apply the actor's field mask + denied-record filter to what it returns/executes (the T-path's PIT-3
  * discipline), and (c) enforce SHEET_REVERT_MAX_RECORDS-class ceilings. Consuming this module without those
  * layers is NOT a production path — it is not wired to any route in this lane (default-off by construction).
- * After retention has pruned raw revisions, production callers must also resolve the trusted checkpoint,
- * compose its baseline overlay, and pass that composed state to `classifyExactAnchorRecoveryPlan`; the direct
- * builder below is intentionally raw-history-only and is not a checkpoint-complete recovery authority.
+ * After retention has pruned raw revisions, production callers must also resolve the trusted checkpoint and
+ * compose its baseline overlay before calling `classifyExactAnchorRecoveryPlan`. This module intentionally
+ * exposes NO multi-query builder: assembling fields, live rows, and revisions from separate autocommit reads
+ * can produce a state that never existed. The L8 caller owns that assembly inside one transaction after taking
+ * the canonical sheet fence, then hands this pure classifier the resulting snapshot.
  *
- * EXACT BIGINT: `anchorSeq` is a decimal string handed to `reconstructRecordsAtSeq`'s `::bigint` bind;
- * `assertSeqString` fails closed here too so a garbage anchor never reaches SQL from the plan layer.
+ * EXACT BIGINT remains the assembly layer's obligation: `anchorSeq` stays a decimal string through
+ * `reconstructRecordsAtSeq`'s `::bigint` bind. This classifier receives the already-resolved state map and
+ * performs no sequence arithmetic or coercion.
  */
 
 export interface AnchorRevertCandidate {
@@ -52,7 +51,7 @@ export interface AnchorRevertCandidate {
   /** the FULL at-anchor record data (unmasked — see the layering contract). */
   targetData: Record<string, unknown>
   /** the at-anchor version (the version the record had as of the anchor). */
-  targetVersion: number | null
+  targetVersion: number
   /** the CURRENT live version (optimistic-concurrency anchor for the apply). */
   liveVersion: number
 }
@@ -61,7 +60,7 @@ export interface AnchorResurrectCandidate {
   recordId: string
   /** the FULL at-anchor snapshot (from the revision chain — never the trash row's terminal vintage). */
   snapshot: Record<string, unknown>
-  targetVersion: number | null
+  targetVersion: number
 }
 
 export interface ExactAnchorRecoveryPlan {
@@ -78,11 +77,6 @@ export interface ExactAnchorRecoveryPlan {
   /** records whose live data already equals the at-anchor state (no-op — informational). */
   unchangedCount: number
 }
-
-const asRec = (v: unknown): Record<string, unknown> =>
-  v && typeof v === 'object' && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : {}
 
 function canonicalize(value: unknown): string {
   const normalize = (v: unknown): unknown => {
@@ -124,54 +118,26 @@ function requireLiveVersion(value: unknown, recordId: string): number {
   return value
 }
 
-function compareRecordId(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0
+function requireTargetVersion(value: unknown, recordId: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new ExactAnchorPlanDataError(`at-anchor record ${recordId} has an invalid version`)
+  }
+  return value
 }
 
-/**
- * Build the exact-anchor recovery plan for a sheet (§5 set recomputation; PURE READ — writes nothing).
- * See the module doc for the classification table and the layering contract.
- */
-export async function buildExactAnchorRecoveryPlan(
-  query: QueryFn,
-  sheetId: string,
-  anchorSeq: string,
-): Promise<ExactAnchorRecoveryPlan> {
-  assertSeqString(anchorSeq, 'buildExactAnchorRecoveryPlan.anchorSeq') // fail-closed on a garbage anchor
-
-  // Current schema — the drift guard's truth (a stale field key must never be re-written).
-  const fieldRes = await query(
-    'SELECT id FROM meta_fields WHERE sheet_id = $1',
-    [sheetId],
-  )
-  const fieldIds = new Set(
-    (fieldRes.rows as Array<{ id: unknown }>).map((r) => String(r.id)),
-  )
-
-  // Live rows.
-  const liveById = new Map<
-    string,
-    { data: Record<string, unknown>; version: number }
-  >()
-  const liveRes = await query(
-    'SELECT id, data, version FROM meta_records WHERE sheet_id = $1',
-    [sheetId],
-  )
-  for (const r of liveRes.rows as Array<{
-    id: unknown
-    data: unknown
-    version: unknown
-  }>) {
-    const recordId = String(r.id)
-    liveById.set(recordId, {
-      data: asRec(r.data),
-      version: requireLiveVersion(r.version, recordId),
-    })
+function requireRecordData(
+  value: unknown,
+  recordId: string,
+  side: 'live' | 'at-anchor',
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ExactAnchorPlanDataError(`${side} record ${recordId} has an invalid data snapshot`)
   }
+  return value as Record<string, unknown>
+}
 
-  // The causal at-anchor state (delete-aware, target-generation-correct — L6-b).
-  const stateMap = await reconstructRecordsAtSeq(query, sheetId, anchorSeq)
-  return classifyExactAnchorRecoveryPlan(stateMap, liveById, fieldIds)
+function compareRecordId(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
 }
 
 /**
@@ -188,7 +154,7 @@ export function classifyExactAnchorRecoveryPlan(
       version: number | null
     }
   >,
-  liveById: Map<string, { data: Record<string, unknown>; version: number }>,
+  liveById: ReadonlyMap<string, { data: unknown; version: unknown }>,
   fieldIds: ReadonlySet<string>,
 ): ExactAnchorRecoveryPlan {
   const plan: ExactAnchorRecoveryPlan = {
@@ -200,10 +166,23 @@ export function classifyExactAnchorRecoveryPlan(
     unchangedCount: 0,
   }
 
+  const validatedLiveById = new Map<string, { data: Record<string, unknown>; version: number }>()
+  for (const [recordId, live] of liveById) {
+    validatedLiveById.set(recordId, {
+      data: requireRecordData(live.data, recordId, 'live'),
+      version: requireLiveVersion(live.version, recordId),
+    })
+  }
+
   for (const [recordId, target] of stateMap) {
-    const live = liveById.get(recordId)
+    const live = validatedLiveById.get(recordId)
     if (target.exists) {
-      const targetData = asRec(target.data)
+      const targetData = requireRecordData(target.data, recordId, 'at-anchor')
+      const targetVersion = requireTargetVersion(target.version, recordId)
+      if (live && dataEquals(live.data, targetData)) {
+        plan.unchangedCount++
+        continue
+      }
       // Schema-drift guard — identical for the revert and resurrect branches (excluded, counted, re-preview).
       let drift = false
       for (const fid of Object.keys(targetData))
@@ -220,18 +199,14 @@ export function classifyExactAnchorRecoveryPlan(
         plan.resurrects.push({
           recordId,
           snapshot: targetData,
-          targetVersion: target.version,
+          targetVersion,
         })
-        continue
-      }
-      if (dataEquals(live.data, targetData)) {
-        plan.unchangedCount++
         continue
       }
       plan.reverts.push({
         recordId,
         targetData,
-        targetVersion: target.version,
+        targetVersion,
         liveVersion: live.version,
       })
       continue
@@ -242,7 +217,7 @@ export function classifyExactAnchorRecoveryPlan(
   }
 
   // Live rows with no revision ≤ anchor at all: created after the anchor.
-  for (const id of liveById.keys())
+  for (const id of validatedLiveById.keys())
     if (!stateMap.has(id)) plan.createdAfterAnchor.push(id)
 
   plan.reverts.sort((a, b) => compareRecordId(a.recordId, b.recordId))

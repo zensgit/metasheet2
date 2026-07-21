@@ -1,13 +1,17 @@
 import { describe, expect, test } from 'vitest'
 
-import {
-  buildExactAnchorRecoveryPlan,
-  classifyExactAnchorRecoveryPlan,
-  ExactAnchorPlanDataError,
-} from '../../src/multitable/exact-anchor-recovery-plan'
-import type { QueryFn } from '../../src/multitable/permission-service'
+import * as exactAnchorPlan from '../../src/multitable/exact-anchor-recovery-plan'
+
+const { classifyExactAnchorRecoveryPlan, ExactAnchorPlanDataError } = exactAnchorPlan
 
 describe('W0 L7 exact-anchor recovery plan hardening', () => {
+  test('the public runtime surface is pure classification only (no autocommit multi-read builder)', () => {
+    expect(Object.keys(exactAnchorPlan).sort()).toEqual([
+      'ExactAnchorPlanDataError',
+      'classifyExactAnchorRecoveryPlan',
+    ])
+  })
+
   test('nested object key order is semantic-equal, so an unchanged record is not reverted', () => {
     const state = new Map([
       [
@@ -100,21 +104,81 @@ describe('W0 L7 exact-anchor recovery plan hardening', () => {
     expect(plan.createdAfterAnchor).toEqual(['a-created', 'z-created'])
   })
 
-  test('an invalid live version fails closed before reconstruction can produce an apply anchor', async () => {
-    let queryCount = 0
-    const query: QueryFn = async () => {
-      queryCount++
-      if (queryCount === 1) return { rows: [{ id: 'f1' }] }
-      if (queryCount === 2)
-        return { rows: [{ id: 'r1', data: { f1: 'v' }, version: null }] }
-      throw new Error(
-        'reconstruction must not run after an invalid live version',
-      )
-    }
+  test('an invalid live version fails closed before it can become an apply anchor', () => {
+    const state = new Map([
+      [
+        'r1',
+        {
+          recordId: 'r1',
+          exists: true,
+          data: { f1: 'old' },
+          version: 1,
+        },
+      ],
+    ])
+    const live = new Map([['r1', { data: { f1: 'new' }, version: null }]])
 
-    await expect(
-      buildExactAnchorRecoveryPlan(query, 'sheet-1', '10'),
-    ).rejects.toThrow(ExactAnchorPlanDataError)
-    expect(queryCount).toBe(2)
+    expect(() => classifyExactAnchorRecoveryPlan(state, live, new Set(['f1']))).toThrow(
+      ExactAnchorPlanDataError,
+    )
+  })
+
+  test('an existing target with no trustworthy snapshot fails closed instead of becoming an empty write', () => {
+    const state = new Map([
+      [
+        'r1',
+        {
+          recordId: 'r1',
+          exists: true,
+          data: null,
+          version: 1,
+        },
+      ],
+    ])
+    const live = new Map([['r1', { data: { f1: 'live' }, version: 2 }]])
+
+    expect(() => classifyExactAnchorRecoveryPlan(state, live, new Set(['f1']))).toThrow(
+      ExactAnchorPlanDataError,
+    )
+  })
+
+  test('an existing target with no trustworthy version fails closed', () => {
+    const state = new Map([
+      [
+        'r1',
+        {
+          recordId: 'r1',
+          exists: true,
+          data: { f1: 'old' },
+          version: null,
+        },
+      ],
+    ])
+    const live = new Map([['r1', { data: { f1: 'live' }, version: 2 }]])
+
+    expect(() => classifyExactAnchorRecoveryPlan(state, live, new Set(['f1']))).toThrow(
+      ExactAnchorPlanDataError,
+    )
+  })
+
+  test('an unchanged stale-key record is a no-op, not whole-plan schema drift', () => {
+    const state = new Map([
+      [
+        'r1',
+        {
+          recordId: 'r1',
+          exists: true,
+          data: { removedField: 'same' },
+          version: 1,
+        },
+      ],
+    ])
+    const live = new Map([['r1', { data: { removedField: 'same' }, version: 1 }]])
+
+    const plan = classifyExactAnchorRecoveryPlan(state, live, new Set())
+
+    expect(plan.unchangedCount).toBe(1)
+    expect(plan.driftCount).toBe(0)
+    expect(plan.reverts).toEqual([])
   })
 })

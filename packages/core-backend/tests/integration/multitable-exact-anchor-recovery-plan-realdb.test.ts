@@ -1,8 +1,11 @@
 /**
  * W0-1 v3.7 Lane L7 — exact-anchor recovery PLAN classification (real DB).
  *
- * Module under test: `exact-anchor-recovery-plan.ts` `buildExactAnchorRecoveryPlan` — the §5 target-set
- * recomputation on top of L6-b's causal reconstructor. Goldens (each mutation-proven in the PR matrix):
+ * Module under test: `exact-anchor-recovery-plan.ts`'s PURE classifier — the §5 target-set recomputation on
+ * top of L6-b's causal reconstructor. This integration harness deliberately performs the three input reads
+ * inside one transaction after acquiring the canonical sheet fence; the production module exposes no bare
+ * multi-query builder that could splice together different autocommit snapshots. Goldens (each
+ * mutation-proven in the PR matrix):
  *   REVERT           live differs from at-anchor ⇒ revert candidate carrying the AT-ANCHOR data.
  *   RESURRECT-AFTER  deleted AFTER the anchor (delete seq > anchor), no live row ⇒ resurrect candidate with
  *                    the at-anchor snapshot (from the revision chain — NOT the trash row's terminal vintage).
@@ -24,7 +27,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { buildExactAnchorRecoveryPlan } from '../../src/multitable/exact-anchor-recovery-plan'
+import { acquireCanonicalSheetFence } from '../../src/multitable/canonical-sheet-fence'
+import {
+  classifyExactAnchorRecoveryPlan,
+  type ExactAnchorRecoveryPlan,
+} from '../../src/multitable/exact-anchor-recovery-plan'
+import { assertSeqString } from '../../src/multitable/history-trust-checkpoint'
+import { reconstructRecordsAtSeq } from '../../src/multitable/record-reconstructor'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -34,6 +43,31 @@ const F_STR = `fld_earp_note_${TS}`
 const ACTOR = `user_earp_${TS}`
 
 const q = (sql: string, params: unknown[] = []) => poolManager.get().query(sql, params)
+
+async function buildPlan(anchorSeq: string): Promise<ExactAnchorRecoveryPlan> {
+  assertSeqString(anchorSeq, 'exact-anchor recovery-plan realDB harness')
+  return poolManager.get().transaction(async ({ query }) => {
+    await acquireCanonicalSheetFence(query, SHEET)
+    const fieldRes = await query('SELECT id FROM meta_fields WHERE sheet_id = $1', [SHEET])
+    const fieldIds = new Set((fieldRes.rows as Array<{ id: unknown }>).map((row) => String(row.id)))
+    const liveRes = await query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [
+      SHEET,
+    ])
+    const liveById = new Map<string, { data: unknown; version: unknown }>()
+    for (const row of liveRes.rows as Array<{
+      id: unknown
+      data: unknown
+      version: unknown
+    }>) {
+      liveById.set(String(row.id), {
+        data: row.data,
+        version: row.version,
+      })
+    }
+    const stateMap = await reconstructRecordsAtSeq(query, SHEET, anchorSeq)
+    return classifyExactAnchorRecoveryPlan(stateMap, liveById, fieldIds)
+  })
+}
 
 const revSeq = (
   recordId: string,
@@ -87,7 +121,7 @@ describeIfDatabase('W0-1 v3.7 L7 — exact-anchor recovery plan (real DB)', () =
     await revSeq(R, 1, 'create', { [F_STR]: 'old' }, '100')
     await revSeq(R, 2, 'update', { [F_STR]: 'new' }, '200')
     await live(R, { [F_STR]: 'new' }, 2)
-    const plan = await buildExactAnchorRecoveryPlan(q, SHEET, '150')
+    const plan = await buildPlan('150')
     expect(plan.reverts).toEqual([{ recordId: R, targetData: { [F_STR]: 'old' }, targetVersion: 1, liveVersion: 2 }])
     expect(plan.resurrects).toEqual([])
     expect(plan.createdAfterAnchor).toEqual([])
@@ -105,7 +139,7 @@ describeIfDatabase('W0-1 v3.7 L7 — exact-anchor recovery plan (real DB)', () =
     await revSeq(BEFORE, 1, 'create', { [F_STR]: 'gone' }, '110')
     await revSeq(BEFORE, 1, 'delete', { [F_STR]: 'gone' }, '120')
 
-    const plan = await buildExactAnchorRecoveryPlan(q, SHEET, '250')
+    const plan = await buildPlan('250')
     // AFTER resurrects with its AT-ANCHOR (v2 'newer') snapshot — from the revision chain, not any trash vintage.
     expect(plan.resurrects).toEqual([{ recordId: AFTER, snapshot: { [F_STR]: 'newer' }, targetVersion: 2 }])
     // BEFORE appears NOWHERE (stays deleted — LOCK-9).
@@ -124,7 +158,7 @@ describeIfDatabase('W0-1 v3.7 L7 — exact-anchor recovery plan (real DB)', () =
     await revSeq(NEWBIE, 1, 'create', { [F_STR]: 'brand-new' }, '500')
     await live(NEWBIE, { [F_STR]: 'brand-new' }, 1)
 
-    const plan = await buildExactAnchorRecoveryPlan(q, SHEET, '200')
+    const plan = await buildPlan('200')
     expect(plan.deletedAtAnchorLiveNow).toEqual([RESURRECTED]) // deleted as of anchor 200, live now
     expect(plan.createdAfterAnchor).toEqual([NEWBIE]) // no revision ≤ 200
     // Neither is a revert or resurrect — the plan never chooses destruction.
@@ -143,11 +177,11 @@ describeIfDatabase('W0-1 v3.7 L7 — exact-anchor recovery plan (real DB)', () =
 
     // anchor 25: inside GEN 1, at its v2 state — the plan must target g1v2 (target-generation A), not the
     // terminal generation's state and not "stays deleted".
-    const plan = await buildExactAnchorRecoveryPlan(q, SHEET, '25')
+    const plan = await buildPlan('25')
     expect(plan.reverts).toEqual([{ recordId: R, targetData: { [F_STR]: 'g1v2' }, targetVersion: 2, liveVersion: 1 }])
 
     // anchor 35 (inside the deletion window): deleted as of the anchor but live now ⇒ caller-picks list.
-    const plan35 = await buildExactAnchorRecoveryPlan(q, SHEET, '35')
+    const plan35 = await buildPlan('35')
     expect(plan35.deletedAtAnchorLiveNow).toEqual([R])
     expect(plan35.reverts).toEqual([])
   })
@@ -162,7 +196,7 @@ describeIfDatabase('W0-1 v3.7 L7 — exact-anchor recovery plan (real DB)', () =
     await revSeq(R_GONE, 1, 'create', { [GHOST_FIELD]: 'stale' }, '110')
     await revSeq(R_GONE, 1, 'delete', { [GHOST_FIELD]: 'stale' }, '400')
 
-    const plan = await buildExactAnchorRecoveryPlan(q, SHEET, '200')
+    const plan = await buildPlan('200')
     expect(plan.driftCount).toBe(2) // one revert-branch drift + one resurrect-branch drift
     expect(plan.reverts).toEqual([])
     expect(plan.resurrects).toEqual([])
@@ -172,7 +206,7 @@ describeIfDatabase('W0-1 v3.7 L7 — exact-anchor recovery plan (real DB)', () =
     const R = `rec_same_${TS}`
     await revSeq(R, 1, 'create', { [F_STR]: 'same' }, '100')
     await live(R, { [F_STR]: 'same' }, 1)
-    const plan = await buildExactAnchorRecoveryPlan(q, SHEET, '200')
+    const plan = await buildPlan('200')
     expect(plan.unchangedCount).toBe(1)
     expect(plan.reverts).toEqual([])
   })
@@ -186,12 +220,11 @@ describeIfDatabase('W0-1 v3.7 L7 — exact-anchor recovery plan (real DB)', () =
     await revSeq(R, 2, 'update', { [F_STR]: 'hi' }, HI)
     await live(R, { [F_STR]: 'hi' }, 2)
     // anchor = LO exactly: the HI write has NOT happened yet ⇒ the plan reverts live('hi') → target('lo').
-    const plan = await buildExactAnchorRecoveryPlan(q, SHEET, LO)
+    const plan = await buildPlan(LO)
     expect(plan.reverts).toEqual([{ recordId: R, targetData: { [F_STR]: 'lo' }, targetVersion: 1, liveVersion: 2 }])
   })
 
-  test('garbage anchor fails closed (assertSeqString throws before any SQL)', async () => {
-    const throwQ = (() => { throw new Error('plan touched the DB on a garbage anchor') }) as never
-    await expect(buildExactAnchorRecoveryPlan(throwQ, SHEET, 'not-a-seq')).rejects.toThrow(/seq/i)
+  test('garbage anchor fails closed before opening the fenced read transaction', async () => {
+    await expect(buildPlan('not-a-seq')).rejects.toThrow(/seq/i)
   })
 })

@@ -150,9 +150,9 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
-      # W0 L6-b CI two-point wiring contract (no DB): the exact-anchor authority real-DB suite must
-      # stay excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
-      - name: W0 L6-b exact-anchor CI wiring contract
+      # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
+      # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
+      - name: W0 exact-anchor L6/L7 CI wiring contract
         run: node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs
 
       # PB4-2 CI two-point wiring contract (no DB): the archive-read-only two-connection suite must
