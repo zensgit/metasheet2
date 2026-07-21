@@ -2607,6 +2607,200 @@ test('anti-vacuity (round 3): the full info string is parsed, and the runbook’
   assert.equal(extractFencedSqlBlocks(runbook).length, 4, 'the runbook has 4 SQL venues')
 })
 
+// ---------------------------------------------------------------------------
+// Gate reproductions (round 4 of PR #4500) — the "is this SQL?" discriminator was a VOCABULARY:
+// a statement whose projection list held one of ~30 English function words was exempted from
+// every guard. A vocabulary cannot decide this question — words that are also SQL had to be left
+// out of the list, so a leaking statement bought its exemption by using one; and the list was
+// consulted on the RAW text, so a word inside a string literal or a `--` comment exempted the
+// whole statement, while a `;` inside a literal cut the candidate before its FROM.
+// All of the samples below returned ok:true at head 2b6590e46.
+// ---------------------------------------------------------------------------
+
+/** Leaking statements, in ordinary body text, that exempted themselves through the vocabulary. */
+const ROUND4_VOCABULARY_BYPASSES = [
+  // Words that are ALSO SQL and were therefore in the prose list: every() is a Postgres aggregate,
+  // BOTH is trim()'s modifier, ANY() is a quantified comparison.
+  ['every() aggregate', "SELECT union_id, every(sync_enabled) AS all_enabled FROM directory_accounts;"],
+  ['trim(BOTH …)', "SELECT union_id, trim(both ' ' from mobile) AS m FROM directory_accounts;"],
+  ['= ANY(…)', "SELECT union_id, mobile = any(array['x']) AS hit FROM directory_accounts;"],
+  // A stopword the statement never USES — it only has to be present, so a literal or a quoted
+  // alias carries it (P3: literals/comments were not neutralised before the test).
+  ['stopword inside a string literal', "SELECT union_id, 'the key' AS label FROM directory_accounts;"],
+  ['stopword inside a quoted alias', 'SELECT union_id, mobile AS "the contact" FROM directory_accounts;'],
+  ['stopword inside a -- comment', 'SELECT union_id, -- the key\n  mobile FROM directory_accounts;'],
+]
+
+test('gate repro (round 4): a leaking statement cannot exempt itself with a WORD', () => {
+  for (const [name, sql] of ROUND4_VOCABULARY_BYPASSES) {
+    const md = `Run this on staging and record the outcome:\n\n${sql}\n\nThen continue with step 4.\n`
+    assert.equal(
+      extractUnfencedSqlStatements(md).length,
+      1,
+      `"${name}" must be READ as one SQL statement, not skipped as prose`,
+    )
+    const result = assertNoRawIdentityProjections(md)
+    assert.equal(result.ok, false, `"${name}" must not bypass the identity guard`)
+    assert.ok(
+      result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+      `"${name}" must report the projection itself, got: ${result.violations.join(' | ')}`,
+    )
+    assert.ok(
+      result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+      `"${name}" must also be reported as unfenced SQL, got: ${result.violations.join(' | ')}`,
+    )
+  }
+})
+
+test('gate repro (round 4): the candidate is not cut at a `;` inside a literal, nor at a blank line', () => {
+  const cases = [
+    [
+      'semicolon inside a string literal',
+      "SELECT union_id, 'a;b' AS label FROM directory_accounts;",
+      `Run this:\n\nSELECT union_id, 'a;b' AS label FROM directory_accounts;\n\nThen continue.\n`,
+    ],
+    [
+      'statement spanning a blank line',
+      'SELECT union_id, open_id,\n\n  mobile\nFROM directory_accounts;',
+      `Run this:\n\nSELECT union_id, open_id,\n\n  mobile\nFROM directory_accounts;\n\nThen continue.\n`,
+    ],
+  ]
+  for (const [name, expected, md] of cases) {
+    const statements = extractUnfencedSqlStatements(md)
+    assert.equal(statements.length, 1, `"${name}" must yield exactly one statement`)
+    assert.equal(statements[0], expected, `"${name}" must keep the whole statement, FROM included`)
+    assert.match(statements[0], /\bFROM\b/i, `"${name}" must not be truncated before its FROM`)
+    const result = assertNoRawIdentityProjections(md)
+    assert.ok(
+      result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+      `"${name}" must be parsed, got: ${result.violations.join(' | ')}`,
+    )
+  }
+
+  // The same masking inside the projection-list extractor: a `;` in a literal is text, so the
+  // list must not end there and every projection after it stays visible.
+  const lists = extractSelectLists("SELECT length(external_key) AS k, 'a;b' AS label, mobile FROM directory_accounts;")
+  assert.equal(lists.length, 1, 'one SELECT list expected')
+  assert.match(lists[0], /mobile$/, `projection list was truncated at a quoted ";": ${JSON.stringify(lists[0])}`)
+})
+
+test('gate repro (round 4): the SQL/prose decision is structural, not a vocabulary', () => {
+  // Resolvable projection expressions — every form the runbook uses, plus the ones the vocabulary
+  // list used to exempt. None of these may be read as prose.
+  for (const expr of [
+    'union_id',
+    'a.union_id',
+    'status',
+    "'the key' AS label",
+    'mobile AS "the contact"',
+    'every(sync_enabled) AS all_enabled',
+    "trim(both ' ' from mobile) AS m",
+    'length(external_key) AS key_len',
+    "count(*) FILTER (WHERE integration_id = '<A>') AS corp_a_rows",
+    '(union_id IS NOT NULL) AS has_union',
+    'mobile m',
+  ]) {
+    assert.equal(
+      isResolvableProjectionExpression(expr),
+      true,
+      `must resolve as a SQL projection: ${expr}`,
+    )
+  }
+  // Sentence fragments — bare words in a row resolve as no expression, whatever words they are.
+  for (const words of ['the corp A rows', 'only the counts', 'each of two integration ids', 'corp A rows by hand']) {
+    assert.equal(
+      isResolvableProjectionExpression(words),
+      false,
+      `a sentence fragment must not resolve as a SQL projection: ${words}`,
+    )
+  }
+  // …and the shape test is decided on the MASKED text: masking preserves length and structure.
+  const masked = maskSqlLiteralsAndComments("SELECT a, 'x;FROM y' AS b -- FROM z\n  FROM t;")
+  assert.equal(masked.length, "SELECT a, 'x;FROM y' AS b -- FROM z\n  FROM t;".length, 'masking must preserve length')
+  assert.equal(masked.includes(';FROM'), false, 'a literal must carry no structure')
+  assert.equal(looksLikeSqlStatement(masked), true, 'the masked statement still resolves as SQL')
+})
+
+test('positive control (round 4): prose still passes, and legitimate unfenced SQL is scanned, not condemned', () => {
+  // The fix must not degrade into "reject everything": operator prose that names the banned
+  // columns in words stays legal…
+  const prose = [
+    'If the admin API is unavailable, select the corp A rows from directory_accounts by hand and ' +
+      'record only the counts.',
+    'Record only the counts; do not select the union ids or the mobile numbers from either corp.',
+    'The sync derives `external_key` as the bare `unionId || openId || userId` — no corp scoping.',
+    'Every row in the table above should be read from directory_sync_runs.',
+  ]
+  for (const line of prose) {
+    assert.equal(extractUnfencedSqlStatements(line).length, 0, `prose must not be read as SQL: ${line}`)
+    const identity = assertNoRawIdentityProjections(line)
+    assert.equal(identity.ok, true, identity.ok ? 'ok' : `prose must stay legal:\n- ${identity.violations.join('\n- ')}`)
+  }
+
+  // …and a values-free statement that IS read as SQL is reported ONLY for its venue, never for its
+  // projections: the discriminator decides where a statement is, the allowlist decides what it may
+  // project, and the two must not be conflated.
+  const legit = `Run this on staging:\n\nSELECT status, ${ALLOWED_DUP}, ${ALLOWED_CONSTRAINT} FROM directory_sync_runs;\n`
+  assert.equal(extractUnfencedSqlStatements(legit).length, 1, 'the values-free statement must be READ as SQL')
+  const result = assertNoRawIdentityProjections(legit)
+  assert.equal(result.ok, false, 'unfenced SQL is a venue violation by construction')
+  assert.deepEqual(
+    result.violations.filter((v) => !/must live in a fenced code block/i.test(v)),
+    [],
+    `a values-free statement must raise no projection violation: ${result.violations.join(' | ')}`,
+  )
+  assert.equal(
+    assertErrorMessageProjectionsAreClosed(legit).ok,
+    true,
+    'the two closed booleans stay legal wherever they are written',
+  )
+})
+
+test('gate NIT (round 4): a code venue is SQL by its CONTENT, never by its language tag', () => {
+  const md = [
+    '```postgresql',
+    'SELECT union_id FROM directory_accounts;',
+    '```',
+    '',
+    '```',
+    'SELECT open_id FROM directory_accounts;',
+    '```',
+    '',
+    '```text',
+    'SELECT mobile FROM directory_accounts;',
+    '```',
+    '',
+    '```sh',
+    'psql -c "\\dt"',
+    '```',
+  ].join('\n')
+  const blocks = extractFencedSqlBlocks(md)
+  assert.equal(blocks.length, 3, `expected the 3 SQL venues regardless of tag, got ${blocks.length}`)
+  for (const needle of [/union_id/, /open_id/, /mobile/]) {
+    assert.ok(blocks.some((b) => needle.test(b)), `a relabelled SQL venue was dropped: ${needle}`)
+  }
+  // Anti-vacuity in the other direction: a venue with no SQL in it is not a SQL block.
+  assert.equal(blocks.some((b) => /psql -c/.test(b)), false, 'a non-SQL venue must not be a SQL block')
+})
+
+test('gate NIT (round 4): the §4 template shows the named-field form the guard actually accepts', () => {
+  const lines = loadRunbook().split('\n')
+  for (const [label, format] of [
+    ['key comparison', KEY_COMPARISON_FORMAT],
+    ['presence', PRESENCE_FORMAT],
+  ]) {
+    const line = lines.find((l) => normalizeEvidenceLabel(l.split(':')[0]) === label)
+    assert.ok(line, `§4 must carry a "${label}" row`)
+    assert.ok(
+      line.includes(format.hint),
+      `§4 "${label}" must show the accepted form "${format.hint}" (an operator who follows a hint ` +
+        `the guard rejects is told his real evidence is malformed), got: ${line.trim()}`,
+    )
+    // Anti-vacuity: the hint the template shows is a value this guard accepts.
+    assert.match(format.hint.replace(/<n>/g, '1').replace(/<true\|false>/g, 'true'), format.re)
+  }
+})
+
 test('synthetic: paste-raw-identity instructions are rejected, negated bans are kept', () => {
   const bad = [
     'Paste the overlap person’s unionId and full name into the §4 evidence block.',
