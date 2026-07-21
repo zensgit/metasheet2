@@ -151,7 +151,17 @@ flowchart LR
 
 ### 4.2 Library decision
 
-D3 evaluates `@vue-flow/core` for interaction/rendering and `elkjs` layered layout. Adoption requires:
+D3 evaluates `@vue-flow/core` for interaction/rendering and `elkjs` layered layout. The disposable
+2026-07-21 spike established the following owner-visible evidence; it did not authorize production code:
+
+- Vue Flow `1.48.2` passed the interaction-shell capability check at about 50 KB gzip.
+- ELK `0.12.0` preserved condition and parallel business order and produced routed edges without crossings
+  in the spike, but adds about 427 KB gzip and requires an explicit EPL-2.0/GPL-3.0-or-later license choice.
+- Dagre `3.0.0` is much smaller and MIT-licensed, but failed the adversarial condition/parallel ordering
+  fixture. Using it would require a separately specified post-layout ordering and rerouting layer; it is not
+  an implicit fallback.
+
+Adoption requires:
 
 - compatible license and acceptable bundle impact;
 - custom nodes/edges and controlled drag behavior;
@@ -160,8 +170,9 @@ D3 evaluates `@vue-flow/core` for interaction/rendering and `elkjs` layered layo
 - no requirement to persist free-form positions;
 - acceptable rendering for the 100-node acceptance fixture.
 
-If the spike fails one of these gates, D3 stops for an owner-visible alternative decision. It must not
-silently fall back to extending the bespoke geometry.
+O3 must choose Vue Flow plus lazy-loaded ELK, or explicitly amend this plan to fund and verify the Dagre
+ordering/rerouting layer. Until that choice is recorded, D3 stops. It must not silently fall back to Dagre
+or to extending the bespoke geometry.
 
 ### 4.3 Release and flag boundaries
 
@@ -188,8 +199,9 @@ file migration with backend runtime semantics.
 | D2-b  | Move and undo command algebra       | New semantic move/reorder commands, explicit inverses, selection restore, invalid-drop rollback             | Grok, Codex contract review              | D2-a                               | C4-C5           |
 | D2-c  | Backend empty-rule compatibility    | Isolate and review #4433 empty condition/branch capture without any authoring UI or renderer                | Grok, Codex runtime review               | none                               | C6              |
 | D3    | Canvas engine spike                 | Vue Flow/ELK adapters, exact feature capability contract, deterministic layout, no persistence change       | Grok                                     | D0, D1, D2-b                       | G1              |
+| D3-p  | Timeout/threshold parity foundation | Add the shipped timeout/threshold fields to shared frontend types and the Canvas adapter contract; no new runtime semantics | Sonnet implementation, Codex contract review | D0 | G1-p |
 | D4    | Canvas shell                        | Custom start/approval/cc/condition/parallel/end nodes, edges, insertion controls, pan/zoom/fit              | Grok                                     | D3                                 | G2-a            |
-| D5    | Inspector and command UX            | Right inspector, save validation, node summaries, undo/redo, keyboard selection                             | Grok                                     | D4                                 | G2-b            |
+| D5    | Inspector and command UX            | Right inspector, save validation, node summaries, timeout/threshold controls, undo/redo, keyboard selection | Grok                                     | D4, D3-p                           | G2-b            |
 | D6    | Condition and parallel authoring    | Rule priority/default branch, parallel all/any, semantic branch reorder, readable labels                    | Grok                                     | D5                                 | G2-c            |
 | D6-f1 | Form-command foundation             | Pure add/remove/reorder for all existing field kinds; save-without-edit and dependency-rewrite tests        | Grok                                     | none                               | F1-F3           |
 | D6-f2 | Form builder                        | Field palette, drag/keyboard reorder, field inspector, narrow-layout alternative; no JSON/ID entry          | Kimi K3 visual pass, Grok implementation | D0, D6-f1                          | G2-f            |
@@ -224,6 +236,7 @@ flowchart TD
   D1 --> D3
   D2B --> D3
   D3 --> D4 --> D5 --> D6
+  D0 --> D3P["D3-p"] --> D5
   D6F1["D6-f1"] --> D6F2["D6-f2"]
   D0 --> D6F2
   D6 --> D7B1["D7-b1"]
@@ -250,7 +263,8 @@ flowchart TD
 
 - Wave 0: D0, D1, D2-a, D2-c, D6-f1, and D8-a may run in parallel in separate worktrees.
 - Wave 0.5: D2-b follows D2-a; D6-f2 follows D0 plus D6-f1.
-- Wave 1: D3 is serial and owns the initial canvas adapter/dependency surface. D3 and D6-f2 serialize if both
+- Wave 1: D3 and the type-only D3-p foundation may run in parallel on disjoint files. D3 owns the initial
+  canvas adapter/dependency surface. D3 and D6-f2 serialize if both
   need `TemplateAuthoringView.vue`; the coordinator assigns the first owner before either starts.
 - Wave 2: D4 then D5 are serial because both establish shared canvas component APIs.
 - Wave 3: D6, D7-d1, D8-b, and D9 runtime work may fan out only after their dependency is on main.
@@ -571,7 +585,8 @@ Stop the current lane and return to review if any of the following occurs:
 | D2-a        | READY         | Re-review #4433 frontend command files/tests without blessing its renderer or backend diff       |
 | D2-b        | BLOCKED       | Follow D2-a with separately tested semantic move/inverse algebra                                 |
 | D2-c        | READY         | Isolate #4433 backend empty-rule behavior into a runtime-only review/PR                          |
-| D3-D6       | BLOCKED       | Wait for D0 ratification and predecessor merge                                                   |
+| D3-p        | BLOCKED       | Wait for D0 ratification; close shipped timeout/threshold frontend parity before D5               |
+| D3-D6       | BLOCKED       | Wait for D0 ratification, O3 layout choice, and predecessor merge                                 |
 | D6-f1       | READY         | Extract current pure field reorder/add/remove contracts and dependency-reference tests           |
 | D6-f2       | BLOCKED       | Wait for D0 and D6-f1                                                                            |
 | D7-b1/c1/d1 | BLOCKED       | Wait for Canvas inspector contracts; preserve only as-built runtime semantics                    |
@@ -592,7 +607,8 @@ flags or production rollout.
 - [ ] O1 - Canvas is the normal user's primary flow-authoring surface after G6-C.
 - [ ] O2 - The structured editor becomes temporary support-only fallback; ordinary-user entry is removed only
       if the accessible-authoring equivalence gate passes.
-- [ ] O3 - D3 may add Vue Flow/ELK dependencies if the spike satisfies section 4.2.
+- [ ] O3 - Choose Vue Flow plus lazy-loaded ELK, accepting its measured bundle/license cost; otherwise amend
+      the plan to authorize and verify a Dagre post-layout ordering/rerouting layer. No silent fallback.
 - [ ] O4 - Dragging is semantic placement; arbitrary persisted positions are out of scope.
 - [ ] O5 - Canvas delivery is D0-D6/D6-f/D7-b1-c1-d1/D8 and may canary without D9 or optional D7 runtime.
 - [ ] O6 - Handler nodes, within-node ordered approvers, new assignee sources, and readonly/editable enforcement

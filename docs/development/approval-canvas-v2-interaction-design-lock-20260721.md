@@ -28,6 +28,9 @@ anything on.
    parallel fork/join with `all`/`any` join, cc targets. It does not authorize a handler/processing node,
    within-node ordered approvers, new assignee sources, or readonly/editable runtime enforcement — each of
    those needs its own ratified design lock (plan §2, §5 D7, G3 optional-runtime rule).
+   The existing timeout/threshold runtime fields are a declared D3-p frontend parity prerequisite. They
+   are not represented by the current frontend graph types, so D5 cannot claim inspector parity until
+   D3-p is merged and its adapter/round-trip tests pass.
 3. **No persisted coordinates.** Node positions are derived by deterministic layout from graph identity and
    viewport class. No x/y value, slot index beyond graph topology, or viewport state ever enters the
    `ApprovalGraph` payload (plan I4). The v1 unsaved free-drag sidecar is removed, not carried forward
