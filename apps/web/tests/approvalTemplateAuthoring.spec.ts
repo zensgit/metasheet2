@@ -717,9 +717,10 @@ describe('TemplateAuthoringView', () => {
     ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
     await flushUi()
 
-    const fieldId = container!.querySelector('[data-testid="approval-template-field-row"] input') as HTMLInputElement
-    fieldId.value = ''
-    fieldId.dispatchEvent(new Event('input'))
+    // D1: field-id input is gone; the first field control is 字段名称 — clear it to surface validation.
+    const fieldName = container!.querySelector('[data-testid="approval-template-field-row"] input') as HTMLInputElement
+    fieldName.value = ''
+    fieldName.dispatchEvent(new Event('input'))
     ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
     await flushUi()
     scrollIntoViewSpy.mockClear()
@@ -732,7 +733,7 @@ describe('TemplateAuthoringView', () => {
     const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
     expect(createTemplateSpy).not.toHaveBeenCalled()
     expect(fieldsStep?.getAttribute('aria-current')).toBe('step')
-    expect(summary?.textContent).toContain('字段 id 必填')
+    expect(summary?.textContent).toContain('名称必填')
     expect(document.activeElement).toBe(summary)
     expect(scrolledElements.at(-1)).toBe(summary)
   })
@@ -935,25 +936,10 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
-  // G-B2-18: the complex-graph approval-node static_user/static_role editor gets the SAME directory
-  // typeahead as the linear step picker (approval-step-user-picker), instead of a bare-ID allow-create
-  // select. cc node forces the preserved-graph (complex) path so the structured editor renders.
+  // G-B2-18 + D1: complex-graph static_user/static_role uses typed directory pickers only
+  // (manual-ID ordinary path removed). cc forces the preserved-graph (complex) path.
   describe('G-B2-18: complex-node assignee picker', () => {
-    // Real per-character typing (reading the DOM value fresh before each keystroke, exactly like a
-    // browser) — NOT a one-shot `input.value = finalString; dispatchEvent(...)`. A one-shot set would
-    // pass even against a naive `ids.join(', ')`-derived display that fights the controlled <el-input>
-    // on every keystroke; only per-character typing can red-light that regression.
-    async function typeChars(input: HTMLInputElement, chars: string) {
-      for (const ch of chars) {
-        input.value = input.value + ch
-        input.dispatchEvent(new Event('input'))
-        await flushUi()
-        // eslint-disable-next-line no-console
-        console.log('DEBUG after char', JSON.stringify(ch), '-> dom value =', JSON.stringify(input.value))
-      }
-    }
-
-    it('renders the user picker (not the role picker) for static_user, hydrated to the stored id via the fallback join', async () => {
+    it('renders the user picker (not the role picker) for static_user; no ordinary manual-ID control', async () => {
       routeParams = { id: 'tpl_g5_static_user' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['legacy-user-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
@@ -963,10 +949,17 @@ describe('TemplateAuthoringView', () => {
 
       expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
       expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).toBeNull()
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('legacy-user-1')
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-step-ids-text"]')).toBeNull()
+      // Stored legacy id still round-trips on an untouched save (picker preserves selection).
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+      expect(approval1.config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['legacy-user-1'] }])
     })
 
-    it('renders the role picker for static_role', async () => {
+    it('renders the role picker for static_role; no ordinary manual-ID control', async () => {
       routeParams = { id: 'tpl_g5_static_role' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
@@ -976,53 +969,49 @@ describe('TemplateAuthoringView', () => {
 
       expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
       expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).toBeNull()
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('mgr')
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+      expect(approval1.config.assigneeSources).toEqual([{ kind: 'static_role', roleIds: ['mgr'] }])
     })
 
-    // KEYSTONE regression for the controlled-<el-input> bug the manual fallback almost shipped with:
-    // deriving the box's displayed text from `ids.join(', ')` re-parsed on every keystroke fights
-    // Vue's DOM patch (it resets the input back to the re-derived text after each render), so a
-    // separator can never be typed and a second id can never be entered. Typed char-by-char, the FIX
-    // (a raw per-node text buffer, independent of the ids array until parsed) must let the full
-    // string through untouched.
-    it('keystone: typing a full multi-id string char-by-char into the manual fallback is never truncated', async () => {
-      routeParams = { id: 'tpl_g5_manual_typing' }
+    it('multi-id static_user selection preserved through save without a manual-ID control', async () => {
+      routeParams = { id: 'tpl_g5_multi_user' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
-        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: [] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1', 'u2'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
       await mountView()
       await flushUi()
 
-      const idsText = container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement
-      await typeChars(idsText, 'u1, u2')
-      expect(idsText.value).toBe('u1, u2') // NOT "u1u2" — separators survive every re-render.
-
+      expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
       ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
       await flushUi()
-
-      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
       const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
       const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
       expect(approval1.config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['u1', 'u2'] }])
     })
 
-    // The manual-text buffer is keyed only by nodeKey, not by (nodeKey, kind) — switching the SOURCE
-    // KIND away and back must not leak the OTHER kind's stale typed text into the box.
-    it('switching source kind clears the manual fallback text (no stale cross-kind leak)', async () => {
+    it('switching source kind swaps typed pickers (no manual-ID surface)', async () => {
       routeParams = { id: 'tpl_g5_kind_switch' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
       await mountView()
       await flushUi()
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('mgr')
+      expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
 
       const kindSelect = container!.querySelector('[data-testid="approval-node-source-kind"]') as HTMLSelectElement
       kindSelect.value = 'static_user'
       kindSelect.dispatchEvent(new Event('change'))
       await flushUi()
 
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('')
+      expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
     })
   })
 

@@ -208,7 +208,7 @@
               <el-input
                 v-model="draft.visibilityIdsText"
                 :disabled="readOnly || draft.visibilityType === 'all'"
-                placeholder="逗号分隔 id"
+                placeholder="逗号分隔，按所选范围填写"
               />
             </div>
           </el-form-item>
@@ -255,9 +255,7 @@
             </div>
           </div>
           <div class="template-authoring__grid">
-            <el-form-item label="字段 ID">
-              <el-input v-model="field.id" :disabled="readOnly" />
-            </el-form-item>
+            <!-- D1 hygiene: field.id is auto-generated / load-preserved; not an ordinary control. -->
             <el-form-item label="字段名称">
               <el-input v-model="field.label" :disabled="readOnly" />
             </el-form-item>
@@ -308,11 +306,7 @@
                   size="small"
                   class="template-authoring__detail-table"
                 >
-                  <el-table-column label="子字段 ID" min-width="120">
-                    <template #default="{ row }">
-                      <el-input v-model="row.id" :disabled="readOnly" placeholder="如 product" />
-                    </template>
-                  </el-table-column>
+                  <!-- D1 hygiene: detail column id is auto-generated / load-preserved; not ordinary UI. -->
                   <el-table-column label="名称" min-width="120">
                     <template #default="{ row }">
                       <el-input v-model="row.label" :disabled="readOnly" placeholder="如 品名" />
@@ -526,7 +520,7 @@
               @dragstart="onCanvasNodeDragStart(pos.key)"
               @dragend="onCanvasNodeDragEnd($event)"
             >
-              <strong>{{ canvasNodeByKey(pos.key)?.name || pos.key }}</strong>
+              <strong>{{ canvasNodeByKey(pos.key)?.name?.trim() || '未命名节点' }}</strong>
               <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
                 {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
               </span>
@@ -549,7 +543,7 @@
             data-testid="approval-graph-node-row"
           >
             <div class="template-authoring__item-toolbar">
-              <strong>{{ node.name || node.key }}</strong>
+              <strong>{{ node.name?.trim() || '未命名节点' }}</strong>
               <span class="template-authoring__node-type" :data-node-type="node.type">
                 {{ nodeTypeLabel(node.type) }}
               </span>
@@ -644,7 +638,7 @@
                       <el-option
                         v-for="field in conditionFieldOptions"
                         :key="field.id"
-                        :label="field.label"
+                        :label="fieldDisplayLabel(field)"
                         :value="field.id"
                       />
                     </el-select>
@@ -751,7 +745,7 @@
                         :title="`插入 requester.role in [&quot;${role.id}&quot;]`"
                         :data-testid="`approval-condition-formula-insert-role-${role.id}`"
                         @click="insertConditionFormulaRoleMembership(branch, role.id)"
-                      >{{ directory.formatRoleLabel(role) }}</el-button>
+                      >{{ directoryRoleDisplayLabel(role) }}</el-button>
                     </template>
                   </div>
                   <div class="template-authoring__condition-formula-dryrun">
@@ -859,18 +853,50 @@
                 </el-select>
               </el-form-item>
               <el-form-item label="抄送对象">
+                <!-- D1: typed directory picker (user remote / role list); no allow-create raw IDs. -->
                 <el-select
-                  v-model="ccEditFor(node.key)!.targetIds"
+                  v-if="ccEditFor(node.key)!.targetType === 'user'"
+                  :model-value="ccEditFor(node.key)!.targetIds"
                   multiple
                   filterable
-                  allow-create
-                  default-first-option
+                  remote
+                  :remote-method="onUserSearch"
+                  :loading="directory.usersLoading.value"
                   size="small"
                   :disabled="readOnly"
                   class="ms-w-360"
-                  placeholder="输入用户/角色 ID 后回车"
+                  placeholder="搜索用户名 / 邮箱"
                   data-testid="approval-cc-target-ids"
-                />
+                  @update:model-value="(ids: string[]) => setCcTargetIds(node.key, ids)"
+                  @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                >
+                  <el-option
+                    v-for="user in directory.users.value"
+                    :key="user.id"
+                    :label="directoryUserDisplayLabel(user)"
+                    :value="user.id"
+                  />
+                </el-select>
+                <el-select
+                  v-else
+                  :model-value="ccEditFor(node.key)!.targetIds"
+                  multiple
+                  filterable
+                  size="small"
+                  :disabled="readOnly"
+                  class="ms-w-360"
+                  placeholder="选择角色"
+                  data-testid="approval-cc-target-ids"
+                  @update:model-value="(ids: string[]) => setCcTargetIds(node.key, ids)"
+                  @visible-change="(visible: boolean) => visible && syncCcOptions(node.key)"
+                >
+                  <el-option
+                    v-for="role in directory.roles.value"
+                    :key="role.id"
+                    :label="directoryRoleDisplayLabel(role)"
+                    :value="role.id"
+                  />
+                </el-select>
               </el-form-item>
             </div>
 
@@ -900,10 +926,7 @@
                   />
                 </el-select>
               </el-form-item>
-              <!-- G-B2-18: same directory typeahead as the linear-step picker (line ~973) — the
-                   composable is shared (one users/roles fetch backs both surfaces), only the
-                   template wiring is duplicated per editor. The manual-ID input stays as the
-                   advanced fallback (directory search doesn't guarantee full id coverage). -->
+              <!-- G-B2-18 + D1: typed directory pickers only (no ordinary manual-ID path). -->
               <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
                 <el-form-item v-if="approvalSourceKind(node.key) === 'static_user'" label="选择用户">
                   <el-select
@@ -916,7 +939,7 @@
                     size="small"
                     :disabled="readOnly"
                     class="ms-w-360"
-                    placeholder="搜索用户名 / 邮箱 / ID"
+                    placeholder="搜索用户名 / 邮箱"
                     data-testid="approval-node-source-user-picker"
                     @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
                     @visible-change="(visible: boolean) => visible && onUserSearch('')"
@@ -924,7 +947,7 @@
                     <el-option
                       v-for="user in directory.users.value"
                       :key="user.id"
-                      :label="directory.formatUserLabel(user)"
+                      :label="directoryUserDisplayLabel(user)"
                       :value="user.id"
                     />
                   </el-select>
@@ -944,27 +967,16 @@
                     <el-option
                       v-for="role in directory.roles.value"
                       :key="role.id"
-                      :label="directory.formatRoleLabel(role)"
+                      :label="directoryRoleDisplayLabel(role)"
                       :value="role.id"
                     />
                   </el-select>
-                </el-form-item>
-                <el-form-item label="手动输入 ID（高级）">
-                  <el-input
-                    :model-value="approvalSourceIdsText(node.key)"
-                    :disabled="readOnly"
-                    placeholder="逗号或换行分隔"
-                    data-testid="approval-node-source-ids-text"
-                    @update:model-value="(text: string) => setApprovalSourceIdsText(node.key, text)"
-                  />
                 </el-form-item>
               </template>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
                 label="表单用户字段"
               >
-                <!-- D1: reuse the linear-step typed user-field picker (same userFields list).
-                     Value remains field.id in the payload; only the free-text ID box is gone. -->
                 <el-select
                   :model-value="approvalSourceFieldId(node.key)"
                   size="small"
@@ -977,7 +989,7 @@
                   <el-option
                     v-for="field in userFields"
                     :key="field.id"
-                    :label="field.label || field.id"
+                    :label="fieldDisplayLabel(field)"
                     :value="field.id"
                   />
                 </el-select>
@@ -1006,7 +1018,7 @@
                 show-icon
                 class="template-authoring__placeholder-hint"
                 data-testid="approval-node-placeholder-hint"
-                title="此为占位审批角色，发布前请替换为真实角色 ID"
+                title="此为占位审批角色，发布前请替换为真实角色"
                 description="占位角色无人可认领，未替换将无法发布该模板。"
               />
             </div>
@@ -1128,7 +1140,7 @@
                 :loading="directory.usersLoading.value"
                 :disabled="readOnly"
                 class="ms-w-100pct"
-                placeholder="搜索用户名 / 邮箱 / ID"
+                placeholder="搜索用户名 / 邮箱"
                 data-testid="approval-step-user-picker"
                 @update:model-value="(ids: string[]) => setStepIds(step, ids)"
                 @visible-change="(visible: boolean) => visible && onUserSearch('')"
@@ -1136,7 +1148,7 @@
                 <el-option
                   v-for="user in directory.users.value"
                   :key="user.id"
-                  :label="directory.formatUserLabel(user)"
+                  :label="directoryUserDisplayLabel(user)"
                   :value="user.id"
                 />
               </el-select>
@@ -1155,20 +1167,17 @@
                 <el-option
                   v-for="role in directory.roles.value"
                   :key="role.id"
-                  :label="directory.formatRoleLabel(role)"
+                  :label="directoryRoleDisplayLabel(role)"
                   :value="role.id"
                 />
               </el-select>
             </el-form-item>
-            <el-form-item v-if="step.sourceKind === 'static_user' || step.sourceKind === 'static_role'" label="手动输入 ID（高级）">
-              <el-input v-model="step.idsText" :disabled="readOnly" placeholder="逗号或换行分隔" data-testid="approval-step-ids-text" />
-            </el-form-item>
             <el-form-item v-if="step.sourceKind === 'form_field_user'" label="表单用户字段">
-              <el-select v-model="step.fieldId" :disabled="readOnly" class="ms-w-100pct">
+              <el-select v-model="step.fieldId" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-source-field">
                 <el-option
                   v-for="field in userFields"
                   :key="field.id"
-                  :label="field.label || field.id"
+                  :label="fieldDisplayLabel(field)"
                   :value="field.id"
                 />
               </el-select>
@@ -1215,7 +1224,7 @@
               class="template-authoring__field-perm-row"
               data-testid="approval-step-field-permission-row"
             >
-              <span class="template-authoring__field-perm-label">{{ field.label || field.id }}</span>
+              <span class="template-authoring__field-perm-label">{{ fieldDisplayLabel(field) }}</span>
               <el-select
                 :model-value="stepFieldAccess(step, field.id)"
                 :disabled="readOnly"
@@ -1271,7 +1280,7 @@
           <el-form-item label="样例发起人（留空 = 以当前管理员身份预览）">
             <ApprovalUserPicker
               v-model="sampleRequesterId"
-              placeholder="搜索用户名 / 邮箱 / ID（可留空）"
+              placeholder="搜索用户名 / 邮箱（可留空）"
               data-testid="approval-template-tryrun-requester-picker"
             />
           </el-form-item>
@@ -1287,14 +1296,14 @@
           <template v-for="field in requesterVisibleFields" :key="field.id">
             <el-form-item
               v-if="!sampleFieldUnsupportedReason(field)"
-              :label="field.label || field.id"
+              :label="fieldDisplayLabel(field)"
               data-testid="approval-template-tryrun-field"
             >
               <!-- text -->
               <el-input
                 v-if="field.type === 'text'"
                 v-model="sampleFormData[field.id]"
-                :placeholder="field.placeholder || `请输入${field.label}`"
+                :placeholder="field.placeholder || `请输入${fieldDisplayLabel(field)}`"
               />
               <!-- textarea -->
               <el-input
@@ -1302,7 +1311,7 @@
                 v-model="sampleFormData[field.id]"
                 type="textarea"
                 :rows="2"
-                :placeholder="field.placeholder || `请输入${field.label}`"
+                :placeholder="field.placeholder || `请输入${fieldDisplayLabel(field)}`"
               />
               <!-- number -->
               <el-input-number
@@ -1315,7 +1324,7 @@
                 v-else-if="field.type === 'date'"
                 v-model="sampleFormData[field.id]"
                 type="date"
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               />
               <!-- datetime -->
@@ -1323,14 +1332,14 @@
                 v-else-if="field.type === 'datetime'"
                 v-model="sampleFormData[field.id]"
                 type="datetime"
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               />
               <!-- select -->
               <el-select
                 v-else-if="field.type === 'select'"
                 v-model="sampleFormData[field.id]"
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               >
                 <el-option
@@ -1345,7 +1354,7 @@
                 v-else-if="field.type === 'multi-select'"
                 v-model="sampleFormData[field.id]"
                 multiple
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               >
                 <el-option
@@ -1367,7 +1376,7 @@
               class="template-authoring__hint template-authoring__wide"
               data-testid="approval-template-tryrun-field-unsupported"
             >
-              {{ field.label || field.id }}：{{ sampleFieldUnsupportedReason(field) }}
+              {{ fieldDisplayLabel(field) }}：{{ sampleFieldUnsupportedReason(field) }}
             </div>
           </template>
         </el-form>
@@ -1388,7 +1397,7 @@
                 :key="entry.field.id"
                 data-testid="approval-template-tryrun-hidden-field"
               >
-                <span class="template-authoring__tryrun-hidden-label">{{ entry.field.label || entry.field.id }}</span>
+                <span class="template-authoring__tryrun-hidden-label">{{ fieldDisplayLabel(entry.field) }}</span>
                 <span class="template-authoring__tryrun-hidden-reason">{{ entry.reason }}</span>
               </li>
             </ul>
@@ -1743,6 +1752,24 @@ function nodeTypeLabel(type: string): string {
 // One read-only descriptor per node config, covering ALL three complex types (condition / parallel
 // / cc) plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
 // without summarisable config (start/end).
+function fieldDisplayLabel(field: { label?: string | null }): string {
+  const label = field.label?.trim()
+  return label ? label : '未命名字段'
+}
+
+/** Ordinary-user directory labels never fall back to the raw directory id. */
+function directoryUserDisplayLabel(user: { name?: string | null; email?: string | null }): string {
+  const name = user.name?.trim()
+  const email = user.email?.trim()
+  if (name) return email ? `${name} · ${email}` : name
+  return email || '未知用户'
+}
+
+function directoryRoleDisplayLabel(role: { name?: string | null }): string {
+  const name = role.name?.trim()
+  return name || '未知角色'
+}
+
 function graphNodeDisplayName(nodeKey: string | null | undefined): string {
   if (!nodeKey) return '（无）'
   const node = draft.value.preservedGraph?.nodes.find((entry) => entry.key === nodeKey)
@@ -1826,7 +1853,7 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
       }
       if (source.kind === 'form_field_user') {
         const field = draft.value.fields.find((entry) => entry.id === source.fieldId)
-        return `审批人：表单用户字段：${field?.label || field?.id || '（未选）'}`
+        return `审批人：表单用户字段：${field ? fieldDisplayLabel(field) : '（未选）'}`
       }
       return `审批人：${assigneeSourceSummary(source)}`
     })
@@ -1860,7 +1887,7 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
 const conditionFieldOptions = computed(() =>
   draft.value.fields
     .filter((field) => field.id.trim())
-    .map((field) => ({ id: field.id.trim(), label: field.label.trim() || field.id.trim() })),
+    .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
 const conditionFormulaInsertOptions = computed(() =>
   approvalFormulaInsertOptions(buildFormSchema(draft.value)),
@@ -2149,7 +2176,7 @@ const publishApprovalFlowIssues = computed<string[]>(() => [
 const publishPlaceholderRoleKeys = computed<string[]>(() => placeholderRoleNodeKeys(draft.value.approvalNodeEdits ?? {}))
 const publishPlaceholderRoleIssues = computed<string[]>(() =>
   publishPlaceholderRoleKeys.value.map(
-    (key) => `审批节点「${canvasNodeByKey(key)?.name || key}」仍为占位审批角色，请先替换为真实角色`,
+    (key) => `审批节点「${canvasNodeByKey(key)?.name?.trim() || '未命名节点'}」仍为占位审批角色，请先替换为真实角色`,
   ),
 )
 const publishChecklist = computed<PublishChecklistItem[]>(() => [
@@ -2208,12 +2235,6 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
 // buffer is the raw carrier instead (never part of node.config / the saved graph): read back
 // verbatim once the author has touched the field, falling back to the derived join before that
 // (hydrate / a node nobody has edited yet).
-function approvalSourceIdsText(nodeKey: string): string {
-  return approvalSourceIds(nodeKey).join(', ')
-}
-function setApprovalSourceIdsText(nodeKey: string, text: string): void {
-  setApprovalSourceIds(nodeKey, parseIdsText(text))
-}
 function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
   setApprovalSourceIds(nodeKey, ids)
 }
@@ -2270,8 +2291,7 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
   // Keep already-selected ids visible as chips even if the new search page omits them —
-  // across BOTH pickers that share this one composable instance (linear steps + G-B2-18
-  // complex-graph nodes).
+  // across linear steps, complex approval nodes, and CC user targets.
   for (const step of draft.value.steps) {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
@@ -2279,6 +2299,11 @@ async function onUserSearch(query: string): Promise<void> {
   for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) {
     if (approvalSourceKind(nodeKey) !== 'static_user') continue
     for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
+  }
+  for (const nodeKey of Object.keys(draft.value.ccEdits ?? {})) {
+    const edit = ccEditFor(nodeKey)
+    if (!edit || edit.targetType !== 'user') continue
+    for (const id of edit.targetIds) directory.ensureUserOptionVisible(id)
   }
 }
 
@@ -2296,11 +2321,8 @@ function syncAllStepOptions(): void {
   for (const step of draft.value.steps) syncStepOptions(step)
 }
 
-// G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to the complex-graph
-// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey, one entry per editable
-// approval node — see approvalNodeEditFor). Also re-seeds (or clears) the manual-ID text buffer
-// so a source-KIND switch never leaves the OTHER kind's stale typed text showing — the buffer is
-// keyed only by nodeKey, not by (nodeKey, kind), so it must be reset whenever kind changes.
+// G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to complex-graph
+// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey).
 function syncApprovalNodeOptions(nodeKey: string): void {
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'static_user') {
@@ -2312,6 +2334,27 @@ function syncApprovalNodeOptions(nodeKey: string): void {
 
 function syncAllApprovalNodeOptions(): void {
   for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
+}
+
+function setCcTargetIds(nodeKey: string, ids: string[]): void {
+  const edit = ccEditFor(nodeKey)
+  if (!edit) return
+  edit.targetIds = ids
+  syncCcOptions(nodeKey)
+}
+
+function syncCcOptions(nodeKey: string): void {
+  const edit = ccEditFor(nodeKey)
+  if (!edit) return
+  if (edit.targetType === 'user') {
+    for (const id of edit.targetIds) directory.ensureUserOptionVisible(id)
+  } else {
+    for (const id of edit.targetIds) directory.ensureRoleOptionVisible(id)
+  }
+}
+
+function syncAllCcOptions(): void {
+  for (const nodeKey of Object.keys(draft.value.ccEdits ?? {})) syncCcOptions(nodeKey)
 }
 
 function clearErrors() {
@@ -2386,7 +2429,7 @@ function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
 function visibilityFieldOptions(current: FieldAuthoringDraft) {
   return draft.value.fields
     .filter((field) => field.localId !== current.localId && field.id.trim().length > 0)
-    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: field.label.trim() || field.id.trim() }))
+    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) }))
 }
 
 function addStep() {
@@ -2426,6 +2469,7 @@ async function loadTemplateForEdit() {
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
+    syncAllCcOptions()
     snapshotDraft()
   } catch (error: any) {
     loadError.value = error?.message ?? '加载审批模板失败'
@@ -2497,6 +2541,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
+    syncAllCcOptions()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
@@ -2569,7 +2614,7 @@ const routePreviewError = ref('')
 const templateIdForPreview = computed(() => draft.value.templateId ?? '')
 
 const tryRunDisabledReason = computed<string>(() => {
-  if (!templateIdForPreview.value) return '请先保存草稿以获取模板 ID，才能试运行'
+  if (!templateIdForPreview.value) return '请先保存草稿，才能试运行'
   if (isDraftDirty.value) return '有未保存的更改，请先保存再试运行'
   return ''
 })
@@ -2640,7 +2685,7 @@ const conditionNodeSummaries = computed(() =>
     .filter((node) => node.type === 'condition')
     .map((node) => ({
       key: node.key,
-      label: node.name || node.key,
+      label: node.name?.trim() || '未命名节点',
       lines: nodeConfigSummary(node),
     })),
 )
