@@ -600,7 +600,8 @@
                 data-testid="approval-condition-branch"
               >
                 <div class="template-authoring__condition-branch-head">
-                  <span>分支「{{ liveBranchSummary(branch) }}」→ {{ branch.edgeKey }}</span>
+                  <!-- D1 ordinary-user hygiene: readable predicate only; edge keys stay in the model/payload, not the DOM. -->
+                  <span>分支「{{ liveBranchSummary(branch) }}」</span>
                   <el-select
                     :model-value="branch.predicateMode"
                     size="small"
@@ -793,7 +794,7 @@
                   <el-option
                     v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
                     :key="edgeKey"
-                    :label="edgeKey"
+                    :label="conditionDefaultEdgeLabel(node.key, edgeKey)"
                     :value="edgeKey"
                   />
                 </el-select>
@@ -825,10 +826,11 @@
                   />
                 </el-select>
               </el-form-item>
-              <!-- branches + join target are preserved topology (not editable here). -->
+              <!-- branches + join target are preserved topology (not editable here).
+                   D1 hygiene: show human node names, never raw edge/node keys. -->
               <ul class="template-authoring__node-summary" data-testid="approval-parallel-topology">
-                <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.join('、') || '（无）' }}</li>
-                <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey || '（无）' }}</li>
+                <li>并行分支：{{ parallelBranchLabels(node) }}</li>
+                <li>汇聚节点：{{ graphNodeDisplayName((node.config as ParallelNodeConfig).joinNodeKey) }}</li>
               </ul>
             </div>
 
@@ -959,17 +961,26 @@
               </template>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
-                label="表单用户字段 ID"
+                label="表单用户字段"
               >
-                <el-input
+                <!-- D1: reuse the linear-step typed user-field picker (same userFields list).
+                     Value remains field.id in the payload; only the free-text ID box is gone. -->
+                <el-select
                   :model-value="approvalSourceFieldId(node.key)"
                   size="small"
                   :disabled="readOnly"
                   class="ms-w-240"
-                  placeholder="顶层 user 字段 ID"
+                  placeholder="选择表单用户字段"
                   data-testid="approval-node-source-field"
                   @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, fieldId)"
-                />
+                >
+                  <el-option
+                    v-for="field in userFields"
+                    :key="field.id"
+                    :label="field.label || field.id"
+                    :value="field.id"
+                  />
+                </el-select>
               </el-form-item>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'manager_at_level' || approvalSourceKind(node.key) === 'continuous_managers'"
@@ -1157,7 +1168,7 @@
                 <el-option
                   v-for="field in userFields"
                   :key="field.id"
-                  :label="`${field.label} (${field.id})`"
+                  :label="field.label || field.id"
                   :value="field.id"
                 />
               </el-select>
@@ -1204,7 +1215,7 @@
               class="template-authoring__field-perm-row"
               data-testid="approval-step-field-permission-row"
             >
-              <span class="template-authoring__field-perm-label">{{ field.label || field.id }}（{{ field.id }}）</span>
+              <span class="template-authoring__field-perm-label">{{ field.label || field.id }}</span>
               <el-select
                 :model-value="stepFieldAccess(step, field.id)"
                 :disabled="readOnly"
@@ -1232,19 +1243,8 @@
         </div>
       </el-card>
 
-      <el-card v-show="activeAuthoringSection === 'review'" class="template-authoring__panel" shadow="never">
-        <template #header>
-          <strong>JSON 预览</strong>
-        </template>
-        <el-collapse>
-          <el-collapse-item title="formSchema" name="form">
-            <pre data-testid="approval-template-form-preview">{{ formSchemaPreview }}</pre>
-          </el-collapse-item>
-          <el-collapse-item title="approvalGraph" name="graph">
-            <pre data-testid="approval-template-graph-preview">{{ approvalGraphPreview }}</pre>
-          </el-collapse-item>
-        </el-collapse>
-      </el-card>
+      <!-- D1 ordinary-user hygiene: JSON formSchema/approvalGraph preview removed from the review
+           step. Payload builders are unchanged; try-run remains the user-facing dry-run surface. -->
 
       <!-- RP-3 (route-preview lock, B3-06) FE 试运行面板: read-only dry-run of the LAST-SAVED
            draft graph — never writes an instance/assignment/notification. Compute-at-click via
@@ -1539,7 +1539,7 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { summarizeConditionBranch, summarizeConditionNode } from '../../approvals/conditionSummary'
+import { summarizeConditionBranch } from '../../approvals/conditionSummary'
 import {
   createTemplate,
   dryRunApprovalConditionFormula,
@@ -1743,31 +1743,93 @@ function nodeTypeLabel(type: string): string {
 // One read-only descriptor per node config, covering ALL three complex types (condition / parallel
 // / cc) plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
 // without summarisable config (start/end).
+function graphNodeDisplayName(nodeKey: string | null | undefined): string {
+  if (!nodeKey) return '（无）'
+  const node = draft.value.preservedGraph?.nodes.find((entry) => entry.key === nodeKey)
+  return node?.name?.trim() || '（未命名节点）'
+}
+
+/** D1 hygiene: resolve a parallel fork edge key to its target node name (never show the raw key). */
+function parallelBranchLabels(node: ApprovalNode): string {
+  const cfg = node.config as ParallelNodeConfig
+  const branches = cfg.branches ?? []
+  if (branches.length === 0) return '（无）'
+  const edges = draft.value.preservedGraph?.edges ?? []
+  return branches.map((edgeKey, index) => {
+    const edge = edges.find((entry) => entry.key === edgeKey)
+    if (edge?.target) return graphNodeDisplayName(edge.target)
+    return `分支 ${index + 1}`
+  }).join('、')
+}
+
+/**
+ * D1 ordinary-user edge-key label for the default-branch picker.
+ * Prefer the matching branch's readable predicate, else the edge's target node name.
+ * Value binding stays the raw edgeKey (payload unchanged).
+ */
+function conditionDefaultEdgeLabel(conditionNodeKey: string, edgeKey: string): string {
+  const edit = conditionEditFor(conditionNodeKey)
+  const branch = edit?.branches.find((entry) => entry.edgeKey === edgeKey)
+  if (branch) {
+    const summary = liveBranchSummary(branch)
+    if (summary && summary !== '（无规则）') return summary
+  }
+  const edge = draft.value.preservedGraph?.edges.find((entry) => entry.key === edgeKey)
+  if (edge?.target) return graphNodeDisplayName(edge.target)
+  return '默认分支'
+}
+
 function nodeConfigSummary(node: ApprovalNode): string[] {
   const config = node.config as Record<string, unknown>
   if (node.type === 'condition') {
     const cfg = config as unknown as ConditionNodeConfig
-    // G-B2-19: readable predicates（「金额 > 5000」）lead; edge keys stay as secondary provenance.
-    return summarizeConditionNode(cfg, buildFormSchema(draft.value))
+    const schema = buildFormSchema(draft.value)
+    // D1 hygiene: readable predicates only — no edge-key secondary provenance in ordinary DOM.
+    const lines = (cfg.branches ?? []).map(
+      (branch) => `分支「${summarizeConditionBranch(branch, schema)}」`,
+    )
+    if (cfg.defaultEdgeKey) {
+      const edge = draft.value.preservedGraph?.edges.find((entry) => entry.key === cfg.defaultEdgeKey)
+      lines.push(`默认分支 → ${edge?.target ? graphNodeDisplayName(edge.target) : '（已配置）'}`)
+    }
+    return lines
   }
   if (node.type === 'parallel') {
     const cfg = config as unknown as ParallelNodeConfig
     return [
-      `并行分支：${(cfg.branches ?? []).join('、') || '（无）'}`,
-      `汇聚节点：${cfg.joinNodeKey ?? '（无）'}`,
+      `并行分支：${parallelBranchLabels(node)}`,
+      `汇聚节点：${graphNodeDisplayName(cfg.joinNodeKey)}`,
       `汇聚模式：${cfg.joinMode ?? '（无）'}`,
     ]
   }
   if (node.type === 'cc') {
     const cfg = config as unknown as CcNodeConfig
+    // H2: CC still has no directory picker — targetIds remain the only carrier. Show type only
+    // so ordinary DOM does not dump raw assignee IDs; the editable picker still holds the values.
     return [
       `抄送类型：${cfg.targetType === 'role' ? '角色' : '用户'}`,
-      `抄送对象：${(cfg.targetIds ?? []).join('、') || '（无）'}`,
+      `抄送对象：${(cfg.targetIds ?? []).length ? `已选 ${(cfg.targetIds ?? []).length} 个` : '（无）'}`,
     ]
   }
   if (node.type === 'approval') {
     const sources = Array.isArray(config.assigneeSources) ? config.assigneeSources as ApprovalAssigneeSource[] : []
-    return sources.map((source) => `审批人：${assigneeSourceSummary(source)}`)
+    // Prefer human labels; for static_user/static_role avoid dumping raw id lists in read-only rows
+    // (typed pickers own those values when the node is editable).
+    return sources.map((source) => {
+      if (source.kind === 'static_user') {
+        const count = source.userIds?.length ?? 0
+        return `审批人：指定用户${count ? `（${count} 人）` : '（无）'}`
+      }
+      if (source.kind === 'static_role') {
+        const count = source.roleIds?.length ?? 0
+        return `审批人：指定角色${count ? `（${count} 个）` : '（无）'}`
+      }
+      if (source.kind === 'form_field_user') {
+        const field = draft.value.fields.find((entry) => entry.id === source.fieldId)
+        return `审批人：表单用户字段：${field?.label || field?.id || '（未选）'}`
+      }
+      return `审批人：${assigneeSourceSummary(source)}`
+    })
   }
   return []
 }
@@ -2147,9 +2209,7 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
 // verbatim once the author has touched the field, falling back to the derived join before that
 // (hydrate / a node nobody has edited yet).
 function approvalSourceIdsText(nodeKey: string): string {
-  const v = approvalSourceIds(nodeKey).join(', ')
-  console.log('DEBUG approvalSourceIdsText call ->', JSON.stringify(v), 'ids=', JSON.stringify(approvalSourceIds(nodeKey)))
-  return v
+  return approvalSourceIds(nodeKey).join(', ')
 }
 function setApprovalSourceIdsText(nodeKey: string, text: string): void {
   setApprovalSourceIds(nodeKey, parseIdsText(text))
@@ -2193,9 +2253,6 @@ const routingDriverFieldIds = computed(() => {
 function onStepFieldAccessChange(step: ApprovalStepDraft, fieldId: string, access: NodeFieldAccess): void {
   step.fieldPermissions = setStepFieldPermission(step.fieldPermissions, fieldId, access)
 }
-
-const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
-const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
 
 // Directory typeahead for static_user / static_role assignee sources. The picker is purely
 // additive: it reads/writes the SAME step.idsText carrier (parseIdsText in, ', ' join out, the
@@ -2555,10 +2612,10 @@ watch(isDraftDirty, (dirty) => {
 })
 
 // The sample form renders off the SAME formSchema the template actually routes on
-// (buildFormSchema(draft.value) — identical source as the "JSON 预览" card above), so an author
-// never types a sample value the template can't see. `detail` (repeating sub-form rows) and
-// `attachment` (no working upload pipeline yet — see ApprovalNewView's own honest stopgap) are
-// skipped with an inline note rather than faked; every other field type gets a plain input.
+// (buildFormSchema(draft.value)), so an author never types a sample value the template can't see.
+// `detail` (repeating sub-form rows) and `attachment` (no working upload pipeline yet — see
+// ApprovalNewView's own honest stopgap) are skipped with an inline note rather than faked; every
+// other field type gets a plain input.
 const templateFormFields = computed<FormField[]>(() => buildFormSchema(draft.value).fields)
 
 // G-B2-21: the requester-view split for the 试运行 sample values. Delegates visibility to the
