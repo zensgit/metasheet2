@@ -499,9 +499,11 @@ exists only after `committed`.
   No contradiction with `ApprovalGraph`.
 - F-2: Threshold mode — backend `ApprovalMode` includes `'threshold'`; the FE type copy currently does
   not. The inspector must not ship a threshold control ahead of the FE type/validation surface catching
-  up via the normal shared-types integration lane; until then threshold graphs load and display
-  read-only summaries but are not editable into threshold mode from the canvas. No runtime change is
-  implied or authorized here.
+  up via D3-p. The current authoring allowlist locks affected graphs before hydration because the linear
+  adapter would otherwise downgrade `threshold` to `single` and omit threshold/timeout fields on rebuild;
+  the current summaries also do not represent those policies reliably. D3-p must reverse that lock only
+  after shared types, policy validation, summaries, and load/save round-trip tests all pass. No runtime
+  change is implied or authorized here.
 - F-3: `readonly`/`editable` field permissions are contract-stable but runtime-inert. The inspector shows
   them as configuration with no claim of enforcement (G3-d1 honesty); `hidden` keeps its server-side
   behavior through canvas/preview/snapshot/history (D7-d1).
