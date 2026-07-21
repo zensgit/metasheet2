@@ -24,6 +24,13 @@ export type AutomationActionType =
   // business side effect (no record write / no outbound / no job). Dispatched
   // through the SAME executor path as every other action (no parallel path).
   | 'record_click'
+  // FWB activation (FWB0 lock, RATIFIED 2026-07-15): write approved form values into the rule's OWN
+  // sheet as a NEW record (lock D2 — FWB-1 target = rule.sheet_id, no cross-base, no explicit sheet
+  // target; §11 Q3 rejected same-base explicit targets). Save-allowed ONLY on approval.completed rules
+  // (lock D11: APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES "只放行这一个新动作"). Execution is flag-gated
+  // (APPROVAL_FWB_WRITEBACK_ENABLED, default OFF) and rides the durable outbox + the FWB instance-scoped
+  // idempotency ledger (lock D9: claim + record + revision + outbox = ONE transaction).
+  | 'write_approval_form_values'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -41,7 +48,33 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'start_approval',
   'parallel_branch',
   'record_click',
+  'write_approval_form_values',
 ]
+
+/**
+ * Config shape for write_approval_form_values (FWB activation).
+ *
+ * Deliberately NO target sheet/base fields: FWB-1's target is the rule's own sheet (FWB0 lock D2; §11 Q3
+ * rejected same-base explicit sheet targets — "显式表目标无表单锚点，会重开 W7 Q2 字面目标之争").
+ * Form VALUES never appear here either — the executor reads the immutable `form_snapshot` server-side by
+ * instanceId (lock D4: 表单值永不进事件载荷/动作配置).
+ */
+export interface WriteApprovalFormValuesConfig {
+  /** template form field → target field mappings; v1 types text/number/date/select (lock §4, D5-D8). */
+  mappings: Array<{
+    formFieldId: string
+    targetFieldId: string
+    targetType: 'text' | 'number' | 'date' | 'select'
+    /** required for 'select': the CLOSED allowed-option set (lock D6 — no create-on-write). */
+    selectOptions?: string[]
+  }>
+  /**
+   * §11 Q6 gate-3 explicit confirmation, BOUND to the actual config: the server-derived sha256 of the
+   * canonicalized {templateId, targetSheetId, mappings}. Save rejects a mismatch; execute re-derives from
+   * the persisted row, so any config/target/template change invalidates the confirmation.
+   */
+  confirmationHash: string
+}
 
 /** Config shape for update_record */
 export interface UpdateRecordConfig {
