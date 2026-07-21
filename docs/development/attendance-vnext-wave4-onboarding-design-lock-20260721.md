@@ -30,6 +30,16 @@
 > canonical activation checklist**（绝不暗示已启用）；模板时区禁硬编码（取组织显式时区，取不到要求
 > 用户选择）。OD 裁决全录 §8；两非阻断项（聚合单 CTE 或短 TTL org-scoped cache；§10 编号 1..7）
 > 已吸收。owner：修订完成并再次核对后方建议 PROPOSED → RATIFIED。
+>
+> **Amendment round-3（2026-07-21，owner 复审 = CHANGES REQUESTED，0 P1 / 3 P2 / 1 P3；其余复核
+> 全过——四红线转写保真、org 门/SELECT-only seam/通知 port/模板合同/preview 零写/Wave 5 串行边界
+> 均闭合）**：P2-1 步骤①「同步**或**创建」曾被错落为 AND → 改为 `orgActiveMemberCount>0` 即完成、
+> `directoryLinked` 仅辅助状态；P2-2 步骤④ default→missing 使「接受默认策略」永远过不了门 →
+> 按 owner 给出的二选一，锁作者选 **(b) 默认即 ready 并显示「使用平台默认策略」**（理由：确认标记
+> 方案在部署级 settings 上要么跨组织假绿、要么需 org 级版本绑定标记而凭空新增 runtime 写面——与
+> R1/零写姿态相悖；owner 终裁时可改选）；P2-3 生效时间改
+> `posture: immediate|scheduled|manual_activation|undeterminable` + known 时附 `effectiveAt`；
+> P3 §4.2 响应描述改「values-free 枚举、时间姿态与计数，不含 ID、姓名、凭据或原始配置值」。
 
 ---
 
@@ -97,25 +107,27 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 
 | 步 | 完成信号（values-free 计数/布尔） | 现有原料（file:line） | 修复动作深链（§6，query 形） |
 |---|---|---|---|
-| ① | `directoryLinked`（S7-5 原样复用）+ `orgActiveMemberCount>0`（**真源 = `user_orgs` 该 org 的 active 成员数**，P2-1：绝不用考勤组成员数——那与步骤②循环依赖） | `attendance-admin.ts:336-360`；`user_orgs` 表（S7-5 门已查同表 `:367-379`） | `attendance-admin-user-access` |
+| ① | **完成条件 = `orgActiveMemberCount>0`**（真源 = `user_orgs` 该 org 的 active 成员数；绝不用考勤组成员数——与步骤②循环依赖）；`directoryLinked` 仅作「同步来源已连接」**辅助状态**，不参与完成判定（round-3 P2-1：「同步**或**创建」——手工创建用户无 directory link，AND 会让百人手工组织永远未完成） | `attendance-admin.ts:336-360`；`user_orgs` 表（S7-5 门已查同表 `:367-379`） | `attendance-admin-user-access` |
 | ② | `groupCount>0 && groupsWithMembers>0` | `index.cjs:37718`（含 member_count 子查询） | `attendance-admin-groups` |
 | ③ | `shiftCount>0`；排班制组存在时另需 `hasRotationRules`（`rotationRuleCount>0`，round-2 闭合项） | `index.cjs:39710`；`attendance_rotation_rules`（`index.cjs:14192`） | `attendance-admin-shifts` |
-| ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**——`attendance.settings` 为部署级单键（`index.cjs:291`），保存写入完整 normalized defaults，key 存在≠本组织配置过；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：与 normalized defaults 比对，前端只收枚举）；`default` 显示「待确认」**绝不伪装已配置**，`unknown` fail-closed） | `system_configs key='attendance.settings'`（`index.cjs:291-295,13733-13760`） | `attendance-admin-settings` |
+| ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**——`attendance.settings` 为部署级单键（`index.cjs:291`），保存写入完整 normalized defaults，key 存在≠本组织配置过；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：与 normalized defaults 比对，前端只收枚举）；round-3 裁定 (b)：`default→ready` 并显示**「使用平台默认策略」**、`customized→ready` 显示「已自定义」、
+`unknown→unknown` fail-closed——平台默认是合法可用策略，显示语义诚实区分，无确认标记、零新写面） | `system_configs key='attendance.settings'`（`index.cjs:291-295,13733-13760`） | `attendance-admin-settings` |
 | ⑤ | `approvalFlowCount>0`（含 active 判定） | `index.cjs:30924` | `attendance-admin-approval-flows` |
 | ⑥ | 经 §4.5 runtime readiness port：`workerEnabled` + `defaultChannelAvailable` + `availableChannelCount` + `orgRecipientBindingReady`（P2-3：历史 delivery 行**不是**配置真源，settings 亦不注册渠道；port 缺失 ⇒ `unknown`） | `AttendanceNotificationDeliveryWorker.ts:370+`（渠道逐个 env-gated、worker 按名路由） | `attendance-admin-notification-deliveries` |
 | ⑦ | 前六步全绿 ⇒ `previewReady`；步名 = **「预览影响范围（preview-ready）」**——向导只做只读预览 + 展示**人工 canonical activation checklist**（逐项列出真人要去哪些 canonical 面完成启用），**绝不暗示已启用**（round-2）；影响人数=①②计数派生 | 聚合派生 | （无——预览在向导内，只读） |
 
 判别值域（纯模块判别矩阵的行）：`ready / missing / forbidden / unknown / db_not_ready`（5 值，与 §7
 纯模块全值域一致；round-1 曾引入 `manual_review_required`，round-2 ④ 改 posture 枚举后该值无生产者，
-遂删——**④ 的 posture→判别值映射显式锁定**：`customized→ready`、`default→missing`（显示「待确认」）、
-`unknown→unknown`），且每信号携带 `scope: 'org' | 'deployment'`（全局信号显式标 `deployment`，追加门禁 2）——
+遂删——**④ 的 posture→判别值映射显式锁定（round-3）**：`customized→ready`（「已自定义」）、
+`default→ready`（「使用平台默认策略」）、`unknown→unknown`），且每信号携带 `scope: 'org' | 'deployment'`（全局信号显式标 `deployment`，追加门禁 2）——
 `forbidden` 为 per-surface（§4.3），`unknown` fail-closed 显示为「未知，去核查」，绝不显示为已完成
 （章程 L232 未知态红线）；`db_not_ready`
 对应各端点统一 503 `DB_NOT_READY` 档（`index.cjs:37752` 等）。
-**「计划生效时间」逐步来源规则（追加门禁 4 + round-2 结构闭合）**：生效时间入响应结构为逐步 posture
-`effectiveTime: {source: <权威来源标识>, posture: 'known'|'undeterminable'}`——有权威来源（如排班生效日、
-节假日同步窗口）才 `known`；否则 `undeterminable` 显示「无法确定」，**不得省略、不得猜测**；各步来源在
-W4-0 判别矩阵逐行登记。
+**「计划生效时间」逐步来源规则（追加门禁 4 + round-3 可展示语义）**：生效时间入响应结构为逐步
+`effectiveTime: {source: <权威来源标识>, posture: 'immediate'|'scheduled'|'manual_activation'|'undeterminable',
+effectiveAt?: ISO 时间（posture=scheduled 且已知时必附）}`——`immediate`=保存即生效、`scheduled`=有权威
+排期（附 effectiveAt）、`manual_activation`=待人工启用（⑦清单联动）、`undeterminable` 显示「无法确定」，
+**不得省略、不得猜测**；各步来源在 W4-0 判别矩阵逐行登记。
 
 ## 4. Readiness 聚合契约（R1）
 
@@ -123,11 +135,12 @@ W4-0 判别矩阵逐行登记。
 core-backend `attendance-admin.ts` router——继承 router 级 `rbacGuard('attendance','admin')` + S7-5 同款
 `user_orgs` org-membership 门 + 平台 admin 直通（`:367-379` 先例逐字复用）。**不选** plugin 路由：
 那将继承「信任客户端 orgId」缺口（§1-5），对一个汇总全 org 配置面的端点不可接受。
-**4.2 响应形状（values-free by construction）**：仅布尔与非负整数计数，每信号带 `scope` 标记
+**4.2 响应形状（values-free by construction）**：**values-free 枚举、时间姿态与计数，不含 ID、姓名、
+凭据或原始配置值**（round-3 P3 措辞），每信号带 `scope` 标记
 `{directoryLinked, orgActiveMemberCount, groupCount, groupsWithMembers, shiftCount, rotationRuleCount,
 hasRotationRules, approvalFlowCount, punchPolicyPosture(default|customized|unknown, scope=deployment),
 notify:{workerEnabled, defaultChannelAvailable, availableChannelCount, orgRecipientBindingReady},
-perStep.effectiveTime:{source, posture(known|undeterminable)}}` ——聚合实现采用**单条 CTE（限 ①②③⑤ 及 group-membership 等 org-scoped 计数——④ 为部署级 settings 读、
+perStep.effectiveTime:{source, posture(immediate|scheduled|manual_activation|undeterminable), effectiveAt?}}` ——聚合实现采用**单条 CTE（限 ①②③⑤ 及 group-membership 等 org-scoped 计数——④ 为部署级 settings 读、
 ⑥ 为运行时 port 非 DB，均在 CTE 之外）或短 TTL org-scoped cache**（owner 非阻断项）——
 契约测试断言 SQL 文本不含任何标识列（S7-5 单测先例：`attendance-admin-directory-readiness-s7-5.test.ts:82-191`）,
 且响应键集合恒等锁定。错误档：400 `ORG_ID_REQUIRED` / 401 / 403 / 503 `DB_NOT_READY` / 500 泛化文案。
