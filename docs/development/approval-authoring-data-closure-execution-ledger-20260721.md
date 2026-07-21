@@ -30,13 +30,29 @@ scope on that branch. Merge, deployment, real tenant UAT, and production enablem
 | Role | Work used in this program | Acceptance boundary |
 |---|---|---|
 | Codex | dependency audit, hot-file integration, FWB/attachment fixes, exact-head tests, CI wiring, final review | final engineering recommendation; no self-ratification of owner gates |
-| Grok Build | bounded D2-b command work plus final exact-head read-only adversarial review | Codex owns every accepted fix and reruns the named tests; Grok is a second opinion, not merge authority |
-| Kimi K3 | document/status consistency review after code evidence is frozen | prose and scope review only; no product-correctness verdict is attributed to Kimi |
+| Grok Build | bounded command work, record-link Layer 2 implementation, dependency/layout spikes, and exact-head adversarial review | Codex owns every accepted fix and reruns the named tests; Grok is an implementation worker/second opinion, not merge authority |
+| Kimi K3 | long-context FWB number/date/select mapping implementation and later document/visual consistency review | Codex reviews the diff and reruns unit/fresh-DB tests; Kimi never supplies the final correctness verdict |
 | Codex subagents | disjoint command-layer and documentation reviews | no shared hot-file writes; every verdict is SHA-scoped |
 | Claude Goal (external history) | source slices for FWB, attachments, and the eight-scenario matrix | replayed as source material; stale claims were re-tested rather than trusted |
 
 Hot files have one integration owner: `TemplateAuthoringView.vue`, `ApprovalProductService.ts`,
 `ApprovalGraphExecutor.ts`, `automation-service.ts`, `index.ts`, and CI manifests.
+
+### 2.1 Current parallel wave and serialization points
+
+| Lane | Worker | Write scope | Current exit gate |
+|---|---|---|---|
+| R1 record-link Layer 2 | Grok Build | pinned base/sheet authoring, dedicated ordinary-user picker, publish/submit authz, focused backend/web tests | Codex security review: base + sheet + row + field visibility, exact pagination, fresh-DB and mounted UI |
+| R2 FWB mapping parity | Kimi K3 | decimal/date/select mapping and execute-time target-field recheck only | Codex diff review, precision counterexamples, fresh-DB production-chain test, backend typecheck |
+| C0 Canvas compatibility gate | Codex + high-reasoning read-only subagent | design/plan documents only | O3-p owner authorization, then D3-p implementation after `approval.ts` is released by R1 |
+
+R1 and R2 may run concurrently because their product write sets are disjoint. D3-p intentionally waits
+for R1 to release `apps/web/src/types/approval.ts`; D3/D4 wait separately for owner O3 (layout engine) and
+G0. FWB-2/3 and attachment authoring serialize on `ApprovalProductService.ts`, the executor seams, and the
+mounted authoring/fill views. Local Claude Code is currently unauthenticated, so Sonnet/Fable/Opus are not
+placed on the critical path; when authentication returns, Sonnet handles mid-tier Vue slices, Fable handles
+ledger prose, and Opus supplies a separate lock/authz/concurrency gate rather than self-reviewing its own
+implementation.
 
 ## 3. Canvas V2 execution ledger
 

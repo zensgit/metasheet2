@@ -199,7 +199,7 @@ file migration with backend runtime semantics.
 | D2-b  | Move and undo command algebra       | New semantic move/reorder commands, explicit inverses, selection restore, invalid-drop rollback             | Grok, Codex contract review              | D2-a                               | C4-C5           |
 | D2-c  | Backend empty-rule compatibility    | Isolate and review #4433 empty condition/branch capture without any authoring UI or renderer                | Grok, Codex runtime review               | none                               | C6              |
 | D3    | Canvas engine spike                 | Vue Flow/ELK adapters, exact feature capability contract, deterministic layout, no persistence change       | Grok                                     | D0, D1, D2-b                       | G1              |
-| D3-p  | Timeout/threshold parity foundation | Add the shipped timeout/threshold fields to shared frontend types and the Canvas adapter contract; no new runtime semantics | Sonnet implementation, Codex contract review | D0 | G1-p |
+| D3-p  | Timeout/threshold parity foundation | Add the shipped timeout/threshold fields to shared frontend types and the Canvas adapter contract; no new runtime semantics | Sonnet implementation (Codex fallback while Claude auth is unavailable), Codex contract review | separate pre-G0 compatibility authorization (O3-p); no D0 dependency | G1-p |
 | D4    | Canvas shell                        | Custom start/approval/cc/condition/parallel/end nodes, edges, insertion controls, pan/zoom/fit              | Grok                                     | D3                                 | G2-a            |
 | D5    | Inspector and command UX            | Right inspector, save validation, node summaries, timeout/threshold controls, undo/redo, keyboard selection | Grok                                     | D4, D3-p                           | G2-b            |
 | D6    | Condition and parallel authoring    | Rule priority/default branch, parallel all/any, semantic branch reorder, readable labels                    | Grok                                     | D5                                 | G2-c            |
@@ -395,6 +395,18 @@ This section is a 2026-07-20 snapshot, not a substitute for live `gh pr view` an
 - No canvas coordinate appears in the approval graph payload.
 - The 100-node fixture renders, fits, selects, pans, and zooms without overlap or runtime error.
 
+### G1-p - Shipped timeout/threshold compatibility
+
+- Shared frontend graph types represent `threshold`, `approvalThreshold`, and the backend-supported
+  timeout shape without widening backend semantics.
+- Linear and complex graphs load and save these fields without downgrading `threshold`, deleting timeout,
+  locking the graph as unknown configuration, or changing unrelated topology/configuration.
+- Frontend validation mirrors the backend's threshold, timeout effect/target, range, and parallel-region
+  restrictions; the backend remains the final authority.
+- Node summaries use business labels and never expose timeout effect enums, user ids, or node keys.
+- This gate authorizes compatibility only. It does not authorize D3 renderer work, G0 ratification, or a
+  Canvas flag change.
+
 ### G2 - Single-canvas authoring
 
 - **G2-a:** The custom node/edge shell renders all existing node types; every insertion control is keyboard
@@ -585,7 +597,7 @@ Stop the current lane and return to review if any of the following occurs:
 | D2-a        | READY         | Re-review #4433 frontend command files/tests without blessing its renderer or backend diff       |
 | D2-b        | BLOCKED       | Follow D2-a with separately tested semantic move/inverse algebra                                 |
 | D2-c        | READY         | Isolate #4433 backend empty-rule behavior into a runtime-only review/PR                          |
-| D3-p        | BLOCKED       | Wait for D0 ratification; close shipped timeout/threshold frontend parity before D5               |
+| D3-p        | OWNER_GATE    | On O3-p approval, close shipped timeout/threshold frontend parity before G0/D5; no renderer work  |
 | D3-D6       | BLOCKED       | Wait for D0 ratification, O3 layout choice, and predecessor merge                                 |
 | D6-f1       | READY         | Extract current pure field reorder/add/remove contracts and dependency-reference tests           |
 | D6-f2       | BLOCKED       | Wait for D0 and D6-f1                                                                            |
@@ -609,6 +621,8 @@ flags or production rollout.
       if the accessible-authoring equivalence gate passes.
 - [ ] O3 - Choose Vue Flow plus lazy-loaded ELK, accepting its measured bundle/license cost; otherwise amend
       the plan to authorize and verify a Dagre post-layout ordering/rerouting layer. No silent fallback.
+- [ ] O3-p - Authorize D3-p as a pre-G0 compatibility repair for already-shipped timeout/threshold semantics.
+      This does not ratify D0, start D3, or enable a flag.
 - [ ] O4 - Dragging is semantic placement; arbitrary persisted positions are out of scope.
 - [ ] O5 - Canvas delivery is D0-D6/D6-f/D7-b1-c1-d1/D8 and may canary without D9 or optional D7 runtime.
 - [ ] O6 - Handler nodes, within-node ordered approvers, new assignee sources, and readonly/editable enforcement

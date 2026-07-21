@@ -30,7 +30,9 @@ anything on.
    those needs its own ratified design lock (plan §2, §5 D7, G3 optional-runtime rule).
    The existing timeout/threshold runtime fields are a declared D3-p frontend parity prerequisite. They
    are not represented by the current frontend graph types, so D5 cannot claim inspector parity until
-   D3-p is merged and its adapter/round-trip tests pass.
+   D3-p is merged and its adapter/round-trip tests pass. D3-p is an explicitly separate pre-G0
+   compatibility authorization (plan O3-p): it may repair loss of already-shipped fields without
+   ratifying this lock, starting the D3 renderer, or changing any runtime/flag behavior.
 3. **No persisted coordinates.** Node positions are derived by deterministic layout from graph identity and
    viewport class. No x/y value, slot index beyond graph topology, or viewport state ever enters the
    `ApprovalGraph` payload (plan I4). The v1 unsaved free-drag sidecar is removed, not carried forward
@@ -528,6 +530,8 @@ exists only after `committed`.
 ## 18. Owner gates preserved
 
 - G0 (this lock) → ratification required before D3/D6-f2 (plan §12: D3–D6 and D6-f2 BLOCKED on D0).
+  D3-p is the sole exception and still requires its own owner O3-p authorization; it closes an existing
+  frontend round-trip defect only and confers no renderer or Canvas enablement authority.
 - Merge authority: every implementation PR requires named human owner/reviewer approval on exact-head
   evidence; subagent/Codex verdicts are recommendations only (plan §9).
 - `approvalCanvasV2` stays default-OFF; canary only after G5-C; default ON only after owner UAT (G6-C,
