@@ -601,6 +601,62 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
     expect(await countConsecutiveFailedRuns(source.integrationId)).toBe(2)
   })
 
+  it('B1 abort never softens a RECLAIMED run: a reclaimer-written failed row survives the freeze abort', async () => {
+    // The abort UPDATE is guarded on `status = 'running'` for a reason the docblock states but
+    // nothing pinned: if the lease was reclaimed while this run was alive-but-silent, the row
+    // already carries the reclaimer's truthful `failed` record, and this run no longer owns it —
+    // softening that to 'aborted' would erase a real liveness incident. Dropping the guard used
+    // to leave the whole suite green.
+    const source = await seedIntegrationWithLiveAccount('b1-reclaimed-src')
+    const target = await seedIntegrationWithLiveAccount('b1-reclaimed-dst')
+
+    await withHolder(async (holder, holderPid) => {
+      // Freeze writer holds the shared source lock uncommitted, so the real sync parks in its
+      // apply transaction (entry check still saw no freeze) — a deterministic barrier.
+      await holder.query('BEGIN')
+      await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        sourceSyncFreezeLockKey(source.integrationId),
+      ])
+      const ins = await holder.query<{ id: string }>(
+        `INSERT INTO provider_org_transfers
+           (org_id, provider, source_integration_id, target_integration_id, status, freeze_source_sync)
+         SELECT org_id, provider, $1, $2, 'draft', true
+           FROM directory_integrations WHERE id = $1
+         RETURNING id`,
+        [source.integrationId, target.integrationId],
+      )
+      cleanupTransferIds.push(ins.rows[0].id)
+
+      const syncOutcome = settled(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`))
+      await waitUntilBlockedOnHolder(holderPid)
+
+      // While the sync is provably parked, a stale-lease reclaimer takes its run row away and
+      // records the truthful liveness failure.
+      const reclaimed = await query<{ id: string }>(
+        `UPDATE directory_sync_runs
+            SET status = 'failed', error_message = 'reclaimed as stale', finished_at = NOW(), updated_at = NOW()
+          WHERE integration_id = $1 AND status = 'running'
+          RETURNING id`,
+        [source.integrationId],
+      )
+      expect(reclaimed.rows).toHaveLength(1)
+
+      await holder.query('COMMIT')
+      const outcome = await syncOutcome
+      expect(outcome).toBeInstanceOf(DirectorySyncFrozenByTransferError)
+    })
+
+    // The reclaimer's record stands: not softened to 'aborted', message intact.
+    const row = await query<{ status: string; error_message: string | null }>(
+      `SELECT status, error_message FROM directory_sync_runs
+        WHERE integration_id = $1 ORDER BY started_at DESC LIMIT 1`,
+      [source.integrationId],
+    )
+    expect(row.rows[0].status).toBe('failed')
+    expect(row.rows[0].error_message).toBe('reclaimed as stale')
+  })
+
   it('RACE sync-wins vs create: apply stand-in holds source lock → real create parks → after release create freezes', async () => {
     const source = await seedIntegrationWithLiveAccount('race-swin-c-src')
     const target = await seedIntegrationWithLiveAccount('race-swin-c-dst')
