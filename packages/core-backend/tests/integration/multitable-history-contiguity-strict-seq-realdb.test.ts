@@ -31,7 +31,8 @@
  *       app-level writer) refuses, never coerced to zero.
  *   FORMULA-NOT-REFUSED            a live formula-field value that differs from its stored snapshot (formula
  *       fields recompute live, never captured in a revision) does not trigger the content-projection layer.
- *   POSITIVE CONTROL               a full healthy chain reverts and executes under strict mode.
+ *   POSITIVE CONTROL               the strict comparator passes a full healthy chain; the retired
+ *       wall-clock HTTP authority still refuses before it can mint or execute a token.
  *
  * Two-point wiring: plugin-tests.yml real-DB run list + vitest.integration.config.ts. Runs only with
  * DATABASE_URL. Fixture hygiene (P2-C): every seq value here is either the natural `DEFAULT nextval(...)`
@@ -121,8 +122,8 @@ async function expectRevertRefusesWithZeroWrites(sheet: string, expectedReason: 
   expect(pv.status).toBe(400)
   expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   const ex = await revertExecute(sheet, 'dummy-never-minted')
-  // execute master-gate or identity invalid — either way zero writes
-  expect([400, 403, 409]).toContain(ex.status)
+  expect(ex.status).toBe(400)
+  expect(ex.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   expect(await sheetWriteState(sheet)).toEqual(before)
 }
 

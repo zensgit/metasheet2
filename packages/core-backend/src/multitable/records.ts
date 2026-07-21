@@ -646,9 +646,10 @@ export async function createRecord(
   // W0 slice ② (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1/OD-3, §0/§7a site A5): this INSERT
   // created a brand-new `meta_records` row with NO revision — `reconstructRecordsAtT` derives record
   // EXISTENCE purely from `meta_record_revisions`, so the record was invisible to it at every T, and a
-  // Reset-to-T at any T after this create could not distinguish "created after T" from "created before T
-  // but never captured" — `computeSheetReset` would push it into the unconditional delete-set and DESTROY
-  // a record that legitimately existed at T (§0.5's corrected CREATE risk). Emitted in the SAME
+  // Reset at an exact anchor after this create could not distinguish "created after the anchor" from
+  // "created before the anchor but never captured" — the exact-anchor Reset planner would push it into
+  // the created-after-anchor delete-set and DESTROY a record that legitimately existed at the anchor
+  // (§0.5's corrected CREATE risk). Emitted in the SAME
   // transaction as the INSERT above (`index.ts` wraps every plugin-SDK `createRecord` call in
   // `poolManager.get().transaction(...)`, re-verified for THIS slice via the real
   // `MetaSheetServer.createCoreAPI()` entry point). source='plugin' (OD-2). actorId=null (OD-3 — the

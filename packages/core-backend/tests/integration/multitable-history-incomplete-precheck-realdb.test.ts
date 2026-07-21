@@ -15,8 +15,9 @@
  *           implementation would pass G-HI-1/2/4).
  *   G-HI-4  live record with ZERO revisions (the uncaptured-CREATE fingerprint) → revert/reset preview AND
  *           execute refuse with zero writes — pins that the precheck enumerates the LIVE row set, not the
- *           reconstruction (computeSheetReset pushes live rows absent from the reconstruction into its
- *           delete-set: this golden closes the silent-delete-on-reset hole).
+ *           reconstruction (the exact-anchor Reset planner treats a live row with no revision at or before
+ *           the anchor as created-after-anchor and puts it in the delete-set: this golden closes the
+ *           silent-delete-on-reset hole).
  *   HI-5    (fail-closed extension, same doctrine) a LIVE row whose LATEST revision is a `delete` — history
  *           claims the record is dead, so reset would push it into the delete-set even though the content
  *           projection matches the pre-delete snapshot → refused. No captured path produces this state
