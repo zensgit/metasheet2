@@ -49,16 +49,23 @@ program finished would violate the ratification gate.
 | Attachment detail assumed the new feature ref always existed | P2 compatibility | optional read, missing ref means OFF | original required run failed 13/13 detail cases; fixed scope 95/95 |
 | Eight-scenario fixture used the pre-publish version | P2 test drift | query and bind `active_version_id` in event/config/hash | old fixture failed save; corrected fixture reaches production action |
 | S7 expected raw database error text | P2 security-test drift | assert values-free `fwb_execution_failed` and absence of raw text | S7 proceeds through rollback and clean replay |
+| ApprovalNewView spec-only changes did not trigger the path guard | P3 CI | add the spec to both pull-request and main-push paths | both trigger lists now contain the exact file |
+| Attachment flag parser had no green required canary | P3 CI | export the pure parser and add a focused camel/snake-key matrix | focused canary 4/4; broad quarantined featureFlags specs remain out |
+| Six real-DB files relied on manually maintained two-point wiring | P3 CI | add a source-derived no-DB-exclude plus whole-file-run contract | structural contract 12/12 |
+| Attachment unit-canary comment incorrectly denied default discovery | P3 documentation | describe the explicit canary as stable ownership, not first-ever collection | source comment corrected without changing execution |
 
 ## 4. Verification evidence
 
 ### Frontend
 
 - Focused composed suite: 11 files, 260/260.
-- Required Canvas canaries: 36/36.
+- Required preflight canaries: Canvas commands 36/36; attachment flag parser 4/4.
 - Required curated main suite: 353 files, 4237/4237.
 - Approval detail compatibility and attachment positives: 95/95.
 - `vue-tsc --noEmit`: pass.
+- Kimi K3 CI-wiring adversarial audit: four low-severity findings reproduced and fixed; the new
+  two-point structural contract passes 12/12. Its three product-code review subagents were interrupted,
+  so this is CI evidence only, not a second independent product-correctness verdict.
 
 ### Backend
 
@@ -76,7 +83,8 @@ program finished would violate the ratification gate.
 
 The first full local required-web run collected the new 36 command tests, then failed 13 legacy
 `approvalDetailPolish` tests at the new feature-ref read. That failure was load-bearing and fixed. The
-post-fix required script passed the command canaries 36/36 and the curated main run 4237/4237.
+post-fix required script passed the command canaries 36/36 and the curated main run 4237/4237. A
+subsequent CI-hardening pass added the focused attachment flag parser canary (4/4) ahead of that run.
 
 ## 5. Flag and deployment ledger
 

@@ -28,7 +28,7 @@ scope on that branch. Merge, deployment, real tenant UAT, and production enablem
 |---|---|---|
 | Codex | dependency audit, hot-file integration, FWB/attachment fixes, exact-head tests, CI wiring, final review | final engineering recommendation; no self-ratification of owner gates |
 | Grok Build | bounded D2-b command-algebra implementation in an isolated worktree | Codex inspected the diff and reran the combined web suite |
-| Kimi K3 | exact-head read-only adversarial review of the 80-file composed diff | findings are inputs only; Codex verifies each finding against code/tests |
+| Kimi K3 | read-only CI-wiring audit of the composed diff; three product-code subreviews were interrupted | four low findings were reproduced and fixed by Codex; no product-correctness verdict is attributed to Kimi |
 | Codex subagents | disjoint command-layer and documentation reviews | no shared hot-file writes; every verdict is SHA-scoped |
 | Claude Goal (external history) | source slices for FWB, attachments, and the eight-scenario matrix | replayed as source material; stale claims were re-tested rather than trusted |
 
@@ -44,7 +44,7 @@ Hot files have one integration owner: `TemplateAuthoringView.vue`, `ApprovalProd
 | D2-a/D2-b graph commands | implemented | immutable add/remove/move/reorder/undo/redo; topology preservation and invalid-slot refusal | D3 consumes this only after G0 |
 | D6-f1 form commands | implemented | stable allocated field IDs, retired-ID refusal, immutable add/update/remove/reorder/undo/redo | D6-f2 mounted UI after G0 |
 | D2-c backend guards | implemented | publish path isolation and canonical guard/purge identities retained on the composed head | merge review |
-| Combined web evidence | passed | 11 focused files / 260 tests; command canaries 36/36 in the required script; web `vue-tsc` clean before final doc refresh | required CI on PR |
+| Combined web evidence | passed | 11 focused files / 260 tests; command canaries 36/36 plus flag-parser canary 4/4 in the required script; web `vue-tsc` clean before final doc refresh | required CI on PR |
 | D3-D11-C | not implemented | no renderer/drag/inspector/version-visual claim is made | owner G0 ratify, then staged implementation |
 
 The current authoring screen therefore has a safer command substrate, but it is **not yet** the final
@@ -86,6 +86,8 @@ Feishu/DingTalk-style tree canvas described by D0.
 7. Approval detail feature lookup defaults OFF when an older injection omits the new feature ref.
 8. FWB date values receive strict calendar validation.
 9. The eight-scenario matrix was updated for active template-version binding and values-free failures.
+10. ApprovalNewView and attachment feature-flag edits now trigger both approval guard modes.
+11. The six data-closure real-DB files have a 12-case structural guard pinning both CI wiring points.
 
 ## 5. Exact-head verification ledger
 
@@ -93,6 +95,7 @@ Feishu/DingTalk-style tree canvas described by D0.
 |---|---:|---|
 | Focused frontend composition | 260/260 | authoring commands, mounted authoring, attachments, ApprovalNewView |
 | Required Canvas command canaries | 36/36 | both new command specs are collected by required `web-tests` |
+| Required attachment flag canary | 4/4 | camel/snake payload keys parse only explicit booleans |
 | Required web main suite | 4237/4237 | post-fix full curated suite; 353/353 files |
 | Approval detail compatibility | 95/95 | old detail fixtures default attachments OFF; refs/download positives still pass |
 | Backend composed unit scope | 275/275 | attachment runtime/routes/storage/GC plus approval graph/product and migration guards |
@@ -102,6 +105,7 @@ Feishu/DingTalk-style tree canvas described by D0.
 | Post-matrix FWB rerun | 8/8 | no cross-suite pollution on the same migrated database |
 | Backend `tsc --noEmit` | pass | composed backend type surface |
 | Web `vue-tsc --noEmit` | pass | composed frontend type surface |
+| CI two-point wiring contract | 12/12 | six real-DB files remain excluded from no-DB discovery and whole-file invoked in required CI |
 
 The required web suite initially failed 13 legacy ApprovalDetail tests because the attachment feature ref
 was assumed present. The fail-closed compatibility fix made the targeted 95-test regression green; the

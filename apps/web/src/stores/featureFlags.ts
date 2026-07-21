@@ -141,7 +141,7 @@ function needsPluginInference(features: Partial<ProductFeatures>): boolean {
   return typeof features.attendance !== 'boolean' || typeof features.workflow !== 'boolean'
 }
 
-function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
+export function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
   const featuresNode =
     payload?.data?.features ||
     payload?.features ||

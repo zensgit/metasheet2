@@ -231,6 +231,11 @@ jobs:
       - name: Stock-preparation P4 repair CI wiring contract
         run: node --test scripts/ops/stock-preparation-p4-repair-ci-wiring.test.mjs
 
+      # Approval data-closure real-DB suites use the same two-point contract: excluded from the
+      # default no-DB collection and invoked as whole files in a required real-DB step.
+      - name: Approval data-closure CI wiring contract
+        run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
+
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
@@ -322,9 +327,8 @@ jobs:
       - name: Run B3-07 approval-attachment unit canaries
         # The approval-attachment pipeline's no-DB units (route contracts, storage containment + the
         # shared-substrate object-store adapter, boot/O3 storage resolution, fail-closed scanner seam,
-        # validation allowlist, GC drain, reconciler) ran in NO workflow before this step — vitest's
-        # default discovery is never
-        # invoked for tests/unit anywhere in CI, so these were green-by-never-running. Wired as WHOLE
+        # validation allowlist, GC drain, reconciler) are repeated as explicit canaries here so their
+        # ownership remains visible and robust if broader default discovery changes. Wired as WHOLE
         # FILE runs (a name filter matching zero tests exits green and hides regressions).
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
