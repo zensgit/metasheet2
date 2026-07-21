@@ -1,8 +1,8 @@
 /**
- * FWB-1 config UI — the mapping-config MODEL (fail-closed validation the editor binds to).
+ * FWB-1 authoring contract — the mapping-config MODEL an ordinary-user editor must bind to.
  *
  * A saved config maps template form fields → target sheet fields for `write_approval_form_values`.
- * The editor may only offer valid choices, but the model re-validates the WHOLE draft before save
+ * A future editor may only offer valid choices, but the model re-validates the WHOLE draft before save
  * (edit-safety = fail-closed allowlist, same doctrine as template authoring):
  *   - every mapping must reference an EXISTING template field and an EXISTING target field;
  *   - text/date/select are authorable; number remains unavailable until the
