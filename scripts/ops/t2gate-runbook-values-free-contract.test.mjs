@@ -272,12 +272,15 @@ export function splitTopLevelProjections(selectList) {
 export function extractSelectLists(sql) {
   const lists = []
   const isWordChar = (ch) => ch !== undefined && /[A-Za-z0-9_]/.test(ch)
+  // Structure is read on the literal/comment-masked copy (same length, so every offset addresses
+  // the original): a `;` or a keyword inside `'…'` / `-- …` is text, not a statement terminator.
+  const scan = maskSqlLiteralsAndComments(sql)
   let fromIdx = 0
   while (fromIdx < sql.length) {
-    const selectMatch = /\bSELECT\b/i.exec(sql.slice(fromIdx))
+    const selectMatch = /\bSELECT\b/i.exec(scan.slice(fromIdx))
     if (!selectMatch) break
     const selectAbs = fromIdx + selectMatch.index
-    if (isWordChar(sql[selectAbs - 1])) {
+    if (isWordChar(scan[selectAbs - 1])) {
       fromIdx = selectAbs + selectMatch[0].length
       continue
     }
@@ -287,7 +290,7 @@ export function extractSelectLists(sql) {
     let i = selectStart
     let end = sql.length
     while (i < sql.length) {
-      const ch = sql[i]
+      const ch = scan[i]
       if (ch === '(') {
         depth += 1
         i += 1
@@ -298,8 +301,8 @@ export function extractSelectLists(sql) {
         i += 1
         continue
       }
-      if (depth === 0 && !isWordChar(sql[i - 1])) {
-        const rest = sql.slice(i)
+      if (depth === 0 && !isWordChar(scan[i - 1])) {
+        const rest = scan.slice(i)
         const term = /^(?:\s|;)*(?:\bFROM\b|\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b|;)/i.exec(
           rest,
         )
@@ -653,16 +656,215 @@ function textOutsideCodeVenues(markdown) {
 }
 
 /**
- * English function words that cannot appear in a SQL projection list. Their presence is what
- * separates a SENTENCE ("select the corp A rows from directory_accounts by hand") from a
- * STATEMENT (`SELECT union_id FROM directory_accounts`).
+ * Blank out the INTERIOR of every SQL string literal / quoted identifier and every SQL comment,
+ * preserving the length of the input so offsets computed on the mask address the original text.
  *
- * Deliberately excludes every word that is also SQL: `a` (table alias), `all`, `and`, `or`, `not`,
- * `in`, `is`, `as`, `on`, `of`… — a word that could legitimately occur in SQL may not be used to
- * excuse a statement from the guards.
+ * Gate finding (round 4 of PR #4500): every structural decision below — where a statement ends,
+ * where its top-level FROM is, what its projections are — was taken on the raw text, so anything
+ * hidden inside `'…'` / `"…"` / `-- …` was read as SQL structure. A single `;` inside a literal
+ * ended the candidate before its FROM, and a word inside a literal or a comment decided the
+ * "is this SQL?" question. Literals and comments carry no structure and must be neutralised
+ * BEFORE the structure is read.
+ *
+ * The quotes/comment length are kept (interior → spaces, newlines preserved) so the masked text
+ * still tokenises identically to the original.
+ * @param {string} sql
+ * @returns {string}
  */
-const PROSE_FUNCTION_WORDS =
-  /\b(?:the|an|any|each|every|those|these|both|its|their|our|your|my|his|her|manually|please|if|when|whether|should|must|can|cannot|will|would|you|we|they|he|she|there|here|again|instead|below|above|to)\b/i
+export function maskSqlLiteralsAndComments(sql) {
+  const out = sql.split('')
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < out.length; k++) if (out[k] !== '\n') out[k] = ' '
+  }
+  let i = 0
+  while (i < sql.length) {
+    const ch = sql[i]
+    if (ch === "'" || ch === '"') {
+      let j = i + 1
+      while (j < sql.length) {
+        if (sql[j] === ch && sql[j + 1] === ch) {
+          j += 2
+          continue
+        }
+        if (sql[j] === ch) break
+        j += 1
+      }
+      blank(i + 1, Math.min(j, sql.length))
+      i = j < sql.length ? j + 1 : sql.length
+      continue
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      let j = sql.indexOf('\n', i)
+      if (j < 0) j = sql.length
+      blank(i, j)
+      i = j
+      continue
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      const close = sql.indexOf('*/', i + 2)
+      const j = close < 0 ? sql.length : close + 2
+      blank(i, j)
+      i = j
+      continue
+    }
+    i += 1
+  }
+  return out.join('')
+}
+
+/**
+ * Words that CONNECT the parts of a SQL expression rather than being one of its values — the
+ * operators/keywords a projection list may contain between two operands.
+ *
+ * This is not a prose vocabulary and cannot be made "complete" or "incomplete" in that sense: the
+ * decision below is about SHAPE (how many operands sit next to each other), and this set only
+ * says which words are not operands.
+ */
+const SQL_CONNECTIVE_WORDS = new Set([
+  'all', 'and', 'any', 'as', 'asc', 'at', 'between', 'both', 'by', 'case', 'cast', 'collate',
+  'cross', 'desc', 'distinct', 'else', 'end', 'escape', 'except', 'exists', 'filter', 'first',
+  'for', 'from', 'full', 'group', 'having', 'ilike', 'in', 'inner', 'intersect', 'interval',
+  'into', 'is', 'join', 'last', 'leading', 'left', 'like', 'limit', 'natural', 'not', 'null',
+  'nulls', 'offset', 'on', 'or', 'order', 'outer', 'over', 'partition', 'right', 'rows', 'select',
+  'similar', 'some', 'then', 'time', 'trailing', 'union', 'using', 'when', 'where', 'window',
+  'with', 'within', 'zone',
+])
+
+/**
+ * Collapse balanced parenthesised groups: a group that FOLLOWS an identifier is that identifier's
+ * argument list (the call is one operand), a group that stands alone is itself one operand.
+ * @param {string} expr
+ * @returns {string}
+ */
+function collapseParenGroups(expr) {
+  let s = expr
+  for (let guard = 0; guard < 100; guard++) {
+    const next = s.replace(/\(([^()]*)\)/g, (match, _inner, offset, whole) =>
+      /[A-Za-z0-9_$"']\s*$/.test(whole.slice(0, offset)) ? ' ' : ' 0 ',
+    )
+    if (next === s) break
+    s = next
+  }
+  return s
+}
+
+/**
+ * Split an expression into tokens and mark each one as an OPERAND (identifier / literal / number /
+ * collapsed group) or a CONNECTIVE (operator or SQL keyword).
+ * @param {string} expr
+ * @returns {('operand'|'connective')[]}
+ */
+function expressionTokenKinds(expr) {
+  const tokens =
+    collapseParenGroups(expr).match(
+      /'[^']*'|"[^"]*"|[A-Za-z_][A-Za-z0-9_$]*|\d+(?:\.\d+)?|::|<>|!=|>=|<=|\|\||\S/g,
+    ) || []
+  return tokens.map((t) => {
+    if (/^['"]/.test(t)) return 'operand'
+    if (/^\d/.test(t)) return 'operand'
+    if (/^[A-Za-z_]/.test(t)) return SQL_CONNECTIVE_WORDS.has(t.toLowerCase()) ? 'connective' : 'operand'
+    return 'connective'
+  })
+}
+
+/**
+ * True iff a single projection-list item RESOLVES as a SQL projection: an expression, optionally
+ * followed by an alias. Structurally that means its operands are separated by operators/keywords —
+ * at most ONE bare adjacency is allowed, and only at the very end (`<expr> <alias>`).
+ *
+ * This is what separates a STATEMENT from a SENTENCE without consulting any English vocabulary:
+ *   `union_id`                                  → 1 operand                       → resolves
+ *   `'…' AS label` / `count(*) FILTER (…) AS n` → operands separated by keywords   → resolves
+ *   `mobile AS "the contact"`                   → operand, AS, operand            → resolves
+ *   `the corp A rows` (prose)                   → 4 operands in a row             → does NOT
+ * @param {string} expr
+ * @returns {boolean}
+ */
+export function isResolvableProjectionExpression(expr) {
+  const kinds = expressionTokenKinds(expr)
+  if (kinds.length === 0) return false
+  let adjacencies = 0
+  let lastAdjacencyAt = -1
+  for (let i = 0; i + 1 < kinds.length; i++) {
+    if (kinds[i] === 'operand' && kinds[i + 1] === 'operand') {
+      adjacencies += 1
+      lastAdjacencyAt = i
+    }
+  }
+  if (adjacencies === 0) return true
+  return adjacencies === 1 && lastAdjacencyAt === kinds.length - 2
+}
+
+/**
+ * True iff what follows FROM resolves as a table reference (optionally schema-qualified / quoted)
+ * or a sub-select. Deliberately lenient: when the source is ambiguous the statement is SCANNED,
+ * never skipped — the projection list carries the discrimination.
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isResolvableFromSource(text) {
+  const m = /^\s*(?:\(\s*SELECT\b|(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"]*")(?:\s*\.\s*(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"]*"))*)/i.exec(
+    text,
+  )
+  if (!m) return false
+  const head = m[0].trim().toLowerCase()
+  return !SQL_CONNECTIVE_WORDS.has(head)
+}
+
+/**
+ * Index of the first FROM at PAREN DEPTH 0, or -1. `trim(BOTH ' ' FROM mobile)` and
+ * `position('x' in y)` carry a FROM/keyword inside the call — splitting there would hand the
+ * shape test an unbalanced fragment and the statement would escape as "not SQL".
+ * @param {string} masked
+ * @returns {number}
+ */
+function topLevelFromIndex(masked) {
+  let depth = 0
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    else if (depth === 0 && /^from\b/i.test(masked.slice(i, i + 5)) && !/[A-Za-z0-9_]/.test(masked[i - 1] ?? ' ')) {
+      return i
+    }
+  }
+  return -1
+}
+
+/**
+ * The "is this SQL?" decision, taken on SHAPE alone (input must already be literal/comment masked).
+ *
+ * Gate finding (round 4 of PR #4500): the previous cut answered it with a list of English function
+ * words that must NOT appear in the projection list. Vocabulary cannot decide this — words that
+ * are also SQL (`every(…)`, `trim(BOTH …)`, `= ANY(…)`) had to be left out of the list, so a
+ * leaking statement in ordinary body text bought itself an exemption just by using one, and a word
+ * hidden inside a string literal or a `--` comment exempted the whole statement. All of
+ * `SELECT union_id, every(is_active) AS a FROM directory_accounts;` and
+ * `SELECT union_id, 'the key' AS label FROM directory_accounts;` returned ok:true.
+ *
+ * A candidate is SQL when it HAS THE SHAPE of a statement: `SELECT <projection list> FROM <source>`
+ * where every top-level projection resolves as an expression (+ optional alias) and the source
+ * resolves as a table reference. Prose that merely mentions column names has no SELECT at all;
+ * a sentence that happens to use the words select/from ("select the corp A rows from
+ * directory_accounts by hand") has a projection list of four bare words in a row, which resolves
+ * as no expression.
+ * @param {string} masked  a candidate whose literals/comments are already masked
+ * @returns {boolean}
+ */
+export function looksLikeSqlStatement(masked) {
+  const s = masked.trim()
+  if (!/^SELECT\b/i.test(s)) return false
+  const fromIdx = topLevelFromIndex(s)
+  if (fromIdx < 0) return false
+  const list = s.slice('SELECT'.length, fromIdx)
+  if (!list.trim()) return false
+  // An unbalanced projection list is a fragment, not a statement.
+  if ((list.match(/\(/g) || []).length !== (list.match(/\)/g) || []).length) return false
+  const projections = splitTopLevelProjections(list)
+  if (projections.length === 0) return false
+  if (!projections.every((p) => isResolvableProjectionExpression(p))) return false
+  return isResolvableFromSource(s.slice(fromIdx + 'FROM'.length))
+}
 
 /**
  * Extract SQL statements that sit OUTSIDE every recognised code venue — anywhere in the document,
@@ -673,13 +875,15 @@ const PROSE_FUNCTION_WORDS =
  * plain `SELECT union_id, open_id, mobile, raw FROM directory_accounts;` sitting in ordinary body
  * text was scanned by nothing at all (verified: it returned ok:true).
  *
- * Prose must keep passing, so the detection is structural, not lexical: a candidate must be a
- * SELECT … FROM <identifier> whose PROJECTION LIST contains no English function word. A prose
- * MENTION of a column ("PostgreSQL duplicate-key text can embed the real `external_key`") has no
- * SELECT at all and is never a candidate; an English sentence that happens to use the words
- * select/from ("select the corp A rows from directory_accounts") is rejected by the function-word
- * test. Everything else is treated AS SQL and goes through the projection guards — when in doubt
- * the statement is scanned, never skipped.
+ * The answer is structural (`looksLikeSqlStatement`), never lexical — so prose keeps passing and a
+ * statement cannot exempt itself with a word.
+ *
+ * The statement's EXTENT is likewise not decided by raw punctuation: gate finding (round 4) — the
+ * candidate was cut at the first blank line and at ANY `;`, including one inside a string literal,
+ * so `SELECT union_id, 'a;b' AS label FROM directory_accounts;` was cut to `SELECT union_id, 'a`
+ * and the shape test never saw its FROM (verified: ok:true). Terminators are now read on the
+ * MASKED text, and every candidate extent is tried shortest-first: the statement is the shortest
+ * one that resolves as SQL, so a statement spanning a blank line is still found.
  *
  * Inline code spans are prose venues, not code venues: `` `SELECT union_id …` `` renders inside the
  * paragraph, so the backticks are dropped and the statement is read as the SQL it is.
@@ -693,18 +897,24 @@ export function extractUnfencedSqlStatements(markdown) {
   let m
   while ((m = selectRe.exec(outside)) !== null) {
     const rest = outside.slice(m.index)
-    // A statement runs to its terminator: `;`, a blank line, or the end of the text.
-    const semi = rest.indexOf(';')
-    const blank = rest.search(/\n[ \t]*\n/)
-    const candidates = [semi >= 0 ? semi + 1 : -1, blank >= 0 ? blank : -1].filter((n) => n >= 0)
-    const stop = candidates.length > 0 ? Math.min(...candidates) : rest.length
-    const statement = rest.slice(0, stop).trim()
+    // Literals/comments carry no structure: mask the candidate BEFORE looking for its terminator.
+    const maskedRest = maskSqlLiteralsAndComments(rest)
+    const blank = maskedRest.search(/\n[ \t]*\n/)
+    const semi = maskedRest.indexOf(';')
+    const ends = [...new Set([blank, semi >= 0 ? semi + 1 : -1, maskedRest.length])]
+      .filter((n) => n > 0)
+      .sort((a, b) => a - b)
 
-    const shape = /^SELECT\b([\s\S]*?)\bFROM\s+[A-Za-z_"][A-Za-z0-9_".]*/i.exec(statement)
-    if (shape && !PROSE_FUNCTION_WORDS.test(shape[1])) {
-      statements.push(statement)
-      selectRe.lastIndex = m.index + statement.length
+    let chosen = -1
+    for (const end of ends) {
+      if (looksLikeSqlStatement(maskedRest.slice(0, end))) {
+        chosen = end
+        break
+      }
     }
+    if (chosen < 0) continue
+    statements.push(rest.slice(0, chosen).trim())
+    selectRe.lastIndex = m.index + chosen
   }
   return statements
 }
