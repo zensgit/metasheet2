@@ -30,9 +30,11 @@
 //   per-source decimalTransit capability (decimal fields carried as text
 //   end-to-end) and expand exponent notation before {decimal} wrapping
 //   (String(1e-7) === '1e-7' would be DECIMAL_MALFORMED here, by design).
-// - computeSnapshotContentDigest([]) is LEGAL: a complete, consistency-proven
-//   EMPTY snapshot is a chartered positive control (§8.2-4); its digest is the
-//   deterministic sha256 of zero tuples.
+// - computeSnapshotContentDigest([], validBound) is LEGAL: a complete,
+//   consistency-proven EMPTY snapshot is a chartered positive control (§8.2-4);
+//   its digest is the deterministic sha256 of zero tuples. The snapshot-level
+//   bound is still required and validated up front — an empty snapshot cannot
+//   bypass it.
 // - The returned {buffer, hex} object is frozen but Buffer CONTENTS are
 //   inherently mutable; hex is the authoritative immutable form.
 
@@ -52,6 +54,9 @@ const MR_DIGEST_ERROR_REASONS = Object.freeze([
   'STRING_ILL_FORMED',
   // Deep-review P3: canonicalRowDigest must be exactly 32 bytes (sha256).
   'DIGEST_WIDTH_INVALID',
+  // Corrective-review P2: a repeated identity-content group in the snapshot
+  // digest is non-canonical (the multiset has two encodings) — rejected.
+  'DUPLICATE_IDENTITY_GROUP',
 ])
 const MR_DIGEST_ERROR_REASON_SET = new Set(MR_DIGEST_ERROR_REASONS)
 
@@ -323,15 +328,18 @@ function encodeIdentitySortTuple(input) {
     multiplicityBound < 1 ||
     multiplicityBound > MAX_MULTIPLICITY_ENCODABLE
   ) {
+    // Round-4 P3: details carry sanitized values only (same discipline as the
+    // snapshot-level pre-loop guard) — a non-integer input never round-trips
+    // into the error surface verbatim.
     throw new MaterialReconciliationDigestError(
       'MULTIPLICITY_OUT_OF_BOUNDS',
       'multiplicityBound must be an integer within 1..2^32-1',
-      { multiplicityBound }
+      { multiplicityBound: Number.isSafeInteger(multiplicityBound) ? multiplicityBound : null }
     )
   }
   if (!Number.isSafeInteger(multiplicity) || multiplicity < 1 || multiplicity > multiplicityBound) {
     throw new MaterialReconciliationDigestError('MULTIPLICITY_OUT_OF_BOUNDS', 'multiplicity must be an integer within 1..multiplicityBound', {
-      multiplicity,
+      multiplicity: Number.isSafeInteger(multiplicity) ? multiplicity : null,
       multiplicityBound,
     })
   }
@@ -345,17 +353,51 @@ function encodeIdentitySortTuple(input) {
   ])
 }
 
-// snapshotContentDigest (frozen, §4.6): normalized multiset digest of the
-// encoded sort tuples — byte-lexicographic sort, each tuple length-prefixed,
-// sha256. Deterministic under any input order; duplicates count (multiset).
-function computeSnapshotContentDigest(tuples) {
-  if (!Array.isArray(tuples)) {
-    throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'computeSnapshotContentDigest requires an array of tuple Buffers')
+// snapshotContentDigest (frozen, §4.6). Corrective-review P2: the old form took
+// pre-encoded tuple Buffers, which admitted TWO encodings of the same multiset
+// (two multiplicity=1 tuples for one identity-content class vs one
+// multiplicity=2 tuple) yielding different digests. The canonical unit is the
+// identity GROUP: for each distinct (identityKeyClass, identityKeyBytes,
+// canonicalRowDigest) there is EXACTLY ONE multiplicity. This function takes
+// structured groups, encodes each canonically, and REJECTS a repeated
+// identity-content group (DUPLICATE_IDENTITY_GROUP) — so the caller must
+// pre-aggregate multiplicity and there is only one legal encoding per multiset.
+function computeSnapshotContentDigest(groups, multiplicityBound) {
+  if (!Array.isArray(groups)) {
+    throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'computeSnapshotContentDigest requires an array of identity groups')
   }
-  for (const tuple of tuples) {
-    if (!Buffer.isBuffer(tuple) || tuple.length === 0) {
-      throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'each tuple must be a non-empty Buffer')
+  // Corrective round-3 P2: validate the snapshot-level bound BEFORE the loop, so
+  // an EMPTY snapshot cannot bypass it. computeSnapshotContentDigest([], valid)
+  // succeeds (empty snapshot is legal, §8.2-4); computeSnapshotContentDigest([])
+  // with no/invalid bound fails closed.
+  if (!Number.isSafeInteger(multiplicityBound) || multiplicityBound < 1 || multiplicityBound > MAX_MULTIPLICITY_ENCODABLE) {
+    throw new MaterialReconciliationDigestError('MULTIPLICITY_OUT_OF_BOUNDS', 'snapshot multiplicityBound must be an integer within 1..2^32-1', {
+      multiplicityBound: Number.isSafeInteger(multiplicityBound) ? multiplicityBound : null,
+    })
+  }
+  const seenGroupKeys = new Set()
+  const tuples = []
+  for (const group of groups) {
+    if (!isPlainObject(group)) {
+      throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'each identity group must be a plain object')
     }
+    // Corrective-review P2: the snapshot-level multiplicityBound is the SOLE
+    // read-upper-bound authority (Charter unified read bound). A group may NOT
+    // carry its own multiplicityBound — that would let one group exceed the
+    // snapshot cap (snapshot bound 1 + group bound 10 + multiplicity 2). Reject
+    // any per-group override fail-closed.
+    if (Object.prototype.hasOwnProperty.call(group, 'multiplicityBound')) {
+      throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'per-group multiplicityBound is forbidden: the snapshot-level bound is authoritative')
+    }
+    const tuple = encodeIdentitySortTuple({ ...group, multiplicityBound })
+    // Group identity = the tuple WITHOUT its trailing fixed 4-byte multiplicity:
+    // (classByte || len4+key || len4+digest). A repeat is a non-canonical multiset.
+    const groupKey = tuple.subarray(0, tuple.length - 4).toString('hex')
+    if (seenGroupKeys.has(groupKey)) {
+      throw new MaterialReconciliationDigestError('DUPLICATE_IDENTITY_GROUP', 'identity group repeated — pre-aggregate multiplicity (multiset must be canonical)')
+    }
+    seenGroupKeys.add(groupKey)
+    tuples.push(tuple)
   }
   const sorted = [...tuples].sort(Buffer.compare)
   const parts = sorted.map((tuple) => lengthPrefix(tuple))
@@ -375,10 +417,13 @@ module.exports = {
   computeCanonicalRowDigest,
   encodeIdentitySortTuple,
   computeSnapshotContentDigest,
+  // Round-4 P2: NO live membership Sets on the export surface — a mutable Set
+  // reachable through __internals lets a consumer flip a validator from reject
+  // to accept (a poisoned identityKeyClass would even encode class byte 0x00,
+  // colliding with the identity_invalid domain separator). Same ruling as the
+  // templates round-1 fix: Sets stay module-private; tests use the public
+  // frozen arrays.
   __internals: {
-    MR_DIGEST_ERROR_REASON_SET,
-    MR_VALUE_KIND_SET,
-    MR_IDENTITY_KEY_CLASS_SET,
     MAX_LENGTH_PREFIX,
     MAX_MULTIPLICITY_ENCODABLE,
     isPlainObject,

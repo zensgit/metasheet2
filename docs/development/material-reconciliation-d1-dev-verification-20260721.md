@@ -118,6 +118,86 @@ independent lane proved whole rule-edges unpinned. The battery now stands at 15 
 12 review-round kills, with golden byte vectors extended (golden-2 carries an interior-zero
 decimal, boolean false, and composed unicode).
 
+## 3c. Owner corrective deep review — absorption (2026-07-21)
+
+An independent review at merged SHA `1f06ecea9` found **0 P1 / 4 P2 / 1 P3** — real contract
+gaps the green tests did not cover (proven with add-poison / plant / SQL probes). This corrective
+PR closes all five (D1 has no route/migration/runtime consumer, so no rollback was needed):
+
+| Finding | Fix |
+|---|---|
+| P2: exported `*_SET` mutable membership Sets are a poisoning vector — `MR_FIELD_TYPE_SET.add('x')` flipped the validator permissive (Object.freeze doesn't stop Set.add) | Removed ALL `*_SET` from the public surface (module-private now); test asserts `Object.keys(mod)` has no `_SET`, the public arrays are frozen (`push` throws), and an out-of-vocab field type is still rejected (private Set unreachable) |
+| P2: `computeSnapshotContentDigest` took pre-encoded tuples → two encodings of one multiset ([mult=1,mult=1] vs [mult=2]) with different digests; a test even pinned "duplicate tuple → different" as correct | API now takes structured identity GROUPS and rejects a repeated identity-content group (`DUPLICATE_IDENTITY_GROUP`) — one legal encoding per multiset; the dedup key is (class,key,digest) WITHOUT multiplicity, so the same row with differing multiplicities is also rejected |
+| P2: `summarizeMaterialReconciliationEvidence(templates)` echoed caller-planted prefix-valid objectIds (`material_reconciliation_MAT-001-SECRET`, label `customer-alpha`) | Takes NO argument; derives evidence ONLY from the frozen registry; plant-and-assert test proves planted business ids never surface |
+| P2: partial-unique predicate was a raw SQL free string (`1=1; DROP TABLE` passed) | Closed structured predicate `{ predicate: <MR_PARTIAL_PREDICATES>, field: <fieldId> }`; the D2 migration layer maps `not_null:X → "X IS NOT NULL"`; free-string / unknown-predicate / unknown-field all rejected |
+| P3: charter header still `PROPOSED / doc-only` while D1 doc claims ratified | Charter header → `RATIFIED` (owner ruling 2026-07-21; ratify unlocks D1 only, not D2 runtime) |
+
+Corrective mutation battery **6/6 RED** (re-export a Set, drop the dup-group guard, restore the
+evidence argument, open the partial-predicate vocab, key dedup on the full tuple incl.
+multiplicity, open the partial-field check); full plugin CJS chain green (94 `scripts.test`
+suites; an earlier "70 suites" figure here counted only the suites that print a literal `OK`
+line — corrected in round-4).
+
+## 3d. Owner corrective review round-2 — absorption (2026-07-21)
+
+A second corrective review found **0 P1 / 2 P2 / 1 P3** (second-order gaps in the round-1
+fixes), all closed in this PR:
+
+| Finding | Fix |
+|---|---|
+| P2: the snapshot-level `multiplicityBound` could be bypassed by a per-group `multiplicityBound` (snapshot bound 1 + group bound 10 + multiplicity 2 was accepted, violating the Charter unified read bound) | the snapshot-level bound is the SOLE authority; any per-group `multiplicityBound` is rejected fail-closed, and a group multiplicity above the snapshot bound is rejected with no group-level escape; a missing snapshot bound fails closed |
+| P2: the partial-unique predicate field was only checked against template fields, not the uniqueness constraint's own fields (a run unique on `run_identity_key` with an `attempt_id` predicate — `attempt_id` being a real run field — passed) | the predicate field must be a member of `uniqueness.fields`; a discriminating test (predicate field IS a template field but NOT in the constraint) pins it |
+| P3: charter §10 still said "建议裁决" and §11 exit criteria were framed as pending | §10 → final RATIFY ruling; §11 criteria marked satisfied (D1 merged at `1f06ecea9`); rev-level deferred wording flagged as historical |
+
+Round-2 mutation battery RED on both P2 fixes (reinstate per-group bound override; revert the
+partial-field check to template-only). One equivalent mutant noted honestly: reordering the
+spread `{ multiplicityBound, ...group }` is behaviourally identical because the hasOwnProperty
+guard already rejects (fail-closed) any group carrying its own bound before the spread is
+reached — no group-level bound ever survives to the encode call.
+
+## 3e. Owner corrective review round-3 — absorption (2026-07-21)
+
+**1 P2**: `computeSnapshotContentDigest([])` succeeded WITHOUT a bound (the bound was only checked
+inside the group loop, which never runs for an empty snapshot), contradicting the PR's
+"missing snapshot bound fails closed" claim. Fixed: the snapshot-level `multiplicityBound` is
+validated BEFORE the loop. `computeSnapshotContentDigest([], validBound)` still succeeds (empty
+snapshot is the chartered §8.2-4 positive control); `computeSnapshotContentDigest([])` with no /
+zero / over-range bound now throws `MULTIPLICITY_OUT_OF_BOUNDS`. Mutation: dropping the pre-loop
+guard → RED. Header comment reconciled.
+
+## 3f. Round-4 — post-APPROVE verify-pass absorption (2026-07-21)
+
+An independent verify pass over the round-1..3 ledger (adversarial agents, after the owner's
+0 P1 / 0 P2 code verdict at `8b9e7a5e8`) found the round-1 Set-privatization ruling had only
+been applied to the TEMPLATES module:
+
+- **P2: the codec `__internals` still exported three live membership Sets**
+  (`MR_DIGEST_ERROR_REASON_SET`, `MR_VALUE_KIND_SET`, `MR_IDENTITY_KEY_CLASS_SET`), and
+  `MR_IDENTITY_KEY_CLASS_SET` is load-bearing in `encodeIdentitySortTuple`. Probe:
+  `__internals.MR_IDENTITY_KEY_CLASS_SET.add('evil')` flipped an unknown `identityKeyClass`
+  from reject to ACCEPT, encoding class byte `0x00` — colliding with the `identity_invalid`
+  domain separator. Fixed: the Sets are module-private; no `*_SET` key and no live `Set`
+  instance anywhere on the export surface (module or `__internals`), pinned by a test that
+  also runs the poisoning attempt as a no-op with reject-before/reject-after positive controls.
+- **P3 (raised in the round-3 re-review, absorbed here): error-detail sanitization aligned** —
+  the in-loop `encodeIdentitySortTuple` guards now null out non-safe-integer
+  `multiplicityBound`/`multiplicity` in `details`, matching the snapshot-level pre-loop guard's
+  discipline; pinned by tests asserting `details.<field> === null` for string inputs.
+- Ledger corrections: "70 suites" → 94 (§3c); §3d equivalent-mutant rationale reworded — the
+  hasOwnProperty guard *rejects fail-closed*, it does not strip.
+
+Round-4 mutation battery: re-export a live Set through `__internals` → RED; revert either
+detail sanitization → RED.
+
+**Round-4b (owner exact-head review of `a1c5e6c87`, 1 P2):** the first surface check scanned
+only two levels, so a nested re-export (`__internals.membership.{SET}`) stayed green while the
+poisoning still reproduced. The check is now a recursive walker over `Object.entries` —
+objects AND functions traversed, WeakSet cycle guard — rejecting `Set` instances and `*_SET`
+keys at any depth. Battery: the owner's nested mutant → RED; three-deep nesting → RED; a Set
+under an innocent key name (instance check, not key match) → RED; direct re-export → RED;
+walker probes: a Set mounted on an exported function is caught, and a cyclic export terminates
+without a false positive.
+
 ## 4. Explicitly out of scope (per §7 gates)
 
 D2 (scenario/binding store, pointer CAS runtime, `SET LOCAL lock_timeout` claim mechanics with
