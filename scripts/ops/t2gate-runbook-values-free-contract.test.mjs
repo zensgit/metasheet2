@@ -2281,6 +2281,21 @@ test('owner repro (round 3, c): unfenced SQL is BOTH flagged as unfenced and par
     result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
     `unfenced SQL must also be PARSED, not merely flagged: ${result.violations.join(' | ')}`,
   )
+
+  // A statement broken across inline code spans is still one statement: the backticks are prose
+  // markup, not a code venue. Without stripping them the FROM target reads as `` `directory_…` ``
+  // and the whole statement disappears from the scanner.
+  const splitSpan = 'Run `SELECT union_id, open_id, mobile, raw` from `directory_accounts` on staging.'
+  assert.equal(
+    extractUnfencedSqlStatements(splitSpan).length,
+    1,
+    `a statement split across inline code spans must still be found: ${splitSpan}`,
+  )
+  const split = assertNoRawIdentityProjections(splitSpan)
+  assert.ok(
+    split.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+    `expected the split-span statement to be parsed, got: ${split.violations.join(' | ')}`,
+  )
 })
 
 test('positive control (round 3): a prose MENTION of a column is not a SQL projection', () => {
