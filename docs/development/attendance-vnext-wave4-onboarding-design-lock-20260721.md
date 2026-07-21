@@ -5,8 +5,10 @@
 > **撤回该 ratification**：合入版是较早稿的定稿，遗漏了 round-3 材料分支上的关键内容与勘误，且含
 > 两处实质错误（见下方 errata 历史块）。撤回时点事实：**W4-0 runtime PR 不存在，无代码损害**
 > （main 上全仓 grep `setup-readiness|setupReadiness|SetupReadiness` = 0 命中；另存在一条已推送但
-> **无 PR、未合入**的 WIP 分支 `claude/w4-0-setup-readiness-20260721`（head `eb98e6f0a`，单提交
-> +1122 行）——**该分支同属冻结范围，不得开 PR、不得合入**，其处置属 owner 决定）。
+> **无 PR、未合入**的 WIP 分支 `claude/w4-0-setup-readiness-20260721`（errata 建 PR 时点 head
+> `eb98e6f0a`，单提交 +1122 行；**勘误门审期间观测到该分支仍在前进**——2026-07-21 门审时 head 已至
+> `b2789cce7`，新增真库双组织测试与 plugin-tests.yml 接线提交，疑似按被撤回的旧 RATIFIED 授权续作）
+> ——**该分支及其后续任何前进同属冻结范围，不得开 PR、不得合入**，其处置属 owner 决定）。
 > 材料分支 `claude/w4-onboarding-design-lock-20260721-5p2-round3`（head `daea4301d`）为**只读材料库**，
 > 其内容已逐条对现 main 重验后手工移植入本文（该分支基于旧基线 `6feff1b2b`，禁止 merge/rebase/
 > cherry-pick；owner：保留至 errata 移植完成，之后作为历史证据关闭）。
@@ -276,7 +278,7 @@ W4-0 判别矩阵逐行登记。
   `index.cjs` 各处）或测试/staging smoke 夹具。
 - **声称一（证实）：admin 建人不写 `user_orgs`。** `POST /api/admin/users`
   （`packages/core-backend/src/routes/admin-users.ts:3072`）写 `users`（`:3215`）、
-  `user_roles`（`:3241`）、`user_permissions`（`:3254`）、attendance onboarding 的
+  `user_roles`（`:3241`）、`user_permissions`（`:3252`）、attendance onboarding 的
   `attendance_group_members`（`:3269`）与 `attendance_shift_assignments`（`:3284`）——
   **全文件零 `user_orgs`**。注意该路径在带 `attendanceOrgId` 时**明知权威 org** 却不落成员表。
 - **声称二（证实）：目录同步 admission 不写 `user_orgs`。**
@@ -637,7 +639,8 @@ W4-PRE-1 完成证据）
      `AttendanceSettingsSection.vue` 存在但**零 import**（死代码，§1-2 结论维持）。
    - 在飞分支（errata 时点实况）：`claude/w4-onboarding-design-lock-20260721-5p2-round3`
      （`daea4301d`，只读材料库，待关闭为历史证据）与
-     `claude/w4-0-setup-readiness-20260721`（`eb98e6f0a`，WIP，无 PR，**冻结范围内不得合入**）——
+     `claude/w4-0-setup-readiness-20260721`（errata 时点 `eb98e6f0a`；门审时已前进至 `b2789cce7`，
+     WIP，无 PR，**该分支及后续任何前进均在冻结范围内，不得开 PR、不得合入**）——
      除此之外无同题分支。
 3. 修改文件：本 errata PR 仅两份文档（本文 + 章程 §15 行，docs-only）；未来切片碰撞车道 =
    `AttendanceView.vue`（单热文件串行，与 Wave 5 不并开——owner 裁决⑤）。
