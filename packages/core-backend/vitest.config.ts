@@ -412,6 +412,10 @@ export default defineConfig({
       // wired into `Run multitable real-DB integration` in plugin-tests.yml. The no-DB wiring contract
       // pins both points.
       'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts',
+      // W0 L7 exact-anchor recovery-plan goldens: DATABASE_URL-gated and meaningful only against real
+      // Postgres. Exclude from the no-DB default lane so it cannot skip-green; the shared exact-anchor
+      // CI wiring contract pins this entry and its whole-file multitable real-DB invocation.
+      'tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

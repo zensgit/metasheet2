@@ -39,6 +39,9 @@ import { assertSeqString } from './history-trust-checkpoint'
  * (b) apply the actor's field mask + denied-record filter to what it returns/executes (the T-path's PIT-3
  * discipline), and (c) enforce SHEET_REVERT_MAX_RECORDS-class ceilings. Consuming this module without those
  * layers is NOT a production path — it is not wired to any route in this lane (default-off by construction).
+ * After retention has pruned raw revisions, production callers must also resolve the trusted checkpoint,
+ * compose its baseline overlay, and pass that composed state to `classifyExactAnchorRecoveryPlan`; the direct
+ * builder below is intentionally raw-history-only and is not a checkpoint-complete recovery authority.
  *
  * EXACT BIGINT: `anchorSeq` is a decimal string handed to `reconstructRecordsAtSeq`'s `::bigint` bind;
  * `assertSeqString` fails closed here too so a garbage anchor never reaches SQL from the plan layer.
@@ -77,18 +80,52 @@ export interface ExactAnchorRecoveryPlan {
 }
 
 const asRec = (v: unknown): Record<string, unknown> =>
-  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+  v && typeof v === 'object' && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : {}
 
-/** Order-insensitive deep-ish equality on record data objects (JSON-shaped values). */
-function dataEquals(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
-  const ka = Object.keys(a)
-  const kb = Object.keys(b)
-  if (ka.length !== kb.length) return false
-  for (const k of ka) {
-    if (!(k in b)) return false
-    if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false
+function canonicalize(value: unknown): string {
+  const normalize = (v: unknown): unknown => {
+    if (v === undefined) return null
+    if (Array.isArray(v)) return v.map(normalize)
+    if (v !== null && typeof v === 'object') {
+      const source = v as Record<string, unknown>
+      const ordered: Record<string, unknown> = {}
+      for (const key of Object.keys(source).sort())
+        ordered[key] = normalize(source[key])
+      return ordered
+    }
+    return v
   }
-  return true
+  return JSON.stringify(normalize(value) ?? null)
+}
+
+/** Key-order-insensitive equality on JSON-shaped record data. */
+function dataEquals(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+): boolean {
+  return canonicalize(a) === canonicalize(b)
+}
+
+export class ExactAnchorPlanDataError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ExactAnchorPlanDataError'
+  }
+}
+
+function requireLiveVersion(value: unknown, recordId: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new ExactAnchorPlanDataError(
+      `live record ${recordId} has an invalid version`,
+    )
+  }
+  return value
+}
+
+function compareRecordId(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
 }
 
 /**
@@ -103,16 +140,32 @@ export async function buildExactAnchorRecoveryPlan(
   assertSeqString(anchorSeq, 'buildExactAnchorRecoveryPlan.anchorSeq') // fail-closed on a garbage anchor
 
   // Current schema — the drift guard's truth (a stale field key must never be re-written).
-  const fieldRes = await query('SELECT id FROM meta_fields WHERE sheet_id = $1', [sheetId])
-  const fieldIds = new Set((fieldRes.rows as Array<{ id: unknown }>).map((r) => String(r.id)))
+  const fieldRes = await query(
+    'SELECT id FROM meta_fields WHERE sheet_id = $1',
+    [sheetId],
+  )
+  const fieldIds = new Set(
+    (fieldRes.rows as Array<{ id: unknown }>).map((r) => String(r.id)),
+  )
 
   // Live rows.
-  const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
-  const liveRes = await query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])
-  for (const r of liveRes.rows as Array<{ id: unknown; data: unknown; version: unknown }>) {
-    liveById.set(String(r.id), {
+  const liveById = new Map<
+    string,
+    { data: Record<string, unknown>; version: number }
+  >()
+  const liveRes = await query(
+    'SELECT id, data, version FROM meta_records WHERE sheet_id = $1',
+    [sheetId],
+  )
+  for (const r of liveRes.rows as Array<{
+    id: unknown
+    data: unknown
+    version: unknown
+  }>) {
+    const recordId = String(r.id)
+    liveById.set(recordId, {
       data: asRec(r.data),
-      version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0,
+      version: requireLiveVersion(r.version, recordId),
     })
   }
 
@@ -126,7 +179,15 @@ export async function buildExactAnchorRecoveryPlan(
  * map before planning — the classification semantics are identical either way; see the module doc table).
  */
 export function classifyExactAnchorRecoveryPlan(
-  stateMap: Map<string, { recordId: string; exists: boolean; data: Record<string, unknown> | null; version: number | null }>,
+  stateMap: Map<
+    string,
+    {
+      recordId: string
+      exists: boolean
+      data: Record<string, unknown> | null
+      version: number | null
+    }
+  >,
   liveById: Map<string, { data: Record<string, unknown>; version: number }>,
   fieldIds: ReadonlySet<string>,
 ): ExactAnchorRecoveryPlan {
@@ -145,15 +206,34 @@ export function classifyExactAnchorRecoveryPlan(
       const targetData = asRec(target.data)
       // Schema-drift guard — identical for the revert and resurrect branches (excluded, counted, re-preview).
       let drift = false
-      for (const fid of Object.keys(targetData)) if (!fieldIds.has(fid)) { drift = true; break }
-      if (drift) { plan.driftCount++; continue }
-      if (!live) {
-        // Existed at the anchor, gone now ⇒ deleted AFTER the anchor ⇒ resurrectable to its at-anchor state.
-        plan.resurrects.push({ recordId, snapshot: targetData, targetVersion: target.version })
+      for (const fid of Object.keys(targetData))
+        if (!fieldIds.has(fid)) {
+          drift = true
+          break
+        }
+      if (drift) {
+        plan.driftCount++
         continue
       }
-      if (dataEquals(live.data, targetData)) { plan.unchangedCount++; continue }
-      plan.reverts.push({ recordId, targetData, targetVersion: target.version, liveVersion: live.version })
+      if (!live) {
+        // Existed at the anchor, gone now ⇒ deleted AFTER the anchor ⇒ resurrectable to its at-anchor state.
+        plan.resurrects.push({
+          recordId,
+          snapshot: targetData,
+          targetVersion: target.version,
+        })
+        continue
+      }
+      if (dataEquals(live.data, targetData)) {
+        plan.unchangedCount++
+        continue
+      }
+      plan.reverts.push({
+        recordId,
+        targetData,
+        targetVersion: target.version,
+        liveVersion: live.version,
+      })
       continue
     }
     // target deleted as of the anchor (latest seq<=anchor revision is a delete — LOCK-9):
@@ -162,7 +242,13 @@ export function classifyExactAnchorRecoveryPlan(
   }
 
   // Live rows with no revision ≤ anchor at all: created after the anchor.
-  for (const id of liveById.keys()) if (!stateMap.has(id)) plan.createdAfterAnchor.push(id)
+  for (const id of liveById.keys())
+    if (!stateMap.has(id)) plan.createdAfterAnchor.push(id)
+
+  plan.reverts.sort((a, b) => compareRecordId(a.recordId, b.recordId))
+  plan.resurrects.sort((a, b) => compareRecordId(a.recordId, b.recordId))
+  plan.deletedAtAnchorLiveNow.sort(compareRecordId)
+  plan.createdAfterAnchor.sort(compareRecordId)
 
   return plan
 }
