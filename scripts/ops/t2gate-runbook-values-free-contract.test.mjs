@@ -2679,9 +2679,17 @@ test('gate repro (round 4): the candidate is not cut at a `;` inside a literal, 
 
   // The same masking inside the projection-list extractor: a `;` in a literal is text, so the
   // list must not end there and every projection after it stays visible.
-  const lists = extractSelectLists("SELECT length(external_key) AS k, 'a;b' AS label, mobile FROM directory_accounts;")
+  const lists = extractSelectLists("SELECT length(external_key) AS k, 'a ;b' AS label, mobile FROM directory_accounts;")
   assert.equal(lists.length, 1, 'one SELECT list expected')
   assert.match(lists[0], /mobile$/, `projection list was truncated at a quoted ";": ${JSON.stringify(lists[0])}`)
+  // …and a keyword inside a literal is text too, not a terminator.
+  const commented = extractSelectLists('SELECT union_id, -- FROM directory_sync_runs\n  mobile FROM directory_accounts;')
+  assert.equal(commented.length, 1, 'one SELECT list expected')
+  assert.match(
+    normalizeSqlWs(commented[0]),
+    /mobile$/,
+    `projection list was truncated at a commented-out keyword: ${JSON.stringify(commented[0])}`,
+  )
 })
 
 test('gate repro (round 4): the SQL/prose decision is structural, not a vocabulary', () => {
