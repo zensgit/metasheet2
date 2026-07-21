@@ -21,9 +21,9 @@
  *     id it writes into the trash row; a subsequent restore (record-service.restoreRecord, flag on)
  *     replays the edge — full round trip through the D-3 capture point.
  * (b) cap breach: MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS forced to 1 with capture ON → reset-execute
- *     refuses and the WHOLE reset rolls back — the delete target stays live, the unrelated revert
- *     candidate stays unreverted, and the neighbour's edge is untouched (fail-closed, never a
- *     half-captured destruction).
+ *     returns the stable 422 TOMBSTONE_CAPTURE_CAP_EXCEEDED contract and the WHOLE reset rolls back —
+ *     the delete target stays live, the unrelated revert candidate stays unreverted, and the
+ *     neighbour's edge is untouched (fail-closed, never a half-captured destruction).
  *
  * Runs only with DATABASE_URL.
  */
@@ -265,12 +265,8 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
 
     process.env[CAP_ROWS_FLAG] = '1' // D would capture 2 inbound rows > cap 1 → assertWithinCaptureCap throws
     const ex = await resetExecute(token)
-    // Exact-anchor apply throws TombstoneCaptureCapExceededError inside the destructive txn. The apply
-    // rolls back (fail-closed). HTTP status mapping for this typed error on the exact-anchor execute
-    // surface is currently the generic 500 INTERNAL_ERROR path (legacy single-record DELETE routes map
-    // the same class to 422) — the load-bearing contract here is ZERO WRITES, not the status code.
-    expect(ex.status).not.toBe(200)
-    expect(ex.body?.ok).not.toBe(true)
+    expect(ex.status).toBe(422)
+    expect(ex.body).toMatchObject({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED' } })
 
     // Fail-closed, all-or-nothing: NOTHING written.
     expect(await recordRow(D)).toBeTruthy() // D still LIVE, never soft-deleted
