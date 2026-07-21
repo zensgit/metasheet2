@@ -625,6 +625,39 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
     expect((await readRow(id, key)).status).toBe('in_progress') // left unresolved for reclaim
   }, 15_000)
 
+  // [#4497 P1] The SAME scenario as P2-C with the load dependence removed: the handler runs 1300ms against a
+  // 1000ms lease, so it ALWAYS outruns the lease (P2-C's 800ms handler only did so under load — which is why
+  // CI was red and a re-run green). Pre-fix this single seeded row was claimed and delivered EIGHT times in
+  // ONE tick (calls=8, heartbeatErrors=8) and was finally burned to dead_letter by attempt exhaustion
+  // (claimTimePoisoned=1) — CI merely caught it at 2. The P2-C assertions are repeated verbatim here.
+  test('P2-C (deterministic): a handler that outruns its lease is still delivered ONCE per tick', async () => {
+    const key = `ck_${RUN}_hbdberr_slow`
+    const id = await seedRow(key)
+    const real = db()
+    const failingDb: Queryable = {
+      query: async (sql, params) => {
+        if (/SET\s+lease_expires_at/.test(sql) && !/last_error/.test(sql)) throw new Error('heartbeat db down')
+        return real.query(sql, params)
+      },
+    }
+    let calls = 0
+    const r = new ConsumerAdapterRegistry()
+    r.register(
+      adapter(key, async () => {
+        calls += 1
+        await new Promise((res2) => setTimeout(res2, 1_300)) // > leaseMs: the lease is gone when the handler returns
+        return { outcome: 'success' }
+      }),
+    )
+    const res = await runDispatchTick(failingDb, r, { leaseMs: 1_000, adapterTimeoutMs: 9_000 })
+    expect(calls).toBe(1) // ONE delivery — for a real adapter a second call is a duplicate external operation
+    expect(res.claimed).toBe(1)
+    expect(res.heartbeatErrors).toBe(1)
+    expect(res.lostLease).toBe(0)
+    expect(res.claimTimePoisoned).toBe(0) // never burned toward the ceiling by the tick's own re-claims
+    expect(await readRow(id, key)).toMatchObject({ status: 'in_progress', attempts: 1 })
+  }, 20_000)
+
   // [#4497 P1 — the CI red on 4e04af582 was a REAL bug, not a timing flake]
   // `heartbeatErrors` increments AT MOST ONCE per processClaimedRow(), yet ONE UUID-isolated seeded row
   // produced 2 — so the SAME ROW was claimed and executed TWICE inside ONE tick. Root cause: after a heartbeat
