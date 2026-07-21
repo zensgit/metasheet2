@@ -617,6 +617,120 @@ test('synthetic: comment-only env/config decoys inside the id step must RED', ()
   assert.throws(() => isSuiteWiredInRealDbStep(commentOnly, STEP_ID, FILE), /env\.DATABASE_URL/)
 })
 
+test('synthetic MUTATION 7: an EMPTY block-scalar env.DATABASE_URL must RED', () => {
+  // Round-4 gate finding N1 (owner acceptance criterion (a)): `DATABASE_URL: |` / `>` is a PRESENT
+  // key whose VALUE is the empty string when the block body is empty or whitespace-only. A scalar
+  // reader that never resolves block scalars sees the literal indicator (`|`) as the value, calls it
+  // non-empty and greens — while at runtime DATABASE_URL is empty and every describeIfDatabase suite
+  // skips. Same skip-green class as `DATABASE_URL: ''`, reached through a different YAML spelling.
+  const headers = ['|', '>', '|-', '>-', '|+', '>2']
+  for (const header of headers) {
+    for (const bodyLines of [
+      [], // empty block body
+      ['             '], // whitespace-only block body
+      ['             ', '', '             '], // several whitespace-only lines
+    ]) {
+      const wf = craftWorkflow({
+        envLines: ['        env:', `          DATABASE_URL: ${header}`, ...bodyLines],
+      })
+      const label = `DATABASE_URL: ${header} + ${bodyLines.length} blank body line(s)`
+      assert.ok(wf.includes('DATABASE_URL'), 'the env key is still present — presence must not pass')
+      assert.ok(wf.includes(FILE), 'the suite path is still listed')
+      const step = extractStepById(wf, STEP_ID)
+      assert.notEqual(step, null, 'the id step still exists; only the env VALUE spelling was mutated')
+      assert.equal(stepHasEnvDatabaseUrl(step), false, `${label} must not count`)
+      assert.throws(
+        () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+        /env\.DATABASE_URL/,
+        `${label} must not satisfy the contract`,
+      )
+    }
+  }
+  // Positive control: the pin RESOLVES block scalars, it does not reject the block-scalar FORM.
+  // A `|` / `>` value with real content is a legitimate way to write the URL and must still pass.
+  for (const header of headers) {
+    const ok = craftWorkflow({
+      envLines: [
+        '        env:',
+        `          DATABASE_URL: ${header}`,
+        '            postgresql://postgres@localhost:5432/metasheet_test',
+      ],
+    })
+    assert.equal(
+      stepHasEnvDatabaseUrl(extractStepById(ok, STEP_ID)),
+      true,
+      `block scalar ${header} WITH content must still pass`,
+    )
+    assert.equal(isSuiteWiredInRealDbStep(ok, STEP_ID, FILE), true, `block scalar ${header} + content`)
+  }
+})
+
+test('synthetic MUTATION 8: a phantom `- name:`/`id:` step minted INSIDE a run script must not anchor', () => {
+  // Round-4 gate finding N2: step discovery scanned the RAW workflow for `^\s*-\s+\S`, and block
+  // scalars were masked only AFTER a candidate block had been carved out — so a `- name:` / `id:`
+  // pair written inside a shell heredoc (or any `run:` body) was minted as a real step. That
+  // resurrects the decoy class the id anchoring was introduced to end: the phantom carries every
+  // pin, the job runs nothing but `cat`.
+  //
+  // Three spellings of the SAME structural mistake are covered, because closing only the heredoc
+  // one leaves the class open: a `run:` value may be a block scalar, a bare multi-line PLAIN scalar,
+  // or a multi-line QUOTED scalar — in all three the following indented lines are scalar CONTENT.
+  const phantomBody = [
+    '          - name: phantom real-DB step',
+    `            id: ${STEP_ID}`,
+    "            if: matrix.node-version == '20.x'",
+    '            env:',
+    '              DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
+    '            run: |',
+    `              pnpm exec vitest --config vitest.integration.config.ts run ${FILE}`,
+  ]
+  const carriers = {
+    'block scalar heredoc': ['        run: |', '          cat <<EOS > /dev/null', ...phantomBody, '          EOS'],
+    'multi-line plain scalar': ['        run: echo', ...phantomBody],
+    'multi-line double-quoted scalar': ['        run: "echo', ...phantomBody, '          "'],
+  }
+  let phantom = null
+  for (const [label, carrierLines] of Object.entries(carriers)) {
+    const wf = [
+      'jobs:',
+      '  test:',
+      '    steps:',
+      '      - name: Innocuous prep step',
+      ...carrierLines,
+      '      - name: Next step',
+      '        run: echo ok',
+    ].join('\n')
+    if (phantom === null) phantom = wf
+    assert.ok(wf.includes(`id: ${STEP_ID}`), `${label}: the id text is present, inside a run VALUE`)
+    assert.ok(wf.includes(FILE), `${label}: the suite path is present too`)
+    assert.equal(
+      extractStepById(wf, STEP_ID),
+      null,
+      `${label}: a sequence item minted inside a run: value must not be discovered as a step`,
+    )
+    assert.throws(
+      () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+      /not found in plugin-tests\.yml|located by exact/,
+      `${label}: a phantom step inside a scalar must not stand in for the id-located step`,
+    )
+  }
+
+  // Positive control: masking scalar bodies BEFORE sequence detection must not swallow the REAL
+  // steps that follow such a script. The genuine id step declared after the heredoc still resolves
+  // and satisfies all four pins — the fix is "don't parse shell as YAML", not "stop finding steps".
+  const withReal = [
+    phantom.split('\n').slice(0, -2).join('\n'),
+    ...craftWorkflow().split('\n').slice(3),
+  ].join('\n')
+  assert.equal(withReal.match(new RegExp(`id: ${STEP_ID}`, 'g')).length, 2, 'phantom + real id both present')
+  const step = extractStepById(withReal, STEP_ID)
+  assert.notEqual(step, null, 'the REAL id step after the heredoc is still discovered')
+  assert.equal(stepRunsOnNode20Matrix(step), true)
+  assert.equal(stepHasEnvDatabaseUrl(step), true)
+  assert.equal(stepInvokesVitestIntegrationConfig(step), true)
+  assert.equal(isSuiteWiredInRealDbStep(withReal, STEP_ID, FILE), true)
+})
+
 test('synthetic: an `id:` token inside a run script cannot anchor the helper', () => {
   // Block-scalar masking: shell text must never be read as YAML keys.
   const wf = [

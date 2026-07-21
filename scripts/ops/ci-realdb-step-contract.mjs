@@ -45,10 +45,26 @@
  * (synthetic) coverage lives in `t2gate-collision-mechanism-ci-wiring.test.mjs`, which is likewise
  * already wired. No workflow step was added or modified for it.
  *
- * Parsing note: block scalars (`run: |`) are masked out of the YAML-key surface, so an `if:` /
- * `id:` / `env:` token appearing inside a shell script cannot anchor or satisfy a pin. Conversely
- * pins (c)/(d) parse ONLY the `run:` script text, split into individual shell commands, and resolve
- * the binary each command executes — so YAML titles, comments and non-vitest commands are inert.
+ * Round 4 closed two more holes found by the gate against the round-3 module:
+ *
+ *   6. `DATABASE_URL: |` / `DATABASE_URL: >` with an EMPTY (or whitespace-only) block body — a
+ *      block scalar carries no value on the key line, so a reader that does not resolve the body
+ *      took the literal indicator `|` for the value and called it non-empty. At runtime the
+ *      variable is empty: the same skip-green as (4), reached through a different YAML spelling.
+ *   7. a PHANTOM step minted from inside a `run:` script — sequence items were detected on the raw
+ *      workflow text and block scalars were masked only afterwards, so a `- name:` / `id:` pair
+ *      written inside a shell heredoc was carved out as a real step and could satisfy every pin
+ *      while the job executed nothing but `cat`. That resurrected the decoy class (3) had ended.
+ *
+ * Parsing note (ordering is load-bearing): the whole workflow is masked FIRST — every block-scalar
+ * body (`run: |`, `run: >`, …) is blanked, line-for-line — and sequence-item detection, step
+ * boundaries, `id:` / `if:` / `env:` anchoring and the `DATABASE_URL` key lookup all run on that
+ * masked view, so no shell text can be read as YAML structure. The raw lines are kept index-aligned
+ * with the masked ones, which is what lets pin (b) resolve a block scalar's actual content and lets
+ * pins (c)/(d) parse ONLY the real `run:` script text — split into individual shell commands, with
+ * the binary each command executes resolved — so YAML titles, comments and non-vitest commands are
+ * inert. One shared `BLOCK_SCALAR_HEADER` pattern serves all three readers: a masker that knew a
+ * spelling (`|-`, `>2`) the value reader did not would itself be a bypass.
  */
 
 /** Stable `id:` values of the two real-DB steps in .github/workflows/plugin-tests.yml. */
@@ -58,40 +74,39 @@ export const REAL_DB_STEP_IDS = Object.freeze({
 })
 
 /**
- * Split a workflow into YAML sequence-item blocks (candidate steps).
- * Each block runs from its `- ` line through (not including) the next line at the same or
- * shallower indent that starts a new sequence item or a new mapping key.
- *
- * @param {string} wf
- * @returns {{ indent: number, start: number, lines: string[] }[]}
+ * A YAML block-scalar HEADER value: `|` or `>` with any chomping (`-`/`+`) and explicit-indentation
+ * digits, in either order, plus an optional trailing comment. ONE definition, used by the masker,
+ * by the `run:` script extractor and by the env-value resolver — if they disagreed on a spelling
+ * (e.g. the masker knowing `|-` while the value reader did not), the disagreement itself would be a
+ * bypass: the reader would take the literal indicator `|-` for a non-empty value.
  */
-function sequenceItemBlocks(wf) {
-  const lines = wf.split('\n')
-  const blocks = []
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)-\s+\S/)
-    if (!m) continue
-    const indent = m[1].length
-    const body = []
-    let j = i + 1
-    for (; j < lines.length; j++) {
-      const line = lines[j]
-      if (/^\s*$/.test(line)) {
-        body.push(line)
-        continue
-      }
-      const lead = (line.match(/^(\s*)/) || ['', ''])[1].length
-      if (lead <= indent) break
-      body.push(line)
-    }
-    blocks.push({ indent, start: i, lines: body })
-  }
-  return blocks
+const BLOCK_SCALAR_HEADER = /^[|>][0-9+-]*\s*(?:#.*)?$/
+
+/** @param {string} rawValue text after `key:` (leading space included) */
+function isBlockScalarHeader(rawValue) {
+  return BLOCK_SCALAR_HEADER.test(rawValue.trim())
 }
 
 /**
- * Blank out block-scalar content (`key: |`, `key: >`, with optional chomping indicators) so shell
- * text inside `run:` cannot be mistaken for YAML keys. Line count is preserved.
+ * Blank out every line that is CONTENT of a scalar value rather than YAML structure, so text a step
+ * merely carries (shell script, log messages) can never be mistaken for YAML keys or sequence
+ * items. Line count — and therefore INDEX ALIGNMENT with the raw lines — is preserved, which is
+ * what lets callers detect structure on the masked view and still read literal content from raw.
+ *
+ * A mapping key opens a scalar body whenever it is NOT followed by a nested collection, i.e.:
+ *   - `key: |` / `key: >` (+ chomping/indent indicators) — a block scalar; the body is the indented
+ *     block below;
+ *   - `key: <anything non-empty>` — a plain or quoted scalar, which in YAML MAY continue onto the
+ *     following more-indented lines (`run: "echo` … `"`, or a bare multi-line plain scalar). Round 4
+ *     found that masking only the `|`/`>` form left this second spelling open: a `- name:` / `id:`
+ *     pair written on the continuation lines of a quoted or plain `run:` value was still minted as a
+ *     step. Structurally these lines are scalar content exactly like a heredoc, so they are masked
+ *     the same way.
+ * Only `key:` with an EMPTY value (or a value that is just a `#` comment) introduces nested
+ * structure, so only then does the following indented block stay visible.
+ *
+ * The direction of any residual imprecision is fail-CLOSED: over-masking hides a step, and every
+ * caller throws when the id-located step is missing.
  *
  * @param {string[]} lines
  * @returns {string[]}
@@ -108,11 +123,13 @@ function maskBlockScalars(lines) {
       }
       scalarIndent = null
     }
-    const m = line.match(/^(\s*)[\w.-]+:\s*[|>][-+]?\d*\s*$/)
+    // `- run: |` (a scalar under an inline sequence item) counts too: the KEY's own column is what
+    // the body must out-indent, so the dash prefix is part of the measured indent.
+    const m = line.match(/^(\s*(?:-\s+)?)[\w.-]+:(.*)$/)
     if (m) {
-      scalarIndent = m[1].length
-      out.push(line)
-      continue
+      const value = m[2].trim()
+      const opensScalar = isBlockScalarHeader(value) || (value !== '' && !value.startsWith('#'))
+      if (opensScalar) scalarIndent = m[1].length
     }
     out.push(line)
   }
@@ -120,9 +137,50 @@ function maskBlockScalars(lines) {
 }
 
 /**
+ * Split a workflow into YAML sequence-item blocks (candidate steps).
+ * Each block runs from its `- ` line through (not including) the next line at the same or
+ * shallower indent that starts a new sequence item or a new mapping key.
+ *
+ * Block scalars are masked BEFORE sequence detection (round-4 gate finding N2). Masking after the
+ * carve-up was too late: a `- name:` / `id:` pair written inside a `run:` heredoc was minted as a
+ * real sequence item, so a PHANTOM step defined in shell text could carry every pin while the job
+ * executed nothing but `cat` — the exact decoy class id-anchoring exists to end. Detection and
+ * boundaries therefore run on the masked view; the RAW body is still returned (index-aligned) so
+ * pins (c)/(d) can parse the real script text.
+ *
+ * @param {string} wf
+ * @returns {{ indent: number, start: number, lines: string[], maskedLines: string[] }[]}
+ */
+function sequenceItemBlocks(wf) {
+  const raw = wf.split('\n')
+  const masked = maskBlockScalars(raw)
+  const blocks = []
+  for (let i = 0; i < masked.length; i++) {
+    const m = masked[i].match(/^(\s*)-\s+\S/)
+    if (!m) continue
+    const indent = m[1].length
+    let j = i + 1
+    for (; j < masked.length; j++) {
+      const line = masked[j]
+      if (/^\s*$/.test(line)) continue
+      const lead = (line.match(/^(\s*)/) || ['', ''])[1].length
+      if (lead <= indent) break
+    }
+    blocks.push({
+      indent,
+      start: i,
+      lines: raw.slice(i + 1, j),
+      maskedLines: masked.slice(i + 1, j),
+    })
+  }
+  return blocks
+}
+
+/**
  * Extract the workflow step carrying the EXACT `id: <stepId>` key, as a step child key
  * (indent === item indent + 2) outside any block scalar. Title text is never consulted, so a
- * name-prefix decoy cannot anchor here.
+ * name-prefix decoy cannot anchor here; and because block scalars are masked before sequence
+ * detection, neither can a step minted inside a `run:` script.
  *
  * @param {string} wf raw workflow YAML
  * @param {string} stepId exact id value
@@ -130,11 +188,10 @@ function maskBlockScalars(lines) {
  */
 export function extractStepById(wf, stepId) {
   for (const block of sequenceItemBlocks(wf)) {
-    const masked = maskBlockScalars(block.lines)
     const childIndent = block.indent + 2
     const idRe = new RegExp(`^\\s{${childIndent}}id:\\s*['"]?${escapeRe(stepId)}['"]?\\s*$`)
-    if (!masked.some((line) => idRe.test(line))) continue
-    return { id: stepId, body: block.lines.join('\n'), yamlBody: masked.join('\n') }
+    if (!block.maskedLines.some((line) => idRe.test(line))) continue
+    return { id: stepId, body: block.lines.join('\n'), yamlBody: block.maskedLines.join('\n') }
   }
   return null
 }
@@ -173,16 +230,48 @@ function scalarYamlValue(raw) {
 }
 
 /**
+ * Does the value written after `DATABASE_URL:` resolve to a NON-EMPTY string?
+ *
+ * Plain scalars are read directly. A BLOCK SCALAR (`|` / `>` and friends) has no value on the key
+ * line at all — its value is the indented body below, which the masked view has blanked out — so
+ * the body is resolved from the RAW, index-aligned lines. Round-4 gate finding N1: without this,
+ * `DATABASE_URL: |` with an empty (or whitespace-only) body read back as the literal `"|"`, i.e.
+ * "non-empty", and greened a step whose DATABASE_URL is empty at runtime — the identical skip-green
+ * to `DATABASE_URL: ''`, spelled differently.
+ *
+ * @param {string} rawValue text following `DATABASE_URL:` on the key line
+ * @param {string[]} rawLines raw step body lines (index-aligned with the masked view)
+ * @param {number} keyIndex index of the key line within those lines
+ * @param {number} keyIndent column of the `DATABASE_URL` key
+ * @returns {boolean}
+ */
+function envValueIsNonEmpty(rawValue, rawLines, keyIndex, keyIndent) {
+  if (!isBlockScalarHeader(rawValue)) return scalarYamlValue(rawValue) !== ''
+  for (let k = keyIndex + 1; k < rawLines.length; k++) {
+    const line = rawLines[k]
+    if (/^\s*$/.test(line)) continue // blank / whitespace-only body lines are not content
+    const lead = (line.match(/^(\s*)/) || ['', ''])[1].length
+    if (lead <= keyIndent) break // dedented out of the block: the body ended
+    return true // first non-blank, deeper-indented line IS the scalar's content
+  }
+  return false
+}
+
+/**
  * Pin (b): the step has a real YAML `env:` mapping child with a `DATABASE_URL:` key carrying a
  * NON-EMPTY value. Comment lines and free-text mentions do not count, and neither does an empty
- * value: `DATABASE_URL: ''` (owner repro), `""`, `"   "` or a bare `DATABASE_URL:` all leave the
- * variable unset/empty at runtime, so every describeIfDatabase suite skips green — the very
- * bypass this pin exists to stop.
+ * value in ANY spelling: `DATABASE_URL: ''` (owner repro), `""`, `"   "`, a bare `DATABASE_URL:`,
+ * or an empty/whitespace-only block scalar `DATABASE_URL: |` / `>` (round-4 gate finding N1) all
+ * leave the variable empty at runtime, so every describeIfDatabase suite skips green — the very
+ * bypass this pin exists to stop. Structure is read from the MASKED view (so an `env:` /
+ * `DATABASE_URL:` line inside a shell script is inert); block-scalar CONTENT is read from the raw,
+ * index-aligned view.
  *
- * @param {{ yamlBody: string }} step
+ * @param {{ body: string, yamlBody: string }} step
  */
 export function stepHasEnvDatabaseUrl(step) {
   const lines = step.yamlBody.split('\n')
+  const rawLines = step.body.split('\n')
   for (let i = 0; i < lines.length; i++) {
     const envM = /^(\s*)env:\s*$/.exec(lines[i])
     if (!envM) continue
@@ -192,8 +281,8 @@ export function stepHasEnvDatabaseUrl(step) {
       if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
       const indent = (line.match(/^(\s*)/) || ['', ''])[1].length
       if (indent <= envIndent) break
-      const dbM = /^\s*DATABASE_URL:(.*)$/.exec(line)
-      if (dbM && scalarYamlValue(dbM[1]) !== '') return true
+      const dbM = /^(\s*)DATABASE_URL:(.*)$/.exec(line)
+      if (dbM && envValueIsNonEmpty(dbM[2], rawLines, j, dbM[1].length)) return true
     }
   }
   return false
@@ -214,7 +303,8 @@ export function stepHasEnvDatabaseUrl(step) {
 function runScriptLines(bodyLines) {
   const out = []
   for (let i = 0; i < bodyLines.length; i++) {
-    const block = /^(\s*)run:\s*[|>][-+]?\d*\s*$/.exec(bodyLines[i])
+    const runKey = /^(\s*)run:(.*)$/.exec(bodyLines[i])
+    const block = runKey && isBlockScalarHeader(runKey[2]) ? runKey : null
     if (block) {
       const keyIndent = block[1].length
       for (let j = i + 1; j < bodyLines.length; j++) {
