@@ -152,6 +152,13 @@ const MR_RETENTION_POLICY_SET = new Set(MR_RETENTION_POLICIES)
 const MR_RUN_PHASES = Object.freeze(['planned', 'reading_sources', 'snapshots_complete', 'compared'])
 const MR_RUN_PHASE_SET = new Set(MR_RUN_PHASES)
 
+// Corrective-review P2: a partial-unique predicate must NOT be a free SQL string
+// (a '1=1; DROP TABLE' probe passed the old free-string form). D1 freezes a
+// CLOSED predicate vocabulary; the D2 migration layer maps each to fixed SQL
+// (e.g. not_null:X -> "X IS NOT NULL"). No raw SQL ever enters the manifest.
+const MR_PARTIAL_PREDICATES = Object.freeze(['not_null'])
+const MR_PARTIAL_PREDICATE_SET = new Set(MR_PARTIAL_PREDICATES)
+
 const MR_BINDING_AUDIT_ACTIONS = Object.freeze([
   'candidate_created',
   'preflight_passed',
@@ -381,8 +388,32 @@ function normalizeMaterialReconciliationUniqueness(input, index, fieldIdSet) {
     }
     out.scope = scope
   }
-  const partial = optionalString(input.partial, `${at}.partial`)
-  if (partial !== undefined) out.partial = assertSafeSchemaString(partial, `${at}.partial`)
+  // Corrective-review P2: partial is a CLOSED structured predicate, never a raw
+  // SQL string. Shape: { predicate: <MR_PARTIAL_PREDICATES>, field: <fieldId> }.
+  if (input.partial !== undefined) {
+    if (!isPlainObject(input.partial)) {
+      throw new MaterialReconciliationTemplateError(
+        `${at}.partial must be a structured predicate { predicate, field }, not a raw string`,
+        { field: `${at}.partial` },
+      )
+    }
+    assertNoContentKeys(input.partial, `${at}.partial`)
+    const predicate = assertSafeSchemaString(input.partial.predicate, `${at}.partial.predicate`)
+    if (!MR_PARTIAL_PREDICATE_SET.has(predicate)) {
+      throw new MaterialReconciliationTemplateError(
+        `${at}.partial.predicate must be one of ${MR_PARTIAL_PREDICATES.join(', ')}`,
+        { field: `${at}.partial.predicate`, value: predicate },
+      )
+    }
+    const predicateField = assertSafeSchemaString(input.partial.field, `${at}.partial.field`)
+    if (!fieldIdSet.has(predicateField)) {
+      throw new MaterialReconciliationTemplateError(`${at}.partial.field references unknown field ${predicateField}`, {
+        field: `${at}.partial.field`,
+        missing: predicateField,
+      })
+    }
+    out.partial = { predicate, field: predicateField }
+  }
   return out
 }
 
@@ -546,12 +577,12 @@ function buildSheetStructureFromMaterialReconciliationTemplate(template) {
 
 // Values-free by construction: objectIds, counts, discipline names and vocab
 // sizes only — no field ids, no labels, no business values.
-function summarizeMaterialReconciliationEvidence(templates) {
-  const list = templates || MATERIAL_RECONCILIATION_TEMPLATES
-  // Normalize BEFORE projecting anything: objectIds must come from validated
-  // templates only, so a caller-supplied list can never place unvalidated
-  // strings on the evidence surface.
-  const normalizedList = list.map((template) => normalizeMaterialReconciliationTemplate(template))
+// Corrective-review P2: takes NO caller argument. A prefix-valid objectId is
+// not values-free (an injected `material_reconciliation_MAT-001-SECRET` would
+// pass the prefix check and be echoed). Evidence is derived ONLY from the
+// frozen registry, so nothing caller-controlled can reach the surface.
+function summarizeMaterialReconciliationEvidence() {
+  const normalizedList = MATERIAL_RECONCILIATION_TEMPLATES
   return {
     manifestId: MATERIAL_RECONCILIATION_MANIFEST_ID,
     templateCount: normalizedList.length,
@@ -627,9 +658,10 @@ const MATERIAL_RECONCILIATION_TEMPLATES = Object.freeze([
       field('completed_at', 'Completed At', 'date'),
     ],
     // §4.4 — 058-precedent partial unique: only claim-winning runs carry the
-    // identity key; losers stay NULL forever.
+    // identity key; losers stay NULL forever. Closed predicate (corrective P2):
+    // the D2 migration maps not_null:run_identity_key -> "... IS NOT NULL".
     uniqueness: [
-      { scope: 'tenant', fields: ['run_identity_key'], partial: 'run_identity_key IS NOT NULL' },
+      { scope: 'tenant', fields: ['run_identity_key'], partial: { predicate: 'not_null', field: 'run_identity_key' } },
     ],
   }),
   // 2. Immutable snapshot header for one role side.
@@ -852,38 +884,24 @@ module.exports = {
   MATERIAL_RECONCILIATION_OBJECT_ID_PREFIX,
   isMaterialReconciliationFlagValueEnabled,
   MR_FIELD_TYPES,
-  MR_FIELD_TYPE_SET,
   MR_TEMPLATE_FAMILIES,
-  MR_TEMPLATE_FAMILY_SET,
   MR_ROLES,
-  MR_ROLE_SET,
   MR_RUN_STATES,
-  MR_RUN_STATE_SET,
   MR_RUN_TERMINAL_STATES,
-  MR_RUN_TERMINAL_STATE_SET,
   MR_RUN_TRANSITIONS,
   MR_BINDING_STATUSES,
-  MR_BINDING_STATUS_SET,
   MR_BINDING_TRANSITIONS,
   MR_DIFF_BUCKETS,
-  MR_DIFF_BUCKET_SET,
   MR_FAILURE_CLASSES,
-  MR_FAILURE_CLASS_SET,
   MR_FAILURE_REASONS,
   MR_FAILURE_REASON_CODES,
-  MR_FAILURE_REASON_CODE_SET,
   MR_CONSISTENCY_PROOF_MECHANISMS,
-  MR_CONSISTENCY_PROOF_MECHANISM_SET,
   MR_WRITE_DISCIPLINES,
-  MR_WRITE_DISCIPLINE_SET,
   MR_RETENTION_POLICIES,
-  MR_RETENTION_POLICY_SET,
   MR_RUN_PHASES,
-  MR_RUN_PHASE_SET,
+  MR_PARTIAL_PREDICATES,
   MR_BINDING_AUDIT_ACTIONS,
-  MR_BINDING_AUDIT_ACTION_SET,
   MR_IDENTITY_KEY_CLASSES,
-  MR_IDENTITY_KEY_CLASS_SET,
   MR_SELECT_VOCABULARIES,
   MATERIAL_RECONCILIATION_TEMPLATES,
   MATERIAL_RECONCILIATION_OBJECT_IDS,

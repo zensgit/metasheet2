@@ -1,8 +1,11 @@
-# PLM <-> ERP 物料主数据对账 V2 Charter（PROPOSED）— 2026-07-19
+# PLM <-> ERP 物料主数据对账 V2 Charter（RATIFIED）— 2026-07-19
 
-> **状态：PROPOSED / doc-only。** 本文把备料通用化计划的下一开发目标收敛为一个真实的
-> 第二场景：**PLM <-> ERP 物料主数据对账**。本文不授权运行时代码、迁移、路由、开关、
-> 实体机重跑或外部写；运行时实现须等 §10 的 owner 决策与 Charter ratify。
+> **状态：RATIFIED（owner 裁决 2026-07-21：OD-V2-1..7 全部按推荐 ratify；ratify 仅解锁 D1）。**
+> 本文把备料通用化计划的下一开发目标收敛为一个真实的第二场景：**PLM <-> ERP 物料主数据对账**。
+> ratify 只解锁 D1（独立 manifest + 冻结模板 + 闭词表 + flag/权限合同 + canonicalRowDigest
+> 确定性契约，schema-only、无 routes/runtime/migration）；D2 及以后仍须逐刀过 §7 门,ratify
+> **不自动授权** D2 及以后的运行时代码、迁移、路由、开关、实体机重跑或外部写。原始
+> PROPOSED 状态见 §12 修订记录。
 >
 > **代码锚：** `origin/main` `d83cf5875f517c3046eb43b37ab83da9e9d2fef9`（rev-5 刷新；较 rev-3 锚
 > `698997cf8…` 仅多一笔 attendance 文档提交 `#4492`,stock-prep / integration-core 面零变动;

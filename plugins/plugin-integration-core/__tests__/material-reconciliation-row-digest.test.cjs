@@ -351,47 +351,76 @@ function sortTupleContract() {
 }
 
 function snapshotContentDigestContract() {
+  // Corrective-review P2: the API takes structured identity GROUPS and enforces
+  // ONE encoding per multiset — a repeated identity-content group is rejected,
+  // so [mult=1, mult=1 same-row] can no longer masquerade as [mult=2].
   const digestOf = (token) => computeCanonicalRowDigest({ fieldOrder: ['k1'], row: { k1: token } }).buffer
-  const tuple = (token, multiplicity) =>
-    encodeIdentitySortTuple({
-      identityKeyClass: 'valid',
-      identityKeyBytes: Buffer.from(token, 'utf8'),
-      canonicalRowDigest: digestOf(token),
-      multiplicity,
-      multiplicityBound: 16,
-    })
-  const t1 = tuple('row-a', 1)
-  const t2 = tuple('row-b', 2)
-  const t3 = tuple('row-c', 1)
-  const invalidT = encodeIdentitySortTuple({
+  const group = (token, multiplicity) => ({
+    identityKeyClass: 'valid',
+    identityKeyBytes: Buffer.from(token, 'utf8'),
+    canonicalRowDigest: digestOf(token),
+    multiplicity,
+    multiplicityBound: 16,
+  })
+  const g1 = group('row-a', 1)
+  const g2 = group('row-b', 2)
+  const g3 = group('row-c', 1)
+  const invalidG = {
     identityKeyClass: 'identity_invalid',
     identityKeyBytes: Buffer.alloc(0),
     canonicalRowDigest: digestOf('row-d'),
     multiplicity: 1,
     multiplicityBound: 16,
-  })
+  }
 
-  const forward = computeSnapshotContentDigest([t1, t2, t3, invalidT]).hex
-  const shuffled = computeSnapshotContentDigest([invalidT, t3, t1, t2]).hex
-  const shuffled2 = computeSnapshotContentDigest([t2, invalidT, t1, t3]).hex
+  const forward = computeSnapshotContentDigest([g1, g2, g3, invalidG]).hex
+  const shuffled = computeSnapshotContentDigest([invalidG, g3, g1, g2]).hex
+  const shuffled2 = computeSnapshotContentDigest([g2, invalidG, g1, g3]).hex
   assert.equal(forward, shuffled, 'snapshot digest is order-independent (normalized multiset)')
   assert.equal(forward, shuffled2, 'snapshot digest is order-independent under any permutation')
 
   // changing one multiplicity -> different
-  const bumped = computeSnapshotContentDigest([t1, tuple('row-b', 3), t3, invalidT]).hex
+  const bumped = computeSnapshotContentDigest([g1, group('row-b', 3), g3, invalidG]).hex
   assert.notEqual(forward, bumped, 'multiplicity change changes the snapshot digest')
 
-  // multiset: adding a duplicate tuple -> different
-  const withDuplicate = computeSnapshotContentDigest([t1, t2, t3, invalidT, t1]).hex
-  assert.notEqual(forward, withDuplicate, 'duplicate tuple counts (multiset semantics)')
+  // Canonical multiset: a REPEATED identity-content group is rejected (the exact
+  // ambiguity the reviewer flagged — two mult=1 vs one mult=2 must not both be
+  // legal); the caller must pre-aggregate.
+  assertThrowsReason(
+    () => computeSnapshotContentDigest([g1, g2, g3, invalidG, group('row-a', 1)]),
+    'DUPLICATE_IDENTITY_GROUP',
+    'repeated identity-content group rejected',
+  )
+  // Same row as mult=2 is DISTINCT from mult=1 and is the ONLY legal encoding
+  // for two such rows.
+  assert.notEqual(
+    computeSnapshotContentDigest([group('row-a', 1)]).hex,
+    computeSnapshotContentDigest([group('row-a', 2)]).hex,
+    'multiplicity is value-bearing',
+  )
+  // The dedup key is the identity-content (class,key,digest) WITHOUT multiplicity:
+  // the SAME row declared with two DIFFERENT multiplicities is contradictory and
+  // must be rejected (kills a mutant that keys dedup on the full tuple).
+  assertThrowsReason(
+    () => computeSnapshotContentDigest([group('row-a', 1), group('row-a', 2)]),
+    'DUPLICATE_IDENTITY_GROUP',
+    'same identity-content with differing multiplicity rejected',
+  )
+
+  // A multiplicityBound may be supplied once for the whole snapshot.
+  assert.equal(
+    computeSnapshotContentDigest([{ ...group('row-a', 1), multiplicityBound: undefined }], 16).hex,
+    computeSnapshotContentDigest([group('row-a', 1)]).hex,
+    'snapshot-level multiplicityBound applies to groups that omit their own',
+  )
 
   // input array is not mutated by the internal sort
-  const inputs = [t3, t1, t2]
+  const inputs = [g3, g1, g2]
   computeSnapshotContentDigest(inputs)
-  assert.ok(inputs[0].equals(t3) && inputs[1].equals(t1) && inputs[2].equals(t2), 'caller array untouched')
+  assert.ok(inputs[0] === g3 && inputs[1] === g1 && inputs[2] === g2, 'caller array untouched')
 
   assertThrowsReason(() => computeSnapshotContentDigest('t'), 'UNSUPPORTED_KIND', 'non-array input')
-  assertThrowsReason(() => computeSnapshotContentDigest([Buffer.alloc(0)]), 'UNSUPPORTED_KIND', 'empty tuple buffer')
+  assertThrowsReason(() => computeSnapshotContentDigest([Buffer.from([0x01])], 16), 'UNSUPPORTED_KIND', 'raw buffer is not a group')
 }
 
 function digestShape() {
@@ -400,9 +429,12 @@ function digestShape() {
   assert.equal(result.buffer.length, 32, 'sha256 digest is 32 bytes')
   assert.equal(result.hex, result.buffer.toString('hex'), 'hex mirrors the buffer')
   assert.ok(Object.isFrozen(result), 'digest result is frozen')
-  const snapshot = computeSnapshotContentDigest([Buffer.from([0x01])])
+  const snapshot = computeSnapshotContentDigest([
+    { identityKeyClass: 'valid', identityKeyBytes: 'k', canonicalRowDigest: result.buffer, multiplicity: 1, multiplicityBound: 4 },
+  ])
   assert.equal(snapshot.buffer.length, 32)
   assert.equal(snapshot.hex, snapshot.buffer.toString('hex'))
+  assert.ok(Object.isFrozen(snapshot), 'snapshot result is frozen')
 }
 
 // Review-P2 hardening: mutation-proven killing pairs + exact-layout and golden
@@ -441,10 +473,18 @@ function reviewHardening() {
   assert.equal(multWide.length, layout.length, 'multiplicity width never varies with its value (no varint)')
   assert.equal(multWide.subarray(multWide.length - 4).toString('hex'), '01020304', 'big-endian byte order pinned')
 
-  // (P3) Snapshot-level per-tuple prefix: ['ab','c'] vs ['a','bc'] must differ.
-  const snapA = computeSnapshotContentDigest([Buffer.from('ab'), Buffer.from('c')])
-  const snapB = computeSnapshotContentDigest([Buffer.from('a'), Buffer.from('bc')])
-  assert.notEqual(snapA.hex, snapB.hex, 'per-tuple length prefixes must defeat snapshot concat collisions')
+  // (P3) Snapshot-level per-tuple length prefix: two groups that would bare-
+  // concat to the same bytes as one different group must stay distinct.
+  const dA = computeCanonicalRowDigest({ fieldOrder: ['k'], row: { k: 'a' } }).buffer
+  const dB = computeCanonicalRowDigest({ fieldOrder: ['k'], row: { k: 'b' } }).buffer
+  const snapTwo = computeSnapshotContentDigest([
+    { identityKeyClass: 'valid', identityKeyBytes: 'ka', canonicalRowDigest: dA, multiplicity: 1, multiplicityBound: 4 },
+    { identityKeyClass: 'valid', identityKeyBytes: 'kb', canonicalRowDigest: dB, multiplicity: 1, multiplicityBound: 4 },
+  ])
+  const snapOne = computeSnapshotContentDigest([
+    { identityKeyClass: 'valid', identityKeyBytes: 'kakb', canonicalRowDigest: dA, multiplicity: 1, multiplicityBound: 4 },
+  ])
+  assert.notEqual(snapTwo.hex, snapOne.hex, 'per-tuple length prefixes must defeat snapshot concat collisions')
 
   // Golden byte vectors: any drift in tags, prefixes, decimal canon, NFC, or
   // hashing changes these constants — the frozen encoding's strongest pin.
@@ -465,8 +505,12 @@ function reviewHardening() {
     '01000000026b31000000205eb48f1710425c9d8ed3b441ccd7c2897bf42345056532992debd9c865f9b6f400000003',
     'golden sort-tuple encoding',
   )
+  // The golden snapshot is the SAME digest — the group encodes to goldenTuple
+  // internally, so the corrective P2 API change preserves the frozen vector.
   assert.equal(
-    computeSnapshotContentDigest([goldenTuple]).hex,
+    computeSnapshotContentDigest([
+      { identityKeyClass: 'valid', identityKeyBytes: Buffer.from('k1', 'utf8'), canonicalRowDigest: golden.buffer, multiplicity: 3, multiplicityBound: 100 },
+    ]).hex,
     '95c50cc9a3f843f3d507fde4da8451831994030818cf9a612d1eae58af9da018',
     'golden snapshot content digest',
   )

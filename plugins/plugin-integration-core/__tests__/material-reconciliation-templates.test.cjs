@@ -286,9 +286,10 @@ function main() {
   assert.deepStrictEqual(clone(run.uniqueness[0]), {
     fields: ['run_identity_key'],
     scope: 'tenant',
-    partial: 'run_identity_key IS NOT NULL',
+    partial: { predicate: 'not_null', field: 'run_identity_key' },
   })
-  assert.ok(run.uniqueness[0].partial.includes('IS NOT NULL'), 'partial unique excludes NULL identity keys')
+  // Corrective-review P2: partial is a CLOSED structured predicate, not raw SQL.
+  assert.deepStrictEqual([...mod.MR_PARTIAL_PREDICATES], ['not_null'])
   const runFieldById = Object.fromEntries(run.fields.map((field) => [field.id, field]))
   assert.equal(runFieldById.state.select.vocab, 'MR_RUN_STATES')
   // Deep review: fail_class is NOT stored (reason->class binding lives in
@@ -390,6 +391,15 @@ function main() {
   const evidence = summarizeMaterialReconciliationEvidence()
   assert.equal(evidence.templateCount, 9)
   assert.deepStrictEqual(evidence.objectIds, [...MATERIAL_RECONCILIATION_OBJECT_IDS])
+  // Corrective-review P2 (plant-and-assert): the summarizer takes NO caller
+  // argument, so a caller-planted business identifier can never reach evidence.
+  assert.equal(summarizeMaterialReconciliationEvidence.length, 0, 'summarizer accepts no argument')
+  const planted = summarizeMaterialReconciliationEvidence([
+    { id: 'material.reconciliation.evil.v1', objectId: 'material_reconciliation_MAT-001-SECRET', label: 'customer-alpha', version: 'v1', family: 'data', writeDiscipline: 'create_only', retention: 'permanent', keyFields: ['k'], fields: [{ id: 'k', label: 'k', type: 'string', key: true, required: true }] },
+  ])
+  const plantedJson = JSON.stringify(planted)
+  assert.ok(!plantedJson.includes('MAT-001-SECRET') && !plantedJson.includes('customer-alpha'), 'planted business ids never reach evidence (frozen registry only)')
+  assert.deepStrictEqual(planted.objectIds, [...MATERIAL_RECONCILIATION_OBJECT_IDS])
   const evidenceJson = JSON.stringify(evidence)
   assert.ok(!evidenceJson.includes('projection'), 'evidence has no projection values or field ids')
   assert.ok(!evidenceJson.includes('digest'), 'evidence has no digest field ids or values')
@@ -521,11 +531,22 @@ function main() {
   )
   // Uniqueness referencing a missing field.
   const badUniqueness = clone(baseTemplate)
-  badUniqueness.uniqueness = [{ scope: 'tenant', fields: ['k1'], partial: 'k1 IS NOT NULL' }]
+  badUniqueness.uniqueness = [{ scope: 'tenant', fields: ['k1'], partial: { predicate: 'not_null', field: 'k1' } }]
   assertThrowsTemplateError(
     () => normalizeMaterialReconciliationTemplate(badUniqueness),
     'uniqueness on unknown field rejected',
   )
+  // Corrective-review P2: a RAW-SQL free-string partial is rejected (the
+  // '1=1; DROP TABLE' probe). Only the closed structured predicate is legal.
+  const sqlPartial = clone(byObjectId.material_reconciliation_run)
+  sqlPartial.uniqueness = [{ scope: 'tenant', fields: ['run_identity_key'], partial: 'run_identity_key IS NOT NULL; DROP TABLE x' }]
+  assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(sqlPartial), 'free-string partial rejected')
+  const badPredicate = clone(byObjectId.material_reconciliation_run)
+  badPredicate.uniqueness = [{ scope: 'tenant', fields: ['run_identity_key'], partial: { predicate: 'raw_sql', field: 'run_identity_key' } }]
+  assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(badPredicate), 'unknown partial predicate rejected')
+  const badPartialField = clone(byObjectId.material_reconciliation_run)
+  badPartialField.uniqueness = [{ scope: 'tenant', fields: ['run_identity_key'], partial: { predicate: 'not_null', field: 'nonexistent' } }]
+  assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(badPartialField), 'partial predicate on unknown field rejected')
   // Reference targeting a foreign-prefix object.
   const badReference = clone(byObjectId.material_reconciliation_scenario)
   badReference.references = [
@@ -552,29 +573,24 @@ function main() {
   const requireCalls = source.match(/require\((?:'|")[^'"]+(?:'|")\)/g) || []
   assert.deepStrictEqual(requireCalls, ["require('./payload-redaction.cjs')"], 'only allowed dependency is payload-redaction')
 
-  // --- Set mirrors must equal their frozen arrays (review P2-1) ------------
-  // Object.freeze cannot protect a Set (Set.prototype.add still works), so the
-  // ONLY possible guard for the charter-closed vocabularies' membership
-  // vehicles is exact parity with the frozen arrays.
-  const setPairs = [
-    [mod.MR_FIELD_TYPES, mod.MR_FIELD_TYPE_SET, 'MR_FIELD_TYPE_SET'],
-    [mod.MR_TEMPLATE_FAMILIES, mod.MR_TEMPLATE_FAMILY_SET, 'MR_TEMPLATE_FAMILY_SET'],
-    [mod.MR_ROLES, mod.MR_ROLE_SET, 'MR_ROLE_SET'],
-    [mod.MR_RUN_STATES, mod.MR_RUN_STATE_SET, 'MR_RUN_STATE_SET'],
-    [mod.MR_RUN_TERMINAL_STATES, mod.MR_RUN_TERMINAL_STATE_SET, 'MR_RUN_TERMINAL_STATE_SET'],
-    [mod.MR_BINDING_STATUSES, mod.MR_BINDING_STATUS_SET, 'MR_BINDING_STATUS_SET'],
-    [mod.MR_DIFF_BUCKETS, mod.MR_DIFF_BUCKET_SET, 'MR_DIFF_BUCKET_SET'],
-    [mod.MR_FAILURE_CLASSES, mod.MR_FAILURE_CLASS_SET, 'MR_FAILURE_CLASS_SET'],
-    [mod.MR_FAILURE_REASON_CODES, mod.MR_FAILURE_REASON_CODE_SET, 'MR_FAILURE_REASON_CODE_SET'],
-    [mod.MR_CONSISTENCY_PROOF_MECHANISMS, mod.MR_CONSISTENCY_PROOF_MECHANISM_SET, 'MR_CONSISTENCY_PROOF_MECHANISM_SET'],
-    [mod.MR_WRITE_DISCIPLINES, mod.MR_WRITE_DISCIPLINE_SET, 'MR_WRITE_DISCIPLINE_SET'],
-    [mod.MR_BINDING_AUDIT_ACTIONS, mod.MR_BINDING_AUDIT_ACTION_SET, 'MR_BINDING_AUDIT_ACTION_SET'],
-    [mod.MR_IDENTITY_KEY_CLASSES, mod.MR_IDENTITY_KEY_CLASS_SET, 'MR_IDENTITY_KEY_CLASS_SET'],
-  ]
-  for (const [array, set, name] of setPairs) {
-    assert.ok(array && set, `${name} pair exported`)
-    assert.deepStrictEqual([...set].sort(), [...array].sort(), `${name} must mirror its frozen array exactly`)
+  // --- Membership Sets must NOT be exported (corrective-review P2) ----------
+  // Object.freeze cannot protect a Set (Set.prototype.add still works), so an
+  // exported Set is a poisoning vector — `MR_FIELD_TYPE_SET.add('x')` turned
+  // the validator permissive. The public surface exports frozen ARRAYS only;
+  // membership Sets are module-private. Assert none leak.
+  const publicSetNames = Object.keys(mod).filter((name) => /_SET$/.test(name))
+  assert.deepStrictEqual(publicSetNames, [], `no membership Set may be exported (found: ${publicSetNames.join(', ')})`)
+  // The frozen arrays ARE exported and are frozen (push throws).
+  for (const arr of [mod.MR_FIELD_TYPES, mod.MR_RUN_STATES, mod.MR_BINDING_STATUSES, mod.MR_DIFF_BUCKETS, mod.MR_CONSISTENCY_PROOF_MECHANISMS, mod.MR_WRITE_DISCIPLINES, mod.MR_RETENTION_POLICIES, mod.MR_RUN_PHASES, mod.MR_PARTIAL_PREDICATES]) {
+    assert.ok(Object.isFrozen(arr), 'public vocabulary arrays are frozen')
+    assert.throws(() => arr.push('poison'), 'frozen array rejects mutation')
   }
+  // Poisoning the exported array is impossible; the validator still rejects an
+  // out-of-vocab field type (proves the private Set was not reachable/poisoned).
+  const poisonAttempt = clone(byObjectId.material_reconciliation_run)
+  poisonAttempt.fields = [{ id: 'x', label: 'x', type: 'attacker_type', key: true, required: true }]
+  poisonAttempt.keyFields = ['x']
+  assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(poisonAttempt), 'illegal field type still rejected (private Set unreachable)')
 
   // --- Transition maps, terminal list, and select-vocab registry are frozen
   //     freezes themselves (review P2-2) ------------------------------------
@@ -672,7 +688,7 @@ function main() {
   )
   // …and the uniqueness scope vocabulary is closed (only 'tenant').
   const badScope = clone(byObjectId.material_reconciliation_run)
-  badScope.uniqueness = [{ scope: 'global', fields: ['run_identity_key'], partial: 'run_identity_key IS NOT NULL' }]
+  badScope.uniqueness = [{ scope: 'global', fields: ['run_identity_key'], partial: { predicate: 'not_null', field: 'run_identity_key' } }]
   assertThrowsTemplateError(
     () => normalizeMaterialReconciliationTemplate(badScope),
     'uniqueness scope outside the closed set rejected',
@@ -685,8 +701,9 @@ function main() {
   assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(badRetention), 'unknown retention rejected')
 
   // Set-mirror parity for the new vocabularies.
-  assert.deepStrictEqual([...mod.MR_RETENTION_POLICY_SET].sort(), [...mod.MR_RETENTION_POLICIES].sort())
-  assert.deepStrictEqual([...mod.MR_RUN_PHASE_SET].sort(), [...mod.MR_RUN_PHASES].sort())
+  // Membership Sets are private (corrective P2): only frozen arrays are public.
+  assert.equal(mod.MR_RETENTION_POLICY_SET, undefined, 'retention Set is not exported')
+  assert.equal(mod.MR_RUN_PHASE_SET, undefined, 'run-phase Set is not exported')
   assert.ok(Object.isFrozen(mod.MR_RETENTION_POLICIES) && Object.isFrozen(mod.MR_RUN_PHASES))
 
   console.log('material-reconciliation-templates.test.cjs OK')

@@ -52,6 +52,9 @@ const MR_DIGEST_ERROR_REASONS = Object.freeze([
   'STRING_ILL_FORMED',
   // Deep-review P3: canonicalRowDigest must be exactly 32 bytes (sha256).
   'DIGEST_WIDTH_INVALID',
+  // Corrective-review P2: a repeated identity-content group in the snapshot
+  // digest is non-canonical (the multiset has two encodings) — rejected.
+  'DUPLICATE_IDENTITY_GROUP',
 ])
 const MR_DIGEST_ERROR_REASON_SET = new Set(MR_DIGEST_ERROR_REASONS)
 
@@ -345,17 +348,35 @@ function encodeIdentitySortTuple(input) {
   ])
 }
 
-// snapshotContentDigest (frozen, §4.6): normalized multiset digest of the
-// encoded sort tuples — byte-lexicographic sort, each tuple length-prefixed,
-// sha256. Deterministic under any input order; duplicates count (multiset).
-function computeSnapshotContentDigest(tuples) {
-  if (!Array.isArray(tuples)) {
-    throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'computeSnapshotContentDigest requires an array of tuple Buffers')
+// snapshotContentDigest (frozen, §4.6). Corrective-review P2: the old form took
+// pre-encoded tuple Buffers, which admitted TWO encodings of the same multiset
+// (two multiplicity=1 tuples for one identity-content class vs one
+// multiplicity=2 tuple) yielding different digests. The canonical unit is the
+// identity GROUP: for each distinct (identityKeyClass, identityKeyBytes,
+// canonicalRowDigest) there is EXACTLY ONE multiplicity. This function takes
+// structured groups, encodes each canonically, and REJECTS a repeated
+// identity-content group (DUPLICATE_IDENTITY_GROUP) — so the caller must
+// pre-aggregate multiplicity and there is only one legal encoding per multiset.
+function computeSnapshotContentDigest(groups, multiplicityBound) {
+  if (!Array.isArray(groups)) {
+    throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'computeSnapshotContentDigest requires an array of identity groups')
   }
-  for (const tuple of tuples) {
-    if (!Buffer.isBuffer(tuple) || tuple.length === 0) {
-      throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'each tuple must be a non-empty Buffer')
+  const seenGroupKeys = new Set()
+  const tuples = []
+  for (const group of groups) {
+    if (!isPlainObject(group)) {
+      throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'each identity group must be a plain object')
     }
+    const bound = group.multiplicityBound === undefined ? multiplicityBound : group.multiplicityBound
+    const tuple = encodeIdentitySortTuple({ ...group, multiplicityBound: bound })
+    // Group identity = the tuple WITHOUT its trailing fixed 4-byte multiplicity:
+    // (classByte || len4+key || len4+digest). A repeat is a non-canonical multiset.
+    const groupKey = tuple.subarray(0, tuple.length - 4).toString('hex')
+    if (seenGroupKeys.has(groupKey)) {
+      throw new MaterialReconciliationDigestError('DUPLICATE_IDENTITY_GROUP', 'identity group repeated — pre-aggregate multiplicity (multiset must be canonical)')
+    }
+    seenGroupKeys.add(groupKey)
+    tuples.push(tuple)
   }
   const sorted = [...tuples].sort(Buffer.compare)
   const parts = sorted.map((tuple) => lengthPrefix(tuple))
