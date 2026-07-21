@@ -16,6 +16,7 @@ import {
   resolveApprovalAttachmentStorage,
 } from '../../src/services/approval-attachment-runtime'
 import type { S3CommandSender } from '../../src/services/approval-attachment-s3'
+import { APPROVAL_ATTACHMENT_SCANNER_MISSING_MESSAGE } from '../../src/services/approval-attachment-scan'
 import { deriveStorageKey } from '../../src/services/approval-attachment-storage'
 
 const logger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -61,6 +62,66 @@ describe('approval attachment runtime boot', () => {
         env: { APPROVAL_ATTACHMENTS_ENABLED: 'true', APPROVAL_ATTACHMENT_STORAGE_DIR: path.join(fileNotDir, 'nested') } as NodeJS.ProcessEnv,
       }),
     ).rejects.toThrow()
+  })
+
+  test('scan flag ON without injected scanner → boot THROWS values-free (fail-closed; never degrades to clean)', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'aatt-'))
+    const { db } = fakeDb()
+    await expect(
+      bootApprovalAttachmentRuntime({
+        db,
+        logger,
+        env: {
+          APPROVAL_ATTACHMENTS_ENABLED: 'true',
+          APPROVAL_ATTACHMENT_SCAN_ENABLED: 'true',
+          APPROVAL_ATTACHMENT_STORAGE_DIR: dir,
+        } as NodeJS.ProcessEnv,
+      }),
+    ).rejects.toThrow(APPROVAL_ATTACHMENT_SCANNER_MISSING_MESSAGE)
+    // Values-free: fixed message only — no paths, storage roots, or secrets.
+    await expect(
+      bootApprovalAttachmentRuntime({
+        db,
+        logger,
+        env: {
+          APPROVAL_ATTACHMENTS_ENABLED: 'true',
+          APPROVAL_ATTACHMENT_SCAN_ENABLED: 'true',
+          APPROVAL_ATTACHMENT_STORAGE_DIR: dir,
+        } as NodeJS.ProcessEnv,
+      }),
+    ).rejects.not.toThrow(new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  })
+
+  test('scan flag ON + injected scanner (positive control) → boot succeeds; scan OFF stays dormant without scanner', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'aatt-'))
+    const { db } = fakeDb()
+    // Scan OFF: no scanner required (byte-compatible dormant posture).
+    const dormant = await bootApprovalAttachmentRuntime({
+      db,
+      logger,
+      env: { APPROVAL_ATTACHMENTS_ENABLED: 'true', APPROVAL_ATTACHMENT_STORAGE_DIR: dir } as NodeJS.ProcessEnv,
+    })
+    expect(dormant).not.toBeNull()
+    expect(dormant!.router).toBeTruthy()
+    // Scan ON + real hook: boots (positive control for the DI seam).
+    let hookCalls = 0
+    const withScanner = await bootApprovalAttachmentRuntime({
+      db,
+      logger,
+      env: {
+        APPROVAL_ATTACHMENTS_ENABLED: 'true',
+        APPROVAL_ATTACHMENT_SCAN_ENABLED: 'true',
+        APPROVAL_ATTACHMENT_STORAGE_DIR: dir,
+      } as NodeJS.ProcessEnv,
+      scanHook: async () => {
+        hookCalls += 1
+        return 'clean'
+      },
+    })
+    expect(withScanner).not.toBeNull()
+    expect(withScanner!.router).toBeTruthy()
+    // Boot itself does not scan bytes — the hook is only invoked on upload.
+    expect(hookCalls).toBe(0)
   })
 
   test('flag ON production: mounts with the O3 fail-close posture; workers deliberately NOT started', async () => {

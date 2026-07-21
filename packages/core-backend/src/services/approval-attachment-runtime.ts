@@ -46,6 +46,10 @@ import {
   type ApprovalAttachmentStore,
 } from './approval-attachment-storage'
 import { createApprovalAttachmentS3Provider, type S3CommandSender } from './approval-attachment-s3'
+import {
+  assertApprovalAttachmentScannerConfigured,
+  type ApprovalAttachmentScanHook,
+} from './approval-attachment-scan'
 
 export type ApprovalAttachmentStorageResolution =
   | { kind: 'local-fs'; store: LocalFsApprovalAttachmentStore; rootDir: string }
@@ -327,6 +331,12 @@ export interface ApprovalAttachmentRuntimeOptions {
   intervals?: { gcSweepMs?: number; purgeDrainMs?: number; reconcileMs?: number }
   /** test seam for the built-in S3 provider; production constructs the official SDK client. */
   s3Sender?: S3CommandSender
+  /**
+   * Real AV scanner for the §6 scan seam. Required when `APPROVAL_ATTACHMENT_SCAN_ENABLED=true`;
+   * absent under that flag aborts boot (fail-closed). When the scan flag is OFF this is ignored.
+   * Production index currently does not inject one — leave the scan flag OFF until a real engine is wired.
+   */
+  scanHook?: ApprovalAttachmentScanHook
 }
 
 /**
@@ -337,6 +347,10 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
   const env = opts.env ?? process.env
   if (!isApprovalAttachmentsEnabled(env)) return null
   const { db, logger } = opts
+
+  // §6 scan fail-closed: flag ON without a real injected scanner is a misconfiguration outage, not a
+  // degrade-to-clean. Values-free throw (assert message carries no paths/credentials/filenames).
+  assertApprovalAttachmentScannerConfigured(env, opts.scanHook)
 
   const storage = resolveApprovalAttachmentStorage(env, opts.s3Sender)
   if (storage.kind === 'local-fs') {
@@ -392,6 +406,8 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     hasApprovalsWrite: (req) => principalHasApprovalsWrite(req),
     resolveAttachmentField: (templateId, fieldId) => isAttachmentFieldInTemplate(db, templateId, fieldId),
     templateVisible: (req, templateId) => templateVisibleToRequester(db, req, templateId),
+    // Only present after the startup assert above; never a clean-by-default stand-in.
+    scanHook: opts.scanHook,
     env,
   })
   if (!inner) return null // unreachable (flag checked above) — kept for type narrowing
