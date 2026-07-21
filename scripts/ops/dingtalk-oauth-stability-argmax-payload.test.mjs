@@ -309,10 +309,17 @@ function revertFixToEnvVarHandoff() {
   return mutated
 }
 
-test('mutation: reverting METRICS_TEXT to an env var makes the oversized payload die with E2BIG', () => {
+test('mutation: reverting METRICS_TEXT to an env var makes the oversized payload die with E2BIG', (t) => {
   const sandbox = makeSandbox({ checkScriptSource: revertFixToEnvVarHandoff() })
   try {
     const result = runScript(sandbox, buildMetricsPayload(OVERSIZED_PAYLOAD_BYTES))
+    // Emitted so the CI step log PROVES whether the version-gated rc==126 pin executed on this
+    // machine. `node --test` reports the same "pass" either way, so without this line a reader
+    // cannot tell an applied pin from a skipped one.
+    t.diagnostic(
+      `bash_major=${BASH_MAJOR_VERSION} reverted_rc=${result.status} ` +
+        `rc126_pin=${BASH_MAJOR_VERSION >= 4 ? 'APPLIED' : 'SKIPPED (bash < 4 collapses set -e aborts to 1)'}`,
+    )
     assert.notEqual(result.status, 0, 'the reverted script must fail on an oversized payload')
     assert.match(
       result.stderr,

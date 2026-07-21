@@ -242,6 +242,22 @@ jobs:
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
 
+      # DT-CLOSE-01C: the ARG_MAX / E2BIG payload-handoff regression of the scheduled
+      # "DingTalk OAuth Stability Recording (Lite)" workflow (rc=126). This drives the real
+      # dingtalk-oauth-stability-check.sh against a PATH-shimmed ssh whose /metrics/prom response is
+      # larger than the machine's own `getconf ARG_MAX`, and includes a red-under-revert mutation.
+      # It lives in the REQUIRED `test` job — on BOTH matrix legs — so a revert to the env-var
+      # handoff cannot land green; the K3 WISE offline PoC job keeps running it next to its five
+      # sibling OAuth-stability suites. Hermetic: no DB, no network, no docker; ~5s wall clock.
+      # `bash --version` is echoed because the rc==126 assertion is gated on bash >= 4 (bash 3.2
+      # collapses every `set -e` abort to 1); printing the interpreter makes it observable in the
+      # step log that the pin actually executed here rather than being silently skipped.
+      - name: DingTalk OAuth-stability ARG_MAX payload-handoff regression (DT-CLOSE-01C)
+        run: |
+          bash --version | head -1
+          getconf ARG_MAX
+          node --test scripts/ops/dingtalk-oauth-stability-argmax-payload.test.mjs
+
       # #4210 T9: the stock-preparation one-click acceptance script's cross-platform contract + behavioural
       # tests are pure pwsh 7 + tar + node. Run once in the required 20.x arm. The package's target-shell
       # semantics are covered separately by the Windows PowerShell 5.1 job above; neither shell substitutes
