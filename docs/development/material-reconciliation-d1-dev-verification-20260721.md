@@ -189,6 +189,15 @@ been applied to the TEMPLATES module:
 Round-4 mutation battery: re-export a live Set through `__internals` → RED; revert either
 detail sanitization → RED.
 
+**Round-4b (owner exact-head review of `a1c5e6c87`, 1 P2):** the first surface check scanned
+only two levels, so a nested re-export (`__internals.membership.{SET}`) stayed green while the
+poisoning still reproduced. The check is now a recursive walker over `Object.entries` —
+objects AND functions traversed, WeakSet cycle guard — rejecting `Set` instances and `*_SET`
+keys at any depth. Battery: the owner's nested mutant → RED; three-deep nesting → RED; a Set
+under an innocent key name (instance check, not key match) → RED; direct re-export → RED;
+walker probes: a Set mounted on an exported function is caught, and a cyclic export terminates
+without a false positive.
+
 ## 4. Explicitly out of scope (per §7 gates)
 
 D2 (scenario/binding store, pointer CAS runtime, `SET LOCAL lock_timeout` claim mechanics with

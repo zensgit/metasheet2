@@ -615,13 +615,23 @@ function deepReviewRound() {
 // identity_invalid domain separator.
 function round4CodecSurface() {
   const mod = require(MODULE_PATH)
-  // 1. No *_SET key and no live Set instance anywhere on the export surface.
-  for (const [scopeName, scope] of [['module', mod], ['__internals', mod.__internals]]) {
-    for (const [key, value] of Object.entries(scope)) {
-      assert.ok(!key.includes('_SET'), `${scopeName}.${key}: no exported Set-mirror names`)
-      assert.ok(!(value instanceof Set), `${scopeName}.${key}: no live Set instances exported`)
+  // 1. No *_SET key and no live Set instance ANYWHERE on the export surface — at
+  //    ANY depth (owner exact-head review of a1c5e6c87): a two-level scan stays
+  //    green for a nested re-export like `__internals.membership.{SET}`, so the
+  //    check is a recursive walker over Object.entries — objects AND functions
+  //    are traversed, with a WeakSet guarding against cycles.
+  const seen = new WeakSet()
+  const walkExportSurface = (value, path) => {
+    assert.ok(!(value instanceof Set), `${path}: live Set instance exported`)
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return
+    if (seen.has(value)) return
+    seen.add(value)
+    for (const [key, child] of Object.entries(value)) {
+      assert.ok(!key.includes('_SET'), `${path}.${key}: no exported Set-mirror names at any depth`)
+      walkExportSurface(child, `${path}.${key}`)
     }
   }
+  walkExportSurface(mod, 'module')
   // 2. Poisoning attempt is a no-op: the Set is unreachable, and an unknown
   //    identityKeyClass still fails closed afterwards (positive control pair).
   const evil = { identityKeyClass: 'evil', identityKeyBytes: Buffer.from('k'), canonicalRowDigest: Buffer.alloc(32), multiplicity: 1, multiplicityBound: 16 }
