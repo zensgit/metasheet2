@@ -9,7 +9,10 @@ import { fileURLToPath } from 'node:url'
 // whole-file entry in plugin-tests.yml's multitable real-DB step. Removing either point must fail CI.
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
-const FILE = 'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts'
+const FILES = [
+  'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts',
+  'tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts',
+]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
 function maskCommentsAndStrings(src) {
@@ -146,59 +149,62 @@ function wholeFileVitestArgs(stepBody) {
   })
 }
 
-test('vitest.config.ts excludes the exact-anchor authority suite from the no-DB job', () => {
-  const config = readFileSync(
-    join(repoRoot, 'packages/core-backend/vitest.config.ts'),
-    'utf8',
-  )
-  assert.ok(
-    testExcludeEntries(config).includes(FILE),
-    `test.exclude must contain the exact entry ${FILE}`,
-  )
-})
+for (const file of FILES) {
+  test(`vitest.config.ts excludes ${file} from the no-DB job`, () => {
+    const config = readFileSync(
+      join(repoRoot, 'packages/core-backend/vitest.config.ts'),
+      'utf8',
+    )
+    assert.ok(
+      testExcludeEntries(config).includes(file),
+      `test.exclude must contain the exact entry ${file}`,
+    )
+  })
 
-test('plugin-tests.yml runs the exact-anchor authority suite as a whole file with real Postgres', () => {
-  const workflow = readFileSync(
-    join(repoRoot, '.github/workflows/plugin-tests.yml'),
-    'utf8',
-  )
-  const step = namedStepBody(workflow, REAL_DB_STEP)
-  assert.ok(
-    stepHasEnvKey(step, 'DATABASE_URL'),
-    `${REAL_DB_STEP} must define DATABASE_URL`,
-  )
-  assert.ok(
-    stepHasEnvKey(step, 'METASHEET_REAL_DB_TEST_STEP'),
-    `${REAL_DB_STEP} must set the fail-not-skip marker`,
-  )
-  assert.match(
-    step,
-    /\bvitest\b[^\n]*--config\s+vitest\.integration\.config\.ts\b/,
-  )
-  assert.ok(
-    wholeFileVitestArgs(step).includes(FILE),
-    `${REAL_DB_STEP} must run ${FILE} as a whole-file argument`,
-  )
-})
+  test(`plugin-tests.yml runs ${file} as a whole file with real Postgres`, () => {
+    const workflow = readFileSync(
+      join(repoRoot, '.github/workflows/plugin-tests.yml'),
+      'utf8',
+    )
+    const step = namedStepBody(workflow, REAL_DB_STEP)
+    assert.ok(
+      stepHasEnvKey(step, 'DATABASE_URL'),
+      `${REAL_DB_STEP} must define DATABASE_URL`,
+    )
+    assert.ok(
+      stepHasEnvKey(step, 'METASHEET_REAL_DB_TEST_STEP'),
+      `${REAL_DB_STEP} must set the fail-not-skip marker`,
+    )
+    assert.match(
+      step,
+      /\bvitest\b[^\n]*--config\s+vitest\.integration\.config\.ts\b/,
+    )
+    assert.ok(
+      wholeFileVitestArgs(step).includes(file),
+      `${REAL_DB_STEP} must run ${file} as a whole-file argument`,
+    )
+  })
+}
 
 test('placement parsers reject comment-only and wrong-step decoys', () => {
-  const configDecoy = `export default defineConfig({ test: { // '${FILE}'\nexclude: ['other.test.ts'] } })`
-  assert.equal(testExcludeEntries(configDecoy).includes(FILE), false)
+  const file = FILES[1]
+  const configDecoy = `export default defineConfig({ test: { // '${file}'\nexclude: ['other.test.ts'] } })`
+  assert.equal(testExcludeEntries(configDecoy).includes(file), false)
 
   const workflowDecoy = [
     'steps:',
-    `  # ${FILE}`,
+    `  # ${file}`,
     '  - name: Run some other integration',
     '    env:',
     '      DATABASE_URL: postgresql://example',
     '      METASHEET_REAL_DB_TEST_STEP: 1',
     '    run: |',
     '      pnpm exec vitest --config vitest.integration.config.ts run \\',
-    `        ${FILE} \\`,
+    `        ${file} \\`,
     `  - name: ${REAL_DB_STEP}`,
     '    run: echo no-db',
   ].join('\n')
   const realStep = namedStepBody(workflowDecoy, REAL_DB_STEP)
   assert.equal(stepHasEnvKey(realStep, 'DATABASE_URL'), false)
-  assert.equal(wholeFileVitestArgs(realStep).includes(FILE), false)
+  assert.equal(wholeFileVitestArgs(realStep).includes(file), false)
 })
