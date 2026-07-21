@@ -30,9 +30,11 @@
 //   per-source decimalTransit capability (decimal fields carried as text
 //   end-to-end) and expand exponent notation before {decimal} wrapping
 //   (String(1e-7) === '1e-7' would be DECIMAL_MALFORMED here, by design).
-// - computeSnapshotContentDigest([]) is LEGAL: a complete, consistency-proven
-//   EMPTY snapshot is a chartered positive control (§8.2-4); its digest is the
-//   deterministic sha256 of zero tuples.
+// - computeSnapshotContentDigest([], validBound) is LEGAL: a complete,
+//   consistency-proven EMPTY snapshot is a chartered positive control (§8.2-4);
+//   its digest is the deterministic sha256 of zero tuples. The snapshot-level
+//   bound is still required and validated up front — an empty snapshot cannot
+//   bypass it.
 // - The returned {buffer, hex} object is frozen but Buffer CONTENTS are
 //   inherently mutable; hex is the authoritative immutable form.
 
@@ -360,6 +362,15 @@ function encodeIdentitySortTuple(input) {
 function computeSnapshotContentDigest(groups, multiplicityBound) {
   if (!Array.isArray(groups)) {
     throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'computeSnapshotContentDigest requires an array of identity groups')
+  }
+  // Corrective round-3 P2: validate the snapshot-level bound BEFORE the loop, so
+  // an EMPTY snapshot cannot bypass it. computeSnapshotContentDigest([], valid)
+  // succeeds (empty snapshot is legal, §8.2-4); computeSnapshotContentDigest([])
+  // with no/invalid bound fails closed.
+  if (!Number.isSafeInteger(multiplicityBound) || multiplicityBound < 1 || multiplicityBound > MAX_MULTIPLICITY_ENCODABLE) {
+    throw new MaterialReconciliationDigestError('MULTIPLICITY_OUT_OF_BOUNDS', 'snapshot multiplicityBound must be an integer within 1..2^32-1', {
+      multiplicityBound: Number.isSafeInteger(multiplicityBound) ? multiplicityBound : null,
+    })
   }
   const seenGroupKeys = new Set()
   const tuples = []

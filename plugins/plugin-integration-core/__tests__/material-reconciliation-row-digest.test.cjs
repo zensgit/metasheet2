@@ -587,12 +587,18 @@ function deepReviewRound() {
     'bound above 2^32-1 rejected with the closed reason',
   )
 
-  // Empty snapshot is LEGAL (charter §8.2-4 positive control): sha256 of zero tuples.
+  // Empty snapshot is LEGAL WITH a valid bound (charter §8.2-4 positive control):
+  // sha256 of zero tuples. Corrective round-3 P2: the bound is validated BEFORE
+  // the loop, so an empty snapshot cannot bypass it.
   assert.equal(
-    computeSnapshotContentDigest([]).hex,
+    computeSnapshotContentDigest([], 16).hex,
     'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    'empty snapshot digest pinned',
+    'empty snapshot digest pinned (with a valid bound)',
   )
+  // Empty snapshot with NO / invalid bound fails closed.
+  assertThrowsReason(() => computeSnapshotContentDigest([]), 'MULTIPLICITY_OUT_OF_BOUNDS', 'empty snapshot with no bound fails closed')
+  assertThrowsReason(() => computeSnapshotContentDigest([], 0), 'MULTIPLICITY_OUT_OF_BOUNDS', 'empty snapshot with zero bound fails closed')
+  assertThrowsReason(() => computeSnapshotContentDigest([], 2 ** 32), 'MULTIPLICITY_OUT_OF_BOUNDS', 'empty snapshot with over-range bound fails closed')
 
   // Golden 2: interior-zero decimal + boolean false + composed unicode.
   const golden2 = computeCanonicalRowDigest({
