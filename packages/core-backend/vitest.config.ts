@@ -373,6 +373,12 @@ export default defineConfig({
       // authz + flag-off. DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot
       // skip-green it; wired whole-file into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
+      // W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED §9): real-Postgres two-org forgery
+      // matrix + org-anchor SQL audit for the setup-readiness aggregate. DATABASE_URL-gated
+      // (describeIfDatabase); excluded here so the no-DB job cannot skip-green it, and wired as a
+      // WHOLE FILE into the `Run attendance integration tests` step in plugin-tests.yml (same shape
+      // as the S7-1..S7-4 entries immediately above).
+      'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
