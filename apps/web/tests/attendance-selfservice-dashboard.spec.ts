@@ -687,7 +687,11 @@ describe('Attendance self-service dashboard', () => {
 
     expect(container?.querySelector('[data-selfservice-card="status"]')?.textContent).toContain('Late + Early')
     expect(container?.querySelector('[data-selfservice-card="status"]')?.textContent).toContain('Both a late arrival and an early departure')
-    expect(container?.querySelector('[data-selfservice-focus-list]')?.textContent).toContain('Resolve anomaly reminders')
+    // Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.2: ONE
+    // canonical attention item replaces the old focus-list + primary-action
+    // "two competing copies" (data-selfservice-focus-list / -primary-action).
+    expect(container?.querySelector('[data-attendance-overview-attention]')?.textContent).toContain('Resolve anomaly reminders')
+    expect(container?.querySelector('[data-attendance-overview-attention]')?.getAttribute('data-attendance-overview-attention-key')).toBe('anomaly')
     expect(container?.querySelector('[data-selfservice-card="requests"]')?.textContent).toContain('Pending · 1')
     expect(container?.querySelector('[data-selfservice-card="requests"]')?.textContent).toContain('Approved · 1')
     expect(container?.querySelector('[data-selfservice-card="requests"]')?.textContent).toContain('Rejected · 1')
@@ -706,7 +710,6 @@ describe('Attendance self-service dashboard', () => {
     expect(rulesCard).not.toContain('wifi-secret')
     expect(rulesCard).not.toContain('integration-secret')
     expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Fix missing punch')
-    expect(container?.querySelector('[data-selfservice-primary-action]')?.textContent).toContain('Resolve anomaly reminders')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('Adjusted')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
   })
@@ -864,15 +867,17 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    const statusCard = container!.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
     const requestsCard = container!.querySelector('[data-selfservice-card="requests"]')?.textContent ?? ''
     const actionsCard = container!.querySelector('[data-selfservice-card="actions"]')?.textContent ?? ''
+    const attentionBand = container!.querySelector('[data-attendance-overview-attention]')?.textContent ?? ''
 
-    expect(statusCard).toContain('Attention items')
-    expect(statusCard).toContain('1')
-    expect(statusCard).toContain('You have 1 anomaly reminders in this range.')
-    expect(statusCard).toContain('Resolve anomaly reminders')
-    expect(statusCard).toContain('Track pending approvals')
+    // Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.1:
+    // Today's status card is narrowed to exactly latest-punch/work-minutes/
+    // late-early — the anomaly count/copy moves to the single Needs-attention
+    // item (§4.2), which is anomaly (priority 2) here, never a second
+    // competing "Track pending approvals" copy for the same fixture.
+    expect(attentionBand).toContain('Resolve anomaly reminders')
+    expect(attentionBand).not.toContain('Track pending approvals')
     expect(requestsCard).toContain('Summarizes the current request backlog from the visible date range.')
     expect(requestsCard).toContain('Pending follow-up')
     expect(requestsCard).toContain('waiting for approval')
@@ -886,7 +891,6 @@ describe('Attendance self-service dashboard', () => {
     expect(requestsCard).toContain('Rejection note: Please attach lobby access evidence.')
     expect(requestsCard).toContain('has already been approved')
     expect(requestsCard).toContain('was rejected')
-    expect(actionsCard).toContain('Resolve anomaly reminders')
     expect(actionsCard).toContain('Start with missing-punch handling to resolve the current anomaly reminder.')
   })
 
@@ -1158,14 +1162,20 @@ describe('Attendance self-service dashboard', () => {
 
     const statusCard = container!.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
     const setupHint = container!.querySelector('[data-selfservice-setup-hint]')?.textContent ?? ''
-    const focusList = container!.querySelector('[data-selfservice-focus-list]')?.textContent ?? ''
+    const attentionBand = container!.querySelector('[data-attendance-overview-attention]')?.textContent ?? ''
+    const attentionKey = container!.querySelector('[data-attendance-overview-attention]')?.getAttribute('data-attendance-overview-attention-key')
     const actionsCard = container!.querySelector('[data-selfservice-card="actions"]')?.textContent ?? ''
 
     expect(statusCard).toContain('No attendance data is available in this range yet.')
     expect(setupHint).toContain('you may not be assigned to an attendance group yet')
     expect(setupHint).toContain('confirm your group and shift setup')
-    expect(focusList).toContain('Check attendance setup')
-    expect(actionsCard).toContain('Wait for attendance setup')
+    // Employee-overview task-first design-lock §4.2 row 6 (setup_needed):
+    // the single canonical attention item reuses this same setup guidance —
+    // no fabricated CTA and no second competing "primary action" copy.
+    expect(attentionKey).toBe('setup_needed')
+    expect(attentionBand).toContain('Check attendance setup')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')).toBeNull()
+    expect(actionsCard).toContain('confirm your group and shift setup')
 
     const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
     expect(requestType).toBeTruthy()
@@ -1587,11 +1597,15 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
+    // Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.1:
+    // Today's status card narrows to exactly latest-punch/work-minutes/
+    // late-early — no fourth "Attention items" stat (that signal now lives
+    // solely in the Needs-attention band, §4.2, avoiding a second copy).
     const summary = container!.querySelector('.attendance__summary--workbench') as HTMLElement
     expect(summary.textContent).toContain('Latest punch')
     expect(summary.textContent).toContain('Work minutes')
     expect(summary.textContent).toContain('Late / Early')
-    expect(summary.textContent).toContain('Attention items')
+    expect(summary.textContent).not.toContain('Attention items')
     const warning = summary.querySelector('.attendance__summary-value--warning') as HTMLElement | null
     expect(warning, 'late/early 18/18 should color as warning').toBeTruthy()
     expect(warning!.textContent).toContain('18 / 18')
