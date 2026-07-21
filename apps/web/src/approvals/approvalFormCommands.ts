@@ -16,6 +16,7 @@ export type FormCommandFailureReason =
   | 'target_not_found'
   | 'unsupported_field_type'
   | 'invalid_field_identity'
+  | 'identity_history_missing'
   | 'field_identity_conflict'
   | 'reference_inventory_missing'
   | 'field_is_referenced'
@@ -68,6 +69,18 @@ export interface FormFieldIdentity {
     readonly persistentId: string
     readonly localId: string
   }
+}
+
+/**
+ * Complete reservation history for the template's published versions and current
+ * draft. D6-f2's durable identity allocator must maintain this set as fields or
+ * detail columns are introduced and retired. D6-f1 uses it as a fail-closed
+ * command input now, so correctness is not left to an unverified caller policy.
+ */
+export interface CompleteFormIdentityHistory {
+  readonly complete: true
+  readonly persistentIds: readonly string[]
+  readonly localIds: readonly string[]
 }
 
 export type FormCommandResult =
@@ -147,55 +160,70 @@ function isUsableIdentity(
   )
 }
 
+function isCompleteIdentityHistory(
+  history: CompleteFormIdentityHistory | undefined,
+): history is CompleteFormIdentityHistory {
+  return Boolean(
+    history &&
+      history.complete === true &&
+      Array.isArray(history.persistentIds) &&
+      Array.isArray(history.localIds) &&
+      history.persistentIds.every(nonBlank) &&
+      history.localIds.every(nonBlank),
+  )
+}
+
 function identityConflicts(
   draft: TemplateAuthoringDraft,
   identity: FormFieldIdentity,
+  history: CompleteFormIdentityHistory,
 ): boolean {
-  const existingPersistentIds = new Set<string>()
-  const existingLocalIds = new Set<string>()
+  const reserved = new Set<string>([
+    ...history.persistentIds,
+    ...history.localIds,
+  ])
   draft.fields.forEach((field) => {
-    existingPersistentIds.add(field.id)
-    existingLocalIds.add(field.localId)
+    reserved.add(field.id)
+    reserved.add(field.localId)
     field.detailColumns.forEach((column) => {
-      existingPersistentIds.add(column.id)
-      existingLocalIds.add(column.localId)
+      reserved.add(column.id)
+      reserved.add(column.localId)
     })
   })
   const candidates = [
-    { persistentId: identity.persistentId, localId: identity.localId },
-    ...(identity.detailColumn ? [identity.detailColumn] : []),
+    identity.persistentId,
+    identity.localId,
+    ...(identity.detailColumn
+      ? [identity.detailColumn.persistentId, identity.detailColumn.localId]
+      : []),
   ]
-  if (
-    new Set(candidates.map((candidate) => candidate.persistentId)).size !==
-      candidates.length ||
-    new Set(candidates.map((candidate) => candidate.localId)).size !==
-      candidates.length
-  ) {
+  if (new Set(candidates).size !== candidates.length) {
     return true
   }
-  return candidates.some(
-    (candidate) =>
-      existingPersistentIds.has(candidate.persistentId) ||
-      existingLocalIds.has(candidate.localId),
-  )
+  return candidates.some((candidate) => reserved.has(candidate))
 }
 
 /**
  * Add a supported top-level field at the selected location. The caller supplies
  * a durable identity, making this pure command deterministic for retries while
  * preventing the old max-suffix allocator from reusing deleted persistent IDs.
+ * Its complete history is mandatory: without it a deleted identity cannot be
+ * distinguished from one that was never allocated, so add fails closed.
  */
 export function addFormField(
   draft: TemplateAuthoringDraft,
   fieldType: AuthorableFieldType,
   identity: FormFieldIdentity,
+  history: CompleteFormIdentityHistory,
   afterLocalId?: string,
 ): FormCommandResult {
   if (!AUTHORABLE_FIELD_TYPES.has(fieldType))
     return rejected('unsupported_field_type')
   if (!isUsableIdentity(fieldType, identity))
     return rejected('invalid_field_identity')
-  if (identityConflicts(draft, identity))
+  if (!isCompleteIdentityHistory(history))
+    return rejected('identity_history_missing')
+  if (identityConflicts(draft, identity, history))
     return rejected('field_identity_conflict')
 
   const field: FieldAuthoringDraft = {

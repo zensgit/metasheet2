@@ -8,6 +8,7 @@ import {
   moveFormFieldByOffset,
   removeFormField,
   type CompleteFormReferenceInventory,
+  type CompleteFormIdentityHistory,
   type FormCommandResult,
   type FormFieldIdentity,
 } from '../src/approvals/approvalFormCommands'
@@ -25,6 +26,12 @@ import {
 const EMPTY_INVENTORY: CompleteFormReferenceInventory = {
   complete: true,
   references: [],
+}
+
+const EMPTY_IDENTITY_HISTORY: CompleteFormIdentityHistory = {
+  complete: true,
+  persistentIds: [],
+  localIds: [],
 }
 
 function field(
@@ -78,8 +85,18 @@ describe('approvalFormCommands - add', () => {
     (type) => {
       const source = draftWith([field(1)])
       const fieldIdentity = identity(2, type === 'detail')
-      const first = addFormField(source, type, fieldIdentity)
-      const replay = addFormField(source, type, fieldIdentity)
+      const first = addFormField(
+        source,
+        type,
+        fieldIdentity,
+        EMPTY_IDENTITY_HISTORY,
+      )
+      const replay = addFormField(
+        source,
+        type,
+        fieldIdentity,
+        EMPTY_IDENTITY_HISTORY,
+      )
       assertOk(first)
       assertOk(replay)
 
@@ -108,6 +125,7 @@ describe('approvalFormCommands - add', () => {
       draftWith([field(1), field(2)]),
       'number',
       identity(3),
+      EMPTY_IDENTITY_HISTORY,
       'local_1',
     )
     assertOk(result)
@@ -119,15 +137,46 @@ describe('approvalFormCommands - add', () => {
     expect(result.focusLocalId).toBe('new_local_3')
   })
 
-  it('fails closed for unsupported kinds, missing identities, and missing insertion targets', () => {
+  it('fails closed for unsupported kinds, missing identities/history, and missing insertion targets', () => {
     expect(
-      addFormField(draftWith([field(1)]), 'attachment' as never, identity(2)),
+      addFormField(
+        draftWith([field(1)]),
+        'attachment' as never,
+        identity(2),
+        EMPTY_IDENTITY_HISTORY,
+      ),
     ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
     expect(
-      addFormField(draftWith([field(1)]), 'text', undefined as never),
+      addFormField(
+        draftWith([field(1)]),
+        'text',
+        undefined as never,
+        EMPTY_IDENTITY_HISTORY,
+      ),
     ).toMatchObject({ ok: false, reason: 'invalid_field_identity' })
     expect(
-      addFormField(draftWith([field(1)]), 'text', identity(2), 'missing'),
+      addFormField(
+        draftWith([field(1)]),
+        'text',
+        identity(2),
+        undefined as never,
+      ),
+    ).toMatchObject({ ok: false, reason: 'identity_history_missing' })
+    expect(
+      addFormField(draftWith([field(1)]), 'text', identity(2), {
+        complete: false,
+        persistentIds: [],
+        localIds: [],
+      } as never),
+    ).toMatchObject({ ok: false, reason: 'identity_history_missing' })
+    expect(
+      addFormField(
+        draftWith([field(1)]),
+        'text',
+        identity(2),
+        EMPTY_IDENTITY_HISTORY,
+        'missing',
+      ),
     ).toMatchObject({ ok: false, reason: 'target_not_found' })
   })
 
@@ -150,71 +199,156 @@ describe('approvalFormCommands - add', () => {
       }),
     ])
     expect(
-      addFormField(source, 'text', { persistentId: ' ', localId: 'new_local' }),
+      addFormField(
+        source,
+        'text',
+        { persistentId: ' ', localId: 'new_local' },
+        EMPTY_IDENTITY_HISTORY,
+      ),
     ).toMatchObject({
       ok: false,
       reason: 'invalid_field_identity',
     })
     expect(
-      addFormField(source, 'text', {
-        persistentId: 'new_field',
-        localId: ' ',
-      }),
+      addFormField(
+        source,
+        'text',
+        {
+          persistentId: 'new_field',
+          localId: ' ',
+        },
+        EMPTY_IDENTITY_HISTORY,
+      ),
     ).toMatchObject({ ok: false, reason: 'invalid_field_identity' })
     expect(
-      addFormField(source, 'text', {
-        persistentId: 'existing_field',
-        localId: 'new_local',
-      }),
-    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
-    expect(
-      addFormField(source, 'text', {
-        persistentId: 'existing_column',
-        localId: 'new_local',
-      }),
-    ).toMatchObject({
-      ok: false,
-      reason: 'field_identity_conflict',
-    })
-    expect(
-      addFormField(source, 'text', {
-        persistentId: 'new_field',
-        localId: 'existing_column_local',
-      }),
-    ).toMatchObject({
-      ok: false,
-      reason: 'field_identity_conflict',
-    })
-    expect(
-      addFormField(source, 'detail', {
-        persistentId: 'new_detail',
-        localId: 'new_detail_local',
-        detailColumn: { persistentId: 'new_column', localId: 'existing_local' },
-      }),
-    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
-    expect(
-      addFormField(source, 'detail', {
-        persistentId: 'new_detail',
-        localId: 'new_detail_local',
-        detailColumn: {
-          persistentId: 'existing_column',
-          localId: 'new_column_local',
+      addFormField(
+        source,
+        'text',
+        {
+          persistentId: 'existing_field',
+          localId: 'new_local',
         },
-      }),
+        EMPTY_IDENTITY_HISTORY,
+      ),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    expect(
+      addFormField(
+        source,
+        'text',
+        {
+          persistentId: 'same_internal_token',
+          localId: 'same_internal_token',
+        },
+        EMPTY_IDENTITY_HISTORY,
+      ),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    expect(
+      addFormField(
+        source,
+        'text',
+        {
+          persistentId: 'existing_column',
+          localId: 'new_local',
+        },
+        EMPTY_IDENTITY_HISTORY,
+      ),
+    ).toMatchObject({
+      ok: false,
+      reason: 'field_identity_conflict',
+    })
+    expect(
+      addFormField(
+        source,
+        'text',
+        {
+          persistentId: 'new_field',
+          localId: 'existing_column_local',
+        },
+        EMPTY_IDENTITY_HISTORY,
+      ),
+    ).toMatchObject({
+      ok: false,
+      reason: 'field_identity_conflict',
+    })
+    expect(
+      addFormField(
+        source,
+        'detail',
+        {
+          persistentId: 'new_detail',
+          localId: 'new_detail_local',
+          detailColumn: {
+            persistentId: 'new_column',
+            localId: 'existing_local',
+          },
+        },
+        EMPTY_IDENTITY_HISTORY,
+      ),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    expect(
+      addFormField(
+        source,
+        'detail',
+        {
+          persistentId: 'new_detail',
+          localId: 'new_detail_local',
+          detailColumn: {
+            persistentId: 'existing_column',
+            localId: 'new_column_local',
+          },
+        },
+        EMPTY_IDENTITY_HISTORY,
+      ),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    expect(
+      addFormField(
+        source,
+        'detail',
+        {
+          persistentId: 'new_detail',
+          localId: 'new_detail_local',
+          detailColumn: {
+            persistentId: 'new_detail_local',
+            localId: 'new_column_local',
+          },
+        },
+        EMPTY_IDENTITY_HISTORY,
+      ),
     ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
     expect(source.fields).toHaveLength(1)
   })
 
-  it('does not reuse the deleted final field identity because identity allocation is explicit', () => {
+  it('rejects a retired identity after delete while a fresh identity remains a positive control', () => {
     const source = draftWith([
       field(1, { id: 'retired_field', localId: 'retired_local' }),
     ])
     const deleted = removeFormField(source, 'retired_local', EMPTY_INVENTORY)
     assertOk(deleted)
-    const added = addFormField(deleted.draft, 'text', {
-      persistentId: 'fresh_field_after_delete',
-      localId: 'fresh_local_after_delete',
-    })
+    const history: CompleteFormIdentityHistory = {
+      complete: true,
+      persistentIds: ['retired_field'],
+      localIds: ['retired_local'],
+    }
+    expect(
+      addFormField(
+        deleted.draft,
+        'text',
+        {
+          persistentId: 'retired_field',
+          localId: 'new_local_after_delete',
+        },
+        history,
+      ),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    const added = addFormField(
+      deleted.draft,
+      'text',
+      {
+        persistentId: 'fresh_field_after_delete',
+        localId: 'fresh_local_after_delete',
+      },
+      history,
+    )
     assertOk(added)
     expect(added.draft.fields.map((entry) => entry.id)).toEqual([
       'fresh_field_after_delete',
