@@ -5056,16 +5056,48 @@ async function createDirectoryAdmittedUserInTransaction(
     }
   }
 
+  // W4-PRE-1 item 1 + item 2 (§3.3 of the Wave-4 onboarding design lock): resolve the
+  // KNOWN AUTHORITATIVE org for this admission from directory_integrations (the account's own
+  // integration row), never from a client-supplied value and never a silent 'default' guess.
+  // Fail-closed BEFORE any write (cheapest-check-first, same discipline as the
+  // DT-HARDEN-02 grant-feasibility assert above) if the integration row cannot be found — this
+  // should not happen in practice (the caller always resolves the account through a live
+  // integration_id) but a foreign-key-orphaned integration_id must not silently admit into no
+  // org, or into a guessed one.
+  const orgResult = await client.query(
+    `SELECT org_id
+     FROM directory_integrations
+     WHERE id = $1::uuid
+     LIMIT 1`,
+    [options.account.integration_id],
+  )
+  const admissionOrgId = (orgResult.rows[0] as { org_id?: string } | undefined)?.org_id
+  if (!admissionOrgId) {
+    throw new Error('Directory integration not found for admitted account org resolution')
+  }
+
   // DT-HARDEN-02: INSERT + bind are one all-or-nothing unit. A bind throw after the INSERT
   // (missing openId/unionId, or an identity already bound to another local user) would
   // otherwise leave a committed orphan once the sync loop swallows the error — the exact
   // hazard this ticket exists to close, and the one the pre-INSERT assert above does not cover.
+  // W4-PRE-1 extends the same all-or-nothing unit to user_orgs: a user_orgs write failure must
+  // also roll the users row back (fresh-DB atomicity leg, §3.3 item 3), not just a bind failure.
   await client.query('SAVEPOINT directory_admit_user')
   try {
     await client.query(
       `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
        VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
       [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+    )
+
+    // W4-PRE-1 item 1 (§3.3): maintain user_orgs in the SAME transaction/savepoint as the users
+    // row. A freshly admitted directory user is always active (matches the hardcoded TRUE on the
+    // users INSERT above).
+    await client.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1::text, $2::text, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+      [userId, admissionOrgId],
     )
 
     await applyDirectoryAccountBindInTransaction(client, {

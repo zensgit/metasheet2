@@ -12,7 +12,7 @@ import { getUserSession, listUserSessions, revokeUserSession } from '../auth/ses
 import { revokeUserSessions } from '../auth/session-revocation'
 import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import {
   deriveDelegatedAdminNamespace,
@@ -3211,52 +3211,6 @@ export function adminUsersRouter(): Router {
         userId,
       })
 
-      await query(
-        `INSERT INTO users (
-           id, email, username, name, mobile, employee_no, department, position, hire_date,
-           password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15, NOW(), NOW())`,
-        [
-          userId,
-          cleanEmail || null,
-          cleanUsername,
-          cleanName,
-          cleanMobile,
-          cleanEmployeeNo,
-          cleanDepartment,
-          cleanPosition,
-          cleanHireDate,
-          passwordHash,
-          mustChangePassword,
-          effectiveRole,
-          JSON.stringify(directPermissions),
-          isActive,
-          effectiveRole === 'admin',
-        ],
-      )
-
-      if (roleId) {
-        await query(
-          `INSERT INTO user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [userId, roleId],
-        )
-        invalidateUserPerms(userId)
-      }
-
-      if (directPermissions.length > 0) {
-        const values = directPermissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-        await query(
-          `INSERT INTO user_permissions (user_id, permission_code)
-           VALUES ${values}
-           ON CONFLICT DO NOTHING`,
-          [userId, ...directPermissions],
-        )
-        invalidateUserPerms(userId)
-      }
-
       const attendanceOnboarding: AttendanceOnboardingResponse | null = attendanceOrgId
         ? {
             orgId: attendanceOrgId,
@@ -3264,36 +3218,112 @@ export function adminUsersRouter(): Router {
             defaultShift: null,
           }
         : null
-      if (attendanceOnboarding && cleanAttendanceGroupId) {
-        const memberResult = await query<{ memberId: string }>(
-          `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
-           VALUES ($1, $2, $3, NOW(), NOW())
-           ON CONFLICT (org_id, group_id, user_id) DO NOTHING
-           RETURNING id AS "memberId"`,
-          [attendanceOrgId, cleanAttendanceGroupId, userId],
+
+      // W4-PRE-1 (§3.3 of the Wave-4 onboarding design lock): this route is the first-priority
+      // user_orgs write site — it already resolves and validates a KNOWN AUTHORITATIVE org
+      // (attendanceOrgId, only set when attendanceGroupId/defaultShiftId was supplied and
+      // matched against attendance_groups/attendance_shifts.org_id above) but historically wrote
+      // users/user_roles/user_permissions/attendance_group_members/attendance_shift_assignments
+      // as independent auto-commit statements with no shared transaction boundary. The W4-PRE-1
+      // atomicity requirement (a user_orgs write failure must roll back the whole admission —
+      // never a `users` row with no membership row) cannot be met without a transaction, and none
+      // existed to reuse, so this establishes the single boundary for the whole write sequence
+      // (not a second/competing one — every write below moved from `query()` to `client.query()`
+      // inside this one call).
+      await transaction(async (client) => {
+        await client.query(
+          `INSERT INTO users (
+             id, email, username, name, mobile, employee_no, department, position, hire_date,
+             password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15, NOW(), NOW())`,
+          [
+            userId,
+            cleanEmail || null,
+            cleanUsername,
+            cleanName,
+            cleanMobile,
+            cleanEmployeeNo,
+            cleanDepartment,
+            cleanPosition,
+            cleanHireDate,
+            passwordHash,
+            mustChangePassword,
+            effectiveRole,
+            JSON.stringify(directPermissions),
+            isActive,
+            effectiveRole === 'admin',
+          ],
         )
-        attendanceOnboarding.group = {
-          id: cleanAttendanceGroupId,
-          name: attendanceGroupName,
-          memberCreated: memberResult.rows.length > 0,
+
+        if (roleId) {
+          await client.query(
+            `INSERT INTO user_roles (user_id, role_id)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`,
+            [userId, roleId],
+          )
         }
-      }
-      if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
-        const assignmentId = crypto.randomUUID()
-        const assignmentResult = await query<{ assignmentId: string }>(
-          `INSERT INTO attendance_shift_assignments
-             (id, org_id, user_id, shift_id, start_date, is_active, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5::date, true, NOW(), NOW())
-           RETURNING id AS "assignmentId"`,
-          [assignmentId, attendanceOrgId, userId, cleanDefaultShiftId, defaultShiftStartDate],
-        )
-        attendanceOnboarding.defaultShift = {
-          id: cleanDefaultShiftId,
-          name: defaultShiftName,
-          startDate: defaultShiftStartDate,
-          assignmentId: assignmentResult.rows[0]?.assignmentId ?? assignmentId,
+
+        if (directPermissions.length > 0) {
+          const values = directPermissions.map((_, index) => `($1, $${index + 2})`).join(', ')
+          await client.query(
+            `INSERT INTO user_permissions (user_id, permission_code)
+             VALUES ${values}
+             ON CONFLICT DO NOTHING`,
+            [userId, ...directPermissions],
+          )
         }
-      }
+
+        if (attendanceOrgId) {
+          // W4-PRE-1 item 1 (first-priority site, §3.3): maintain user_orgs in the SAME
+          // transaction as the users row whenever the org is known-authoritative. `isActive`
+          // mirrors the created user's own active flag — an admin-created-but-deactivated user
+          // must not count as an active org member (RD-3 dual is_active precedent,
+          // plugins/plugin-attendance/index.cjs:15532-15541).
+          await client.query(
+            `INSERT INTO user_orgs (user_id, org_id, is_active)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+            [userId, attendanceOrgId, isActive],
+          )
+        }
+
+        if (attendanceOnboarding && cleanAttendanceGroupId) {
+          const memberResult = await client.query(
+            `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
+             VALUES ($1, $2, $3, NOW(), NOW())
+             ON CONFLICT (org_id, group_id, user_id) DO NOTHING
+             RETURNING id AS "memberId"`,
+            [attendanceOrgId, cleanAttendanceGroupId, userId],
+          )
+          attendanceOnboarding.group = {
+            id: cleanAttendanceGroupId,
+            name: attendanceGroupName,
+            memberCreated: (memberResult.rows as Array<{ memberId: string }>).length > 0,
+          }
+        }
+        if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
+          const assignmentId = crypto.randomUUID()
+          const assignmentResult = await client.query(
+            `INSERT INTO attendance_shift_assignments
+               (id, org_id, user_id, shift_id, start_date, is_active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5::date, true, NOW(), NOW())
+             RETURNING id AS "assignmentId"`,
+            [assignmentId, attendanceOrgId, userId, cleanDefaultShiftId, defaultShiftStartDate],
+          )
+          attendanceOnboarding.defaultShift = {
+            id: cleanDefaultShiftId,
+            name: defaultShiftName,
+            startDate: defaultShiftStartDate,
+            assignmentId: (assignmentResult.rows as Array<{ assignmentId: string }>)[0]?.assignmentId ?? assignmentId,
+          }
+        }
+      })
+
+      // Cache invalidation is a post-commit side effect, not part of the atomic write set.
+      if (roleId) invalidateUserPerms(userId)
+      if (directPermissions.length > 0) invalidateUserPerms(userId)
 
       await auditLog({
         actorId: adminUserId,

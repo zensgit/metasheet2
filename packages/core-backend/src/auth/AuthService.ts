@@ -296,6 +296,19 @@ export class AuthService {
   /**
    * 用户注册
    */
+  // W4-PRE-1 policy (§3.3 item 2 of the Wave-4 onboarding design lock, docs/development/
+  // attendance-w4-pre1-user-orgs-lifecycle-20260721.md): this signature carries no org
+  // parameter and this deployment-level self-service registration path has no source of an
+  // authoritative org anywhere in its call chain — it is the design lock's own example of an
+  // "org 不可知的路径(如部署级注册)". Per the explicit ticket instruction, an org-unknowable
+  // path MUST record its policy and MUST NOT silently guess an org (e.g. defaulting to
+  // 'default' — that string is the one-time zzzz20260114110000 backfill's semantics, not a
+  // live admission default). Deliberately: this method does NOT write user_orgs. A user
+  // created here has no org membership until an org-aware admission path (POST
+  // /api/admin/users with attendanceOrgId, or directory sync admission) later adds one, or an
+  // operator backfills it explicitly. Verified by
+  // attendance-w4pre1-user-orgs-org-unknowable-policy.db.test.ts (zero user_orgs rows for a
+  // user created via this path).
   async register(email: string, password: string, name: string): Promise<User | null> {
     try {
       // 检查邮箱是否已存在
