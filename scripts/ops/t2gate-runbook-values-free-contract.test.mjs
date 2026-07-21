@@ -87,18 +87,90 @@ function loadRunbook() {
 }
 
 /**
- * Extract fenced ```sql ... ``` bodies from markdown (case-insensitive fence tag).
+ * Every VENUE a reader sees as a code block — scanned as a closed set, not as a denylist of
+ * delimiters.
+ *
+ * Gate finding (audit follow-up, PR #4500): the projection FORMS were closed into an allowlist,
+ * but the venues stayed open-ended — only BACKTICK fences were ever recognised. GitHub renders a
+ * `~~~sql` (tilde) fence and an HTML `<pre>` block identically to ```` ```sql ````, so the same
+ * identity SELECT passed every guard untouched simply by choosing a different delimiter. A guard's
+ * visibility must not depend on which equivalent delimiter an editor happens to use.
+ *
+ * Recognised venues:
+ *   - backtick fences  ```` ```[info] … ``` ````            (CommonMark: close repeats the same
+ *   - tilde fences     `~~~[info] … ~~~`                     character at least as many times)
+ *   - HTML blocks      `<pre …> … </pre>` / `<code …> … </code>`
+ *
+ * Leading whitespace is allowed on the fence lines: the runbook's own SQL fences are indented
+ * three spaces inside a numbered list, and dropping them would make the runbook-level guards
+ * silently vacuous.
+ *
+ * `start`/`end` are offsets into `markdown`, so the same scan can also REMOVE the venues (used by
+ * the indented-SQL extractor, which must not re-read a tilde-fenced body as "indented SQL").
+ * @param {string} markdown
+ * @returns {{ kind: 'fence' | 'html', info: string, body: string, start: number, end: number }[]}
+ */
+export function scanCodeVenues(markdown) {
+  const lines = markdown.split('\n')
+  const lineStart = []
+  let offset = 0
+  for (const line of lines) {
+    lineStart.push(offset)
+    offset += line.length + 1
+  }
+
+  const venues = []
+  let i = 0
+  while (i < lines.length) {
+    const open = /^[ \t]*(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)[ \t]*$/.exec(lines[i])
+    if (!open) {
+      i += 1
+      continue
+    }
+    const marker = open[1]
+    // Close fence: same character, at least as long, on its own line (or EOF — an unterminated
+    // fence swallows the rest of the document rather than disappearing from the guards).
+    const closeRe = new RegExp(`^[ \\t]*[${marker[0]}]{${marker.length},}[ \\t]*$`)
+    let j = i + 1
+    const body = []
+    while (j < lines.length && !closeRe.test(lines[j])) {
+      body.push(lines[j])
+      j += 1
+    }
+    venues.push({
+      kind: 'fence',
+      info: open[2].toLowerCase(),
+      body: body.length > 0 ? `${body.join('\n')}\n` : '',
+      start: lineStart[i],
+      end: j < lines.length ? lineStart[j] + lines[j].length : markdown.length,
+    })
+    i = j + 1
+  }
+
+  const htmlRe = /<(pre|code)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi
+  let m
+  while ((m = htmlRe.exec(markdown)) !== null) {
+    const start = m.index
+    const end = start + m[0].length
+    // Skip HTML that merely LIVES inside a fence (e.g. a ```html sample) — already covered.
+    if (venues.some((v) => v.kind === 'fence' && start >= v.start && start < v.end)) continue
+    venues.push({ kind: 'html', info: '', body: m[2], start, end })
+  }
+
+  return venues.sort((a, b) => a.start - b.start)
+}
+
+/**
+ * Extract SQL-tagged code-block bodies across every recognised venue (case-insensitive tag).
+ * HTML `<pre>`/`<code>` blocks carry no language tag at all, so they are always included: an
+ * untagged venue must fail closed, never be skipped.
  * @param {string} markdown
  * @returns {string[]}
  */
 export function extractFencedSqlBlocks(markdown) {
-  const blocks = []
-  const re = /```sql\s*\n([\s\S]*?)```/gi
-  let m
-  while ((m = re.exec(markdown)) !== null) {
-    blocks.push(m[1])
-  }
-  return blocks
+  return scanCodeVenues(markdown)
+    .filter((v) => v.kind === 'html' || v.info === 'sql')
+    .map((v) => v.body)
 }
 
 /**
@@ -344,19 +416,14 @@ const RAW_IDENTITY_SQL_COLUMN_RE = new RegExp(
 )
 
 /**
- * Extract every fenced code block (any/no language tag) — a bypass must not be possible by
- * relabelling ```sql as ```postgresql or a bare fence.
+ * Extract every code block (any/no language tag) in every recognised VENUE — a bypass must not be
+ * possible by relabelling ```sql as ```postgresql or a bare fence (form), nor by swapping the
+ * delimiter for `~~~` or `<pre>` (venue). See `scanCodeVenues`.
  * @param {string} markdown
  * @returns {string[]}
  */
 export function extractFencedCodeBlocks(markdown) {
-  const blocks = []
-  const re = /```[A-Za-z0-9_+-]*[ \t]*\n([\s\S]*?)```/g
-  let m
-  while ((m = re.exec(markdown)) !== null) {
-    blocks.push(m[1])
-  }
-  return blocks
+  return scanCodeVenues(markdown).map((v) => v.body)
 }
 
 /**
@@ -523,7 +590,17 @@ const WHOLE_ROW_SERIALIZER_RE = /\b(?:to_json|to_jsonb|row_to_json|json_agg|json
  * @returns {string[]}
  */
 export function extractIndentedSqlBlocks(markdown) {
-  const withoutFences = markdown.replace(/```[A-Za-z0-9_+-]*[ \t]*\n[\s\S]*?```/g, '\n')
+  // Remove EVERY recognised code venue, not just backtick fences: a tilde-fenced or <pre> block
+  // whose body happens to be indented must be read as that block (and rejected by the projection
+  // guards), never re-reported here as an "indented SQL block".
+  let withoutFences = ''
+  let cursor = 0
+  for (const venue of scanCodeVenues(markdown)) {
+    if (venue.start < cursor) continue
+    withoutFences += `${markdown.slice(cursor, venue.start)}\n`
+    cursor = venue.end
+  }
+  withoutFences += markdown.slice(cursor)
   const blocks = []
   let current = []
   for (const line of withoutFences.split('\n')) {
@@ -738,13 +815,30 @@ const PRESENCE_FORMAT = {
   hint: 'present_in_a=<n> / present_in_b=<n> / keys_all_distinct=<true|false>',
 }
 
+/**
+ * The CLOSED `directory_sync_runs.status` vocabulary (migration default `running`; the sync
+ * service only ever writes `completed` / `failed` / `running`).
+ *
+ * Anchored on purpose (owner rule, applied to the §3 status conditions the same way it was
+ * applied to the two composite fields): an UNANCHORED `\b(?:completed|failed)\b` accepted prose
+ * such as `failed - the sync never completed` or `not completed` as a valid status, and the §3
+ * matrix then read the substring `completed` out of it — grounding DISPROVED on a FAILED corp-B
+ * run, which skips T2.5 and unlocks T3. Anything outside this set is a malformed field and is
+ * REJECTED outright, never silently skipped.
+ */
+const RUN_STATUS_VALUES = ['completed', 'failed', 'running']
+const RUN_STATUS_SHAPE = {
+  re: new RegExp(`^(?:${RUN_STATUS_VALUES.join('|')})$`, 'i'),
+  hint: `exactly one of ${RUN_STATUS_VALUES.join(' / ')} (the closed directory_sync_runs.status vocabulary)`,
+}
+
 /** Shape a filled dependency must have before it can ground a verdict (junk is not evidence). */
 const EVIDENCE_VALUE_SHAPES = new Map([
   ['staging sha', { re: /^[0-9a-f]{7,40}$/i, hint: 'a 7-40 character git SHA' }],
   ['corp a integration id', { re: UUID_SHAPE_RE, hint: 'a UUID' }],
   ['corp b integration id', { re: UUID_SHAPE_RE, hint: 'a UUID' }],
-  ['corp a run status', { re: /\b(?:completed|failed)\b/i, hint: 'completed or failed' }],
-  ['corp b run status', { re: /\b(?:completed|failed)\b/i, hint: 'completed or failed' }],
+  ['corp a run status', RUN_STATUS_SHAPE],
+  ['corp b run status', RUN_STATUS_SHAPE],
   [
     'key comparison',
     { re: KEY_COMPARISON_FORMAT.re, hint: `the complete named form "${KEY_COMPARISON_FORMAT.hint}"` },
@@ -841,11 +935,30 @@ function impliedVerdictFromEvidence(byLabel) {
     return m
   }
 
-  const runA = read('corp a run status')
-  const runB = read('corp b run status')
-  if (!runA || !runB) {
-    problems.push('§4 corp A / corp B run status is missing/blank, so the §3 row cannot be computed')
+  /**
+   * Parse a run status against the CLOSED vocabulary, or record a problem. Same rule as the
+   * composite fields: "cannot tell" is never "accept", and the matrix below compares with `===`
+   * so no substring of a longer sentence can stand in for the status.
+   */
+  const parseStatus = (label) => {
+    const raw = read(label)
+    if (raw === null) {
+      problems.push(`§4 evidence field "${label}" is missing/blank, so the §3 row cannot be computed`)
+      return null
+    }
+    if (!RUN_STATUS_SHAPE.re.test(raw)) {
+      problems.push(
+        `§4 evidence field "${label}" is not one of the closed run statuses ` +
+          `[${RUN_STATUS_VALUES.join(', ')}] (got "${raw}") — a malformed status is rejected, ` +
+          `never read as a substring`,
+      )
+      return null
+    }
+    return raw
   }
+
+  const runA = parseStatus('corp a run status')
+  const runB = parseStatus('corp b run status')
   const dup = read('corp b duplicate_key_detected')
   const constraintHit = read('corp b expected_constraint_detected')
   const keyComparison = parseComposite('key comparison', KEY_COMPARISON_FORMAT)
@@ -860,7 +973,7 @@ function impliedVerdictFromEvidence(byLabel) {
 
   // §3 row 1 — CONFIRMED. All four conditions, none of them optional.
   const confirmedRow = {
-    "corp-B run status='failed'": /\bfailed\b/.test(runB),
+    "corp-B run status='failed'": runB === 'failed',
     'duplicate_key_detected=true': isTrue(dup),
     'expected_constraint_detected=true': isTrue(constraintHit),
     'corp B row count 0': corpBRows === 0,
@@ -876,7 +989,7 @@ function impliedVerdictFromEvidence(byLabel) {
 
   // §3 row 2 — DISPROVED. All four conditions, none of them optional.
   const disprovedRow = {
-    'both runs completed': /\bcompleted\b/.test(runA) && /\bcompleted\b/.test(runB),
+    'both runs completed': runA === 'completed' && runB === 'completed',
     'present_in_a=1': presentInA === 1,
     'present_in_b=1': presentInB === 1,
     'keys_all_distinct=true': keysAllDistinct,
@@ -906,15 +1019,16 @@ function impliedVerdictFromEvidence(byLabel) {
 }
 
 /**
- * Extract the §4 evidence block body (first fenced block after the `## 4.` heading).
+ * Extract the §4 evidence block body (first code block after the `## 4.` heading, in any
+ * recognised venue — the block must not escape the verdict guards by being tilde-fenced).
  * @param {string} markdown
  * @returns {string | null}
  */
 export function extractEvidenceBlock(markdown) {
   const headingIdx = markdown.search(/^##\s*4\./m)
   if (headingIdx < 0) return null
-  const m = /```[A-Za-z0-9_+-]*[ \t]*\n([\s\S]*?)```/.exec(markdown.slice(headingIdx))
-  return m ? m[1] : null
+  const [first] = scanCodeVenues(markdown.slice(headingIdx))
+  return first ? first.body : null
 }
 
 /**
@@ -1596,6 +1710,116 @@ test('positive control: honest CONFIRMED / DISPROVED / INCONCLUSIVE blocks all p
 })
 
 // ---------------------------------------------------------------------------
+// F1 — the two §3 run-status conditions are decided on the CLOSED status vocabulary.
+// The unanchored `\b(?:completed|failed)\b` read the substring `completed` out of a sentence,
+// so a FAILED corp-B run could ground DISPROVED (skips T2.5, unlocks T3).
+// ---------------------------------------------------------------------------
+
+test('verifier repro (F1): a run status outside the closed vocabulary is rejected, never substring-matched', () => {
+  const prose = [
+    // The two committed mutation proofs: both read as `completed` under the old unanchored regex.
+    'failed - the sync never completed',
+    'not completed',
+    'completed with errors',
+    'the corp B run failed',
+  ]
+  for (const status of prose) {
+    const result = assertEvidenceVerdictIsGrounded(
+      evidenceDoc({ ...COMPLETED_EVIDENCE, 'corp B run status': status }),
+    )
+    assert.equal(result.ok, false, `run status "${status}" must be rejected outright`)
+    // Half 1 — the anchored SHAPE (kills an unanchored EVIDENCE_VALUE_SHAPES entry).
+    assert.ok(
+      result.violations.some((v) => /"corp b run status" does not have the shape of/i.test(v)),
+      `expected an anchored-shape violation for "${status}", got: ${result.violations.join(' | ')}`,
+    )
+    // Half 2 — the §3 matrix REJECTS rather than skips (kills a substring test in the matrix).
+    assert.ok(
+      result.violations.some((v) => /is not one of the closed run statuses/i.test(v)),
+      `expected a closed-vocabulary rejection for "${status}", got: ${result.violations.join(' | ')}`,
+    )
+    // And it must never have been routed to a §3 row at all.
+    assert.ok(
+      !result.violations.some((v) => /contradicts its own evidence/i.test(v)),
+      `"${status}" must be rejected before the §3 row is computed: ${result.violations.join(' | ')}`,
+    )
+  }
+})
+
+test('positive control (F1): the closed vocabulary is accepted and routed by the §3 matrix', () => {
+  // `running` is a real directory_sync_runs status: valid vocabulary, but it satisfies neither
+  // closed §3 row — so it routes to INCONCLUSIVE rather than being rejected as malformed.
+  const runningInconclusive = assertEvidenceVerdictIsGrounded(
+    evidenceDoc({ ...COMPLETED_EVIDENCE, 'corp B run status': 'running', verdict: 'INCONCLUSIVE' }),
+  )
+  assert.equal(
+    runningInconclusive.ok,
+    true,
+    runningInconclusive.ok
+      ? 'ok'
+      : `"running" is closed vocabulary and must be accepted:\n- ${runningInconclusive.violations.join('\n- ')}`,
+  )
+  // …and a DISPROVED recorded over it is a CONTRADICTION (routed), not a malformed field.
+  const runningDisproved = assertEvidenceVerdictIsGrounded(
+    evidenceDoc({ ...COMPLETED_EVIDENCE, 'corp B run status': 'running' }),
+  )
+  assert.equal(runningDisproved.ok, false, '"running" + DISPROVED must fail')
+  assert.ok(
+    runningDisproved.violations.some((v) => /contradicts its own evidence/i.test(v)),
+    `expected a §3 contradiction, got: ${runningDisproved.violations.join(' | ')}`,
+  )
+  // Case-insensitivity of the closed set is preserved (operators write it either way).
+  assert.equal(
+    assertEvidenceVerdictIsGrounded(
+      evidenceDoc({ ...CONFIRMED_EVIDENCE, 'corp B run status': 'FAILED' }),
+    ).ok,
+    true,
+    'uppercase closed-vocabulary status must still be accepted',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// F3 — guards that no committed test pinned (each neuter below used to leave the suite green).
+// ---------------------------------------------------------------------------
+
+test('verifier repro (F3.2): a duplicate §4 label is rejected (last-wins must not restore a placeholder)', () => {
+  // A real, contradictory verdict followed by a SECOND `verdict:` line inside the same fence.
+  // Under `new Map(fields.map(…))` / last-wins the placeholder would win and grounding would be
+  // skipped entirely, so the whole block would pass.
+  const lines = evidenceDoc({ ...CONFIRMED_EVIDENCE, verdict: 'DISPROVED' }).split('\n')
+  const closingFence = lines.lastIndexOf('```')
+  assert.ok(closingFence > 0, 'fixture must have a closing fence')
+  lines.splice(closingFence, 0, 'verdict: _TBD_')
+  const result = assertEvidenceVerdictIsGrounded(lines.join('\n'))
+  assert.equal(result.ok, false, 'a duplicated §4 label must be rejected')
+  assert.ok(
+    result.violations.some((v) => /declares "verdict" more than once/i.test(v)),
+    `expected a duplicate-label violation, got: ${result.violations.join(' | ')}`,
+  )
+  // FIRST occurrence must still be the one judged — the contradiction is reported, not skipped.
+  assert.ok(
+    result.violations.some((v) => /contradicts its own evidence/i.test(v)),
+    `first-occurrence-wins must still judge the real verdict, got: ${result.violations.join(' | ')}`,
+  )
+})
+
+test('verifier repro (F3.3): a ruled verdict recorded outside the §4 block is rejected', () => {
+  // Everything inside §4 is still an honest placeholder, so ONLY the stray line can red this.
+  const md = `${evidenceDoc()}\nRollout note: verdict: CONFIRMED — T2.5 scheduled.\n`
+  assert.equal(
+    assertEvidenceVerdictIsGrounded(evidenceDoc()).ok,
+    true,
+    'control: the all-placeholder block alone must pass',
+  )
+  const result = assertEvidenceVerdictIsGrounded(md)
+  assert.equal(result.ok, false, 'a verdict outside the §4 block must be rejected')
+  assert.ok(
+    result.violations.some((v) => /recorded outside the §4 evidence block/i.test(v)),
+    `expected a stray-verdict violation, got: ${result.violations.join(' | ')}`,
+  )
+})
+
+// ---------------------------------------------------------------------------
 // Synthetic guards — clauses (1)+(2): identity/PII projections + paste instructions
 // ---------------------------------------------------------------------------
 
@@ -1757,11 +1981,131 @@ test('synthetic: an identity projection cannot hide behind a relabelled fence', 
   }
 })
 
+// ---------------------------------------------------------------------------
+// F2 — the VENUES are a closed set too, not a denylist of delimiters.
+// GitHub renders `~~~sql` and `<pre>` exactly like a backtick fence; a guard that only knows
+// backticks is bypassed by pressing a different key.
+// ---------------------------------------------------------------------------
+
+const IDENTITY_SELECT = 'SELECT union_id, open_id, mobile, raw FROM directory_accounts;'
+const RAW_ERROR_SELECT = 'SELECT status, error_message FROM directory_sync_runs;'
+
+/** Every venue a reader sees as a code block, as an editor would actually write it. */
+const CODE_VENUES = [
+  ['backtick fence (control)', (sql) => ['```sql', sql, '```'].join('\n')],
+  ['tilde fence', (sql) => ['~~~sql', sql, '~~~'].join('\n')],
+  ['long tilde fence', (sql) => ['~~~~~sql', sql, '~~~~~'].join('\n')],
+  ['indented tilde fence', (sql) => ['   ~~~sql', `   ${sql}`, '   ~~~'].join('\n')],
+  // Body indented 4+ spaces: if the stripper does not remove the TILDE venue, this body is
+  // re-read as "indented SQL" instead of as the code block it is. That is what pins the
+  // stripper to the same closed venue set as the extractors.
+  ['tilde fence with a 4-space-indented body', (sql) => ['~~~sql', `    ${sql}`, '~~~'].join('\n')],
+  ['html <pre>', (sql) => ['<pre>', sql, '</pre>'].join('\n')],
+  ['html <pre> with attributes', (sql) => ['<pre class="highlight">', sql, '</pre>'].join('\n')],
+  ['html <code>', (sql) => ['<code>', sql, '</code>'].join('\n')],
+]
+
+test('verifier repro (F2): raw identity projections are rejected in EVERY code venue, not just backticks', () => {
+  for (const [name, wrap] of CODE_VENUES) {
+    const result = assertNoRawIdentityProjections(wrap(IDENTITY_SELECT))
+    assert.equal(result.ok, false, `venue "${name}" must not bypass the identity guard`)
+    assert.ok(
+      result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+      `venue "${name}" must report the projection itself, got: ${result.violations.join(' | ')}`,
+    )
+    // The venue must be read AS a code block: an indented body inside a non-backtick fence must
+    // not be re-reported as "indented SQL" (that would mean the stripper missed the venue).
+    assert.ok(
+      !result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+      `venue "${name}" was not stripped before the indented-SQL scan: ${result.violations.join(' | ')}`,
+    )
+  }
+})
+
+test('verifier repro (F2): raw error_message projections stay closed in EVERY code venue', () => {
+  for (const [name, wrap] of CODE_VENUES) {
+    if (name === 'html <code>') continue // covered by <pre>; identical extraction path
+    const result = assertErrorMessageProjectionsAreClosed(wrap(RAW_ERROR_SELECT))
+    assert.equal(result.ok, false, `venue "${name}" must not bypass the error_message guard`)
+    assert.ok(
+      result.violations.some((v) => /direct\/unaliased error_message projection forbidden/i.test(v)),
+      `venue "${name}" expected a direct/unaliased violation, got: ${result.violations.join(' | ')}`,
+    )
+  }
+  // Alias-smuggling is equally closed in a non-backtick venue.
+  const smuggle = assertErrorMessageProjectionsAreClosed(
+    ['~~~sql', 'SELECT substring(error_message,1,120) AS duplicate_key_detected FROM directory_sync_runs;', '~~~'].join('\n'),
+  )
+  assert.equal(smuggle.ok, false, 'tilde-fenced alias-smuggle must fail')
+})
+
+test('positive control (F2): the allowed closed booleans still pass in a non-backtick venue', () => {
+  const body = [
+    `SELECT status, ${ALLOWED_DUP}, ${ALLOWED_CONSTRAINT}`,
+    '  FROM directory_sync_runs',
+    " WHERE integration_id = '<B>'",
+    ' ORDER BY started_at DESC LIMIT 1;',
+  ].join('\n')
+  for (const wrap of [
+    (sql) => ['~~~sql', sql, '~~~'].join('\n'),
+    (sql) => ['<pre>', sql, '</pre>'].join('\n'),
+  ]) {
+    const result = assertErrorMessageProjectionsAreClosed(wrap(body))
+    assert.equal(
+      result.ok,
+      true,
+      result.ok ? 'ok' : `allowed booleans must still pass:\n- ${result.violations.join('\n- ')}`,
+    )
+  }
+})
+
+test('anti-vacuity (F2): the venue scanner still sees the runbook’s own indented backtick fences', () => {
+  // The runbook writes `   ```sql` (three-space indent, inside a numbered list). If the scanner
+  // required a column-0 fence, every runbook-level guard below would pass on an EMPTY block list.
+  const runbook = loadRunbook()
+  const sqlBlocks = extractFencedSqlBlocks(runbook)
+  assert.ok(sqlBlocks.length >= 4, `expected >=4 runbook SQL venues, got ${sqlBlocks.length}`)
+  assert.ok(
+    sqlBlocks.some((b) => /position\('duplicate key' in error_message\)/i.test(b)),
+    'the closed-classification SQL block must still be extracted',
+  )
+  assert.equal(
+    extractIndentedSqlBlocks(runbook).length,
+    0,
+    'the runbook’s fenced SQL must not be misread as indented SQL',
+  )
+})
+
+test('verifier repro (F3.1): an indented (unfenced) identity SELECT is rejected, not invisible', () => {
+  const md = [
+    'Run this on staging and record the result:',
+    '',
+    "    SELECT union_id, mobile FROM directory_accounts WHERE integration_id = '<A>';",
+    '',
+  ].join('\n')
+  const result = assertNoRawIdentityProjections(md)
+  assert.equal(result.ok, false, 'indented SQL must not be invisible to the projection guards')
+  assert.ok(
+    result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+    `expected an indented-SQL violation, got: ${result.violations.join(' | ')}`,
+  )
+  assert.ok(
+    result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+    `indented SQL must also be PARSED, not merely flagged: ${result.violations.join(' | ')}`,
+  )
+})
+
 test('synthetic: paste-raw-identity instructions are rejected, negated bans are kept', () => {
   const bad = [
     'Paste the overlap person’s unionId and full name into the §4 evidence block.',
     'Record the corpId and mobile number in the evidence pack.',
     'Copy the openId of the overlap person into §4.',
+    // A bare "no"/"not" ANYWHERE earlier in the clause must not read as a prohibition — the
+    // negation has to attach to the capture itself. This is the case the negation fix closed;
+    // without a committed fixture, broadening PROSE_NEGATION back to /\b(?:no|not|…)/ was a
+    // silent, fully-green neuter (found while re-running the older mutation proofs).
+    'There is no need to redact anything here, paste the unionId into the evidence pack.',
+    'It is not a secret, so record the overlap person’s mobile number in §4.',
   ]
   for (const line of bad) {
     const result = assertNoRawIdentityPasteInstructions(line)
