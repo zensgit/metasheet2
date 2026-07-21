@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const routeState = vi.hoisted(() => ({
   user: { id: 'owner-1' } as Record<string, unknown> | null,
@@ -123,6 +124,8 @@ async function buildApp() {
   return app
 }
 
+const pinned = usePinnedServer()
+
 describe('workflow-designer compile-preview route - A6-4b', () => {
   beforeEach(() => {
     routeState.user = { id: 'owner-1' }
@@ -136,7 +139,8 @@ describe('workflow-designer compile-preview route - A6-4b', () => {
     routeState.loadWorkflowDraft.mockResolvedValue(draft())
     const app = await buildApp()
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/compile-preview')
       .send({})
 
@@ -169,7 +173,8 @@ describe('workflow-designer compile-preview route - A6-4b', () => {
     }))
     const app = await buildApp()
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/compile-preview')
       .send({})
 
@@ -200,7 +205,8 @@ describe('workflow-designer compile-preview route - A6-4b', () => {
     }))
     const app = await buildApp()
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/compile-preview')
       .send({})
 
@@ -222,7 +228,8 @@ describe('workflow-designer compile-preview route - A6-4b', () => {
     routeState.saveBpmnDraft.mockResolvedValue('wf_copy')
     const app = await buildApp()
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/duplicate')
       .send({ name: 'Copy' })
 
@@ -240,7 +247,8 @@ describe('workflow-designer compile-preview route - A6-4b', () => {
     routeState.loadWorkflowDraft.mockResolvedValue(draft())
     const app = await buildApp()
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/compile-preview')
       .send({})
 
@@ -252,7 +260,8 @@ describe('workflow-designer compile-preview route - A6-4b', () => {
     routeState.loadWorkflowDraft.mockResolvedValue(draft({ visual: null, bpmnXml: undefined }))
     const app = await buildApp()
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/compile-preview')
       .send({})
 

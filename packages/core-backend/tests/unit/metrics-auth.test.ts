@@ -2,8 +2,11 @@ import express from 'express'
 import client from 'prom-client'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 import { createMetricsAuthMiddleware, resolveMetricsScrapeToken } from '../../src/metrics/metrics'
+
+const pinned = usePinnedServer()
 
 describe('metrics auth middleware', () => {
   afterEach(() => {
@@ -24,7 +27,8 @@ describe('metrics auth middleware', () => {
       res.type('text/plain').send('metric_a 1\n')
     })
 
-    const res = await request(app).get('/metrics/prom')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/metrics/prom')
     expect(res.status).toBe(200)
     expect(res.text).toContain('metric_a 1')
   })
@@ -35,7 +39,8 @@ describe('metrics auth middleware', () => {
       res.type('text/plain').send('metric_a 1\n')
     })
 
-    const res = await request(app).get('/metrics/prom')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/metrics/prom')
     expect(res.status).toBe(401)
     expect(res.headers['www-authenticate']).toContain('Bearer')
     expect(res.body).toEqual({
@@ -53,7 +58,8 @@ describe('metrics auth middleware', () => {
       res.type('text/plain').send('metric_a 1\n')
     })
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .get('/metrics/prom')
       .set('Authorization', 'Bearer secret-token')
 
@@ -67,7 +73,8 @@ describe('metrics auth middleware', () => {
       res.json({ ok: true })
     })
 
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .get('/metrics')
       .set('x-metrics-token', 'secret-token')
 

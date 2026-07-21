@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // The gate resolves per-sheet capabilities; drive that resolution from the test.
 const resolveSheetCapabilities = vi.hoisted(() => vi.fn())
@@ -45,6 +46,8 @@ function makeService() {
   }
 }
 
+const pinned = usePinnedServer()
+
 describe('G8 — test-run route capability gate', () => {
   beforeEach(() => {
     resolveSheetCapabilities.mockReset()
@@ -54,7 +57,8 @@ describe('G8 — test-run route capability gate', () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: false } })
     const svc = makeService()
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .send({})
 
@@ -70,7 +74,8 @@ describe('G8 — test-run route capability gate', () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
     const svc = makeService()
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .send({})
 
@@ -82,7 +87,8 @@ describe('G8 — test-run route capability gate', () => {
     resolveSheetCapabilities.mockRejectedValue(new Error('Connection terminated to db.internal.host:5432 as user pg_app'))
     const svc = makeService()
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .send({})
 
@@ -97,7 +103,8 @@ describe('G8 — test-run route capability gate', () => {
     resolveSheetCapabilities.mockRejectedValue(new Error('unexpected TypeError: cannot read x of undefined at /srv/app/secret-path'))
     const svc = makeService()
 
-    const res = await request(buildApp(svc))
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .send({})
 

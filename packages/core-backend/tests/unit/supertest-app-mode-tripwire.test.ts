@@ -1,20 +1,18 @@
 /**
- * Anti-regression tripwire for supertest app-mode call sites (#4154 slice, owner round-1).
+ * Zero-tolerance tripwire for supertest app-mode call sites (#4154; wave-2 drained the debt to 0).
  *
- * Freezes the current inventory of `request(<app>)` sites (per file) in
- * tests/utils/supertest-app-mode-baseline.json. The batch migration drains this baseline to
- * zero; until then this test guarantees the debt only shrinks:
- *   - a NEW file with app-mode sites fails;
- *   - an INCREASED count in an existing file fails;
- *   - decreases pass (regenerate the baseline in the same PR to lock them in).
- *
- * Regenerate after a migration wave:
- *   UPDATE_SUPERTEST_APP_MODE_BASELINE=1 npx vitest run tests/unit/supertest-app-mode-tripwire.test.ts
+ * History: this test originally froze a per-file baseline and enforced drain-only shrinkage, with
+ * an UPDATE_SUPERTEST_APP_MODE_BASELINE=1 regeneration channel. Owner P2 (wave-2 review): that
+ * channel could regenerate a NON-EMPTY baseline and CI would accept re-inflated debt. The channel
+ * is deleted; the test now asserts the baseline file IS exactly {} and the recursive scan finds
+ * ZERO app-mode sites anywhere under tests/unit — there is no sanctioned path back.
  *
  * Counting is an AST walk (ts.createSourceFile), not a regex: it resolves the local default-import
  * name of 'supertest' per file and exempts only URL-string literals and `*.url()` transports.
+ * The scan is recursive (owner P2): nested test directories cannot bypass the ban.
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { countAppModeSites, scanAppModeSites } from '../utils/supertest-app-mode-scan'
@@ -39,36 +37,37 @@ describe('supertest app-mode tripwire', () => {
     expect(countAppModeSites('no-supertest.test.ts', 'const request = (x: unknown) => x\nrequest({})')).toBe(0)
   })
 
-  it('app-mode sites never grow beyond the frozen baseline (drain-only)', () => {
+  it('scanner is recursive: nested app-mode sites are counted (fixture discriminator)', () => {
+    // Owner P2: a top-level-only scan would let tests placed in subdirectories bypass the ban.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appmode-scan-fixture-'))
+    const nested = path.join(dir, 'nested', 'deep')
+    fs.mkdirSync(nested, { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, 'top.test.ts'),
+      "import request from 'supertest'\ndeclare const app: unknown\nrequest(app)\n",
+    )
+    fs.writeFileSync(
+      path.join(nested, 'hidden.test.ts'),
+      "import request from 'supertest'\ndeclare const app: unknown\nrequest(app)\nrequest(app)\n",
+    )
+    const scan = scanAppModeSites(dir)
+    expect(scan.counts['top.test.ts']).toBe(1)
+    expect(scan.counts['nested/deep/hidden.test.ts'], 'nested file must be found by the recursive walk').toBe(2)
+    expect(scan.totalSites).toBe(3)
+  })
+
+  it('the app-mode debt IS zero and stays zero — no regeneration channel exists', () => {
+    // The baseline is the permanent zero anchor: assert its CONTENT, not a process around it.
+    // Reintroducing any regeneration path cannot help an offender — a non-empty baseline fails here.
+    const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'))
+    expect(baseline, 'supertest-app-mode-baseline.json must remain exactly {}').toEqual({})
+
     const scan = scanAppModeSites(UNIT_DIR)
-
-    if (process.env.UPDATE_SUPERTEST_APP_MODE_BASELINE === '1') {
-      fs.writeFileSync(BASELINE_PATH, `${JSON.stringify(scan.counts, null, 2)}\n`)
-      throw new Error(
-        `baseline regenerated (${Object.keys(scan.counts).length} files / ${scan.totalSites} sites) — commit it and re-run without UPDATE_SUPERTEST_APP_MODE_BASELINE`,
-      )
-    }
-
-    const baseline: Record<string, number> = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'))
-    const violations: string[] = []
-    for (const [file, count] of Object.entries(scan.counts)) {
-      const allowed = baseline[file]
-      if (allowed === undefined) {
-        violations.push(`${file}: ${count} app-mode supertest site(s) in a file not in the baseline — use usePinnedServer() + request(pinned.url()) instead (tests/utils/pinned-server.ts)`)
-      } else if (count > allowed) {
-        violations.push(`${file}: app-mode sites grew ${allowed} -> ${count} — new sites must use the pinned-server transport`)
-      }
-    }
-    expect(violations, violations.join('\n')).toEqual([])
-
-    // Migrated suites must stay fully drained.
-    for (const migrated of [
-      'dashboard-routes-wiring.test.ts',
-      'approval-rbac-boundary.test.ts',
-      'multitable-ai-suggest-formula-routes.test.ts',
-      'pinned-server.test.ts',
-    ]) {
-      expect(scan.counts[migrated], `${migrated} must remain app-mode-free`).toBeUndefined()
-    }
+    const offenders = Object.entries(scan.counts).map(
+      ([file, count]) =>
+        `${file}: ${count} app-mode supertest site(s) — use usePinnedServer() + request(pinned.url()) instead (tests/utils/pinned-server.ts)`,
+    )
+    expect(offenders, offenders.join('\n')).toEqual([])
+    expect(scan.totalSites).toBe(0)
   })
 })
