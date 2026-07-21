@@ -1037,6 +1037,14 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
         .send({ anchorOperationId: anchorOp })
       expect(unknown.status).toBe(403)
       expect(unknown.body).toEqual(pv.body)
+
+      const knownExecute = await revertExecute({ previewIdentity: 'invalid-but-shape-valid' })
+      expect(knownExecute.status).toBe(403)
+      const unknownExecute = await request(app)
+        .post(`/api/multitable/sheets/sheet_earw_unknown_${TS}/revert-execute`)
+        .send({ previewIdentity: 'invalid-but-shape-valid' })
+      expect(unknownExecute.status).toBe(403)
+      expect(unknownExecute.body).toEqual(knownExecute.body)
     } finally {
       await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     }

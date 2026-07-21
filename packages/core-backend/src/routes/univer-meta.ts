@@ -10656,6 +10656,13 @@ export function univerMetaRouter(): Router {
       const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2
+      const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
+      // Match preview's existence-hiding contract before token verification. A non-system-admin must not
+      // distinguish an unknown sheet from an existing sheet they cannot read in full by observing 409 vs 403.
+      if (exists.rows.length === 0) {
+        if (!access.isAdminRole) return sendForbidden(res)
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
       // Fresh conservative full-read BEFORE token/anchor adjudication — no oracle for denied actors.
       if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
         return sendForbidden(res)
