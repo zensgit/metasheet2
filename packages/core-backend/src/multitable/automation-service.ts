@@ -41,6 +41,7 @@ import {
   canUserWriteFwbTargetFields,
   collectFwbActionConfigs,
   deriveFwbConfirmationHash,
+  hasUnavailableFwbNumberMapping,
   isFwbTargetFieldTypeCompatible,
   normalizeFwbMappings,
 } from './approval-fwb-activation'
@@ -2014,6 +2015,9 @@ export class AutomationService {
       const normalized = normalizeFwbMappings(config.mappings)
       if (!normalized.ok) {
         return `${FWB_ACTION_TYPE} mapping config invalid: ${(normalized as { issue: string }).issue}`
+      }
+      if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+        return `${FWB_ACTION_TYPE} mapping invalid: exact_number_mapping_unavailable`
       }
       for (const mapping of normalized.mappings) {
         if (!sourceFieldIds.has(mapping.formFieldId)) {

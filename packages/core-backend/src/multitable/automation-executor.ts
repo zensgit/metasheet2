@@ -26,7 +26,11 @@ import { withAutomationEventId } from './automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { produceAutomationEvent } from './automation-durable-activation'
-import { isFwbWritebackEnabled, normalizeFwbMappings } from './approval-fwb-activation'
+import {
+  hasUnavailableFwbNumberMapping,
+  isFwbWritebackEnabled,
+  normalizeFwbMappings,
+} from './approval-fwb-activation'
 import { executeWriteApprovalFormValues, resolveFwbRuntimeMappings, type FwbRecordWriteSeam } from './approval-fwb-write-action'
 import type { FwbGateChecks } from './approval-fwb-permission-gates'
 import { redactString } from './automation-log-redact'
@@ -2896,6 +2900,9 @@ export class AutomationExecutor {
       const normalized = normalizeFwbMappings((config as { mappings?: unknown }).mappings)
       if (!normalized.ok) {
         return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
+      }
+      if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+        return { actionType, status: 'failed', error: 'fwb_rejected:exact_number_mapping_unavailable' }
       }
       const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
         ? config.sourceTemplateVersionId.trim()
