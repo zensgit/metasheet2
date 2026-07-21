@@ -2,30 +2,80 @@ import type { QueryFn } from './permission-service'
 
 type LiveLinkRecord = { data: Record<string, unknown> }
 
-function canonicalProjectionLinkIds(value: unknown): string[] | null {
-  if (value === null || value === undefined) return []
-  const raw = Array.isArray(value) ? value : [value]
-  if (raw.some((item) => typeof item !== 'string' || item.trim().length === 0)) return null
-  const ids = raw.map((item) => (item as string).trim())
-  if (new Set(ids).size !== ids.length) return null
-  return ids.sort()
+export const LIVE_LINK_TARGET_CONSTRAINT = 'meta_links_foreign_record_id_fkey'
+
+export function isLiveLinkTargetForeignKeyViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === '23503'
+    && (error as { constraint?: unknown }).constraint === LIVE_LINK_TARGET_CONSTRAINT
 }
 
-function canonicalEdgeIds(value: readonly string[]): string[] {
-  return [...value].sort()
+export function isRetryableLiveLinkDatabaseConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const code = (error as { code?: unknown }).code
+  return code === '40P01' || code === '40001'
+}
+
+export interface AuthoritativeLiveLinkEdge {
+  fieldId: string
+  recordId: string
+  foreignRecordId: string
+}
+
+export class LiveLinkProjectionDataError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LiveLinkProjectionDataError'
+  }
 }
 
 /**
- * Verify that writable forward-link cells agree with the authoritative meta_links relation.
- * Recovery must not plan from a stale JSON mirror: a mismatch is corrupt live substrate and the
- * caller fails closed before minting or spending a destructive token.
+ * Load the effective forward-link relation for one sheet. The joins intentionally match the normal
+ * read projection: the source record and field must still belong to the sheet, and dangling targets
+ * are omitted. Rows are not deduplicated; a duplicate edge is meaningful corrupt substrate and must
+ * remain visible to the identity hash / hydration guard.
  */
-export async function isLiveLinkProjectionConsistent(
+export async function loadAuthoritativeLiveLinkEdgesForSheet(
   query: QueryFn,
-  liveById: ReadonlyMap<string, LiveLinkRecord>,
+  sheetId: string,
+): Promise<AuthoritativeLiveLinkEdge[]> {
+  const res = await query(
+    `SELECT l.field_id, l.record_id, l.foreign_record_id
+       FROM meta_links l
+       JOIN meta_fields f ON f.id = l.field_id AND f.sheet_id = $1
+       JOIN meta_records source ON source.id = l.record_id AND source.sheet_id = $1
+      WHERE EXISTS (SELECT 1 FROM meta_records target WHERE target.id = l.foreign_record_id)
+      ORDER BY l.field_id, l.record_id, l.foreign_record_id, l.id`,
+    [sheetId],
+  )
+  return (res.rows as Array<{ field_id: unknown; record_id: unknown; foreign_record_id: unknown }>).map(
+    (row) => ({
+      fieldId: String(row.field_id),
+      recordId: String(row.record_id),
+      foreignRecordId: String(row.foreign_record_id),
+    }),
+  )
+}
+
+/**
+ * Build the current live state used by recovery planning with writable forward-link values hydrated
+ * from the authoritative `meta_links` relation. `meta_records.data` is not a second authority: normal
+ * deletion/repair flows may leave its link-shaped JSON stale while every production read resolves the
+ * effective relation from `meta_links`.
+ *
+ * Dangling targets are omitted exactly like the normal read path. Duplicate authoritative edges are
+ * not a meaningful set projection and fail closed instead of being silently collapsed.
+ */
+export async function hydrateLiveLinkProjection<T extends LiveLinkRecord>(
+  query: QueryFn,
+  liveById: ReadonlyMap<string, T>,
   writableLinkFieldIds: ReadonlySet<string>,
-): Promise<boolean> {
-  if (liveById.size === 0 || writableLinkFieldIds.size === 0) return true
+): Promise<Map<string, T>> {
+  const hydrated = new Map<string, T>()
+  for (const [recordId, live] of liveById) {
+    hydrated.set(recordId, { ...live, data: { ...live.data } })
+  }
+  if (liveById.size === 0 || writableLinkFieldIds.size === 0) return hydrated
 
   const recordIds = [...liveById.keys()].sort()
   const fieldIds = [...writableLinkFieldIds].sort()
@@ -34,6 +84,7 @@ export async function isLiveLinkProjectionConsistent(
        FROM meta_links
       WHERE record_id = ANY($1::text[])
         AND field_id = ANY($2::text[])
+        AND EXISTS (SELECT 1 FROM meta_records target WHERE target.id = foreign_record_id)
       ORDER BY record_id, field_id, foreign_record_id`,
     [recordIds, fieldIds],
   )).rows as Array<{ record_id: unknown; field_id: unknown; foreign_record_id: unknown }>
@@ -45,7 +96,9 @@ export async function isLiveLinkProjectionConsistent(
     const fieldId = String(row.field_id)
     const foreignRecordId = String(row.foreign_record_id)
     const edgeKey = `${recordId}\u0000${fieldId}\u0000${foreignRecordId}`
-    if (edgeKeys.has(edgeKey)) return false
+    if (edgeKeys.has(edgeKey)) {
+      throw new LiveLinkProjectionDataError('duplicate authoritative link edge')
+    }
     edgeKeys.add(edgeKey)
     const cellKey = `${recordId}\u0000${fieldId}`
     const ids = edgeIdsByCell.get(cellKey) ?? []
@@ -53,16 +106,14 @@ export async function isLiveLinkProjectionConsistent(
     edgeIdsByCell.set(cellKey, ids)
   }
 
-  for (const [recordId, live] of liveById) {
+  for (const [recordId, live] of hydrated) {
     for (const fieldId of fieldIds) {
-      const fromData = canonicalProjectionLinkIds(live.data[fieldId])
-      if (!fromData) return false
-      const fromEdges = canonicalEdgeIds(edgeIdsByCell.get(`${recordId}\u0000${fieldId}`) ?? [])
-      if (fromData.length !== fromEdges.length) return false
-      for (let i = 0; i < fromData.length; i++) {
-        if (fromData[i] !== fromEdges[i]) return false
-      }
+      const authoritativeIds = [...(edgeIdsByCell.get(`${recordId}\u0000${fieldId}`) ?? [])].sort()
+      // Missing and [] are the same link-set value. Preserve the sparse canonical shape for an empty
+      // relation so planning does not manufacture an unrelated empty field in a scalar-only write.
+      if (authoritativeIds.length === 0) delete live.data[fieldId]
+      else live.data[fieldId] = authoritativeIds
     }
   }
-  return true
+  return hydrated
 }

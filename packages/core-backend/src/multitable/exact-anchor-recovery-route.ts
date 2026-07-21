@@ -52,7 +52,10 @@ import {
 import { isWriterFenceEnabled } from './canonical-sheet-fence'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import { projectRestorableOntoLive } from './record-restore-diff'
-import { isLiveLinkProjectionConsistent } from './live-link-projection-integrity'
+import {
+  hydrateLiveLinkProjection,
+  LiveLinkProjectionDataError,
+} from './live-link-projection-integrity'
 
 export type ExactAnchorBody = {
   historyBatchId?: unknown
@@ -454,18 +457,24 @@ export async function previewExactAnchorRecovery(
   if (!liveLoaded.ok) return { ok: false as const, reason: 'recovery-trust-required' as const }
 
   const surface = await loadFieldSurfaceForPreview(query, input.sheetId)
-  if (!(await isLiveLinkProjectionConsistent(
-    query,
-    liveLoaded.liveById,
-    surface.writableLinkFieldIds,
-  ))) {
-    return { ok: false as const, reason: 'recovery-trust-required' as const }
+  let authoritativeLiveById: typeof liveLoaded.liveById
+  try {
+    authoritativeLiveById = await hydrateLiveLinkProjection(
+      query,
+      liveLoaded.liveById,
+      surface.writableLinkFieldIds,
+    )
+  } catch (error) {
+    if (error instanceof LiveLinkProjectionDataError) {
+      return { ok: false as const, reason: 'recovery-trust-required' as const }
+    }
+    throw error
   }
   let details: PreviewPlanDetails
   try {
     details = buildPreviewPlanDetails(
       resolved.stateMap,
-      liveLoaded.liveById,
+      authoritativeLiveById,
       surface.fieldIds,
       input.mode,
       { fieldById: surface.fieldById, rawTypeById: surface.rawTypeById },
@@ -475,6 +484,26 @@ export async function previewExactAnchorRecovery(
       return { ok: false as const, reason: 'recovery-trust-required' as const }
     }
     throw e
+  }
+
+  const { summary } = details
+
+  // A resurrect-bearing preview is presentation-only and can never mint an execute token: L8 whole-refuses
+  // it as INBOUND_UNPROVABLE. The actor has already passed the sheet-admin + full-table-read floor, so the
+  // values-free record ids are readable; do not let write authorization against a currently absent same-op
+  // target hide the explicit doomed-plan explanation behind a generic forbidden. The size ceiling still
+  // applies before returning the summary.
+  if (summary.resurrectIds.length > 0) {
+    const maxRecords = resolveSheetRevertMaxRecords()
+    if (summary.effectiveWriteCount > maxRecords) {
+      return {
+        ok: false as const,
+        reason: 'too-large' as const,
+        recordCount: summary.effectiveWriteCount,
+        maxRecords,
+      }
+    }
+    return finalizePreviewSuccess(resolved, summary)
   }
 
   // Preview must not mint a token that is already known to be unusable. Reuse the SAME route adapter
@@ -490,8 +519,6 @@ export async function previewExactAnchorRecovery(
   if (!(await input.evaluatePlanAuthorization(query, previewAuth))) {
     return { ok: false as const, reason: 'forbidden' as const }
   }
-
-  const { summary } = details
 
   // Secondary ceiling on the effective write set (parity with the old T8-1 effective_write_set guard).
   const maxRecords = resolveSheetRevertMaxRecords()

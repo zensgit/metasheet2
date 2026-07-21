@@ -31,6 +31,10 @@ import {
 } from './side-door-delete-trash'
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
 import {
+  isLiveLinkTargetForeignKeyViolation,
+  isRetryableLiveLinkDatabaseConflict,
+} from './live-link-projection-integrity'
+import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
   queryRecordsWithCursor as queryRecordsWithCursorViaQueryService,
@@ -402,12 +406,22 @@ async function replaceRecordLinks(
     }
 
     for (const foreignId of toInsert) {
-      await query(
-        `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT DO NOTHING`,
-        [`lnk_${randomUUID()}`, fieldId, recordId, foreignId],
-      )
+      try {
+        await query(
+          `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT DO NOTHING`,
+          [`lnk_${randomUUID()}`, fieldId, recordId, foreignId],
+        )
+      } catch (error) {
+        if (isLiveLinkTargetForeignKeyViolation(error)) {
+          throw new MultitableRecordValidationError(`Linked record no longer exists: ${foreignId}`)
+        }
+        if (isRetryableLiveLinkDatabaseConflict(error)) {
+          throw new MultitableRecordValidationError('Linked records changed concurrently; retry the write')
+        }
+        throw error
+      }
     }
   }
 }

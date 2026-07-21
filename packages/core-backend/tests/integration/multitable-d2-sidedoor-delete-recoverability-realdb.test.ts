@@ -274,7 +274,10 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
     app.use('/api/multitable', univerMetaRouter())
 
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [OWNER])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [OWNER, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE, 'D2 Base', OWNER])
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE_X, 'D2 Base X', OWNER])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_A, BASE, 'D2 A'])

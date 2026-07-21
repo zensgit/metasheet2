@@ -128,7 +128,10 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_A, BASE, 'RIC A'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_B, BASE, 'RIC B'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET_A, 'Name', 'string', '{}', 0])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     process.env[RESET_FLAG] = 'true'
     process.env[CAPTURE_FLAG] = 'true'
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'

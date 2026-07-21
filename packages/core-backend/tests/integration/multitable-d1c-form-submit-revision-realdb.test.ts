@@ -188,8 +188,12 @@ describeIfDatabase('D-1c slice ① — form-submit CREATE/EDIT write public-form
       patch: {},
       snapshot: { [FLD_NAME]: 'link-target-1' },
     })
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [MEMBER])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ADMIN])
+    for (const userId of [MEMBER, ADMIN]) {
+      await q(
+        "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+        [userId, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+      )
+    }
     // Fence on so form-submit CREATE/EDIT mint sealed operation endpoints usable as anchors.
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'

@@ -29,10 +29,9 @@ import { resolveExactAnchor } from '../../src/multitable/exact-anchor-recovery'
 import { applyExactAnchorRecovery, pruneExpiredRecoveryTokenBurns, type ExactAnchorApplyMode } from '../../src/multitable/exact-anchor-recovery-execute'
 import { countInboundLinkCaptureRows, isTombstoneCaptureEnabled } from '../../src/multitable/tombstone-capture'
 import {
-  hashAnchorRecoveryScope,
-  hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   mintExactAnchorRecoveryIdentity,
+  verifyExactAnchorRecoveryIdentity,
 } from '../../src/multitable/restore-preview-identity'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
 import { __resetRecoveryWriterStateColumnProbe } from '../../src/multitable/canonical-sheet-fence'
@@ -324,11 +323,11 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
   test('CHECKPOINT-GONE / CHECKPOINT-CHANGED: the in-fence re-resolution never trusts the token echo', async () => {
     const { anchorOp } = await seedWorld()
     const pv = await preview(anchorOp)
-    // (a) remove the covering checkpoint entirely ⇒ no-covering-checkpoint, zero writes.
+    // (a) remove the active checkpoint entirely ⇒ the authoritative production precheck fails first.
     await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET])
     expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
-      .toEqual({ ok: false, reason: 'no-covering-checkpoint' })
+      .toEqual({ ok: false, reason: 'history-incomplete' })
     expect(await burnCount()).toBe(0)
     // (b) restore a covering checkpoint with a DIFFERENT id than the token bound ⇒ checkpoint-changed.
     await activate()
@@ -547,16 +546,11 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     const { R_REV, anchorOp } = await seedWorld()
     const pv = await preview(anchorOp, 'revert')
     const before = await liveRow(R_REV)
-    // Same REAL scopeHash/liveSetHash/schemaHash/checkpoint — only the signed authorization basis is wrong.
-    const liveRows = (await q('SELECT id, version FROM meta_records WHERE sheet_id = $1', [SHEET])).rows as Array<{ id: string; version: number }>
-    const fieldRows = (await q('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [SHEET])).rows as Array<{ id: string; type: string; property: unknown }>
-    const schemaHash = hashExactAnchorSchema(fieldRows.map((r) => ({ id: String(r.id), type: String(r.type), property: r.property })))
-    const liveSetHash = hashAnchorRecoveryScope(liveRows.map((r) => ({ recordId: String(r.id), exists: true, version: Number(r.version) })))
-    const claims = {
-      sheetId: SHEET, anchorOperationId: anchorOp, anchorSeq: pv.anchorSeq, checkpointId: pv.checkpointId,
-      scopeHash: pv.scopeHash, liveSetHash, schemaHash, actorId: ACTOR, mode: 'revert' as const,
-      authorizedScopeHash: 'e'.repeat(64),
-    }
+    // Copy every REAL current claim from the preview; only the signed authorization basis is wrong.
+    // This deliberately avoids reimplementing the live-record + authoritative-link freshness hash here.
+    const verified = verifyExactAnchorRecoveryIdentity(pv.token, { sheetId: SHEET, actorId: ACTOR })
+    expect(verified.valid).toBe(true)
+    const claims = { ...verified.claims!, authorizedScopeHash: 'e'.repeat(64) }
     const wrongBasis = mintExactAnchorRecoveryIdentity(claims)
     expect(await applyExactAnchorRecovery(txn, applyArgs(wrongBasis)))
       .toEqual({ ok: false, reason: 'forbidden' })
@@ -1178,7 +1172,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
   })
 
   // ── LINK alias ambiguity + same-op delete target ──────────────────────────────────────────────────────
-  test('LINK-INTEGRITY alias conflict: foreignSheetId ≠ foreignDatasheetId ⇒ link-integrity', async () => {
+  test('NO-ORACLE alias conflict: foreignSheetId ≠ foreignDatasheetId ⇒ forbidden before link-integrity', async () => {
     const F_AMB = `fld_eaa_amb_${TS}`
     const OTHER = `${SHEET}_amb`
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3) ON CONFLICT (id) DO NOTHING', [OTHER, BASE, 'amb'])
@@ -1198,7 +1192,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       await revSeq(R, 2, 'update', { [F_STR]: 'x', [F_AMB]: [] }, sUpdate)
       await live(R, { [F_STR]: 'x', [F_AMB]: [] }, 2)
       const pv = await preview(op, 'revert')
-      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'link-integrity' })
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'forbidden' })
       expect(await burnCount()).toBe(0)
     } finally {
       await q('DELETE FROM meta_fields WHERE id = $1', [F_AMB]).catch(() => {})

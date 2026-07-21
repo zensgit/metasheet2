@@ -25,6 +25,7 @@ import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
 import * as realtimeMod from '../../src/multitable/realtime-publish'
 import { eventBus } from '../../src/integration/events/event-bus'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
+import { lockRecoveryAuthorityUsers } from '../../src/multitable/recovery-authorization-stability'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -46,6 +47,8 @@ const F_REL_LOOKUP = `fld_earw_rel_lu_${TS}`
 const TGT_SHEET = `sheet_earw_tgt_${TS}`
 const ACTOR = `user_earw_${TS}`
 const ROLE_RACE = `role_earw_race_${TS}`
+const GROUP_RACE = randomUUID()
+const PERMISSION_RACE = `permission:earw:${TS}`
 const REC_A = `rec_earw_a_${TS}`
 const REC_B = `rec_earw_b_${TS}`
 const REC_C = `rec_earw_c_${TS}`
@@ -123,6 +126,7 @@ async function wipe(): Promise<void> {
     [[REC_A, REC_B, REC_REL, REC_REL_UNRELATED, REC_TGT_ANCHOR, REC_TGT_LIVE]],
   ).catch(() => {})
   await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
+  await q('DELETE FROM role_permissions WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
 }
 
 /**
@@ -313,7 +317,17 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
        ON CONFLICT DO NOTHING`,
       [F_REL_LOOKUP, REL_SHEET, 'Lookup', 'lookup', JSON.stringify({ linkFieldId: F_REL_LINK, targetFieldId: F_NUM, foreignSheetId: SHEET }), 2],
     )
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      `INSERT INTO users (id, password_hash, permissions)
+       VALUES ($1, 'x', $2::jsonb)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
+    await q('INSERT INTO roles (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [ROLE_RACE, 'EARW race role'])
+    await q(
+      'INSERT INTO permissions (code, name, description) VALUES ($1,$2,$3) ON CONFLICT (code) DO NOTHING',
+      [PERMISSION_RACE, 'EARW race permission', 'exact-anchor authority-lock golden'],
+    )
   })
 
   afterAll(async () => {
@@ -330,6 +344,10 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SHEET, REL_SHEET, TGT_SHEET]]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SHEET, REL_SHEET, TGT_SHEET]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM role_permissions WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
+    await q('DELETE FROM user_roles WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
+    await q('DELETE FROM roles WHERE id = $1', [ROLE_RACE]).catch(() => {})
+    await q('DELETE FROM permissions WHERE code = $1', [PERMISSION_RACE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
     await q(`SELECT setval('meta_record_chain_seq', 1000, true)`).catch(() => {})
   })
@@ -345,6 +363,10 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
     setYjsInvalidatorForRoutes(null)
     await wipe()
+    await q('UPDATE users SET permissions = $2::jsonb, is_active = TRUE WHERE id = $1', [
+      ACTOR,
+      JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share']),
+    ])
   })
 
   /** Success-path requires trust pair: fence + CONTIGUITY_STRICT (RECOVERY_TRUST_REQUIRED otherwise). */
@@ -679,7 +701,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     }
   })
 
-  test('LIVE-LINK-DRIFT: preview and execute both refuse a JSON/meta_links split with no token burn', async () => {
+  test('LIVE-LINK-AUTHORITY: stale JSON is hydrated from meta_links; post-preview relation drift refuses with no burn', async () => {
     enableRecoveryExecute()
 
     const first = await seedWorld({ withSideEffects: true })
@@ -689,10 +711,14 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       REC_A,
       REC_TGT_ANCHOR,
     ])
-    const refusedPreview = await revertPreview({ anchorOperationId: first.anchorOp })
-    expect(refusedPreview.status).toBe(409)
-    expect(refusedPreview.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
-    expect(refusedPreview.body?.data?.previewIdentity).toBeUndefined()
+    const hydratedPreview = await revertPreview({ anchorOperationId: first.anchorOp })
+    expect(hydratedPreview.status).toBe(200)
+    const hydratedToken = hydratedPreview.body?.data?.previewIdentity as string
+    expect(hydratedToken).toBeTruthy()
+    const hydratedExecute = await revertExecute({ previewIdentity: hydratedToken })
+    expect(hydratedExecute.status).toBe(200)
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_SRC_LINK])
+      .toEqual([REC_TGT_ANCHOR])
 
     const second = await seedWorld({ withSideEffects: true })
     const preview = await revertPreview({ anchorOperationId: second.anchorOp })
@@ -708,13 +734,27 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
 
     const refusedExecute = await revertExecute({ previewIdentity: token })
     expect(refusedExecute.status).toBe(409)
-    expect(refusedExecute.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect(refusedExecute.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
     expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_SRC_LINK])
       .toEqual([REC_TGT_LIVE])
     expect((await q(
       'SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1',
       [SHEET],
     )).rows[0]?.c).toBe(0)
+  })
+
+  test('LIVE-LINK-DUPLICATE: duplicate authoritative edges fail closed before a token is exposed', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld({ withSideEffects: true })
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_SRC_LINK,
+      REC_A,
+      REC_TGT_LIVE,
+    ])
+    const preview = await revertPreview({ anchorOperationId: anchorOp })
+    expect(preview.status).toBe(409)
+    expect(preview.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect(preview.body?.data?.previewIdentity).toBeUndefined()
   })
 
   test('RESET LINK INVALIDATION: deleting a target invalidates the surviving inbound source record', async () => {
@@ -1057,6 +1097,273 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     }
   })
 
+  test('AUTH-DB-FRESH: a committed database revoke defeats stale request claims and rolls back the token burn', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const preview = await revertPreview({ anchorOperationId: anchorOp })
+    expect(preview.status).toBe(200)
+    const token = preview.body?.data?.previewIdentity as string
+
+    // curPerms intentionally retains the old grants. Execute must use request ∩ DB-fresh authority.
+    await q('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]'])
+    const execute = await revertExecute({ previewIdentity: token })
+    expect(execute.status).toBe(403)
+    expect(execute.body?.error?.code).toBe('FORBIDDEN')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
+    expect((await q(
+      'SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1',
+      [SHEET],
+    )).rows[0]?.c).toBe(0)
+  })
+
+  test('AUTHORITY-LOCKS: user/role revokes park, while unrelated last-login writes remain unblocked', async () => {
+    await q(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [ACTOR, ROLE_RACE],
+    )
+    await q(
+      'INSERT INTO role_permissions (role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [ROLE_RACE, PERMISSION_RACE],
+    )
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    const userWriter = await livePool!.connect()
+    const roleWriter = await livePool!.connect()
+    const unrelatedWriter = await livePool!.connect()
+    let userChange: Promise<void> | null = null
+    let roleChange: Promise<void> | null = null
+    let userSettled = false
+    let roleSettled = false
+    try {
+      await holder.query('BEGIN')
+      await lockRecoveryAuthorityUsers(
+        (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
+        [ACTOR],
+      )
+
+      // The users trigger is intentionally column-scoped: session metadata must not wait behind a
+      // potentially long recovery transaction.
+      await unrelatedWriter.query('BEGIN')
+      await unrelatedWriter.query("SET LOCAL lock_timeout = '250ms'")
+      await unrelatedWriter.query('UPDATE users SET last_login_at = now() WHERE id = $1', [ACTOR])
+      await unrelatedWriter.query('COMMIT')
+
+      const userWriterPid = Number((await userWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      const roleWriterPid = Number((await roleWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      userChange = (async () => {
+        await userWriter.query('BEGIN')
+        try {
+          await userWriter.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]'])
+          await userWriter.query('COMMIT')
+        } catch (error) {
+          await userWriter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { userSettled = true })
+      roleChange = (async () => {
+        await roleWriter.query('BEGIN')
+        try {
+          await roleWriter.query(
+            'DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+            [ROLE_RACE, PERMISSION_RACE],
+          )
+          await roleWriter.query('COMMIT')
+        } catch (error) {
+          await roleWriter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { roleSettled = true })
+
+      let bothParked = false
+      for (let i = 0; i < 100; i++) {
+        const states = await q(
+          'SELECT pid, wait_event_type FROM pg_stat_activity WHERE pid = ANY($1::int[])',
+          [[userWriterPid, roleWriterPid]],
+        )
+        bothParked = states.rows.length === 2 && states.rows.every((row) => row.wait_event_type === 'Lock')
+        if (bothParked || userSettled || roleSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(userSettled).toBe(false)
+      expect(roleSettled).toBe(false)
+      expect(bothParked).toBe(true)
+
+      await holder.query('COMMIT')
+      await userChange
+      await roleChange
+      expect((await q('SELECT permissions FROM users WHERE id = $1', [ACTOR])).rows[0]?.permissions).toEqual([])
+      expect((await q(
+        'SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+        [ROLE_RACE, PERMISSION_RACE],
+      )).rowCount).toBe(0)
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      if (userChange) await userChange.catch(() => {})
+      if (roleChange) await roleChange.catch(() => {})
+      await userWriter.query('ROLLBACK').catch(() => {})
+      await roleWriter.query('ROLLBACK').catch(() => {})
+      await unrelatedWriter.query('ROLLBACK').catch(() => {})
+      holder.release()
+      userWriter.release()
+      roleWriter.release()
+      unrelatedWriter.release()
+      await q('DELETE FROM role_permissions WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
+      await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
+      await q('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [
+        ACTOR,
+        JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share']),
+      ]).catch(() => {})
+    }
+  })
+
+  test('AUTHORITY-SUBJECT-LOCKS: sheet/field/record grant revokes park on user, role, and group keys', async () => {
+    await seedWorld()
+    await q(
+      'INSERT INTO platform_member_groups (id, name) VALUES ($1::uuid,$2) ON CONFLICT (id) DO NOTHING',
+      [GROUP_RACE, `EARW group ${TS}`],
+    )
+    await q(
+      'INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING',
+      [GROUP_RACE, ACTOR],
+    )
+    await q(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [ACTOR, ROLE_RACE],
+    )
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code)
+       VALUES ($1,'user',$2,'spreadsheet:admin') ON CONFLICT DO NOTHING`,
+      [SHEET, ACTOR],
+    )
+    await q(
+      `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+       VALUES ($1,$2,'role',$3,true,false) ON CONFLICT DO NOTHING`,
+      [SHEET, F_STR, ROLE_RACE],
+    )
+    await q(
+      `INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level)
+       VALUES ($1,$2,'member-group',$3,'admin') ON CONFLICT DO NOTHING`,
+      [SHEET, REC_A, GROUP_RACE],
+    )
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    const userWriter = await livePool!.connect()
+    const roleWriter = await livePool!.connect()
+    const groupWriter = await livePool!.connect()
+    let userRevoke: Promise<void> | null = null
+    let roleRevoke: Promise<void> | null = null
+    let groupRevoke: Promise<void> | null = null
+    const settled = { user: false, role: false, group: false }
+    try {
+      await holder.query('BEGIN')
+      await lockRecoveryAuthorityUsers(
+        (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
+        [ACTOR],
+      )
+
+      const userPid = Number((await userWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      const rolePid = Number((await roleWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      const groupPid = Number((await groupWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      userRevoke = (async () => {
+        await userWriter.query('BEGIN')
+        try {
+          await userWriter.query(
+            `DELETE FROM spreadsheet_permissions
+              WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+            [SHEET, ACTOR],
+          )
+          await userWriter.query('COMMIT')
+        } catch (error) {
+          await userWriter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { settled.user = true })
+      roleRevoke = (async () => {
+        await roleWriter.query('BEGIN')
+        try {
+          await roleWriter.query(
+            `DELETE FROM field_permissions
+              WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+            [SHEET, F_STR, ROLE_RACE],
+          )
+          await roleWriter.query('COMMIT')
+        } catch (error) {
+          await roleWriter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { settled.role = true })
+      groupRevoke = (async () => {
+        await groupWriter.query('BEGIN')
+        try {
+          await groupWriter.query(
+            `DELETE FROM record_permissions
+              WHERE sheet_id = $1 AND record_id = $2
+                AND subject_type = 'member-group' AND subject_id = $3`,
+            [SHEET, REC_A, GROUP_RACE],
+          )
+          await groupWriter.query('COMMIT')
+        } catch (error) {
+          await groupWriter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { settled.group = true })
+
+      let allParked = false
+      for (let i = 0; i < 100; i++) {
+        const states = await q(
+          'SELECT pid, wait_event_type FROM pg_stat_activity WHERE pid = ANY($1::int[])',
+          [[userPid, rolePid, groupPid]],
+        )
+        allParked = states.rows.length === 3 && states.rows.every((row) => row.wait_event_type === 'Lock')
+        if (allParked || settled.user || settled.role || settled.group) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(settled).toEqual({ user: false, role: false, group: false })
+      expect(allParked).toBe(true)
+
+      await holder.query('COMMIT')
+      await Promise.all([userRevoke, roleRevoke, groupRevoke])
+      expect((await q(
+        `SELECT 1 FROM spreadsheet_permissions
+          WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+        [SHEET, ACTOR],
+      )).rowCount).toBe(0)
+      expect((await q(
+        `SELECT 1 FROM field_permissions
+          WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+        [SHEET, F_STR, ROLE_RACE],
+      )).rowCount).toBe(0)
+      expect((await q(
+        `SELECT 1 FROM record_permissions
+          WHERE sheet_id = $1 AND record_id = $2
+            AND subject_type = 'member-group' AND subject_id = $3`,
+        [SHEET, REC_A, GROUP_RACE],
+      )).rowCount).toBe(0)
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      if (userRevoke) await userRevoke.catch(() => {})
+      if (roleRevoke) await roleRevoke.catch(() => {})
+      if (groupRevoke) await groupRevoke.catch(() => {})
+      await userWriter.query('ROLLBACK').catch(() => {})
+      await roleWriter.query('ROLLBACK').catch(() => {})
+      await groupWriter.query('ROLLBACK').catch(() => {})
+      holder.release()
+      userWriter.release()
+      roleWriter.release()
+      groupWriter.release()
+      await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ROLE_RACE]).catch(() => {})
+      await q('DELETE FROM record_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, GROUP_RACE]).catch(() => {})
+      await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
+      await q('DELETE FROM platform_member_group_members WHERE group_id = $1::uuid', [GROUP_RACE]).catch(() => {})
+      await q('DELETE FROM platform_member_groups WHERE id = $1::uuid', [GROUP_RACE]).catch(() => {})
+    }
+  })
+
   test('NO-ORACLE AUTH-RACE: fence-parked full-read revoke outranks concurrent HISTORY_INCOMPLETE, zero writes', async () => {
     enableRecoveryExecute()
     const { anchorOp } = await seedWorld()
@@ -1199,7 +1506,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)).toBe(0)
   })
 
-  test('LINK-TARGET-RACE: recovery key-shares a foreign target until commit so concurrent delete cannot leave a dangling link', async () => {
+  test('LINK-TARGET-RACE: recovery locks a foreign target through commit so concurrent delete cannot invalidate authorization', async () => {
     enableRecoveryExecute()
     const { anchorOp } = await seedWorld({ withSideEffects: true })
     const pv = await revertPreview({ anchorOperationId: anchorOp })
@@ -1223,7 +1530,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       const deleterPid = Number((await targetDeleter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
 
       // Pause the source UPDATE after plan authorization + foreign-target validation. At this point the
-      // recovery transaction must already hold FOR KEY SHARE on REC_TGT_ANCHOR.
+      // recovery transaction must already hold FOR UPDATE on REC_TGT_ANCHOR.
       await q(`
         CREATE OR REPLACE FUNCTION ${fnName}() RETURNS trigger AS $$
         BEGIN
@@ -1286,8 +1593,8 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
         }
       })().finally(() => { deleteSettled = true })
 
-      // The target delete must park on recovery's row-level key-share. Removing FOR KEY SHARE makes this
-      // transaction commit here; after the barrier release recovery then inserts a dangling foreign_record_id.
+      // The target delete must park on recovery's authorization-stability row lock. Removing FOR UPDATE
+      // lets the delete finish before apply and makes this golden red (the FK remains the structural backstop).
       let deleteParked = false
       for (let i = 0; i < 100; i++) {
         const state = await q('SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [deleterPid])
@@ -1314,6 +1621,98 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       barrier.release()
       await q(`DROP TRIGGER IF EXISTS ${triggerName} ON meta_records`).catch(() => {})
       await q(`DROP FUNCTION IF EXISTS ${fnName}()`).catch(() => {})
+    }
+  })
+
+  test('LINK-FK-COMMIT-ORDERS: concurrent target delete either cascades a committed edge or rejects the late insert', async () => {
+    await seedWorld({ withSideEffects: true })
+    await q('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_SRC_LINK, REC_B])
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const writer = await livePool!.connect()
+    const deleter = await livePool!.connect()
+    let deleting: Promise<void> | null = null
+    let inserting: Promise<unknown> | null = null
+    try {
+      // Insert wins first: the FK's referenced-row lock parks DELETE. Once the edge commits, ON DELETE
+      // CASCADE sees and removes it in the delete transaction; no hand-written sweep order is trusted.
+      await writer.query('BEGIN')
+      await writer.query(
+        'INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)',
+        [F_SRC_LINK, REC_B, REC_TGT_ANCHOR],
+      )
+      const deleterPid = Number((await deleter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      let deleteSettled = false
+      deleting = (async () => {
+        await deleter.query('BEGIN')
+        try {
+          await deleter.query('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_TGT_ANCHOR, TGT_SHEET])
+          await deleter.query('COMMIT')
+        } catch (error) {
+          await deleter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { deleteSettled = true })
+      let deleteParked = false
+      for (let i = 0; i < 100; i++) {
+        const state = await q('SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [deleterPid])
+        deleteParked = state.rows[0]?.wait_event_type === 'Lock'
+        if (deleteParked || deleteSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(deleteSettled).toBe(false)
+      expect(deleteParked).toBe(true)
+      await writer.query('COMMIT')
+      await deleting
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(0)
+      expect((await q('SELECT 1 FROM meta_links WHERE foreign_record_id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(0)
+
+      // Delete wins first: a late link insert waits for the target transaction, then fails 23503 after
+      // the delete commits. The FK is NOT VALID only for historical rows; every new write is enforced.
+      await q(
+        'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+        [REC_TGT_ANCHOR, TGT_SHEET, JSON.stringify({ [F_TGT_NUM]: 10 })],
+      )
+      await deleter.query('BEGIN')
+      await deleter.query('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_TGT_ANCHOR, TGT_SHEET])
+      const writerPid = Number((await writer.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      let insertSettled = false
+      inserting = (async () => {
+        await writer.query('BEGIN')
+        try {
+          await writer.query(
+            'INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)',
+            [F_SRC_LINK, REC_B, REC_TGT_ANCHOR],
+          )
+          await writer.query('COMMIT')
+          return null
+        } catch (error) {
+          await writer.query('ROLLBACK').catch(() => {})
+          return error
+        }
+      })().finally(() => { insertSettled = true })
+      let insertParked = false
+      for (let i = 0; i < 100; i++) {
+        const state = await q('SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [writerPid])
+        insertParked = state.rows[0]?.wait_event_type === 'Lock'
+        if (insertParked || insertSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(insertSettled).toBe(false)
+      expect(insertParked).toBe(true)
+      await deleter.query('COMMIT')
+      const insertError = await inserting as { code?: unknown; constraint?: unknown } | null
+      expect(insertError?.code).toBe('23503')
+      expect(insertError?.constraint).toBe('meta_links_foreign_record_id_fkey')
+      expect((await q('SELECT 1 FROM meta_links WHERE foreign_record_id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(0)
+    } finally {
+      await writer.query('ROLLBACK').catch(() => {})
+      await deleter.query('ROLLBACK').catch(() => {})
+      if (deleting) await deleting.catch(() => {})
+      if (inserting) await inserting.catch(() => {})
+      writer.release()
+      deleter.release()
     }
   })
 

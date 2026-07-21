@@ -3,12 +3,14 @@ import { assertSeqString, selectCheckpointByAnchorSeq } from './history-trust-ch
 import { reconstructRecordsAtSeq, type RecordStateAtT } from './record-reconstructor'
 import {
   hashAnchorRecoveryScope,
+  hashExactAnchorLiveSet,
   hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   mintExactAnchorRecoveryIdentity,
   verifyExactAnchorRecoveryIdentity,
   type ExactAnchorRecoveryMode,
 } from './restore-preview-identity'
+import { loadAuthoritativeLiveLinkEdgesForSheet } from './live-link-projection-integrity'
 
 /**
  * W0-1 v3.7 Lane L6-b — the EXACT-ANCHOR recovery resolution + execute authority.
@@ -271,23 +273,22 @@ export async function resolveExactAnchor(
     throw error
   }
   const scopeHash = hashAnchorRecoveryScope(scopeEntriesOf(stateMap))
-  // W0-1 L8 preview-freshness binding: fingerprint the LIVE set {id, version} too (same order-invariant
-  // HMAC primitive, exists:true). The destructive apply re-hashes the live set IN-FENCE and refuses
-  // `preview-drift` when a concurrent write landed between preview and execute — the anchor-authority
-  // `scopeHash` alone cannot see that (the at-anchor reconstruction is immutable under append-only history).
+  // W0-1 L8 preview-freshness binding: fingerprint the LIVE id/version set AND the effective authoritative
+  // link relation. A direct/legacy meta_links repair need not bump the source record version; omitting it
+  // would let execute apply a different link plan than preview. Apply re-hashes both surfaces in-fence.
   const liveRes = await query('SELECT id, version FROM meta_records WHERE sheet_id = $1', [sheetId])
-  let liveEntries: Array<{ recordId: string; exists: true; version: number }>
+  let liveEntries: Array<{ recordId: string; version: number }>
   try {
     liveEntries = (liveRes.rows as Array<{ id: unknown; version: unknown }>).map((r) => ({
       recordId: requireHistoryRecordId(r.id, 'live recovery identity'),
-      exists: true,
       version: requireHistoryVersion(r.version, 'live recovery identity'),
     }))
   } catch (error) {
     if (error instanceof ExactAnchorHistoryDataError) return { ok: false, reason: 'history-incomplete' }
     throw error
   }
-  const liveSetHash = hashAnchorRecoveryScope(liveEntries)
+  const liveLinkEntries = await loadAuthoritativeLiveLinkEdgesForSheet(query, sheetId)
+  const liveSetHash = hashExactAnchorLiveSet(liveEntries, liveLinkEntries)
   // G-SCHEMA-BEFORE-FENCE: bind CURRENT semantic field surface (id/type/property) into the identity.
   // Apply recomputes under the fence and refuses schema-drift on retype / property drift / field add-drop.
   const schemaRes = await query('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [sheetId])

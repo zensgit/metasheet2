@@ -11,6 +11,7 @@ import { ensureRecordNotLocked } from './record-lock'
 import { loadFieldsForSheet } from './loaders'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
+  hashExactAnchorLiveSet,
   hashAnchorRecoveryScope,
   hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
@@ -48,7 +49,12 @@ import {
   loadHierarchyParentFieldIds,
   type HierarchyCycleLinkGuard,
 } from './hierarchy-cycle-guard'
-import { isLiveLinkProjectionConsistent } from './live-link-projection-integrity'
+import {
+  hydrateLiveLinkProjection,
+  isLiveLinkTargetForeignKeyViolation,
+  LiveLinkProjectionDataError,
+  loadAuthoritativeLiveLinkEdgesForSheet,
+} from './live-link-projection-integrity'
 
 /** Normalize a link-field cell (array | single | null) to a string[] of foreign record ids. */
 function normalizeLinkIds(value: unknown): string[] {
@@ -441,6 +447,17 @@ class ApplyRefusalError extends Error {
 const isUniqueViolation = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && (e as { code?: unknown }).code === '23505'
 
+/** Database conflicts that are safe, whole-transaction retry signals rather than server faults. */
+export function classifyExactAnchorDatabaseConflict(e: unknown): ExactAnchorApplyRefusal | null {
+  if (typeof e !== 'object' || e === null) return null
+  const pg = e as { code?: unknown; constraint?: unknown }
+  if (pg.code === '40P01' || pg.code === '40001') return 'preview-drift'
+  if (isLiveLinkTargetForeignKeyViolation(e)) {
+    return 'link-integrity'
+  }
+  return null
+}
+
 /**
  * Live-state truth must be WELL-FORMED — a malformed row is corrupt substrate, not a value to coerce.
  * (The old `asRec`/`Number(...) || 0` coercions could hash a corrupt row into a "matching" live set and
@@ -569,7 +586,7 @@ export async function applyExactAnchorRecovery(
       // direct-SQL hardening: a RESET's stale delete set and a version bump on a "non-affected" row are
       // both live-set drift the token's liveSetHash must veto, so every live row is locked and hashed
       // from the LOCKED (EvalPlanQual-fresh) truth. Malformed rows fail closed — never coerced.
-      const liveById = new Map<string, {
+      let liveById = new Map<string, {
         data: Record<string, unknown>
         version: number
         locked?: unknown
@@ -604,8 +621,9 @@ export async function applyExactAnchorRecovery(
           updated_at: r.updated_at,
         })
       }
-      const liveHash = hashAnchorRecoveryScope(
-        [...liveById.entries()].map(([recordId, l]) => ({ recordId, exists: true, version: l.version })),
+      const liveHash = hashExactAnchorLiveSet(
+        [...liveById.entries()].map(([recordId, l]) => ({ recordId, version: l.version })),
+        await loadAuthoritativeLiveLinkEdgesForSheet(query, input.sheetId),
       )
       if (liveHash !== liveSetHash) throw new ApplyRefusalError('preview-drift')
 
@@ -615,10 +633,11 @@ export async function applyExactAnchorRecovery(
       // statement. Any divergence from the token ⇒ preview-drift, full rollback (burn included).
       // HONESTY: fence-bypassing direct SQL committed AFTER this recheck is outside the all-writer-fence
       // model (see module doc); fenced writers cannot commit while we hold the fence.
-      const recheckHash = hashAnchorRecoveryScope(
+      const recheckHash = hashExactAnchorLiveSet(
         ((await query('SELECT id, version FROM meta_records WHERE sheet_id = $1', [input.sheetId]))
           .rows as Array<{ id: unknown; version: unknown }>)
-          .map((r) => ({ recordId: String(r.id), exists: true, version: requireLiveVersion(r.version) })),
+          .map((r) => ({ recordId: String(r.id), version: requireLiveVersion(r.version) })),
+        await loadAuthoritativeLiveLinkEdgesForSheet(query, input.sheetId),
       )
       if (recheckHash !== liveSetHash) throw new ApplyRefusalError('preview-drift')
 
@@ -661,11 +680,17 @@ export async function applyExactAnchorRecovery(
         projectionFieldById.set(f.id, { type: f.type })
       }
 
-      // meta_links is authoritative for writable forward links; meta_records.data is only its JSON mirror.
-      // Planning from a diverged mirror can classify an actually-wrong edge set as unchanged, so fail closed
-      // before plan authorization/token consumption instead of preserving or rewriting an invented state.
-      if (!(await isLiveLinkProjectionConsistent(query, liveById, writableLinkFieldIds))) {
-        throw new ApplyRefusalError('recovery-trust-required')
+      // meta_links is authoritative for writable forward links; meta_records.data is not a second
+      // authority and can legitimately retain stale link-shaped JSON after normal delete/repair flows.
+      // Hydrate the effective current relation exactly like read paths before planning. A duplicate
+      // authoritative edge remains corrupt substrate and fails closed.
+      try {
+        liveById = await hydrateLiveLinkProjection(query, liveById, writableLinkFieldIds)
+      } catch (error) {
+        if (error instanceof LiveLinkProjectionDataError) {
+          throw new ApplyRefusalError('recovery-trust-required')
+        }
+        throw error
       }
       const sameBaseMirrorConfigByField = await loadSameBaseMirrorConfigByField(
         query,
@@ -737,13 +762,11 @@ export async function applyExactAnchorRecovery(
         deleteRecordIds,
       }
 
-      // Stabilize the COMPLETE permission authority before the final adjudication:
-      //   - lock source + every changed forward-link target sheet in one deterministic order; all
-      //     production sheet/field/record permission writers take that same owning-sheet row lock;
-      //   - hold SHARE locks on the two mutable actor-membership relations so a role/group add or revoke
-      //     cannot change which subject-scoped grants/denies apply after the final read but before COMMIT.
-      // The canonical sheet fence covers record/schema writers, not this permission plane. Acquiring all
-      // sheet rows in one ORDER BY avoids A->B / B->A recovery deadlocks caused by source-first locking.
+      // Stabilize sheet-local permission authority before the final adjudication. All production
+      // sheet/field/record permission writers take the owning meta_sheets row lock. Actor/person RBAC,
+      // active-user, role and member-group authority is stabilized by the route adapter's DB-enforced
+      // per-user advisory protocol; no process-wide table lock is taken here.
+      // Acquiring all sheet rows in one ORDER BY avoids A->B / B->A recovery deadlocks.
       const authoritySheetIds = new Set<string>([input.sheetId])
       for (const rw of revertWrites) {
         for (const lu of rw.linkUpdates) {
@@ -766,15 +789,6 @@ export async function applyExactAnchorRecovery(
       if (orderedAuthoritySheetIds.some((id) => !lockedAuthorityIds.has(id))) {
         throw new ApplyRefusalError('forbidden')
       }
-      try {
-        await query('LOCK TABLE user_roles, platform_member_group_members IN SHARE MODE')
-      } catch (error) {
-        if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '42P01') {
-          throw new ApplyRefusalError('recovery-trust-required')
-        }
-        throw error
-      }
-
       // REQUIRED FINAL authorization over the true restorable delta (BEFORE scalar/link validation).
       // Full-read is repeated under the authority locks; the route adapter then covers source row/field,
       // person membership, and foreign target read/edit authority. Every denial is the same `forbidden`,
@@ -833,11 +847,9 @@ export async function applyExactAnchorRecovery(
           if (targetIds.length === 0) continue
           // Same-operation delete: a projected link target that this apply will delete becomes dangling.
           if (targetIds.some((id) => deleteIdSet.has(id))) throw new ApplyRefusalError('link-integrity')
-          // Hold every foreign target through COMMIT. Without this row lock, a target-sheet delete can
-          // commit after the existence check but before syncOneOutboundLinkField(), leaving a dangling
-          // meta_links row (foreign_record_id intentionally has no FK). ORDER BY gives concurrent
-          // multi-target recoveries one deterministic lock order; a delete that wins first makes the
-          // fresh READ COMMITTED statement return no row and therefore fails closed below.
+          // The route authorization adapter already holds these target rows FOR UPDATE through COMMIT;
+          // re-select them here to keep the kernel's existence/wrong-sheet check explicit. The database
+          // FK is the final structural guard for every link writer and target-delete path.
           const found = await query(
             `SELECT id FROM meta_records
               WHERE sheet_id = $1 AND id = ANY($2::text[])
@@ -1126,6 +1138,8 @@ export async function applyExactAnchorRecovery(
     })
   } catch (e) {
     if (e instanceof ApplyRefusalError) return { ok: false, reason: e.reason }
+    const conflict = classifyExactAnchorDatabaseConflict(e)
+    if (conflict) return { ok: false, reason: conflict }
     throw e
   }
 }

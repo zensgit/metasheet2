@@ -25,7 +25,10 @@ import {
   type PreviewPlanSummary,
 } from '../../src/multitable/exact-anchor-recovery-route'
 import { ExactAnchorPlanDataError } from '../../src/multitable/exact-anchor-recovery-plan'
-import type { ExactAnchorApplyRefusal } from '../../src/multitable/exact-anchor-recovery-execute'
+import {
+  classifyExactAnchorDatabaseConflict,
+  type ExactAnchorApplyRefusal,
+} from '../../src/multitable/exact-anchor-recovery-execute'
 import { composeBaselineOverlay, type ResolveAnchorRefusal } from '../../src/multitable/exact-anchor-recovery'
 import type { QueryFn } from '../../src/multitable/permission-service'
 
@@ -614,6 +617,17 @@ describe('HTTP mapping — every current ExactAnchorApplyRefusal is values-free'
     expect(valueInvalid.message).toMatch(/invalid under the current schema/i)
     expect(mapApplyRefusal('recovery-trust-required')).toEqual(mapRecoveryTrustRefusal())
     expect(mapApplyRefusal('history-incomplete')).toEqual(mapHistoryIncompleteRefusal())
+  })
+
+  test('database deadlock/serialization and live-target FK failures become retryable typed refusals', () => {
+    expect(classifyExactAnchorDatabaseConflict({ code: '40P01' })).toBe('preview-drift')
+    expect(classifyExactAnchorDatabaseConflict({ code: '40001' })).toBe('preview-drift')
+    expect(classifyExactAnchorDatabaseConflict({
+      code: '23503',
+      constraint: 'meta_links_foreign_record_id_fkey',
+    })).toBe('link-integrity')
+    expect(classifyExactAnchorDatabaseConflict({ code: '23503', constraint: 'some_other_fk' })).toBeNull()
+    expect(classifyExactAnchorDatabaseConflict(new Error('not postgres'))).toBeNull()
   })
 
   test('mapResolveRefusal covers every ResolveAnchorRefusal', () => {

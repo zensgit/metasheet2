@@ -64,6 +64,11 @@ import {
   type MultitableSheetPermissionCandidate,
   type SheetPermissionScope,
 } from '../multitable/permission-service'
+import {
+  lockRecoveryAuthorityUsers,
+  RecoveryAuthorityUnavailableError,
+  resolveRecoverySheetAuthority,
+} from '../multitable/recovery-authorization-stability'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
@@ -90,6 +95,10 @@ import {
   type ExactAnchorLinkInvalidation,
   type ExactAnchorPlanAuthContext,
 } from '../multitable/exact-anchor-recovery-execute'
+import {
+  isLiveLinkTargetForeignKeyViolation,
+  isRetryableLiveLinkDatabaseConflict,
+} from '../multitable/live-link-projection-integrity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -6428,7 +6437,7 @@ async function hasFullTableReadAccess(
   req: Request,
   query: QueryFn,
   sheetId: string,
-  access: { userId: string | null; isAdminRole: boolean },
+  access: ResolvedRequestAccess,
   capabilities: MultitableCapabilities,
 ): Promise<boolean> {
   if (!access.userId) return false // anonymous/unscoped → fail closed
@@ -6439,7 +6448,22 @@ async function hasFullTableReadAccess(
   const unscoped = computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
   if (scoped.size !== unscoped.size) return false
   for (const id of unscoped) if (!scoped.has(id)) return false
-  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped)
+  // Formula-taint resolution traverses foreign-sheet/base readability through request-shaped helpers.
+  // Recovery must not feed those helpers the original JWT/cache claims after DB-fresh adjudication:
+  // expose only the transaction-fresh access snapshot while inheriting the request's non-auth surface.
+  const authorityReq = Object.create(req) as Request
+  Object.defineProperty(authorityReq, 'user', {
+    value: {
+      id: access.userId,
+      perms: access.permissions,
+      permissions: access.permissions,
+      roles: access.isAdminRole ? ['admin'] : [],
+      role: access.isAdminRole ? 'admin' : 'user',
+    },
+    enumerable: true,
+    configurable: true,
+  })
+  const masked = await maskStoredRecordFieldIds(authorityReq, query, sheetId, undefined, scoped)
   return masked.size === scoped.size
 }
 
@@ -9041,6 +9065,12 @@ export function univerMetaRouter(): Router {
             return null
           })
         } catch (e) {
+          if (isLiveLinkTargetForeignKeyViolation(e) || isRetryableLiveLinkDatabaseConflict(e)) {
+            return res.status(409).json({
+              ok: false,
+              error: { code: 'LINK_INTEGRITY', message: 'A linked record was deleted concurrently; retry the undelete.' },
+            })
+          }
           if (e instanceof RecordServiceRestoreConflictError) {
             return res.status(409).json({ ok: false, error: { code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' } })
           }
@@ -10188,9 +10218,14 @@ export function univerMetaRouter(): Router {
    */
   const makeFullReadEvaluator = (req: Request, sheetId: string) =>
     async (query: TrustCheckpointQueryFn): Promise<boolean> => {
-      const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
-      if (!access.userId || !capabilities.canManageSheetAccess) return false
-      return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
+      try {
+        const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
+        if (!access.userId || !capabilities.canManageSheetAccess) return false
+        return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
+      } catch (error) {
+        if (error instanceof RecoveryAuthorityUnavailableError) return false
+        throw error
+      }
     }
 
   /**
@@ -10209,7 +10244,33 @@ export function univerMetaRouter(): Router {
    */
   const makePlanAuthorization = (req: Request, sheetId: string) =>
     async (query: TrustCheckpointQueryFn, ctx: ExactAnchorPlanAuthContext): Promise<boolean> => {
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, query, sheetId)
+      // Freeze the actor plus every person id the recovery could assign BEFORE the final authority
+      // reads. DB triggers on RBAC/users/member-group relations acquire these same per-user locks, so
+      // deactivation/revoke/membership changes cannot commit until this destructive txn finishes.
+      const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+      const fieldByIdFull = new Map(fields.map((f) => [f.id, f]))
+      const authorityUserIds = new Set<string>([ctx.actorId])
+      for (const rw of ctx.revertWrites) {
+        for (const fid of rw.changedFieldIds) {
+          if (fieldByIdFull.get(fid)?.type !== 'person') continue
+          const raw = rw.patch[fid]
+          if (!Array.isArray(raw)) continue
+          for (const candidate of raw) {
+            if (typeof candidate !== 'string' && typeof candidate !== 'number') continue
+            const userId = String(candidate).trim()
+            if (userId) authorityUserIds.add(userId)
+          }
+        }
+      }
+      try {
+        await lockRecoveryAuthorityUsers(query, authorityUserIds)
+      } catch (error) {
+        if (error instanceof RecoveryAuthorityUnavailableError) return false
+        throw error
+      }
+
+      const { access, capabilities, sheetScope } = await resolveRecoverySheetAuthority(req, query, sheetId)
+      if (access.userId !== ctx.actorId) return false
       if (!access.userId || !capabilities.canManageSheetAccess) return false
       if (!(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) return false
 
@@ -10237,8 +10298,6 @@ export function univerMetaRouter(): Router {
       }
 
       // 3. Layer-3 field-write gate over the TRUE changed set.
-      const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
-      const fieldByIdFull = new Map(fields.map((f) => [f.id, f]))
       const changedFieldIds = new Set(ctx.revertWrites.flatMap((rw) => rw.changedFieldIds))
       if (changedFieldIds.size > 0) {
         const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
@@ -10295,44 +10354,44 @@ export function univerMetaRouter(): Router {
           }
           rawPropById.set(String(r.id), prop)
         }
-        type ForeignAuth = {
-          access: ResolvedRequestAccess
-          capabilities: MultitableCapabilities
-          sheetScope: SheetPermissionScope | undefined
-          denied: Set<string> | null
-        }
-        const foreignAuthCache = new Map<string, ForeignAuth | null>()
+        const targetsByForeignSheet = new Map<string, Set<string>>()
         for (const [fieldId, rawTargets] of linkTargetsByField) {
-          const targetIds = [...new Set(rawTargets)]
           const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(fieldId))
           if (!foreignSheetId) return false
-          let fAuth = foreignAuthCache.get(foreignSheetId)
-          if (fAuth === undefined) {
-            const resolved = await resolveSheetCapabilities(req, query, foreignSheetId)
-            if (!resolved.access.userId || !resolved.capabilities.canRead || !resolved.capabilities.canEditRecord) {
-              fAuth = null
-            } else {
-              let denied: Set<string> | null = null
-              if (!resolved.access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
-                denied = await loadDeniedRecordIds(query, foreignSheetId, resolved.access.userId)
-              }
-              fAuth = { access: resolved.access, capabilities: resolved.capabilities, sheetScope: resolved.sheetScope, denied }
-            }
-            foreignAuthCache.set(foreignSheetId, fAuth)
+          const targets = targetsByForeignSheet.get(foreignSheetId) ?? new Set<string>()
+          for (const id of rawTargets) targets.add(id)
+          targetsByForeignSheet.set(foreignSheetId, targets)
+        }
+
+        for (const foreignSheetId of [...targetsByForeignSheet.keys()].sort()) {
+          const targetIds = [...(targetsByForeignSheet.get(foreignSheetId) ?? [])].sort()
+          // Establish foreign-sheet authority before any target-row lookup, preserving the no-oracle
+          // order for an actor who can manage the source sheet but cannot inspect the foreign sheet.
+          const resolved = await resolveRecoverySheetAuthority(req, query, foreignSheetId)
+          if (!resolved.access.userId || !resolved.capabilities.canRead || !resolved.capabilities.canEditRecord) {
+            return false
           }
-          if (!fAuth) return false
-          if (fAuth.denied && targetIds.some((id) => fAuth.denied!.has(id))) return false
+          // Lock target rows BEFORE reading data-dependent row denial or created_by authority. FOR UPDATE
+          // (not KEY SHARE) blocks both delete and ordinary data updates through COMMIT; all targets for a
+          // sheet are acquired in one deterministic statement to avoid per-field lock-order drift.
           const targetRows = (await query(
-            'SELECT id, created_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+            `SELECT id, created_by FROM meta_records
+              WHERE sheet_id = $1 AND id = ANY($2::text[])
+              ORDER BY id
+              FOR UPDATE`,
             [foreignSheetId, targetIds],
           )).rows as Array<{ id: unknown; created_by: unknown }>
           const foreignCreatedBy = new Map(targetRows.map((r) => [String(r.id), typeof r.created_by === 'string' ? r.created_by : null]))
           // A missing target cannot be authority-proven — uniform forbidden HERE keeps the later
           // link-integrity validator from becoming an existence oracle for unauthorized actors.
           if (foreignCreatedBy.size !== targetIds.length) return false
-          const foreignScopeMap = await loadRecordPermissionScopeMap(query, foreignSheetId, targetIds, fAuth.access.userId!)
+          if (!resolved.access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
+            const denied = await loadDeniedRecordIds(query, foreignSheetId, resolved.access.userId)
+            if (targetIds.some((id) => denied.has(id))) return false
+          }
+          const foreignScopeMap = await loadRecordPermissionScopeMap(query, foreignSheetId, targetIds, resolved.access.userId)
           for (const id of targetIds) {
-            if (!ensureRecordWriteAllowed(fAuth.capabilities, fAuth.sheetScope, fAuth.access, foreignCreatedBy.get(id) ?? null, 'edit', foreignScopeMap, id)) return false
+            if (!ensureRecordWriteAllowed(resolved.capabilities, resolved.sheetScope, resolved.access, foreignCreatedBy.get(id) ?? null, 'edit', foreignScopeMap, id)) return false
           }
         }
       }
@@ -15021,6 +15080,18 @@ export function univerMetaRouter(): Router {
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      if (isLiveLinkTargetForeignKeyViolation(err)) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'LINK_INTEGRITY', message: 'A linked record was deleted concurrently; retry the form submission.' },
+        })
+      }
+      if (isRetryableLiveLinkDatabaseConflict(err)) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'LINK_CONFLICT', message: 'Linked records changed concurrently; retry the form submission.' },
+        })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

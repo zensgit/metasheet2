@@ -194,8 +194,12 @@ describeIfDatabase('D-1c slice ⑤ (FINAL) — attachment-delete cell-strip writ
       'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_FILES, SHEET, 'Files', 'attachment', '{}', 2],
     )
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [MEMBER])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ADMIN])
+    for (const userId of [MEMBER, ADMIN]) {
+      await q(
+        "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+        [userId, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+      )
+    }
     // Fence on for the whole suite so strip writers mint sealed operation endpoints usable as anchors.
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'

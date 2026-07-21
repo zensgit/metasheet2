@@ -141,6 +141,10 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     app.use((req, _res, next) => { ;(req as { user?: Actor }).user = actor; next() })
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'TFRR Base'])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [MANAGER.id, JSON.stringify(MANAGER.perms)],
+    )
   })
 
   afterAll(async () => {
@@ -159,6 +163,7 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
       await q('DELETE FROM meta_sheets WHERE id = $1', [s]).catch(() => {})
     }
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [MANAGER.id]).catch(() => {})
   })
 
   beforeEach(() => {

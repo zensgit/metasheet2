@@ -635,6 +635,34 @@ export function hashExactAnchorSchema(
     .digest('hex')
 }
 
+/**
+ * W0 L8 preview-freshness identity over both live records and the effective authoritative link
+ * relation. Record id/version alone cannot see a direct or legacy `meta_links` repair that does not
+ * bump `meta_records.version`; binding both surfaces prevents execute from applying a different link
+ * plan than preview. Duplicate edges remain duplicated in the canonical input so corruption cannot be
+ * normalized away. A domain bump makes every pre-link-binding token fail closed and require re-preview.
+ */
+export function hashExactAnchorLiveSet(
+  records: Array<{ recordId: string; version: number }>,
+  links: Array<{ fieldId: string; recordId: string; foreignRecordId: string }>,
+): string {
+  const recordCanon = [...records]
+    .map((r) => [String(r.recordId), r.version] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1]))
+  const linkCanon = [...links]
+    .map((l) => [String(l.fieldId), String(l.recordId), String(l.foreignRecordId)] as const)
+    .sort((a, b) => {
+      for (let i = 0; i < 3; i++) {
+        if (a[i] < b[i]) return -1
+        if (a[i] > b[i]) return 1
+      }
+      return 0
+    })
+  return createHmac('sha256', getSecret())
+    .update(JSON.stringify(['exact-anchor-live-set-v2', recordCanon, linkCanon]))
+    .digest('hex')
+}
+
 export interface ExactAnchorRecoveryIdentityClaims {
   sheetId: string
   /** the OPAQUE recovery anchor: the sealed operation endpoint id (`meta_record_history_operations.operation_id`).
@@ -650,12 +678,10 @@ export interface ExactAnchorRecoveryIdentityClaims {
   checkpointId: string
   /** order-invariant HMAC over the reconstructed record set at `anchorSeq` (`hashAnchorRecoveryScope`). */
   scopeHash: string
-  /** W0-1 L8: order-invariant HMAC over the LIVE record set {id, version} at preview time (same
-   *  `hashAnchorRecoveryScope` primitive, `exists:true`). `scopeHash` binds the ANCHOR AUTHORITY (the
-   *  immutable at-anchor reconstruction — it can never move under an append-only history), while this
-   *  binds PREVIEW FRESHNESS: any concurrent version-bumping write / create / delete between preview and
-   *  execute changes it, and the destructive apply refuses `preview-drift` (409-class) in-fence — the
-   *  actor always applies exactly the world they previewed. */
+  /** W0-1 L8: order-invariant HMAC over the LIVE record set {id, version} AND the effective
+   *  authoritative `meta_links` set at preview time (`hashExactAnchorLiveSet`). `scopeHash` binds the
+   *  ANCHOR AUTHORITY, while this binds PREVIEW FRESHNESS: record and relation drift between preview and
+   *  execute changes it, and the destructive apply refuses `preview-drift` in-fence. */
   liveSetHash: string
   /**
    * G-SCHEMA-BEFORE-FENCE: SERVER-KEYED HMAC over CURRENT `{id,type,property}` field surface at preview

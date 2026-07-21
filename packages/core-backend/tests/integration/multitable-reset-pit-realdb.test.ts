@@ -119,7 +119,10 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'RS Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET, 'Name', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [SALARY, SHEET, 'Salary', 'number', '{}', 2])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
   })
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
@@ -135,6 +138,10 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
   beforeEach(async () => {
     curRoles = ['member']
     curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
+    await q('UPDATE users SET permissions = $2::jsonb, is_active = TRUE WHERE id = $1', [
+      ACTOR,
+      JSON.stringify(curPerms),
+    ])
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true' // flag ON for most tests; (a) turns it off
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'

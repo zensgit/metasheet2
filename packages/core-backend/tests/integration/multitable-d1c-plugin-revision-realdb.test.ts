@@ -294,7 +294,10 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
     // internal `precheckSheetHistoryIntegrity` function) — same auth-stub pattern as
     // `multitable-reset-pit-realdb.test.ts` / `multitable-history-incomplete-precheck-realdb.test.ts`.
     // 'multitable:share' → canManageSheetAccess, the D2 gate revert-preview's route enforces.
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
