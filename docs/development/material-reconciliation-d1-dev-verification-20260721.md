@@ -99,6 +99,25 @@ verify per cluster, probe-mutation based). All four P2s were **test-strength** f
 - Values-free: fixtures use abstract tokens only; evidence surfaces expose ids/counts/vocab
   sizes only.
 
+## 3b. Owner six-focus deep review — absorption (2026-07-21)
+
+The owner directed a deep review before merge (six foci). Ran as six independent adversarial
+review lanes; findings: **2 P1, ~10 P2, ~10 P3** — all absorbed in the follow-up commit:
+
+| Focus | Outcome |
+|---|---|
+| ① Nine templates vs charter | **P1**: `binding_version` froze `create_only`, contradicting the §4.5 one-way status lifecycle → new `create_only_status_one_way` discipline. P2s: `binding_member` gains frozen uniqueness `(binding_version_id, role)`; `source_snapshot` gains `(attempt_id, role)`; `binding_version` gains `(scenario_id, binding_version_id)` backing the composite FK; §5 failed-record **counts** added (per-side pages/rows read); machine-readable **retention** attribute frozen per object (`claim = released_on_failed`, others `permanent`); charter-unconditional digest fields now `required`; `fail_class` **dropped** (the reason→class binding lives in `MR_FAILURE_REASONS`; a stored class could contradict the reason) |
+| ② Codec byte contract | **P1**: lone surrogates were silently folded to U+FFFD by `Buffer.from(...,'utf8')` — probe-proven digest collisions at all three string ingestion points → rejected with new closed reason `STRING_ILL_FORMED` (U+FFFD itself stays a legal value; astral pairs legal). P2s: field ids now NFC-normalized before uniqueness + encoding (NFC-duplicate ids throw); string identity keys NFC-normalized on the convenience path (Buffer path = caller-owned byte authority, documented); `canonicalRowDigest` fixed 32-byte width (`DIGEST_WIDTH_INVALID`); empty-snapshot digest ruled LEGAL (chartered §8.2-4 positive control) and pinned |
+| ③ fail_phase ruling | **FREEZE NOW**: `MR_RUN_PHASES = ['planned','reading_sources','snapshots_complete','compared']` — mechanically the states with an `X→failed` transition ("the run state at the moment of failure"); zero invented phases (the reviewer explicitly rejected inventing e.g. `identity_analysis`, which is chartered as a phase that cannot fail the run). `fail_phase` is now a select over it; parity with the state machine is itself asserted |
+| ④ identity_key_normalized in diff | **DROP** (charter letter: handles only; keys recoverable via stored row handles). Frozen per-bucket handle discipline recorded in the template: matched = both handles; only_in = exactly one; ambiguous = per-side deterministic exemplar (**byte-lexicographically smallest `canonical_row_digest`** — never `row_index`, replay-nondeterministic per §8.2b-7) + per-side multiplicities; identity_invalid = single handle + class. The dropped field id joined the test's forbidden list |
+| ⑤ decimal float-reject stance | **KEEP STRICT** (no-IEEE754-transit is itself a frozen §4.6 rule). Verified transit reality: today's http/K3/SQL adapters all JSON.parse — raw decimal text is destroyed before projection; therefore **two D3a design-gate contract items recorded**: per-source `decimalTransit` capability (decimal fields carried as text end-to-end) and upstream kind-coercion authority (per-field frozen kinds; `classifyValue` is not type inference). Both + the exponent-expansion trap (`String(1e-7)==='1e-7'`) are now in the codec header |
+| ⑥ CI + mutations | CI reality PROVEN (the PR's integration-guard log contains both literal `... OK` lines — 被触发且被验证). **6/6 independent mutants SURVIVED** the original battery (interior-zero strip, boolean-false byte, fieldId NFC, multiplicity upper edge, FK arity, uniqueness scope) — each now has a killing test; re-run post-fix: **all six RED**, plus six new-defense mutants (ill-formed off, width off, retention open, phase de-select, member-uniqueness drop, binding-discipline revert) **all RED**; clean rerun green |
+
+Honest accounting: the original "15/15 mutation battery" was real but incomplete — the
+independent lane proved whole rule-edges unpinned. The battery now stands at 15 original +
+12 review-round kills, with golden byte vectors extended (golden-2 carries an interior-zero
+decimal, boolean false, and composed unicode).
+
 ## 4. Explicitly out of scope (per §7 gates)
 
 D2 (scenario/binding store, pointer CAS runtime, `SET LOCAL lock_timeout` claim mechanics with
