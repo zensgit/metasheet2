@@ -1,8 +1,8 @@
 # Approval Canvas V2 Development Plan (2026-07-20)
 
 **Status:** PROPOSED - owner ratification required before D3 canvas foundation work starts
-**Baseline:** `origin/main@a98996ee2e0269b22801a6b87d2b8d5b5f076025`  
-**Scope:** approval form authoring, approval-flow canvas, template versions, form/decision-value writeback, and attachment integration  
+**Baseline:** `origin/main@a98996ee2e0269b22801a6b87d2b8d5b5f076025`
+**Scope:** approval form authoring, approval-flow canvas, template versions, form/decision-value writeback, and attachment integration
 **Flags:** Canvas V2 defaults OFF until G5-C plus owner UAT; FWB and attachments retain separate default-OFF gates
 **Authoritative runtime model:** existing `ApprovalGraph` plus backend `normalizeApprovalGraph`
 

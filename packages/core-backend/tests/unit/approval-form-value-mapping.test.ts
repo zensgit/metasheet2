@@ -52,6 +52,19 @@ describe('FWB-1 form-value mapping (pure, fail-closed)', () => {
     }
   })
 
+  test('rejects calendar-invalid ISO dates instead of persisting invented dates', () => {
+    for (const value of ['2026-02-29', '2026-02-31', '2026-04-31', '2026-13-01', '2026-00-10']) {
+      const r = mapApprovalFormValues([M({ targetType: 'date' })], { f1: value })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.errors[0].code).toBe('not_a_date')
+    }
+
+    expect(mapApprovalFormValues([M({ targetType: 'date' })], { f1: '2024-02-29' })).toEqual({
+      ok: true,
+      values: { t1: '2024-02-29' },
+    })
+  })
+
   test('missing/blank form values are errors (never silently skipped)', () => {
     for (const v of [undefined, null, '   ']) {
       const r = mapApprovalFormValues([M({})], { f1: v })

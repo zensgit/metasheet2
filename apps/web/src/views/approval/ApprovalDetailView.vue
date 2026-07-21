@@ -872,7 +872,7 @@ const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.v
 // B3-07: the new attachment pipeline is default OFF. Flag OFF still renders legacy
 // attachment string/object snapshot values inline (no refs endpoint); flag ON uses the
 // auth-proxied refs resolver + download block below.
-const attachmentPipelineEnabled = computed(() => productFeatures.value.approvalAttachments === true)
+const attachmentPipelineEnabled = computed(() => productFeatures?.value?.approvalAttachments === true)
 
 const approval = computed(() => store.activeApproval)
 // PageHeader requires a non-optional title; before the detail loads (or on error) fall back to

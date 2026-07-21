@@ -22,6 +22,8 @@ on:
       - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/approvalNodeEdit.ts'
       - 'apps/web/src/approvals/graphTopologyEdit.ts'
+      - 'apps/web/src/approvals/approvalCanvasCommands.ts'
+      - 'apps/web/src/approvals/approvalFormCommands.ts'
       - 'apps/web/src/approvals/graphLayout.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/commonTemplatePresets.ts'
@@ -84,6 +86,8 @@ on:
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
+      - 'apps/web/tests/approval-canvas-commands.test.ts'
+      - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
@@ -190,6 +194,8 @@ on:
       - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/approvalNodeEdit.ts'
       - 'apps/web/src/approvals/graphTopologyEdit.ts'
+      - 'apps/web/src/approvals/approvalCanvasCommands.ts'
+      - 'apps/web/src/approvals/approvalFormCommands.ts'
       - 'apps/web/src/approvals/graphLayout.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/commonTemplatePresets.ts'
@@ -235,6 +241,8 @@ on:
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
+      - 'apps/web/tests/approval-canvas-commands.test.ts'
+      - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
@@ -371,6 +379,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Run Canvas V2 command canaries
+        run: pnpm --filter @metasheet/web exec vitest run approval-canvas-commands approval-form-commands --reporter=dot
 
       - name: Run approval web guard specs (targeted)
         # detail/sub-form (明细) FE helpers: frozen-schema row render + fill-row seeding +

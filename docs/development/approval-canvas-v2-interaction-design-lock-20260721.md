@@ -455,7 +455,7 @@ Component/module names follow plan §4.1. "Part" = rendered region; "Emits" = ty
 loading → ready | permission-denied | load-error
 ready → saving (on save/publish) → ready | save-error(conflict?) → ready
 ready → conflict-banner (on stale detection) → ready (after reload/resolve)
-ready → readonly (on permission loss mid-session, backend 403) 
+ready → readonly (on permission loss mid-session, backend 403)
 ```
 
 `ready` is the only state that accepts edit commands. `permission-denied`/`readonly` accept no edit

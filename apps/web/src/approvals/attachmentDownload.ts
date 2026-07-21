@@ -4,7 +4,6 @@ export interface ApprovalAttachmentDownload {
   downloadUrl: string
   fileName: string
 }
-
 export type ApprovalAttachmentFetch = (path: string) => Promise<Response>
 
 const PROXIED_DOWNLOAD_PATH = /^\/api\/approval\/attachments\/[^/]+\/download$/
@@ -21,4 +20,3 @@ export async function fetchApprovalAttachmentBlob(
   if (!response.ok) throw new Error(`approval_attachment_download_failed_${response.status}`)
   return response.blob()
 }
-

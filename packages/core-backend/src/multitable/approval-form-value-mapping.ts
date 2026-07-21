@@ -41,6 +41,15 @@ export type FwbMappingErrorCode =
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
+function isValidIsoCalendarDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false
+  const [year, month, day] = value.split('-').map(Number)
+  if (month < 1 || month > 12 || day < 1) return false
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= daysInMonth[month - 1]
+}
+
 function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string | number } | { ok: false; code: FwbMappingErrorCode } {
   switch (mapping.targetType) {
     case 'text': {
@@ -55,9 +64,9 @@ function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string |
       return { ok: false, code: 'not_a_number' }
     }
     case 'date': {
-      if (typeof raw === 'string' && ISO_DATE.test(raw.trim())) {
-        const t = Date.parse(raw.trim() + 'T00:00:00Z')
-        if (Number.isFinite(t)) return { ok: true, v: raw.trim() }
+      if (typeof raw === 'string') {
+        const value = raw.trim()
+        if (isValidIsoCalendarDate(value)) return { ok: true, v: value }
       }
       if (typeof raw === 'number' && Number.isFinite(raw)) {
         const d = new Date(raw)
