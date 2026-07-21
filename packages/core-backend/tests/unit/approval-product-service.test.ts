@@ -5844,6 +5844,28 @@ describe('ApprovalProductService', () => {
       approvalGraph: graph,
     })
 
+    it('rejects an empty parallel branch that connects the fork directly to its join', async () => {
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['empty', 'review'], joinMode: 'any', joinNodeKey: 'end' } },
+          { key: 'reviewer', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['reviewer-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'start-fork', source: 'start', target: 'fork' },
+          { key: 'empty', source: 'fork', target: 'end' },
+          { key: 'review', source: 'fork', target: 'reviewer' },
+          { key: 'review-end', source: 'reviewer', target: 'end' },
+        ],
+        policy: { allowRevoke: true },
+      }
+      await expect(createTemplate(baseRequest(graph))).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        statusCode: 400,
+      })
+    })
+
     it('rejects a threshold node whose N exceeds the distinct static approver count', async () => {
       // N=4 against 3 distinct static users → out of range.
       await expect(createTemplate(baseRequest(thresholdGraph({

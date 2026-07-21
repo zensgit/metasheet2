@@ -28,6 +28,8 @@ import { createHash } from 'node:crypto'
 import { canonicalizeConfig } from './automation-action-idempotency'
 import type { FwbFieldMapping } from './approval-form-value-mapping'
 import type { FwbGateChecks } from './approval-fwb-permission-gates'
+import { deriveFieldPermissions, isFieldWriteForbidden, type FieldLike } from './permission-derivation'
+import { loadFieldPermissionScopeMap } from './permission-service'
 import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
 
 export const FWB_ACTION_TYPE = 'write_approval_form_values'
@@ -100,6 +102,8 @@ export interface FwbConfirmationSubject {
   sourceTemplateVersionId: string
   /** FWB-1 target = the rule's OWN sheet (lock D2) — bound into the hash so a sheet move invalidates. */
   targetSheetId: string
+  /** base containing targetSheetId at confirmation time; a sheet rehome invalidates confirmation. */
+  targetBaseId: string
   mappings: readonly FwbFieldMapping[]
 }
 
@@ -112,6 +116,7 @@ export function deriveFwbConfirmationHash(subject: FwbConfirmationSubject): stri
     .update(canonicalizeConfig({
       templateId: subject.templateId,
       sourceTemplateVersionId: subject.sourceTemplateVersionId,
+      targetBaseId: subject.targetBaseId,
       targetSheetId: subject.targetSheetId,
       mappings: subject.mappings,
     }))
@@ -156,6 +161,48 @@ export interface ProductionFwbGateDeps {
   canReadTemplateFn(userId: string, templateId: string): Promise<boolean>
 }
 
+function parseFieldProperty(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+    } catch { /* fail closed below */ }
+  }
+  return {}
+}
+
+/** Canonical layer-2/layer-3 create-field gate for every FWB target field. */
+export async function canUserWriteFwbTargetFields(
+  queryFn: QueryFn,
+  userId: string,
+  sheetId: string,
+  targetFieldIds: readonly string[],
+): Promise<boolean> {
+  if (!userId || targetFieldIds.length === 0) return false
+  const uniqueIds = [...new Set(targetFieldIds)]
+  const [resolved, fieldScopeMap, fieldResult] = await Promise.all([
+    resolveSheetCapabilitiesForUser(queryFn, sheetId, userId),
+    loadFieldPermissionScopeMap(queryFn, sheetId, userId),
+    queryFn(
+      'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      [sheetId, uniqueIds],
+    ),
+  ])
+  if (!resolved.capabilities.canCreateRecord) return false
+  const fields: FieldLike[] = (fieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
+    .filter((row): row is { id: string; type: string; property?: unknown } => (
+      typeof row.id === 'string' && typeof row.type === 'string'
+    ))
+    .map((row) => ({ id: row.id, type: row.type, property: parseFieldProperty(row.property) }))
+  if (fields.length !== uniqueIds.length) return false
+  const permissions = deriveFieldPermissions(fields, resolved.capabilities, {
+    allowCreateOnly: true,
+    fieldScopeMap,
+  })
+  return uniqueIds.every((fieldId) => !isFieldWriteForbidden(permissions[fieldId]))
+}
+
 /**
  * The REAL §11 Q6 gate set bound at AutomationService construction. Every check is fail-closed at the
  * caller (`recheckFwbPermissionGates` counts a thrown check as failed), so none of these needs its own
@@ -175,22 +222,50 @@ export function buildProductionFwbGateChecks(deps: ProductionFwbGateDeps): FwbGa
       const resolved = await resolveSheetCapabilitiesForUser(deps.queryFn, sheetId, userId)
       return resolved.capabilities.canCreateRecord
     },
+    canWriteTargetFields: async (userId, ruleId, sheetId) => {
+      const res = await deps.queryFn(
+        'SELECT action_type, action_config, actions FROM automation_rules WHERE id = $1 AND sheet_id = $2',
+        [ruleId, sheetId],
+      )
+      const row = res.rows[0] as {
+        action_type?: unknown
+        action_config?: unknown
+        actions?: unknown
+      } | undefined
+      if (!row) return false
+      const configs = collectFwbActionConfigs(
+        typeof row.action_type === 'string' ? row.action_type : null,
+        parseJsonObject(row.action_config),
+        parseJsonArray(row.actions) as PersistedActionShape[] | null,
+      )
+      const targetFieldIds: string[] = []
+      for (const config of configs) {
+        const normalized = normalizeFwbMappings(config.mappings)
+        if (!normalized.ok) return false
+        targetFieldIds.push(...normalized.mappings.map((mapping) => mapping.targetFieldId))
+      }
+      return canUserWriteFwbTargetFields(deps.queryFn, userId, sheetId, targetFieldIds)
+    },
     hasRecordedConfirmation: async (ruleId) => {
       // G4 re-derivation against the CURRENT persisted rule: every FWB action's stored confirmationHash
       // must equal the hash of its CURRENT normalized config + the rule's CURRENT sheet/template. A rule
       // with no FWB action, a broken config, or ANY stale hash → false (fail-closed).
       const res = await deps.queryFn(
-        `SELECT sheet_id, trigger_config, action_type, action_config, actions FROM automation_rules WHERE id = $1`,
+        `SELECT r.sheet_id, s.base_id, r.trigger_config, r.action_type, r.action_config, r.actions
+           FROM automation_rules r
+           JOIN meta_sheets s ON s.id = r.sheet_id
+          WHERE r.id = $1`,
         [ruleId],
       )
       const row = res.rows[0] as {
         sheet_id?: unknown
+        base_id?: unknown
         trigger_config?: unknown
         action_type?: unknown
         action_config?: unknown
         actions?: unknown
       } | undefined
-      if (!row || typeof row.sheet_id !== 'string') return false
+      if (!row || typeof row.sheet_id !== 'string' || typeof row.base_id !== 'string') return false
       const triggerConfig = parseJsonObject(row.trigger_config)
       const templateId = typeof triggerConfig?.templateId === 'string' ? triggerConfig.templateId : ''
       if (!templateId) return false
@@ -217,6 +292,7 @@ export function buildProductionFwbGateChecks(deps: ProductionFwbGateDeps): FwbGa
         const expected = deriveFwbConfirmationHash({
           templateId,
           sourceTemplateVersionId: confirmedVersionId,
+          targetBaseId: row.base_id,
           targetSheetId: row.sheet_id,
           mappings: normalized.mappings,
         })

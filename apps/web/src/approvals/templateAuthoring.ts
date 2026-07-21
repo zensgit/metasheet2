@@ -702,7 +702,7 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
   if (unsupportedField) {
-    return `包含暂不支持编辑的字段类型：${unsupportedField.label || unsupportedField.id} (${unsupportedField.type})`
+    return `包含暂不支持编辑的字段类型：${unsupportedField.label || '未命名字段'}`
   }
 
   // A node carrying extra keys, or an unrecognised node type, is genuinely un-authorable and
@@ -714,7 +714,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       || !RECOGNISED_GRAPH_NODE_TYPES.has(node.type)
   })
   if (unknownNode) {
-    return `包含暂不支持编辑的审批节点：${unknownNode.name || unknownNode.key} (${unknownNode.type})`
+    return `包含暂不支持编辑的审批节点：${unknownNode.name || '未命名节点'}`
   }
 
   // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim via
@@ -725,7 +725,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
   if (isComplexApprovalGraph(template.approvalGraph)) {
     const unsupportedNode = template.approvalGraph.nodes.find((node) => complexNodeConfigHasBackendDrop(node))
     if (unsupportedNode) {
-      return `节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedNode.name || unsupportedNode.key}（${unsupportedNode.type}）`
+      return `节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedNode.name || '未命名节点'}`
     }
     return null
   }
@@ -772,7 +772,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     return false
   })
   if (unsupportedApproval) {
-    return `审批节点含暂不支持的配置：${unsupportedApproval.name || unsupportedApproval.key}`
+    return `审批节点含暂不支持的配置：${unsupportedApproval.name || '未命名节点'}`
   }
 
   return null
@@ -1085,13 +1085,14 @@ export function validateTemplateFormFields(
   const fields = draft.fields.map((field) => field.id.trim()).filter(Boolean)
   if (fields.length !== draft.fields.length) errors.push('字段 id 必填')
   if (new Set(fields).size !== fields.length) errors.push('字段 id 不能重复')
-  draft.fields.forEach((field) => {
-    if (!field.label.trim()) errors.push(`字段 ${field.id || '(未命名)'} 的名称必填`)
+  draft.fields.forEach((field, index) => {
+    const authorLabel = field.label.trim() || `第 ${index + 1} 个字段`
+    if (!field.label.trim()) errors.push(`第 ${index + 1} 个字段的名称必填`)
     if ((field.type === 'select' || field.type === 'multi-select')) {
       const options = parseOptionsText(field.optionsText)
-      if (options.length === 0) errors.push(`字段 ${field.label || field.id} 需要至少一个选项`)
+      if (options.length === 0) errors.push(`${authorLabel}需要至少一个选项`)
       if (options.some((option) => !option.label.trim() || !option.value.trim())) {
-        errors.push(`字段 ${field.label || field.id} 的选项 label/value 不能为空`)
+        errors.push(`${authorLabel}的选项名称和值不能为空`)
       }
     }
     // detail / sub-form: mirror the backend `normalizeDetailFieldParts` reject-set client-side
@@ -1099,7 +1100,7 @@ export function validateTemplateFormFields(
     if (field.type === 'detail') {
       errors.push(
         ...validateDetailColumnsDraft(
-          field.label.trim() || field.id.trim(),
+          field.label.trim() || `第 ${index + 1} 个明细字段`,
           field.detailColumns,
           field.minRowsText,
           field.maxRowsText,

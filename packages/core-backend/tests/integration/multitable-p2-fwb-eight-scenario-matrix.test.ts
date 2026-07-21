@@ -352,6 +352,7 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
         confirmationHash: deriveFwbConfirmationHash({
           templateId,
           sourceTemplateVersionId: templateVersionId,
+          targetBaseId: BASE_ID,
           targetSheetId: SHEET_ID,
           mappings: MAPPINGS,
         }),
@@ -408,7 +409,8 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
     await q(`CREATE TRIGGER ${ABORT_FN} BEFORE INSERT ON meta_automation_outbox FOR EACH ROW WHEN (NEW.event_id LIKE '${evtCrash}::fwb::%') EXECUTE FUNCTION ${ABORT_FN}()`)
     setFlags(true, true)
     try {
-      await svc.handleApprovalCompletionTrigger(completionEvent(instanceB, evtCrash))
+      await expect(svc.handleApprovalCompletionTrigger(completionEvent(instanceB, evtCrash)))
+        .rejects.toThrow('approval_completed_trigger_retryable_failure')
       await waitForExecutionCount(3)
       let exec = await lastExecution()
       expect(exec?.steps?.[0]?.status).toBe('failed')

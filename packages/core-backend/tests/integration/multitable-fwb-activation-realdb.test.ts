@@ -64,6 +64,7 @@ const confirmation = (mappings: unknown = MAPPINGS, sourceVersionId = templateVe
   deriveFwbConfirmationHash({
     templateId,
     sourceTemplateVersionId: sourceVersionId,
+    targetBaseId: BASE_ID,
     targetSheetId: SHEET_ID,
     mappings: mappings as never,
   })
@@ -337,6 +338,59 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     expect((rule as { id: string }).id).toBeTruthy()
   })
 
+  test('save/update gate binds the real modifier and canonical target-field writability', async () => {
+    const temp = await svc.createRule(SHEET_ID, {
+      name: 'fwb authoring guard',
+      triggerType: 'approval.completed',
+      triggerConfig: { templateId, outcomes: ['approved'] },
+      actionType: 'write_approval_form_values',
+      actionConfig: fwbConfig(),
+      createdBy: CREATOR,
+    } as never)
+    const tempId = (temp as { id: string }).id
+    ruleIds.push(tempId)
+
+    // REQUESTER can be admitted to the generic PATCH route by canManageAutomation in another deployment,
+    // but lacks Q6's stronger admin/canManageSheetAccess authority. An enabled-only patch must still run
+    // the resulting-shape gate and bind THIS actor, not silently reuse created_by.
+    await expect(svc.updateRule(tempId, SHEET_ID, { enabled: false }, REQUESTER))
+      .rejects.toThrow(/creator, modifier, or enabler/)
+    const ownerUpdate = await svc.updateRule(tempId, SHEET_ID, { enabled: false }, CREATOR)
+    expect(ownerUpdate?.enabled).toBe(false)
+
+    // The same canonical field guard used by record writes rejects a per-subject read-only target.
+    await q(
+      `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+       VALUES ($1,$2,'user',$3,true,true)`,
+      [SHEET_ID, F_AMOUNT, CREATOR],
+    )
+    try {
+      await expect(svc.updateRule(tempId, SHEET_ID, { name: 'must revalidate fields' }, CREATOR))
+        .rejects.toThrow(/target fields that are not writable/)
+    } finally {
+      await q(
+        `DELETE FROM field_permissions
+          WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'user' AND subject_id = $3`,
+        [SHEET_ID, F_AMOUNT, CREATOR],
+      )
+    }
+    const restored = await svc.updateRule(tempId, SHEET_ID, { name: 'field gate restored' }, CREATOR)
+    expect(restored?.name).toBe('field gate restored')
+
+    // A sheet rehome changes the target base while preserving the sheet id. The old confirmation must
+    // not survive that move because Q6 binds both base and sheet identifiers.
+    const movedBase = `base_fwbact_moved_${TS}`
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [movedBase, 'FWB moved base'])
+    await q('UPDATE meta_sheets SET base_id = $1 WHERE id = $2', [movedBase, SHEET_ID])
+    try {
+      await expect(svc.updateRule(tempId, SHEET_ID, { name: 'stale base confirmation' }, CREATOR))
+        .rejects.toThrow(/confirmationHash must match/)
+    } finally {
+      await q('UPDATE meta_sheets SET base_id = $1 WHERE id = $2', [BASE_ID, SHEET_ID])
+      await q('DELETE FROM meta_bases WHERE id = $1', [movedBase])
+    }
+  })
+
   // ── Execution through the REAL trigger → executeRule → executor chain ───────────────────────────
 
   test('flag OFF → step skipped, ZERO writes; FWB ON + durable OFF → failed (no half-durable), ZERO writes; both ON → record+revision+claim+outbox in one commit; net-once redelivery; new-instance positive control', async () => {
@@ -446,6 +500,37 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     }
   })
 
+  test('durable FWB infrastructure failure stays reclaimable instead of being marked done', async () => {
+    const ruleId = ruleIds[0]
+    const eventId = `evt_fwbact_${TS}_retryable`
+    const originalExecuteRule = svc.executeRule.bind(svc)
+    ;(svc as unknown as { executeRule: AutomationService['executeRule'] }).executeRule = async () => ({
+      id: `axe_${randomUUID()}`,
+      ruleId,
+      triggeredBy: 'event',
+      triggeredAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      duration: 1,
+      status: 'failed',
+      error: 'fwb_execution_failed',
+      steps: [{ actionType: 'write_approval_form_values', status: 'failed', error: 'fwb_execution_failed' }],
+    } as never)
+    setFlags(true, true)
+    try {
+      await expect(svc.handleApprovalCompletionTrigger(completionEvent(randomUUID(), eventId)))
+        .rejects.toThrow(/approval_completed_trigger_retryable_failure/)
+      const fire = await q(
+        `SELECT status FROM meta_automation_event_fires
+          WHERE rule_id = $1 AND dedup_key = $2`,
+        [ruleId, `approval.completed:${eventId}`],
+      )
+      expect((fire.rows[0] as { status?: string } | undefined)?.status).toBe('in_progress')
+    } finally {
+      ;(svc as unknown as { executeRule: AutomationService['executeRule'] }).executeRule = originalExecuteRule
+      setFlags(false, false)
+    }
+  })
+
   // ── Executor-level goldens that require seam control (still real DB, real executor, real FWB core) ──
 
   function executorRule(ruleId: string, actions: Array<{ type: string; config: Record<string, unknown> }>): ExecutorRule {
@@ -481,6 +566,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     canManageSheetAccess: async () => true,
     canReadTemplate: async () => true,
     canWriteSheet: async () => true,
+    canWriteTargetFields: async () => true,
     hasRecordedConfirmation: async () => true,
   }
 
@@ -631,6 +717,42 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
         await q('DELETE FROM meta_records WHERE id = $1', [id])
       }
       await q('DELETE FROM meta_fwb_action_applied WHERE rule_id = $1', [ruleId])
+    } finally {
+      setFlags(false, false)
+    }
+  })
+
+  test('cross-rule event identity: two rules at the same structural path emit distinct chained event ids', async () => {
+    setFlags(true, true)
+    try {
+      const instanceG = await startInstance({ summary: 'two rules', amount: 6 })
+      await approveInstance(instanceG)
+      const eventId = `evt_fwbact_${TS}_two_rules`
+      const executor = buildExecutor({})
+      const ruleA = `rule_fwbact_a_${TS}`
+      const ruleB = `rule_fwbact_b_${TS}`
+      const runA = await executor.execute(executorRule(ruleA, [fwbAction()]), triggerPayload(instanceG, eventId))
+      const runB = await executor.execute(executorRule(ruleB, [fwbAction()]), triggerPayload(instanceG, eventId))
+      expect(runA.steps[0]?.status).toBe('success')
+      expect(runB.steps[0]?.status).toBe('success')
+      const outbox = await q(
+        'SELECT event_id FROM meta_automation_outbox WHERE event_id LIKE $1 ORDER BY event_id',
+        [`${eventId}::fwb::%`],
+      )
+      const eventIds = outbox.rows.map((row) => String((row as { event_id: string }).event_id))
+      expect(eventIds).toHaveLength(2)
+      expect(new Set(eventIds).size).toBe(2)
+      expect(eventIds.some((id) => id.includes(`::${ruleA}::`))).toBe(true)
+      expect(eventIds.some((id) => id.includes(`::${ruleB}::`))).toBe(true)
+
+      const recordIds = [runA, runB]
+        .map((run) => (run.steps[0]?.output as { recordId?: string } | undefined)?.recordId)
+        .filter((id): id is string => typeof id === 'string')
+      for (const recordId of recordIds) {
+        await q('DELETE FROM meta_record_revisions WHERE record_id = $1', [recordId])
+        await q('DELETE FROM meta_records WHERE id = $1', [recordId])
+      }
+      await q('DELETE FROM meta_fwb_action_applied WHERE rule_id = ANY($1::text[])', [[ruleA, ruleB]])
     } finally {
       setFlags(false, false)
     }

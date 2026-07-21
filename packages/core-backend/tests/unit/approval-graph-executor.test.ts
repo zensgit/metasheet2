@@ -958,6 +958,13 @@ describe('ApprovalGraphExecutor', () => {
 })
 
 describe('validateApprovalFormData', () => {
+  test('number fields reject unsafe integers instead of freezing a rounded snapshot value', () => {
+    const schema = { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] } as never
+    expect(validateApprovalFormData(schema, { amount: 9007199254740993 }))
+      .toEqual(['amount must be a lossless number'])
+    expect(validateApprovalFormData(schema, { amount: Number.MAX_SAFE_INTEGER })).toEqual([])
+  })
+
   it('keeps the pre-feature attachment contract while the runtime flag is OFF', () => {
     const schema: FormSchema = { fields: [{ id: 'files', type: 'attachment', label: 'Files' }] }
     expect(validateApprovalFormData(schema, { files: 'legacy-file-reference' })).toEqual([])

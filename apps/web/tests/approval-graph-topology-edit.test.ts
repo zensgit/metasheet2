@@ -13,6 +13,7 @@ import {
   removeParallelBranch,
   addConditionBranch,
   removeConditionBranch,
+  hasEmptyParallelBranch,
 } from '../src/approvals/graphTopologyEdit'
 import {
   applyTopologyToComplexDraft,
@@ -227,6 +228,12 @@ describe('removeLinearNode', () => {
     expect(() => removeLinearNode(CONDITION, 'cond_1')).toThrow(/only approval\/cc/)
     expect(() => removeLinearNode(LINEAR, 'start')).toThrow(/only approval\/cc/)
   })
+  it('refuses to remove the sole body node of a parallel branch', () => {
+    const before = snap(PARALLEL)
+    expect(() => removeLinearNode(PARALLEL, 'app_a')).toThrow(/must keep at least one body node/)
+    expect(PARALLEL).toEqual(before)
+    expect(hasEmptyParallelBranch(PARALLEL)).toBe(false)
+  })
 })
 
 describe('addParallelBranch / removeParallelBranch', () => {
@@ -246,6 +253,16 @@ describe('addParallelBranch / removeParallelBranch', () => {
     const back = removeParallelBranch(three, 'parallel_1', cfg.branches[2])
     expect((node(back, 'parallel_1')!.config as { branches: string[] }).branches).toHaveLength(2)
     expect(() => removeParallelBranch(back, 'parallel_1', 'e-fork-a')).toThrow(/at least 2/)
+  })
+  it('refuses complex or shared branch removal instead of orphaning its tail', () => {
+    const three = addParallelBranch(PARALLEL, 'parallel_1', 'C')
+    const cfg = node(three, 'parallel_1')!.config as { branches: string[] }
+    const forkKey = cfg.branches[2]
+    const branchTarget = three.edges.find((edge) => edge.key === forkKey)!.target
+    const multiNode = appendApprovalNode(three, branchTarget, 'C2')
+    const before = snap(multiNode)
+    expect(() => removeParallelBranch(multiNode, 'parallel_1', forkKey)).toThrow(/complex or shared/)
+    expect(multiNode).toEqual(before)
   })
 })
 
@@ -284,6 +301,16 @@ describe('addConditionBranch / removeConditionBranch', () => {
     const back = removeConditionBranch(two, 'cond_1', cfg.branches[1].edgeKey)
     expect((back.nodes.find((n) => n.key === 'cond_1')!.config as { branches: unknown[] }).branches).toHaveLength(1)
     expect(() => removeConditionBranch(CONDITION, 'cond_1', 'e-low')).toThrow(/default/)
+  })
+  it('refuses a multi-node condition branch instead of leaving an orphan tail', () => {
+    const two = addConditionBranch(CONDITION, 'cond_1')
+    const cfg = node(two, 'cond_1')!.config as { branches: Array<{ edgeKey: string }> }
+    const edgeKey = cfg.branches[1].edgeKey
+    const branchTarget = two.edges.find((edge) => edge.key === edgeKey)!.target
+    const multiNode = appendApprovalNode(two, branchTarget, '第二级审批')
+    const before = snap(multiNode)
+    expect(() => removeConditionBranch(multiNode, 'cond_1', edgeKey)).toThrow(/complex or shared/)
+    expect(multiNode).toEqual(before)
   })
 })
 

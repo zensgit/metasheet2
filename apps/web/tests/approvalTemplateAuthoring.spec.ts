@@ -400,6 +400,34 @@ describe('approval template authoring helpers', () => {
     expect(reason).toContain('暂不支持编辑的字段类型')
   })
 
+  it('keeps raw field and node identifiers out of author-facing refusal and validation messages', () => {
+    const fieldReason = unsupportedTemplateAuthoringReason(buildTemplate({
+      formSchema: { fields: [{ id: 'secret_field_identifier', type: 'signature' as any, label: '' }] },
+    }))
+    expect(fieldReason).toContain('未命名字段')
+    expect(fieldReason).not.toContain('secret_field_identifier')
+
+    const nodeReason = unsupportedTemplateAuthoringReason(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'secret_node_identifier', type: 'unsupported' as any, name: '', config: {} },
+        ],
+        edges: [],
+      },
+    }))
+    expect(nodeReason).toContain('未命名节点')
+    expect(nodeReason).not.toContain('secret_node_identifier')
+
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'identifier-hygiene'
+    draft.name = '标识卫生'
+    draft.fields[0].id = 'secret_validation_identifier'
+    draft.fields[0].label = ''
+    const validationText = validateTemplateDraft(draft).join(' ')
+    expect(validationText).toContain('第 1 个字段的名称必填')
+    expect(validationText).not.toContain('secret_validation_identifier')
+  })
+
   it('validates duplicate field ids, select options, and form-field-user sources', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'bad'

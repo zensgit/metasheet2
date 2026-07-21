@@ -5,7 +5,7 @@ import type {
   ConditionNodeConfig,
   ParallelNodeConfig,
 } from '../types/approval'
-import { collectParallelRegionNodeKeys } from './graphTopologyEdit'
+import { collectParallelRegionNodeKeys, hasEmptyParallelBranch } from './graphTopologyEdit'
 
 // Canvas V2 D2-b — pure move / reorder / undo command algebra.
 // ApprovalGraph remains the sole persisted model (no coordinates). Mutations reuse the D2-a
@@ -124,6 +124,7 @@ export type ApprovalCanvasCommandErrorCode =
   | 'ambiguous-slot'
   | 'cycle'
   | 'nested-parallel-invalid'
+  | 'empty-parallel-branch'
   | 'invalid-branch-order'
   | 'default-edge-immutable'
   | 'unknown-command'
@@ -290,6 +291,12 @@ function executeMoveNodeIntoEdge(
     return fail(
       'nested-parallel-invalid',
       `move: placing ${nodeKey} on ${intoEdgeKey} would nest a parallel gateway`,
+    )
+  }
+  if (hasEmptyParallelBranch(nextGraph)) {
+    return fail(
+      'empty-parallel-branch',
+      'move: a parallel branch must keep at least one body node',
     )
   }
 

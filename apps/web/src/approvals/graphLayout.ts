@@ -85,7 +85,7 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
   if (keys.size !== graph.nodes.length) {
     const seenKeys = new Set<string>()
     for (const node of graph.nodes) {
-      if (seenKeys.has(node.key)) issues.push(`节点 key 重复：${node.key}`)
+      if (seenKeys.has(node.key)) issues.push('存在重复的节点标识')
       seenKeys.add(node.key)
     }
   }
@@ -93,14 +93,14 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
   if (edgeKeySet.size !== graph.edges.length) {
     const seenEdge = new Set<string>()
     for (const edge of graph.edges) {
-      if (seenEdge.has(edge.key)) issues.push(`连线 key 重复：${edge.key}`)
+      if (seenEdge.has(edge.key)) issues.push('存在重复的连线标识')
       seenEdge.add(edge.key)
     }
   }
 
   for (const edge of graph.edges) {
     if (!keys.has(edge.source) || !keys.has(edge.target)) {
-      issues.push(`连线 ${edge.key} 指向不存在的节点（${edge.source} → ${edge.target}）`)
+      issues.push('存在指向不存在节点的连线')
     }
   }
   const start = graph.nodes.find((n) => n.type === 'start')?.key
@@ -119,13 +119,13 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
       for (const next of adj.get(cur) ?? []) if (!seen.has(next)) { seen.add(next); queue.push(next) }
     }
     for (const node of graph.nodes) {
-      if (!seen.has(node.key)) issues.push(`节点「${node.name || node.key}」无法从发起节点到达`)
+      if (!seen.has(node.key)) issues.push(`节点「${node.name || '未命名节点'}」无法从发起节点到达`)
     }
     // every non-end node must have an outgoing edge
     const hasOut = new Set(graph.edges.map((e) => e.source))
     for (const node of graph.nodes) {
       if (node.type !== 'end' && !hasOut.has(node.key)) {
-        issues.push(`节点「${node.name || node.key}」没有后继连线（流程会卡住）`)
+        issues.push(`节点「${node.name || '未命名节点'}」没有后继连线（流程会卡住）`)
       }
     }
     // D-5: every reachable node must be able to REACH an end node (backward reachability). A node that
@@ -146,7 +146,7 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
       }
       for (const node of graph.nodes) {
         if (node.type !== 'end' && seen.has(node.key) && !canReachEnd.has(node.key)) {
-          issues.push(`节点「${node.name || node.key}」无法到达结束节点（流程不会结束）`)
+          issues.push(`节点「${node.name || '未命名节点'}」无法到达结束节点（流程不会结束）`)
         }
       }
     }

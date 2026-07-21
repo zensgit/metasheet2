@@ -88,6 +88,50 @@ export function collectParallelRegionNodeKeys(graph: ApprovalGraph): Set<string>
   return regionNodeKeys
 }
 
+/**
+ * True when a configured parallel fork edge enters its join directly. Such an empty branch has no
+ * approval body and, under joinMode=any, can win immediately before sibling assignments exist.
+ */
+export function hasEmptyParallelBranch(graph: ApprovalGraph): boolean {
+  for (const node of graph.nodes) {
+    if (node.type !== 'parallel') continue
+    const config = node.config as ParallelNodeConfig
+    if (typeof config.joinNodeKey !== 'string' || !Array.isArray(config.branches)) return true
+    for (const branchEdgeKey of config.branches) {
+      const edge = graph.edges.find((candidate) => candidate.key === branchEdgeKey)
+      if (!edge || edge.source !== node.key || edge.target === config.joinNodeKey) return true
+    }
+  }
+  return false
+}
+
+function removableSingleNodeBranch(
+  graph: ApprovalGraph,
+  gatewayNodeKey: string,
+  branchEdgeKey: string,
+  rejoinNodeKey: string,
+  operation: string,
+): { branchNodeKey: string; dropEdges: Set<string> } {
+  const forkEdge = graph.edges.find((edge) => edge.key === branchEdgeKey)
+  if (!forkEdge || forkEdge.source !== gatewayNodeKey || forkEdge.target === rejoinNodeKey) {
+    throw new Error(`${operation}: branch must have one exclusive body node`)
+  }
+  const incoming = inEdges(graph, forkEdge.target)
+  const outgoing = outEdges(graph, forkEdge.target)
+  if (
+    incoming.length !== 1
+    || incoming[0].key !== branchEdgeKey
+    || outgoing.length !== 1
+    || outgoing[0].target !== rejoinNodeKey
+  ) {
+    throw new Error(`${operation}: complex or shared branch removal is not supported`)
+  }
+  return {
+    branchNodeKey: forkEdge.target,
+    dropEdges: new Set([branchEdgeKey, outgoing[0].key]),
+  }
+}
+
 function reachableDistances(graph: ApprovalGraph, startKey: string): Map<string, number> {
   const distances = new Map<string, number>([[startKey, 0]])
   const queue = [startKey]
@@ -311,6 +355,17 @@ export function removeLinearNode(graph: ApprovalGraph, nodeKey: string): Approva
   const outs = outEdges(graph, nodeKey)
   if (ins.length !== 1 || outs.length !== 1) throw new Error(`removeLinearNode: ${nodeKey} must be single-in/single-out (in=${ins.length} out=${outs.length})`)
   const succ = outs[0].target
+  for (const gateway of graph.nodes) {
+    if (gateway.type !== 'parallel') continue
+    const config = gateway.config as ParallelNodeConfig
+    if (
+      Array.isArray(config.branches)
+      && config.branches.includes(ins[0].key)
+      && succ === config.joinNodeKey
+    ) {
+      throw new Error('removeLinearNode: a parallel branch must keep at least one body node')
+    }
+  }
   return {
     nodes: graph.nodes.filter((n) => n.key !== nodeKey).map(clone),
     edges: graph.edges
@@ -355,10 +410,13 @@ export function removeParallelBranch(graph: ApprovalGraph, parallelNodeKey: stri
   const config = clone(node.config) as ParallelNodeConfig
   if (!config.branches.includes(forkEdgeKey)) throw new Error(`removeParallelBranch: ${forkEdgeKey} not a branch of ${parallelNodeKey}`)
   if (config.branches.length <= 2) throw new Error('removeParallelBranch: a parallel node must keep at least 2 branches')
-  const forkEdge = graph.edges.find((e) => e.key === forkEdgeKey)!
-  const branchNodeKey = forkEdge.target
-  const branchOutEdges = new Set(outEdges(graph, branchNodeKey).map((e) => e.key))
-  const dropEdges = new Set([forkEdgeKey, ...branchOutEdges])
+  const { branchNodeKey, dropEdges } = removableSingleNodeBranch(
+    graph,
+    parallelNodeKey,
+    forkEdgeKey,
+    config.joinNodeKey,
+    'removeParallelBranch',
+  )
   return {
     nodes: graph.nodes.filter((n) => n.key !== branchNodeKey).map((n) => (n.key === parallelNodeKey ? { ...clone(n), config: { ...config, branches: config.branches.filter((b) => b !== forkEdgeKey) } } : clone(n))),
     edges: graph.edges.filter((e) => !dropEdges.has(e.key)).map(clone),
@@ -420,10 +478,16 @@ export function removeConditionBranch(graph: ApprovalGraph, conditionNodeKey: st
   const config = clone(node.config) as ConditionNodeConfig
   if (config.defaultEdgeKey === edgeKey) throw new Error('removeConditionBranch: cannot remove the default (fall-through) edge')
   if (!config.branches.some((b) => b.edgeKey === edgeKey)) throw new Error(`removeConditionBranch: ${edgeKey} not a branch of ${conditionNodeKey}`)
-  const branchEdge = graph.edges.find((e) => e.key === edgeKey)!
-  const targetKey = branchEdge.target
-  const targetOut = new Set(outEdges(graph, targetKey).map((e) => e.key))
-  const dropEdges = new Set([edgeKey, ...targetOut])
+  const defaultEdge = graph.edges.find((edge) => edge.key === config.defaultEdgeKey)
+  const rejoinTarget = conditionRejoinTarget(graph, config) ?? defaultEdge?.target
+  if (!rejoinTarget) throw new Error('removeConditionBranch: branch convergence is ambiguous')
+  const { branchNodeKey: targetKey, dropEdges } = removableSingleNodeBranch(
+    graph,
+    conditionNodeKey,
+    edgeKey,
+    rejoinTarget,
+    'removeConditionBranch',
+  )
   return {
     nodes: graph.nodes.filter((n) => n.key !== targetKey).map((n) => (n.key === conditionNodeKey ? { ...clone(n), config: { ...config, branches: config.branches.filter((b) => b.edgeKey !== edgeKey) } } : clone(n))),
     edges: graph.edges.filter((e) => !dropEdges.has(e.key)).map(clone),

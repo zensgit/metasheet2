@@ -492,6 +492,17 @@ describe('executeApprovalCanvasCommand — move-node-into-edge', () => {
     // Parallel join/branches invariants on the gateway config are untouched.
     expect(node(result.graph, 'parallel_1')).toEqual(node(withExtra, 'parallel_1'))
   })
+
+  it('rejects moving the sole body node out of a parallel branch', () => {
+    const before = snap(PARALLEL)
+    const result = executeApprovalCanvasCommand(PARALLEL, {
+      type: 'move-node-into-edge',
+      nodeKey: 'app_a',
+      intoEdgeKey: 'e-start-p',
+    })
+    expect(result).toMatchObject({ ok: false, error: { code: 'empty-parallel-branch' } })
+    expect(PARALLEL).toEqual(before)
+  })
 })
 
 describe('executeApprovalCanvasCommand — reorder branches', () => {

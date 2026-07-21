@@ -64,7 +64,9 @@ describe('graphValidityIssues (D-5 preview)', () => {
   })
   it('flags a dangling edge (target not a node)', () => {
     const broken: ApprovalGraph = { nodes: LINEAR.nodes, edges: [...LINEAR.edges, { key: 'bad', source: 'a1', target: 'ghost' }] }
-    expect(graphValidityIssues(broken).some((i) => /不存在的节点/.test(i))).toBe(true)
+    const issues = graphValidityIssues(broken)
+    expect(issues.some((i) => /不存在节点/.test(i))).toBe(true)
+    expect(issues.join(' ')).not.toMatch(/bad|ghost/)
   })
   it('flags an unreachable node', () => {
     const orphan: ApprovalGraph = {
@@ -86,12 +88,16 @@ describe('graphValidityIssues (D-5 preview)', () => {
       nodes: [...LINEAR.nodes, { key: 'a1', type: 'approval', config: {} }], // 'a1' duplicated
       edges: LINEAR.edges,
     }
-    expect(graphValidityIssues(dupNode).some((i) => /节点 key 重复：a1/.test(i))).toBe(true)
+    const nodeIssues = graphValidityIssues(dupNode)
+    expect(nodeIssues.some((i) => /重复的节点标识/.test(i))).toBe(true)
+    expect(nodeIssues.join(' ')).not.toContain('a1')
     const dupEdge: ApprovalGraph = {
       nodes: LINEAR.nodes,
       edges: [...LINEAR.edges, { key: 'e1', source: 'a1', target: 'end' }], // 'e1' duplicated
     }
-    expect(graphValidityIssues(dupEdge).some((i) => /连线 key 重复：e1/.test(i))).toBe(true)
+    const edgeIssues = graphValidityIssues(dupEdge)
+    expect(edgeIssues.some((i) => /重复的连线标识/.test(i))).toBe(true)
+    expect(edgeIssues.join(' ')).not.toContain('e1')
   })
 
   it('D-5: flags a cycle AND the nodes trapped in it (cannot reach end, but not "no-successor")', () => {

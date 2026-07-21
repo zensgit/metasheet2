@@ -20,6 +20,7 @@ export interface FwbGateChecks {
   canManageSheetAccess(userId: string, sheetId: string): Promise<boolean>
   canReadTemplate(userId: string, templateId: string): Promise<boolean>
   canWriteSheet(userId: string, sheetId: string): Promise<boolean>
+  canWriteTargetFields(userId: string, ruleId: string, sheetId: string): Promise<boolean>
   /** G4: the saved rule carries a recorded explicit confirmation (identifiers only). */
   hasRecordedConfirmation(ruleId: string): Promise<boolean>
 }
@@ -32,7 +33,12 @@ export interface FwbGateSubject {
   targetSheetId: string
 }
 
-export type FwbGateId = 'configurer_authority' | 'source_readable' | 'target_writable' | 'confirmation_recorded'
+export type FwbGateId =
+  | 'configurer_authority'
+  | 'source_readable'
+  | 'target_writable'
+  | 'target_fields_writable'
+  | 'confirmation_recorded'
 
 export type FwbGateResult = { ok: true } | { ok: false; failed: FwbGateId[] }
 
@@ -46,16 +52,18 @@ export async function recheckFwbPermissionGates(checks: FwbGateChecks, s: FwbGat
       return false // fail-closed: an errored check is a failed check
     }
   }
-  const [admin, manage, readSrc, writeTgt, confirmed] = await Promise.all([
+  const [admin, manage, readSrc, writeTgt, writeFields, confirmed] = await Promise.all([
     safe(checks.isAdmin(s.configurerUserId)),
     safe(checks.canManageSheetAccess(s.configurerUserId, s.targetSheetId)),
     safe(checks.canReadTemplate(s.configurerUserId, s.sourceTemplateId)),
     safe(checks.canWriteSheet(s.configurerUserId, s.targetSheetId)),
+    safe(checks.canWriteTargetFields(s.configurerUserId, s.ruleId, s.targetSheetId)),
     safe(checks.hasRecordedConfirmation(s.ruleId)),
   ])
   if (!admin && !manage) failed.push('configurer_authority')
   if (!readSrc) failed.push('source_readable')
   if (!writeTgt) failed.push('target_writable')
+  if (!writeFields) failed.push('target_fields_writable')
   if (!confirmed) failed.push('confirmation_recorded')
   return failed.length > 0 ? { ok: false, failed } : { ok: true }
 }

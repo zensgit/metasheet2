@@ -2101,8 +2101,10 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
 function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
   try {
     draft.value = applyTopologyToComplexDraft(draft.value, op)
-  } catch (error) {
-    loadError.value = error instanceof Error ? error.message : '拓扑修改失败'
+  } catch {
+    // Topology helpers include internal node/edge keys in diagnostics. Those identifiers are useful
+    // to developers but are not an author-facing vocabulary and must not leak into the editor banner.
+    loadError.value = '该拓扑操作不适用于当前流程结构'
   }
 }
 function onAddConditionBranch(nodeKey: string): void {
@@ -2124,9 +2126,16 @@ function canInsertAfter(node: ApprovalNode): boolean {
   return node.type !== 'end' && topologyEdgeCount(node.key, 'source') === 1
 }
 function canRemoveNode(node: ApprovalNode): boolean {
-  return (node.type === 'approval' || node.type === 'cc')
+  const isLinearRemovable = (node.type === 'approval' || node.type === 'cc')
     && topologyEdgeCount(node.key, 'target') === 1
     && topologyEdgeCount(node.key, 'source') === 1
+  if (!isLinearRemovable) return false
+  try {
+    removeLinearNode(buildApprovalGraph(draft.value), node.key)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ── D-1/D-5/D-6 visual canvas (bespoke SVG/HTML — the render is DATA, so it's unit-testable; only the

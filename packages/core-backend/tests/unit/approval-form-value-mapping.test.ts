@@ -72,4 +72,17 @@ describe('FWB-1 form-value mapping (pure, fail-closed)', () => {
       if (!r.ok) expect(r.errors[0].code).toBe('missing_required_value')
     }
   })
+
+  test('numbers fail closed on unsafe integer precision and target decimal scale', () => {
+    const unsafe = mapApprovalFormValues([M({ targetType: 'number' })], { f1: 9007199254740993 })
+    expect(unsafe.ok).toBe(false)
+    if (!unsafe.ok) expect(unsafe.errors[0].code).toBe('number_not_lossless')
+
+    const tooPrecise = mapApprovalFormValues([M({ targetType: 'number', numberPrecision: 2 })], { f1: '12.345' })
+    expect(tooPrecise.ok).toBe(false)
+    if (!tooPrecise.ok) expect(tooPrecise.errors[0].code).toBe('number_precision_exceeded')
+
+    expect(mapApprovalFormValues([M({ targetType: 'number', numberPrecision: 2 })], { f1: '12.340' }))
+      .toEqual({ ok: true, values: { t1: 12.34 } })
+  })
 })

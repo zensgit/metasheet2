@@ -910,6 +910,7 @@ const DEFAULT_DENY_FWB_GATES: FwbGateChecks = {
   canManageSheetAccess: async () => false,
   canReadTemplate: async () => false,
   canWriteSheet: async () => false,
+  canWriteTargetFields: async () => false,
   hasRecordedConfirmation: async () => false,
 }
 
@@ -2906,10 +2907,37 @@ export class AutomationExecutor {
       // Per-action identity: the SAME §2.1 derivation Class-A uses — structuralPath keeps two
       // byte-identical FWB actions in one rule distinct (config-hash identity would collapse them).
       const actionKey = deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config })
-      const fwbEventId = `${baseEventId}::fwb::${identity.structuralPath}`
+      const fwbEventId = `${baseEventId}::fwb::${context.ruleId}::${actionKey}`
       const automationDepth = (typeof trig._automationDepth === 'number' ? trig._automationDepth : 0) + 1
 
       const result = await this.withTransaction(context.sheetId, async (query) => {
+        const targetFieldResult = await query(
+          `SELECT id, type, property
+             FROM meta_fields
+            WHERE sheet_id = $1 AND id = ANY($2::text[])
+            FOR SHARE`,
+          [context.sheetId, normalized.mappings.map((mapping) => mapping.targetFieldId)],
+        )
+        const targetFields = new Map(
+          (targetFieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
+            .filter((row): row is { id: string; type: string; property?: unknown } => (
+              typeof row.id === 'string' && typeof row.type === 'string'
+            ))
+            .map((row) => [row.id, { type: row.type, property: normalizeJson(row.property) }] as const),
+        )
+        if (targetFields.size !== normalized.mappings.length) throw new Error('fwb_rejected:mapping_target_changed')
+        const runtimeMappings = normalized.mappings.map((mapping) => {
+          const field = targetFields.get(mapping.targetFieldId)
+          if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
+          if (mapping.targetType !== 'number') return mapping
+          const precision = field.property.precision
+          return {
+            ...mapping,
+            ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
+              ? { numberPrecision: precision }
+              : {}),
+          }
+        })
         // D4: the immutable form snapshot is the ONLY value source, read server-side inside the txn.
         const snapRes = await query(
           `SELECT form_snapshot FROM approval_instances
@@ -2967,7 +2995,7 @@ export class AutomationExecutor {
             sourceTemplateId: templateId,
             targetSheetId: context.sheetId,
           },
-          mappings: normalized.mappings,
+          mappings: runtimeMappings,
           formValues,
           eventId: fwbEventId,
           automationDepth,

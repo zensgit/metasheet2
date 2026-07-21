@@ -1704,6 +1704,12 @@ function normalizeApprovalGraph(
           `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`,
         )
       }
+      if (edge.target === parallelConfig.joinNodeKey) {
+        failValidation(
+          context,
+          `approvalGraph parallel node ${node.key} has an empty branch`,
+        )
+      }
     }
     const joinNode = nodeByKey.get(parallelConfig.joinNodeKey)
     if (!joinNode) {

@@ -360,7 +360,10 @@ function validateFieldType(
         ? null
         : `${field.id} must be an array of attachment ids`
     case 'number':
-      return typeof value === 'number' && Number.isFinite(value) ? null : `${field.id} must be a number`
+      if (typeof value !== 'number' || !Number.isFinite(value)) return `${field.id} must be a number`
+      return Number.isInteger(value) && !Number.isSafeInteger(value)
+        ? `${field.id} must be a lossless number`
+        : null
     case 'date':
     case 'datetime':
       if (typeof value === 'string') {
