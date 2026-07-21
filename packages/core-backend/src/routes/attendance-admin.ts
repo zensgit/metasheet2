@@ -7,6 +7,11 @@ import { MAX_MANAGER_CHAIN_LEVELS } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
 import { ensurePlatformAdmin } from './admin-users'
+import { isDatabaseSchemaError } from '../utils/database-errors'
+import {
+  createAttendanceDeliveryChannelsFromEnv,
+  DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME,
+} from '../services/AttendanceNotificationDeliveryWorker'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -378,6 +383,375 @@ export async function canReadAttendanceDirectoryReadiness(
   return member.rows.length > 0
 }
 
+// ---------------------------------------------------------------------------------------------
+// W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED): seven-step setup-readiness aggregate.
+// §0 red line R1: readiness is READ-ONLY. Every aggregation query below MUST be issued through
+// `createReadOnlyReadinessSeam` — a runtime guard (not a comment) that rejects any non-SELECT/WITH
+// statement before it reaches the database. Authorization (`canReadAttendanceDirectoryReadiness`,
+// reused verbatim from S7-5 above) is checked by the route BEFORE `buildAttendanceSetupReadiness`
+// is ever invoked, so a foreign-org 403 issues zero aggregation SQL (OD-W4-1 追加门禁1).
+// ---------------------------------------------------------------------------------------------
+
+export type AttendanceSetupReadinessQueryFn = typeof query
+
+/**
+ * §9 追加门禁3: the setup-readiness query seam only accepts SELECT/WITH statements. Throws
+ * synchronously — before any I/O — for anything else, so a mutation that slips a write statement
+ * into a call site fails loudly instead of silently running against the database.
+ */
+export function assertSelectOnlyReadinessSql(sql: string): void {
+  const normalized = sql.trim().toUpperCase()
+  if (!(normalized.startsWith('SELECT') || normalized.startsWith('WITH'))) {
+    throw new Error('attendance setup-readiness query seam rejected a non-SELECT/WITH statement')
+  }
+}
+
+export function createReadOnlyReadinessSeam(
+  runQuery: AttendanceSetupReadinessQueryFn = query,
+): AttendanceSetupReadinessQueryFn {
+  // `async` (not a plain arrow returning runQuery's promise) so the guard's synchronous throw
+  // becomes a REJECTED PROMISE — matching `typeof query`'s always-async contract and letting every
+  // caller keep using `await`/`.catch` uniformly instead of needing a try/catch just for the guard.
+  return async (sql, params) => {
+    assertSelectOnlyReadinessSql(sql)
+    return runQuery(sql, params)
+  }
+}
+
+export interface AttendanceSetupReadinessOrgCounts {
+  orgActiveMemberCount: number
+  groupCount: number
+  groupsWithMembers: number
+  shiftCount: number
+  rotationRuleCount: number
+  approvalFlowCount: number
+}
+
+/**
+ * §4.2 single CTE covering every org-scoped count (①②③⑤ + group-membership, OD-W4-6). ④ (settings)
+ * and ⑥ (notify runtime port) are deliberately NOT here — ④ is a deployment-level system_configs
+ * read, ⑥ is a non-DB runtime port; both live in their own functions below.
+ */
+export async function readAttendanceSetupReadinessOrgCounts(
+  orgId: string,
+  runQuery: AttendanceSetupReadinessQueryFn,
+): Promise<AttendanceSetupReadinessOrgCounts> {
+  const result = await runQuery<{
+    org_active_member_count: number
+    group_count: number
+    groups_with_members: number
+    shift_count: number
+    rotation_rule_count: number
+    approval_flow_count: number
+  }>(
+    `WITH member_scope AS (
+       SELECT COUNT(*)::int AS org_active_member_count
+         FROM user_orgs
+        WHERE org_id = $1 AND is_active = true
+     ),
+     group_member_counts AS (
+       SELECT group_id, COUNT(*)::int AS member_count
+         FROM attendance_group_members
+        WHERE org_id = $1
+        GROUP BY group_id
+     ),
+     group_scope AS (
+       SELECT COUNT(*)::int AS group_count,
+              COUNT(*) FILTER (WHERE COALESCE(gmc.member_count, 0) > 0)::int AS groups_with_members
+         FROM attendance_groups g
+         LEFT JOIN group_member_counts gmc ON gmc.group_id = g.id
+        WHERE g.org_id = $1
+     ),
+     shift_scope AS (
+       SELECT COUNT(*)::int AS shift_count
+         FROM attendance_shifts
+        WHERE org_id = $1
+     ),
+     rotation_scope AS (
+       SELECT COUNT(*)::int AS rotation_rule_count
+         FROM attendance_rotation_rules
+        WHERE org_id = $1
+     ),
+     approval_scope AS (
+       SELECT COUNT(*)::int AS approval_flow_count
+         FROM attendance_approval_flows
+        WHERE org_id = $1 AND is_active = true
+     )
+     SELECT member_scope.org_active_member_count,
+            group_scope.group_count,
+            group_scope.groups_with_members,
+            shift_scope.shift_count,
+            rotation_scope.rotation_rule_count,
+            approval_scope.approval_flow_count
+       FROM member_scope, group_scope, shift_scope, rotation_scope, approval_scope`,
+    [orgId],
+  )
+  const row = result.rows[0]
+  return {
+    orgActiveMemberCount: Number(row?.org_active_member_count ?? 0),
+    groupCount: Number(row?.group_count ?? 0),
+    groupsWithMembers: Number(row?.groups_with_members ?? 0),
+    shiftCount: Number(row?.shift_count ?? 0),
+    rotationRuleCount: Number(row?.rotation_rule_count ?? 0),
+    approvalFlowCount: Number(row?.approval_flow_count ?? 0),
+  }
+}
+
+const ATTENDANCE_SETTINGS_KEY = 'attendance.settings'
+
+export type AttendancePunchPolicyPosture = 'default' | 'customized' | 'unknown'
+
+// Mirrors plugins/plugin-attendance/index.cjs DEFAULT_SETTINGS.punchPolicy (~L291-345; SETTINGS_KEY
+// 'attendance.settings' is a single DEPLOYMENT-WIDE key — round-1 P2-2). Core-backend has no
+// sanctioned import of plugin internals (plugin -> core-backend is the only wired dependency
+// direction, e.g. the attendanceScheduler/approvalAssigneeResolver ports), so this is a literal,
+// independently pinned mirror of the punchPolicy subtree only — deliberately NOT the whole settings
+// blob, so an unrelated customization elsewhere (e.g. holiday sync years) can never mislabel step ④.
+const ATTENDANCE_DEFAULT_PUNCH_POLICY_MIRROR = {
+  unscheduledMode: 'allow',
+  mergeInternalWinsOnIn: false,
+  mergeExternalWinsOnOut: false,
+  outdoorRequireApproval: false,
+  outdoorRequireNote: false,
+  outdoorRequirePhoto: false,
+  outdoorApprovalFlowId: '',
+} as const
+
+function isDefaultAttendancePunchPolicy(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  const unscheduled = (v.unscheduled ?? {}) as Record<string, unknown>
+  const merge = (v.merge ?? {}) as Record<string, unknown>
+  const outdoor = (v.outdoor ?? {}) as Record<string, unknown>
+  const d = ATTENDANCE_DEFAULT_PUNCH_POLICY_MIRROR
+  return (
+    unscheduled.mode === d.unscheduledMode &&
+    merge.internalWinsOnIn === d.mergeInternalWinsOnIn &&
+    merge.externalWinsOnOut === d.mergeExternalWinsOnOut &&
+    outdoor.requireApproval === d.outdoorRequireApproval &&
+    outdoor.requireNote === d.outdoorRequireNote &&
+    outdoor.requirePhoto === d.outdoorRequirePhoto &&
+    (outdoor.approvalFlowId ?? '') === d.outdoorApprovalFlowId
+  )
+}
+
+/**
+ * §3④ / OD-W4-4=(c): back-end internal semantic check against normalized defaults. The FRONT END
+ * never sees `attendance.settings` values — only this values-free posture enum (round-3 P3).
+ * `default` and `customized` are both `ready` at the discriminator layer (round-3 (b): the platform
+ * default is a legitimate, usable policy); only `unknown` fails closed.
+ */
+export async function readAttendancePunchPolicyPosture(
+  runQuery: AttendanceSetupReadinessQueryFn,
+): Promise<AttendancePunchPolicyPosture> {
+  try {
+    const result = await runQuery<{ value: string }>(
+      'SELECT value FROM system_configs WHERE key = $1',
+      [ATTENDANCE_SETTINGS_KEY],
+    )
+    const raw = result.rows[0]?.value
+    if (raw === undefined || raw === null) {
+      // No row at all: the platform default is in force (never explicitly saved).
+      return 'default'
+    }
+    const parsed = JSON.parse(String(raw)) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object' || !('punchPolicy' in parsed)) {
+      // A row exists but carries no punchPolicy subtree (pre-S0 shape / corrupted write) — cannot
+      // honestly claim default or customized.
+      return 'unknown'
+    }
+    return isDefaultAttendancePunchPolicy(parsed.punchPolicy) ? 'default' : 'customized'
+  } catch {
+    return 'unknown'
+  }
+}
+
+export interface AttendanceSetupReadinessNotifyPort {
+  workerEnabled: boolean | 'unknown'
+  defaultChannelAvailable: boolean | 'unknown'
+  availableChannelCount: number | 'unknown'
+  orgRecipientBindingReady: boolean | 'unknown'
+}
+
+const ATTENDANCE_NOTIFY_PORT_UNKNOWN: AttendanceSetupReadinessNotifyPort = {
+  workerEnabled: 'unknown',
+  defaultChannelAvailable: 'unknown',
+  availableChannelCount: 'unknown',
+  orgRecipientBindingReady: 'unknown',
+}
+
+/**
+ * §4.5 read-only runtime readiness port (P2-3). Never returns env names, channel names, or
+ * credentials — only booleans/counts. `orgRecipientBindingReady` mirrors the EXACT join
+ * `AttendanceNotificationDeliveryWorker.resolveRecipient` uses to find a bound DingTalk recipient
+ * (org-scoped, values-free EXISTS). If the port itself throws, the WHOLE block fails closed to
+ * `unknown` rather than a partial/misleading signal; if only the org-scoped DB probe fails, that
+ * one field alone goes `unknown` while the pure env-derived fields still resolve.
+ */
+export async function readAttendanceNotifyReadinessPort(
+  orgId: string,
+  runQuery: AttendanceSetupReadinessQueryFn,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AttendanceSetupReadinessNotifyPort> {
+  try {
+    const workerEnabled = env.ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED === 'true'
+    const channels = createAttendanceDeliveryChannelsFromEnv(env)
+    const defaultChannelAvailable = channels.some((c) => c.name === DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
+    const availableChannelCount = channels.length
+
+    let orgRecipientBindingReady: boolean | 'unknown' = 'unknown'
+    try {
+      const result = await runQuery<{ ready: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM directory_account_links l
+             JOIN directory_accounts a
+               ON a.id = l.directory_account_id
+              AND a.provider = 'dingtalk'
+              AND a.is_active = true
+             JOIN directory_integrations i
+               ON i.id = a.integration_id
+              AND i.provider = 'dingtalk'
+              AND i.status = 'active'
+              AND i.org_id = $1
+            WHERE l.link_status = 'linked'
+            LIMIT 1
+         ) AS ready`,
+        [orgId],
+      )
+      orgRecipientBindingReady = Boolean(result.rows[0]?.ready)
+    } catch {
+      orgRecipientBindingReady = 'unknown'
+    }
+
+    return { workerEnabled, defaultChannelAvailable, availableChannelCount, orgRecipientBindingReady }
+  } catch {
+    return { ...ATTENDANCE_NOTIFY_PORT_UNKNOWN }
+  }
+}
+
+export type AttendanceSetupReadinessEffectiveTimePosture =
+  | 'immediate'
+  | 'scheduled'
+  | 'manual_activation'
+  | 'undeterminable'
+
+export interface AttendanceSetupReadinessEffectiveTime {
+  source: string
+  posture: AttendanceSetupReadinessEffectiveTimePosture
+  effectiveAt?: string
+}
+
+export interface AttendanceSetupReadinessStepMeta {
+  /** Canonical admin-section deep-link id (§6.2) that "去配置/修复" resolves to; 'preview' for ⑦
+   *  (no section — the preview lives inside the wizard itself, read-only). */
+  step: string
+  scope: 'org' | 'deployment'
+  effectiveTime: AttendanceSetupReadinessEffectiveTime
+}
+
+// §3 "计划生效时间" (追加门禁4): each step's authoritative source registered here, once, for the
+// whole W4-0/W4-1/W4-2 lifetime. A step with no app-observable trigger is 'undeterminable' or
+// 'manual_activation' — NEVER guessed as 'immediate' ("不得省略、不得猜测").
+export const ATTENDANCE_SETUP_READINESS_STEP_META: readonly AttendanceSetupReadinessStepMeta[] = [
+  {
+    step: 'attendance-admin-user-access',
+    scope: 'org',
+    effectiveTime: { source: 'user_orgs.is_active', posture: 'immediate' },
+  },
+  {
+    step: 'attendance-admin-groups',
+    scope: 'org',
+    effectiveTime: { source: 'attendance_group_members', posture: 'immediate' },
+  },
+  {
+    step: 'attendance-admin-shifts',
+    scope: 'org',
+    effectiveTime: { source: 'attendance_shifts+attendance_rotation_rules', posture: 'immediate' },
+  },
+  {
+    step: 'attendance-admin-settings',
+    scope: 'deployment',
+    effectiveTime: { source: 'system_configs.attendance_settings', posture: 'immediate' },
+  },
+  {
+    step: 'attendance-admin-approval-flows',
+    scope: 'org',
+    effectiveTime: { source: 'attendance_approval_flows.is_active', posture: 'immediate' },
+  },
+  {
+    step: 'attendance-admin-notification-deliveries',
+    scope: 'deployment',
+    // Channel/worker enablement is operator env/redeploy-controlled — no app-observable schedule.
+    effectiveTime: { source: 'none', posture: 'undeterminable' },
+  },
+  {
+    step: 'preview',
+    scope: 'org',
+    // §3⑦: preview-ready never means "already enabled" — activation is a human action against the
+    // canonical checklist, never an app-triggered event.
+    effectiveTime: { source: 'none', posture: 'manual_activation' },
+  },
+] as const
+
+// §4.2 / 追加门禁2: the deployment-scoped ("global") signals, explicitly enumerated so a contract
+// test can lock this list rather than re-deriving it from prose. Every signal NOT listed here is
+// org-scoped (org_id-anchored).
+export const ATTENDANCE_SETUP_READINESS_DEPLOYMENT_SCOPED_SIGNALS = [
+  'punchPolicyPosture',
+  'notify.workerEnabled',
+  'notify.defaultChannelAvailable',
+  'notify.availableChannelCount',
+] as const
+
+export interface AttendanceSetupReadinessResponse {
+  directoryLinked: boolean
+  orgActiveMemberCount: number
+  groupCount: number
+  groupsWithMembers: number
+  shiftCount: number
+  rotationRuleCount: number
+  hasRotationRules: boolean
+  approvalFlowCount: number
+  punchPolicyPosture: AttendancePunchPolicyPosture
+  notify: AttendanceSetupReadinessNotifyPort
+  perStep: readonly AttendanceSetupReadinessStepMeta[]
+  deploymentScopedSignals: readonly string[]
+}
+
+/**
+ * Owns EVERY aggregation read for the setup-readiness endpoint. The route calls this ONLY after
+ * `canReadAttendanceDirectoryReadiness` has already returned true — so a 403 response path never
+ * reaches this function, and therefore never issues a single aggregation query (OD-W4-1 追加门禁1).
+ */
+export async function buildAttendanceSetupReadiness(
+  orgId: string,
+  runQuery: AttendanceSetupReadinessQueryFn = query,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AttendanceSetupReadinessResponse> {
+  const seam = createReadOnlyReadinessSeam(runQuery)
+  const [directory, counts, punchPolicyPosture, notify] = await Promise.all([
+    readOrgDirectoryReadiness(orgId, seam),
+    readAttendanceSetupReadinessOrgCounts(orgId, seam),
+    readAttendancePunchPolicyPosture(seam),
+    readAttendanceNotifyReadinessPort(orgId, seam, env),
+  ])
+  return {
+    directoryLinked: directory.hasLinkedDirectoryAccounts,
+    orgActiveMemberCount: counts.orgActiveMemberCount,
+    groupCount: counts.groupCount,
+    groupsWithMembers: counts.groupsWithMembers,
+    shiftCount: counts.shiftCount,
+    rotationRuleCount: counts.rotationRuleCount,
+    hasRotationRules: counts.rotationRuleCount > 0,
+    approvalFlowCount: counts.approvalFlowCount,
+    punchPolicyPosture,
+    notify,
+    perStep: ATTENDANCE_SETUP_READINESS_STEP_META,
+    deploymentScopedSignals: ATTENDANCE_SETUP_READINESS_DEPLOYMENT_SCOPED_SIGNALS,
+  }
+}
+
 export function attendanceAdminRouter(): Router {
   const r = Router()
 
@@ -408,6 +782,36 @@ export function attendanceAdminRouter(): Router {
     } catch (_error) {
       // Values-free seam: never leak raw DB / driver messages to the client.
       return jsonError(res, 500, 'DIRECTORY_READINESS_FAILED', 'Failed to load directory readiness')
+    }
+  })
+
+  // W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED §4.1 OD-W4-1=(a)): seven-step
+  // setup-readiness aggregate. Same org-membership door as S7-5 above (canReadAttendanceDirectoryReadiness,
+  // reused verbatim) — authorization completes BEFORE buildAttendanceSetupReadiness is ever called, so a
+  // foreign-org 403 issues zero aggregation SQL. Response is values-free by construction (§4.2): counts,
+  // enums, and time postures only — never IDs, names, credentials, or raw configuration values.
+  r.get('/api/attendance-admin/setup-readiness', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      const userId = getAttendanceAdminRequestUserId(req)
+      if (!userId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for setup readiness')
+      }
+      const readiness = await buildAttendanceSetupReadiness(orgId)
+      return jsonOk(res, readiness)
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables not ready')
+      }
+      // Values-free seam: never leak raw DB / driver messages to the client.
+      return jsonError(res, 500, 'SETUP_READINESS_FAILED', 'Failed to load setup readiness')
     }
   })
 
