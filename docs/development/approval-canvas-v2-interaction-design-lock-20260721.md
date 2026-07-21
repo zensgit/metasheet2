@@ -1,8 +1,9 @@
 # Approval Canvas V2 Interaction Design Lock (D0, 2026-07-21)
 
-**Status:** PROPOSED — owner ratification required (G0) before D3/D6-f2 start
+**Status:** PROPOSED — owner ratification required (G0) before D3-D6 (D6-f1 excepted) and D6-f2 start
 **Plan item:** D0 of `docs/development/approval-canvas-v2-development-plan-20260720.md` ("the plan")
-**Baseline:** `origin/main@a98996ee2e0269b22801a6b87d2b8d5b5f076025`
+**Review baseline:** `3ade0d685bbad1605cf71803b228f9aac27d0842`
+**Phase-1 implementation checkpoint:** `eb107032d` (command/preview/backend guards only; no D3+ authorization)
 **Authoritative runtime model:** existing `ApprovalGraph` plus backend `normalizeApprovalGraph`
 **Scope of this document:** interaction and visual contract for the ordinary-user, canvas-first approval
 authoring surface — flow canvas, inspector, form builder, version lifecycle, route preview, states,
@@ -157,6 +158,11 @@ with rollback feedback (§7.3). There is no "drop to free space" concept anywher
   control — and both reflect it.
 - Branch add/remove keeps the shipped ≥2-branch invariant; removing down to 2 is allowed, below that is
   rejected pre-mutation with the reason surfaced (plan C3).
+- Every configured branch must contain at least one body node before the paired join. A direct
+  fork-to-join edge is invalid because `joinMode=any` could otherwise advance without a real branch
+  assignment. Delete, move, and branch-removal commands must preserve this invariant before mutation;
+  backend normalization repeats the same check at save/publish. Complex or shared branch shapes that
+  cannot be proven safe are refused rather than heuristically rewritten.
 - Summary copy on the join node states the consequence plainly:
   - all: "所有分支都完成后继续"
   - any: "任一分支完成后继续，其余分支自动跳过"
@@ -560,15 +566,25 @@ node configs, `normalizeApprovalGraph` invariants) and plan invariants I1–I9:
   §8.3. Consistent with I6/V1–V4.
 - **No semantic invention:** condition priority = array order (F-1); join all/any = shipped `joinMode`;
   threshold handled as a type-parity gap, not a new feature (F-2); inert field permissions not claimed as
-  enforced (F-3); branch ≥2, no nested parallel, default-branch protections inherited — §4. Consistent
+  enforced (F-3); branch ≥2, every branch non-empty, no nested parallel, default-branch protections
+  inherited — §4. Consistent
   with the shipped model and G3.
 - **No unauthorized capability:** no new node types, sources, or enforcement paths anywhere — §1.2, §17.
   Consistent with plan §2/O6.
 - **Dormant rollout:** flag-off path untouched; this lock enables nothing — §2, §17, §18. Consistent
   with I8.
 
-One acknowledged forward dependency, not a contradiction: D2-b must deliver the move/reorder command
-algebra with inverses that §6/§7 assume; D3 must satisfy the §4.2 library gates including deterministic
+One acknowledged forward dependency, not a contradiction: D2-b has delivered the move/reorder command
+algebra with inverses on the integration candidate (§21); D3 must still satisfy the §4.2 library gates including deterministic
 layout without persisted positions. If either fails its gate, the affected interaction (semantic move,
 drag) degrades to insertion-menu + context-menu actions — which this lock already requires to exist —
 rather than to free positioning.
+
+## 21. Implementation checkpoint (non-ratifying)
+
+The integration candidate implements only the pre-visual foundation: ordinary-user raw-ID hygiene,
+immutable topology commands, stable form-field ID allocation/sequencing, and the frontend/backend
+non-empty-parallel-branch guard. The form command slice does **not** yet provide field update/removal,
+inverse history, or mounted undo/redo. D3 renderer, D4 inspector, D5 semantic drag, D6-f2 mounted form
+builder, version visuals, responsive/a11y proof, and flag enablement remain unimplemented and blocked by
+G0. This checkpoint records evidence; it does not change this document's `PROPOSED` status.
