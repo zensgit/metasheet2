@@ -532,6 +532,45 @@ test('synthetic MUTATION 6b: config on one real command + suite file on another 
   assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, 'tests/integration/other.db.test.ts'), true)
 })
 
+test('synthetic MUTATION 6c: a comment interrupting the continuation detaches the suite args must RED', () => {
+  // Same class as (b), found while writing the command splitter: in bash a `#` line reached while a
+  // `\` continuation is open TERMINATES that command, so the lines after it are NOT arguments of the
+  // vitest invocation — they are separate commands and never run. Treating them as arguments would
+  // be a false-green.
+  const wf = [
+    'jobs:', '  test:', '    steps:',
+    '      - name: Run approval real-DB integration (directory endpoints)',
+    `        id: ${STEP_ID}`,
+    NODE20_IF,
+    ...DB_ENV,
+    '        run: |',
+    '          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\',
+    '          # temporarily parked',
+    `            ${FILE} \\`,
+    '            --reporter=dot',
+    '      - name: Next step', '        run: echo ok',
+  ].join('\n')
+  assert.ok(wf.includes(FILE), 'the suite path is still textually inside the run script')
+  const step = extractStepById(wf, STEP_ID)
+  // Positive control: pin (c) still holds — the vitest command itself is intact and real.
+  assert.equal(stepInvokesVitestIntegrationConfig(step), true)
+  assert.deepEqual(wholeFileVitestArgs(step), [], 'args after the interrupting comment are detached')
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), false)
+})
+
+test('synthetic CONTROL: a whole-line comment before the command does NOT swallow it, even with a trailing backslash', () => {
+  // The mirror of MUTATION 6c: bash ends a comment at the newline, so a `\` on a COMMENT line does
+  // not continue it and the real command below stays intact. Without this control, 6c could be
+  // "satisfied" by a parser that drops everything after any `#`.
+  const wf = craftWorkflow({
+    runPrefixLines: ['          # parked command follows \\', '          echo staging'],
+  })
+  const step = extractStepById(wf, STEP_ID)
+  assert.equal(stepInvokesVitestIntegrationConfig(step), true)
+  assert.deepEqual(wholeFileVitestArgs(step), [FILE])
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), true)
+})
+
 test('synthetic CONTROL: a benign echo mentioning vitest next to the REAL integration-config command still passes', () => {
   // Positive control for MUTATION 6: the fix is "resolve the executed binary", not "reject any step
   // whose body mentions vitest twice". A logging/echo line is inert, and the real command still

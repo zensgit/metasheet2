@@ -374,19 +374,26 @@ function argsUseIntegrationConfig(args) {
 }
 
 /**
- * Every REAL vitest invocation in the step's `run:` script, with its own argument list. Full-line
- * `#` comments are dropped BEFORE `\` continuations are joined (bash ends a comment at the
- * newline), then each logical line is split on `;` / `&&` / `||` / `|` / `&` so each command is
- * judged by the binary IT executes.
+ * Every REAL vitest invocation in the step's `run:` script, with its own argument list.
+ *
+ * Comment handling follows bash exactly, because both directions are exploitable:
+ *   - a `#` line that STARTS a logical line is a comment and is dropped whole — a trailing `\` on a
+ *     comment line does NOT continue it (bash ends the comment at the newline), so the next line
+ *     stays an independent command;
+ *   - a `#` line reached WHILE a `\` continuation is open is joined in, and the `#` then terminates
+ *     that logical command — so the lines after it are NOT arguments of the interrupted command.
+ * Each logical line is then split on `;` / `&&` / `||` / `|` / `&`, and every command is judged by
+ * the binary IT executes.
  *
  * @param {{ body: string }} step
  * @returns {{ args: string[], usesIntegrationConfig: boolean, wholeFileArgs: string[] }[]}
  */
 export function vitestInvocations(step) {
-  const script = runScriptLines(step.body.split('\n')).filter((line) => !/^\s*#/.test(line))
+  const script = runScriptLines(step.body.split('\n'))
   const logical = []
   let pending = null
   for (const line of script) {
+    if (pending === null && /^\s*#/.test(line)) continue // whole-line comment, `\` does not continue
     const continued = /\\\s*$/.test(line)
     const text = continued ? line.replace(/\\\s*$/, ' ') : line
     pending = pending === null ? text : pending + text
