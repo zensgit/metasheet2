@@ -178,11 +178,18 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 **逐字继承的范围与两处显式差异（P2-3 / P2-5e）**：①-⑥ 逐字继承章程 §4.5 L202-207；两处差异登记如下，
 不得当作转写失真——
 - **①「同步或创建」= OR 语义**（章程 L202 原文）：完成真值 = `orgActiveMemberCount>0`，
-  `directoryLinked` 只是**来源/能力 posture**、不参与完成判定。纯本地组织（人员经 LOCAL provider 直接建，
-  无任何外部目录）在 `user_orgs` 有 active 成员却无 `directory_account_links` 行——实证：`user_orgs`
-  由 `users` 全量回填、与目录无耦合（`packages/core-backend/src/db/migrations/zzzz20260114110000_create_user_orgs_table.ts:33-41`），
-  而 `provider='local'` 是一等公民 provider（`…/zzzz20260717100000_create_directory_department_bindings.ts:22-23`
-  的 `local_provider='local' AND remote_provider<>'local'` CHECK）。若用 AND 判定，这类组织**永远不会转绿**。
+  `directoryLinked` 只是**来源/能力 posture**、不参与完成判定。OR 语义的依据：`provider='local'`
+  是一等公民 provider（`…/zzzz20260717100000_create_directory_department_bindings.ts:22-23`
+  的 `local_provider='local' AND remote_provider<>'local'` CHECK），纯本地组织不会有任何
+  `directory_account_links` 行——若用 AND 判定，这类组织**永远不会转绿**。
+  **未来态表述（owner P2 勘误 2026-07-21）：W4-PRE-1 落地后，已建立 active membership 的纯本地
+  组织方可独立转绿。** 今天**不能**以一次性回填迁移作为「本地组织在 `user_orgs` 有 active 成员」
+  的证据（本 errata 早期稿曾如此声称，勘误于此）：该回填
+  （`packages/core-backend/src/db/migrations/zzzz20260114110000_create_user_orgs_table.ts:33-41`）
+  仅执行一次、**仅写 `'default'` org**、仅覆盖迁移时点已存在且 `is_active` 的 `users` 行，且带
+  `checkTableExists(db, 'users')` 守卫（`:32-33`，表不存在则整段跳过）——fresh DB 上迁移时点
+  `users` 无行（用户是运行期数据），**可能根本没有可回填行**；非 default 的本地组织即使有存量
+  用户也永远得不到行；LOCAL provider 建人路径同样不写 `user_orgs`（§3.3）。
 - **⑦ 章程 L208 原文作「预览影响范围并启用」；本锁按 round-2 裁决把 ⑦ 收敛为 preview-only**
   （向导只做只读预览 + 展示人工 canonical activation checklist，绝不暗示已启用，见 §5.3 与 R3/R4）。
   引用保持，语义差异在此显式登记。
@@ -192,7 +199,7 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 
 | 步 | 完成信号（values-free 计数/布尔） | 现有原料（file:line） | 修复动作深链（§6，query 形） |
 |---|---|---|---|
-| ① | **完成真值 = `orgActiveMemberCount>0`**（真源 = `user_orgs` 该 org 的 active 成员数，P2-1：绝不用考勤组成员数——那与步骤②循环依赖；正确计数必须同时要求 `user_orgs.is_active=true` **且** `users.is_active=true`，先例 `index.cjs:15532-15541`「RD-3 target population: active org members only」）；`directoryLinked` **仅为来源/能力 posture，不参与完成判定**（P2-3，OR 语义见上）。**errata 冻结语义：在 W4-PRE-1（§3.3）落地前，① 恒 = `unknown`（fail-closed）**——不是查询写不出来，而是 `user_orgs` 今天没有任何生产写路径维护，计数真值不可信（新组织/迁移后新建的人不会出现在表里）；「双 is_active」只是正确计数的必要条件，**不能只补它便宣布 ① 闭合**（owner 原话）。解除条件 = W4-PRE-1 落地（此为具名恢复路径，`unknown` 非吸收态） | `user_orgs`（S7-5 门查同表：`attendance-admin.ts:375`）；`directoryLinked` 复用 `readOrgDirectoryReadiness`（`attendance-admin.ts:336-360`，EXISTS-only） | `attendance-admin-user-access`（注意：该面管理**权限**，不管理 org 成员资格——§3.3 实证；W4-PRE-1 落地前不得把它当「去补成员」的修复动作展示） |
+| ① | **完成真值 = `orgActiveMemberCount>0`**（真源 = `user_orgs` 该 org 的 active 成员数，P2-1：绝不用考勤组成员数——那与步骤②循环依赖；正确计数必须同时要求 `user_orgs.is_active=true` **且** `users.is_active=true`，先例 `index.cjs:15532-15541`「RD-3 target population: active org members only」）；`directoryLinked` **仅为来源/能力 posture，不参与完成判定**（P2-3，OR 语义见上）。**errata 冻结语义：在 W4-PRE-1（§3.3）落地前，① 恒 = `unknown`（fail-closed）**——不是查询写不出来，而是 `user_orgs` 今天没有任何生产写路径维护，计数真值不可信（新组织/迁移后新建的人不会出现在表里）；「双 is_active」只是正确计数的必要条件，**不能只补它便宣布 ① 闭合**（owner 原话）。解除条件 = W4-PRE-1 落地（此为具名恢复路径，`unknown` 非吸收态） | `user_orgs`（S7-5 门查同表：`attendance-admin.ts:375`）；`directoryLinked` 复用 `readOrgDirectoryReadiness`（`attendance-admin.ts:336-360`，EXISTS-only） | **冻结期 = 无修复动作（`unavailable`，owner P2 勘误）**——`attendance-admin-user-access` 只管理**权限**、不管理 org 成员资格（§3.3 声称三实证），不得作为 ① 的修复动作展示；今天仓内**不存在**可指路的「建人/同步成员」canonical surface（这正是 W4-PRE-1 要补的空缺）。重新 ratify 时以 W4-PRE-1 done-gate 第 5 项具名并验证过的真实 create/sync canonical surface 回填此格 |
 | ② | `groupCount>0 && groupsWithMembers>0` | `index.cjs:37720`（`COUNT(*)::int … FROM attendance_groups WHERE org_id=$1`；同端点列表带 member_count 子查询） | `attendance-admin-groups` |
 | ③ | **owner errata 逐字**：`scheduledShiftGroupCount = attendance_groups WHERE org_id=$1 AND attendance_type='scheduled_shift'`；`step3Ready = shiftCount > 0 AND (scheduledShiftGroupCount = 0 OR activeRotationRuleCount > 0)`。**显式声明：这是 org 级存在性判定，不是逐组 rotation 覆盖度**——今日 schema 没有权威的组↔轮班规则关联（`attendance_rotation_rules` 无 group 列，`zzzz20260120114000_create_attendance_rotation_tables.ts:12-23`；`attendance_rotation_assignments` 把规则绑到**用户**而非组，`:30-44`）。原稿「排班制组存在时另需 hasRotationRules」不可计算：合同内没有「排班制组存在」的信号来源 | `index.cjs:39710`（attendance_shifts COUNT）；`index.cjs:31185-31190`（attendance_rotation_rules 的 org-scoped COUNT，`is_active` 过滤即 `activeRotationRuleCount`）；`attendance_type` 值域 CHECK ∈ {fixed_shift, scheduled_shift, free_time}（`zzzz20260529213000_add_attendance_group_type.ts:12-27`；type 过滤先例 `index.cjs:15187`） | `attendance-admin-shifts` |
 | ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**，比对范围 = §3.1 **打卡策略闭集**且仅此闭集；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：闭集逐键与 normalized defaults 比对，前端只收枚举））。**判别值映射（owner errata，推翻合入版 ④=(b)）**：`customized→ready`（「已自定义」）、**`default→manual_review_required`（「待确认：当前使用平台默认策略」），绝不 `ready`**、`unknown→unknown` fail-closed。`manual_review_required` 不阻断 ⑦ preview-ready（§3.2），但**必须**出现在 ⑦ 人工 activation checklist 上 | `system_configs key='attendance.settings'`：SETTINGS_KEY `index.cjs:291`、`DEFAULT_SETTINGS` `:295-512`、`loadSettings` `:13715-13725`、`saveSettings` `:13749-13759`（单键、无 org 维度、写入完整 normalized 结果） | `attendance-admin-settings` |
@@ -301,7 +308,11 @@ W4-0 判别矩阵逐行登记。
    行在，且回填行不被破坏）/ **two-org**（A/B 两 org 各自建人 ⇒ 计数互不串）；
 4. 计数正确性口径：`user_orgs.is_active=true` **且** `users.is_active=true`
    （先例 `index.cjs:15532-15541`「RD-3 target population: active org members only」）——
-   但**只补双 is_active 不闭合 ①**（owner：不能只补「双 is_active」便宣布闭合；真值来源必须先有人维护）。
+   但**只补双 is_active 不闭合 ①**（owner：不能只补「双 is_active」便宣布闭合；真值来源必须先有人维护）；
+5. **done-gate 增项（owner P2 勘误 2026-07-21）：具名并验证「建人/同步成员」的真实 create/sync
+   canonical surface**（file:line + 行为验证：经该面建人/同步 ⇒ 同一事务内 `user_orgs` 行在）——
+   它是重新 ratify 时回填 §3① 行修复动作深链的**唯一合法来源**；在此之前 ① 的修复动作恒为
+   `unavailable`（§3① 行），不得以任何既有面（含 `attendance-admin-user-access`）顶替。
 
 **顺序（owner 裁定）**：本 errata 合入（过 docs-vs-code 门）→ W4-PRE-1 落地 → 重新 ratify 本锁 →
 方开 W4-0。
