@@ -1543,9 +1543,19 @@ test('synthetic: an unparseable composite field grounds NOTHING (cannot tell ≠
       evidenceDoc({ ...COMPLETED_EVIDENCE, ...override }),
     )
     assert.equal(result.ok, false, `malformed "${label}" (${override[label]}) must fail`)
+    // Both rejection paths are load-bearing and proven separately: the field-shape check, and
+    // the §3 matrix refusing to ground a verdict on evidence it cannot read.
     assert.ok(
-      result.violations.some((v) => /complete named form/i.test(v) && v.includes(label)),
-      `expected a complete-named-form rejection for "${label}", got: ${result.violations?.join(' | ')}`,
+      result.violations.some(
+        (v) => /does not have the shape of/i.test(v) && /complete named form/i.test(v) && v.includes(label),
+      ),
+      `expected a field-shape rejection for "${label}", got: ${result.violations?.join(' | ')}`,
+    )
+    assert.ok(
+      result.violations.some(
+        (v) => /cannot be grounded/i.test(v) && v.includes(label),
+      ),
+      `expected an ungrounded-verdict rejection for "${label}", got: ${result.violations?.join(' | ')}`,
     )
     assert.ok(
       !result.violations.some((v) => /contradicts its own evidence/i.test(v)),
