@@ -4,7 +4,7 @@ import type { QueryFn } from './permission-service'
 import { assertInTransaction } from './pg-transaction-guard'
 import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
 import { selectCheckpointByAnchorSeq } from './history-trust-checkpoint'
-import { reconstructRecordsAtSeq } from './record-reconstructor'
+import { reconstructRecordsAtSeq, type RecordStateAtT } from './record-reconstructor'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
 import { ensureRecordNotLocked } from './record-lock'
@@ -17,7 +17,7 @@ import {
   verifyExactAnchorRecoveryIdentity,
   type ExactAnchorRecoveryMode,
 } from './restore-preview-identity'
-import { composeBaselineOverlay, type EvaluateRecoveryFullReadAccess } from './exact-anchor-recovery'
+import { composeBaselineOverlay, ExactAnchorHistoryDataError, type EvaluateRecoveryFullReadAccess } from './exact-anchor-recovery'
 import {
   classifyExactAnchorRecoveryPlan,
   ExactAnchorPlanDataError,
@@ -386,7 +386,13 @@ export async function applyExactAnchorRecovery(
 
       // 6. Dual-hash drift + live rows for plan/projection.
       const replayMap = await reconstructRecordsAtSeq(query, input.sheetId, anchorSeq)
-      const composed = await composeBaselineOverlay(query, { sheetId: input.sheetId, checkpointId: checkpoint.id, stateMap: replayMap })
+      let composed: Map<string, RecordStateAtT>
+      try {
+        composed = await composeBaselineOverlay(query, { sheetId: input.sheetId, checkpointId: checkpoint.id, stateMap: replayMap })
+      } catch (error) {
+        if (error instanceof ExactAnchorHistoryDataError) throw new ApplyRefusalError('history-incomplete')
+        throw error
+      }
       const anchorHash = hashAnchorRecoveryScope(
         [...composed.values()].map((s) => ({ recordId: s.recordId, exists: s.exists, version: s.version })),
       )

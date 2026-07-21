@@ -568,6 +568,8 @@ export function mapResolveRefusal(reason: ResolveAnchorRefusal): { status: numbe
         code: 'NO_COVERING_CHECKPOINT',
         message: 'No active trust checkpoint covers this anchor; activate a trust checkpoint before recovery.',
       }
+    case 'history-incomplete':
+      return mapHistoryIncompleteRefusal()
     case 'forbidden':
       return {
         status: 403,

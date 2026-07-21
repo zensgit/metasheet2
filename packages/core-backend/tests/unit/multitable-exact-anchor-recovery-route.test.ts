@@ -26,7 +26,7 @@ import {
 } from '../../src/multitable/exact-anchor-recovery-route'
 import { ExactAnchorPlanDataError } from '../../src/multitable/exact-anchor-recovery-plan'
 import type { ExactAnchorApplyRefusal } from '../../src/multitable/exact-anchor-recovery-execute'
-import type { ResolveAnchorRefusal } from '../../src/multitable/exact-anchor-recovery'
+import { composeBaselineOverlay, type ResolveAnchorRefusal } from '../../src/multitable/exact-anchor-recovery'
 import type { QueryFn } from '../../src/multitable/permission-service'
 
 const originalFence = process.env.MULTITABLE_ENABLE_WRITER_FENCE
@@ -121,6 +121,35 @@ describe('parseRecoveryAnchorRequest — exactly one anchor, no silent prefer', 
       ok: false,
       reason: 'invalid-request',
     })
+  })
+})
+
+describe('composeBaselineOverlay — corrupt checkpoint rows fail closed', () => {
+  const queryWith = (row: Record<string, unknown>): QueryFn =>
+    (async () => ({ rows: [row], rowCount: 1 })) as QueryFn
+
+  test.each([
+    ['scalar data', { record_id: 'r1', data: 'not-an-object', version: 1, is_trashed: false }],
+    ['array data', { record_id: 'r1', data: [], version: 1, is_trashed: false }],
+    ['string version', { record_id: 'r1', data: {}, version: '1', is_trashed: false }],
+    ['negative version', { record_id: 'r1', data: {}, version: -1, is_trashed: false }],
+    ['non-boolean trash marker', { record_id: 'r1', data: {}, version: 1, is_trashed: 'false' }],
+    ['missing record id', { record_id: null, data: {}, version: 1, is_trashed: false }],
+  ])('%s is rejected instead of coerced into a signed recovery state', async (_name, row) => {
+    await expect(composeBaselineOverlay(queryWith(row), {
+      sheetId: 'sheet-1',
+      checkpointId: 'checkpoint-1',
+      stateMap: new Map(),
+    })).rejects.toThrow(/checkpoint baseline/)
+  })
+
+  test('a replay-exact record wins without consuming its stale baseline payload', async () => {
+    const replay = new Map([['r1', { recordId: 'r1', exists: true, data: { value: 'exact' }, version: 2 }]])
+    const out = await composeBaselineOverlay(
+      queryWith({ record_id: 'r1', data: 'stale-and-irrelevant', version: -1, is_trashed: false }),
+      { sheetId: 'sheet-1', checkpointId: 'checkpoint-1', stateMap: replay },
+    )
+    expect(out).toEqual(replay)
   })
 })
 
@@ -593,6 +622,7 @@ describe('HTTP mapping — every current ExactAnchorApplyRefusal is values-free'
       'invalid-anchor',
       'unknown-anchor',
       'no-covering-checkpoint',
+      'history-incomplete',
       'forbidden',
     ]
     for (const reason of all) {

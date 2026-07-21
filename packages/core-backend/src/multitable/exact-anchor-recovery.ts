@@ -69,6 +69,8 @@ export type ResolveAnchorRefusal =
   | 'unknown-anchor'
   /** no active/retained trust checkpoint covers the anchor (`trusted_since_seq <= anchorSeq`) — fail-closed. */
   | 'no-covering-checkpoint'
+  /** the checkpoint baseline or current live-set identity contains malformed server-side data. */
+  | 'history-incomplete'
   /** the actor fails the v1 FULL-READ authorization (owner P1-2 — U-L8 gate shape): the whole surface is
    *  refused BEFORE any anchor/batch resolution, so an unauthorized actor learns nothing (not even whether
    *  the anchor exists). */
@@ -111,8 +113,32 @@ export function scopeEntriesOf(stateMap: Map<string, RecordStateAtT>): Array<{ r
   return [...stateMap.values()].map((s) => ({ recordId: s.recordId, exists: s.exists, version: s.version }))
 }
 
-const asRecord = (v: unknown): Record<string, unknown> =>
-  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+/** Corrupt checkpoint/live identity is trust failure, never a value to coerce into a signed token. */
+export class ExactAnchorHistoryDataError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ExactAnchorHistoryDataError'
+  }
+}
+
+const requireHistoryRecordId = (value: unknown, source: string): string => {
+  if (typeof value !== 'string' || value.length === 0) throw new ExactAnchorHistoryDataError(`${source}: invalid record id`)
+  return value
+}
+
+const requireHistoryData = (value: unknown, source: string): Record<string, unknown> => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ExactAnchorHistoryDataError(`${source}: invalid record data`)
+  }
+  return value as Record<string, unknown>
+}
+
+const requireHistoryVersion = (value: unknown, source: string): number => {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new ExactAnchorHistoryDataError(`${source}: invalid record version`)
+  }
+  return value
+}
 
 /**
  * F4 (pre-wiring gate list) — L5 BASELINE COMPOSITION, shared by PREVIEW and APPLY so the two sides are
@@ -135,14 +161,17 @@ export async function composeBaselineOverlay(
   )
   const composed = new Map<string, RecordStateAtT>(input.stateMap)
   for (const raw of baselineRes.rows as Array<Record<string, unknown>>) {
-    const recordId = String(raw.record_id)
+    const recordId = requireHistoryRecordId(raw.record_id, 'checkpoint baseline')
     if (composed.has(recordId)) continue // replay map wins — it is at-anchor-exact
-    const trashed = raw.is_trashed === true
+    if (typeof raw.is_trashed !== 'boolean') throw new ExactAnchorHistoryDataError('checkpoint baseline: invalid trash marker')
+    const trashed = raw.is_trashed
+    const data = requireHistoryData(raw.data, 'checkpoint baseline')
+    const version = requireHistoryVersion(raw.version, 'checkpoint baseline')
     composed.set(recordId, {
       recordId,
       exists: !trashed,
-      data: trashed ? null : asRecord(raw.data),
-      version: typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : null,
+      data: trashed ? null : data,
+      version,
     })
   }
   return composed
@@ -232,20 +261,31 @@ export async function resolveExactAnchor(
   // (F4 — the preview must show exactly the set the apply will plan over), and bind the COMPOSED set into
   // the token.
   const replayMap = await reconstructRecordsAtSeq(query, sheetId, anchorSeq)
-  const stateMap = await composeBaselineOverlay(query, { sheetId, checkpointId: checkpoint.id, stateMap: replayMap })
+  let stateMap: Map<string, RecordStateAtT>
+  try {
+    stateMap = await composeBaselineOverlay(query, { sheetId, checkpointId: checkpoint.id, stateMap: replayMap })
+  } catch (error) {
+    if (error instanceof ExactAnchorHistoryDataError) return { ok: false, reason: 'history-incomplete' }
+    throw error
+  }
   const scopeHash = hashAnchorRecoveryScope(scopeEntriesOf(stateMap))
   // W0-1 L8 preview-freshness binding: fingerprint the LIVE set {id, version} too (same order-invariant
   // HMAC primitive, exists:true). The destructive apply re-hashes the live set IN-FENCE and refuses
   // `preview-drift` when a concurrent write landed between preview and execute — the anchor-authority
   // `scopeHash` alone cannot see that (the at-anchor reconstruction is immutable under append-only history).
   const liveRes = await query('SELECT id, version FROM meta_records WHERE sheet_id = $1', [sheetId])
-  const liveSetHash = hashAnchorRecoveryScope(
-    (liveRes.rows as Array<{ id: unknown; version: unknown }>).map((r) => ({
-      recordId: String(r.id),
+  let liveEntries: Array<{ recordId: string; exists: true; version: number }>
+  try {
+    liveEntries = (liveRes.rows as Array<{ id: unknown; version: unknown }>).map((r) => ({
+      recordId: requireHistoryRecordId(r.id, 'live recovery identity'),
       exists: true,
-      version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0,
-    })),
-  )
+      version: requireHistoryVersion(r.version, 'live recovery identity'),
+    }))
+  } catch (error) {
+    if (error instanceof ExactAnchorHistoryDataError) return { ok: false, reason: 'history-incomplete' }
+    throw error
+  }
+  const liveSetHash = hashAnchorRecoveryScope(liveEntries)
   // G-SCHEMA-BEFORE-FENCE: bind CURRENT semantic field surface (id/type/property) into the identity.
   // Apply recomputes under the fence and refuses schema-drift on retype / property drift / field add-drop.
   const schemaRes = await query('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [sheetId])
@@ -283,6 +323,8 @@ export type ExecuteAnchorRefusal =
   /** the reconstructed set at the token-bound anchorSeq no longer matches what the preview signed (data moved
    *  since preview, OR — the load-bearing mutation surface — the execute recomputed the anchor as MAX(seq)). */
   | 'scope-drift'
+  /** checkpoint baseline corruption discovered while rebuilding the token-bound target. */
+  | 'history-incomplete'
 
 export interface ExecuteAnchorSuccess {
   ok: true
@@ -324,7 +366,13 @@ export async function executeExactAnchorRecovery(
   // Reconstruct at the TOKEN-BOUND anchorSeq — the sole authority. NOT MAX(seq), NOT the request — then
   // compose the SAME baseline overlay the preview hashed (F4 symmetry; checkpointId is token-bound).
   const replayMap = await reconstructRecordsAtSeq(query, input.sheetId, anchorSeq)
-  const stateMap = await composeBaselineOverlay(query, { sheetId: input.sheetId, checkpointId, stateMap: replayMap })
+  let stateMap: Map<string, RecordStateAtT>
+  try {
+    stateMap = await composeBaselineOverlay(query, { sheetId: input.sheetId, checkpointId, stateMap: replayMap })
+  } catch (error) {
+    if (error instanceof ExactAnchorHistoryDataError) return { ok: false, reason: 'history-incomplete' }
+    throw error
+  }
   const liveScopeHash = hashAnchorRecoveryScope(scopeEntriesOf(stateMap))
   if (liveScopeHash !== scopeHash) return { ok: false, reason: 'scope-drift' }
 

@@ -394,6 +394,26 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(await burnCount()).toBe(0)
   })
 
+  test('BASELINE corruption after preview: apply refuses history-incomplete and rolls back the burn before any recovery write', async () => {
+    const { R_REV, anchorOp } = await seedWorld()
+    const pv = await preview(anchorOp)
+    const before = await liveRow(R_REV)
+    await q(
+      `INSERT INTO meta_history_baselines (checkpoint_id, sheet_id, record_id, data, version, is_trashed)
+       VALUES ($1,$2,$3,$4::jsonb,1,false)`,
+      [pv.checkpointId, SHEET, `rec_corrupt_apply_${TS}`, JSON.stringify('not-an-object')],
+    )
+
+    expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
+      .toEqual({ ok: false, reason: 'history-incomplete' })
+    expect(await liveRow(R_REV)).toEqual(before)
+    expect(await burnCount()).toBe(0)
+    expect(Number(((await q(
+      `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+      [SHEET],
+    )).rows[0] as { c: number }).c)).toBe(0)
+  })
+
   test('LOCKED record: a lock held by ANOTHER actor ⇒ record-locked (values-free), zero writes; unlocking lets it through', async () => {
     const { R_REV, anchorOp } = await seedWorld()
     await q('UPDATE meta_records SET locked = true, locked_by = $1 WHERE id = $2 AND sheet_id = $3', ['someone-else', R_REV, SHEET])
