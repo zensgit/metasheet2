@@ -136,6 +136,22 @@ Corrective mutation battery **6/6 RED** (re-export a Set, drop the dup-group gua
 evidence argument, open the partial-predicate vocab, key dedup on the full tuple incl.
 multiplicity, open the partial-field check); full plugin CJS chain (70 suites) green.
 
+## 3d. Owner corrective review round-2 — absorption (2026-07-21)
+
+A second corrective review found **0 P1 / 2 P2 / 1 P3** (second-order gaps in the round-1
+fixes), all closed in this PR:
+
+| Finding | Fix |
+|---|---|
+| P2: the snapshot-level `multiplicityBound` could be bypassed by a per-group `multiplicityBound` (snapshot bound 1 + group bound 10 + multiplicity 2 was accepted, violating the Charter unified read bound) | the snapshot-level bound is the SOLE authority; any per-group `multiplicityBound` is rejected fail-closed, and a group multiplicity above the snapshot bound is rejected with no group-level escape; a missing snapshot bound fails closed |
+| P2: the partial-unique predicate field was only checked against template fields, not the uniqueness constraint's own fields (a run unique on `run_identity_key` with an `attempt_id` predicate — `attempt_id` being a real run field — passed) | the predicate field must be a member of `uniqueness.fields`; a discriminating test (predicate field IS a template field but NOT in the constraint) pins it |
+| P3: charter §10 still said "建议裁决" and §11 exit criteria were framed as pending | §10 → final RATIFY ruling; §11 criteria marked satisfied (D1 merged at `1f06ecea9`); rev-level deferred wording flagged as historical |
+
+Round-2 mutation battery RED on both P2 fixes (reinstate per-group bound override; revert the
+partial-field check to template-only). One equivalent mutant noted honestly: reordering the
+spread `{ multiplicityBound, ...group }` is behaviourally identical because the hasOwnProperty
+guard already strips any group-level bound before the encode call.
+
 ## 4. Explicitly out of scope (per §7 gates)
 
 D2 (scenario/binding store, pointer CAS runtime, `SET LOCAL lock_timeout` claim mechanics with
