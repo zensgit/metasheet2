@@ -40,6 +40,12 @@ import { dirname, join } from 'node:path'
 // forms the runbook legitimately uses: length(), count()/count(*) FILTER (WHERE …),
 // IS [NOT] NULL, and column-to-column equality.
 //
+// STRICT FENCE CONTRACT (owner ruling 2026-07-21, round 5 of PR #4500): ALL SQL in this runbook
+// must live inside a scanned code venue. Outside venues, ANY `SELECT … FROM` shape is a
+// violation, full stop — no vocabulary test, no prose exemption, no structural cleverness
+// (see `findUnfencedSelectFromShapes`). Inside venues, the closed projection allowlist below
+// stays exactly as it is.
+//
 // Verdict grounding: the §4 verdict field may only hold the placeholder OR one of the three
 // ruled values, and a filled verdict must be accompanied by the evidence it depends on.
 // (A whole-file /_TBD_/ assert cannot express that: §4 has 11 _TBD_ lines, so ANY survivor
@@ -195,8 +201,8 @@ export function fenceLanguageTag(infoString) {
 
 /**
  * A code-block body counts as SQL when it CONTAINS a SELECT — inside a code venue there is no
- * prose to confuse it with, so the tag is irrelevant. (`extractUnfencedSqlStatements` applies the
- * stricter, structure-based test that ordinary body text needs.)
+ * prose to confuse it with, so the tag is irrelevant. (Outside venues nothing is parsed as SQL
+ * at all: any `SELECT … FROM` shape there is a violation — see `findUnfencedSelectFromShapes`.)
  * @param {string} text
  * @returns {boolean}
  */
@@ -373,15 +379,10 @@ export function isClosedBooleanBodyForAlias(body, alias) {
  * @returns {{ ok: true } | { ok: false, violations: string[] }}
  */
 export function assertErrorMessageProjectionsAreClosed(markdownOrSql, opts = {}) {
-  // Every venue body PLUS every SQL statement outside them: the question is "is this SQL?", never
-  // "which delimiter is it in?".
-  const sqlBlocks = opts.bareSql
-    ? [markdownOrSql]
-    : [
-        ...extractFencedCodeBlocks(markdownOrSql),
-        ...extractUnfencedSqlStatements(markdownOrSql),
-      ]
-  const violations = []
+  // Strict fence contract: SQL is parsed inside code venues only. Outside them, any
+  // `SELECT … FROM` shape is itself a violation — nothing outside a venue is ever parsed as SQL.
+  const sqlBlocks = opts.bareSql ? [markdownOrSql] : extractFencedCodeBlocks(markdownOrSql)
+  const violations = opts.bareSql ? [] : unfencedShapeViolations(markdownOrSql)
 
   for (const block of sqlBlocks) {
     for (const selectList of extractSelectLists(block)) {
@@ -668,6 +669,12 @@ function textOutsideCodeVenues(markdown) {
  *
  * The quotes/comment length are kept (interior → spaces, newlines preserved) so the masked text
  * still tokenises identically to the original.
+ *
+ * Gate finding (round 5 of PR #4500): PostgreSQL dollar-quoting (`$$…$$` / `$tag$…$tag$`) was not
+ * masked, so a `;` or a keyword inside a dollar-quoted literal was read as a terminator and the
+ * projection list was truncated there — everything after it went unseen by the projection guards
+ * (verified: `…, $$a ;b$$ AS label, mobile FROM …` lost `mobile`). A dollar-quoted literal is a
+ * literal: its interior is blanked exactly like `'…'`.
  * @param {string} sql
  * @returns {string}
  */
@@ -679,6 +686,17 @@ export function maskSqlLiteralsAndComments(sql) {
   let i = 0
   while (i < sql.length) {
     const ch = sql[i]
+    if (ch === '$') {
+      const open = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i))
+      if (open) {
+        const tag = open[0]
+        const close = sql.indexOf(tag, i + tag.length)
+        // An unterminated dollar-quote swallows the rest (same fail-closed rule as fences).
+        blank(i + tag.length, close < 0 ? sql.length : close)
+        i = close < 0 ? sql.length : close + tag.length
+        continue
+      }
+    }
     if (ch === "'" || ch === '"') {
       let j = i + 1
       while (j < sql.length) {
@@ -713,240 +731,78 @@ export function maskSqlLiteralsAndComments(sql) {
 }
 
 /**
- * Words that CONNECT the parts of a SQL expression rather than being one of its values — the
- * operators/keywords a projection list may contain between two operands.
+ * STRICT FENCE CONTRACT (owner ruling 2026-07-21, round 5 of PR #4500) — the "smart SQL"
+ * vocabulary is RETIRED.
  *
- * This is not a prose vocabulary and cannot be made "complete" or "incomplete" in that sense: the
- * decision below is about SHAPE (how many operands sit next to each other), and this set only
- * says which words are not operands.
+ * Two cuts at "is this unfenced text SQL?" failed the same way from opposite sides. The
+ * vocabulary cut (SQL_CONNECTIVE_WORDS + an English stop-word list) let a leaking statement
+ * exempt itself with a word. Its structural replacement ("does the projection list resolve as
+ * an expression?") began mis-flagging ordinary prose: «Select status from directory_sync_runs
+ * after each run and record only the booleans.» has exactly the shape
+ * `SELECT status FROM directory_sync_runs …` — one bare operand, a resolvable source — so an
+ * English imperative was swallowed whole as a SQL statement (verified at 28cc7c5a4).
+ *
+ * The controlled document is a single runbook, so the rule is now simple and LOUD instead of
+ * clever: ALL SQL must live inside a scanned code venue (backtick/tilde fence with any complete
+ * info string, or an HTML <pre>/<code> block — see scanCodeVenues). Outside those venues, ANY
+ * `SELECT … FROM` shape is a violation, full stop. Over-flagging is acceptable and intended:
+ * the failure is visible, and the author's fix is to fence the SQL or reword the sentence.
+ * Nothing outside a venue is ever parsed as SQL — there is no vocabulary, no prose exemption,
+ * and no statement-extent machinery to bypass.
+ *
+ * Inline code spans are NOT an exemption: `` `SELECT union_id …` `` renders inside the
+ * paragraph, and a backtick is ordinary punctuation to the shape scan (word boundaries hold
+ * straight through it), so the shape is found whether or not it is span-wrapped — a span is
+ * prose markup, not a code venue (same rule as before the rewrite).
+ * @param {string} markdown
+ * @returns {string[]} one normalized snippet per unfenced `SELECT … FROM` shape (SELECT through
+ *   the end of the line its FROM sits on), for reporting
  */
-const SQL_CONNECTIVE_WORDS = new Set([
-  'all', 'and', 'any', 'as', 'asc', 'at', 'between', 'both', 'by', 'case', 'cast', 'collate',
-  'cross', 'desc', 'distinct', 'else', 'end', 'escape', 'except', 'exists', 'filter', 'first',
-  'for', 'from', 'full', 'group', 'having', 'ilike', 'in', 'inner', 'intersect', 'interval',
-  'into', 'is', 'join', 'last', 'leading', 'left', 'like', 'limit', 'natural', 'not', 'null',
-  'nulls', 'offset', 'on', 'or', 'order', 'outer', 'over', 'partition', 'right', 'rows', 'select',
-  'similar', 'some', 'then', 'time', 'trailing', 'union', 'using', 'when', 'where', 'window',
-  'with', 'within', 'zone',
-])
-
-/**
- * Collapse balanced parenthesised groups: a group that FOLLOWS an identifier is that identifier's
- * argument list (the call is one operand), a group that stands alone is itself one operand.
- * @param {string} expr
- * @returns {string}
- */
-function collapseParenGroups(expr) {
-  let s = expr
-  for (let guard = 0; guard < 100; guard++) {
-    const next = s.replace(/\(([^()]*)\)/g, (match, _inner, offset, whole) =>
-      /[A-Za-z0-9_$"']\s*$/.test(whole.slice(0, offset)) ? ' ' : ' 0 ',
-    )
-    if (next === s) break
-    s = next
+export function findUnfencedSelectFromShapes(markdown) {
+  const outside = textOutsideCodeVenues(markdown)
+  const shapes = []
+  const re = /\bSELECT\b[\s\S]*?\bFROM\b[^\n]*/gi
+  let m
+  while ((m = re.exec(outside)) !== null) {
+    shapes.push(normalizeSqlWs(m[0]).slice(0, 160))
   }
-  return s
+  return shapes
 }
 
 /**
- * Split an expression into tokens and mark each one as an OPERAND (identifier / literal / number /
- * collapsed group) or a CONNECTIVE (operator or SQL keyword).
- * @param {string} expr
- * @returns {('operand'|'connective')[]}
- */
-function expressionTokenKinds(expr) {
-  const tokens =
-    collapseParenGroups(expr).match(
-      /'[^']*'|"[^"]*"|[A-Za-z_][A-Za-z0-9_$]*|\d+(?:\.\d+)?|::|<>|!=|>=|<=|\|\||\S/g,
-    ) || []
-  return tokens.map((t) => {
-    if (/^['"]/.test(t)) return 'operand'
-    if (/^\d/.test(t)) return 'operand'
-    if (/^[A-Za-z_]/.test(t)) return SQL_CONNECTIVE_WORDS.has(t.toLowerCase()) ? 'connective' : 'operand'
-    return 'connective'
-  })
-}
-
-/**
- * True iff a single projection-list item RESOLVES as a SQL projection: an expression, optionally
- * followed by an alias. Structurally that means its operands are separated by operators/keywords —
- * at most ONE bare adjacency is allowed, and only at the very end (`<expr> <alias>`).
- *
- * This is what separates a STATEMENT from a SENTENCE without consulting any English vocabulary:
- *   `union_id`                                  → 1 operand                       → resolves
- *   `'…' AS label` / `count(*) FILTER (…) AS n` → operands separated by keywords   → resolves
- *   `mobile AS "the contact"`                   → operand, AS, operand            → resolves
- *   `the corp A rows` (prose)                   → 4 operands in a row             → does NOT
- * @param {string} expr
- * @returns {boolean}
- */
-export function isResolvableProjectionExpression(expr) {
-  const kinds = expressionTokenKinds(expr)
-  if (kinds.length === 0) return false
-  let adjacencies = 0
-  let lastAdjacencyAt = -1
-  for (let i = 0; i + 1 < kinds.length; i++) {
-    if (kinds[i] === 'operand' && kinds[i + 1] === 'operand') {
-      adjacencies += 1
-      lastAdjacencyAt = i
-    }
-  }
-  if (adjacencies === 0) return true
-  return adjacencies === 1 && lastAdjacencyAt === kinds.length - 2
-}
-
-/**
- * True iff what follows FROM resolves as a table reference (optionally schema-qualified / quoted)
- * or a sub-select. Deliberately lenient: when the source is ambiguous the statement is SCANNED,
- * never skipped — the projection list carries the discrimination.
- * @param {string} text
- * @returns {boolean}
- */
-export function isResolvableFromSource(text) {
-  const m = /^\s*(?:\(\s*SELECT\b|(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"]*")(?:\s*\.\s*(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"]*"))*)/i.exec(
-    text,
-  )
-  if (!m) return false
-  const head = m[0].trim().toLowerCase()
-  return !SQL_CONNECTIVE_WORDS.has(head)
-}
-
-/**
- * Index of the first FROM at PAREN DEPTH 0, or -1. `trim(BOTH ' ' FROM mobile)` and
- * `position('x' in y)` carry a FROM/keyword inside the call — splitting there would hand the
- * shape test an unbalanced fragment and the statement would escape as "not SQL".
- * @param {string} masked
- * @returns {number}
- */
-function topLevelFromIndex(masked) {
-  let depth = 0
-  for (let i = 0; i < masked.length; i++) {
-    const ch = masked[i]
-    if (ch === '(') depth += 1
-    else if (ch === ')') depth = Math.max(0, depth - 1)
-    else if (depth === 0 && /^from\b/i.test(masked.slice(i, i + 5)) && !/[A-Za-z0-9_]/.test(masked[i - 1] ?? ' ')) {
-      return i
-    }
-  }
-  return -1
-}
-
-/**
- * The "is this SQL?" decision, taken on SHAPE alone (input must already be literal/comment masked).
- *
- * Gate finding (round 4 of PR #4500): the previous cut answered it with a list of English function
- * words that must NOT appear in the projection list. Vocabulary cannot decide this — words that
- * are also SQL (`every(…)`, `trim(BOTH …)`, `= ANY(…)`) had to be left out of the list, so a
- * leaking statement in ordinary body text bought itself an exemption just by using one, and a word
- * hidden inside a string literal or a `--` comment exempted the whole statement. All of
- * `SELECT union_id, every(is_active) AS a FROM directory_accounts;` and
- * `SELECT union_id, 'the key' AS label FROM directory_accounts;` returned ok:true.
- *
- * A candidate is SQL when it HAS THE SHAPE of a statement: `SELECT <projection list> FROM <source>`
- * where every top-level projection resolves as an expression (+ optional alias) and the source
- * resolves as a table reference. Prose that merely mentions column names has no SELECT at all;
- * a sentence that happens to use the words select/from ("select the corp A rows from
- * directory_accounts by hand") has a projection list of four bare words in a row, which resolves
- * as no expression.
- * @param {string} masked  a candidate whose literals/comments are already masked
- * @returns {boolean}
- */
-export function looksLikeSqlStatement(masked) {
-  const s = masked.trim()
-  if (!/^SELECT\b/i.test(s)) return false
-  const fromIdx = topLevelFromIndex(s)
-  if (fromIdx < 0) return false
-  const list = s.slice('SELECT'.length, fromIdx)
-  if (!list.trim()) return false
-  // An unbalanced projection list is a fragment, not a statement.
-  if ((list.match(/\(/g) || []).length !== (list.match(/\)/g) || []).length) return false
-  const projections = splitTopLevelProjections(list)
-  if (projections.length === 0) return false
-  if (!projections.every((p) => isResolvableProjectionExpression(p))) return false
-  return isResolvableFromSource(s.slice(fromIdx + 'FROM'.length))
-}
-
-/**
- * Extract SQL statements that sit OUTSIDE every recognised code venue — anywhere in the document,
- * not only in four-space-indented blocks.
- *
- * Owner ruling (round 3 of PR #4500): the guard must ask "is this SQL?", not "is it in a delimiter
- * I happen to know". The previous cut only reconstructed four-space/tab indented blocks, so a
- * plain `SELECT union_id, open_id, mobile, raw FROM directory_accounts;` sitting in ordinary body
- * text was scanned by nothing at all (verified: it returned ok:true).
- *
- * The answer is structural (`looksLikeSqlStatement`), never lexical — so prose keeps passing and a
- * statement cannot exempt itself with a word.
- *
- * The statement's EXTENT is likewise not decided by raw punctuation: gate finding (round 4) — the
- * candidate was cut at the first blank line and at ANY `;`, including one inside a string literal,
- * so `SELECT union_id, 'a;b' AS label FROM directory_accounts;` was cut to `SELECT union_id, 'a`
- * and the shape test never saw its FROM (verified: ok:true). Terminators are now read on the
- * MASKED text, and every candidate extent is tried shortest-first: the statement is the shortest
- * one that resolves as SQL, so a statement spanning a blank line is still found.
- *
- * Inline code spans are prose venues, not code venues: `` `SELECT union_id …` `` renders inside the
- * paragraph, so the backticks are dropped and the statement is read as the SQL it is.
+ * The violation every unfenced `SELECT … FROM` shape produces — shared by BOTH SQL guards, so
+ * neither can be satisfied while SQL sits outside a venue.
  * @param {string} markdown
  * @returns {string[]}
  */
-export function extractUnfencedSqlStatements(markdown) {
-  const outside = textOutsideCodeVenues(markdown).replace(/`/g, ' ')
-  const statements = []
-  const selectRe = /\bSELECT\b/gi
-  let m
-  while ((m = selectRe.exec(outside)) !== null) {
-    const rest = outside.slice(m.index)
-    // Literals/comments carry no structure: mask the candidate BEFORE looking for its terminator.
-    const maskedRest = maskSqlLiteralsAndComments(rest)
-    const blank = maskedRest.search(/\n[ \t]*\n/)
-    const semi = maskedRest.indexOf(';')
-    const ends = [...new Set([blank, semi >= 0 ? semi + 1 : -1, maskedRest.length])]
-      .filter((n) => n > 0)
-      .sort((a, b) => a - b)
-
-    let chosen = -1
-    for (const end of ends) {
-      if (looksLikeSqlStatement(maskedRest.slice(0, end))) {
-        chosen = end
-        break
-      }
-    }
-    if (chosen < 0) continue
-    statements.push(rest.slice(0, chosen).trim())
-    selectRe.lastIndex = m.index + chosen
-  }
-  return statements
+function unfencedShapeViolations(markdown) {
+  return findUnfencedSelectFromShapes(markdown).map(
+    (shape) =>
+      `SELECT … FROM outside a code venue — ALL runbook SQL must live in a fenced code block ` +
+      `(strict fence contract: fence the SQL or reword the sentence): ${shape}`,
+  )
 }
 
 /**
  * Validate that no runbook SQL projection emits a raw provider-identity / PII column value.
  *
  * Covers rather than enumerates: besides the column-name list, a projection is rejected when it
- * is a wildcard or a whole-row serializer (both leak every column while naming none), and SQL is
- * required to live in a code block — SQL found anywhere else in the document is itself a
- * violation AND is parsed through the same projection guards, so it cannot hide by choosing a
- * delimiter (or none at all).
+ * is a wildcard or a whole-row serializer (both leak every column while naming none). SQL is
+ * required to live in a code venue — outside venues, any `SELECT … FROM` shape is itself a
+ * violation (strict fence contract), so SQL cannot hide by choosing a delimiter or none at all.
  * @param {string} markdownOrSql
  * @param {{ bareSql?: boolean }} [opts]
  * @returns {{ ok: true } | { ok: false, violations: string[] }}
  */
 export function assertNoRawIdentityProjections(markdownOrSql, opts = {}) {
-  const violations = []
+  let violations
   let blocks
   if (opts.bareSql) {
+    violations = []
     blocks = [markdownOrSql]
   } else {
-    const unfenced = extractUnfencedSqlStatements(markdownOrSql)
-    for (const block of unfenced) {
-      violations.push(
-        `runbook SQL must live in a fenced code block so the values-free guards can read it — ` +
-          `found unfenced SQL: ${normalizeSqlWs(block).slice(0, 120)}`,
-      )
-    }
-    blocks = [...extractFencedCodeBlocks(markdownOrSql), ...unfenced].filter((b) =>
-      /\bSELECT\b/i.test(b),
-    )
+    violations = unfencedShapeViolations(markdownOrSql)
+    blocks = extractFencedCodeBlocks(markdownOrSql).filter((b) => /\bSELECT\b/i.test(b))
   }
 
   for (const block of blocks) {
@@ -2370,9 +2226,9 @@ test('anti-vacuity (F2): the venue scanner still sees the runbook’s own indent
     'the closed-classification SQL block must still be extracted',
   )
   assert.equal(
-    extractUnfencedSqlStatements(runbook).length,
+    findUnfencedSelectFromShapes(runbook).length,
     0,
-    'the runbook’s fenced SQL must not be misread as unfenced SQL',
+    'the runbook’s fenced SQL must not be misread as an unfenced SELECT … FROM shape',
   )
 })
 
@@ -2389,10 +2245,8 @@ test('verifier repro (F3.1): an indented (unfenced) identity SELECT is rejected,
     result.violations.some((v) => /must live in a fenced code block/i.test(v)),
     `expected an unfenced-SQL violation, got: ${result.violations.join(' | ')}`,
   )
-  assert.ok(
-    result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
-    `indented SQL must also be PARSED, not merely flagged: ${result.violations.join(' | ')}`,
-  )
+  // Strict fence contract: the SHAPE alone is the violation — nothing outside a venue is parsed
+  // as SQL, so no projection-level report is expected (or needed) here.
 })
 
 // ---------------------------------------------------------------------------
@@ -2401,8 +2255,9 @@ test('verifier repro (F3.1): an indented (unfenced) identity SELECT is rejected,
 //   (a) a fence whose info string carries extra words (```sql linenums) was not scanned;
 //   (b) `~~~sql title=probe` (tilde fence + attribute) was not scanned;
 //   (c) a plain SELECT in ordinary body text — not indented, not fenced — was not scanned at all.
-// Owner ruling: support the COMPLETE fence info string on either delimiter, and scan ALL SQL
-// outside fences. The venue question is now "is this SQL?".
+// Round-5 owner ruling (strict fence contract): (a)/(b) are real venues and go through the
+// projection guards; every (c) sample is a `SELECT … FROM` shape outside a venue and is a
+// violation BY THAT FACT alone — it is never parsed as SQL.
 // ---------------------------------------------------------------------------
 
 /** The owner's three samples, plus the near neighbours of each. */
@@ -2427,28 +2282,33 @@ const OWNER_VENUE_SAMPLES = [
   ['(c) table cell', (sql) => `| step | query |\n|---|---|\n| 2 | ${sql} |\n`],
 ]
 
-test('owner repro (round 3): identity projections are rejected in EVERY venue — full info strings and no venue at all', () => {
+test('owner repro (round 3): identity SQL is rejected in EVERY venue — full info strings scanned, no venue at all is a violation by itself', () => {
   for (const [name, wrap] of OWNER_VENUE_SAMPLES) {
     const md = wrap(IDENTITY_SELECT)
     const result = assertNoRawIdentityProjections(md)
     assert.equal(result.ok, false, `venue "${name}" must not bypass the identity guard`)
-    assert.ok(
-      result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
-      `venue "${name}" must report the projection itself, got: ${result.violations.join(' | ')}`,
-    )
-    assert.ok(
-      result.violations.some((v) => /outside the closed values-free allowlist/i.test(v) && /raw/.test(v)),
-      `venue "${name}" must also report the un-named "raw" column, got: ${result.violations.join(' | ')}`,
-    )
-    // The fenced samples must be READ AS a code block, not merely caught by the unfenced
-    // fallback: an info string the scanner cannot parse turns a real fence into loose text, which
-    // is a different (and much noisier) verdict than "this fence contains a forbidden projection".
-    const readAsCodeBlock = !result.violations.some((v) => /must live in a fenced code block/i.test(v))
-    assert.equal(
-      readAsCodeBlock,
-      !name.startsWith('(c)'),
-      `venue "${name}" was classified wrongly (fenced vs unfenced): ${result.violations.join(' | ')}`,
-    )
+    if (name.startsWith('(c)')) {
+      // Strict fence contract: outside a code venue the SELECT … FROM shape IS the violation.
+      assert.ok(
+        result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+        `venue "${name}" must red as unfenced SQL, got: ${result.violations.join(' | ')}`,
+      )
+    } else {
+      assert.ok(
+        result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+        `venue "${name}" must report the projection itself, got: ${result.violations.join(' | ')}`,
+      )
+      assert.ok(
+        result.violations.some((v) => /outside the closed values-free allowlist/i.test(v) && /raw/.test(v)),
+        `venue "${name}" must also report the un-named "raw" column, got: ${result.violations.join(' | ')}`,
+      )
+      // A real venue must be READ AS a code block, never mis-reported as loose text: an info
+      // string the scanner cannot parse would turn a real fence into "unfenced SQL".
+      assert.ok(
+        !result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+        `venue "${name}" was classified wrongly (fenced vs unfenced): ${result.violations.join(' | ')}`,
+      )
+    }
     assert.equal(
       scanCodeVenues(md).length,
       name.startsWith('(c)') ? 0 : 1,
@@ -2461,10 +2321,17 @@ test('owner repro (round 3): error_message projections stay closed in EVERY venu
   for (const [name, wrap] of OWNER_VENUE_SAMPLES) {
     const result = assertErrorMessageProjectionsAreClosed(wrap(RAW_ERROR_SELECT))
     assert.equal(result.ok, false, `venue "${name}" must not bypass the error_message guard`)
-    assert.ok(
-      result.violations.some((v) => /direct\/unaliased error_message projection forbidden/i.test(v)),
-      `venue "${name}" expected a direct/unaliased violation, got: ${result.violations.join(' | ')}`,
-    )
+    if (name.startsWith('(c)')) {
+      assert.ok(
+        result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+        `venue "${name}" must red as unfenced SQL, got: ${result.violations.join(' | ')}`,
+      )
+    } else {
+      assert.ok(
+        result.violations.some((v) => /direct\/unaliased error_message projection forbidden/i.test(v)),
+        `venue "${name}" expected a direct/unaliased violation, got: ${result.violations.join(' | ')}`,
+      )
+    }
   }
   // …and alias-smuggling is equally closed in the same venues.
   for (const [name, wrap] of OWNER_VENUE_SAMPLES) {
@@ -2475,43 +2342,54 @@ test('owner repro (round 3): error_message projections stay closed in EVERY venu
   }
 })
 
-test('owner repro (round 3, c): unfenced SQL is BOTH flagged as unfenced and parsed', () => {
+test('owner repro (round 3, c) under the strict fence contract: unfenced SQL is a violation by SHAPE alone', () => {
   const md = `Run this on staging and record the outcome:\n\n${IDENTITY_SELECT}\n\nThen continue.\n`
-  // Anti-vacuity: the scanner must actually return the statement, not silently match nothing.
-  const statements = extractUnfencedSqlStatements(md)
-  assert.equal(statements.length, 1, `expected exactly one unfenced statement, got ${statements.length}`)
-  assert.equal(statements[0], IDENTITY_SELECT)
+  // Anti-vacuity: the scanner must actually return the shape, not silently match nothing.
+  const shapes = findUnfencedSelectFromShapes(md)
+  assert.equal(shapes.length, 1, `expected exactly one unfenced shape, got ${shapes.length}`)
+  assert.match(
+    shapes[0],
+    /^SELECT union_id, open_id, mobile, raw FROM directory_accounts;/,
+    `the reported shape must be the statement itself: ${shapes[0]}`,
+  )
 
   const result = assertNoRawIdentityProjections(md)
+  assert.equal(result.ok, false, 'unfenced SQL must red')
   assert.ok(
     result.violations.some((v) => /must live in a fenced code block/i.test(v)),
     `expected an unfenced-SQL violation, got: ${result.violations.join(' | ')}`,
   )
+  // …and the error_message guard enforces the SAME venue rule — neither guard can be satisfied
+  // while SQL sits outside a venue.
+  const errResult = assertErrorMessageProjectionsAreClosed(md)
+  assert.equal(errResult.ok, false, 'the error_message guard must apply the same venue rule')
   assert.ok(
-    result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
-    `unfenced SQL must also be PARSED, not merely flagged: ${result.violations.join(' | ')}`,
+    errResult.violations.some((v) => /must live in a fenced code block/i.test(v)),
+    `expected an unfenced-SQL violation from the error_message guard, got: ${errResult.violations.join(' | ')}`,
   )
 
-  // A statement broken across inline code spans is still one statement: the backticks are prose
-  // markup, not a code venue. Without stripping them the FROM target reads as `` `directory_…` ``
-  // and the whole statement disappears from the scanner.
+  // A statement broken across inline code spans is still an unfenced shape: the backticks are
+  // prose markup, not a code venue. Without stripping them the FROM target reads as
+  // `` `directory_…` `` and the shape disappears from the scanner.
   const splitSpan = 'Run `SELECT union_id, open_id, mobile, raw` from `directory_accounts` on staging.'
   assert.equal(
-    extractUnfencedSqlStatements(splitSpan).length,
+    findUnfencedSelectFromShapes(splitSpan).length,
     1,
-    `a statement split across inline code spans must still be found: ${splitSpan}`,
+    `a shape split across inline code spans must still be found: ${splitSpan}`,
   )
-  const split = assertNoRawIdentityProjections(splitSpan)
-  assert.ok(
-    split.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
-    `expected the split-span statement to be parsed, got: ${split.violations.join(' | ')}`,
+  assert.equal(
+    assertNoRawIdentityProjections(splitSpan).ok,
+    false,
+    'the split-span shape must red as unfenced SQL',
   )
 })
 
 test('positive control (round 3): a prose MENTION of a column is not a SQL projection', () => {
   // The runbook's own values-free ban lines and operator prose — every one of them names banned
-  // columns IN WORDS. If the SQL detection ever degrades into a bare column-name matcher, or the
-  // unfenced scanner starts swallowing sentences, these red.
+  // columns IN WORDS, and none of them has a `SELECT … FROM` shape. If the guards ever degrade
+  // into a bare column-name matcher, or the shape scan starts swallowing shape-free prose, these
+  // red. (A sentence that DOES carry the shape — «select the corp A rows from directory_accounts
+  // by hand» — is now flagged BY RULE: see the strict-fence-contract tests below.)
   const prose = [
     'PostgreSQL duplicate-key text can embed the real `external_key` / `unionId`; **never** ' +
       'project, print, grep, copy, or persist `error_message` / err-head into the evidence pack.',
@@ -2522,16 +2400,14 @@ test('positive control (round 3): a prose MENTION of a column is not a SQL proje
     'The sync derives `external_key` as the bare `unionId || openId || userId` — no corp scoping.',
     '**No** names, raw provider union/open/user IDs, DingTalk corp IDs, credentials, URLs, SQL ' +
       'error strings, or business values in operator evidence.',
-    // An English sentence that happens to use the words select/from is prose, not a statement.
-    'If the admin API is unavailable, select the corp A rows from directory_accounts by hand and ' +
-      'record only the counts.',
+    // FROM without SELECT is not the shape.
     'Every row in the table above should be read from directory_sync_runs.',
   ]
   for (const line of prose) {
     assert.equal(
-      extractUnfencedSqlStatements(line).length,
+      findUnfencedSelectFromShapes(line).length,
       0,
-      `prose must not be read as a SQL statement: ${line}`,
+      `shape-free prose must not be flagged: ${line}`,
     )
     const identity = assertNoRawIdentityProjections(line)
     assert.equal(
@@ -2608,16 +2484,21 @@ test('anti-vacuity (round 3): the full info string is parsed, and the runbook’
 })
 
 // ---------------------------------------------------------------------------
-// Gate reproductions (round 4 of PR #4500) — the "is this SQL?" discriminator was a VOCABULARY:
-// a statement whose projection list held one of ~30 English function words was exempted from
-// every guard. A vocabulary cannot decide this question — words that are also SQL had to be left
-// out of the list, so a leaking statement bought its exemption by using one; and the list was
-// consulted on the RAW text, so a word inside a string literal or a `--` comment exempted the
-// whole statement, while a `;` inside a literal cut the candidate before its FROM.
-// All of the samples below returned ok:true at head 2b6590e46.
+// STRICT FENCE CONTRACT (round 5 of PR #4500) — the "is this unfenced text SQL?" question is
+// RETIRED, because both answers to it failed:
+//   - round ≤3: a VOCABULARY (~30 English function words) — a leaking statement exempted itself
+//     with a word (all samples below returned ok:true at head 2b6590e46);
+//   - round 4: a STRUCTURAL test ("does the projection list resolve as an expression?") — which
+//     began mis-flagging ordinary prose: «Select status from directory_sync_runs after each run
+//     and record only the booleans.» was swallowed whole as a SQL statement (verified at
+//     28cc7c5a4), because `status` is one bare operand and `directory_sync_runs` resolves as a
+//     source.
+// Owner ruling: outside a scanned code venue, ANY `SELECT … FROM` shape is a violation, full
+// stop. Over-flagging is intended — the failure is loud, and the author's fix is to fence the
+// SQL or reword the sentence. Inside venues, the closed projection allowlist is unchanged.
 // ---------------------------------------------------------------------------
 
-/** Leaking statements, in ordinary body text, that exempted themselves through the vocabulary. */
+/** Leaking statements, in ordinary body text, that once exempted themselves through the vocabulary. */
 const ROUND4_VOCABULARY_BYPASSES = [
   // Words that are ALSO SQL and were therefore in the prose list: every() is a Postgres aggregate,
   // BOTH is trim()'s modifier, ANY() is a quantified comparison.
@@ -2631,58 +2512,57 @@ const ROUND4_VOCABULARY_BYPASSES = [
   ['stopword inside a -- comment', 'SELECT union_id, -- the key\n  mobile FROM directory_accounts;'],
 ]
 
-test('gate repro (round 4): a leaking statement cannot exempt itself with a WORD', () => {
+test('strict fence contract: a leaking statement cannot exempt itself with a WORD — there is no vocabulary left to consult', () => {
   for (const [name, sql] of ROUND4_VOCABULARY_BYPASSES) {
     const md = `Run this on staging and record the outcome:\n\n${sql}\n\nThen continue with step 4.\n`
-    assert.equal(
-      extractUnfencedSqlStatements(md).length,
-      1,
-      `"${name}" must be READ as one SQL statement, not skipped as prose`,
+    assert.ok(
+      findUnfencedSelectFromShapes(md).length >= 1,
+      `"${name}" must be flagged as an unfenced SELECT … FROM shape, not skipped as prose`,
     )
     const result = assertNoRawIdentityProjections(md)
     assert.equal(result.ok, false, `"${name}" must not bypass the identity guard`)
     assert.ok(
-      result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
-      `"${name}" must report the projection itself, got: ${result.violations.join(' | ')}`,
-    )
-    assert.ok(
       result.violations.some((v) => /must live in a fenced code block/i.test(v)),
-      `"${name}" must also be reported as unfenced SQL, got: ${result.violations.join(' | ')}`,
+      `"${name}" must be reported as unfenced SQL, got: ${result.violations.join(' | ')}`,
+    )
+    // …and the SAME statement inside a fence is decided by the projection allowlist, which
+    // rejects its identity projection — no word grants an exemption in either venue.
+    const fenced = assertNoRawIdentityProjections(['```sql', sql, '```'].join('\n'))
+    assert.equal(fenced.ok, false, `"${name}" fenced must still red on its projections`)
+    assert.ok(
+      fenced.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+      `"${name}" fenced must report the projection itself, got: ${fenced.violations.join(' | ')}`,
     )
   }
 })
 
-test('gate repro (round 4): the candidate is not cut at a `;` inside a literal, nor at a blank line', () => {
+test('strict fence contract: no literal can hide a statement from the shape scan, and no `;`/blank line rescues it', () => {
+  // These two used to need statement-extent cleverness; the shape rule flags both trivially.
   const cases = [
-    [
-      'semicolon inside a string literal',
-      "SELECT union_id, 'a;b' AS label FROM directory_accounts;",
-      `Run this:\n\nSELECT union_id, 'a;b' AS label FROM directory_accounts;\n\nThen continue.\n`,
-    ],
-    [
-      'statement spanning a blank line',
-      'SELECT union_id, open_id,\n\n  mobile\nFROM directory_accounts;',
-      `Run this:\n\nSELECT union_id, open_id,\n\n  mobile\nFROM directory_accounts;\n\nThen continue.\n`,
-    ],
+    ['semicolon inside a string literal', `Run this:\n\nSELECT union_id, 'a;b' AS label FROM directory_accounts;\n\nThen continue.\n`],
+    ['statement spanning a blank line', `Run this:\n\nSELECT union_id, open_id,\n\n  mobile\nFROM directory_accounts;\n\nThen continue.\n`],
   ]
-  for (const [name, expected, md] of cases) {
-    const statements = extractUnfencedSqlStatements(md)
-    assert.equal(statements.length, 1, `"${name}" must yield exactly one statement`)
-    assert.equal(statements[0], expected, `"${name}" must keep the whole statement, FROM included`)
-    assert.match(statements[0], /\bFROM\b/i, `"${name}" must not be truncated before its FROM`)
-    const result = assertNoRawIdentityProjections(md)
+  for (const [name, md] of cases) {
     assert.ok(
-      result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
-      `"${name}" must be parsed, got: ${result.violations.join(' | ')}`,
+      findUnfencedSelectFromShapes(md).length >= 1,
+      `"${name}" must be flagged as an unfenced SELECT … FROM shape`,
+    )
+    const result = assertNoRawIdentityProjections(md)
+    assert.equal(result.ok, false, `"${name}" must red`)
+    assert.ok(
+      result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+      `"${name}" must red as unfenced SQL, got: ${result.violations.join(' | ')}`,
     )
   }
+})
 
-  // The same masking inside the projection-list extractor: a `;` in a literal is text, so the
-  // list must not end there and every projection after it stays visible.
+test('fenced SQL parsing: a `;`/keyword inside a literal, a comment, or a DOLLAR-QUOTE is text, not a terminator', () => {
+  // A `;` in a literal is text, so the projection list must not end there and every projection
+  // after it stays visible to the guards.
   const lists = extractSelectLists("SELECT length(external_key) AS k, 'a ;b' AS label, mobile FROM directory_accounts;")
   assert.equal(lists.length, 1, 'one SELECT list expected')
   assert.match(lists[0], /mobile$/, `projection list was truncated at a quoted ";": ${JSON.stringify(lists[0])}`)
-  // …and a keyword inside a literal is text too, not a terminator.
+  // …and a keyword inside a comment is text too, not a terminator.
   const commented = extractSelectLists('SELECT union_id, -- FROM directory_sync_runs\n  mobile FROM directory_accounts;')
   assert.equal(commented.length, 1, 'one SELECT list expected')
   assert.match(
@@ -2690,66 +2570,91 @@ test('gate repro (round 4): the candidate is not cut at a `;` inside a literal, 
     /mobile$/,
     `projection list was truncated at a commented-out keyword: ${JSON.stringify(commented[0])}`,
   )
-})
 
-test('gate repro (round 4): the SQL/prose decision is structural, not a vocabulary', () => {
-  // Resolvable projection expressions — every form the runbook uses, plus the ones the vocabulary
-  // list used to exempt. None of these may be read as prose.
-  for (const expr of [
-    'union_id',
-    'a.union_id',
-    'status',
-    "'the key' AS label",
-    'mobile AS "the contact"',
-    'every(sync_enabled) AS all_enabled',
-    "trim(both ' ' from mobile) AS m",
-    'length(external_key) AS key_len',
-    "count(*) FILTER (WHERE integration_id = '<A>') AS corp_a_rows",
-    '(union_id IS NOT NULL) AS has_union',
-    'mobile m',
+  // Gate finding (round 5): PostgreSQL dollar-quoting was NOT masked, so a `;` or a FROM inside
+  // `$$…$$` / `$tag$…$tag$` truncated the projection list there — `mobile` after the dollar-quote
+  // was invisible to every projection guard (verified at 28cc7c5a4: the extracted list ended at
+  // `$$a`). The literal's interior must carry no structure, like any other literal.
+  for (const sql of [
+    'SELECT length(external_key) AS k, $$a ;b$$ AS label, mobile FROM directory_accounts;',
+    'SELECT length(external_key) AS k, $$note FROM x$$ AS label, mobile FROM directory_accounts;',
+    'SELECT length(external_key) AS k, $tag$a ;b$tag$ AS label, mobile FROM directory_accounts;',
   ]) {
-    assert.equal(
-      isResolvableProjectionExpression(expr),
-      true,
-      `must resolve as a SQL projection: ${expr}`,
+    const dollarLists = extractSelectLists(sql)
+    assert.equal(dollarLists.length, 1, `one SELECT list expected: ${sql}`)
+    assert.match(
+      normalizeSqlWs(dollarLists[0]),
+      /mobile$/,
+      `projection list was truncated inside a dollar-quote: ${JSON.stringify(dollarLists[0])}`,
+    )
+    const result = assertNoRawIdentityProjections(sql, { bareSql: true })
+    assert.equal(result.ok, false, `dollar-quoted sample must still red on its projections: ${sql}`)
+    assert.ok(
+      result.violations.some((v) => /raw identity\/PII column "mobile" is projected/i.test(v)),
+      `the projection AFTER the dollar-quote must be seen and rejected, got: ${result.violations.join(' | ')}`,
     )
   }
-  // Sentence fragments — bare words in a row resolve as no expression, whatever words they are.
-  for (const words of ['the corp A rows', 'only the counts', 'each of two integration ids', 'corp A rows by hand']) {
-    assert.equal(
-      isResolvableProjectionExpression(words),
-      false,
-      `a sentence fragment must not resolve as a SQL projection: ${words}`,
-    )
-  }
-  // …and the shape test is decided on the MASKED text: masking preserves length and structure.
+
+  // The masking itself: length-preserving, structure removed.
   const masked = maskSqlLiteralsAndComments("SELECT a, 'x;FROM y' AS b -- FROM z\n  FROM t;")
   assert.equal(masked.length, "SELECT a, 'x;FROM y' AS b -- FROM z\n  FROM t;".length, 'masking must preserve length')
   assert.equal(masked.includes(';FROM'), false, 'a literal must carry no structure')
-  assert.equal(looksLikeSqlStatement(masked), true, 'the masked statement still resolves as SQL')
+  const dollarSql = 'SELECT a, $$x;FROM y$$ AS b FROM t;'
+  const dollarMasked = maskSqlLiteralsAndComments(dollarSql)
+  assert.equal(dollarMasked.length, dollarSql.length, 'dollar-quote masking must preserve length')
+  assert.equal(dollarMasked.includes(';FROM'), false, 'a dollar-quoted literal must carry no structure')
+  assert.match(dollarMasked, /\$\$ {8}\$\$/, 'the $$ delimiters stay; only the interior is blanked')
 })
 
-test('positive control (round 4): prose still passes, and legitimate unfenced SQL is scanned, not condemned', () => {
-  // The fix must not degrade into "reject everything": operator prose that names the banned
-  // columns in words stays legal…
-  const prose = [
+test('strict fence contract: prose WITH a SELECT … FROM shape is flagged LOUDLY — over-strictness is intended', () => {
+  // The round-5 gate sample plus the two sentences the earlier cuts fought to keep legal. Under
+  // the strict contract they are violations BY RULE: the failure is visible, and the author's
+  // fix is to fence the SQL or reword the sentence.
+  const flagged = [
+    'Select status from directory_sync_runs after each run and record only the booleans.',
     'If the admin API is unavailable, select the corp A rows from directory_accounts by hand and ' +
       'record only the counts.',
     'Record only the counts; do not select the union ids or the mobile numbers from either corp.',
+  ]
+  for (const line of flagged) {
+    assert.equal(findUnfencedSelectFromShapes(line).length, 1, `the strict contract must flag: ${line}`)
+    const identity = assertNoRawIdentityProjections(line)
+    assert.equal(identity.ok, false, `the strict contract must red: ${line}`)
+    assert.ok(
+      identity.violations.some((v) => /must live in a fenced code block/i.test(v)),
+      `expected the strict-fence violation, got: ${identity.violations.join(' | ')}`,
+    )
+    const errMessage = assertErrorMessageProjectionsAreClosed(line)
+    assert.equal(errMessage.ok, false, `both guards enforce the venue rule: ${line}`)
+  }
+
+  // The documented fix works: fenced, the venue rule stops firing and the projection allowlist
+  // takes over — `SELECT status FROM directory_sync_runs` projects only the allowed bare column.
+  const fenced = ['```sql', 'SELECT status FROM directory_sync_runs;', '```'].join('\n')
+  assert.equal(findUnfencedSelectFromShapes(fenced).length, 0, 'fenced SQL is not an unfenced shape')
+  assert.equal(assertNoRawIdentityProjections(fenced).ok, true, 'the fenced fix must pass')
+  assert.equal(assertErrorMessageProjectionsAreClosed(fenced).ok, true, 'the fenced fix must pass')
+})
+
+test('positive control (strict fence contract): shape-free prose passes — no vocabulary is consulted in either direction', () => {
+  // The guard must not degrade into "reject everything": prose that names banned columns in
+  // words, uses FROM without SELECT, or uses SELECT without FROM, all stays legal.
+  const prose = [
     'The sync derives `external_key` as the bare `unionId || openId || userId` — no corp scoping.',
     'Every row in the table above should be read from directory_sync_runs.',
+    'The operator may select either corp to create first.',
+    'Read the outcome — closed classifications only.',
+    'the corp A rows / only the counts / each of two integration ids',
   ]
   for (const line of prose) {
-    assert.equal(extractUnfencedSqlStatements(line).length, 0, `prose must not be read as SQL: ${line}`)
+    assert.equal(findUnfencedSelectFromShapes(line).length, 0, `shape-free prose must not be flagged: ${line}`)
     const identity = assertNoRawIdentityProjections(line)
     assert.equal(identity.ok, true, identity.ok ? 'ok' : `prose must stay legal:\n- ${identity.violations.join('\n- ')}`)
   }
 
-  // …and a values-free statement that IS read as SQL is reported ONLY for its venue, never for its
-  // projections: the discriminator decides where a statement is, the allowlist decides what it may
-  // project, and the two must not be conflated.
+  // A values-free statement outside a venue is reported ONLY for its venue, never for its
+  // projections (nothing outside a venue is parsed as SQL)…
   const legit = `Run this on staging:\n\nSELECT status, ${ALLOWED_DUP}, ${ALLOWED_CONSTRAINT} FROM directory_sync_runs;\n`
-  assert.equal(extractUnfencedSqlStatements(legit).length, 1, 'the values-free statement must be READ as SQL')
   const result = assertNoRawIdentityProjections(legit)
   assert.equal(result.ok, false, 'unfenced SQL is a venue violation by construction')
   assert.deepEqual(
@@ -2757,10 +2662,19 @@ test('positive control (round 4): prose still passes, and legitimate unfenced SQ
     [],
     `a values-free statement must raise no projection violation: ${result.violations.join(' | ')}`,
   )
+  // …and the SAME statement inside a fence passes both guards untouched.
+  const fenced = ['```sql', `SELECT status, ${ALLOWED_DUP}, ${ALLOWED_CONSTRAINT} FROM directory_sync_runs;`, '```'].join('\n')
+  const fencedIdentity = assertNoRawIdentityProjections(fenced)
   assert.equal(
-    assertErrorMessageProjectionsAreClosed(legit).ok,
+    fencedIdentity.ok,
     true,
-    'the two closed booleans stay legal wherever they are written',
+    fencedIdentity.ok ? 'ok' : `the fenced closed booleans must pass:\n- ${fencedIdentity.violations.join('\n- ')}`,
+  )
+  const fencedErr = assertErrorMessageProjectionsAreClosed(fenced)
+  assert.equal(
+    fencedErr.ok,
+    true,
+    fencedErr.ok ? 'ok' : `the fenced closed booleans must pass:\n- ${fencedErr.violations.join('\n- ')}`,
   )
 })
 
