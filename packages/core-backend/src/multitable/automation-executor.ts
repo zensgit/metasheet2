@@ -2875,11 +2875,14 @@ export class AutomationExecutor {
       const approval = (trig.approval && typeof trig.approval === 'object' ? trig.approval : {}) as Record<string, unknown>
       const instanceId = typeof approval.instanceId === 'string' ? approval.instanceId.trim() : ''
       const templateId = typeof approval.templateId === 'string' ? approval.templateId.trim() : ''
+      const templateVersionId = typeof approval.templateVersionId === 'string'
+        ? approval.templateVersionId.trim()
+        : ''
       const baseEventId = typeof trig.eventId === 'string' && trig.eventId.trim()
         ? trig.eventId.trim()
         : (typeof trig._eventId === 'string' ? trig._eventId.trim() : '')
-      if (!instanceId || !templateId || !baseEventId) {
-        return { actionType, status: 'failed', error: 'write_approval_form_values requires an approval completion event carrying instanceId + templateId + a stable eventId' }
+      if (!instanceId || !templateId || !templateVersionId || !baseEventId) {
+        return { actionType, status: 'failed', error: 'write_approval_form_values requires an approval completion event carrying instanceId + templateId + templateVersionId + a stable eventId' }
       }
       // D1 hard gate: writeback fires on APPROVED completions only — regardless of the rule's outcome filter.
       const transition = (trig.transition && typeof trig.transition === 'object' ? trig.transition : {}) as Record<string, unknown>
@@ -2893,6 +2896,12 @@ export class AutomationExecutor {
       if (!normalized.ok) {
         return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
       }
+      const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+        ? config.sourceTemplateVersionId.trim()
+        : ''
+      if (!confirmedVersionId || confirmedVersionId !== templateVersionId) {
+        return { actionType, status: 'failed', error: 'fwb_rejected:source_template_version' }
+      }
       const gates = this.deps.fwbGateChecks ?? DEFAULT_DENY_FWB_GATES
       // Per-action identity: the SAME §2.1 derivation Class-A uses — structuralPath keeps two
       // byte-identical FWB actions in one rule distinct (config-hash identity would collapse them).
@@ -2902,7 +2911,11 @@ export class AutomationExecutor {
 
       const result = await this.withTransaction(context.sheetId, async (query) => {
         // D4: the immutable form snapshot is the ONLY value source, read server-side inside the txn.
-        const snapRes = await query('SELECT form_snapshot FROM approval_instances WHERE id = $1', [instanceId])
+        const snapRes = await query(
+          `SELECT form_snapshot FROM approval_instances
+            WHERE id = $1 AND template_id = $2 AND template_version_id = $3 AND status = 'approved'`,
+          [instanceId, templateId, templateVersionId],
+        )
         const snapRow = snapRes.rows[0] as { form_snapshot?: unknown } | undefined
         if (!snapRow) throw new Error('fwb_rejected:instance_not_found')
         const rawSnap = snapRow.form_snapshot
@@ -2972,7 +2985,12 @@ export class AutomationExecutor {
       }
       return { actionType, status: 'failed', error: 'fwb_rejected:mapping' }
     } catch (err) {
-      return { actionType, status: 'failed', error: err instanceof Error ? err.message : String(err) }
+      const message = err instanceof Error ? err.message : String(err)
+      if (message.startsWith('fwb_rejected:') || message.startsWith('write_approval_form_values requires')) {
+        return { actionType, status: 'failed', error: message }
+      }
+      logger.warn('write_approval_form_values execution failed')
+      return { actionType, status: 'failed', error: 'fwb_execution_failed' }
     }
   }
 

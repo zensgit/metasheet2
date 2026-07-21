@@ -10,8 +10,9 @@
  *   2. fail-closed structural validation of the mapping config — the server-side mirror of
  *      `apps/web/src/approvals/fwbMappingConfig.ts` (same issue codes; the FE model is UX, THIS is the
  *      unbypassable boundary — its own header says "the server re-validates on save").
- *   3. the §11 Q6 gate-3 confirmation hash: sha256 over the CANONICALIZED `{templateId, targetSheetId,
- *      mappings}` triple. Save requires the submitted `confirmationHash` to equal the server-derived one;
+ *   3. the §11 Q6 gate-3 confirmation hash: sha256 over the CANONICALIZED
+ *      `{templateId, sourceTemplateVersionId, targetSheetId, mappings}` subject. Save requires the
+ *      submitted `confirmationHash` to equal the server-derived one;
  *      execute re-derives from the CURRENT persisted rule row — so "任一映射项或目标（base/sheet/模板…）
  *      变化都令确认失效" holds by construction (a config no longer matching its hash denies G4), and the
  *      recorded confirmation is identifiers+hash only, never values (Q6: 审计只记标识不记值).
@@ -95,6 +96,8 @@ export function normalizeFwbMappings(raw: unknown):
 export interface FwbConfirmationSubject {
   /** the approval template the rule listens on (trigger_config.templateId). */
   templateId: string
+  /** exact published form schema whose field meanings were explicitly confirmed. */
+  sourceTemplateVersionId: string
   /** FWB-1 target = the rule's OWN sheet (lock D2) — bound into the hash so a sheet move invalidates. */
   targetSheetId: string
   mappings: readonly FwbFieldMapping[]
@@ -108,6 +111,7 @@ export function deriveFwbConfirmationHash(subject: FwbConfirmationSubject): stri
   return createHash('sha256')
     .update(canonicalizeConfig({
       templateId: subject.templateId,
+      sourceTemplateVersionId: subject.sourceTemplateVersionId,
       targetSheetId: subject.targetSheetId,
       mappings: subject.mappings,
     }))
@@ -190,6 +194,12 @@ export function buildProductionFwbGateChecks(deps: ProductionFwbGateDeps): FwbGa
       const triggerConfig = parseJsonObject(row.trigger_config)
       const templateId = typeof triggerConfig?.templateId === 'string' ? triggerConfig.templateId : ''
       if (!templateId) return false
+      const templateResult = await deps.queryFn(
+        'SELECT active_version_id FROM approval_templates WHERE id = $1',
+        [templateId],
+      )
+      const activeVersionId = (templateResult.rows[0] as { active_version_id?: unknown } | undefined)?.active_version_id
+      if (typeof activeVersionId !== 'string' || !activeVersionId) return false
       const configs = collectFwbActionConfigs(
         typeof row.action_type === 'string' ? row.action_type : null,
         parseJsonObject(row.action_config),
@@ -199,9 +209,14 @@ export function buildProductionFwbGateChecks(deps: ProductionFwbGateDeps): FwbGa
       for (const config of configs) {
         const normalized = normalizeFwbMappings(config.mappings)
         if (!normalized.ok) return false
+        const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+          ? config.sourceTemplateVersionId
+          : ''
+        if (confirmedVersionId !== activeVersionId) return false
         const stored = typeof config.confirmationHash === 'string' ? config.confirmationHash : ''
         const expected = deriveFwbConfirmationHash({
           templateId,
+          sourceTemplateVersionId: confirmedVersionId,
           targetSheetId: row.sheet_id,
           mappings: normalized.mappings,
         })

@@ -53,14 +53,25 @@ const queryFn = ((sqlText: string, params?: unknown[]) => poolManager.get().quer
 let svc: AutomationService
 let approvals: ApprovalProductService
 let templateId = ''
+let templateVersionId = ''
 const ruleIds: string[] = []
 
 const MAPPINGS = [
   { formFieldId: 'summary', targetFieldId: F_TITLE, targetType: 'text' as const },
   { formFieldId: 'amount', targetFieldId: F_AMOUNT, targetType: 'number' as const },
 ]
-const confirmation = (mappings: unknown = MAPPINGS) =>
-  deriveFwbConfirmationHash({ templateId, targetSheetId: SHEET_ID, mappings: mappings as never })
+const confirmation = (mappings: unknown = MAPPINGS, sourceVersionId = templateVersionId) =>
+  deriveFwbConfirmationHash({
+    templateId,
+    sourceTemplateVersionId: sourceVersionId,
+    targetSheetId: SHEET_ID,
+    mappings: mappings as never,
+  })
+const fwbConfig = (
+  mappings: unknown = MAPPINGS,
+  sourceVersionId = templateVersionId,
+  confirmationHash = confirmation(mappings, sourceVersionId),
+) => ({ mappings, sourceTemplateVersionId: sourceVersionId, confirmationHash })
 
 function setFlags(fwb: boolean, durable: boolean) {
   if (fwb) process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
@@ -118,7 +129,7 @@ function completionEvent(instanceId: string, eventId: string) {
     eventType: 'approval.approved',
     eventId,
     occurredAt: new Date().toISOString(),
-    approval: { instanceId, templateId, status: 'approved' },
+    approval: { instanceId, templateId, templateVersionId, status: 'approved' },
     transition: { action: 'approve', fromStatus: 'pending', toStatus: 'approved', fromVersion: 1, toVersion: 2, nodeKey: 'approval_1' },
     requester: { id: REQUESTER, name: REQUESTER },
     actor: null, // §2.2: auto/system completion has no human actor — the write identity is the rule creator
@@ -198,6 +209,8 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     const template = await approvals.createTemplate(approvalTemplateRequest() as never)
     templateId = (template as { id: string }).id
     await approvals.publishTemplate(templateId, { policy: { allowRevoke: true } } as never)
+    const activeVersion = await q('SELECT active_version_id FROM approval_templates WHERE id = $1', [templateId])
+    templateVersionId = String((activeVersion.rows[0] as { active_version_id: string }).active_version_id)
 
     svc = new AutomationService(integrationEventBus, db as never, queryFn)
   })
@@ -234,59 +247,72 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       ...fwbBase,
       triggerType: 'record.created',
       triggerConfig: {},
-      actionConfig: { mappings: MAPPINGS, confirmationHash: confirmation() },
+      actionConfig: fwbConfig(),
     } as never)).rejects.toThrow(/only allowed on approval\.completed rules/)
     // D1: outcomes must be exactly ['approved']
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
       triggerConfig: { templateId, outcomes: ['approved', 'rejected'] },
-      actionConfig: { mappings: MAPPINGS, confirmationHash: confirmation() },
+      actionConfig: fwbConfig(),
     } as never)).rejects.toThrow(/outcomes = \["approved"\]/)
     // empty config
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: [], confirmationHash: confirmation([]) },
+      actionConfig: fwbConfig([]),
     } as never)).rejects.toThrow(/empty_config/)
     // duplicate target
     const dup = [MAPPINGS[0], { ...MAPPINGS[1], targetFieldId: F_TITLE, targetType: 'text' as const }]
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: dup, confirmationHash: confirmation(dup) },
+      actionConfig: fwbConfig(dup),
     } as never)).rejects.toThrow(/duplicate_target/)
     // non-v1 target type
     const badType = [{ formFieldId: 'summary', targetFieldId: F_TITLE, targetType: 'attachment' }]
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: badType, confirmationHash: confirmation(badType) },
+      actionConfig: fwbConfig(badType),
     } as never)).rejects.toThrow(/unsupported_target_type/)
     // select without options
     const selNoOpts = [{ formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select' }]
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: selNoOpts, confirmationHash: confirmation(selNoOpts) },
+      actionConfig: fwbConfig(selNoOpts),
     } as never)).rejects.toThrow(/select_options_missing/)
     // select option outside the field's configured set (D6: closed vocabulary)
     const selBadOpt = [{ formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select', selectOptions: ['NOT_ON_FIELD'] }]
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: selBadOpt, confirmationHash: confirmation(selBadOpt) },
+      actionConfig: fwbConfig(selBadOpt),
     } as never)).rejects.toThrow(/select_option_not_on_field/)
     // unknown target field
     const unknownTarget = [{ formFieldId: 'summary', targetFieldId: 'fld_does_not_exist', targetType: 'text' }]
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: unknownTarget, confirmationHash: confirmation(unknownTarget) },
+      actionConfig: fwbConfig(unknownTarget),
     } as never)).rejects.toThrow(/unknown_target_field/)
+    // unknown source field is rejected at save, not deferred until an approval completes.
+    const unknownSource = [{ formFieldId: 'source_does_not_exist', targetFieldId: F_TITLE, targetType: 'text' }]
+    await expect(svc.createRule(SHEET_ID, {
+      ...fwbBase,
+      actionConfig: fwbConfig(unknownSource),
+    } as never)).rejects.toThrow(/unknown_form_field/)
+    // The declassification confirmation is version-bound. A newly published schema must be reviewed
+    // and confirmed rather than silently inheriting the old template-level hash.
+    const staleVersionId = randomUUID()
+    await expect(svc.createRule(SHEET_ID, {
+      ...fwbBase,
+      actionConfig: fwbConfig(MAPPINGS, staleVersionId),
+    } as never)).rejects.toThrow(/sourceTemplateVersionId must match/)
     // type mismatch (number field declared text)
     const mismatch = [{ formFieldId: 'amount', targetFieldId: F_AMOUNT, targetType: 'text' }]
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: mismatch, confirmationHash: confirmation(mismatch) },
+      actionConfig: fwbConfig(mismatch),
     } as never)).rejects.toThrow(/target_type_mismatch/)
     // Q6 gate 3: confirmation hash must match the server-derived hash of the ACTUAL config
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
-      actionConfig: { mappings: MAPPINGS, confirmationHash: 'deadbeef' },
+      actionConfig: fwbConfig(MAPPINGS, templateVersionId, 'deadbeef'),
     } as never)).rejects.toThrow(/confirmationHash must match/)
     // Q6 gate 1: non-admin creator without canManageSheetAccess (REQUESTER holds approvals:write only —
     // grant approvals:read so the earlier trigger legs pass and THIS gate is the one that rejects)
@@ -294,7 +320,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
       createdBy: REQUESTER,
-      actionConfig: { mappings: MAPPINGS, confirmationHash: confirmation() },
+      actionConfig: fwbConfig(),
     } as never)).rejects.toThrow(/canManageSheetAccess/)
   })
 
@@ -304,7 +330,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       triggerType: 'approval.completed',
       triggerConfig: { templateId, outcomes: ['approved'] },
       actionType: 'write_approval_form_values',
-      actionConfig: { mappings: MAPPINGS, confirmationHash: confirmation() },
+      actionConfig: fwbConfig(),
       createdBy: CREATOR,
     } as never)
     ruleIds.push((rule as { id: string }).id)
@@ -444,7 +470,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       _automationDepth: 0,
       eventId,
       eventType: 'approval.approved',
-      approval: { instanceId, templateId },
+      approval: { instanceId, templateId, templateVersionId },
       transition: { action: 'approve', fromStatus: 'pending', toStatus: 'approved' },
       requester: { id: REQUESTER, name: REQUESTER },
     }
@@ -481,7 +507,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
 
   const fwbAction = () => ({
     type: 'write_approval_form_values',
-    config: { mappings: MAPPINGS, confirmationHash: confirmation() },
+    config: fwbConfig() as Record<string, unknown>,
   })
 
   test('ATOMICITY golden: injected post-handler abort erases record + revision + claim + outbox together; no-injection control commits all four', async () => {
@@ -494,7 +520,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       const injectingTransaction: NonNullable<AutomationDeps['transaction']> = async (handler) =>
         realTransaction(async (client) => {
           const result = await handler(client)
-          if (inject) throw new Error('injected post-handler abort (before COMMIT)')
+          if (inject) throw new Error('injected post-handler abort host=db.internal user=secret_owner')
           return result
         })
       const executor = buildExecutor({ transaction: injectingTransaction })
@@ -502,7 +528,8 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       const beforeCount = Number(((await q('SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1', [SHEET_ID])).rows[0] as { c: number }).c)
       const run1 = await executor.execute(executorRule(ruleId, [fwbAction()]), triggerPayload(instanceD, `evt_fwbact_${TS}_atomic1`))
       expect(run1.steps[0]?.status).toBe('failed')
-      expect(String(run1.steps[0]?.error ?? '')).toMatch(/injected post-handler abort/)
+      expect(String(run1.steps[0]?.error ?? '')).toBe('fwb_execution_failed')
+      expect(String(run1.steps[0]?.error ?? '')).not.toMatch(/db\.internal|secret_owner|injected/)
       // all four gone together: no record, no revision (checked via record absence), no claim, no outbox
       const afterAbort = Number(((await q('SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1', [SHEET_ID])).rows[0] as { c: number }).c)
       expect(afterAbort).toBe(beforeCount)
@@ -560,6 +587,16 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       })
       expect(runC.status).toBe('failed')
       expect(String(runC.error ?? '')).toMatch(/rule-execution identity/)
+
+      // (d) the event's frozen template version must match the explicitly confirmed config version.
+      const staleEvent = triggerPayload(instanceE, `evt_fwbact_${TS}_stale_version`)
+      ;(staleEvent.approval as Record<string, unknown>).templateVersionId = randomUUID()
+      const runD = await executor.execute(
+        executorRule(`rule_fwbact_stalever_${TS}`, [fwbAction()]),
+        staleEvent,
+      )
+      expect(runD.steps[0]?.status).toBe('failed')
+      expect(String(runD.steps[0]?.error ?? '')).toBe('fwb_rejected:source_template_version')
 
       const after = Number(((await q('SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1', [SHEET_ID])).rows[0] as { c: number }).c)
       expect(after).toBe(before)

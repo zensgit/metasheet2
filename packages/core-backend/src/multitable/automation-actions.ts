@@ -68,9 +68,11 @@ export interface WriteApprovalFormValuesConfig {
     /** required for 'select': the CLOSED allowed-option set (lock D6 — no create-on-write). */
     selectOptions?: string[]
   }>
+  /** Exact published template version whose source-field meanings the configurer confirmed. */
+  sourceTemplateVersionId: string
   /**
    * §11 Q6 gate-3 explicit confirmation, BOUND to the actual config: the server-derived sha256 of the
-   * canonicalized {templateId, targetSheetId, mappings}. Save rejects a mismatch; execute re-derives from
+   * canonicalized {templateId, sourceTemplateVersionId, targetSheetId, mappings}. Save rejects a mismatch; execute re-derives from
    * the persisted row, so any config/target/template change invalidates the confirmation.
    */
   confirmationHash: string

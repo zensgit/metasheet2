@@ -1916,8 +1916,10 @@ export class AutomationService {
    *   - target-schema truth: every targetFieldId exists on the RULE's sheet, its meta_fields.type equals
    *     the declared targetType, and select options are ⊆ the field's configured option values (D6
    *     closed vocabulary — `select_option_not_on_field`);
+   *   - source truth: every formFieldId exists in the currently active template version, and the
+   *     action explicitly binds that version; a new publish therefore requires confirmation again;
    *   - Q6 gate 3: the submitted confirmationHash equals the server-derived hash over
-   *     {templateId, targetSheetId, normalized mappings} — any drift invalidates the confirmation;
+   *     {templateId, sourceTemplateVersionId, targetSheetId, normalized mappings} — any drift invalidates the confirmation;
    *   - Q6 gate 1 at save: the creator is a platform admin OR holds canManageSheetAccess on the target
    *     sheet (re-checked at execute time by the bound production gates).
    */
@@ -1946,10 +1948,49 @@ export class AutomationService {
         return `${FWB_ACTION_TYPE} requires trigger_config.outcomes = ["approved"] (FWB0 D1 — writeback fires on approved completions only)`
       }
     }
+    const versionResult = await this.queryFn(
+      `SELECT t.active_version_id, v.form_schema
+         FROM approval_templates t
+         JOIN approval_template_versions v ON v.id = t.active_version_id
+        WHERE t.id = $1`,
+      [templateId],
+    )
+    const versionRow = versionResult.rows[0] as {
+      active_version_id?: unknown
+      form_schema?: unknown
+    } | undefined
+    const activeVersionId = typeof versionRow?.active_version_id === 'string'
+      ? versionRow.active_version_id
+      : ''
+    if (!activeVersionId) return `${FWB_ACTION_TYPE} source template has no active version`
+    const rawSchema = typeof versionRow?.form_schema === 'string'
+      ? (() => { try { return JSON.parse(versionRow.form_schema as string) as unknown } catch { return null } })()
+      : versionRow?.form_schema
+    const schema = rawSchema && typeof rawSchema === 'object' && !Array.isArray(rawSchema)
+      ? rawSchema as { fields?: unknown }
+      : null
+    const sourceFieldIds = new Set(
+      (Array.isArray(schema?.fields) ? schema.fields : [])
+        .map((field) => field && typeof field === 'object' && !Array.isArray(field)
+          ? (field as { id?: unknown }).id
+          : null)
+        .filter((id): id is string => typeof id === 'string' && /[!-~]/.test(id)),
+    )
     for (const config of configs) {
       const normalized = normalizeFwbMappings(config.mappings)
       if (!normalized.ok) {
         return `${FWB_ACTION_TYPE} mapping config invalid: ${(normalized as { issue: string }).issue}`
+      }
+      for (const mapping of normalized.mappings) {
+        if (!sourceFieldIds.has(mapping.formFieldId)) {
+          return `${FWB_ACTION_TYPE} mapping invalid: unknown_form_field`
+        }
+      }
+      const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+        ? config.sourceTemplateVersionId.trim()
+        : ''
+      if (confirmedVersionId !== activeVersionId) {
+        return `${FWB_ACTION_TYPE} sourceTemplateVersionId must match the active template version`
       }
       // target-schema truth on the rule's OWN sheet (FWB-1 target, lock D2)
       const targetIds = normalized.mappings.map((m) => m.targetFieldId)
@@ -1984,7 +2025,12 @@ export class AutomationService {
       }
       // Q6 gate 3: recorded confirmation = hash over the canonicalized subject
       const stored = typeof config.confirmationHash === 'string' ? config.confirmationHash : ''
-      const expected = deriveFwbConfirmationHash({ templateId, targetSheetId: sheetId, mappings: normalized.mappings })
+      const expected = deriveFwbConfirmationHash({
+        templateId,
+        sourceTemplateVersionId: confirmedVersionId,
+        targetSheetId: sheetId,
+        mappings: normalized.mappings,
+      })
       if (stored !== expected) {
         return `${FWB_ACTION_TYPE} actionConfig.confirmationHash must match the server-derived confirmation hash (FWB0 §11 Q6 gate 3)`
       }
