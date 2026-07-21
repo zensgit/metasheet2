@@ -754,8 +754,13 @@ describe('Attendance self-service dashboard', () => {
     expect(rulesIndex).toBeLessThan(filtersIndex)
     // lock §5: the history disclosure sits immediately before historical content.
     expect(filtersIndex).toBeLessThan(summaryIndex)
-    // lock §4.3 item 6: status guide is the last, lowest-frequency surface.
+    // lock §4.3 item 6: status guide is the last, lowest-frequency surface — pinned against EVERY
+    // historical section, not just the requests summary (review NIT: under-pinned order).
+    const anomaliesIndex = domOrderIndex(container!, '#attendance-overview-anomalies')
+    const requestReportIndex = domOrderIndex(container!, '#attendance-overview-request-report')
     expect(summaryIndex).toBeLessThan(guideIndex)
+    expect(anomaliesIndex).toBeLessThan(guideIndex)
+    expect(requestReportIndex).toBeLessThan(guideIndex)
 
     // §9.2: exactly one primary recommended action across the whole page.
     expect(container!.querySelectorAll('[data-attendance-overview-attention-action]')).toHaveLength(1)
@@ -787,6 +792,37 @@ describe('Attendance self-service dashboard', () => {
     // state; the attention band must not render a second actionable control.
     expect(container!.querySelectorAll('[data-attendance-overview-attention-action]')).toHaveLength(0)
     expect(container!.textContent).toContain('Retry refresh')
+  })
+
+  it('W2/4355 negative scoping: a NON-punch error must never occupy the punch_failure attention slot', async () => {
+    // Review P3-a: punchFailureActive = statusKind==='error' AND statusSource==='punch'. The shared
+    // status banner is reused by refresh/admin/import/save paths with source=null — a regression that
+    // widens statusSource to every error must turn THIS leg red (the sibling punch test alone cannot:
+    // it only ever drives a punch error).
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // After a clean mount, make every attendance GET fail, then drive the overview Refresh action —
+    // a non-punch setStatus(error) path (source=null) through the SHARED banner.
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      jsonResponse(500, { ok: false, error: { code: 'INTERNAL', message: 'refresh boom' } }))
+
+    const details = container!.querySelector('[data-attendance-history-filters]') as HTMLDetailsElement
+    details.open = true
+    details.dispatchEvent(new Event('toggle'))
+    await flushUi()
+    findButton(container!, 'Refresh').click()
+    await flushUi(4)
+
+    // Positive control INSIDE the negative test: the refresh failure genuinely reached the shared
+    // banner (its retry control renders the refresh-overview action label) — without this the leg
+    // could pass vacuously with no error at all.
+    expect(container!.textContent).toContain('Retry refresh')
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention).toBeTruthy()
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).not.toBe('punch_failure')
   })
 
   it('W2/4355 OD-O2: history filters start collapsed, expand without resetting values or firing new requests', async () => {
