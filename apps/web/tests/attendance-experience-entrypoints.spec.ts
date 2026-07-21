@@ -67,7 +67,8 @@ vi.mock('../src/views/attendance/AttendanceAdminCenter.vue', () => ({
         default: '',
       },
     },
-    template: '<div data-view="admin" :data-section="initialSectionId"></div>',
+    emits: ['clear-section'],
+    template: '<div data-view="admin" :data-section="initialSectionId"><button data-return-admin-home @click="$emit(\'clear-section\')">Home</button></div>',
   }),
 }))
 
@@ -149,6 +150,36 @@ describe('Attendance experience entrypoints', () => {
     expect(adminView?.dataset.section).toBe('attendance-admin-assignments')
   })
 
+  it('clears a deep-linked section through the router when returning to management home', async () => {
+    routeState.query = { tab: 'admin', section: 'attendance-admin-assignments' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-return-admin-home]')!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenLastCalledWith({ query: { tab: 'admin' } })
+    expect(routeState.query).toEqual({ tab: 'admin' })
+    expect(container!.querySelector<HTMLElement>('[data-view="admin"]')?.dataset.section).toBe('')
+  })
+
+  it('returns the dedicated import entrypoint to the management home tab', async () => {
+    routeState.query = { tab: 'import' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-return-admin-home]')!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenLastCalledWith({ query: { tab: 'admin' } })
+    expect(routeState.query).toEqual({ tab: 'admin' })
+    expect(container!.querySelector<HTMLElement>('[data-view="admin"]')?.dataset.section).toBe('')
+  })
+
   it('routes the attendance approval queue shortcut into the overview requests section', async () => {
     routeState.query = { section: 'attendance-overview-requests', requestId: 'request-123' }
 
@@ -160,6 +191,18 @@ describe('Attendance experience entrypoints', () => {
     expect(overviewView).toBeTruthy()
     expect(overviewView?.dataset.section).toBe('attendance-overview-requests')
     expect(overviewView?.dataset.requestId).toBe('request-123')
+  })
+
+  it('routes the attendance anomaly shortcut into the overview anomaly section', async () => {
+    routeState.query = { section: 'attendance-overview-anomalies' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const overviewView = container!.querySelector<HTMLElement>('[data-view="overview"]')
+    expect(overviewView).toBeTruthy()
+    expect(overviewView?.dataset.section).toBe('attendance-overview-anomalies')
   })
 
   it('routes the reports entrypoint into a dedicated reports view', async () => {

@@ -1301,84 +1301,51 @@
           </div>
           <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
           <template v-else>
-            <div v-if="visibleRecentAdminSectionNavItems.length > 0" class="attendance__admin-shortcuts">
-              <div class="attendance__admin-shortcuts-header">
-                <div class="attendance__admin-shortcuts-title">
-                  <strong>{{ tr('Recent', '最近访问') }}</strong>
-                  <span>{{ tr('Jump back without searching the left rail.', '不用再回左侧查找，直接跳转。') }}</span>
-                </div>
-                <button
-                  class="attendance__btn attendance__btn--inline"
-                  type="button"
-                  data-admin-shortcuts-clear="true"
-                  @click="clearRecentAdminSections"
-                >
-                  {{ tr('Clear', '清空') }}
-                </button>
-              </div>
-              <div class="attendance__admin-shortcuts-items">
-                <button
-                  v-for="item in visibleRecentAdminSectionNavItems"
-                  :key="`shortcut-${item.id}`"
-                  class="attendance__admin-shortcut"
-                  :class="{ 'attendance__admin-shortcut--active': adminActiveSectionId === item.id }"
-                  :data-admin-shortcut="item.id"
-                  type="button"
-                  @click="selectAdminSection(item.id)"
-                >
-                  {{ item.contextLabel }}
-                </button>
-              </div>
-            </div>
-            <div class="attendance__admin-task-home" data-admin-task-home="true">
-              <div class="attendance__admin-task-home-header">
-                <div>
-                  <span class="attendance__admin-task-home-eyebrow">
-                    {{ tr('Admin workflow', '管理流程') }}
-                  </span>
-                  <h4>{{ tr('Start from the daily task, not the full settings list', '从日常任务开始，而不是从完整配置列表开始') }}</h4>
-                </div>
-                <span class="attendance__admin-task-home-hint">
-                  {{ tr('Detailed configuration remains available in the left rail.', '详细配置仍可从左侧区块进入。') }}
-                </span>
-              </div>
-              <div class="attendance__admin-task-grid">
-                <section
-                  v-for="group in adminTaskHomeGroups"
-                  :key="group.key"
-                  class="attendance__admin-task-group"
-                >
-                  <div class="attendance__admin-task-copy">
-                    <strong>{{ group.title }}</strong>
-                    <span>{{ group.detail }}</span>
+            <div
+              v-show="adminTaskHomeOpen"
+              class="attendance__admin-home-context"
+              data-admin-home-context="true"
+            >
+              <div v-if="visibleRecentAdminSectionNavItems.length > 0" class="attendance__admin-shortcuts">
+                <div class="attendance__admin-shortcuts-header">
+                  <div class="attendance__admin-shortcuts-title">
+                    <strong>{{ tr('Recent', '最近访问') }}</strong>
+                    <span>{{ tr('Recently opened attendance workspaces', '最近打开的考勤工作区') }}</span>
                   </div>
-                  <div class="attendance__admin-task-actions">
-                    <a
-                      v-for="action in group.linkActions"
-                      :key="action.key"
-                      class="attendance__btn attendance__btn--inline attendance__admin-task-action"
-                      :class="{ 'attendance__btn--primary': action.primary }"
-                      :data-admin-task-action="action.key"
-                      :href="action.href"
-                    >
-                      {{ action.label }}
-                    </a>
-                    <button
-                      v-for="action in group.buttonActions"
-                      :key="action.key"
-                      class="attendance__btn attendance__btn--inline attendance__admin-task-action"
-                      :class="{ 'attendance__btn--primary': action.primary }"
-                      :data-admin-task-action="action.key"
-                      type="button"
-                      @click="selectAdminSection(action.sectionId)"
-                    >
-                      {{ action.label }}
-                    </button>
-                  </div>
-                </section>
+                  <button
+                    class="attendance__btn attendance__btn--inline"
+                    type="button"
+                    data-admin-shortcuts-clear="true"
+                    @click="clearRecentAdminSections"
+                  >
+                    {{ tr('Clear', '清空') }}
+                  </button>
+                </div>
+                <div class="attendance__admin-shortcuts-items">
+                  <button
+                    v-for="item in visibleRecentAdminSectionNavItems"
+                    :key="`shortcut-${item.id}`"
+                    class="attendance__admin-shortcut"
+                    :class="{ 'attendance__admin-shortcut--active': adminActiveSectionId === item.id }"
+                    :data-admin-shortcut="item.id"
+                    type="button"
+                    @click="selectAdminSection(item.id)"
+                  >
+                    {{ item.contextLabel }}
+                  </button>
+                </div>
               </div>
+              <AttendanceAdminTaskHome
+                :tr="tr"
+                :groups="adminTaskHomeGroups"
+                @select-section="selectAdminSection"
+              />
             </div>
-            <div class="attendance__admin-shell">
+            <div
+              v-show="!adminTaskHomeOpen"
+              class="attendance__admin-shell"
+              data-admin-section-workspace="true"
+            >
             <AttendanceAdminRail
               :tr="tr"
               :active-admin-section-context-label="activeAdminSectionContextLabel"
@@ -1400,21 +1367,19 @@
               data-admin-current-section="true"
             >
               <div class="attendance__admin-current-section-copy">
+                <button
+                  class="attendance__btn attendance__btn--inline attendance__admin-home-action"
+                  type="button"
+                  data-admin-task-home-return="true"
+                  @click="showAdminTaskHome"
+                >
+                  <ArrowLeft class="attendance__admin-home-action-icon" aria-hidden="true" />
+                  <span>{{ tr('Management home', '管理首页') }}</span>
+                </button>
                 <span class="attendance__admin-current-section-eyebrow">
                   {{ tr('Current section', '当前区块') }}
                 </span>
                 <strong>{{ activeAdminSectionContextLabel }}</strong>
-                <span class="attendance__admin-current-section-description">
-                  {{ tr('Choose another item on the left and the right pane will return here immediately.', '点击左侧其他区块后，右侧会立即回到这里。') }}
-                </span>
-                <span class="attendance__admin-current-section-hint">
-                  {{
-                    tr(
-                      'Quick switch: Alt+↑ previous · Alt+↓ next.',
-                      '快速切换：Alt+↑ 上一个 · Alt+↓ 下一个。',
-                    )
-                  }}
-                </span>
               </div>
               <div class="attendance__admin-current-section-actions">
                 <button
@@ -9743,8 +9708,10 @@
 </template>
 
 <script setup lang="ts">
+import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
+import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import AttendanceCalendarPolicyQuickAdd from './attendance/AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
@@ -10002,6 +9969,10 @@ const props = withDefaults(
     initialRequestId: '',
   }
 )
+
+const emit = defineEmits<{
+  (event: 'clear-section'): void
+}>()
 
 const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
@@ -14410,12 +14381,28 @@ const {
   notify: (message, kind = 'info') => setStatus(message, kind),
 })
 
+// vNext charter §4.2 / §7 Wave 3 (issue #4353, reclaimed from stacked draft
+// #4414): the admin center defaults to the task home and only shows the
+// full section workspace once an operator picks a task or arrives via an
+// explicit deep link (query `section` or URL hash). `adminNavigationEnabled`
+// gates hash-restore/scroll-spy/keyboard-nav so a hidden workspace doesn't
+// silently mutate `adminActiveSectionId` or scroll behind the task home.
+function hasExplicitAdminSectionTarget(): boolean {
+  if (isKnownAdminSectionId(props.initialSectionId.trim())) return true
+  if (typeof window === 'undefined') return false
+  return isKnownAdminSectionId(window.location.hash.replace(/^#/, '').trim())
+}
+
+const adminTaskHomeOpen = ref(!hasExplicitAdminSectionTarget())
+const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHomeOpen.value)
+
 const {
   adminSectionBinding,
   scrollToAdminSection,
 } = useAttendanceAdminRailNavigation({
   showAdmin,
   adminForbidden,
+  adminNavigationEnabled: showAdminSectionWorkspace,
   adminFocusCurrentSectionOnly: adminFocusedMode,
   previousAdminSectionId: computed(() => previousAdminSectionNavItem.value?.id ?? ''),
   nextAdminSectionId: computed(() => nextAdminSectionNavItem.value?.id ?? ''),
@@ -14464,70 +14451,85 @@ function buildAdminTaskHomeGroup(
 
 const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
-    key: 'today-queue',
-    title: tr('Today queue', '今日待办'),
+    key: 'daily-operations',
+    title: tr('Daily operations', '日常运营'),
     detail: tr(
-      'Review pending requests and make sure approval policy is ready before payroll work starts.',
-      '先处理待审批申请，并确认审批策略可用，再进入计薪处理。',
+      'Approvals, anomalies, imports, and audit follow-up.',
+      '审批、异常、导入与审计跟进。',
     ),
     actions: [
       {
         key: 'pending-attendance-approvals',
-        label: tr('Pending attendance approvals', '待处理考勤审批'),
+        label: tr('Pending approvals', '待处理审批'),
         href: '/attendance?section=attendance-overview-requests',
         primary: true,
       },
       {
-        key: 'approval-flows',
-        label: tr('Approval flows', '审批流'),
-        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows,
+        key: 'attendance-anomalies',
+        label: tr('Anomalies', '异常'),
+        href: '/attendance?section=attendance-overview-anomalies',
       },
-    ],
-  },
-  {
-    key: 'monthly-processing',
-    title: tr('Monthly processing', '月度处理'),
-    detail: tr(
-      'Import CSV, inspect import batches, tune report fields, then close payroll cycles.',
-      '导入 CSV、检查导入批次、调整统计字段，再收口计薪周期。',
-    ),
-    actions: [
       {
-        key: 'monthly-import',
-        label: tr('Import CSV', '导入 CSV'),
+        key: 'daily-import',
+        label: tr('Import', '导入'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.import,
-        primary: true,
       },
       {
-        key: 'import-batches',
-        label: tr('Import batches', '导入批次'),
-        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
-      },
-      {
-        key: 'payroll-cycles',
-        label: tr('Payroll cycles', '计薪周期'),
-        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
+        key: 'audit-follow-up',
+        label: tr('Audit logs', '审计日志'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
       },
     ],
   },
   {
-    key: 'base-config',
-    title: tr('Base configuration', '基础配置'),
+    key: 'people-groups',
+    title: tr('People and attendance groups', '人员与考勤组'),
     detail: tr(
-      'Maintain groups, members, shifts, holidays, and rule sets before daily import.',
-      '维护考勤组、成员、班次、节假日和规则集，为日常导入打底。',
+      'Groups, members, owners, access, and availability.',
+      '考勤组、成员、负责人、权限与可用性。',
     ),
     actions: [
       {
         key: 'attendance-groups',
-        label: tr('Groups', '考勤组'),
+        label: tr('Attendance groups', '考勤组'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
         primary: true,
       },
       {
+        key: 'group-members',
+        label: tr('Members', '成员'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
+      },
+      {
+        key: 'user-access',
+        label: tr('Access', '权限'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.userAccess,
+      },
+      {
+        key: 'team-availability',
+        label: tr('Availability', '可用性'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability,
+      },
+    ],
+  },
+  {
+    key: 'work-time-policies',
+    title: tr('Work time and policies', '工时与策略'),
+    detail: tr(
+      'Shifts, schedules, holidays, rule sets, overtime, and leave policies.',
+      '班次、排班、节假日、规则集、加班与请假策略。',
+    ),
+    actions: [
+      {
         key: 'shifts',
         label: tr('Shifts', '班次'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+        primary: true,
+      },
+      {
+        key: 'schedules',
+        label: tr('Schedules', '排班'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.assignments,
       },
       {
         key: 'holidays',
@@ -14539,26 +14541,46 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
         label: tr('Rule sets', '规则集'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.ruleSets,
       },
+      {
+        key: 'overtime-rules',
+        label: tr('Overtime', '加班'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules,
+      },
+      {
+        key: 'leave-types',
+        label: tr('Leave policies', '请假策略'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes,
+      },
     ],
   },
   {
-    key: 'audit-rollback',
-    title: tr('Audit and rollback', '审计回滚'),
+    key: 'reporting-payroll',
+    title: tr('Reporting and payroll', '报表与计薪'),
     detail: tr(
-      'Trace recent admin changes and failed imports before retrying or rolling back.',
-      '重试或回滚前，先追踪最近管理变更和失败导入。',
+      'Import batches, report fields, payroll templates, and payroll cycles.',
+      '导入批次、统计字段、计薪模板与计薪周期。',
     ),
     actions: [
       {
-        key: 'audit-logs',
-        label: tr('Audit logs', '审计日志'),
-        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
+        key: 'import-batches',
+        label: tr('Import batches', '导入批次'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
         primary: true,
       },
       {
-        key: 'rollback-import-batches',
-        label: tr('Import batches', '导入批次'),
-        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
+        key: 'report-fields',
+        label: tr('Report fields', '统计字段'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.reportFields,
+      },
+      {
+        key: 'payroll-templates',
+        label: tr('Payroll templates', '计薪模板'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates,
+      },
+      {
+        key: 'payroll-cycles',
+        label: tr('Payroll cycles', '计薪周期'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
       },
     ],
   },
@@ -14569,11 +14591,30 @@ function shouldShowAdminSection(id: string): boolean {
 }
 
 function selectAdminSection(id: string): void {
+  adminTaskHomeOpen.value = false
   adminFocusedMode.value = true
   adminActiveSectionId.value = id
   focusAdminSectionGroup(id)
   void nextTick(() => {
     scrollToAdminSection(id)
+  })
+}
+
+function showAdminTaskHome(): void {
+  adminTaskHomeOpen.value = true
+  adminCompactNavOpen.value = false
+  if (typeof window !== 'undefined') {
+    const url = new URL(window.location.href)
+    const querySection = url.searchParams.get('section')
+    if (isKnownAdminSectionId(querySection)) {
+      url.searchParams.delete('section')
+    }
+    url.hash = ''
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
+  }
+  emit('clear-section')
+  void nextTick(() => {
+    document.getElementById('attendance-admin-task-home-title')?.focus({ preventScroll: true })
   })
 }
 
@@ -29488,88 +29529,8 @@ const holidaySectionBindings = {
   font-weight: 600;
 }
 
-.attendance__admin-task-home {
-  display: grid;
-  gap: 14px;
-  margin-bottom: 16px;
-  padding: 14px 0 16px;
-  border-top: 1px solid #e2e8f0;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.attendance__admin-task-home-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
-}
-
-.attendance__admin-task-home-eyebrow {
-  display: block;
-  margin-bottom: 4px;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.attendance__admin-task-home h4 {
-  margin: 0;
-  color: #0f172a;
-  font-size: 16px;
-}
-
-.attendance__admin-task-home-hint {
-  max-width: 300px;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: right;
-}
-
-.attendance__admin-task-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.attendance__admin-task-group {
-  display: flex;
+.attendance__admin-home-context {
   min-width: 0;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.attendance__admin-task-copy {
-  display: grid;
-  gap: 5px;
-}
-
-.attendance__admin-task-copy strong {
-  color: #1f2937;
-  font-size: 13px;
-}
-
-.attendance__admin-task-copy span {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.attendance__admin-task-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.attendance__admin-task-action {
-  text-decoration: none;
 }
 
 .attendance__admin-content {
@@ -29605,24 +29566,25 @@ const holidaySectionBindings = {
   font-size: 15px;
 }
 
-.attendance__admin-current-section-description {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.attendance__admin-current-section-hint {
-  color: #1d4ed8;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
 .attendance__admin-current-section-eyebrow {
   color: #2563eb;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.attendance__admin-home-action {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+}
+
+.attendance__admin-home-action-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
 }
 
 .attendance__admin-current-section-actions {
@@ -30739,19 +30701,6 @@ const holidaySectionBindings = {
     flex-direction: column;
   }
 
-  .attendance__admin-task-home-header {
-    flex-direction: column;
-  }
-
-  .attendance__admin-task-home-hint {
-    max-width: none;
-    text-align: left;
-  }
-
-  .attendance__admin-task-grid {
-    grid-template-columns: 1fr;
-  }
-
   .attendance__admin-current-section {
     top: 8px;
     flex-direction: column;
@@ -30760,6 +30709,10 @@ const holidaySectionBindings = {
 
   .attendance__admin-current-section-actions {
     width: 100%;
+  }
+
+  .attendance__admin-home-action {
+    width: fit-content;
   }
 
   .attendance__admin-current-section-jump,
