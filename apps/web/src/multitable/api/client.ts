@@ -2133,6 +2133,25 @@ export class MultitableApiClient {
     return this.parseJson<ResetResult>(res)
   }
 
+  // W2: preview an exact-anchor Revert. The anchor contract is identical to Reset, but Revert keeps records
+  // created after the anchor and is exposed only when the server-derived sheetRevertEnabled capability is on.
+  async revertPreview(sheetId: string, anchor: ExactAnchorRequest): Promise<ResetPreview> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/revert-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(anchor),
+    })
+    return this.parseJson<ResetPreview>(res)
+  }
+
+  // Execute is token-only. Revert has no typed destructive confirmation because it cannot delete
+  // post-anchor-created records; the verified token binds both the exact anchor and mode server-side.
+  async revertExecute(sheetId: string, previewIdentity: string): Promise<ResetResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/revert-execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ previewIdentity }),
+    })
+    return this.parseJson<ResetResult>(res)
+  }
+
   // --- Global History & Point-in-Time Restore (read-only) ---
   async listHistoryEvents(
     baseId: string,

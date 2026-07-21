@@ -482,4 +482,56 @@ describe('ResetConfirmDialog — T8-2 / W2 exact-anchor Reset UI', () => {
     await errCase(410, 'PREVIEW_IDENTITY_INVALID', '数据表在预览之后已发生变化 — 请重新预览后再试。')
     await errCase(409, 'TOKEN_REPLAYED', '数据表在预览之后已发生变化 — 请重新预览后再试。')
   })
+
+  it('(k) Revert mode keeps post-anchor-created records, never renders Reset confirmation, and executes token-only', async () => {
+    const resetExecute = vi.fn(async () => ({ strategy: 'revert', revertedCount: 2, deletedRecordIds: [] } as ResetResult))
+    mount({
+      mode: 'revert',
+      sheetRevertEnabled: true,
+      pitResetEnabled: false,
+      resetPreview: vi.fn(async () => previewOf({
+        strategy: 'revert',
+        summary: { visibleRevertCount: 2, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 2 },
+        deleteRecordIds: [],
+        previewIdentity: 'revert-token',
+      })),
+      resetExecute,
+    })
+    await nextTick()
+    expect(q('[data-test="reset-entry"]')).toBeFalsy()
+    expect(q('[data-test="revert-entry"]')?.textContent?.trim()).toBe('Revert to 2026-06-20T00:00:00Z…')
+    ;(q('[data-test="revert-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="reset-confirm-btn"]'))
+    expect(q('[data-test="revert-confirm"]')).toBeTruthy()
+    expect(q('.reset-confirm-modal')?.getAttribute('aria-label')).toBe('Revert sheet to a history point')
+    expect(q('.reset-confirm__title')?.textContent).toBe('Revert sheet to 2026-06-20T00:00:00Z')
+    expect(q('[data-test="reset-confirm-revert-equiv"]')?.textContent).toContain('Records created after 2026-06-20T00:00:00Z will be kept')
+    expect(q('[data-test="reset-confirm-type"]')).toBeFalsy()
+    expect(q('[data-test="reset-confirm-ack"]')).toBeFalsy()
+    ;(q('[data-test="reset-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => resetExecute.mock.calls.length === 1)
+    expect(resetExecute).toHaveBeenCalledWith('revert-token')
+  })
+
+  it('(k2) malformed Revert preview with a delete set fails closed even when the server supplies a token', async () => {
+    const resetExecute = vi.fn(async () => ({ strategy: 'revert', revertedCount: 1 } as ResetResult))
+    mount({
+      mode: 'revert',
+      sheetRevertEnabled: true,
+      pitResetEnabled: false,
+      resetPreview: vi.fn(async () => previewOf({
+        strategy: 'revert',
+        summary: { visibleRevertCount: 1, deleteCount: 1, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 2 },
+        deleteRecordIds: ['must-not-delete'],
+        previewIdentity: 'must-not-execute',
+      })),
+      resetExecute,
+    })
+    await nextTick()
+    ;(q('[data-test="revert-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="revert-confirm-invalid-preview"]'))
+    expect(q('[data-test="reset-confirm-btn"]')).toBeFalsy()
+    expect(q('[data-test="reset-confirm-type"]')).toBeFalsy()
+    expect(resetExecute).not.toHaveBeenCalled()
+  })
 })

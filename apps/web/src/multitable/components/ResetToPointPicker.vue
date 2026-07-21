@@ -1,15 +1,14 @@
 <!--
-  T8-2 / W2 Reset UI — the exact-anchor T-source picker (the product entry the #3250 dialog was missing;
-  #3250/#3251 flagged "entry-wiring needs a T-source"). Lets a sheet-admin pick a Global History batch and
-  hands `historyBatchId` to ResetConfirmDialog as the destructive `anchor`. The dialog owns preview → typed
-  two-step confirm → execute; this only sources the anchor.
+  W2 exact-anchor recovery picker. Lets a sheet-admin pick a Global History batch and hands its
+  `historyBatchId` to the mode-specific Revert/Reset dialog. Revert keeps post-anchor-created records; Reset
+  can delete them and therefore owns the typed two-step confirmation.
 
   EXACT ANCHOR ONLY (W2): the free datetime-local fallback is GONE. Destructive Reset accepts exactly one of
   `historyBatchId` (this picker) or `anchorOperationId` (API-only, not offered as a control here) — never a
   wall-clock time. `createdAt` stays display text: the human-facing "Target" line is derived FROM the selected
   batch's `createdAt` (not any free-form input), so what the user sees can never diverge from the anchor the
-  destructive op uses. Gated on `pitResetEnabled` ALONE (it already encodes flag ∧ canManageSheetAccess); the
-  dialog is mounted only once a history batch is selected, so the dialog's own entry button never fires empty.
+  destructive op uses. Each command is gated by its own server-derived capability (which already encodes
+  flag ∧ canManageSheetAccess); dialogs mount only after a history batch is selected.
 
   i18n (R5b strict-zero closeout): strings routed through `l()` → meta-record-labels.ts `record.resetPicker*`.
   The stray `{{ ' ' }}` mustaches around some labels are NOT decorative — a whitespace-only static text node that
@@ -19,9 +18,9 @@
   keeps it immune to that pass — do not "clean this up" without re-diffing rendered output byte-for-byte.
 -->
 <template>
-  <div v-if="pitResetEnabled" class="reset-picker" data-test="reset-picker">
+  <div v-if="recoveryEnabled" class="reset-picker" data-test="reset-picker">
     <div class="reset-picker__history" data-test="reset-picker-history">
-      <div class="reset-picker__heading">{{ l('record.resetPickerHeading') }}</div>
+      <div class="reset-picker__heading">{{ l(pickerHeadingKey) }}</div>
       <div class="reset-picker__history-row">
         <label class="reset-picker__label">
           <span>{{ l('record.resetPickerHistoryLabel') }}</span>
@@ -51,13 +50,25 @@
     </div>
 
     <!-- Exact-anchor only: no free wall-clock control is offered (removed W2). -->
-    <p class="reset-picker__hint" data-test="reset-picker-exact-anchor-note">{{ l('record.resetPickerExactAnchorNote') }}</p>
+    <p class="reset-picker__hint" data-test="reset-picker-exact-anchor-note">{{ l(pickerNoteKey) }}</p>
 
     <template v-if="anchor">
       <p class="reset-picker__target" data-test="reset-picker-target">{{ ' ' }}{{ l('record.resetPickerTargetPrefix') }} <strong>{{ targetDisplay }}</strong> {{ l('record.resetPickerTargetSuffix') }}
         <span>{{ ' ' }}{{ l('record.resetPickerFromBatch') }} {{ shortSelectedBatchId }}</span>
       </p>
       <ResetConfirmDialog
+        v-if="revertReady"
+        mode="revert"
+        :sheet-revert-enabled="true"
+        :as-of="historyAsOf ?? ''"
+        :anchor="anchor"
+        :reset-preview="boundRevertPreview"
+        :reset-execute="boundRevertExecute"
+        :on-done="handleDone"
+      />
+      <ResetConfirmDialog
+        v-if="pitResetEnabled"
+        mode="reset"
         :pit-reset-enabled="true"
         :as-of="historyAsOf ?? ''"
         :anchor="anchor"
@@ -87,6 +98,8 @@ type ListHistoryEvents = (
 const props = defineProps<{
   /** flag-derived capability (MULTITABLE_ENABLE_PIT_RESET ∧ canManageSheetAccess); off/absent ⇒ whole entry hidden. */
   pitResetEnabled?: boolean
+  /** flag-derived Revert capability (MULTITABLE_ENABLE_SHEET_REVERT ∧ canManageSheetAccess). */
+  sheetRevertEnabled?: boolean
   /** base-level Global History scope. Required for the primary history-anchored picker path. */
   baseId?: string
   /** bound here (not in the dialog) so the (sheetId, anchor) wiring is covered by THIS component's unit test. */
@@ -94,6 +107,8 @@ const props = defineProps<{
   listHistoryEvents?: ListHistoryEvents
   resetPreview: (sheetId: string, anchor: ExactAnchorRequest) => Promise<ResetPreview>
   resetExecute: (sheetId: string, previewIdentity: string) => Promise<ResetResult>
+  revertPreview?: (sheetId: string, anchor: ExactAnchorRequest) => Promise<ResetPreview>
+  revertExecute?: (sheetId: string, previewIdentity: string) => Promise<ResetResult>
   onDone?: () => void | Promise<void>
 }>()
 
@@ -109,6 +124,20 @@ const historyLoading = ref(false)
 const historyError = ref<string | null>(null)
 let historyLoadSeq = 0
 
+const recoveryEnabled = computed(() => props.pitResetEnabled === true || props.sheetRevertEnabled === true)
+const revertReady = computed(() =>
+  props.sheetRevertEnabled === true &&
+  typeof props.revertPreview === 'function' &&
+  typeof props.revertExecute === 'function',
+)
+const pickerHeadingKey = computed<MetaRecordLabelKey>(() => {
+  if (props.pitResetEnabled === true && props.sheetRevertEnabled === true) return 'record.recoveryPickerHeading'
+  return props.sheetRevertEnabled === true ? 'record.revertPickerHeading' : 'record.resetPickerHeading'
+})
+const pickerNoteKey = computed<MetaRecordLabelKey>(() =>
+  props.sheetRevertEnabled === true ? 'record.recoveryPickerExactAnchorNote' : 'record.resetPickerExactAnchorNote',
+)
+
 function hasUsableCreatedAt(batch: HistoryBatchSummary): boolean {
   return typeof batch.createdAt === 'string' && batch.createdAt.length > 0 && !Number.isNaN(new Date(batch.createdAt).getTime())
 }
@@ -122,7 +151,7 @@ function historyBatchLabel(batch: HistoryBatchSummary): string {
 }
 
 const canLoadHistory = computed(() =>
-  props.pitResetEnabled === true &&
+  recoveryEnabled.value &&
   typeof props.baseId === 'string' &&
   props.baseId.length > 0 &&
   typeof props.listHistoryEvents === 'function',
@@ -191,7 +220,7 @@ watch(
 )
 
 watch(
-  () => [props.pitResetEnabled === true, props.baseId, props.sheetId, props.listHistoryEvents] as const,
+  () => [props.pitResetEnabled === true, props.sheetRevertEnabled === true, props.baseId, props.sheetId, props.listHistoryEvents] as const,
   () => {
     // Scope switches revoke the old selection synchronously. The frozen sheet id below then prevents even
     // a same-tick stale modal callback from pairing an old anchor with the newly selected sheet.
@@ -212,6 +241,14 @@ const boundPreview = (a: ExactAnchorRequest): Promise<ResetPreview> =>
   selectedSheetId.value ? props.resetPreview(selectedSheetId.value, a) : Promise.reject(staleSelectionError())
 const boundExecute = (identity: string): Promise<ResetResult> =>
   selectedSheetId.value ? props.resetExecute(selectedSheetId.value, identity) : Promise.reject(staleSelectionError())
+const boundRevertPreview = (a: ExactAnchorRequest): Promise<ResetPreview> =>
+  selectedSheetId.value && props.revertPreview
+    ? props.revertPreview(selectedSheetId.value, a)
+    : Promise.reject(staleSelectionError())
+const boundRevertExecute = (identity: string): Promise<ResetResult> =>
+  selectedSheetId.value && props.revertExecute
+    ? props.revertExecute(selectedSheetId.value, identity)
+    : Promise.reject(staleSelectionError())
 
 async function handleDone(): Promise<void> {
   try {

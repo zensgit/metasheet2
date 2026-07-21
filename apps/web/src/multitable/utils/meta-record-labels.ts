@@ -257,9 +257,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'form.previousPage': { en: 'Previous', zh: '上一页' },
   'form.nextPage': { en: 'Next', zh: '下一页' },
 
-  // T8-2 Reset UI T-source picker (ResetToPointPicker.vue, R5b strict-zero closeout — the component was born
-  // after the i18n line closed and shipped all-English; flag (pitResetEnabled) is dormant by default so this
-  // is a shape-only migration, no behavior change).
+  // Exact-anchor recovery picker. Reset and Revert are separately capability-gated and remain dormant by default.
   'record.resetPickerHeading': { en: 'Reset this sheet to a Global History point', zh: '将此数据表重置到某个全局历史点' },
   'record.resetPickerHistoryLabel': { en: 'History point', zh: '历史点' },
   'record.resetPickerHistoryPlaceholder': { en: 'Select a recent history batch', zh: '选择一个最近的历史批次' },
@@ -277,10 +275,15 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetPickerErrorLoad': { en: 'Failed to load history points', zh: '加载历史点失败' },
   'record.resetPickerSystemActor': { en: 'System', zh: '系统' },
   'record.resetPickerDefaultAction': { en: 'update', zh: '更新' },
+  'record.revertPickerHeading': { en: 'Revert this sheet to a Global History point', zh: '将此数据表回退到某个全局历史点' },
+  'record.recoveryPickerHeading': { en: 'Recover this sheet from Global History', zh: '从全局历史恢复此数据表' },
+  'record.recoveryPickerExactAnchorNote': {
+    en: 'Recovery uses an exact, audited point from Global History only — free time entry is not supported.',
+    zh: '恢复仅使用来自全局历史的精确、可审计时间点——不支持自由输入时间。',
+  },
 
-  // T8-2 Reset UI confirm dialog (ResetConfirmDialog.vue, R5c strict-zero closeout — the final microslice of
-  // this line; ResetToPointPicker/R5b was the other post-closure component, now landed). Static labels only;
-  // the asOf/count-interpolated strings live in the helper functions below.
+  // Exact-anchor recovery confirmation. Static labels live here; asOf/count-interpolated strings use the
+  // helpers below so Reset and Revert can keep their distinct semantics.
   'record.resetConfirmDialogAria': { en: 'Reset sheet to a point in time', zh: '将数据表重置到某个时间点' },
   'record.resetConfirmCancelAria': { en: 'Cancel', zh: '取消' },
   'record.resetConfirmLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
@@ -330,6 +333,13 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
     en: 'Reset is unavailable while revision retention is running. Try again after retention is disabled.',
     zh: '修订保留任务运行期间无法执行重置。请在停用保留任务后重试。',
   },
+  'record.revertConfirmDialogAria': { en: 'Revert sheet to a history point', zh: '将数据表回退到某个历史点' },
+  'record.revertConfirmErrorDisabled': { en: 'Revert is not enabled here.', zh: '此处未启用回退。' },
+  'record.revertConfirmErrorForbidden': { en: 'You do not have permission to revert this sheet.', zh: '你没有权限回退此数据表。' },
+  'record.revertConfirmErrorTooLarge': { en: 'This sheet has too many records for a one-shot revert.', zh: '此数据表记录过多，无法一次性回退。' },
+  'record.revertConfirmErrorTrustRequired': { en: "Revert is unavailable — this sheet's history trust could not be verified.", zh: '回退不可用——无法验证此数据表的历史可信度。' },
+  'record.revertConfirmErrorGeneric': { en: 'Revert could not be completed. Please re-preview and try again.', zh: '回退未能完成。请重新预览后再试。' },
+  'record.revertConfirmInvalidPreview': { en: 'This Revert preview contains a destructive delete set and was refused. Refresh and preview again.', zh: '此次回退预览包含破坏性删除集合，已被拒绝。请刷新后重新预览。' },
   // The three inline-bold words in the destructive warning paragraph. Word-for-word bold placement doesn't
   // map 1:1 to Chinese, so the zh values are chosen so the concatenated sentence (built from these plus the
   // resetConfirmWarn* helpers below, in the same fixed template slots) still reads naturally.
@@ -447,6 +457,14 @@ export function resetConfirmTitle(asOf: string, isZh: boolean): string {
   return isZh ? `将数据表重置到 ${asOf}` : `Reset sheet to ${asOf}`
 }
 
+export function revertConfirmEntryLabel(asOf: string, isZh: boolean): string {
+  return isZh ? `回退到 ${asOf}…` : `Revert to ${asOf}…`
+}
+
+export function revertConfirmTitle(asOf: string, isZh: boolean): string {
+  return isZh ? `将数据表回退到 ${asOf}` : `Revert sheet to ${asOf}`
+}
+
 // resetConfirmBlockedResurrectMessage: preview-time block — a preview whose plan would need to restore
 // `resurrectCount` deleted record(s) can never become executable (exact-anchor kernel fails RESURRECT closed
 // as `inbound-unprovable`). Rendered INSTEAD of the revert/destructive confirm branches, never alongside them.
@@ -454,6 +472,12 @@ export function resetConfirmBlockedResurrectMessage(resurrectCount: number, isZh
   return isZh
     ? `无法重置到该时间点——这需要恢复 ${resurrectCount} 条已删除的记录，当前不支持该操作。请选择一个更近的历史点。`
     : `Can't reset to this point — it would require restoring ${resurrectCount} deleted record(s), which isn't supported. Choose a more recent history point.`
+}
+
+export function revertConfirmBlockedResurrectMessage(resurrectCount: number, isZh: boolean): string {
+  return isZh
+    ? `无法回退到该时间点——这需要恢复 ${resurrectCount} 条已删除的记录，当前不支持该操作。请选择一个更近的历史点。`
+    : `Can't revert to this point — it would require restoring ${resurrectCount} deleted record(s), which isn't supported. Choose a more recent history point.`
 }
 
 // resetConfirmResultSummary: the post-execute result line. A non-destructive Revert-equivalent
@@ -475,6 +499,14 @@ export function resetConfirmRevertEquivIntro(asOf: string, revertCount: number, 
   return isZh
     ? `${asOf} 之后没有新建任何记录。这会将 ${revertCount} 条记录回退到它们在 ${asOf} 时的状态 — 非破坏性操作，等同于`
     : `Nothing was created after ${asOf}. This reverts ${revertCount} record(s) to their state at ${asOf} — non-destructive, the same as`
+}
+
+// Revert keeps records created after the anchor; unlike Reset's zero-delete branch, it must never claim that
+// no such records exist. This copy is intentionally mode-specific even though both paths share a confirm button.
+export function revertConfirmIntro(asOf: string, revertCount: number, isZh: boolean): string {
+  return isZh
+    ? `${asOf} 之后新建的记录会保留。这会将 ${revertCount} 条记录回退到它们在 ${asOf} 时的状态 — 非破坏性操作，即`
+    : `Records created after ${asOf} will be kept. This reverts ${revertCount} record(s) to their state at ${asOf} — non-destructive`
 }
 
 // resetConfirmRevertButtonLabel: the non-destructive confirm button ("Revert to <T>").
