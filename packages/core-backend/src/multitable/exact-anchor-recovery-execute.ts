@@ -743,11 +743,11 @@ export async function applyExactAnchorRecovery(
               p.revisionId,
             ],
           )
-          // lock-guarded: L8 reset delete — ensureRecordNotLocked earlier in this txn.
-          // revision-emitted: L8 reset delete — recordRecordRevision(action:'delete', id=pre-gen) above.
           // Version-CAS on the LOCKED expected version: a zero-row delete means the row moved under us
           // (fence-bypassing direct SQL / same-txn side effect) ⇒ preview-drift, full rollback — never a
           // bare Error and never an unconditional delete of a row the token did not hash.
+          // lock-guarded: L8 reset delete — ensureRecordNotLocked earlier in this txn.
+          // revision-emitted: L8 reset delete — recordRecordRevision(action:'delete', id=pre-gen) above.
           const del = await query(
             'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2 AND version = $3 RETURNING version',
             [p.recordId, input.sheetId, p.live.version],
