@@ -624,6 +624,107 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
     expect(res.lostLease).toBe(0) // NOT masqueraded as a normal lost lease
     expect((await readRow(id, key)).status).toBe('in_progress') // left unresolved for reclaim
   }, 15_000)
+
+  // [#4497 P1 — the CI red on 4e04af582 was a REAL bug, not a timing flake]
+  // `heartbeatErrors` increments AT MOST ONCE per processClaimedRow(), yet ONE UUID-isolated seeded row
+  // produced 2 — so the SAME ROW was claimed and executed TWICE inside ONE tick. Root cause: after a heartbeat
+  // renew failure the row is left `in_progress` on its ORIGINAL lease, so a handler that outran that lease
+  // (~800ms handler vs a 1s lease, under load) makes the row reclaimable BY THIS TICK'S OWN NEXT SLOT. For a
+  // real adapter that is a DUPLICATE EXTERNAL OPERATION, and a green re-run only means the run missed the
+  // window. Reproduced DETERMINISTICALLY here — no sleep, no load dependence:
+  //   - an INJECTED CLOCK is advanced past the lease inside the handler, so "the lease expired" is a fact of
+  //     the claim's own `asOf`, not a wall-clock race;
+  //   - the handler is GATED on the first renew having actually THROWN (resolved from onHeartbeatError), so
+  //     the heartbeat-error ordering is fixed rather than raced.
+  // Row B (never renew-failed) is the POSITIVE CONTROL: excluding A must not reject/stall the rest of the tick.
+  test('P1 same-tick re-claim: a row this tick already dispatched is never claimed again by a later slot', async () => {
+    const key = `ck_${RUN}_selfreclaim`
+    const idA = await seedRow(key)
+    const idB = await seedRow(key)
+    // claim order is by consumer.updated_at ASC — pin A as the HEAD so slot 0 deterministically takes it.
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '5 seconds' WHERE outbox_id=$1`, [idA])
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '4 seconds' WHERE outbox_id=$1`, [idB])
+
+    const LEASE_MS = 1_000
+    let nowMs = Date.now()
+    const now = () => new Date(nowMs)
+    const real = db()
+    // The heartbeat renew (the only `SET lease_expires_at` without `last_error`) throws for row A ONLY.
+    const failingDb: Queryable = {
+      query: async (sql, params) => {
+        if (/SET\s+lease_expires_at/.test(sql) && !/last_error/.test(sql) && (params as unknown[] | undefined)?.[0] === idA) {
+          throw new Error('heartbeat db down')
+        }
+        return real.query(sql, params)
+      },
+    }
+    let openGate!: () => void
+    const renewThrew = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    let callsA = 0
+    let callsB = 0
+    const r = new ConsumerAdapterRegistry()
+    r.register(
+      adapter(key, async (e) => {
+        if (e.outboxId !== idA) {
+          callsB += 1
+          return { outcome: 'success' }
+        }
+        callsA += 1
+        await renewThrew // gate: return only once the heartbeat renew has actually thrown (event-driven, no sleep)
+        nowMs += LEASE_MS * 5 // the handler outran its lease → A is reclaimable by the CLAIM's own clock
+        return { outcome: 'success' }
+      }),
+    )
+    const res = await runDispatchTick(failingDb, r, {
+      leaseMs: LEASE_MS,
+      adapterTimeoutMs: 9_000,
+      now,
+      onHeartbeatError: () => openGate(),
+    })
+    // BEFORE the fix this tick re-claimed A (claimed=3, callsA=2, A.attempts=2 — the CI red's double execution).
+    expect(callsA).toBe(1) // processClaimedRow ran ONCE for A — no duplicate external operation
+    expect(res.claimed).toBe(2) // A + B, never A + B + A
+    expect(res.heartbeatErrors).toBe(1)
+    expect(await readRow(idA, key)).toMatchObject({ status: 'in_progress', attempts: 1 }) // a re-claim would show attempts=2
+    // POSITIVE CONTROL: excluding A is not a head-of-line block — B behind it was still claimed and delivered.
+    expect(callsB).toBe(1)
+    expect(res.completed).toBe(1)
+    expect((await readRow(idB, key)).status).toBe('done')
+  }, 20_000)
+
+  // [#4497 P1] The second half of the same bug: a lease that cannot be maintained must lead to a SAFE outcome.
+  // Fence-CAS alone only catches a competitor that ALREADY reclaimed — it says nothing about the window where
+  // OUR lease has expired and nobody has reclaimed yet, in which the old terminal write applied a handler
+  // result produced without ownership. Deterministic: the injected clock is advanced past the lease INSIDE the
+  // handler, which returns before any heartbeat could fire, so the completion runs with the lease already gone.
+  test('P1 lease guard: a completion attempted after the lease expired is refused (row left for reclaim)', async () => {
+    const keyX = `ck_${RUN}_leaseguard_x`
+    const keyY = `ck_${RUN}_leaseguard_y`
+    const idX = await seedRow(keyX)
+    const idY = await seedRow(keyY)
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '5 seconds' WHERE outbox_id=$1`, [idX])
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '4 seconds' WHERE outbox_id=$1`, [idY])
+    const LEASE_MS = 1_000
+    let nowMs = Date.now()
+    const now = () => new Date(nowMs)
+    const r = new ConsumerAdapterRegistry()
+    r.register(
+      adapter(keyX, async () => {
+        nowMs += LEASE_MS * 5 // this delivery outlived its lease before returning success
+        return { outcome: 'success' }
+      }),
+    )
+    r.register(adapter(keyY, ok))
+    const res = await runDispatchTick(db(), r, { leaseMs: LEASE_MS, now })
+    expect(res.claimed).toBe(2)
+    expect(res.lostLease).toBe(1) // X's success was NOT applied under an expired lease
+    expect(await readRow(idX, keyX)).toMatchObject({ status: 'in_progress' }) // left for a legitimate reclaim
+    // POSITIVE CONTROL: the guard is not "refuse everything" — Y, still inside its lease, completed normally.
+    expect(res.completed).toBe(1)
+    expect((await readRow(idY, keyY)).status).toBe('done')
+  }, 15_000)
 })
 
 /**
