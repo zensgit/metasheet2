@@ -24,32 +24,7 @@
             }}
           </p>
         </div>
-        <div v-if="showOverview" class="attendance__hero-punch" data-testid="attendance-hero-punch">
-          <div class="attendance__hero-clock">
-            <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
-            <span class="attendance__hero-date">{{ heroClockDate }}</span>
-          </div>
-          <div class="attendance__actions attendance__hero-actions">
-            <button class="attendance__btn attendance__btn--primary attendance__btn--hero" :disabled="punching" @click="punch('check_in')">
-              {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
-            </button>
-            <button class="attendance__btn attendance__btn--hero-secondary" :disabled="punching" @click="punch('check_out')">
-              {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
-            </button>
-          </div>
-          <div v-if="heroTodayTimeline" class="attendance__hero-timeline" data-testid="attendance-hero-timeline">
-            <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTodayTimeline.checkIn }">
-              <span class="attendance__hero-timeline-dot" />
-              {{ tr('In', '上班') }} {{ heroTodayTimeline.checkIn ?? '--:--' }}
-            </span>
-            <span class="attendance__hero-timeline-rail" />
-            <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTodayTimeline.checkOut }">
-              <span class="attendance__hero-timeline-dot" />
-              {{ tr('Out', '下班') }} {{ heroTodayTimeline.checkOut ?? '--:--' }}
-            </span>
-          </div>
-        </div>
-        <div v-else class="attendance__chip-list attendance__chip-list--header">
+        <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
             {{ tr('Records', '记录') }} {{ recordsTotal }}
           </span>
@@ -60,30 +35,14 @@
             {{ tr('Minutes', '分钟') }} {{ requestReportMinutesTotal }}
           </span>
         </div>
-        <div v-if="showOverview && punchOutdoorNoteRequired" class="attendance__punch-note" data-attendance-punch-note-form>
-          <label class="attendance__field" for="attendance-punch-outdoor-note">
-            <span>{{ tr('Outdoor punch note', '外勤打卡备注') }}</span>
-            <input
-              id="attendance-punch-outdoor-note"
-              v-model="punchOutdoorNoteDraft"
-              type="text"
-              :placeholder="tr('Required to submit an outdoor punch', '提交外勤打卡需填写')"
-              @keydown.enter.prevent="retryPunchWithOutdoorNote"
-            />
-          </label>
-          <button
-            class="attendance__btn attendance__btn--inline"
-            type="button"
-            data-attendance-punch-note-retry
-            :disabled="punching || !punchOutdoorNoteDraft.trim()"
-            @click="retryPunchWithOutdoorNote"
-          >
-            {{ punching ? tr('Working...', '处理中...') : tr('Retry punch with note', '补充备注后重试打卡') }}
-          </button>
-        </div>
       </header>
 
-      <section class="attendance__filters" v-if="showOverview || showReports">
+      <!-- Reports mode keeps its existing filter-row position/behavior
+           byte-identical (employee-overview-task-first-design-lock-20260716
+           §5: "this lock changes only mode === 'overview' presentation").
+           The overview filter row moves into AttendanceEmployeeWorkspace's
+           collapsed-by-default history disclosure below. -->
+      <section class="attendance__filters" v-if="showReports">
         <label class="attendance__field" for="attendance-from-date">
           <span>{{ tr('From', '开始') }}</span>
           <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
@@ -107,7 +66,7 @@
           />
         </label>
         <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
-          {{ showReports ? tr('Reload report', '重载报表') : tr('Refresh', '刷新') }}
+          {{ tr('Reload report', '重载报表') }}
         </button>
         <div v-if="statusMessage" class="attendance__status-block">
           <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
@@ -131,344 +90,107 @@
         </div>
       </section>
 
-      <section v-if="showOverview" class="attendance__grid attendance__grid--selfservice">
-        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="annual-balance">
-          <div class="attendance__requests-header">
-            <div><h3>{{ tr('My annual leave', '我的年假') }}</h3></div>
-          </div>
-          <p v-if="annualSelfBalanceLoading" class="attendance__field-hint">{{ tr('Loading...', '加载中...') }}</p>
-          <p v-else-if="annualSelfBalanceError" class="attendance__error" data-annual-self-balance-error>{{ annualSelfBalanceError }}</p>
-          <div v-else-if="annualSelfBalance" class="attendance__selfbalance" data-annual-self-balance>
-            <div class="attendance__selfbalance-remaining">
-              <strong>{{ annualSelfBalance.summary.remainingMinutes }}</strong> {{ tr('min remaining', '分钟剩余') }}
-            </div>
-            <small class="attendance__field-hint">
-              {{ tr('Granted', '已发放') }} {{ annualSelfBalance.summary.grantedMinutes }} ·
-              {{ tr('Used', '已用') }} {{ annualSelfBalance.summary.exhaustedMinutes }} ·
-              {{ tr('Expired', '已过期') }} {{ annualSelfBalance.summary.expiredMinutes }}
-            </small>
-          </div>
-          <p v-else class="attendance__field-hint">{{ tr('No annual leave balance yet.', '暂无年假余额。') }}</p>
-        </div>
-        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="status">
-          <div class="attendance__requests-header">
-            <div>
-              <h3>{{ tr('My status', '我的状态') }}</h3>
-              <small class="attendance__field-hint">
-                {{
-                  activeWorkbenchRecord
-                    ? tr(
-                      `Focus date: ${formatDate(activeWorkbenchRecord.work_date)}`,
-                      `关注日期：${formatDate(activeWorkbenchRecord.work_date)}`,
-                    )
-                    : tr('Focus date: current range', '关注日期：当前区间')
-                }}
-              </small>
-            </div>
-            <span
-              v-if="activeWorkbenchRecord"
-              class="attendance__status-chip"
-              :class="`attendance__status-chip--${activeWorkbenchRecord.status}`"
-            >
-              {{ formatStatus(activeWorkbenchRecord.status) }}
-            </span>
-          </div>
-          <p class="attendance__selfservice-lead">
-            {{ activeWorkbenchStatusDescription }}
-          </p>
-          <div class="attendance__summary attendance__summary--workbench attendance__summary--stat">
-            <div class="attendance__summary-item attendance__summary-item--stat">
-              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
-              <span>{{ tr('Latest punch', '最近一次打卡') }}</span>
-              <strong class="attendance__summary-value">{{ activeWorkbenchLatestPunchLabel }}</strong>
-            </div>
-            <div class="attendance__summary-item attendance__summary-item--stat">
-              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 2h4M12 2v4" /><circle cx="12" cy="14" r="7" /><path d="M12 14l2.5-2.5" /></svg>
-              <span>{{ tr('Work minutes', '工时分钟') }}</span>
-              <strong class="attendance__summary-value">{{ activeWorkbenchRecord?.work_minutes ?? 0 }}</strong>
-            </div>
-            <div class="attendance__summary-item attendance__summary-item--stat">
-              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l10 18H2z" /><path d="M12 10v5M12 18.5v.5" /></svg>
-              <span>{{ tr('Late / Early', '迟到 / 早退') }}</span>
-              <strong class="attendance__summary-value" :class="{ 'attendance__summary-value--warning': activeWorkbenchHasLateEarly }">{{ activeWorkbenchLateEarlyLabel }}</strong>
-            </div>
-            <div class="attendance__summary-item attendance__summary-item--stat">
-              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg>
-              <span>{{ tr('Attention items', '需处理事项') }}</span>
-              <strong class="attendance__summary-value" :class="{ 'attendance__summary-value--danger': activeWorkbenchAttentionCount > 0 }">{{ activeWorkbenchAttentionCount }}</strong>
-            </div>
-          </div>
-          <p class="attendance__field-hint attendance__field-hint--strong">
-            {{
-              activeWorkbenchAttentionCount > 0
-                ? tr(
-                  `You have ${activeWorkbenchAttentionCount} anomaly reminders in this range.`,
-                  `当前区间内有 ${activeWorkbenchAttentionCount} 条异常提醒。`,
-                )
-                : tr('No anomaly reminders in the current range.', '当前区间内没有异常提醒。')
-            }}
-          </p>
-          <p
-            v-if="selfServiceNeedsSetupHint"
-            class="attendance__field-hint attendance__field-hint--strong"
-            data-selfservice-setup-hint
-          >
-            {{ selfServiceSetupFollowupHint }}
-          </p>
-          <ul class="attendance__selfservice-focus-list" data-selfservice-focus-list>
-            <li v-for="item in selfServiceFocusItems" :key="item.key" class="attendance__selfservice-focus-item">
-              <div class="attendance__selfservice-focus-copy">
-                <strong>{{ item.title }}</strong>
-                <span>{{ item.detail }}</span>
-              </div>
-              <button
-                v-if="item.action && item.actionLabel"
-                class="attendance__btn attendance__btn--inline"
-                type="button"
-                :data-selfservice-focus-action="item.action"
-                @click="runSelfServiceAction(item.action)"
-              >
-                {{ item.actionLabel }}
-              </button>
-            </li>
-          </ul>
-        </div>
+      <AttendanceEmployeeWorkspace
+        v-if="showOverview"
+        :tr="tr"
+        :hero-clock-time="heroClockTime"
+        :hero-clock-date="heroClockDate"
+        :punching="punching"
+        :hero-timeline="heroTodayTimeline"
+        :punch-outdoor-note-required="punchOutdoorNoteRequired"
+        :punch-outdoor-note-draft="punchOutdoorNoteDraft"
+        :workbench-status-description="activeWorkbenchStatusDescription"
+        :workbench-record-status="workbenchRecordStatus"
+        :workbench-focus-date-label="workbenchFocusDateLabel"
+        :workbench-latest-punch-label="activeWorkbenchLatestPunchLabel"
+        :workbench-work-minutes="workbenchWorkMinutes"
+        :workbench-late-early-label="activeWorkbenchLateEarlyLabel"
+        :workbench-has-late-early="activeWorkbenchHasLateEarly"
+        :self-service-needs-setup-hint="selfServiceNeedsSetupHint"
+        :self-service-setup-followup-hint="selfServiceSetupFollowupHint"
+        :format-status="formatStatus"
+        :status-message="statusMessage"
+        :status-kind="statusKind"
+        :status-code="statusCode"
+        :status-hint="statusHint"
+        :status-action-label="statusActionLabel"
+        :status-action-busy="statusActionBusy"
+        :attention-item="attendanceOverviewAttentionItem"
+        :requests-total="requests.length"
+        :self-service-request-status-items="selfServiceRequestStatusItems"
+        :self-service-request-followup="selfServiceRequestFollowup"
+        :self-service-recent-requests="selfServiceRecentRequests"
+        :format-request-type="formatRequestType"
+        :format-date="formatDate"
+        :self-service-request-subtitle="selfServiceRequestSubtitle"
+        :request-reason-text="requestReasonText"
+        :request-decision-comment-text="requestDecisionCommentText"
+        :request-decision-comment-label="requestDecisionCommentLabel"
+        :describe-request-status="describeRequestStatus"
+        :self-service-quick-action-hint="selfServiceQuickActionHint"
+        :annual-self-balance-loading="annualSelfBalanceLoading"
+        :annual-self-balance-error="annualSelfBalanceError"
+        :annual-self-balance-summary="annualSelfBalanceSummary"
+        :self-rules-loading="selfRulesLoading"
+        :self-rules-error="selfRulesError"
+        :self-rules-has-data="selfRulesHasData"
+        :self-rules-attendance-group-summary="selfRulesAttendanceGroupSummary"
+        :self-rules-schedule-group-summary="selfRulesScheduleGroupSummary"
+        :self-rules-work-window-summary="selfRulesWorkWindowSummary"
+        :self-rules-punch-policy-summary="selfRulesPunchPolicySummary"
+        :self-rules-working-days-summary="selfRulesWorkingDaysSummary"
+        :self-rules-grace-summary="selfRulesGraceSummary"
+        :self-rules-late-threshold-summary="selfRulesLateThresholdSummary"
+        :self-rules-configured-rule-summary="selfRulesConfiguredRuleSummary"
+        :self-rules-warning-codes="selfRulesWarningCodes"
+        :format-self-rules-warning="formatSelfRulesWarning"
+        :attendance-status-guide-items="attendanceStatusGuideItems"
+        @punch="punch"
+        @retry-punch-note="retryPunchWithOutdoorNote"
+        @update:punch-outdoor-note-draft="punchOutdoorNoteDraft = $event"
+        @status-action="runStatusAction"
+        @self-service-action="runSelfServiceAction"
+      >
+        <template #historyFilters>
+          <label class="attendance__field" for="attendance-from-date">
+            <span>{{ tr('From', '开始') }}</span>
+            <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
+          </label>
+          <label class="attendance__field" for="attendance-to-date">
+            <span>{{ tr('To', '结束') }}</span>
+            <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
+          </label>
+          <label class="attendance__field" for="attendance-org-id">
+            <span>{{ tr('Org ID', '组织 ID') }}</span>
+            <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
+          </label>
+          <label class="attendance__field" for="attendance-user-id">
+            <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
+            <input
+              id="attendance-user-id"
+              name="targetUserId"
+              v-model="targetUserId"
+              type="text"
+              :placeholder="tr('Current user', '当前用户')"
+            />
+          </label>
+          <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
+            {{ tr('Refresh', '刷新') }}
+          </button>
+        </template>
+      </AttendanceEmployeeWorkspace>
 
-        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="rules">
-          <div class="attendance__requests-header">
-            <div>
-              <h3>{{ tr('My attendance rules', '我的考勤规则') }}</h3>
-              <small class="attendance__field-hint">{{ tr('Read-only summary of the rules currently used for you.', '当前适用于您的考勤规则只读摘要。') }}</small>
-            </div>
-          </div>
-          <p v-if="selfRulesLoading" class="attendance__field-hint">{{ tr('Loading...', '加载中...') }}</p>
-          <p v-else-if="selfRulesError" class="attendance__error" data-selfservice-rules-error>{{ selfRulesError }}</p>
-          <div v-else-if="selfRulesData" class="attendance__selfrules" data-selfservice-rules>
-            <div class="attendance__summary attendance__summary--workbench">
-              <div class="attendance__summary-item">
-                <span>{{ tr('Attendance group', '考勤组') }}</span>
-                <strong>{{ selfRulesAttendanceGroupSummary }}</strong>
-              </div>
-              <div class="attendance__summary-item">
-                <span>{{ tr('Schedule group', '排班组') }}</span>
-                <strong>{{ selfRulesScheduleGroupSummary }}</strong>
-              </div>
-              <div class="attendance__summary-item">
-                <span>{{ tr('Work window', '工作时间') }}</span>
-                <strong>{{ selfRulesWorkWindowSummary }}</strong>
-              </div>
-              <div class="attendance__summary-item">
-                <span>{{ tr('Punch policy', '打卡策略') }}</span>
-                <strong>{{ selfRulesPunchPolicySummary }}</strong>
-              </div>
-              <div class="attendance__summary-item">
-                <span>{{ tr('Working days', '工作日') }}</span>
-                <strong>{{ selfRulesWorkingDaysSummary }}</strong>
-              </div>
-              <div class="attendance__summary-item">
-                <span>{{ tr('Late / early grace', '迟到 / 早退宽限') }}</span>
-                <strong>{{ selfRulesGraceSummary }}</strong>
-              </div>
-              <div class="attendance__summary-item">
-                <span>{{ tr('Severe / absence late', '严重 / 旷工迟到') }}</span>
-                <strong>{{ selfRulesLateThresholdSummary }}</strong>
-              </div>
-            </div>
-            <p v-if="selfRulesConfiguredRuleSummary" class="attendance__field-hint attendance__field-hint--strong">
-              {{ selfRulesConfiguredRuleSummary }}
-            </p>
-            <div v-if="selfRulesWarningCodes.length > 0" class="attendance__chip-list" data-selfservice-rules-warnings>
-              <span
-                v-for="code in selfRulesWarningCodes"
-                :key="code"
-                class="attendance__status-chip attendance__status-chip--pending"
-              >
-                {{ formatSelfRulesWarning(code) }}
-              </span>
-            </div>
-          </div>
-          <p v-else class="attendance__field-hint">{{ tr('No attendance rules loaded yet.', '暂无考勤规则摘要。') }}</p>
-        </div>
-
-        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="requests">
-          <div class="attendance__requests-header">
-            <div>
-              <h3>{{ tr('My request status', '我的申请状态') }}</h3>
-              <small class="attendance__field-hint">
-                {{
-                  tr(
-                    'Summarizes the current request backlog from the visible date range.',
-                    '汇总当前可见日期区间内的申请处理状态。',
-                  )
-                }}
-              </small>
-            </div>
-            <strong>{{ requests.length }}</strong>
-          </div>
-          <div class="attendance__chip-list">
-            <span
-              v-for="item in selfServiceRequestStatusItems"
-              :key="item.key"
-              class="attendance__status-chip"
-              :class="`attendance__status-chip--${item.key}`"
-              :data-selfservice-request-stat="item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </span>
-          </div>
-          <div class="attendance__selfservice-callout" data-selfservice-request-followup>
-            <div class="attendance__selfservice-callout-copy">
-              <div class="attendance__selfservice-callout-header">
-                <strong>{{ selfServiceRequestFollowup.title }}</strong>
-                <span
-                  v-if="selfServiceRequestFollowup.status"
-                  class="attendance__status-chip"
-                  :class="`attendance__status-chip--${selfServiceRequestFollowup.status}`"
-                >
-                  {{ formatStatus(selfServiceRequestFollowup.status) }}
-                </span>
-              </div>
-              <p>{{ selfServiceRequestFollowup.detail }}</p>
-            </div>
-            <button
-              class="attendance__btn attendance__btn--inline"
-              type="button"
-              data-selfservice-action="request-followup"
-              @click="runSelfServiceAction(selfServiceRequestFollowup.action)"
-            >
-              {{ selfServiceRequestFollowup.actionLabel }}
-            </button>
-          </div>
-          <ul v-if="selfServiceRecentRequests.length > 0" class="attendance__request-list attendance__request-list--compact">
-            <li v-for="item in selfServiceRecentRequests" :key="item.id" class="attendance__request-item">
-              <div>
-                <strong>{{ formatRequestType(item.request_type) }}</strong>
-                <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
-                  {{ formatStatus(item.status) }}
-                </span>
-              </div>
-              <div class="attendance__request-meta">
-                <span>{{ formatDate(item.work_date) }}</span>
-                <span>{{ selfServiceRequestSubtitle(item) }}</span>
-              </div>
-              <div class="attendance__request-meta" v-if="requestReasonText(item)">
-                <span>{{ tr('Reason', '原因') }}: {{ requestReasonText(item) }}</span>
-              </div>
-              <div class="attendance__request-meta" v-if="requestDecisionCommentText(item)">
-                <span>{{ requestDecisionCommentLabel(item) }}: {{ requestDecisionCommentText(item) }}</span>
-              </div>
-              <p class="attendance__request-note">
-                {{ describeRequestStatus(item.status, item) }}
-              </p>
-            </li>
-          </ul>
-          <div v-else class="attendance__empty">{{ tr('No recent requests in this range.', '当前区间内暂无申请。') }}</div>
-        </div>
-
-        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="actions">
-          <div class="attendance__requests-header">
-            <div>
-              <h3>{{ tr('Quick actions', '快捷操作') }}</h3>
-              <small class="attendance__field-hint">
-                {{
-                  tr(
-                    'Jump straight into the most common employee actions without leaving overview.',
-                    '无需离开总览，直接进入最常用的员工操作。',
-                  )
-                }}
-              </small>
-            </div>
-          </div>
-          <div class="attendance__selfservice-callout" data-selfservice-primary-action>
-            <div class="attendance__selfservice-callout-copy">
-              <div class="attendance__selfservice-callout-header">
-                <strong>{{ selfServicePrimaryAction.title }}</strong>
-              </div>
-              <p>{{ selfServicePrimaryAction.detail }}</p>
-            </div>
-            <button
-              v-if="selfServicePrimaryAction.action && selfServicePrimaryAction.actionLabel"
-              class="attendance__btn attendance__btn--primary"
-              type="button"
-              data-selfservice-action="recommended"
-              @click="runSelfServiceAction(selfServicePrimaryAction.action)"
-            >
-              {{ selfServicePrimaryAction.actionLabel }}
-            </button>
-          </div>
-          <div class="attendance__quick-actions">
-            <button
-              class="attendance__btn attendance__btn--primary"
-              type="button"
-              data-selfservice-action="missing-punch"
-              @click="openMissingPunchQuickAction"
-            >
-              {{ tr('Fix missing punch', '处理缺卡') }}
-            </button>
-            <button
-              class="attendance__btn"
-              type="button"
-              data-selfservice-action="leave"
-              @click="openQuickRequestDraft('leave')"
-            >
-              {{ tr('Leave request', '请假申请') }}
-            </button>
-            <button
-              class="attendance__btn"
-              type="button"
-              data-selfservice-action="overtime"
-              @click="openQuickRequestDraft('overtime')"
-            >
-              {{ tr('Overtime request', '加班申请') }}
-            </button>
-            <button
-              class="attendance__btn"
-              type="button"
-              data-selfservice-action="shift-swap"
-              @click="openQuickRequestDraft('shift_swap')"
-            >
-              {{ tr('Shift swap', '换班申请') }}
-            </button>
-            <button
-              class="attendance__btn"
-              type="button"
-              data-selfservice-action="records"
-              @click="scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)"
-            >
-              {{ tr('Review records', '查看记录') }}
-            </button>
-          </div>
-          <p class="attendance__field-hint attendance__field-hint--strong">
-            {{ selfServiceQuickActionHint }}
-          </p>
-        </div>
-
-        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="guide">
-          <div class="attendance__requests-header">
-            <div>
-              <h3>{{ tr('Status guide', '状态说明') }}</h3>
-              <small class="attendance__field-hint">
-                {{
-                  tr(
-                    'Turns attendance status codes into plain-language reminders for employees.',
-                    '把考勤状态码转换成员工能直接理解的说明。',
-                  )
-                }}
-              </small>
-            </div>
-          </div>
-          <ul class="attendance__status-guide">
-            <li v-for="item in attendanceStatusGuideItems" :key="item.key" class="attendance__status-guide-item">
-              <div class="attendance__status-guide-header">
-                <strong>{{ item.label }}</strong>
-                <span class="attendance__field-hint">{{ item.code }}</span>
-              </div>
-              <p>{{ item.description }}</p>
-            </li>
-          </ul>
-        </div>
-      </section>
-
+      <!--
+        The historical surfaces below (summary/calendar/adjustment-request/
+        request-report, then status guide) stay parent-authored and simply
+        keep their existing v-if gating — since the reports-only toolbar/
+        insights sections between here and there render zero DOM nodes in
+        overview mode, they do not break DOM adjacency (lock §5: the history
+        disclosure sits "immediately before historical content"; §4.3 item 6
+        keeps the status guide last). This first extraction does not move
+        this handler-dense block into AttendanceEmployeeWorkspace — see the
+        component's file header comment.
+      -->
       <section v-if="showReports" class="attendance__card attendance__card--report-toolbar">
         <div class="attendance__requests-header">
           <h3>{{ tr('Report Period', '报表区间') }}</h3>
@@ -1358,6 +1080,31 @@
             </table>
           </div>
         </div>
+      </section>
+
+      <section v-if="showOverview" class="attendance__card attendance__card--selfservice" data-selfservice-card="guide">
+        <div class="attendance__requests-header">
+          <div>
+            <h3>{{ tr('Status guide', '状态说明') }}</h3>
+            <small class="attendance__field-hint">
+              {{
+                tr(
+                  'Turns attendance status codes into plain-language reminders for employees.',
+                  '把考勤状态码转换成员工能直接理解的说明。',
+                )
+              }}
+            </small>
+          </div>
+        </div>
+        <ul class="attendance__status-guide">
+          <li v-for="item in attendanceStatusGuideItems" :key="item.key" class="attendance__status-guide-item">
+            <div class="attendance__status-guide-header">
+              <strong>{{ item.label }}</strong>
+              <span class="attendance__field-hint">{{ item.code }}</span>
+            </div>
+            <p>{{ item.description }}</p>
+          </li>
+        </ul>
       </section>
 
       <section
@@ -10015,6 +9762,8 @@ import {
 } from './attendance/attendanceApprovalSteps'
 import { useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
+import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
 import {
   buildCalendarPolicyOverrideDiagnostics,
   calendarPolicyOverridesFromForm,
@@ -10586,14 +10335,6 @@ type AttendanceSelfServiceActionKey =
   | 'shift_swap'
   | 'records'
   | 'request-report'
-
-interface AttendanceSelfServiceFocusItem {
-  key: string
-  title: string
-  detail: string
-  action: AttendanceSelfServiceActionKey | null
-  actionLabel: string | null
-}
 
 interface AttendanceSelfServiceRequestFollowup {
   title: string
@@ -11790,6 +11531,15 @@ const missedPunchReminderConfirm = reactive({
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
 const statusMeta = ref<AttendanceStatusMeta | null>(null)
+// Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.2 row 1:
+// the shared status banner is reused by many non-punch flows (refresh,
+// admin, import, save-settings...), so "actionable punch failure" needs a
+// marker scoped to punch specifically — set only by punch()'s catch branches
+// via setStatus's optional `source` argument, cleared whenever any OTHER
+// call to setStatus/setStatusFromError supersedes the banner (default source
+// is null, so every pre-existing call site is unaffected).
+const statusSource = ref<'punch' | null>(null)
+const punchFailureActive = computed(() => statusKind.value === 'error' && statusSource.value === 'punch')
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
@@ -13180,100 +12930,34 @@ const attendanceStatusGuideItems = computed<AttendanceSelfServiceStatusGuideItem
   },
 ])
 
-const selfServiceFocusItems = computed<AttendanceSelfServiceFocusItem[]>(() => {
-  if (selfServiceNeedsSetupHint.value) {
-    return [
-      {
-        key: 'setup-guidance',
-        title: tr('Check attendance setup', '检查考勤配置'),
-        detail: selfServiceSetupFollowupHint.value,
-        action: null,
-        actionLabel: null,
-      },
-    ]
-  }
+// Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.2: ONE
+// canonical "Needs attention" item, built from the same facts the retired
+// selfServiceFocusItems/selfServicePrimaryAction computeds used to derive
+// (activeWorkbenchRecord, anomalies, requests, the setup gate) plus the
+// shared status banner. See attendanceOverviewPriority.ts for the pure,
+// independently-tested first-match table.
+const workbenchRecordStatus = computed<string | null>(() => activeWorkbenchRecord.value?.status ?? null)
+const workbenchFocusDateLabel = computed<string | null>(() =>
+  activeWorkbenchRecord.value ? formatDate(activeWorkbenchRecord.value.work_date) : null
+)
+const workbenchWorkMinutes = computed(() => activeWorkbenchRecord.value?.work_minutes ?? 0)
 
-  const items: AttendanceSelfServiceFocusItem[] = []
-  const focusRecord = activeWorkbenchRecord.value
-  const attentionCount = activeWorkbenchAttentionCount.value
-  const pendingCount = countRequestsByStatus('pending')
-
-  if (attentionCount > 0) {
-    items.push({
-      key: 'anomalies',
-      title: tr('Resolve anomaly reminders', '优先处理异常提醒'),
-      detail: tr(
-        `The focus date still has ${attentionCount} anomaly reminder${attentionCount === 1 ? '' : 's'}.`,
-        `关注日期仍有 ${attentionCount} 条异常提醒待处理。`,
-      ),
-      action: 'missing-punch',
-      actionLabel: tr('Fix missing punch', '处理缺卡'),
-    })
-  }
-
-  if (pendingCount > 0) {
-    items.push({
-      key: 'pending-requests',
-      title: tr('Track pending approvals', '跟进待审批申请'),
-      detail: tr(
-        `${pendingCount} request${pendingCount === 1 ? '' : 's'} in this range still need approval.`,
-        `当前区间内还有 ${pendingCount} 条申请待审批。`,
-      ),
-      action: 'request-report',
-      actionLabel: tr('Open request report', '打开申请报表'),
-    })
-  }
-
-  if (focusRecord && !['normal', 'off'].includes(focusRecord.status)) {
-    items.push({
-      key: 'record-review',
-      title: tr('Review the focus workday', '查看关注工作日'),
-      detail: tr(
-        `${formatStatus(focusRecord.status)} was recorded for ${formatDate(focusRecord.work_date)}.`,
-        `${formatDate(focusRecord.work_date)} 记录为${formatStatus(focusRecord.status)}。`,
-      ),
-      action: 'records',
-      actionLabel: tr('Review records', '查看记录'),
-    })
-  }
-
-  if (items.length === 0) {
-    items.push({
-      key: 'all-clear',
-      title: tr('You are caught up', '当前已处理完毕'),
-      detail: tr(
-        'No anomaly reminders or pending approvals are blocking your attendance follow-up in this range.',
-        '当前区间内没有异常提醒或待审批事项阻塞你的考勤跟进。',
-      ),
-      action: 'records',
-      actionLabel: tr('Open records', '打开记录'),
-    })
-  }
-
-  return items
-})
-
-const selfServicePrimaryAction = computed<AttendanceSelfServiceFocusItem>(() => {
-  if (selfServiceNeedsSetupHint.value) {
-    return {
-      key: 'setup-wait',
-      title: tr('Wait for attendance setup', '等待考勤配置'),
-      detail: selfServiceSetupFollowupHint.value,
-      action: null,
-      actionLabel: null,
-    }
-  }
-  return selfServiceFocusItems.value.find(item => item.action && item.actionLabel) ?? {
-    key: 'default-leave',
-    title: tr('Start a new attendance request', '发起新的考勤申请'),
-    detail: tr(
-      'Use the quick actions to create a leave, overtime, or missing-punch request without leaving overview.',
-      '无需离开总览，即可用快捷操作发起请假、加班或补卡申请。',
-    ),
-    action: 'leave',
-    actionLabel: tr('Leave request', '请假申请'),
-  }
-})
+const attendanceOverviewAttentionItem = computed(() => resolveAttendanceOverviewAttention(
+  {
+    punchFailureActive: punchFailureActive.value,
+    punchFailureMessage: statusMessage.value,
+    anomalyCount: activeWorkbenchAttentionCount.value,
+    focusDateLabel: workbenchFocusDateLabel.value,
+    latestRequestStatus: selfServiceSortedRequests.value[0]?.status ?? null,
+    pendingRequestCount: countRequestsByStatus('pending'),
+    focusRecordStatus: workbenchRecordStatus.value,
+    focusRecordStatusLabel: workbenchRecordStatus.value ? formatStatus(workbenchRecordStatus.value) : null,
+    focusRecordDateLabel: workbenchFocusDateLabel.value,
+    needsSetup: selfServiceNeedsSetupHint.value,
+    setupHint: selfServiceSetupFollowupHint.value,
+  },
+  tr,
+))
 
 const selfServiceQuickActionHint = computed(() => {
   if (selfServiceNeedsSetupHint.value) {
@@ -20073,9 +19757,14 @@ function classifyStatusError(
   return { message, meta }
 }
 
-function setStatusFromError(error: unknown, fallbackMessage: string, context: AttendanceStatusContext) {
+function setStatusFromError(
+  error: unknown,
+  fallbackMessage: string,
+  context: AttendanceStatusContext,
+  source: 'punch' | null = null,
+) {
   const { message, meta } = classifyStatusError(error, fallbackMessage, context)
-  setStatus(message || fallbackMessage, 'error', meta)
+  setStatus(message || fallbackMessage, 'error', meta, source)
 }
 
 async function runStatusAction() {
@@ -20144,12 +19833,18 @@ async function runStatusAction() {
   }
 }
 
-function setStatus(message: string, kind: 'info' | 'error' = 'info', meta: AttendanceStatusMeta | null = null) {
+function setStatus(
+  message: string,
+  kind: 'info' | 'error' = 'info',
+  meta: AttendanceStatusMeta | null = null,
+  source: 'punch' | null = null,
+) {
   const normalizedMessage = kind === 'error'
     ? localizeRuntimeErrorMessage(message, message)
     : message
   statusKind.value = kind
   statusMeta.value = kind === 'error' ? meta : null
+  statusSource.value = normalizedMessage ? source : null
   if (statusMessage.value === normalizedMessage && normalizedMessage) {
     statusMessage.value = ''
     void nextTick(() => {
@@ -20167,6 +19862,9 @@ function setStatus(message: string, kind: 'info' | 'error' = 'info', meta: Atten
       statusMessage.value = ''
       if (statusMeta.value === meta) {
         statusMeta.value = null
+      }
+      if (statusSource.value === source) {
+        statusSource.value = null
       }
     }
   }, timeoutMs)
@@ -20973,16 +20671,18 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
       // G2: enum-strict — only this exact code opens the inline note form.
       punchOutdoorNoteRequired.value = true
       punchOutdoorNoteEventType.value = eventType
-      setStatus(errorOutcome.message, 'error', { code: errorOutcome.code })
+      // source: 'punch' — employee-overview task-first design-lock §4.2 row 1
+      // ("actionable punch failure") reads this via punchFailureActive.
+      setStatus(errorOutcome.message, 'error', { code: errorOutcome.code }, 'punch')
     } else if (errorOutcome?.kind === 'locationRestricted') {
       // G3: a calibrated dead-end — no retry action (a retry would fail the
       // same way every time under the current org configuration).
       resetPunchOutdoorNote()
-      setStatus(errorOutcome.message, 'error', { code: errorOutcome.code })
+      setStatus(errorOutcome.message, 'error', { code: errorOutcome.code }, 'punch')
     } else {
       // Unknown/other codes: unchanged existing generic path.
       resetPunchOutdoorNote()
-      setStatusFromError(error, tr('Punch failed', '打卡失败'), 'refresh')
+      setStatusFromError(error, tr('Punch failed', '打卡失败'), 'refresh', 'punch')
     }
   } finally {
     punching.value = false
@@ -23836,6 +23536,7 @@ const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
 const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
+const selfRulesHasData = computed(() => selfRulesData.value !== null)
 
 function summarizeSelfRulesGroups(groups: AttendanceSelfRulesGroupSummary[] | undefined, emptyLabel: string): string {
   if (!Array.isArray(groups) || groups.length === 0) return emptyLabel
@@ -24032,6 +23733,7 @@ const leaveMinutesDaysHint = computed(() => {
 const annualSelfBalance = ref<AnnualLeaveBalanceData | null>(null)
 const annualSelfBalanceLoading = ref(false)
 const annualSelfBalanceError = ref<string | null>(null)
+const annualSelfBalanceSummary = computed(() => annualSelfBalance.value?.summary ?? null)
 
 async function loadAnnualSelfBalance(): Promise<void> {
   annualSelfBalanceLoading.value = true

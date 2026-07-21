@@ -548,7 +548,7 @@ owner 已采用以下推荐值：
 | 本总纲 | 本文 | N/A | `git diff --check` + 引用核对 | RATIFIED；OD-VX1..6 于 2026-07-20 接受推荐值 |
 | Wave 0 / #4371 | 既有测试意图 | test/workflow only，head `1a88e7aa5` | 历史 checks 绿，需 current-head 重跑 | OPEN / BEHIND |
 | Wave 1 / #4359 | issue #4354 | 已有实现分支，head `2eff10bc9` | 历史 required checks 绿，需 re-port 后重跑 | OPEN / BEHIND |
-| Wave 2 / issue #4355 | #4370 PROPOSED，head `6a01ec630`；产品方向已由 OD-VX2 接受 | 未开始 | 未开始 | PREDECESSOR / DOC-SYNC-GATED |
+| Wave 2 / issue #4355 | #4370 **RATIFIED**（owner 2026-07-21，OD-O1..O4 全按推荐值接受；post-#4359 doc-sync 复核 NO-DRIFT）| 未开始 | 未开始 | RATIFIED / landing——#4370 合入后即从新 main 开 runtime PR（§14 步骤 4）|
 | Wave 3 / issue #4353 | #4414 stacked draft，head `8a10cdea5` | 旧基线实现存在，不可直接合 | 仅 stacked-base checks；无 main current-base required gate | RE-PORT-GATED |
 | Wave 4 onboarding | 本总纲仅定义范围 | 未开始 | 未开始 | DESIGN-LOCK-GATED |
 | Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |
