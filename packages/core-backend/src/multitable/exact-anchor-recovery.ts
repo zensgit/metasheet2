@@ -40,10 +40,10 @@ import {
  * a read-only point-in-time VIEW still uses `T` (`reconstructRecordsAtT`, v3.7 §9.2) — that is display, not the
  * destructive authority; only the destructive recovery authority is anchor-only.
  *
- * DRAFT / DEFAULT-OFF: this module is the recovery precheck/execute AUTHORITY, ready for the Revert/Reset routes
- * to adopt, but it performs NO destructive write itself — the actual apply stays behind the existing default-OFF
- * `MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET` flags. Resolving/verifying an anchor is a pure
- * read; with every flag off nothing here is reached from a default-on path (flag-off parity: byte-identical).
+ * WIRED / DEFAULT-OFF: this module is the recovery anchor AUTHORITY used by the four Revert/Reset routes. It
+ * performs no destructive write itself; L8 apply remains behind the existing default-OFF
+ * `MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET` flags. Preview resolution is read-only but
+ * still requires the conservative full-read gate and recovery trust pair before an execute token is minted.
  */
 
 /** A recovery ANCHOR request. Discriminated so the wall-clock branch is refused by construction (§1.3). */

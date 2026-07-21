@@ -1029,6 +1029,14 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       expect(pv.body?.error?.code).not.toBe('SHEET_TOO_LARGE')
       expect(pv.body?.data?.previewIdentity).toBeUndefined()
       expect(JSON.stringify(pv.body)).not.toMatch(/healed-v3|A-live-now|A-at-anchor/)
+
+      // A non-system-admin with the broad manage capability must see the exact same refusal for an unknown
+      // sheet. Otherwise 404 vs 403 becomes a sheet-existence oracle before the conservative full-read gate.
+      const unknown = await request(app)
+        .post(`/api/multitable/sheets/sheet_earw_unknown_${TS}/revert-preview`)
+        .send({ anchorOperationId: anchorOp })
+      expect(unknown.status).toBe(403)
+      expect(unknown.body).toEqual(pv.body)
     } finally {
       await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     }

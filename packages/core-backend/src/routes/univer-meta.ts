@@ -4,7 +4,6 @@ import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
-import { db as kyselyDb } from '../db/db'
 import { eventBus } from '../integration/events/event-bus'
 import {
   deriveFieldPermissions,
@@ -21,10 +20,9 @@ import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitabl
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
-import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
-  normalizePermissionCodes,
   resolveRequestAccess,
   type MultitableCapabilities,
   type ResolvedRequestAccess,
@@ -34,7 +32,6 @@ import {
   MANAGED_SHEET_PERMISSION_CODES,
   PUBLIC_FORM_CAPABILITIES,
   applyContextSheetSchemaWriteGrant,
-  applySheetPermissionScope,
   buildRowActionOverrides,
   canReadWithSheetGrant,
   deriveCapabilityOrigin,
@@ -64,19 +61,15 @@ import {
   resolveSheetReadableCapabilities,
   type MultitableCapabilityOrigin,
   type MultitableRowActions,
-  type MultitableSheetAccessLevel,
   type MultitableSheetPermissionCandidate,
-  type MultitableSheetPermissionEntry,
-  type MultitableSheetPermissionSubjectType,
   type SheetPermissionScope,
 } from '../multitable/permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { precheckSheetHistoryIntegrity, HistoryIncompleteInTxnError } from '../multitable/history-integrity-precheck'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
   enforceSheetRecoverySizeCeiling,
@@ -252,13 +245,9 @@ import {
   backfillAutoNumberField,
 } from '../multitable/auto-number-service'
 import {
-  acquireCanonicalSheetFence,
   assertNoActiveWriterBlock,
-  claimDurableWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
-  PIT_RECOVERY_LOCK_NS,
-  setRecoveryWriterState,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
@@ -271,16 +260,6 @@ import {
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, recordRecordRevisionsBatch, recordVersionMarker, type RecordRevisionEntry, type RecordRevisionInput } from '../multitable/record-history-service'
 import { mintOperation, sealOperation } from '../multitable/operation-ledger'
-import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
-import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
-
-// 4c-3: pre-migration deploy window guard for the delete_revision_id column (mirrors record-service).
-function isUndefinedColumnError42703(err: unknown, columnName: string): boolean {
-  const code = (err as { code?: string } | null)?.code
-  const msg = err instanceof Error ? err.message : String(err)
-  if (code === '42703') return msg.includes(columnName)
-  return msg.includes(`column "${columnName}" does not exist`)
-}
 import {
   isPersonalViewsEnabled,
   applyPersonalViewOverlay,
@@ -497,11 +476,6 @@ type UniverMetaViewConfig = {
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-const DEFAULT_BASE_ID = 'base_legacy'
-const DEFAULT_BASE_NAME = 'Migrated Base'
-// W0-1 C4 fence: `PIT_RECOVERY_LOCK_NS` (recovery-only advisory lock namespace, paired with
-// `hashtext(sheetId)` as the per-sheet key) now lives in `canonical-sheet-fence.ts` — single source of
-// truth shared by reset-execute AND revert-execute (see that module's RECOVERY-VS-RECOVERY doc section).
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
 // ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
@@ -10118,9 +10092,10 @@ export function univerMetaRouter(): Router {
   // Revert-execute master gate (default-OFF). The exact-anchor authority is WIRED (L6 resolveExactAnchor +
   // L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing); enablement remains a separate
   // owner-gated ops decision. Mirrors reset-execute's PIT_RESET_ENABLED() gate exactly (same
-  // String(env).trim().toLowerCase()==='true' resolution). revert-preview stays UNGATED (read-only, no
-  // writes to protect, and the FE preview UI still needs to render even while the execute button is hidden);
-  // it still refuses without the trust pair (RECOVERY_TRUST_REQUIRED) before minting any token.
+  // String(env).trim().toLowerCase()==='true' resolution). revert-preview is outside the execution-feature
+  // flag so the FE can render a read-only plan while execute remains hidden; it is not open access: the route
+  // still requires authentication, sheet management, conservative full-read, and the recovery trust pair
+  // before it can mint an execute token.
   const SHEET_REVERT_ENABLED = () => String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true'
 
   // ── W0-1 L5-wire: trust-checkpoint ACTIVATION (the production caller for activateCheckpoint) ────────────
@@ -10526,7 +10501,8 @@ export function univerMetaRouter(): Router {
 
   /**
    * Shared PREVIEW handler for both modes. No-oracle ordering: parse shape (no DB) → 401/403 admin floor →
-   * 404 → conservative full-read 403 → trust 409 → live-count ceiling 413 → L6/L7 preview. The response is
+   * existence-hidden 403 for non-admin unknown sheets → conservative full-read 403 → system-admin-only 404 →
+   * trust 409 → live-count ceiling 413 → L6/L7 preview. The response is
    * VALUES-FREE (record/field ids + counts only; never targetData/live snapshots), and `previewIdentity`
    * is present ONLY when the plan is executable — resurrection-bearing, schema-drifted, and no-op plans
    * never receive a destructive token.
@@ -10549,9 +10525,15 @@ export function univerMetaRouter(): Router {
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-admin floor, above plain record-write
       const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
-      if (exists.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      // Conservative full-table read FIRST among sheet-state adjudications — an actor without it sees 403
-      // before any anchor/history/size oracle.
+      // A non-system-admin who can manage some sheets must not use 404 vs 403 to probe whether another sheet
+      // exists. Only a system admin may receive an explicit missing-sheet result; everyone else gets the same
+      // values-free 403 as an existing sheet they cannot read in full.
+      if (exists.rows.length === 0) {
+        if (!access.isAdminRole) return sendForbidden(res)
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      // Conservative full-table read before anchor/history/size adjudication — an actor without it sees 403
+      // before any recovery-state oracle.
       if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
         return sendForbidden(res)
       }
@@ -12750,7 +12732,7 @@ export function univerMetaRouter(): Router {
       // ON DELETE CASCADE so their OUTBOUND edges go — but foreign_record_id has NO FK, so INBOUND edges from
       // OTHER sheets pointing to these records would DANGLE. Clean those inbound edges FIRST, in the SAME
       // transaction, before the records vanish (else the subquery can't find them) — atomic delete-edges+sheet.
-      const del = await pool.transaction(async ({ query }) => {
+      await pool.transaction(async ({ query }) => {
         await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
         return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       })
@@ -14271,7 +14253,6 @@ export function univerMetaRouter(): Router {
 
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
       const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
-      const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
       const fieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, effectiveAccess.userId) : new Map()
       const viewScopeMap = (effectiveAccess.userId && resolved.view) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [resolved.view.id], effectiveAccess.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, {
@@ -14282,7 +14263,7 @@ export function univerMetaRouter(): Router {
       // D1 (#2106): the record-value echo must honor layer-3 (field_permissions), not just layer-1∧2 — the
       // same composite /view + /records enforce (#2028). visibleFields already applied layer-1 (view.hidden) ∧
       // layer-2 (property.hidden); fieldPermissions[].visible adds layer-3. For an ANONYMOUS public-form caller
-      // effectiveAccess.userId='' → fieldScopeMap is empty → this equals visibleFieldIds (the public path is
+      // effectiveAccess.userId='' → fieldScopeMap is empty → this equals the layer-1/2 visible set (the public path is
       // unchanged; anonymous has no subject to scope to).
       let readableFieldIds = new Set(visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id))
       // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): in edit-mode
@@ -14845,11 +14826,10 @@ export function univerMetaRouter(): Router {
         data: normalizeJson(row.data),
       }
       const visibleFormFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
-      const visibleFormFieldIds = new Set(visibleFormFields.map((field) => field.id))
       // D1 (#2106): gate the write echo by layer-2 ∧ layer-3 (the #2028 composite), not just layer-1∧2. This
       // covers a denied field the submitter never sent — a server-assigned / recalculated formula value. The
       // submit handler loads no fieldScopeMap today; add one. ANONYMOUS (effectiveAccess.userId='') → empty
-      // scope map → readableEchoFieldIds equals visibleFormFieldIds, so the public-form echo is unchanged.
+      // scope map → readableEchoFieldIds equals the layer-1/2 visible set, so the public-form echo is unchanged.
       const echoFieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), view.sheetId, effectiveAccess.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, { hiddenFieldIds: view.hiddenFieldIds ?? [], fieldScopeMap: echoFieldScopeMap })
       // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds) — C1: in
