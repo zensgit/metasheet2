@@ -138,18 +138,14 @@ export interface AttachmentRefResult {
   downloadUrl?: string
 }
 
-/**
- * §8 batched reference resolution. Omit `instanceId` for the uploader-scoped DRAFT STALE-CHECK (G13);
- * pass it for BOUND metadata on a submitted instance (authorized by the same visibility + hidden-field
- * predicates the byte path uses). Returns `[]` for an empty id list without a round-trip.
- */
-export async function fetchApprovalAttachmentRefs(
-  ids: readonly string[],
-  instanceId?: string,
-  fetcher: AttachmentFetcher = apiFetch,
+/** Server contract: every `/refs` request carries at most this many frozen ids. */
+export const CLIENT_ATTACHMENT_REF_BATCH_SIZE = 200
+
+async function fetchApprovalAttachmentRefBatch(
+  wanted: readonly string[],
+  instanceId: string | undefined,
+  fetcher: AttachmentFetcher,
 ): Promise<AttachmentRefResult[]> {
-  const wanted = ids.filter((id) => typeof id === 'string' && id.length > 0)
-  if (wanted.length === 0) return []
   const res = await fetcher('/api/approval/attachments/refs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -179,11 +175,31 @@ export async function fetchApprovalAttachmentRefs(
     }
     byId.set(id, entry as AttachmentRefResult)
   }
-  const ordered: AttachmentRefResult[] = []
-  for (const id of wanted) {
+  return wanted.map((id) => {
     const entry = byId.get(id)
     if (!entry) throw new Error('attachment refs failed: partial_response')
-    ordered.push(entry)
+    return entry
+  })
+}
+
+/**
+ * §8 batched reference resolution. Omit `instanceId` for the uploader-scoped DRAFT STALE-CHECK (G13);
+ * pass it for BOUND metadata on a submitted instance (authorized by the same visibility + hidden-field
+ * predicates the byte path uses). Every caller is chunked to the server's 200-id contract. Batches run
+ * sequentially and no partial result escapes when a later batch fails. Returns `[]` for an empty id list.
+ */
+export async function fetchApprovalAttachmentRefs(
+  ids: readonly string[],
+  instanceId?: string,
+  fetcher: AttachmentFetcher = apiFetch,
+): Promise<AttachmentRefResult[]> {
+  const wanted = ids.filter((id) => typeof id === 'string' && id.length > 0)
+  if (wanted.length === 0) return []
+
+  const ordered: AttachmentRefResult[] = []
+  for (let offset = 0; offset < wanted.length; offset += CLIENT_ATTACHMENT_REF_BATCH_SIZE) {
+    const batch = wanted.slice(offset, offset + CLIENT_ATTACHMENT_REF_BATCH_SIZE)
+    ordered.push(...await fetchApprovalAttachmentRefBatch(batch, instanceId, fetcher))
   }
   return ordered
 }

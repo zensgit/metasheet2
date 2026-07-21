@@ -87,6 +87,10 @@ import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import {
+  approvalAttachmentRefsJsonParser,
+  isApprovalAttachmentsEnabled,
+} from './routes/approval-attachments'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
@@ -1159,6 +1163,13 @@ export class MetaSheetServer {
     // T1-2 inbound automation webhooks need the exact raw JSON bytes for HMAC verification and a
     // narrower body limit than the general API. Parse this prefix before the global JSON parser.
     this.app.use('/api/multitable/automation/webhooks', automationWebhookJsonParser)
+
+    // `/refs` has a 64 KB contract. This exact-path parser MUST run before the global 10 MB parser;
+    // mounting it only in the late attachment router is ineffective once `req.body` already exists.
+    // Flag OFF remains a byte-for-byte no-op: no parser and therefore no attachment-specific refusal.
+    if (isApprovalAttachmentsEnabled()) {
+      this.app.post('/api/approval/attachments/refs', approvalAttachmentRefsJsonParser)
+    }
 
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))

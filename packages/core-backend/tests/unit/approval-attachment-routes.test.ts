@@ -1,11 +1,17 @@
 /** Attachment slice ⑤ — route goldens (supertest over injected seams; required no-DB lane). */
+import { request as httpRequest } from 'node:http'
+
 import express from 'express'
+import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { describe, expect, test } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
 
+import { MetaSheetServer } from '../../src/index'
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled, MAX_REF_BATCH } from '../../src/routes/approval-attachments'
+import { resolveRuntimeJwtSecret } from '../../src/security/auth-runtime-config'
+import { secretManager } from '../../src/security/SecretManager'
 import { APPROVAL_ATTACHMENT_LIMITS } from '../../src/services/approval-attachment-validation'
 import type { ApprovalAttachmentStore } from '../../src/services/approval-attachment-storage'
 
@@ -18,6 +24,39 @@ const pinned = usePinnedServer()
 function serve(app: express.Express) {
   pinned.setApp(app)
   return request(pinned.url())
+}
+
+async function postChunkedJson(path: string, token: string, chunks: readonly string[]): Promise<{ status: number; body: unknown }> {
+  const url = new URL(pinned.url())
+  return await new Promise((resolve, reject) => {
+    const req = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Transfer-Encoding': 'chunked',
+      },
+    }, (res) => {
+      const responseChunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => responseChunks.push(chunk))
+      res.on('end', () => {
+        const text = Buffer.concat(responseChunks).toString('utf8')
+        let body: unknown = text
+        try {
+          body = JSON.parse(text)
+        } catch {
+          // A flag-OFF fallthrough can be Express's plain-text/HTML 404; status is the contract there.
+        }
+        resolve({ status: res.statusCode ?? 0, body })
+      })
+    })
+    req.on('error', reject)
+    for (const chunk of chunks) req.write(chunk)
+    req.end()
+  })
 }
 
 function makeApp(over: {
@@ -268,6 +307,16 @@ describe('approval attachment routes (flag-gated)', () => {
     expect(r.body).toEqual({ error: 'storage_unavailable' }) // values-free
     expect(up.inserted.length).toBe(0)
     expect(up.blobs.size).toBe(0)
+    // Discriminating control: Multer would reject this as too_many_files. Storage refusal must win,
+    // proving unavailable production storage is checked before multipart bytes are parsed/buffered.
+    const twoFiles = await serve(up.app)
+      .post('/api/approval/attachments')
+      .field('fieldId', 'fld1')
+      .field('templateId', 'tpl1')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'b.pdf', contentType: 'application/pdf' })
+    expect(twoFiles.status).toBe(503)
+    expect(twoFiles.body).toEqual({ error: 'storage_unavailable' })
     const row = {
       status: 'bound',
       uploader_id: 'up1',
@@ -664,6 +713,64 @@ describe('approval attachment /refs (§8)', () => {
     expect(r.status).toBe(413)
     expect(r.body).toEqual({ error: 'too_many_ids' })
     expect(app.queries).toEqual([])
+  })
+
+  test('real-server pre-parser rejects chunked 65 KB JSON whitespace with no Content-Length', async () => {
+    const target = makeApp({ queryHandler: () => ({ rows: [] }) })
+    const previousTrust = process.env.RBAC_TOKEN_TRUST
+    const previousFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+    process.env.RBAC_TOKEN_TRUST = 'true'
+    process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+    try {
+      const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+      const realApp = (server as unknown as { app: express.Express }).app
+      if (target.router) realApp.use(target.router)
+      pinned.setApp(realApp)
+      const token = jwt.sign(
+        { userId: 'u1', email: 'u1@example.test', role: 'admin', roles: ['admin'], perms: ['*'], tenantId: 'org1' },
+        resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false })),
+      )
+      const whitespaceBytes = 65 * 1024
+      const left = ' '.repeat(Math.floor(whitespaceBytes / 2))
+      const right = ' '.repeat(Math.ceil(whitespaceBytes / 2))
+      const r = await postChunkedJson('/api/approval/attachments/refs', token, [left, '{"ids":[]}', right])
+
+      expect(r.status).toBe(413)
+      expect(r.body).toEqual({ error: 'payload_too_large' })
+      expect(target.queries).toEqual([])
+    } finally {
+      if (previousTrust === undefined) delete process.env.RBAC_TOKEN_TRUST
+      else process.env.RBAC_TOKEN_TRUST = previousTrust
+      if (previousFlag === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+      else process.env.APPROVAL_ATTACHMENTS_ENABLED = previousFlag
+    }
+  })
+
+  test('real-server flag OFF installs no refs pre-parser or attachment-specific refusal', async () => {
+    const previousTrust = process.env.RBAC_TOKEN_TRUST
+    const previousFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+    process.env.RBAC_TOKEN_TRUST = 'true'
+    process.env.APPROVAL_ATTACHMENTS_ENABLED = 'false'
+    try {
+      const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+      pinned.setApp((server as unknown as { app: express.Express }).app)
+      const token = jwt.sign(
+        { userId: 'u1', email: 'u1@example.test', role: 'admin', roles: ['admin'], perms: ['*'], tenantId: 'org1' },
+        resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false })),
+      )
+      const whitespaceBytes = 65 * 1024
+      const r = await postChunkedJson('/api/approval/attachments/refs', token, [
+        ' '.repeat(whitespaceBytes),
+        '{"ids":[]}',
+      ])
+
+      expect(r.status).toBe(404)
+    } finally {
+      if (previousTrust === undefined) delete process.env.RBAC_TOKEN_TRUST
+      else process.env.RBAC_TOKEN_TRUST = previousTrust
+      if (previousFlag === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+      else process.env.APPROVAL_ATTACHMENTS_ENABLED = previousFlag
+    }
   })
 })
 

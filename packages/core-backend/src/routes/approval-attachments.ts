@@ -86,6 +86,22 @@ export interface ApprovalAttachmentRouteDeps {
 /** Hard bound on one `/refs` batch — a submission can carry at most 10 files/field (O1), so this is
  *  generous for any legitimate form while capping the work an authenticated caller can request. */
 export const MAX_REF_BATCH = 200
+export const MAX_REF_BODY_BYTES = 64 * 1024
+
+const approvalAttachmentRefsJson = json({ limit: MAX_REF_BODY_BYTES })
+
+/** Parse `/refs` JSON with a fixed values-free error contract. Also mounted before the global parser. */
+export function approvalAttachmentRefsJsonParser(req: Request, res: Response, next: NextFunction): void {
+  approvalAttachmentRefsJson(req, res, (error?: unknown) => {
+    if (!error) return next()
+    const parseError = error as { status?: unknown; type?: unknown }
+    if (parseError.status === 413 || parseError.type === 'entity.too.large') {
+      res.status(413).json({ error: 'payload_too_large' })
+      return
+    }
+    res.status(400).json({ error: 'invalid_body' })
+  })
+}
 
 export function isApprovalAttachmentsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return String(env.APPROVAL_ATTACHMENTS_ENABLED ?? '').trim().toLowerCase() === 'true'
@@ -158,17 +174,24 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     next()
   }
 
+  /** O3 must refuse before Multer allocates or parses any multipart bytes. */
+  const requireStorageAvailable = (_req: Request, res: Response, next: NextFunction): void => {
+    if (deps.storageAvailable === false) {
+      res.status(503).json({ error: 'storage_unavailable' })
+      return
+    }
+    next()
+  }
+
   router.post(
     '/api/approval/attachments',
     requireUploadAuth,
+    requireStorageAvailable,
     runUpload,
     asyncHandler(async (req: Request, res: Response) => {
       // Identity already verified by requireUploadAuth; re-read for the durable row stamps.
       const uploaderId = deps.viewerId(req)!
       const orgId = deps.orgId(req)! // server-derived from the principal — never the body
-      // O3 prod fail-close: no S3-compatible store configured in production ⇒ 503, values-free, BEFORE any
-      // validation/blob work — an upload never lands on the deploy host's local filesystem (§7/§9).
-      if (deps.storageAvailable === false) return res.status(503).json({ error: 'storage_unavailable' })
       const f = (req as Request & { file?: { originalname: string; mimetype: string; size: number; buffer: Buffer } }).file
       if (!f) return res.status(400).json({ error: 'file_required' })
       const fieldId = typeof req.body?.fieldId === 'string' && /[!-~]/.test(req.body.fieldId) ? req.body.fieldId : null
@@ -339,10 +362,7 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
    * resolve to a live row bound to THAT instance renders as a `tombstone` (the §8 "附件已删除" contract)
    * — never a silent swap to a different file, and never a leak of another instance's attachment.
    */
-  // Self-contained JSON parsing (small, bounded) so the router does not depend on the host app having
-  // mounted a body parser — and so the bound never inherits a larger app-wide limit.
-  const refsJson = json({ limit: '64kb' })
-  router.post('/api/approval/attachments/refs', refsJson, asyncHandler(async (req: Request, res: Response) => {
+  const handleRefs = asyncHandler(async (req: Request, res: Response) => {
     const viewerId = deps.viewerId(req)
     if (!viewerId) return res.status(401).json({ error: 'unauthenticated' })
     const orgId = deps.orgId(req)
@@ -426,7 +446,12 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
         }]
       }),
     })
-  }))
+  })
+  router.post(
+    '/api/approval/attachments/refs',
+    approvalAttachmentRefsJsonParser,
+    handleRefs,
+  )
 
   return router
 }

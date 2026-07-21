@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from 'vitest'
 
 import {
   CLIENT_ATTACHMENT_LIMITS,
+  CLIENT_ATTACHMENT_REF_BATCH_SIZE,
   CLIENT_ATTACHMENT_RULES_VERSION,
   deleteApprovalAttachment,
   fetchApprovalAttachmentRefs,
@@ -135,6 +136,65 @@ describe('approval attachment delete + refs clients', () => {
     // Partial: server returned 200 but omitted one of the requested ids.
     const partial = vi.fn(async () => new Response(JSON.stringify({ attachments: [{ id: 'a', stale: false }] }), { status: 200 }))
     await expect(fetchApprovalAttachmentRefs(['a', 'b'], undefined, partial)).rejects.toThrow(/partial_response/)
+  })
+
+  test('refs: instance-bound resolution sends 450 ids as 200/200/50 and restores frozen order', async () => {
+    const ids = Array.from({ length: 450 }, (_, index) => `att_${index}`)
+    const fetcher = vi.fn(async (_path: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { ids: string[]; instanceId?: string }
+      expect(body.instanceId).toBe('apv_1')
+      expect(body.ids.length).toBeLessThanOrEqual(CLIENT_ATTACHMENT_REF_BATCH_SIZE)
+      return new Response(JSON.stringify({
+        attachments: [...body.ids].reverse().map((id) => ({ id, tombstone: false, fileName: `${id}.pdf` })),
+      }), { status: 200 })
+    })
+
+    const result = await fetchApprovalAttachmentRefs(ids, 'apv_1', fetcher)
+
+    expect(fetcher.mock.calls.map(([, init]) => (JSON.parse(String(init?.body)) as { ids: string[] }).ids.length))
+      .toEqual([200, 200, 50])
+    expect(result.map((entry) => entry.id)).toEqual(ids)
+  })
+
+  test('refs: draft restore sends 450 ids as 200/200/50 without instanceId', async () => {
+    const ids = Array.from({ length: 450 }, (_, index) => `att_${index}`)
+    const fetcher = vi.fn(async (_path: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { ids: string[]; instanceId?: string }
+      expect(body).not.toHaveProperty('instanceId')
+      return new Response(JSON.stringify({
+        attachments: body.ids.map((id) => ({ id, stale: false, fileName: `${id}.pdf` })),
+      }), { status: 200 })
+    })
+
+    const result = await fetchApprovalAttachmentRefs(ids, undefined, fetcher)
+
+    expect(fetcher.mock.calls.map(([, init]) => (JSON.parse(String(init?.body)) as { ids: string[] }).ids.length))
+      .toEqual([200, 200, 50])
+    expect(result.map((entry) => entry.id)).toEqual(ids)
+  })
+
+  test('refs: a later chunk failure rejects the whole result with a values-free error', async () => {
+    const ids = Array.from({ length: 450 }, (_, index) => `att_${index}`)
+    let call = 0
+    const fetcher = vi.fn(async (_path: string, init?: RequestInit) => {
+      call += 1
+      const body = JSON.parse(String(init?.body)) as { ids: string[] }
+      if (call === 2) {
+        return new Response(JSON.stringify({ error: 'att_secret_customer_contract' }), { status: 503 })
+      }
+      return new Response(JSON.stringify({ attachments: body.ids.map((id) => ({ id, stale: false })) }), { status: 200 })
+    })
+
+    let caught: unknown
+    try {
+      await fetchApprovalAttachmentRefs(ids, undefined, fetcher)
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).message).toBe('attachment refs failed: 503')
+    expect((caught as Error).message).not.toContain('att_secret_customer_contract')
+    expect(fetcher).toHaveBeenCalledTimes(2)
   })
 })
 
