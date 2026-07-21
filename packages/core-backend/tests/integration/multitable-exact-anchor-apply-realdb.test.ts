@@ -1614,8 +1614,13 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       [`deadmid${TS}`.padEnd(64, '1'), SHEET, ACTOR],
     )
 
+    const beforeGlobal = Number(((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns')).rows[0] as { c: number }).c)
     const pruned = await pruneExpiredRecoveryTokenBurns(q as unknown as QueryFn, 1) // aggressive request
-    expect(pruned).toBe(1) // ONLY the 2h-old row — the 12m row is inside the 15m floor, the fresh row is new
+    const afterGlobal = Number(((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns')).rows[0] as { c: number }).c)
+    // The production sweep is intentionally global, so a reused real-DB may contain other legitimately expired
+    // burns. Pin its reported row count to the actual global delta without claiming this fixture owns every row.
+    expect(pruned).toBe(beforeGlobal - afterGlobal)
+    expect(pruned).toBeGreaterThanOrEqual(1)
     const remaining = (await q('SELECT token_sha256 FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows as Array<{ token_sha256: string }>
     const shas = new Set(remaining.map((r) => r.token_sha256))
     expect(shas.has(`deadold${TS}`.padEnd(64, '0'))).toBe(false) // pruned

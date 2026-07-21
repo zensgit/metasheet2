@@ -76,7 +76,12 @@ describeIfDatabase('multitable #4261 revert-preview undelete gate disclosure (ex
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'SRTG Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'SRTG Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET, 'Name', 'string', '{}', 1])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      `INSERT INTO users (id, password_hash, permissions)
+       VALUES ($1,'x',$2::jsonb)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
   })
   afterAll(async () => {
     await pruneSealedHistoryOperations(SHEET).catch(() => {})

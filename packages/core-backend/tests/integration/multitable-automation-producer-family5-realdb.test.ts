@@ -214,7 +214,17 @@ describeIfDatabase('P1#2d producer family 5 (univer-meta routes) — durable REP
       await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fld, sheet, 'Name', 'string', '{}', 1])
     }
     await q('INSERT INTO meta_views (id, sheet_id, name, type, config) VALUES ($1,$2,$3,$4,$5::jsonb)', [FORM_VIEW, FORM_SHEET, 'Form', 'form', '{}'])
-    for (const u of [MEMBER, ADMIN]) await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [u])
+    for (const [userId, permissions] of [
+      [MEMBER, ['multitable:read', 'multitable:write']],
+      [ADMIN, ['multitable:read', 'multitable:write', 'multitable:share']],
+    ] as const) {
+      await q(
+        `INSERT INTO users (id, password_hash, permissions)
+         VALUES ($1,'x',$2::jsonb)
+         ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
+        [userId, JSON.stringify(permissions)],
+      )
+    }
   })
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT

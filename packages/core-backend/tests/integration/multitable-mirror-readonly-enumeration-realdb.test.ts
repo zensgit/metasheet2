@@ -95,7 +95,12 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
     app.use('/api/multitable', univerMetaRouter())
 
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [USER])
+    await q(
+      `INSERT INTO users (id, password_hash, permissions)
+       VALUES ($1,'x',$2::jsonb)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
+      [USER, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'MRO'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3),($4,$5,$6)', [SA, BASE, 'A', SB, BASE, 'B'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
