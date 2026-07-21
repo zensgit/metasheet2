@@ -99,6 +99,7 @@ export type MetaRecordLabelKey =
   | 'record.resetPickerRefresh' | 'record.resetPickerHistoryLoading'
   | 'record.resetPickerHistoryEmpty' | 'record.resetPickerHistoryUnavailable'
   | 'record.resetPickerExactAnchorNote'
+  | 'record.revertPickerHeading' | 'record.recoveryPickerHeading' | 'record.recoveryPickerExactAnchorNote'
   | 'record.resetPickerTargetPrefix' | 'record.resetPickerTargetSuffix' | 'record.resetPickerFromBatch'
   | 'record.resetPickerErrorLoad' | 'record.resetPickerSystemActor' | 'record.resetPickerDefaultAction'
   // --- T8-2 Reset UI confirm dialog (R5c strict-zero closeout, final microslice of this line) ---
@@ -113,6 +114,10 @@ export type MetaRecordLabelKey =
   | 'record.resetConfirmErrorTrustRequired' | 'record.resetConfirmErrorSchemaDrift'
   | 'record.resetConfirmErrorLinkIntegrity' | 'record.resetConfirmErrorValueInvalid'
   | 'record.resetConfirmErrorInboundUnprovable' | 'record.resetConfirmErrorRetentionConflict'
+  | 'record.revertConfirmDialogAria' | 'record.revertConfirmErrorDisabled'
+  | 'record.revertConfirmErrorForbidden' | 'record.revertConfirmErrorTooLarge'
+  | 'record.revertConfirmErrorTrustRequired' | 'record.revertConfirmErrorGeneric'
+  | 'record.revertConfirmInvalidPreview'
   | 'record.resetConfirmWarnResetWord' | 'record.resetConfirmWarnNotWord' | 'record.resetConfirmRevertWord'
   | 'record.resetConfirmWarnBeforeNot' | 'record.resetConfirmWarnInstead'
   | 'record.resetConfirmTypePrefix' | 'record.resetConfirmTypeSuffix' | 'record.resetConfirmTypeAria'
