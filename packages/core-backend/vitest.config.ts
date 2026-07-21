@@ -558,6 +558,13 @@ export default defineConfig({
       // T1-2 inbound webhook trigger: mounted-route + real-DB execution row. Excluded from the no-DB
       // default job so it does not skip-green, and wired as a WHOLE FILE into the multitable real-DB lane.
       'tests/integration/multitable-inbound-webhook-trigger.test.ts',
+      // Audit B2 (2026-07-20): the outbound-webhook retry tick + durable-dedup suites are
+      // describeIfDatabase-gated and ALREADY wired as WHOLE FILES into the `Run multitable real-DB
+      // integration` step in plugin-tests.yml, but were missing from this exclude list — a
+      // half-satisfied two-point wiring, so the no-DB default job COLLECTED and skip-greened them
+      // (zero assertions, reported green). Both points are now present.
+      'tests/integration/multitable-webhook-retry-tick.test.ts',
+      'tests/integration/multitable-webhook-durable-dedup.test.ts',
       // R1 (DT-HARDEN-08 follow-up) dingtalk_group_deliveries retention sweep: DATABASE_URL-gated
       // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and wired
       // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
