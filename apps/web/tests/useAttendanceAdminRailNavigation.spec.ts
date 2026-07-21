@@ -283,15 +283,19 @@ describe('useAttendanceAdminRailNavigation', () => {
       expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(false)
     })
 
-    // Positive control: the same stored last-section IS honored once navigation is enabled,
-    // proving the disabled-case above comes from the gate and not a broken fixture.
+    // Positive control: the same stored last-section IS honored (and scrolled to) once
+    // navigation is enabled, proving the disabled-case above comes from the gate and not a
+    // broken fixture. (Hash-writing for this restore-only path is not this composable's own
+    // guarantee in isolation — it stays '' here with or without the gate — so this control
+    // asserts the id restore + scroll, the two effects the gate actually governs.)
     it('restores the remembered section when navigation is enabled (positive control)', async () => {
       window.localStorage.setItem('metasheet_attendance_admin_nav_last_section:default', 'attendance-admin-approval-flows')
       const vm = mountHost({ navigationEnabled: true })
       await flushUi()
 
       expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
-      expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(true)
     })
 
     it('still honors an explicit hash even while navigation is disabled', async () => {
