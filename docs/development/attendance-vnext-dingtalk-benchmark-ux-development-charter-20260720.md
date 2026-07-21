@@ -550,7 +550,7 @@ owner 已采用以下推荐值：
 | Wave 1 / #4359 | issue #4354 | 已有实现分支，head `2eff10bc9` | 历史 required checks 绿，需 re-port 后重跑 | OPEN / BEHIND |
 | Wave 2 / issue #4355 | #4370 **RATIFIED**（owner 2026-07-21，OD-O1..O4 全按推荐值接受；post-#4359 doc-sync 复核 NO-DRIFT）| 未开始 | 未开始 | RATIFIED / landing——#4370 合入后即从新 main 开 runtime PR（§14 步骤 4）|
 | Wave 3 / issue #4353 | #4414 stacked draft，head `8a10cdea5` | 旧基线实现存在，不可直接合 | 仅 stacked-base checks；无 main current-base required gate | RE-PORT-GATED |
-| Wave 4 onboarding | 设计锁 `attendance-vnext-wave4-onboarding-design-lock-20260721.md`（**RATIFIED** owner 2026-07-21，OD-W4-1..7 全裁决，④=(b) 平台默认即 ready；三轮修订台账在 #4509） | 未开始 | 未开始 | RATIFIED / landing——锁合入后从新 main 开 W4-0（readiness 安全底座） |
+| Wave 4 onboarding | 设计锁 `attendance-vnext-wave4-onboarding-design-lock-20260721.md`（**RATIFICATION SUSPENDED**——owner errata 2026-07-21 撤回 #4509 所记 RATIFIED：④=(b)「default→ready」被推翻为 `default→manual_review_required`；③ 补 `scheduledShiftGroupCount`/`step3Ready` 缺失信号；① 冻结待前置票 **W4-PRE-1**（`user_orgs` 今无生产维护写路径，锁 §3.3）；round-3 材料与锚点勘误经重验移植） | 未开始（**W4-0 FROZEN**；WIP 分支 `claude/w4-0-setup-readiness-20260721` 无 PR、冻结范围内不得合入） | 未开始 | RATIFICATION SUSPENDED / W4-0 FROZEN——errata 合入 → W4-PRE-1 落地 → 重新 ratify → 方开 W4-0（锁 §10 重启序） |
 | Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |
 | S7 runtime flag | 已交付并验证 | main 已有，默认 OFF | #4483 verification 已合且为刷新基线祖先 | OPERATOR-OPT-IN，非本线完成项 |
 | 原生/硬件/飞书/多午夜 | 不在本总纲 | 未授权 | N/A | OUT / 独立立项 |
