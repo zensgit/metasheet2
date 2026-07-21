@@ -525,14 +525,20 @@ export function assertNoRawIdentityProjections(markdownOrSql, opts = {}) {
 
 /** Verbs that put something INTO the evidence pack. */
 const EVIDENCE_CAPTURE_VERBS =
-  /\b(?:pastes?|copy|copies|records?|writes?|enters?|attaches?|attach|includes?|include|exports?|dumps?|prints?|puts?|put|saves?|logs?)\b/i
+  /\b(?:pastes?|copy|copies|records?|writes?|enters?|attaches?|attach|includes?|include|exports?|dumps?|prints?|puts?|put|saves?|logs?|adds?|add|captures?|capture|notes?|note|fills?|fill|transcribes?|transcribe|stores?|store|lists?|list|sends?|send|reports?|report)\b/i
 
 /** Raw provider identity / business values as they read in prose. */
 const RAW_IDENTITY_PROSE_TERMS =
   /\b(?:union[_\s-]?ids?|open[_\s-]?ids?|openid|corp[_\s-]?ids?|corpid|external[_\s-]?user[_\s-]?ids?|external[_\s-]?keys?|user[_\s-]?ids?|userid|(?:full|real|display|employee|legal|person)[_\s-]?names?|mobile(?:\s+numbers?)?|phone(?:\s+numbers?)?|e-?mail(?:\s+address(?:es)?)?|avatars?|id\s?cards?)\b/i
 
+/**
+ * A negation only exempts a clause when it actually negates the CAPTURE. A bare "no"/"not"
+ * anywhere earlier in the sentence used to do it — so "There is no need to redact anything here,
+ * paste the unionId …" read as a prohibition. Bare "no"/"not" are gone; what remains either
+ * attaches to a verb ("do not paste") or is an explicit prohibition word.
+ */
 const PROSE_NEGATION =
-  /\b(?:do\s+not|does\s+not|don'?t|never|must\s+not|may\s+not|cannot|can'?t|without|avoid|forbidden|prohibited|no|not)\b/i
+  /\b(?:do\s+not|does\s+not|don'?t|never|must\s+not|may\s+not|shall\s+not|should\s+not|cannot|can'?t|without|avoid|forbidden|prohibited|not\s+(?:be\s+)?(?:pasted?|copied|recorded|written|entered|attached|included|exported|dumped|printed|saved|logged|added|captured|noted|filled|transcribed|stored|listed|sent|reported))\b/i
 
 /**
  * Strip fenced code blocks — SQL is covered by the projection guards, and the §4 evidence
@@ -567,9 +573,21 @@ export function splitProseClauses(text) {
  * @param {string} markdown
  * @returns {{ ok: true } | { ok: false, violations: string[] }}
  */
+/**
+ * Markdown emphasis must not split a phrase the guards match on: the runbook's own legitimate
+ * ban reads "do **not** paste …", and a negation regex anchored on `do\s+not` would miss it (the
+ * first cut only matched because it accepted a bare `not` anywhere, which is what made the
+ * negation bypassable). Strip emphasis markers before matching, keeping offsets meaningful by
+ * replacing them with nothing on a per-clause copy.
+ */
+function stripMarkdownEmphasis(text) {
+  return text.replace(/[*_~`]/g, '')
+}
+
 export function assertNoRawIdentityPasteInstructions(markdown) {
   const violations = []
-  for (const clause of splitProseClauses(stripFencedBlocks(markdown))) {
+  for (const rawClause of splitProseClauses(stripFencedBlocks(markdown))) {
+    const clause = stripMarkdownEmphasis(rawClause)
     const verb = EVIDENCE_CAPTURE_VERBS.exec(clause)
     if (!verb) continue
     const term = RAW_IDENTITY_PROSE_TERMS.exec(clause)
@@ -653,6 +671,72 @@ function isEvidencePlaceholder(value) {
 }
 
 /**
+ * The §3 decision matrix, as code. Returns the verdict the recorded evidence IMPLIES (or null
+ * when the evidence is too incomplete/ambiguous to imply anything), plus a human-readable reason.
+ *
+ * §3 rows, verbatim:
+ *  - corp-B run failed + duplicate_key_detected=true + expected_constraint_detected=true  → CONFIRMED
+ *  - both runs completed + present_in_a=1 AND present_in_b=1 AND keys_all_distinct=true   → DISPROVED
+ *  - anything else (both completed but present_in_b=0; failed without both flags true)    → INCONCLUSIVE
+ * @param {Map<string, {value: string}>} byLabel
+ * @returns {{ verdict: string | null, because: string }}
+ */
+function impliedVerdictFromEvidence(byLabel) {
+  const read = (label) => {
+    const f = byLabel.get(label)
+    if (!f || isEvidencePlaceholder(f.value)) return null
+    return normalizeEvidenceValue(f.value).toLowerCase()
+  }
+  const runA = read('corp a run status')
+  const runB = read('corp b run status')
+  const dup = read('corp b duplicate_key_detected')
+  const constraintHit = read('corp b expected_constraint_detected')
+  const presence = read('presence')
+  if (!runA || !runB) return { verdict: null, because: '' }
+
+  const failedB = /\bfailed\b/.test(runB)
+  const bothCompleted = /\bcompleted\b/.test(runA) && /\bcompleted\b/.test(runB)
+  const isTrue = (v) => v !== null && /^true$/.test(v)
+
+  if (failedB) {
+    return isTrue(dup) && isTrue(constraintHit)
+      ? { verdict: 'CONFIRMED', because: 'a failed corp-B run with both closed classifications true' }
+      : {
+          verdict: 'INCONCLUSIVE',
+          because: 'a failed corp-B run WITHOUT both closed classifications true',
+        }
+  }
+  if (bothCompleted) {
+    if (presence === null) return { verdict: null, because: '' }
+    // present_in_b is the discriminator §3 names; keys_all_distinct must also hold for DISPROVED.
+    const presentInB = /present_in_b\s*[=:]?\s*([01])/.exec(presence)
+    const allDistinct = /keys_all_distinct\s*[=:]?\s*(true|false)/i.exec(presence)
+    const numbers = presence.match(/\b[01]\b|\btrue\b|\bfalse\b/gi) || []
+    const bMissing = presentInB ? presentInB[1] === '0' : numbers[1] === '0'
+    const distinctFalse = allDistinct
+      ? /false/i.test(allDistinct[1])
+      : numbers.some((n) => /^false$/i.test(n))
+    if (bMissing) {
+      return {
+        verdict: 'INCONCLUSIVE',
+        because: 'both runs completed but the overlap person is absent under corp B (present_in_b=0)',
+      }
+    }
+    if (distinctFalse) {
+      return {
+        verdict: 'INCONCLUSIVE',
+        because: 'both runs completed but the keys are not all distinct',
+      }
+    }
+    return {
+      verdict: 'DISPROVED',
+      because: 'both runs completed with the overlap person present on both sides and all keys distinct',
+    }
+  }
+  return { verdict: 'INCONCLUSIVE', because: 'a run-status combination outside the two closed §3 rows' }
+}
+
+/**
  * Extract the §4 evidence block body (first fenced block after the `## 4.` heading).
  * @param {string} markdown
  * @returns {string | null}
@@ -694,7 +778,32 @@ export function assertEvidenceVerdictIsGrounded(markdown) {
   }
 
   const fields = parseEvidenceFields(block)
-  const byLabel = new Map(fields.map((f) => [f.label, f]))
+  // FIRST occurrence wins, and a duplicate is itself a violation: `new Map(fields.map(...))` let
+  // the LAST line win, so appending a second `verdict: _TBD_` after a real one made the guard
+  // judge the placeholder and skip grounding entirely.
+  const byLabel = new Map()
+  for (const f of fields) {
+    if (byLabel.has(f.label)) {
+      violations.push(
+        `§4 evidence block declares "${f.label}" more than once — a duplicate label makes which ` +
+          `value is judged ambiguous: ${f.raw}`,
+      )
+      continue
+    }
+    byLabel.set(f.label, f)
+  }
+
+  // A verdict recorded OUTSIDE the §4 block is unguarded by everything below, so it must not
+  // exist: the evidence block is the single place a verdict is allowed to live.
+  const outsideBlock = markdown.split(block).join('\n')
+  const strayVerdict =
+    /(^|\n)[^\n]*\bverdict\b\s*[:：]\s*\**\s*(CONFIRMED|DISPROVED|INCONCLUSIVE)\b/i.exec(outsideBlock)
+  if (strayVerdict) {
+    violations.push(
+      `a ruled verdict ("${strayVerdict[2]}") is recorded outside the §4 evidence block, where ` +
+        `the grounding checks cannot see it: ${strayVerdict[0].trim().slice(0, 120)}`,
+    )
+  }
 
   for (const label of [
     ...VERDICT_EVIDENCE_DEPENDENCIES,
@@ -753,6 +862,18 @@ export function assertEvidenceVerdictIsGrounded(markdown) {
             `("${f.value}") — a verdict may not rest on it`,
         )
       }
+    }
+
+    // Present is not the same as CONSISTENT: the recorded verdict must be the §3 row the
+    // evidence actually implies. Without this, "corp B run status: failed" + "verdict:
+    // DISPROVED" passes — recording the CONFIRMED row as its exact opposite, which is what
+    // unlocks T3 and skips the T2.5 tenant-scoped key migration.
+    const implied = impliedVerdictFromEvidence(byLabel)
+    if (implied.verdict && implied.verdict !== ruled) {
+      violations.push(
+        `§4 verdict "${ruled}" contradicts its own evidence — the §3 decision matrix routes ` +
+          `${implied.because} to ${implied.verdict}`,
+      )
     }
   }
 
