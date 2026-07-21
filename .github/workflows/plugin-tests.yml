@@ -321,8 +321,9 @@ jobs:
 
       - name: Run B3-07 approval-attachment unit canaries
         # The approval-attachment pipeline's no-DB units (route contracts, storage containment + the
-        # shared-substrate object-store adapter, boot/O3 storage resolution, validation allowlist, GC
-        # drain, reconciler) ran in NO workflow before this step — vitest's default discovery is never
+        # shared-substrate object-store adapter, boot/O3 storage resolution, fail-closed scanner seam,
+        # validation allowlist, GC drain, reconciler) ran in NO workflow before this step — vitest's
+        # default discovery is never
         # invoked for tests/unit anywhere in CI, so these were green-by-never-running. Wired as WHOLE
         # FILE runs (a name filter matching zero tests exits green and hides regressions).
         run: |
@@ -330,6 +331,7 @@ jobs:
             tests/unit/approval-attachment-routes.test.ts \
             tests/unit/approval-attachment-storage.test.ts \
             tests/unit/approval-attachment-s3.test.ts \
+            tests/unit/approval-attachment-scan.test.ts \
             tests/unit/approval-attachment-runtime.test.ts \
             tests/unit/approval-attachment-validation.test.ts \
             tests/unit/approval-attachment-gc-drain.test.ts \
