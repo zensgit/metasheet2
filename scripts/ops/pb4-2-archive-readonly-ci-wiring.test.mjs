@@ -3,6 +3,11 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import {
+  REAL_DB_STEP_IDS,
+  isSuiteWiredInRealDbStep,
+  realDbStepWholeFileArgs,
+} from './ci-realdb-step-contract.mjs'
 
 // PB4-2 CI two-point wiring contract (owner P1). The archive-read-only suite is a TWO-CONNECTION
 // concurrency test that is meaningless without a real DB: it needs BOTH (1) the vitest.config.ts
@@ -15,62 +20,29 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const FILE = 'tests/integration/local-directory-org-archive-readonly.db.test.ts'
 
-// In plugin-tests.yml, directory real-DB suites share the single named step
-// "Run approval real-DB integration (...)" with the approval suites. The guard anchors to that
-// named step block — a path that appears only in a comment, the multitable step, or elsewhere
-// must NOT pass (a suite moved out of the real-DB step never runs against a DB).
-const DIRECTORY_REAL_DB_STEP = 'Run approval real-DB integration'
-
-/**
- * Body of the first workflow step whose name contains `nameNeedle`, from the line after
- * `- name:` through (not including) the next same-indent `- name:`.
- */
-function namedStepBody(wf, nameNeedle) {
-  const lines = wf.split('\n')
-  let start = -1
-  let indent = ''
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)- name:\s*(.*)$/)
-    if (m && m[2].includes(nameNeedle)) {
-      start = i
-      indent = m[1]
-      break
-    }
-  }
-  assert.ok(start >= 0, `workflow step whose name includes ${JSON.stringify(nameNeedle)} not found`)
-  const body = []
-  for (let i = start + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)- name:\s*/)
-    if (m && m[1] === indent) break
-    body.push(lines[i])
-  }
-  return body.join('\n')
-}
-
-/** Whole-file vitest arg line: newline + indent + path + trailing ` \`. */
-function wholeFileRunRe(file) {
-  return new RegExp(`\\n\\s*${file.replace(/[.]/g, '\\.')} \\\\`)
-}
-
+// Located by the step's EXACT stable `id:` in plugin-tests.yml — never by its `- name:` title.
+// Title-prefix anchoring was bypassable: an earlier decoy step whose name merely CONTAINS the
+// same prefix would capture the guard while the real step was gutted. The shared helper also
+// pins EXECUTABILITY of the located step (if 20.x + env.DATABASE_URL + vitest.integration.config.ts),
+// so membership of the path in a step that can never run no longer passes.
+const STEP_ID = REAL_DB_STEP_IDS.approval
 
 test('vitest.config.ts excludes the PB4-2 archive-read-only suite from the no-DB job', () => {
   const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
   assert.ok(cfg.includes(`'${FILE}'`), `vitest.config.ts must exclude ${FILE} (DATABASE_URL-gated whole file)`)
 })
 
-test('plugin-tests.yml runs the PB4-2 archive-read-only suite as a whole file in the directory real-DB step (Run approval real-DB integration)', () => {
+test('plugin-tests.yml runs the PB4-2 archive-read-only suite as a whole file in the directory real-DB step (id: approval-real-db-integration)', () => {
   const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-  const step = namedStepBody(wf, DIRECTORY_REAL_DB_STEP)
-  assert.match(
-    step,
-    wholeFileRunRe(FILE),
-    `plugin-tests.yml directory real-DB step (${DIRECTORY_REAL_DB_STEP}) must run ${FILE} as a whole file`,
+  assert.ok(
+    isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+    `plugin-tests.yml real-DB step id "${STEP_ID}" (if 20.x + env.DATABASE_URL + `
+      + `vitest.integration.config.ts) must run ${FILE} as a whole-file vitest arg`,
   )
   // Negative: must not be the sole (or any) placement under multitable real-DB.
-  const multi = namedStepBody(wf, 'Run multitable real-DB integration')
-  assert.doesNotMatch(
-    multi,
-    wholeFileRunRe(FILE),
+  assert.equal(
+    realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(FILE),
+    false,
     `${FILE} must not be wired into the multitable real-DB step`,
   )
 })

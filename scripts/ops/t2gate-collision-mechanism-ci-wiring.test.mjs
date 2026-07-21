@@ -3,6 +3,17 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import {
+  REAL_DB_STEP_IDS,
+  extractStepById,
+  isSuiteWiredInRealDbStep,
+  realDbStepWholeFileArgs,
+  requireExecutableRealDbStep,
+  stepHasEnvDatabaseUrl,
+  stepInvokesVitestIntegrationConfig,
+  stepRunsOnNode20Matrix,
+  wholeFileVitestArgs,
+} from './ci-realdb-step-contract.mjs'
 
 // T2-Gate CI two-point wiring contract. The collision-mechanism suite is the CI-provable half of
 // the §3.4 two-corp question: the (provider, external_key) unique index, the bare-unionId
@@ -13,21 +24,30 @@ import { dirname, join } from 'node:path'
 // Two load-bearing placements (both must hold or CI can stay green while the suite never runs):
 //   (1) exact quoted path inside the real `test.exclude` array of vitest.config.ts
 //       (a comment / coverage.exclude / nested exclude / free-text hit is NOT enough)
-//   (2) whole-file vitest arg inside the named "Run approval real-DB integration..." step that
-//       has a real env.DATABASE_URL key and a real run line invoking vitest with
-//       vitest.integration.config.ts (comment-only decoys do not count)
+//   (2) the suite is a whole-file vitest arg of the real-DB step located by its EXACT stable
+//       `id:` — and that step is EXECUTABLE: `if: matrix.node-version == '20.x'`, a real
+//       `env.DATABASE_URL`, and `--config vitest.integration.config.ts`
+//
+// THIS FILE ALSO HOSTS the shared helper's synthetic mutation coverage (owner ruling on #4496).
+// `scripts/ops/ci-realdb-step-contract.mjs` is imported by all fifteen `*-ci-wiring.test.mjs`
+// guards, each already wired to its own `node --test` step in the required no-DB `test` job — so
+// the helper's real-workflow path runs in CI fifteen times over. Its MUTATION coverage needs a CI
+// home too; it lives here rather than in a new file so that no `plugin-tests.yml` step had to be
+// added or modified (that file is shared with every other lane; this PR's only workflow change is
+// the two `id:` lines). The synthetics feed the helper CRAFTED workflow strings, so they cannot rot
+// with the real file.
 //
 // Helpers parse source structure — mere whole-file filename / keyword search is insufficient.
 // Runs in the gating no-DB test job.
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const FILE = 'tests/integration/directory-account-external-key-collision-mechanism.db.test.ts'
-const REAL_DB_STEP = 'Run approval real-DB integration'
+const STEP_ID = REAL_DB_STEP_IDS.approval
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 
 // ---------------------------------------------------------------------------
-// Source parsers (exported for synthetic mutation coverage)
+// vitest.config.ts source parsers (exported for synthetic mutation coverage)
 // ---------------------------------------------------------------------------
 
 /**
@@ -170,114 +190,6 @@ export function isQuotedInTestExclude(src, file) {
   return quotedExcludeEntries(body).includes(file)
 }
 
-/**
- * Body of the first workflow step whose name contains `nameNeedle`, from the line after
- * `- name:` through (not including) the next same-indent `- name:`.
- * @param {string} wf
- * @param {string} nameNeedle
- * @returns {string}
- */
-export function namedStepBody(wf, nameNeedle) {
-  const lines = wf.split('\n')
-  let start = -1
-  let indent = ''
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)- name:\s*(.*)$/)
-    if (m && m[2].includes(nameNeedle)) {
-      start = i
-      indent = m[1]
-      break
-    }
-  }
-  assert.ok(start >= 0, `workflow step whose name includes ${JSON.stringify(nameNeedle)} not found`)
-  const body = []
-  for (let i = start + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)- name:\s*/)
-    if (m && m[1] === indent) break
-    body.push(lines[i])
-  }
-  return body.join('\n')
-}
-
-/**
- * True iff the step body has a real YAML `env:` mapping child with a `DATABASE_URL:` key.
- * Comment lines and free-text mentions do not count.
- * @param {string} stepBody
- */
-export function stepHasEnvDatabaseUrl(stepBody) {
-  const lines = stepBody.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const envM = /^(\s*)env:\s*$/.exec(lines[i])
-    if (!envM) continue
-    const envIndent = envM[1].length
-    for (let j = i + 1; j < lines.length; j++) {
-      const line = lines[j]
-      if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
-      const indent = (line.match(/^(\s*)/) || ['', ''])[1].length
-      if (indent <= envIndent) break
-      // Real key under env: — not a comment.
-      if (/^\s*DATABASE_URL:\s*\S/.test(line)) return true
-    }
-  }
-  return false
-}
-
-/**
- * True iff the step body has a non-comment run command line that invokes `vitest`
- * with `--config vitest.integration.config.ts` (order-tolerant enough for the real
- * `pnpm ... exec vitest --config vitest.integration.config.ts run \` line).
- * Free-text / comment mentions do not count.
- * @param {string} stepBody
- */
-export function stepInvokesVitestIntegrationConfig(stepBody) {
-  for (const line of stepBody.split('\n')) {
-    if (/^\s*#/.test(line)) continue
-    // Strip trailing shell comments for the match surface.
-    const code = line.replace(/(^|[^\\])#.*$/, '$1')
-    if (!/\bvitest\b/.test(code)) continue
-    if (/--config\s+vitest\.integration\.config\.ts\b/.test(code)) return true
-  }
-  return false
-}
-
-/**
- * Ordered whole-file vitest path args in a step body
- * (`tests/integration/foo.db.test.ts` with optional trailing `\`).
- * Comment lines ignored.
- * @param {string} stepBody
- * @returns {string[]}
- */
-export function wholeFileVitestArgs(stepBody) {
-  const files = []
-  for (const line of stepBody.split('\n')) {
-    if (/^\s*#/.test(line)) continue
-    const m = line.match(/^\s+(tests\/integration\/\S+\.(?:test|spec)\.[tj]sx?)\s*(?:\\)?\s*$/)
-    if (m) files.push(m[1])
-  }
-  return files
-}
-
-/**
- * True iff `file` is a whole-file vitest arg inside the named real-DB step that also
- * has a real env.DATABASE_URL key and a real vitest --config vitest.integration.config.ts run line.
- * @param {string} wf
- * @param {string} file
- * @param {string} [stepNeedle]
- */
-export function isWholeFileInApprovalRealDbStep(wf, file, stepNeedle = REAL_DB_STEP) {
-  const step = namedStepBody(wf, stepNeedle)
-  assert.ok(
-    stepHasEnvDatabaseUrl(step),
-    `${stepNeedle} step must have env.DATABASE_URL (real YAML key, not a comment/decoy)`,
-  )
-  assert.ok(
-    stepInvokesVitestIntegrationConfig(step),
-    `${stepNeedle} step must run vitest with --config vitest.integration.config.ts ` +
-      `(real command line, not a comment/decoy)`,
-  )
-  return wholeFileVitestArgs(step).includes(file)
-}
-
 // ---------------------------------------------------------------------------
 // Repo contracts (real sources)
 // ---------------------------------------------------------------------------
@@ -291,24 +203,34 @@ test('vitest.config.ts quotes the T2-Gate collision-mechanism suite inside test.
   )
 })
 
-test('plugin-tests.yml runs the suite as a whole file in the approval real-DB step (DATABASE_URL + integration config)', () => {
+test('plugin-tests.yml runs the suite as a whole file in the id-located, executable approval real-DB step', () => {
   const wf = readFileSync(WORKFLOW, 'utf8')
   assert.ok(
-    isWholeFileInApprovalRealDbStep(wf, FILE),
-    `plugin-tests.yml step "${REAL_DB_STEP}" (with env.DATABASE_URL + vitest.integration.config.ts) ` +
-      `must list ${FILE} as a whole-file vitest arg`,
+    isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+    `plugin-tests.yml real-DB step id "${STEP_ID}" (if 20.x + env.DATABASE_URL + ` +
+      `vitest.integration.config.ts) must list ${FILE} as a whole-file vitest arg`,
   )
   // Negative: multitable real-DB must not be the (sole) placement.
-  const multi = namedStepBody(wf, 'Run multitable real-DB integration')
   assert.equal(
-    wholeFileVitestArgs(multi).includes(FILE),
+    realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(FILE),
     false,
     `${FILE} must not be wired into the multitable real-DB step`,
   )
 })
 
+test('both real-DB steps in plugin-tests.yml carry their stable ids and satisfy all four pins', () => {
+  const wf = readFileSync(WORKFLOW, 'utf8')
+  for (const id of Object.values(REAL_DB_STEP_IDS)) {
+    const step = requireExecutableRealDbStep(wf, id)
+    assert.equal(stepRunsOnNode20Matrix(step), true, `${id}: pin (a) if 20.x`)
+    assert.equal(stepHasEnvDatabaseUrl(step), true, `${id}: pin (b) env.DATABASE_URL`)
+    assert.equal(stepInvokesVitestIntegrationConfig(step), true, `${id}: pin (c) integration config`)
+    assert.ok(wholeFileVitestArgs(step).length > 0, `${id}: pin (d) whole-file suite args`)
+  }
+})
+
 // ---------------------------------------------------------------------------
-// Synthetic / mutation guards (in-memory) — prove parsers, not whole-file search
+// vitest.config.ts synthetic / mutation guards (in-memory)
 // ---------------------------------------------------------------------------
 
 test('synthetic: path only in a comment outside the exclude array does not count as excluded', () => {
@@ -403,68 +325,147 @@ test('synthetic positive: exact quoted entry inside direct test.exclude passes',
   assert.equal(isQuotedInTestExclude(ok, 'tests/**'), false)
 })
 
-test('synthetic: wrong-step relocation (multitable only) fails the approval real-DB placement check', () => {
-  const wf = [
-    'jobs:',
-    '  test:',
-    '    steps:',
-    '      - name: Run multitable real-DB integration',
-    '        env:',
-    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
+// ---------------------------------------------------------------------------
+// SHARED HELPER synthetic / mutation guards (ci-realdb-step-contract.mjs)
+//
+// Each mutation below is one of the green bypasses the owner ruled must RED. The helper is fed a
+// CRAFTED workflow string (never the real file), so this coverage cannot rot.
+// ---------------------------------------------------------------------------
+
+const NODE20_IF = "        if: matrix.node-version == '20.x'"
+const DB_ENV = [
+  '        env:',
+  '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
+]
+
+/**
+ * Craft a one-real-DB-step workflow. Every knob corresponds to one pin of the owner contract, so a
+ * mutation is expressed by changing exactly one knob.
+ */
+function craftWorkflow({
+  ifLines = [NODE20_IF],
+  envLines = DB_ENV,
+  config = 'vitest.integration.config.ts',
+  file = FILE,
+  stepId = STEP_ID,
+  withIdStep = true,
+  withPrefixDecoy = false,
+} = {}) {
+  const payload = [
+    ...ifLines,
+    ...envLines,
     '        run: |',
-    '          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\',
-    `            ${FILE} \\`,
+    '          : "${DATABASE_URL:?DATABASE_URL is required}"',
+    `          pnpm --filter @metasheet/core-backend exec vitest --config ${config} run \\`,
+    `            ${file} \\`,
     '            --reporter=dot',
-    '      - name: Run approval real-DB integration (directory endpoints)',
-    '        env:',
-    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
-    '        run: |',
-    '          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\',
-    '            tests/integration/other.db.test.ts \\',
-    '            --reporter=dot',
-    '      - name: Next step',
-    '        run: echo ok',
-  ].join('\n')
-  assert.ok(wf.includes(FILE))
-  assert.equal(
-    isWholeFileInApprovalRealDbStep(wf, FILE),
-    false,
-    'file present only under multitable real-DB must not satisfy approval real-DB placement',
-  )
-  assert.equal(
-    wholeFileVitestArgs(namedStepBody(wf, 'Run multitable real-DB integration')).includes(FILE),
-    true,
-    'control: multitable step does list the file',
-  )
+  ]
+  const lines = ['jobs:', '  test:', '    steps:']
+  // The decoy is placed EARLIER, exactly as the reproduced bypass did.
+  if (withPrefixDecoy) {
+    lines.push('      - name: Run approval real-DB integration (decoy prep)', ...payload)
+  }
+  if (withIdStep) {
+    lines.push(
+      '      - name: Run approval real-DB integration (directory endpoints)',
+      `        id: ${stepId}`,
+      ...payload,
+    )
+  }
+  lines.push('      - name: Next step', '        run: echo ok')
+  return lines.join('\n')
+}
+
+test('synthetic POSITIVE: the crafted well-formed workflow satisfies all four pins', () => {
+  const wf = craftWorkflow()
+  const step = requireExecutableRealDbStep(wf, STEP_ID)
+  assert.equal(stepRunsOnNode20Matrix(step), true)
+  assert.equal(stepHasEnvDatabaseUrl(step), true)
+  assert.equal(stepInvokesVitestIntegrationConfig(step), true)
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), true)
 })
 
-test('synthetic: approval real-DB step without env.DATABASE_URL fails even if the file is listed', () => {
-  const wf = [
-    'jobs:',
-    '  test:',
-    '    steps:',
-    '      - name: Run approval real-DB integration (directory endpoints)',
-    '        run: |',
-    '          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\',
-    `            ${FILE} \\`,
-    '            --reporter=dot',
-    '      - name: Next step',
-    '        run: echo ok',
-  ].join('\n')
+test('synthetic MUTATION 1: name-prefix decoy carrying the payload while the id step is gone must RED', () => {
+  // Reproduced bypass #3: an earlier step whose name merely CONTAINS "Run approval real-DB
+  // integration" holds env + integration config + the file arg, and the real step is gutted/absent.
+  // Title-prefix anchoring bound to the decoy and stayed green; id-anchoring finds nothing.
+  const wf = craftWorkflow({ withPrefixDecoy: true, withIdStep: false })
+  assert.ok(wf.includes('Run approval real-DB integration'), 'decoy still carries the title prefix')
+  assert.ok(wf.includes(FILE), 'decoy still lists the suite path')
+  assert.equal(extractStepById(wf, STEP_ID), null, 'no step carries the exact id')
   assert.throws(
-    () => isWholeFileInApprovalRealDbStep(wf, FILE),
-    /env\.DATABASE_URL|DATABASE_URL/,
-    'missing env.DATABASE_URL must red the real-DB placement check',
+    () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+    /not found in plugin-tests\.yml|located by exact/,
+    'a name-prefix decoy must not be able to stand in for the id-located step',
   )
 })
 
-test('synthetic: comment-only DATABASE_URL / vitest.integration.config decoys fail step placement', () => {
-  // Keywords appear only in comments — old /\bDATABASE_URL\b/ search would green.
+test('synthetic CONTROL: a name-prefix decoy alongside a healthy id step is simply ignored', () => {
+  // Positive control for MUTATION 1: id-anchoring is decoy-INSENSITIVE, so the presence of a decoy
+  // is not itself a failure. Without this control MUTATION 1 could pass for the wrong reason.
+  const wf = craftWorkflow({ withPrefixDecoy: true, withIdStep: true })
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), true)
+})
+
+test('synthetic MUTATION 2: non-20.x / false step condition must RED', () => {
+  // Reproduced bypass #1: the step never runs in the required `test (20.x)` leg.
+  for (const mutated of [
+    ["        if: matrix.node-version == '18.x'", /if: matrix\.node-version == '20\.x'|20\.x/],
+    ['        if: false', /if: matrix\.node-version == '20\.x'|20\.x/],
+    [null, /if: matrix\.node-version == '20\.x'|20\.x/], // `if:` removed entirely
+  ]) {
+    const [ifLine, sig] = mutated
+    const wf = craftWorkflow({ ifLines: ifLine === null ? [] : [ifLine] })
+    assert.ok(wf.includes(FILE), 'the suite path is still listed — membership alone must not pass')
+    const step = extractStepById(wf, STEP_ID)
+    assert.notEqual(step, null, 'the id step still exists; only its condition was mutated')
+    assert.equal(stepRunsOnNode20Matrix(step), false)
+    assert.throws(() => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), sig, `if=${ifLine}`)
+  }
+})
+
+test('synthetic MUTATION 3: env.DATABASE_URL removed must RED', () => {
+  // Reproduced bypass #2: describeIfDatabase makes every suite skip green without a DB URL.
+  const wf = craftWorkflow({ envLines: [] })
+  assert.ok(wf.includes(FILE), 'the suite path is still listed')
+  assert.equal(stepHasEnvDatabaseUrl(extractStepById(wf, STEP_ID)), false)
+  assert.throws(
+    () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+    /env\.DATABASE_URL/,
+    'a step without env.DATABASE_URL must not satisfy the contract',
+  )
+})
+
+test('synthetic MUTATION 4: config swapped to the default vitest.config.ts must RED', () => {
+  // The default config EXCLUDES every DB-gated suite, so the run is a silent no-op.
+  const wf = craftWorkflow({ config: 'vitest.config.ts' })
+  assert.ok(wf.includes(FILE), 'the suite path is still listed')
+  assert.equal(stepInvokesVitestIntegrationConfig(extractStepById(wf, STEP_ID)), false)
+  assert.throws(
+    () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+    /vitest\.integration\.config\.ts/,
+    'the default config must not satisfy the contract',
+  )
+})
+
+test('synthetic: suite relocated out of the id-located step is not membership anywhere else', () => {
+  const wf = craftWorkflow({ file: 'tests/integration/other.db.test.ts' })
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), false)
+  // Positive control: the step is fully executable and does list a suite — the `false` above is a
+  // membership miss for FILE, not a collapsed/erroring parse.
+  assert.deepEqual(wholeFileVitestArgs(extractStepById(wf, STEP_ID)), [
+    'tests/integration/other.db.test.ts',
+  ])
+})
+
+test('synthetic: comment-only env/config decoys inside the id step must RED', () => {
   const commentOnly = [
     'jobs:',
     '  test:',
     '    steps:',
     '      - name: Run approval real-DB integration (directory endpoints)',
+    `        id: ${STEP_ID}`,
+    NODE20_IF,
     '        # env:',
     '        #   DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
     '        run: |',
@@ -473,72 +474,25 @@ test('synthetic: comment-only DATABASE_URL / vitest.integration.config decoys fa
     '      - name: Next step',
     '        run: echo ok',
   ].join('\n')
-  assert.ok(commentOnly.includes('DATABASE_URL'))
-  assert.ok(commentOnly.includes('vitest.integration.config.ts'))
-  assert.throws(
-    () => isWholeFileInApprovalRealDbStep(commentOnly, FILE),
-    /env\.DATABASE_URL|DATABASE_URL/,
-    'comment-only DATABASE_URL must red',
-  )
-
-  // env.DATABASE_URL present, but vitest config only in a comment.
-  const configCommentOnly = [
-    'jobs:',
-    '  test:',
-    '    steps:',
-    '      - name: Run approval real-DB integration (directory endpoints)',
-    '        env:',
-    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
-    '        run: |',
-    '          # pnpm exec vitest --config vitest.integration.config.ts run',
-    '          echo hi',
-    `            ${FILE} \\`,
-    '      - name: Next step',
-    '        run: echo ok',
-  ].join('\n')
-  assert.throws(
-    () => isWholeFileInApprovalRealDbStep(configCommentOnly, FILE),
-    /vitest\.integration\.config/,
-    'comment-only vitest.integration.config.ts must red',
-  )
-
-  // Real env key + real vitest line, but FILE only under another step — still false for FILE.
-  const noFile = [
-    'jobs:',
-    '  test:',
-    '    steps:',
-    '      - name: Run approval real-DB integration (directory endpoints)',
-    '        env:',
-    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
-    '        run: |',
-    '          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\',
-    '            tests/integration/other.db.test.ts \\',
-    '            --reporter=dot',
-    '      - name: Next step',
-    '        run: echo ok',
-  ].join('\n')
-  assert.equal(isWholeFileInApprovalRealDbStep(noFile, FILE), false)
+  assert.ok(commentOnly.includes('DATABASE_URL') && commentOnly.includes('vitest.integration.config.ts'))
+  assert.throws(() => isSuiteWiredInRealDbStep(commentOnly, STEP_ID, FILE), /env\.DATABASE_URL/)
 })
 
-test('synthetic positive: file inside named approval real-DB step with env.DATABASE_URL + vitest integration config passes', () => {
+test('synthetic: an `id:` token inside a run script cannot anchor the helper', () => {
+  // Block-scalar masking: shell text must never be read as YAML keys.
   const wf = [
     'jobs:',
     '  test:',
     '    steps:',
-    '      - name: Run approval real-DB integration (directory endpoints)',
-    '        env:',
-    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test',
+    '      - name: Unrelated step',
     '        run: |',
-    '          : "${DATABASE_URL:?DATABASE_URL is required}"',
-    '          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\',
-    `            ${FILE} \\`,
-    '            --reporter=dot',
+    `          echo "id: ${STEP_ID}"`,
+    `          echo "${FILE}"`,
     '      - name: Next step',
     '        run: echo ok',
   ].join('\n')
-  assert.equal(isWholeFileInApprovalRealDbStep(wf, FILE), true)
-  assert.equal(stepHasEnvDatabaseUrl(namedStepBody(wf, REAL_DB_STEP)), true)
-  assert.equal(stepInvokesVitestIntegrationConfig(namedStepBody(wf, REAL_DB_STEP)), true)
+  assert.ok(wf.includes(`id: ${STEP_ID}`), 'the id text is present, but only inside a run script')
+  assert.equal(extractStepById(wf, STEP_ID), null, 'run-script text must not anchor the step lookup')
 })
 
 test('the T2-Gate collision-mechanism suite file exists on disk', () => {
