@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const authState = vi.hoisted(() => ({
   user: {
@@ -40,8 +41,10 @@ describe('approval history routing', () => {
   app.use(express.json())
   app.use(approvalsRouter())
   app.use(approvalHistoryRouter())
+  const pinned = usePinnedServer()
 
   beforeEach(() => {
+    pinned.setApp(app)
     authState.user = {
       sub: 'user-1',
       userId: 'user-1',
@@ -72,7 +75,7 @@ describe('approval history routing', () => {
         ],
       })
 
-    const response = await request(app).get('/api/approvals/inst-1/history?page=2&pageSize=1')
+    const response = await request(pinned.url()).get('/api/approvals/inst-1/history?page=2&pageSize=1')
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({
@@ -113,7 +116,7 @@ describe('approval history routing', () => {
   it('requires authentication for approval history', async () => {
     authState.user = null
 
-    const response = await request(app).get('/api/approvals/inst-1/history')
+    const response = await request(pinned.url()).get('/api/approvals/inst-1/history')
 
     expect(response.status).toBe(401)
     expect(pgState.pool.query).not.toHaveBeenCalled()

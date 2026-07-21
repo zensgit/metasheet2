@@ -4,6 +4,7 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ApprovalMetricsService as ApprovalMetricsServiceType } from '../../src/services/ApprovalMetricsService'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const authState = vi.hoisted(() => ({
   user: {
@@ -75,6 +76,8 @@ function buildService() {
   }
 }
 
+const pinned = usePinnedServer()
+
 describe('approval metrics report route', () => {
   let service: ReturnType<typeof buildService>
   let app: express.Express
@@ -95,7 +98,8 @@ describe('approval metrics report route', () => {
   })
 
   it('returns a TopN report and clamps limit/date query parameters', async () => {
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/approvals/metrics/report')
       .query({
         since: '2026-04-01T00:00:00Z',
@@ -117,7 +121,8 @@ describe('approval metrics report route', () => {
   it('falls back to default tenant and default limit for invalid query values', async () => {
     authState.user = { id: 'admin-1', permissions: ['*:*'] }
 
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .get('/api/approvals/metrics/report')
       .query({ since: 'not-a-date', until: '', limit: 'not-a-number' })
       .expect(200)
@@ -132,11 +137,12 @@ describe('approval metrics report route', () => {
 
   it('preserves auth and RBAC gates', async () => {
     authState.user = null
-    await request(app).get('/api/approvals/metrics/report').expect(401)
+    pinned.setApp(app)
+    await request(pinned.url()).get('/api/approvals/metrics/report').expect(401)
 
     authState.user = { id: 'viewer-1', tenantId: 'tenant-a' }
     authState.allowRbac = false
-    await request(app).get('/api/approvals/metrics/report').expect(403)
+    await request(pinned.url()).get('/api/approvals/metrics/report').expect(403)
 
     expect(service.getMetricsReport).not.toHaveBeenCalled()
   })
@@ -144,7 +150,8 @@ describe('approval metrics report route', () => {
   it('returns a stable 500 error payload when the service fails', async () => {
     service.getMetricsReport.mockRejectedValueOnce(new Error('db down'))
 
-    const response = await request(app).get('/api/approvals/metrics/report')
+    pinned.setApp(app)
+    const response = await request(pinned.url()).get('/api/approvals/metrics/report')
 
     expect(response.status).toBe(500)
     expect(response.body).toEqual({
@@ -173,7 +180,8 @@ describe('approval metrics person/team routes (T2-3)', () => {
   })
 
   it('GET /people forwards parsed tenant/since/until/limit and returns the dimension array', async () => {
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/approvals/metrics/people')
       .query({ since: '2026-04-01T00:00:00Z', until: '2026-04-25T23:59:59Z', limit: '999' })
 
@@ -188,7 +196,8 @@ describe('approval metrics person/team routes (T2-3)', () => {
   })
 
   it('GET /teams forwards parsed params and returns the dimension array', async () => {
-    const response = await request(app).get('/api/approvals/metrics/teams').query({ limit: 'x' })
+    pinned.setApp(app)
+    const response = await request(pinned.url()).get('/api/approvals/metrics/teams').query({ limit: 'x' })
     expect(response.status).toBe(200)
     expect(response.body.data[0]).toMatchObject({ key: 'Engineering', total: 1 })
     expect(service.getMetricsByDepartment).toHaveBeenCalledWith({
@@ -201,28 +210,31 @@ describe('approval metrics person/team routes (T2-3)', () => {
 
   it('enforces auth on both endpoints (401 when unauthenticated)', async () => {
     authState.user = null
-    await request(app).get('/api/approvals/metrics/people').expect(401)
-    await request(app).get('/api/approvals/metrics/teams').expect(401)
+    pinned.setApp(app)
+    await request(pinned.url()).get('/api/approvals/metrics/people').expect(401)
+    await request(pinned.url()).get('/api/approvals/metrics/teams').expect(401)
     expect(service.getMetricsByRequester).not.toHaveBeenCalled()
     expect(service.getMetricsByDepartment).not.toHaveBeenCalled()
   })
 
   it('Q4: /people requires approvals:analytics — approvals:admin alone is 403, analytics is 200', async () => {
     authState.user = { id: 'admin-1', tenantId: 'tenant-a', permissions: ['approvals:admin'] }
-    await request(app).get('/api/approvals/metrics/people').expect(403)
+    pinned.setApp(app)
+    await request(pinned.url()).get('/api/approvals/metrics/people').expect(403)
     expect(service.getMetricsByRequester).not.toHaveBeenCalled()
 
     authState.user = { id: 'analyst-1', tenantId: 'tenant-a', permissions: ['approvals:analytics'] }
-    await request(app).get('/api/approvals/metrics/people').expect(200)
+    await request(pinned.url()).get('/api/approvals/metrics/people').expect(200)
     expect(service.getMetricsByRequester).toHaveBeenCalledTimes(1)
   })
 
   it('Q4: /teams stays on approvals:admin — admin is 200, analytics-only is 403', async () => {
     authState.user = { id: 'admin-1', tenantId: 'tenant-a', permissions: ['approvals:admin'] }
-    await request(app).get('/api/approvals/metrics/teams').expect(200)
+    pinned.setApp(app)
+    await request(pinned.url()).get('/api/approvals/metrics/teams').expect(200)
     expect(service.getMetricsByDepartment).toHaveBeenCalledTimes(1)
 
     authState.user = { id: 'analyst-1', tenantId: 'tenant-a', permissions: ['approvals:analytics'] }
-    await request(app).get('/api/approvals/metrics/teams').expect(403)
+    await request(pinned.url()).get('/api/approvals/metrics/teams').expect(403)
   })
 })

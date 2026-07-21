@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { isAdmin } from '../../src/rbac/service'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: vi.fn().mockResolvedValue(true),
@@ -58,6 +59,8 @@ function mutationServiceCalls(): number {
   )
 }
 
+const pinned = usePinnedServer()
+
 describe('snapshot-labels router — platform-admin gate + identity (GHSA-h8mf F2)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -67,34 +70,39 @@ describe('snapshot-labels router — platform-admin gate + identity (GHSA-h8mf F
   it('non-admin -> 403 on tags/protection/release-channel, NO service mutation called', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     const app = buildApp({ id: 'u-nonadmin' })
-    await request(app).put('/api/admin/snapshots/s1/tags').send({ add: ['x'] }).expect(403)
-    await request(app).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(403)
-    await request(app).patch('/api/admin/snapshots/s1/release-channel').send({ channel: 'stable' }).expect(403)
+    pinned.setApp(app)
+    await request(pinned.url()).put('/api/admin/snapshots/s1/tags').send({ add: ['x'] }).expect(403)
+    await request(pinned.url()).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(403)
+    await request(pinned.url()).patch('/api/admin/snapshots/s1/release-channel').send({ channel: 'stable' }).expect(403)
     expect(mutationServiceCalls()).toBe(0)
   })
 
   it('unauthenticated (no req.user) -> 403, no service mutation', async () => {
     const app = buildApp(undefined)
-    await request(app).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(403)
+    pinned.setApp(app)
+    await request(pinned.url()).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(403)
     expect(mutationServiceCalls()).toBe(0)
   })
 
   it('RBAC check failure (isAdmin throws) -> 503 fail-closed, no service mutation', async () => {
     vi.mocked(isAdmin).mockRejectedValue(new Error('rbac db down'))
     const app = buildApp({ id: 'u-x' })
-    await request(app).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(503)
+    pinned.setApp(app)
+    await request(pinned.url()).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(503)
     expect(mutationServiceCalls()).toBe(0)
   })
 
   it('platform-admin -> protection mutation succeeds and reaches the service', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(200)
+    pinned.setApp(app)
+    await request(pinned.url()).patch('/api/admin/snapshots/s1/protection').send({ level: 'critical' }).expect(200)
     expect(snapshotService.setProtectionLevel).toHaveBeenCalledTimes(1)
   })
 
   it('identity comes ONLY from req.user.id — a spoofed x-user-id header is ignored', async () => {
     const app = buildApp({ id: 'u-realadmin' })
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .patch('/api/admin/snapshots/s1/protection')
       .set('x-user-id', 'u-spoofed')
       .send({ level: 'critical' })
