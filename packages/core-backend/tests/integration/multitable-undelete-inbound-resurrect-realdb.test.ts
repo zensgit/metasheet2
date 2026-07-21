@@ -245,7 +245,8 @@ describeIfDatabase('4c-3 §7 — multi-vintage PIT-resurrect heuristic retired; 
       previewIdentity: 'dummy-never-minted',
       confirm: 'undelete',
     })
-    expect([400, 409]).toContain(ex.status)
+    expect(ex.status).toBe(400)
+    expect(ex.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
     expect(await sheetAWriteState()).toEqual(before)
     expect(await liveRow(R)).toBeUndefined()
     expect(await edgeCount(F, N, R)).toBe(0)
@@ -290,8 +291,10 @@ describeIfDatabase('4c-3 §7 — multi-vintage PIT-resurrect heuristic retired; 
 
     const noToken = await execute({ confirm: 'undelete' })
     expect(noToken.status).toBe(400)
+    expect(noToken.body?.error?.code).toBe('VALIDATION_ERROR')
     const forged = await execute({ previewIdentity: 'forged.token.value', confirm: 'undelete' })
-    expect([409, 410]).toContain(forged.status)
+    expect(forged.status).toBe(409)
+    expect(forged.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
 
     expect(await sheetAWriteState()).toEqual(before)
     expect(await liveRow(R)).toBeUndefined()

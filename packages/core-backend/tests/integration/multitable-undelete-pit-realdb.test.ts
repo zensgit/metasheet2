@@ -175,9 +175,9 @@ describeIfDatabase('multitable T8-1 PIT undelete — exact-anchor fail-closed (r
       previewIdentity: 'dummy-never-minted',
       confirm: 'undelete',
     })
-    // Wall-clock refuses before token verification (400), or identity invalid — either way zero writes.
-    expect([400, 409]).toContain(ex.status)
-    if (ex.status === 400) expect(ex.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+    // The nonblank wall-clock authority is rejected before token verification.
+    expect(ex.status).toBe(400)
+    expect(ex.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
     expect(await sheetWriteState()).toEqual(before)
     expect(await liveRow(U)).toBeUndefined()
   })
@@ -219,7 +219,7 @@ describeIfDatabase('multitable T8-1 PIT undelete — exact-anchor fail-closed (r
       previewIdentity: 'forged.token.value',
       confirm: 'undelete',
     })
-    expect([409, 410]).toContain(forged.status)
+    expect(forged.status).toBe(409)
     expect(forged.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
 
     expect(await sheetWriteState()).toEqual(before)
