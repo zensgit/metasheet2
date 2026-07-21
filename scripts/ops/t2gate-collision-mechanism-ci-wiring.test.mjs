@@ -26,7 +26,8 @@ import {
 //       (a comment / coverage.exclude / nested exclude / free-text hit is NOT enough)
 //   (2) the suite is a whole-file vitest arg of the real-DB step located by its EXACT stable
 //       `id:` — and that step is EXECUTABLE: `if: matrix.node-version == '20.x'`, a real
-//       `env.DATABASE_URL` with a NON-EMPTY value, and a REAL vitest invocation under
+//       `env.DATABASE_URL` whose value is a LITERAL PostgreSQL URL (no `${{ … }}` expressions —
+//       a missing secret/context resolves to '' at runtime ⇒ skip-green), and a REAL vitest invocation under
 //       `--config vitest.integration.config.ts` that carries the suite path as its OWN argument
 //       (pins (c) and (d) are judged on the same command, so a decoy line cannot supply either)
 //
@@ -820,6 +821,54 @@ test('synthetic MUTATION 8: a phantom `- name:`/`id:` step minted INSIDE a run s
   assert.equal(stepHasEnvDatabaseUrl(quotedStep), true)
   assert.equal(stepInvokesVitestIntegrationConfig(quotedStep), true)
   assert.equal(isSuiteWiredInRealDbStep(quotedKeysReal, STEP_ID, FILE), true)
+})
+
+test('synthetic MUTATION 9: an Actions-expression / non-URL-literal env.DATABASE_URL must RED', () => {
+  // Owner-reproduced bypass on the round-5 contract (#4496 P2, 2026-07-21):
+  // `DATABASE_URL: ${{ secrets.DOES_NOT_EXIST }}` is a non-empty STRING after the YAML parse, so
+  // the "non-empty value" pin greened it — but at RUNTIME GitHub Actions resolves a missing
+  // secret/context to the EMPTY string, DATABASE_URL is '' in the job, every describeIfDatabase
+  // suite skips, and the run is exactly the skip-green pin (b) exists to stop. The guard executes
+  // pre-install and cannot evaluate expressions, so it cannot tell a resolving expression from a
+  // vanishing one: pin (b) now refuses ANY `${{` anywhere in the value (mixed literal+expression
+  // included — the expression part can resolve empty/garbage just the same) and requires the
+  // remaining literal to be a scheme-anchored PostgreSQL URL (`postgres://` / `postgresql://`) —
+  // `true` / `1` / `file.txt` are non-empty text but not a DB URL.
+  for (const value of [
+    '${{ secrets.DOES_NOT_EXIST }}', // (a) the owner's verbatim reproduction
+    "'${{ secrets.DOES_NOT_EXIST }}'", // (a) quoted spelling — same parsed value
+    '${{secrets.X}}', // (b) no-space expression spelling
+    'postgresql://user:${{ secrets.PW }}@localhost:5432/db', // (c) mixed literal+expression
+    'postgresql://user:${{secrets.PW}}@localhost:5432/db', // (c) mixed, no-space — URL-shaped, so only the ${{ refusal catches it
+    'true', // (d) non-URL literal — YAML boolean, not even a string
+    "'true'", // (d) non-URL literal string
+    '1', // (d) non-URL literal — YAML number
+    'file.txt', // (d) non-URL literal text
+    '${{ env.DATABASE_URL }}', // (e) expression via the env context — resolves '' when unset, like secrets
+  ]) {
+    const wf = craftWorkflow({ envLines: ['        env:', `          DATABASE_URL: ${value}`] })
+    assert.ok(wf.includes('DATABASE_URL'), 'the env key is still present — presence alone must not pass')
+    assert.ok(wf.includes(FILE), 'the suite path is still listed')
+    const step = extractStepById(wf, STEP_ID)
+    assert.notEqual(step, null, 'the id step still exists; only the env VALUE was mutated')
+    assert.equal(stepHasEnvDatabaseUrl(step), false, `DATABASE_URL: ${value} must not count`)
+    assert.throws(
+      () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+      /env\.DATABASE_URL/,
+      `DATABASE_URL: ${value} must not satisfy the contract`,
+    )
+  }
+  // Positive control (unit-level): the EXACT literal both real steps carry in plugin-tests.yml is
+  // accepted by the new predicate, in both official scheme spellings — the pin is "refuse what can
+  // be empty at runtime", not "reject every value".
+  for (const value of [
+    'postgresql://postgres@localhost:5432/metasheet_test', // verbatim plugin-tests.yml value
+    'postgres://postgres@localhost:5432/metasheet_test',
+  ]) {
+    const ok = craftWorkflow({ envLines: ['        env:', `          DATABASE_URL: ${value}`] })
+    assert.equal(stepHasEnvDatabaseUrl(extractStepById(ok, STEP_ID)), true, `value ${value}`)
+    assert.equal(isSuiteWiredInRealDbStep(ok, STEP_ID, FILE), true, `value ${value}`)
+  }
 })
 
 test('synthetic: an `id:` token inside a run script cannot anchor the helper', () => {

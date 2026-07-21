@@ -19,11 +19,21 @@
  * located step pin ALL FOUR of
  *
  *   (a) `if: matrix.node-version == '20.x'`   — it runs in the required 20.x leg
- *   (b) an `env.DATABASE_URL` key on the step with a NON-EMPTY value — the DB-gated suites do not
- *       skip-green. Empty in ANY spelling is rejected: `''`, `""`, `"   "`, a bare key, `~`,
- *       `null`, `!!str` with no content, an anchored/aliased empty string (`&a ""` / `*a`), and a
- *       block scalar (`|` / `>` + chomping/indent indicators) with an empty or whitespace-only
- *       body — the parser resolves them all to the empty string or null.
+ *   (b) an `env.DATABASE_URL` key on the step whose value is a LITERAL PostgreSQL URL — the
+ *       DB-gated suites do not skip-green (owner ruling 2026-07-21, round 6). Two refusals:
+ *       - NO Actions expression anywhere in the value (any occurrence of `${{`): at runtime
+ *         GitHub resolves a missing secret/context to the EMPTY string, so
+ *         `${{ secrets.DOES_NOT_EXIST }}` reads as non-empty text here while DATABASE_URL is ''
+ *         in the job and every describeIfDatabase suite skips green (owner-reproduced bypass).
+ *         Mixed literal+expression (`postgresql://user:${{ secrets.PW }}@host/db`) is refused
+ *         too: the guard runs pre-install and cannot evaluate expressions, so it cannot prove
+ *         the expression part resolves to anything at all.
+ *       - the remaining literal must be scheme-anchored (`postgres://` / `postgresql://`, see
+ *         LITERAL_POSTGRES_URL_RE) — `true`, `1`, `file.txt` are non-empty text but not a DB
+ *         URL. Empty in ANY spelling thereby stays rejected as before: `''`, `""`, `"   "`, a
+ *         bare key, `~`, `null`, `!!str` with no content, an anchored/aliased empty string
+ *         (`&a ""` / `*a`), and a block scalar (`|` / `>` + chomping/indent indicators) with an
+ *         empty or whitespace-only body — the parser resolves them all to '' or null.
  *   (c) a REAL vitest invocation in the run script uses `--config vitest.integration.config.ts`
  *       (not the default config); the executed binary is resolved per command, so `echo vitest …`
  *       or any other non-vitest binary is not an invocation
@@ -199,14 +209,46 @@ export function stepRunsOnNode20Matrix(step) {
 }
 
 /**
+ * Pin (b) literal-shape test: an anchored PostgreSQL connection URL — one of the two official
+ * schemes (`postgres://` / `postgresql://`), at least one non-whitespace character after the
+ * scheme, nothing else (`^…$`).
+ *
+ * WHY SCHEME-ANCHORING IS THE RIGHT LITERAL-SHAPE TEST: this pin exists to stop skip-green, and
+ * it runs pre-install on text — it cannot dial the database and it cannot evaluate expressions.
+ * The strongest property it CAN prove is that the value is already, literally, a Postgres URL:
+ * every working libpq/node-postgres connection string starts with one of these two schemes, and
+ * none of the skip-green artifacts do — `''`, `~`, `true`, `1`, `file.txt`, or whatever an
+ * unevaluated `${{ … }}` might resolve to. Anchoring both ends (with `\S+`, no internal
+ * whitespace) means the URL cannot smuggle a prefix/suffix around the scheme. Deeper validation
+ * (host/port/db present, credentials) would re-implement the URL grammar for no additional
+ * skip-green protection: describeIfDatabase gates on truthiness only, so a malformed-but-
+ * scheme-anchored literal makes the suites fail LOUDLY at connect — red, which is not this
+ * pin's bypass class.
+ */
+const LITERAL_POSTGRES_URL_RE = /^postgres(?:ql)?:\/\/\S+$/
+
+/**
  * Pin (b): the step has a real `env` mapping with a `DATABASE_URL` key whose PARSED value is a
- * non-empty string. The parser has already resolved every spelling: quoted/plain scalars, block
- * scalars (`|`/`>` + chomping/indent, empty or whitespace-only body → `''`), `!!str` with no
- * content (→ `''`), `~` / `null` / bare key (→ null), anchors and aliases (`&a ""` / `*a` → `''`).
- * Comment lines and free-text mentions were never structure to begin with. Whitespace-only values
- * are rejected the same as before (`"   "` is as skip-green-adjacent as `''`). A non-string
- * non-null value (e.g. a number) stringifies non-empty — at runtime GitHub renders it non-empty
- * too, so the suites would fail LOUDLY rather than skip-green, which is not this pin's bypass.
+ * LITERAL PostgreSQL URL (owner ruling 2026-07-21, round 6 — supersedes the round-5 "non-empty
+ * string" contract, which had a skip-green bypass the owner reproduced live):
+ *
+ *   1. the value must be a string containing NO Actions expression — any occurrence of `${{` is
+ *      refused, mixed literal+expression included. At runtime GitHub resolves a missing
+ *      secret/context to the EMPTY string, so `${{ secrets.DOES_NOT_EXIST }}` is non-empty TEXT
+ *      here but '' in the job: DATABASE_URL is empty, every describeIfDatabase suite skips, the
+ *      run is skip-green. This guard executes pre-install and cannot evaluate expressions, so it
+ *      cannot tell a resolving expression from a vanishing one — it must refuse them all. (The
+ *      real workflow needs no expression: both guarded steps carry the literal
+ *      `postgresql://postgres@localhost:5432/metasheet_test`.)
+ *   2. after trim, the value must match LITERAL_POSTGRES_URL_RE (rationale above) — `true`, `1`,
+ *      `file.txt` are non-empty text but not a DB URL; a non-string scalar (YAML `true` / `1` /
+ *      `~` / `null`) can never be one.
+ *
+ * The parser has already resolved every spelling before this predicate runs: quoted/plain
+ * scalars, block scalars (`|`/`>` + chomping/indent, empty or whitespace-only body → `''`),
+ * `!!str` with no content (→ `''`), `~` / `null` / bare key (→ null), anchors and aliases
+ * (`&a ""` / `*a` → `''`). Comment lines and free-text mentions were never structure to begin
+ * with, and every empty spelling fails the URL shape exactly as it failed "non-empty".
  *
  * @param {Record<string, unknown>} step parsed step mapping
  */
@@ -215,8 +257,9 @@ export function stepHasEnvDatabaseUrl(step) {
   if (!isPlainObject(env)) return false
   if (!Object.prototype.hasOwnProperty.call(env, 'DATABASE_URL')) return false
   const value = env.DATABASE_URL
-  if (value === null || value === undefined) return false
-  return String(value).trim() !== ''
+  if (typeof value !== 'string') return false
+  if (value.includes('${{')) return false
+  return LITERAL_POSTGRES_URL_RE.test(value.trim())
 }
 
 // ---------------------------------------------------------------------------
@@ -485,9 +528,14 @@ export function requireExecutableRealDbStep(wf, stepId) {
   if (!stepHasEnvDatabaseUrl(step)) {
     throw new Error(
       `real-DB step id "${stepId}" must have env.DATABASE_URL as a real YAML key (not a comment) ` +
-        `with a NON-EMPTY value ('' / "" / whitespace-only / ~ / null / !!str / an aliased empty ` +
-        `string / an empty block scalar do not count) — otherwise every describeIfDatabase suite ` +
-        `in it skips green`,
+        `whose value is a LITERAL PostgreSQL URL (anchored postgres:// or postgresql://). ` +
+        `Actions expressions are refused — any \${{ … }} anywhere in the value, mixed ` +
+        `literal+expression included: a missing secret/context resolves to the EMPTY string at ` +
+        `runtime, so the suites skip green while the text reads non-empty, and this guard runs ` +
+        `pre-install so it cannot evaluate expressions. Empty in any spelling ('' / "" / ` +
+        `whitespace-only / ~ / null / !!str / an aliased empty string / an empty block scalar) ` +
+        `and non-URL literals (true / 1 / file.txt) do not count either — otherwise every ` +
+        `describeIfDatabase suite in it skips green`,
     )
   }
   if (!stepInvokesVitestIntegrationConfig(step)) {
