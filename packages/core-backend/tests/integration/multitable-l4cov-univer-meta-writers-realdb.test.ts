@@ -115,6 +115,10 @@ const createField = (body: Record<string, unknown>) => {
   actor = MEMBER
   return request(app).post('/api/multitable/fields').send(body)
 }
+const patchField = (fieldId: string, body: Record<string, unknown>) => {
+  actor = MEMBER
+  return request(app).patch(`/api/multitable/fields/${fieldId}`).send(body)
+}
 const restorePreview = (revisionId: string) => {
   actor = MEMBER
   return request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-preview`).send({ revisionId })
@@ -288,7 +292,7 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
       if ((r.rows[0] as { c: number }).c >= 1) return
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
-    throw new Error('plugin-create never parked on the held canonical fence — the unconditional fence is gone')
+    throw new Error('writer never parked on the held canonical fence — the expected fence entry is gone')
   }
 
   test('AF [flag OFF] plugin-create STILL parks on a held canonical fence (the unconditional auto-number lock survives)', async () => {
@@ -402,6 +406,35 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
     await q('DELETE FROM meta_config_revisions WHERE entity_id = $1', [F_NEW]).catch(() => {})
     await q('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [F_NEW]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE id = $1', [F_NEW]).catch(() => {})
+  })
+
+  test('B3c [ordinary field create] applying block ⇒ 409 before schema mutation (flag ON)', async () => {
+    const F_NEW = mkField('b3cstring')
+    process.env[FLAG] = 'true'
+    await setBlock('applying')
+    const res = await createField({ id: F_NEW, sheetId: SHEET, name: 'B3c String', type: 'string', order: 8 })
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('RECOVERY_IN_PROGRESS')
+    expect(await fieldExists(F_NEW)).toBe(false)
+  })
+
+  test('B3d [ordinary field patch] applying block ⇒ 409 and schema stays unchanged (flag ON)', async () => {
+    const F = mkField('b3dstring')
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [F, SHEET, 'B3d Before', 'string', '{}', 8],
+    )
+    process.env[FLAG] = 'true'
+    await setBlock('applying')
+    const res = await patchField(F, { name: 'B3d After', property: { maxLength: 40 } })
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('RECOVERY_IN_PROGRESS')
+    const row = (await q('SELECT name, property FROM meta_fields WHERE id = $1', [F])).rows[0] as {
+      name: string
+      property: Record<string, unknown>
+    }
+    expect(row).toEqual({ name: 'B3d Before', property: {} })
+    await q('DELETE FROM meta_fields WHERE id = $1', [F])
   })
 
   // ── config-restore-execute record writers (B) ──────────────────────────────────────────────────────────
@@ -604,6 +637,48 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
     expect(createdId).toBeUndefined() // never inserted
     expect(await readBlock()).toBe('applying')
     await setBlock(null)
+  })
+
+  test('R2 [field schema writers] create and patch park behind the recovery fence before committing', async () => {
+    process.env[FLAG] = 'true'
+    await setBlock(null)
+    const blocker = await poolManager.get().getInternalPool().connect()
+    const CREATE_FIELD = mkField('r2create')
+    const PATCH_FIELD = mkField('r2patch')
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [PATCH_FIELD, SHEET, 'R2 Before', 'string', '{}', 8],
+    )
+    try {
+      for (const run of [
+        () => createField({ id: CREATE_FIELD, sheetId: SHEET, name: 'R2 Created', type: 'string', order: 9 }),
+        () => patchField(PATCH_FIELD, { name: 'R2 After', property: { maxLength: 64 } }),
+      ]) {
+        await blocker.query('BEGIN')
+        const blockerPid = Number((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+        await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)])
+        // Supertest requests are lazy thenables; assimilating into a real Promise starts the
+        // production route before we inspect pg_locks.
+        const requestPromise = Promise.resolve(run())
+        await waitUntilBlockedOnFence(blockerPid)
+        await blocker.query('COMMIT')
+        const response = await requestPromise
+        expect([200, 201]).toContain(response.status)
+      }
+      expect(await fieldExists(CREATE_FIELD)).toBe(true)
+      const patched = (await q('SELECT name, property FROM meta_fields WHERE id = $1', [PATCH_FIELD])).rows[0] as {
+        name: string
+        property: Record<string, unknown>
+      }
+      expect(patched).toEqual({ name: 'R2 After', property: { maxLength: 64 } })
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+      await q('DELETE FROM meta_config_revisions WHERE entity_id = ANY($1::text[])', [[CREATE_FIELD, PATCH_FIELD]]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE id = ANY($1::text[])', [[CREATE_FIELD, PATCH_FIELD]]).catch(() => {})
+    }
+    expect(await fieldExists(CREATE_FIELD)).toBe(false)
+    expect(await fieldExists(PATCH_FIELD)).toBe(false)
   })
 
   // ── §C — POST-COMMIT derived-value recompute JOINS THE FENCE (relation-aggregation). ────────────────────

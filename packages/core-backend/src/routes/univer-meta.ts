@@ -11219,6 +11219,10 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        // Exact-anchor recovery binds its plan to the complete field schema. Join the canonical
+        // sheet fence before reading or changing that schema so a create cannot commit between
+        // the recovery transaction's schema hash and its final writes. Flag-off remains a no-op.
+        await fenceWriterEntry(query, sheetId)
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the new field + any shifted fields share it
         const { type, property } = await normalizeFieldWriteInput(
           query as unknown as QueryFn,
@@ -11554,6 +11558,9 @@ export function univerMetaRouter(): Router {
       // response counts are internally consistent (no re-query drift between the two).
       let bulkRecomputeRecordIds: string[] | null = null
       const updated = await pool.transaction(async ({ query }) => {
+        // Fence before re-reading the field: recovery hashes and applies against one schema
+        // generation, while field retype/property/order writes serialize outside that window.
+        await fenceWriterEntry(query, preflightSheetId)
         const existing = await query(
           'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
           [fieldId],
