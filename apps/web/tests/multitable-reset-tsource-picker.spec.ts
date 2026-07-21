@@ -6,10 +6,10 @@
  * `historyBatchId` (never a wall-clock time) reaches reset-preview, and that reset-execute is token-only.
  */
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { createApp, nextTick } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 
 import ResetToPointPicker from '../src/multitable/components/ResetToPointPicker.vue'
-import { MultitableApiClient, type ExactAnchorRequest } from '../src/multitable/api/client'
+import { MultitableApiClient, type ExactAnchorRequest, type ResetPreview } from '../src/multitable/api/client'
 import { useLocale } from '../src/composables/useLocale'
 import type { HistoryBatchSummary } from '../src/multitable/types'
 
@@ -140,6 +140,7 @@ describe('ResetToPointPicker — T8-2 / W2 exact-anchor Reset UI T-source', () =
 
   it('(f) POST-EXECUTE SEAM: a successful reset fires onDone and hits reset-execute with ONLY the previewIdentity + confirm — never the batch id or a timestamp', async () => {
     const onDone = vi.fn()
+    const listHistoryEvents = vi.fn(async () => ({ batches: [historyBatch('batch_execute')], total: 1, nextCursor: null, searchTruncated: false }))
     const fetchFn = vi.fn(async (url: string) => {
       // deleteCount:0 → the dialog's revert-equivalent path (no typed confirm) so we can drive execute simply.
       if (String(url).includes('reset-preview')) return new Response(JSON.stringify({ ok: true, data: {
@@ -150,7 +151,7 @@ describe('ResetToPointPicker — T8-2 / W2 exact-anchor Reset UI T-source', () =
     const client = new MultitableApiClient({ fetchFn })
     mount({
       sheetId: 'sheet_xyz', onDone,
-      listHistoryEvents: vi.fn(async () => ({ batches: [historyBatch('batch_execute')], total: 1, nextCursor: null, searchTruncated: false })),
+      listHistoryEvents,
       resetPreview: (sid: string, anchor: ExactAnchorRequest) => client.resetPreview(sid, anchor),
       resetExecute: (sid: string, id: string) => client.resetExecute(sid, id),
     })
@@ -167,6 +168,69 @@ describe('ResetToPointPicker — T8-2 / W2 exact-anchor Reset UI T-source', () =
     const execBody = JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string)
     expect(execBody).toEqual({ previewIdentity: 'srv', confirm: 'reset' })
     await waitUntil(() => onDone.mock.calls.length >= 1) // the seam back to the workbench (grid refresh) fired
+    await waitUntil(() => listHistoryEvents.mock.calls.length >= 2) // committed recovery refreshes the History picker too
+  })
+
+  it('(f2) SHEET SWITCH: revokes the selected anchor immediately and a late old-sheet preview cannot execute on the new sheet', async () => {
+    const sheetId = ref('sheet_A')
+    let resolvePreview!: (value: ResetPreview) => void
+    let resolveSheetB!: (value: { batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }) => void
+    const resetPreview = vi.fn((_sid: string, _anchor: ExactAnchorRequest) => new Promise<ResetPreview>((resolve) => { resolvePreview = resolve }))
+    const resetExecute = vi.fn(async () => ({ strategy: 'reset' as const, revertedCount: 1, deletedCount: 0 }))
+    const listHistoryEvents = vi.fn((_baseId: string, params?: { sheetId?: string }) => {
+      if (params?.sheetId === 'sheet_B') {
+        return new Promise<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>((resolve) => {
+          resolveSheetB = resolve
+        })
+      }
+      return Promise.resolve({
+        batches: [historyBatch(`batch_${params?.sheetId ?? 'none'}`)],
+        total: 1,
+        nextCursor: null,
+        searchTruncated: false,
+      })
+    })
+    const app: App<Element> = createApp({
+      setup: () => () => h(ResetToPointPicker, {
+        pitResetEnabled: true,
+        baseId: 'base_abc',
+        sheetId: sheetId.value,
+        listHistoryEvents,
+        resetPreview,
+        resetExecute,
+      }),
+    })
+    const c = document.createElement('div'); document.body.appendChild(c); app.mount(c)
+    mounted.push({ unmount: () => app.unmount() })
+
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 2)
+    setSelect('[data-test="reset-picker-history-select"]', 'batch_sheet_A'); await flush()
+    ;(q('[data-test="reset-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => resetPreview.mock.calls.length === 1)
+    expect(resetPreview.mock.calls[0]).toEqual(['sheet_A', { historyBatchId: 'batch_sheet_A' }])
+
+    sheetId.value = 'sheet_B'
+    await flush()
+    await waitUntil(() => listHistoryEvents.mock.calls.some((call) => call[1]?.sheetId === 'sheet_B'))
+    // The B-list is deliberately still pending. Scope revocation must not wait for its response.
+    expect(q('[data-test="reset-confirm"]')).toBeFalsy()
+    expect(q('[data-test="reset-entry"]')).toBeFalsy()
+
+    resolvePreview({
+      strategy: 'reset',
+      summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 },
+      deleteRecordIds: [],
+      previewIdentity: 'old-sheet-token',
+    })
+    await flush()
+    expect(resetExecute).not.toHaveBeenCalled()
+    resolveSheetB({
+      batches: [historyBatch('batch_sheet_B')],
+      total: 1,
+      nextCursor: null,
+      searchTruncated: false,
+    })
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 2)
   })
 
   it('(g) R5b i18n: zh locale renders the typed zh labels (strings live in meta-record-labels, not inline)', async () => {

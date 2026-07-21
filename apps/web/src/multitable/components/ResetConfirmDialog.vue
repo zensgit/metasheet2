@@ -25,7 +25,12 @@
             <a v-if="deletedCount > 0" href="#trash" class="reset-confirm__trash-link" data-test="reset-confirm-trash-link">{{ l('record.resetConfirmViewInTrash') }}</a>
           </p>
 
-          <p v-else-if="error" class="reset-confirm__hint reset-confirm__hint--warn" role="alert" data-test="reset-confirm-error">{{ errorCopy }}</p>
+          <div v-else-if="error" class="reset-confirm__error">
+            <p class="reset-confirm__hint reset-confirm__hint--warn" role="alert" data-test="reset-confirm-error">{{ errorCopy }}</p>
+            <MtButton data-test="reset-confirm-retry" :disabled="loading || submitting" @click="retryPreview">
+              {{ l('record.resetConfirmRetryPreview') }}
+            </MtButton>
+          </div>
 
           <template v-else-if="preview">
             <!-- Defense in depth: the backend withholds tokens for both refusal classes. The client also
@@ -160,12 +165,12 @@ const errorCopy = computed(() => {
     case 'IDENTITY_INVALID':
     case 'PREVIEW_IDENTITY_INVALID': return l('record.resetConfirmErrorStale')
     case 'SHEET_TOO_LARGE': return l('record.resetConfirmErrorTooLarge')
+    case 'RESET_CONFIRM_REQUIRED': return l('record.resetConfirmErrorTypeMismatch')
     default: break
   }
   if (s === 403) return l('record.resetConfirmErrorForbidden')
   if (s === 409) return l('record.resetConfirmErrorStale')
   if (s === 413) return l('record.resetConfirmErrorTooLarge')
-  if (s === 400) return l('record.resetConfirmErrorTypeMismatch')
   return l('record.resetConfirmErrorGeneric')
 })
 
@@ -195,6 +200,11 @@ async function loadPreview(epoch: number): Promise<void> {
   } finally {
     if (epoch === dialogEpoch) loading.value = false
   }
+}
+
+function retryPreview(): void {
+  if (!open.value || loading.value || submitting.value || !openedAnchor.value) return
+  void loadPreview(++dialogEpoch)
 }
 
 async function onConfirm(): Promise<void> {
@@ -241,6 +251,8 @@ function onCancel(): void {
 .reset-confirm__title { margin: 0; font-size: 16px; }
 .reset-confirm__close { background: none; border: none; font-size: 22px; cursor: pointer; }
 .reset-confirm__body { padding: 20px; }
+.reset-confirm__error { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.reset-confirm__error .reset-confirm__hint { margin: 0; }
 .reset-confirm__warn { background: #fef3f2; border: 1px solid #fda29b; color: #912018; border-radius: 6px; padding: 12px; }
 .reset-confirm__ack { display: block; margin: 12px 0; }
 .reset-confirm__type { display: block; margin: 8px 0 16px; }

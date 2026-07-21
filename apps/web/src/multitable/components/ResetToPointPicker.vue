@@ -63,7 +63,7 @@
         :anchor="anchor"
         :reset-preview="boundPreview"
         :reset-execute="boundExecute"
-        :on-done="onDone"
+        :on-done="handleDone"
       />
     </template>
   </div>
@@ -103,6 +103,7 @@ const { isZh } = useLocale()
 const l = (key: MetaRecordLabelKey): string => recordLabel(key, isZh.value)
 
 const selectedBatchId = ref('')
+const selectedSheetId = ref('')
 const historyBatches = ref<HistoryBatchSummary[]>([])
 const historyLoading = ref(false)
 const historyError = ref<string | null>(null)
@@ -172,16 +173,53 @@ async function loadHistoryBatches(): Promise<void> {
   }
 }
 
+function resetHistoryScope(): void {
+  ++historyLoadSeq
+  selectedBatchId.value = ''
+  selectedSheetId.value = ''
+  historyBatches.value = []
+  historyError.value = null
+  historyLoading.value = false
+}
+
+watch(
+  selectedBatchId,
+  (batchId) => {
+    selectedSheetId.value = batchId ? props.sheetId : ''
+  },
+  { flush: 'sync' },
+)
+
 watch(
   () => [props.pitResetEnabled === true, props.baseId, props.sheetId, props.listHistoryEvents] as const,
   () => {
+    // Scope switches revoke the old selection synchronously. The frozen sheet id below then prevents even
+    // a same-tick stale modal callback from pairing an old anchor with the newly selected sheet.
+    resetHistoryScope()
     void loadHistoryBatches()
   },
   { immediate: true },
 )
 
-const boundPreview = (a: ExactAnchorRequest): Promise<ResetPreview> => props.resetPreview(props.sheetId, a)
-const boundExecute = (identity: string): Promise<ResetResult> => props.resetExecute(props.sheetId, identity)
+function staleSelectionError(): Error & { status: number; code: string } {
+  return Object.assign(new Error('The selected recovery scope changed; re-preview.'), {
+    status: 409,
+    code: 'PREVIEW_IDENTITY_INVALID',
+  })
+}
+
+const boundPreview = (a: ExactAnchorRequest): Promise<ResetPreview> =>
+  selectedSheetId.value ? props.resetPreview(selectedSheetId.value, a) : Promise.reject(staleSelectionError())
+const boundExecute = (identity: string): Promise<ResetResult> =>
+  selectedSheetId.value ? props.resetExecute(selectedSheetId.value, identity) : Promise.reject(staleSelectionError())
+
+async function handleDone(): Promise<void> {
+  try {
+    await props.onDone?.()
+  } finally {
+    await loadHistoryBatches()
+  }
+}
 </script>
 
 <style scoped>

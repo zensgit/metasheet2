@@ -331,6 +331,37 @@ describe('ResetConfirmDialog — T8-2 / W2 exact-anchor Reset UI', () => {
     expect(q('[data-test="reset-confirm-result"]')?.textContent).toContain('1 record(s) reverted')
   })
 
+  it('(h3c) RETRY PREVIEW: an execute-time stale error can obtain a fresh token in place and never reuses the rejected token', async () => {
+    const resetPreview = vi.fn()
+      .mockResolvedValueOnce(previewOf({
+        summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 },
+        deleteRecordIds: [],
+        previewIdentity: 'stale-token',
+      }))
+      .mockResolvedValueOnce(previewOf({
+        summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 },
+        deleteRecordIds: [],
+        previewIdentity: 'fresh-token',
+      }))
+    const resetExecute = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('stale'), { status: 409, code: 'PREVIEW_IDENTITY_INVALID' }))
+      .mockResolvedValueOnce({ strategy: 'revert', revertedCount: 1, deletedCount: 0 } as ResetResult)
+    mount({ resetPreview, resetExecute })
+    await nextTick()
+    ;(q('[data-test="reset-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="reset-confirm-btn"]'))
+    ;(q('[data-test="reset-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="reset-confirm-retry"]'))
+    expect(resetExecute).toHaveBeenLastCalledWith('stale-token')
+
+    ;(q('[data-test="reset-confirm-retry"]') as HTMLButtonElement).click()
+    await waitUntil(() => resetPreview.mock.calls.length === 2 && !!q('[data-test="reset-confirm-btn"]'))
+    expect(resetPreview.mock.calls).toEqual([[ANCHOR], [ANCHOR]])
+    ;(q('[data-test="reset-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="reset-confirm-result"]'))
+    expect(resetExecute.mock.calls).toEqual([['stale-token'], ['fresh-token']])
+  })
+
   it('(h4) doomed/no-op previews have no executable control, including a malformed drift+token response', async () => {
     mount({ resetPreview: vi.fn(async () => previewOf({
       summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 1, effectiveWriteCount: 1 },
@@ -432,7 +463,8 @@ describe('ResetConfirmDialog — T8-2 / W2 exact-anchor Reset UI', () => {
     await errCase(409, 'RESET_RETENTION_CONFLICT', '修订保留任务运行期间无法执行重置。请在停用保留任务后重试。')
     await errCase(409, undefined, '数据表在预览之后已发生变化 — 请重新预览后再试。')
     await errCase(413, undefined, '此数据表记录过多，无法一次性重置。')
-    await errCase(400, undefined, '请输入 "reset" 以确认。') // 'reset' literal preserved even in zh
+    await errCase(400, 'RESET_CONFIRM_REQUIRED', '请输入 "reset" 以确认。') // 'reset' literal preserved even in zh
+    await errCase(400, undefined, '重置未能完成。请重新预览后再试。')
     await errCase(999, undefined, '重置未能完成。请重新预览后再试。')
     // exact-anchor / kernel refusal mapping — code-driven, not status-driven
     await errCase(400, 'EXACT_ANCHOR_REQUIRED', '这不是一个有效的精确历史点。请刷新并从列表中重新选择一个批次。')

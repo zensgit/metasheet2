@@ -387,6 +387,25 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
   })
 
+  test('reset execute validation is typed and token rejection never echoes verifier-internal reasons', async () => {
+    enableRecoveryExecute()
+
+    const missingConfirm = await resetExecute({ previewIdentity: 'opaque-token' })
+    expect(missingConfirm.status).toBe(400)
+    expect(missingConfirm.body?.error).toEqual({
+      code: 'RESET_CONFIRM_REQUIRED',
+      message: 'Type "reset" to confirm this operation.',
+    })
+
+    const forged = await resetExecute({ previewIdentity: 'not-a-valid-token', confirm: 'reset' })
+    expect(forged.status).toBe(409)
+    expect(forged.body?.error).toEqual({
+      code: 'PREVIEW_IDENTITY_INVALID',
+      message: 'Reset preview identity rejected; the sheet changed since preview — re-preview',
+    })
+    expect(String(forged.body?.error?.message)).not.toMatch(/\((?:invalid|expired|signature|malformed)[^)]*\)/i)
+  })
+
   test('execute is token-only: caller anchor/mode authority is rejected with zero writes and does not burn the token', async () => {
     enableRecoveryExecute()
     const { anchorOp } = await seedWorld()

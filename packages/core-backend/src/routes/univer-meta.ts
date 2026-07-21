@@ -10667,7 +10667,7 @@ export function univerMetaRouter(): Router {
     }
     // D4: Reset keeps the typed two-step confirm — a stray Revert-shaped call cannot trigger a Reset.
     if (mode === 'reset' && confirm.trim() !== 'reset') {
-      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, previewIdentity and confirm:"reset" are required' } })
+      return res.status(400).json({ ok: false, error: { code: 'RESET_CONFIRM_REQUIRED', message: 'Type "reset" to confirm this operation.' } })
     }
     try {
       const pool = poolManager.get()
@@ -10683,7 +10683,7 @@ export function univerMetaRouter(): Router {
       const verified = verifyExactAnchorRecoveryIdentity(previewIdentity, { sheetId, actorId: access.userId })
       if (!verified.valid || !verified.claims) {
         const status = verified.reason === 'expired' ? 410 : 409
-        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `${mode === 'reset' ? 'Reset' : 'Revert'} preview identity rejected (${verified.reason ?? 'invalid'}); the sheet changed since preview — re-preview` } })
+        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `${mode === 'reset' ? 'Reset' : 'Revert'} preview identity rejected; the sheet changed since preview — re-preview` } })
       }
       if (verified.claims.mode !== mode) {
         return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Preview identity was minted for a different recovery mode; re-preview as ${mode}.` } })

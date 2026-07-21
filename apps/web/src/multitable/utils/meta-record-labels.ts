@@ -104,7 +104,7 @@ export type MetaRecordLabelKey =
   // --- T8-2 Reset UI confirm dialog (R5c strict-zero closeout, final microslice of this line) ---
   | 'record.resetConfirmDialogAria' | 'record.resetConfirmCancelAria' | 'record.resetConfirmLoading'
   | 'record.resetConfirmSubmitting' | 'record.resetConfirmNoChanges'
-  | 'record.resetConfirmViewInTrash'
+  | 'record.resetConfirmViewInTrash' | 'record.resetConfirmRetryPreview'
   | 'record.resetConfirmErrorDisabled' | 'record.resetConfirmErrorForbidden' | 'record.resetConfirmErrorBlocked'
   | 'record.resetConfirmErrorStale' | 'record.resetConfirmErrorTooLarge' | 'record.resetConfirmErrorTypeMismatch'
   | 'record.resetConfirmErrorGeneric'
@@ -287,6 +287,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetConfirmSubmitting': { en: 'Applying the recovery…', zh: '正在执行恢复…' },
   'record.resetConfirmNoChanges': { en: 'This history point already matches the current sheet.', zh: '当前数据表已与该历史点一致。' },
   'record.resetConfirmViewInTrash': { en: 'View in Trash', zh: '在回收站中查看' },
+  'record.resetConfirmRetryPreview': { en: 'Preview again', zh: '重新预览' },
   'record.resetConfirmErrorDisabled': { en: 'Reset is not enabled here.', zh: '此处未启用重置。' },
   'record.resetConfirmErrorForbidden': { en: 'You do not have permission to reset this sheet.', zh: '你没有权限重置此数据表。' },
   'record.resetConfirmErrorBlocked': { en: 'A target record is locked or denied — nothing was changed.', zh: '某条目标记录被锁定或拒绝 — 未做任何更改。' },
