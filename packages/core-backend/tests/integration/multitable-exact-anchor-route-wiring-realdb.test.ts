@@ -917,6 +917,124 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)).toBe(0)
   })
 
+  test('LINK-TARGET-RACE: recovery key-shares a foreign target until commit so concurrent delete cannot leave a dangling link', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld({ withSideEffects: true })
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+
+    const livePool = poolManager.get().getInternalPool()
+    const barrier = await livePool.connect()
+    const targetDeleter = await livePool.connect()
+    const barrierClass = 731_927
+    const barrierObject = Math.max(1, TS % 2_000_000_000)
+    const fnName = `earw_pause_${TS}`
+    const triggerName = `earw_pause_trg_${TS}`
+    let applying: Promise<Awaited<ReturnType<typeof revertExecute>>> | null = null
+    let deleting: Promise<void> | null = null
+    let deleteSettled = false
+    try {
+      await barrier.query('SELECT pg_advisory_lock($1::int, $2::int)', [barrierClass, barrierObject])
+      const barrierPid = Number((await barrier.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      const deleterPid = Number((await targetDeleter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+
+      // Pause the source UPDATE after plan authorization + foreign-target validation. At this point the
+      // recovery transaction must already hold FOR KEY SHARE on REC_TGT_ANCHOR.
+      await q(`
+        CREATE OR REPLACE FUNCTION ${fnName}() RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(${barrierClass}, ${barrierObject});
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await q(`
+        CREATE TRIGGER ${triggerName}
+        BEFORE UPDATE ON meta_records
+        FOR EACH ROW WHEN (OLD.id = '${REC_A}')
+        EXECUTE FUNCTION ${fnName}()
+      `)
+
+      // SuperTest requests are lazy thenables; Promise.resolve starts the route immediately.
+      applying = Promise.resolve(revertExecute({ previewIdentity: token }))
+      let recoveryParked = false
+      for (let i = 0; i < 100; i++) {
+        const parked = await q(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_locks held
+               JOIN pg_locks waiter
+                 ON waiter.locktype = held.locktype
+                AND waiter.database IS NOT DISTINCT FROM held.database
+                AND waiter.classid IS NOT DISTINCT FROM held.classid
+                AND waiter.objid IS NOT DISTINCT FROM held.objid
+                AND waiter.objsubid IS NOT DISTINCT FROM held.objsubid
+              WHERE held.pid = $1
+                AND held.locktype = 'advisory'
+                AND held.granted = true
+                AND waiter.granted = false
+           ) AS parked`,
+          [barrierPid],
+        )
+        recoveryParked = parked.rows[0]?.parked === true
+        if (recoveryParked) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(recoveryParked).toBe(true)
+
+      deleting = (async () => {
+        await targetDeleter.query('BEGIN')
+        try {
+          await targetDeleter.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(TGT_SHEET)])
+          await targetDeleter.query(
+            'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+            [REC_TGT_ANCHOR, TGT_SHEET],
+          )
+          await targetDeleter.query(
+            'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
+            [REC_TGT_ANCHOR],
+          )
+          await targetDeleter.query('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_TGT_ANCHOR, TGT_SHEET])
+          await targetDeleter.query('COMMIT')
+        } catch (error) {
+          await targetDeleter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { deleteSettled = true })
+
+      // The target delete must park on recovery's row-level key-share. Removing FOR KEY SHARE makes this
+      // transaction commit here; after the barrier release recovery then inserts a dangling foreign_record_id.
+      let deleteParked = false
+      for (let i = 0; i < 100; i++) {
+        const state = await q('SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [deleterPid])
+        deleteParked = state.rows[0]?.wait_event_type === 'Lock'
+        if (deleteParked || deleteSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(deleteSettled).toBe(false)
+      expect(deleteParked).toBe(true)
+
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject])
+      const ex = await applying
+      expect(ex.status).toBe(200)
+      await deleting
+
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_TGT_ANCHOR, TGT_SHEET])).rowCount).toBe(0)
+      expect((await q('SELECT 1 FROM meta_links WHERE foreign_record_id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(0)
+    } finally {
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject]).catch(() => {})
+      if (applying) await applying.catch(() => {})
+      if (deleting) await deleting.catch(() => {})
+      await targetDeleter.query('ROLLBACK').catch(() => {})
+      targetDeleter.release()
+      barrier.release()
+      await q(`DROP TRIGGER IF EXISTS ${triggerName} ON meta_records`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${fnName}()`).catch(() => {})
+    }
+  })
+
   test('doomed resurrect preview: discloses undelete set but mints NO executable token', async () => {
     enableRecoveryExecute()
     process.env.MULTITABLE_ENABLE_PIT_UNDELETE = 'true'

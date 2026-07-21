@@ -610,8 +610,16 @@ export async function applyExactAnchorRecovery(
           if (targetIds.length === 0) continue
           // Same-operation delete: a projected link target that this apply will delete becomes dangling.
           if (targetIds.some((id) => deleteIdSet.has(id))) throw new ApplyRefusalError('link-integrity')
+          // Hold every foreign target through COMMIT. Without this row lock, a target-sheet delete can
+          // commit after the existence check but before syncOneOutboundLinkField(), leaving a dangling
+          // meta_links row (foreign_record_id intentionally has no FK). ORDER BY gives concurrent
+          // multi-target recoveries one deterministic lock order; a delete that wins first makes the
+          // fresh READ COMMITTED statement return no row and therefore fails closed below.
           const found = await query(
-            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+            `SELECT id FROM meta_records
+              WHERE sheet_id = $1 AND id = ANY($2::text[])
+              ORDER BY id
+              FOR KEY SHARE`,
             [foreignSheetId, targetIds],
           )
           const foundSet = new Set((found.rows as Array<{ id: unknown }>).map((row) => String(row.id)))
