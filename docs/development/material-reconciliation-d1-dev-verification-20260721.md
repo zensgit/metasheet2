@@ -134,7 +134,9 @@ PR closes all five (D1 has no route/migration/runtime consumer, so no rollback w
 
 Corrective mutation battery **6/6 RED** (re-export a Set, drop the dup-group guard, restore the
 evidence argument, open the partial-predicate vocab, key dedup on the full tuple incl.
-multiplicity, open the partial-field check); full plugin CJS chain (70 suites) green.
+multiplicity, open the partial-field check); full plugin CJS chain green (94 `scripts.test`
+suites; an earlier "70 suites" figure here counted only the suites that print a literal `OK`
+line — corrected in round-4).
 
 ## 3d. Owner corrective review round-2 — absorption (2026-07-21)
 
@@ -150,7 +152,8 @@ fixes), all closed in this PR:
 Round-2 mutation battery RED on both P2 fixes (reinstate per-group bound override; revert the
 partial-field check to template-only). One equivalent mutant noted honestly: reordering the
 spread `{ multiplicityBound, ...group }` is behaviourally identical because the hasOwnProperty
-guard already strips any group-level bound before the encode call.
+guard already rejects (fail-closed) any group carrying its own bound before the spread is
+reached — no group-level bound ever survives to the encode call.
 
 ## 3e. Owner corrective review round-3 — absorption (2026-07-21)
 
@@ -161,6 +164,30 @@ validated BEFORE the loop. `computeSnapshotContentDigest([], validBound)` still 
 snapshot is the chartered §8.2-4 positive control); `computeSnapshotContentDigest([])` with no /
 zero / over-range bound now throws `MULTIPLICITY_OUT_OF_BOUNDS`. Mutation: dropping the pre-loop
 guard → RED. Header comment reconciled.
+
+## 3f. Round-4 — post-APPROVE verify-pass absorption (2026-07-21)
+
+An independent verify pass over the round-1..3 ledger (adversarial agents, after the owner's
+0 P1 / 0 P2 code verdict at `8b9e7a5e8`) found the round-1 Set-privatization ruling had only
+been applied to the TEMPLATES module:
+
+- **P2: the codec `__internals` still exported three live membership Sets**
+  (`MR_DIGEST_ERROR_REASON_SET`, `MR_VALUE_KIND_SET`, `MR_IDENTITY_KEY_CLASS_SET`), and
+  `MR_IDENTITY_KEY_CLASS_SET` is load-bearing in `encodeIdentitySortTuple`. Probe:
+  `__internals.MR_IDENTITY_KEY_CLASS_SET.add('evil')` flipped an unknown `identityKeyClass`
+  from reject to ACCEPT, encoding class byte `0x00` — colliding with the `identity_invalid`
+  domain separator. Fixed: the Sets are module-private; no `*_SET` key and no live `Set`
+  instance anywhere on the export surface (module or `__internals`), pinned by a test that
+  also runs the poisoning attempt as a no-op with reject-before/reject-after positive controls.
+- **P3 (raised in the round-3 re-review, absorbed here): error-detail sanitization aligned** —
+  the in-loop `encodeIdentitySortTuple` guards now null out non-safe-integer
+  `multiplicityBound`/`multiplicity` in `details`, matching the snapshot-level pre-loop guard's
+  discipline; pinned by tests asserting `details.<field> === null` for string inputs.
+- Ledger corrections: "70 suites" → 94 (§3c); §3d equivalent-mutant rationale reworded — the
+  hasOwnProperty guard *rejects fail-closed*, it does not strip.
+
+Round-4 mutation battery: re-export a live Set through `__internals` → RED; revert either
+detail sanitization → RED.
 
 ## 4. Explicitly out of scope (per §7 gates)
 

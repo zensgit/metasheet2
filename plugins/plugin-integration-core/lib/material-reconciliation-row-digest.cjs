@@ -328,15 +328,18 @@ function encodeIdentitySortTuple(input) {
     multiplicityBound < 1 ||
     multiplicityBound > MAX_MULTIPLICITY_ENCODABLE
   ) {
+    // Round-4 P3: details carry sanitized values only (same discipline as the
+    // snapshot-level pre-loop guard) — a non-integer input never round-trips
+    // into the error surface verbatim.
     throw new MaterialReconciliationDigestError(
       'MULTIPLICITY_OUT_OF_BOUNDS',
       'multiplicityBound must be an integer within 1..2^32-1',
-      { multiplicityBound }
+      { multiplicityBound: Number.isSafeInteger(multiplicityBound) ? multiplicityBound : null }
     )
   }
   if (!Number.isSafeInteger(multiplicity) || multiplicity < 1 || multiplicity > multiplicityBound) {
     throw new MaterialReconciliationDigestError('MULTIPLICITY_OUT_OF_BOUNDS', 'multiplicity must be an integer within 1..multiplicityBound', {
-      multiplicity,
+      multiplicity: Number.isSafeInteger(multiplicity) ? multiplicity : null,
       multiplicityBound,
     })
   }
@@ -414,10 +417,13 @@ module.exports = {
   computeCanonicalRowDigest,
   encodeIdentitySortTuple,
   computeSnapshotContentDigest,
+  // Round-4 P2: NO live membership Sets on the export surface — a mutable Set
+  // reachable through __internals lets a consumer flip a validator from reject
+  // to accept (a poisoned identityKeyClass would even encode class byte 0x00,
+  // colliding with the identity_invalid domain separator). Same ruling as the
+  // templates round-1 fix: Sets stay module-private; tests use the public
+  // frozen arrays.
   __internals: {
-    MR_DIGEST_ERROR_REASON_SET,
-    MR_VALUE_KIND_SET,
-    MR_IDENTITY_KEY_CLASS_SET,
     MAX_LENGTH_PREFIX,
     MAX_MULTIPLICITY_ENCODABLE,
     isPlainObject,

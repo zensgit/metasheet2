@@ -608,6 +608,42 @@ function deepReviewRound() {
   assert.equal(golden2.hex, '35785be424f326d567759cbf530f0c0a5cb85091ada133ec710833021e872296', 'golden 2 canonical row digest')
 }
 
+// Round-4 (post-APPROVE verify pass): the CODEC export surface must not leak a
+// live membership Set either — same poisoning class the templates round-1 fix
+// closed. A reachable mutable Set flips a validator from reject to accept, and
+// a poisoned identityKeyClass would encode class byte 0x00, colliding with the
+// identity_invalid domain separator.
+function round4CodecSurface() {
+  const mod = require(MODULE_PATH)
+  // 1. No *_SET key and no live Set instance anywhere on the export surface.
+  for (const [scopeName, scope] of [['module', mod], ['__internals', mod.__internals]]) {
+    for (const [key, value] of Object.entries(scope)) {
+      assert.ok(!key.includes('_SET'), `${scopeName}.${key}: no exported Set-mirror names`)
+      assert.ok(!(value instanceof Set), `${scopeName}.${key}: no live Set instances exported`)
+    }
+  }
+  // 2. Poisoning attempt is a no-op: the Set is unreachable, and an unknown
+  //    identityKeyClass still fails closed afterwards (positive control pair).
+  const evil = { identityKeyClass: 'evil', identityKeyBytes: Buffer.from('k'), canonicalRowDigest: Buffer.alloc(32), multiplicity: 1, multiplicityBound: 16 }
+  assertThrowsReason(() => encodeIdentitySortTuple(evil), 'UNSUPPORTED_KIND', 'unknown identityKeyClass rejected before poisoning attempt')
+  __internals.MR_IDENTITY_KEY_CLASS_SET?.add?.('evil') // unreachable: optional-chain no-op
+  assertThrowsReason(() => encodeIdentitySortTuple(evil), 'UNSUPPORTED_KIND', 'unknown identityKeyClass STILL rejected after poisoning attempt')
+  // Positive control: the two chartered classes still encode.
+  assert.equal(encodeIdentitySortTuple({ identityKeyClass: 'valid', identityKeyBytes: Buffer.from('k'), canonicalRowDigest: Buffer.alloc(32), multiplicity: 1, multiplicityBound: 16 })[0], MR_IDENTITY_KEY_CLASS_BYTES.valid, 'valid class still encodes')
+  assert.equal(encodeIdentitySortTuple({ identityKeyClass: 'identity_invalid', identityKeyBytes: Buffer.alloc(0), canonicalRowDigest: Buffer.alloc(32), multiplicity: 1, multiplicityBound: 16 })[0], MR_IDENTITY_KEY_CLASS_BYTES.identity_invalid, 'identity_invalid class still encodes')
+  // 3. Round-4 P3: error details carry sanitized values only — a non-integer
+  //    bound/multiplicity never round-trips into the error surface verbatim.
+  for (const [label, input, field] of [
+    ['non-integer bound sanitized', { ...evil, identityKeyClass: 'valid', multiplicityBound: '9' }, 'multiplicityBound'],
+    ['non-integer multiplicity sanitized', { ...evil, identityKeyClass: 'valid', multiplicity: 'x' }, 'multiplicity'],
+  ]) {
+    let thrown = null
+    try { encodeIdentitySortTuple(input) } catch (error) { thrown = error }
+    assert.ok(thrown && thrown.reason === 'MULTIPLICITY_OUT_OF_BOUNDS', `${label}: fails closed`)
+    assert.equal(thrown.details[field], null, `${label}: details.${field} is null, not the raw value`)
+  }
+}
+
 function main() {
   structuralIndependence()
   frozenVocabularies()
@@ -621,6 +657,7 @@ function main() {
   digestShape()
   reviewHardening()
   deepReviewRound()
+  round4CodecSurface()
 }
 
 main()
