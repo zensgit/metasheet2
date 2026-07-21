@@ -7,6 +7,19 @@
 > 上位文档：`attendance-vnext-dingtalk-benchmark-ux-development-charter-20260720.md`
 > （RATIFIED；§4.5/§4.6/§6.2/§7-Wave4/§9/§13-3/§15），OD-VX3/OD-VX4 已按推荐值 ratify。
 > 基线 = `origin/main` `6feff1b2b`（Wave 0-3 已收档，3/3 波次验证 MD 在 main）。
+>
+> **Amendment round-1（2026-07-21，owner 审阅 = CHANGES REQUESTED，0 P1 / 4 P2 + 五条追加门禁；
+> 措辞取自 owner 审阅原文）**：P2-1 步骤① memberCount 真源改 `user_orgs`（原考勤组成员数与步骤②
+> 循环依赖）→ §3①/§4.2；P2-2 步骤④ `attendance.settings` 为部署级单键（`index.cjs:135`
+> SETTINGS_KEY 无 org 维度，保存写入完整 normalized defaults）——「key 存在」会跨组织假绿 →
+> 重定义为「平台级打卡策略已显式确认」+ `scope=deployment` 显式标记，无法证明人工确认 ⇒
+> `manual_review_required`，绝不 `ready`（§3④/§4.2）；P2-3 步骤⑥历史 delivery 行非配置真源 →
+> 新增 core-backend 只读 runtime readiness port（`workerEnabled/defaultChannelAvailable/
+> availableChannelCount/orgRecipientBindingReady`，仅布尔/计数；port 缺失 ⇒ `unknown`，禁由
+> delivery 存在性推断）（§4.5）；P2-4 恢复合同与「无向导态」矛盾 → OD-W4-7 重写为四点恢复合同
+> （已保存=readiness 重算恢复 / 未保存不承诺+离开提示 / 模板选择只存 ID 且 key 含 userId+orgId /
+> 「未完成」提示来自 readiness 非访问史）。追加门禁五条入 §9。owner 核心判断维持：core-backend
+> 聚合 + user_orgs 门方向正确；①④⑥真源修正后 OD-W4-1..7 方可提交 ratify。
 
 ---
 
@@ -74,17 +87,22 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 
 | 步 | 完成信号（values-free 计数/布尔） | 现有原料（file:line） | 修复动作深链（§6，query 形） |
 |---|---|---|---|
-| ① | `directoryLinked`（S7-5 原样复用）+ `memberCount>0` | `attendance-admin.ts:336-360`；groups members 计数 | `attendance-admin-user-access` |
+| ① | `directoryLinked`（S7-5 原样复用）+ `orgActiveMemberCount>0`（**真源 = `user_orgs` 该 org 的 active 成员数**，P2-1：绝不用考勤组成员数——那与步骤②循环依赖） | `attendance-admin.ts:336-360`；`user_orgs` 表（S7-5 门已查同表 `:367-379`） | `attendance-admin-user-access` |
 | ② | `groupCount>0 && groupsWithMembers>0` | `index.cjs:37718`（含 member_count 子查询） | `attendance-admin-groups` |
 | ③ | `shiftCount>0`（排班制另加 rotation 存在） | `index.cjs:39710` | `attendance-admin-shifts` |
-| ④ | 打卡方式设置已显式保存过（settings 键存在性,非值） | `system_configs key='attendance.settings'`（`index.cjs:291-295,13733-13760`） | `attendance-admin-settings` |
+| ④ | **平台级打卡策略已显式确认**（`punchPolicyConfirmed`，**`scope=deployment` 显式标记**——`attendance.settings` 是部署级单键无 org 维度（`index.cjs:135`），任何保存写入完整 normalized defaults，「key 存在」≠本组织配置过（P2-2 跨组织假绿）；无法证明人工确认 ⇒ `manual_review_required`，**绝不 `ready`**） | `system_configs key='attendance.settings'`（`index.cjs:135,291-295,13733-13760`） | `attendance-admin-settings` |
 | ⑤ | `approvalFlowCount>0`（含 active 判定） | `index.cjs:30924` | `attendance-admin-approval-flows` |
-| ⑥ | 通知渠道配置存在性布尔（**不回传渠道值**） | deliveries/settings 存在性 | `attendance-admin-notification-deliveries` |
+| ⑥ | 经 §4.5 runtime readiness port：`workerEnabled` + `defaultChannelAvailable` + `availableChannelCount` + `orgRecipientBindingReady`（P2-3：历史 delivery 行**不是**配置真源，settings 亦不注册渠道；port 缺失 ⇒ `unknown`） | `AttendanceNotificationDeliveryWorker.ts:370+`（渠道逐个 env-gated、worker 按名路由） | `attendance-admin-notification-deliveries` |
 | ⑦ | 前六步全 `ready` ⇒ `previewReady`；影响人数=①②计数派生 | 聚合派生 | （无——预览在向导内，只读） |
 
-判别值域（纯模块判别矩阵的行）：`ready / missing / forbidden / unknown / db_not_ready`——
+判别值域（纯模块判别矩阵的行）：`ready / missing / forbidden / unknown / manual_review_required / db_not_ready`，
+且每信号携带 `scope: 'org' | 'deployment'`（全局信号显式标 `deployment`，追加门禁 2）——
 `forbidden` 为 per-surface（§4.3），`unknown` fail-closed 显示为「未知，去核查」，绝不显示为已完成
-（章程 L232 未知态红线）；`db_not_ready` 对应各端点统一 503 `DB_NOT_READY` 档（`index.cjs:37752` 等）。
+（章程 L232 未知态红线）；`manual_review_required` 显示为「需人工确认」并给出确认入口；`db_not_ready`
+对应各端点统一 503 `DB_NOT_READY` 档（`index.cjs:37752` 等）。
+**「计划生效时间」逐步来源规则（追加门禁 4）**：每步的生效时间必须有权威来源方可显示（如排班生效日、
+节假日同步窗口）；无权威来源的步骤显示「无法确定」，**不得省略、不得猜测**——各步来源在 W4-0 判别
+矩阵中逐行登记，缺来源即登记为「无法确定」档。
 
 ## 4. Readiness 聚合契约（R1）
 
@@ -92,14 +110,23 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 core-backend `attendance-admin.ts` router——继承 router 级 `rbacGuard('attendance','admin')` + S7-5 同款
 `user_orgs` org-membership 门 + 平台 admin 直通（`:367-379` 先例逐字复用）。**不选** plugin 路由：
 那将继承「信任客户端 orgId」缺口（§1-5），对一个汇总全 org 配置面的端点不可接受。
-**4.2 响应形状（values-free by construction）**：仅布尔与非负整数计数
-`{directoryLinked, memberCount, groupCount, groupsWithMembers, shiftCount, approvalFlowCount, punchSettingsSaved, notifyConfigured, …}` ——
+**4.2 响应形状（values-free by construction）**：仅布尔与非负整数计数，每信号带 `scope` 标记
+`{directoryLinked, orgActiveMemberCount, groupCount, groupsWithMembers, shiftCount, approvalFlowCount,
+punchPolicyConfirmed(scope=deployment), notify:{workerEnabled, defaultChannelAvailable,
+availableChannelCount, orgRecipientBindingReady}}` ——
 契约测试断言 SQL 文本不含任何标识列（S7-5 单测先例：`attendance-admin-directory-readiness-s7-5.test.ts:82-191`）,
 且响应键集合恒等锁定。错误档：400 `ORG_ID_REQUIRED` / 401 / 403 / 503 `DB_NOT_READY` / 500 泛化文案。
 **4.3 权限信号**：端点级 403 = 整面 `forbidden`；不复用 `adminForbidden` 全局 flag（§1-6）。FE 纯模块
 将 403 映射为对应步 `forbidden`，与 `missing` 显示语义分离（L358）。
 **4.4 读放大**：单次聚合替代 5-6 次 list 调用；GET 不限流（`attendance-production.ts:461-497` 现状），
 IP allowlist 对 `/api/attendance-admin/*` 的既有覆盖自动适用。
+**4.5 通知 runtime readiness port（P2-3，W4-0 新增，core-backend 只读）**：真实可用性真源 = worker
+是否开启 + 默认 channel 是否已注册 + 各 provider env/credential readiness
+（`AttendanceNotificationDeliveryWorker.ts:370+` `createAttendanceDeliveryChannelsFromEnv`：渠道逐个
+env-gated、default-off、worker 按 `row.channel` 名路由）。port 只回
+`{workerEnabled, defaultChannelAvailable, availableChannelCount, orgRecipientBindingReady}` 布尔/计数——
+**不回传 env 名、渠道名或凭据**；port 缺失/异常 ⇒ 步骤⑥ = `unknown`，**禁止**由 delivery 行存在性
+推断成功。契约测试断言：port 实现零 env 值外泄 + 缺 port 时聚合端点仍 200 且 notify 块为 unknown 档。
 
 ## 5. 模板与预填契约（R3/R4）
 
@@ -128,8 +155,8 @@ multiShiftDay/annualLeavePolicy/attendanceResultEditPolicy`）——向导对 se
 加一项——**不加第 5 组**，避免 4 列栅格改动 `AttendanceAdminTaskHome.vue:175-179`；任务首页实有四组
 = daily-operations / people-groups / work-time-policies / reporting-payroll，归组位置 owner 可在
 ratify 时调整）。不做首次进入自动拦截（现状无 first-run 逻辑，
-强拦截违背「不与日常混首屏」的克制姿态；localStorage 首访信号仅用于任务首页 action 上的轻量「未完成」
-提示，OD-W4-2(c)）。
+强拦截违背「不与日常混首屏」的克制姿态）。任务首页 action 上的轻量「未完成」提示**来自 readiness
+派生（前六步存在非 ready 步 ⇒ 提示），不来自「是否访问过」的本地信号**（P2-4 第 4 点，OD-W4-2(c) 修订）。
 **6.2 深链纪律**：向导内七步「去配置/修复」全部 = `selectAdminSection` 或 `?section=` query 深链
 （W3 实证契约形态）；禁 hash 形；禁新增 route 参数。中途退出即自然落在 canonical form，无需「恢复」
 状态机——向导本身无持久向导态（readiness 是重进即重算的派生，非流程状态）。
@@ -168,16 +195,22 @@ ratify 时调整）。不做首次进入自动拦截（现状无 first-run 逻�
   英文错误串）；(b) 记 deferred 继续留已知项。
 - **OD-W4-6 影响人数口径**：(a) `memberCount`/`groupsWithMembers` 派生的计数（**recommended**）；
   (b) 逐用户名单预览（不推荐，与 values-free 及只读面冲突）。
-- **OD-W4-7 中途退出恢复口径**（章程 L358「中途退出后状态可恢复」的读法，预审 P3-3 要求显式）：
-  (a) **无状态重派生**（**recommended**）——向导无持久向导态，readiness 重进即重算；用户已填内容
-  落在 canonical form 各自的既有状态里，不存在会丢失的「向导中间态」；W4-1 完成门补可验证断言：
-  中途退出→重进 ⇒ 判别矩阵输出与直接重算逐项一致；(b) 持久向导态（不推荐——引入新状态真源，
-  与 R1 只读面和「向导本身无流程状态机」的设计相悖）。
+- **OD-W4-7 中途退出恢复合同**（章程 L358 读法，owner P2-4 四点合同，(a) **recommended**）：
+  (a) **四点合同**——①已保存进度由 readiness 重算恢复（无持久向导态）；②**未保存表单不承诺恢复**，
+  离开向导预填未保存时给离开前提示（beforeunload/切区确认）；③若保存模板选择，只存模板 ID，
+  存储 key **必须含 `userId + orgId`**（防多用户/多组织串状态）；④「未完成」提示来自 readiness，
+  不来自访问史。W4-1 完成门断言：中途退出→重进 ⇒ 判别矩阵与直接重算逐项一致 + 未保存离开提示
+  真实弹出 + 存储 key 含双 id 的负向测试（换 user/org ⇒ 互不可见）。
+  (b) 持久向导态（不推荐——引入新状态真源，与 R1 及无流程状态机设计相悖）。
 
 ## 9. 切片（严格串行，全部 RATIFY 后开工；每片完成门 = 章程 §8.1 十一门 + 本锁红线负向断言 + Opus 对抗审 0 P1/P2 + PR 门禁记录）
 
-- **W4-0 readiness 底座**：纯模块 + `setup-readiness` 端点 + 契约/判别矩阵测试。红线断言：R1（端点
-  零写路径 mutation）+ §4.3 per-surface 403。
+- **W4-0 readiness 底座**：纯模块 + `setup-readiness` 端点 + §4.5 通知 readiness port + 契约/判别
+  矩阵测试。红线与追加门禁断言（owner round-1）：R1 + §4.3 per-surface 403 + **两组织真库矩阵**
+  （A org 管理员伪造 `orgId=B` ⇒ 在任何聚合 SQL 执行前 403）+ **计数 SQL 逐项含 `org_id=$1` 审计**
+  （全局信号显式 `scope=deployment`）+ **query seam 只接受 SELECT**（写语句 mutation ⇒ 契约测试
+  精确翻红）+ 生效时间来源逐行登记。**W4-0 无 UI：三视口门标 N/A**（视觉证据从 W4-1 起，
+  避免形式化假验收——owner 追加门禁 5）。
 - **W4-1 向导壳与七步导航**：`AttendanceSetupReadiness.vue` + section 注册 + 任务首页 action + 帮助。
   红线断言：R2（深链全 query 形，负向：hash 导航零出现）+ §3 未知态 fail-closed 显示。
 - **W4-2 模板预填 + ⑦预览**：模板常量 + 预填跳转 + 预览派生。红线断言：R3（preview 期零写请求）+
