@@ -1318,8 +1318,8 @@ function evidenceDoc(overrides = {}) {
     'corp B run status': '_TBD_ (completed|failed|…)',
     'corp B duplicate_key_detected': '_TBD_ (true|false)',
     'corp B expected_constraint_detected': '_TBD_ (true|false)',
-    'key comparison': '_TBD_ (corp_a_rows / corp_b_rows / distinct_keys)',
-    presence: '_TBD_ (present_in_a / present_in_b / keys_all_distinct)',
+    'key comparison': '_TBD_ (corp_a_rows=<n> / corp_b_rows=<n> / distinct_keys=<n>)',
+    presence: '_TBD_ (present_in_a=<n> / present_in_b=<n> / keys_all_distinct=<true|false>)',
     verdict: '_TBD_ (CONFIRMED / DISPROVED / INCONCLUSIVE)',
   }
   const merged = { ...base, ...overrides }
