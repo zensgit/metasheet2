@@ -57,7 +57,15 @@
 # fallback — see docs/development/attendance-bulk-balance-adjust-s6-design-lock-20260710.md,
 # #3925; DOM-level confirm-gate / exact-POST-body / cap-block / partial-failure / policy-off
 # coverage for the same slice lives in attendance-admin-regressions.spec.ts, already covered by
-# this guard).
+# this guard), and AttendanceAdminTaskHome.spec.ts (new — vNext charter §7 Wave 3 / issue
+# #4353, reclaimed from stacked draft #4414: mounted spec for the extracted four-task-group
+# admin home component — header/region semantics, link-vs-button action rendering,
+# select-section emit, empty-groups-render-nothing for parent-side permission filtering — see
+# docs/development/attendance-vnext-dingtalk-benchmark-ux-development-charter-20260720.md), and
+# attendance-experience-entrypoints.spec.ts (newly wired here — Wave 3 added real behavior to
+# this previously-ungated file: the admin/import "Management home" clear-section round trip
+# through the router and the overview anomaly-section deep link; the file's pre-existing
+# tab/section routing coverage rides along).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -102,6 +110,8 @@ on:
       - 'apps/web/tests/attendance-report-xlsx-export.spec.ts'
       - 'apps/web/tests/attendance-reports-analytics.spec.ts'
       - 'apps/web/tests/attendance-overview-priority.spec.ts'
+      - 'apps/web/tests/AttendanceAdminTaskHome.spec.ts'
+      - 'apps/web/tests/attendance-experience-entrypoints.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -141,6 +151,8 @@ on:
       - 'apps/web/tests/attendance-report-xlsx-export.spec.ts'
       - 'apps/web/tests/attendance-reports-analytics.spec.ts'
       - 'apps/web/tests/attendance-overview-priority.spec.ts'
+      - 'apps/web/tests/AttendanceAdminTaskHome.spec.ts'
+      - 'apps/web/tests/attendance-experience-entrypoints.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -183,4 +195,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints --reporter=dot
