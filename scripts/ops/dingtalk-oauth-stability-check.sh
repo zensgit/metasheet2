@@ -22,6 +22,16 @@ DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
 # shellcheck source=./dingtalk-oauth-stability-log-probe-cmds.sh
 source "${ROOT_DIR}/scripts/ops/dingtalk-oauth-stability-log-probe-cmds.sh"
 
+# DT-CLOSE-01C (rc=126 / E2BIG): scratch dir for the large scraped payloads handed to the verdict
+# python below. `mktemp -d` creates it 0700-owned-by-us; the EXIT trap removes it. It deliberately
+# lives under TMPDIR, NOT under output/ — the recording workflow uploads output/github/... as a
+# build artifact, and these files can contain hostnames/tokens from the raw scrapes.
+PAYLOAD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingtalk-oauth-stability.XXXXXX")"
+cleanup_payload_dir() {
+  rm -rf "${PAYLOAD_DIR}"
+}
+trap cleanup_payload_dir EXIT
+
 ssh_cmd() {
   ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER_HOST}" "$@"
 }
@@ -123,11 +133,36 @@ else
 fi
 ROOT_DF_LINE="$(ssh_cmd "df -P / | awk 'NR==2 {print \$2\" \"\$3\" \"\$4\" \"\$5}'")"
 
-WEBHOOK_STATUS_INPUT="${WEBHOOK_STATUS}" \
-HEALTH_JSON_INPUT="${HEALTH_JSON}" \
-METRICS_TEXT_INPUT="${METRICS_TEXT}" \
-ALERTMANAGER_STATUS_JSON_INPUT="${ALERTMANAGER_STATUS_JSON}" \
-ALERTS_JSON_INPUT="${ALERTS_JSON}" \
+# DT-CLOSE-01C: the scraped payloads are passed to the verdict python by FILE PATH, never by env
+# var or argv.
+#
+# The regression this fixes: these five values used to be exported as `NAME_INPUT="${VALUE}" python3 …`.
+# A process's argv+envp share one kernel budget (ARG_MAX; on Linux each individual string is
+# additionally capped at MAX_ARG_STRLEN = 128 KiB), and METRICS_TEXT is a full `/metrics/prom` scrape
+# whose size is unbounded and grows with the deploy host's metric cardinality. Once it crossed the
+# limit, `execve()` returned E2BIG, bash reported
+#     dingtalk-oauth-stability-check.sh: line 126: /usr/bin/python3: Argument list too long
+# and exited 126 — so EVERY scheduled recording failed at the command level, regardless of how healthy
+# the host actually was. A file path is a fixed ~40 bytes no matter how large the payload is.
+#
+# `printf` is a bash builtin, so writing these out never execs anything and cannot itself hit E2BIG.
+printf '%s' "${WEBHOOK_STATUS}" >"${PAYLOAD_DIR}/webhook-status.txt"
+printf '%s' "${HEALTH_JSON}" >"${PAYLOAD_DIR}/health.json"
+printf '%s' "${METRICS_TEXT}" >"${PAYLOAD_DIR}/metrics.prom"
+printf '%s' "${ALERTMANAGER_STATUS_JSON}" >"${PAYLOAD_DIR}/alertmanager-status.json"
+printf '%s' "${ALERTS_JSON}" >"${PAYLOAD_DIR}/alerts.json"
+
+# Only the *_FILE forms are set here — never the *_INPUT forms for these five, since setting both
+# would put the payload back in envp and re-open E2BIG. read_input()'s *_INPUT fallback exists solely
+# for the hermetic unit test that injects small literal values
+# (dingtalk-oauth-stability-metrics-only-contract.test.mjs); the full-script ARG_MAX test
+# (dingtalk-oauth-stability-argmax-payload.test.mjs) is what keeps THIS call site from reverting to it.
+# The remaining variables below are bounded scalars (counts, a df line, flags) and stay in env.
+WEBHOOK_STATUS_FILE="${PAYLOAD_DIR}/webhook-status.txt" \
+HEALTH_JSON_FILE="${PAYLOAD_DIR}/health.json" \
+METRICS_TEXT_FILE="${PAYLOAD_DIR}/metrics.prom" \
+ALERTMANAGER_STATUS_JSON_FILE="${PAYLOAD_DIR}/alertmanager-status.json" \
+ALERTS_JSON_FILE="${PAYLOAD_DIR}/alerts.json" \
 ALERTMANAGER_ERROR_COUNT_INPUT="${ALERTMANAGER_ERROR_COUNT}" \
 BRIDGE_NOTIFY_COUNT_INPUT="${BRIDGE_NOTIFY_COUNT}" \
 BRIDGE_RESOLVED_COUNT_INPUT="${BRIDGE_RESOLVED_COUNT}" \
@@ -142,17 +177,34 @@ import json
 import os
 from datetime import datetime, timezone
 
-webhook_status_lines = os.environ['WEBHOOK_STATUS_INPUT'].splitlines()
+
+def read_input(name):
+    """Read one scraped payload.
+
+    DT-CLOSE-01C: the caller passes these by FILE PATH (<NAME>_FILE), because an unbounded
+    /metrics/prom scrape in envp blew the kernel argv+env budget and made execve() fail with E2BIG
+    ("Argument list too long", rc=126) on every scheduled run. The <NAME>_INPUT env fallback is kept
+    only so the hermetic verdict unit test can inject small literal values directly; the shell above
+    must never use it for these payloads.
+    """
+    path = os.environ.get(name + '_FILE')
+    if path:
+        with open(path, 'r', encoding='utf-8') as handle:
+            return handle.read()
+    return os.environ[name + '_INPUT']
+
+
+webhook_status_lines = read_input('WEBHOOK_STATUS').splitlines()
 webhook_status = {}
 for line in webhook_status_lines:
     if '=' in line:
         key, value = line.split('=', 1)
         webhook_status[key] = value
 
-health = json.loads(os.environ['HEALTH_JSON_INPUT'])
-metrics_lines = os.environ['METRICS_TEXT_INPUT'].splitlines()
-alertmanager_status = json.loads(os.environ['ALERTMANAGER_STATUS_JSON_INPUT'])
-alerts = json.loads(os.environ['ALERTS_JSON_INPUT'])
+health = json.loads(read_input('HEALTH_JSON'))
+metrics_lines = read_input('METRICS_TEXT').splitlines()
+alertmanager_status = json.loads(read_input('ALERTMANAGER_STATUS_JSON'))
+alerts = json.loads(read_input('ALERTS_JSON'))
 root_df_parts = os.environ.get('ROOT_DF_LINE_INPUT', '').split()
 if len(root_df_parts) == 4:
     root_total, root_used, root_avail, root_percent = root_df_parts
