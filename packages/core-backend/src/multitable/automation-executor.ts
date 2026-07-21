@@ -28,6 +28,7 @@ import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { produceAutomationEvent } from './automation-durable-activation'
 import {
   extractExactLinkedRecordId,
+  hasUnavailableFwbNumberMapping,
   isFwbWritebackEnabled,
   normalizeFwbMappings,
   normalizeFwbUpdateRecordLinkFieldId,
@@ -3036,6 +3037,9 @@ export class AutomationExecutor {
     if (!normalized.ok) {
       return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
     }
+    if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:exact_number_mapping_unavailable' }
+    }
     const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
       ? config.sourceTemplateVersionId.trim()
       : ''
@@ -3165,6 +3169,9 @@ export class AutomationExecutor {
     const normalized = normalizeFwbMappings((config as { mappings?: unknown }).mappings)
     if (!normalized.ok) {
       return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
+    }
+    if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:exact_number_mapping_unavailable' }
     }
     const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
       ? config.sourceTemplateVersionId.trim()

@@ -16,13 +16,11 @@ describe('FWB mapping config model', () => {
   test('valid draft → no issues; executor mappings carry types + select options', () => {
     const draft = [
       { formFieldId: 'f1', targetFieldId: 't_text' },
-      { formFieldId: 'f1', targetFieldId: 't_num' },
       { formFieldId: 'f2', targetFieldId: 't_sel' },
     ]
     expect(validateFwbMappingConfig(draft, TPL, TGT)).toEqual([])
     expect(toExecutorMappings(draft, TGT)).toEqual([
       { formFieldId: 'f1', targetFieldId: 't_text', targetType: 'text' },
-      { formFieldId: 'f1', targetFieldId: 't_num', targetType: 'number' },
       { formFieldId: 'f2', targetFieldId: 't_sel', targetType: 'select', selectOptions: ['低', '高'] },
     ])
   })
@@ -32,6 +30,7 @@ describe('FWB mapping config model', () => {
     expect(validateFwbMappingConfig([{ formFieldId: 'ghost', targetFieldId: 't_text' }], TPL, TGT)).toEqual([{ code: 'unknown_form_field', index: 0 }])
     expect(validateFwbMappingConfig([{ formFieldId: 'f1', targetFieldId: 'ghost' }], TPL, TGT)).toEqual([{ code: 'unknown_target_field', index: 0 }])
     expect(validateFwbMappingConfig([{ formFieldId: 'f1', targetFieldId: 't_formula' }], TPL, TGT)).toEqual([{ code: 'unsupported_target_type', index: 0 }])
+    expect(validateFwbMappingConfig([{ formFieldId: 'f1', targetFieldId: 't_num' }], TPL, TGT)).toEqual([{ code: 'exact_number_mapping_unavailable', index: 0 }])
     expect(validateFwbMappingConfig([{ formFieldId: 'f1', targetFieldId: 't_sel_empty' }], TPL, TGT)).toEqual([{ code: 'select_options_missing', index: 0 }])
     expect(
       validateFwbMappingConfig(
@@ -48,5 +47,6 @@ describe('FWB mapping config model', () => {
   test('toExecutorMappings refuses an unvalidated draft (programmer-error guard)', () => {
     expect(() => toExecutorMappings([{ formFieldId: 'f1', targetFieldId: 'ghost' }], TGT)).toThrow(/unvalidated/)
     expect(() => toExecutorMappings([{ formFieldId: 'f1', targetFieldId: 't_formula' }], TGT)).toThrow(/unvalidated/)
+    expect(() => toExecutorMappings([{ formFieldId: 'f1', targetFieldId: 't_num' }], TGT)).toThrow(/unvalidated/)
   })
 })

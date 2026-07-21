@@ -123,6 +123,21 @@ export function resolveRecordLinkTargetFromSchema(
 }
 
 /**
+ * Exact-number activation stop rule (PROPOSED lock 2026-07-21, section 1).
+ *
+ * The mapper can preserve a decimal string, but the ordinary multitable edit,
+ * query, formula, rollup, and export paths do not yet provide end-to-end exact
+ * semantics. This is deliberately NOT an environment flag: an operator must not
+ * be able to opt into a partially implemented numeric contract. Save and execute
+ * both call this guard; D0-D4 will replace it with the ratified server capability.
+ */
+export function hasUnavailableFwbNumberMapping(
+  mappings: readonly Pick<FwbFieldMapping, 'targetType'>[],
+): boolean {
+  return mappings.some((mapping) => mapping.targetType === 'number')
+}
+
+/**
  * Runtime flag, default OFF. Execution additionally requires the durable-delivery flag (D9/D10: claim +
  * record + revision + outbox commit in ONE transaction and ride the durable dispatcher — with durable OFF
  * the outbox seam is a no-op, so running would silently drop the chained event: no half-durable path).

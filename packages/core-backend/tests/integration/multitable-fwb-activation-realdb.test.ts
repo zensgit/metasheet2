@@ -58,6 +58,8 @@ const ruleIds: string[] = []
 
 const MAPPINGS = [
   { formFieldId: 'summary', targetFieldId: F_TITLE, targetType: 'text' as const },
+]
+const NUMBER_MAPPINGS = [
   { formFieldId: 'amount', targetFieldId: F_AMOUNT, targetType: 'number' as const },
 ]
 const confirmation = (mappings: unknown = MAPPINGS, sourceVersionId = templateVersionId) =>
@@ -262,7 +264,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       actionConfig: fwbConfig([]),
     } as never)).rejects.toThrow(/empty_config/)
     // duplicate target
-    const dup = [MAPPINGS[0], { ...MAPPINGS[1], targetFieldId: F_TITLE, targetType: 'text' as const }]
+    const dup = [MAPPINGS[0], { ...MAPPINGS[0] }]
     await expect(svc.createRule(SHEET_ID, {
       ...fwbBase,
       actionConfig: fwbConfig(dup),
@@ -273,6 +275,12 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       ...fwbBase,
       actionConfig: fwbConfig(badType),
     } as never)).rejects.toThrow(/unsupported_target_type/)
+    // Exact decimal semantics are not yet end-to-end across ordinary multitable
+    // writers/readers, so number mappings stay server-disabled independently of flags.
+    await expect(svc.createRule(SHEET_ID, {
+      ...fwbBase,
+      actionConfig: fwbConfig(NUMBER_MAPPINGS),
+    } as never)).rejects.toThrow(/exact_number_mapping_unavailable/)
     // select without options
     const selNoOpts = [{ formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select' }]
     await expect(svc.createRule(SHEET_ID, {
@@ -364,7 +372,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     await q(
       `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
        VALUES ($1,$2,'user',$3,true,true)`,
-      [SHEET_ID, F_AMOUNT, CREATOR],
+      [SHEET_ID, F_TITLE, CREATOR],
     )
     try {
       await expect(svc.updateRule(tempId, SHEET_ID, { name: 'must revalidate fields' }, CREATOR))
@@ -373,7 +381,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       await q(
         `DELETE FROM field_permissions
           WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'user' AND subject_id = $3`,
-        [SHEET_ID, F_AMOUNT, CREATOR],
+        [SHEET_ID, F_TITLE, CREATOR],
       )
     }
     const restored = await svc.updateRule(tempId, SHEET_ID, { name: 'field gate restored' }, CREATOR)
@@ -437,7 +445,8 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     state = await stateFor(instanceId, ruleId)
     expect(state.records.length).toBe(1)
     expect(state.claims).toBe(1)
-    expect(state.records[0].data).toMatchObject({ [F_TITLE]: 'FWB run', [F_AMOUNT]: '42' }) // D7: canonical decimal STRING
+    expect(state.records[0].data).toMatchObject({ [F_TITLE]: 'FWB run' })
+    expect(state.records[0].data).not.toHaveProperty(F_AMOUNT)
     expect(await revisionCountFor(state.records[0].id)).toBe(1)
     expect(await outboxCountLike(`${evtOn}::fwb::`)).toBe(1)
     expect(legacyChainedEmits).toBe(0) // REPLACE, not keep-both
@@ -514,7 +523,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     await q(
       `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
        VALUES ($1,$2,'user',$3,true,true)`,
-      [SHEET_ID, F_AMOUNT, CREATOR],
+      [SHEET_ID, F_TITLE, CREATOR],
     )
     try {
       setFlags(true, true)
@@ -534,28 +543,31 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       await q(
         `DELETE FROM field_permissions
           WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'user' AND subject_id = $3`,
-        [SHEET_ID, F_AMOUNT, CREATOR],
+        [SHEET_ID, F_TITLE, CREATOR],
       )
     }
   })
 
-  test('execute-time number precision uses canonical field property.decimals and rejects excess scale', async () => {
+  test('execute-time guard rejects a legacy persisted number mapping before claim or record write', async () => {
     const ruleId = ruleIds[0]
-    const instanceId = await startInstance({ summary: 'precision reject', amount: 12.345 })
+    const instanceId = await startInstance({ summary: 'number stop rule', amount: 12.345 })
     await approveInstance(instanceId)
     const beforeExecutions = await waitForExecutionCount(ruleId, 0)
     const beforeRecords = Number(((await q(
       'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
       [SHEET_ID],
     )).rows[0] as { c: number }).c)
-    await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', [JSON.stringify({ decimals: 2 }), F_AMOUNT])
+    await q('UPDATE automation_rules SET action_config = $1::jsonb WHERE id = $2', [
+      JSON.stringify(fwbConfig(NUMBER_MAPPINGS)),
+      ruleId,
+    ])
     try {
       setFlags(true, true)
-      await svc.handleApprovalCompletionTrigger(completionEvent(instanceId, `evt_fwbact_${TS}_precision`))
+      await svc.handleApprovalCompletionTrigger(completionEvent(instanceId, `evt_fwbact_${TS}_number_stop`))
       await waitForExecutionCount(ruleId, beforeExecutions + 1)
       const exec = await lastExecution(ruleId)
       expect(exec?.steps?.[0]?.status).toBe('failed')
-      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:mapping')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:exact_number_mapping_unavailable')
       expect((await stateFor(instanceId, ruleId)).claims).toBe(0)
       const afterRecords = Number(((await q(
         'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
@@ -564,36 +576,10 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       expect(afterRecords).toBe(beforeRecords)
     } finally {
       setFlags(false, false)
-      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', ['{}', F_AMOUNT])
-    }
-  })
-
-  test('execute-time number precision rejects coercible malformed metadata before claim or record write', async () => {
-    const ruleId = ruleIds[0]
-    const instanceId = await startInstance({ summary: 'invalid precision metadata', amount: 12.3 })
-    await approveInstance(instanceId)
-    const beforeExecutions = await waitForExecutionCount(ruleId, 0)
-    const beforeRecords = Number(((await q(
-      'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
-      [SHEET_ID],
-    )).rows[0] as { c: number }).c)
-    await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', [JSON.stringify({ decimals: true }), F_AMOUNT])
-    try {
-      setFlags(true, true)
-      await svc.handleApprovalCompletionTrigger(completionEvent(instanceId, `evt_fwbact_${TS}_precision_invalid_metadata`))
-      await waitForExecutionCount(ruleId, beforeExecutions + 1)
-      const exec = await lastExecution(ruleId)
-      expect(exec?.steps?.[0]?.status).toBe('failed')
-      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:mapping_target_changed')
-      expect((await stateFor(instanceId, ruleId)).claims).toBe(0)
-      const afterRecords = Number(((await q(
-        'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
-        [SHEET_ID],
-      )).rows[0] as { c: number }).c)
-      expect(afterRecords).toBe(beforeRecords)
-    } finally {
-      setFlags(false, false)
-      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', ['{}', F_AMOUNT])
+      await q('UPDATE automation_rules SET action_config = $1::jsonb WHERE id = $2', [
+        JSON.stringify(fwbConfig(MAPPINGS)),
+        ruleId,
+      ])
     }
   })
 
