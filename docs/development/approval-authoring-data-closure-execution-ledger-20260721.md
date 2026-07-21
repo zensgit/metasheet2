@@ -2,7 +2,7 @@
 
 **Status:** INTEGRATION CANDIDATE - approval-data closure is implemented; Canvas V2 phase 1 is implemented; D3+ remains owner-gated
 **Program:** Approval Canvas V2 plus approval-data closure (FWB and attachments)
-**Integration base:** `origin/main@e91d20e5cb94024171b7e333df8a36ec944d1ee1`
+**Integration base:** `origin/main@1f06ecea96be1dfb86f6b24830e1525c3e1d9f2e`
 **Integration branch:** `codex/approval-program-integration-20260721`
 **Authority:** `ApprovalGraph` and backend `normalizeApprovalGraph` remain the only flow semantics
 **Merge/enablement:** no entry in this ledger authorizes merge, UAT, or a runtime flag change

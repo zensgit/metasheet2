@@ -3,7 +3,7 @@
 **Status:** ENGINEERING CLOSEOUT CANDIDATE - approval-data closure ready for review/UAT; Canvas V2 phase 2 remains gated
 **Design lock:** `approval-canvas-v2-interaction-design-lock-20260721.md` (`PROPOSED`)
 **Execution ledger:** `approval-authoring-data-closure-execution-ledger-20260721.md`
-**Integration base:** `origin/main@e91d20e5cb94024171b7e333df8a36ec944d1ee1`
+**Integration base:** `origin/main@1f06ecea96be1dfb86f6b24830e1525c3e1d9f2e`
 **Runtime posture:** all new product flags remain default OFF
 
 ## 1. Verdict
@@ -53,6 +53,7 @@ program finished would violate the ratification gate.
 | Attachment flag parser had no green required canary | P3 CI | export the pure parser and add a focused camel/snake-key matrix | focused canary 4/4; broad quarantined featureFlags specs remain out |
 | Six real-DB files relied on manually maintained two-point wiring | P3 CI | add a source-derived no-DB-exclude plus whole-file-run contract | structural contract 12/12 |
 | Attachment unit-canary comment incorrectly denied default discovery | P3 documentation | describe the explicit canary as stable ownership, not first-ever collection | source comment corrected without changing execution |
+| Booted attachment suite inherited a 15-second setup limit | P3 test stability | give this full-server setup/cleanup an explicit 30-second hook budget | exact-head rerun reaches and passes all product assertions |
 
 ## 4. Verification evidence
 

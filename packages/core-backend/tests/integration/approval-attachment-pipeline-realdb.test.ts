@@ -145,7 +145,7 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
     expect(port).toBeTruthy()
     baseUrl = `http://127.0.0.1:${port}`
     await ensureUsers(REQUESTER, OUTSIDER, OTHER, APPROVER)
-  })
+  }, 30_000)
 
   afterAll(async () => {
     try {
@@ -192,7 +192,7 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
       await offServer?.stop().catch(() => {})
       await server?.stop().catch(() => {})
     }
-  })
+  }, 30_000)
 
   it('sentinel: DATABASE_URL set', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
