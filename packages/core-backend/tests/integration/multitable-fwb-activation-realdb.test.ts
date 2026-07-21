@@ -401,6 +401,29 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     }
   })
 
+  test('legacy number-mapped rule cannot bypass the resulting-shape gate through setRuleEnabled', async () => {
+    const ruleId = `atr_fwbact_legacy_number_${TS}`
+    ruleIds.push(ruleId)
+    await q(
+      `INSERT INTO automation_rules
+        (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
+       VALUES ($1,$2,$3,'approval.completed',$4::jsonb,'write_approval_form_values',$5::jsonb,false,$6)`,
+      [
+        ruleId,
+        SHEET_ID,
+        'legacy exact-number rule',
+        JSON.stringify({ templateId, outcomes: ['approved'] }),
+        JSON.stringify(fwbConfig(NUMBER_MAPPINGS)),
+        CREATOR,
+      ],
+    )
+
+    await expect(svc.setRuleEnabled(ruleId, SHEET_ID, true, CREATOR))
+      .rejects.toThrow(/exact_number_mapping_unavailable/)
+    const persisted = await q('SELECT enabled FROM automation_rules WHERE id = $1', [ruleId])
+    expect(persisted.rows[0]).toMatchObject({ enabled: false })
+  })
+
   // ── Execution through the REAL trigger → executeRule → executor chain ───────────────────────────
 
   test('flag OFF → step skipped, ZERO writes; FWB ON + durable OFF → failed (no half-durable), ZERO writes; both ON → record+revision+claim+outbox in one commit; net-once redelivery; new-instance positive control', async () => {
