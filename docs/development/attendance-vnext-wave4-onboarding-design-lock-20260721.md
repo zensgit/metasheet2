@@ -1,9 +1,12 @@
 # 考勤 vNext Wave 4 · 首次启用向导（onboarding）design-lock — 2026-07-21
 
-> **Status: PROPOSED — docs-only，不授权任何 runtime。** owner 2026-07-21 裁决原文授权范围 =
-> 「只读侦察 + docs-only design-lock，暂不授权 runtime」。本锁不改任何代码、不建端点、不动 flag；
-> runtime 切片只有在 owner RATIFY 本锁之后按 §9 切片序逐一开工。Wave 5（explainability）保持
-> DATA-CONTRACT-GATED，且按同一裁决**不与 Wave 4 runtime 并开**。
+> **Status: RATIFIED（owner 终裁 2026-07-21：0 P1 / 0 P2 / 0 P3）。** 三轮 CHANGES-REQUESTED 修订
+> （round-1..3，见下方历史块）全部吸收并经终核后，owner 终裁 RATIFY：**步骤④确认采用方案 (b)**
+> （default → ready，明确显示「使用平台默认策略」，不新增确认写面）；四条红线（§0）转写保真、
+> 未扩大 runtime 权限；OD-W4-1..7 按 §8 裁决表锁定。因 PR 作者与 owner 为同一 GitHub 账户、平台
+> 禁止自批 APPROVE，终裁以 **owner comment 形式持久化于 PR #4509**（先例：单维护者仓审阅记录落
+> comment 惯例）。RATIFY 授权 §9 切片序开工——**W4-0 须待本 PR fresh required checks 全绿合入后
+> 从新 main 起步**；Wave 5（explainability）保持 DATA-CONTRACT-GATED，不与 Wave 4 runtime 并开。
 > 上位文档：`attendance-vnext-dingtalk-benchmark-ux-development-charter-20260720.md`
 > （RATIFIED；§4.5/§4.6/§6.2/§7-Wave4/§9/§13-3/§15），OD-VX3/OD-VX4 已按推荐值 ratify。
 > 基线 = `origin/main` `6feff1b2b`（Wave 0-3 已收档，3/3 波次验证 MD 在 main）。
