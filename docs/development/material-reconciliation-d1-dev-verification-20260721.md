@@ -118,6 +118,24 @@ independent lane proved whole rule-edges unpinned. The battery now stands at 15 
 12 review-round kills, with golden byte vectors extended (golden-2 carries an interior-zero
 decimal, boolean false, and composed unicode).
 
+## 3c. Owner corrective deep review — absorption (2026-07-21)
+
+An independent review at merged SHA `1f06ecea9` found **0 P1 / 4 P2 / 1 P3** — real contract
+gaps the green tests did not cover (proven with add-poison / plant / SQL probes). This corrective
+PR closes all five (D1 has no route/migration/runtime consumer, so no rollback was needed):
+
+| Finding | Fix |
+|---|---|
+| P2: exported `*_SET` mutable membership Sets are a poisoning vector — `MR_FIELD_TYPE_SET.add('x')` flipped the validator permissive (Object.freeze doesn't stop Set.add) | Removed ALL `*_SET` from the public surface (module-private now); test asserts `Object.keys(mod)` has no `_SET`, the public arrays are frozen (`push` throws), and an out-of-vocab field type is still rejected (private Set unreachable) |
+| P2: `computeSnapshotContentDigest` took pre-encoded tuples → two encodings of one multiset ([mult=1,mult=1] vs [mult=2]) with different digests; a test even pinned "duplicate tuple → different" as correct | API now takes structured identity GROUPS and rejects a repeated identity-content group (`DUPLICATE_IDENTITY_GROUP`) — one legal encoding per multiset; the dedup key is (class,key,digest) WITHOUT multiplicity, so the same row with differing multiplicities is also rejected |
+| P2: `summarizeMaterialReconciliationEvidence(templates)` echoed caller-planted prefix-valid objectIds (`material_reconciliation_MAT-001-SECRET`, label `customer-alpha`) | Takes NO argument; derives evidence ONLY from the frozen registry; plant-and-assert test proves planted business ids never surface |
+| P2: partial-unique predicate was a raw SQL free string (`1=1; DROP TABLE` passed) | Closed structured predicate `{ predicate: <MR_PARTIAL_PREDICATES>, field: <fieldId> }`; the D2 migration layer maps `not_null:X → "X IS NOT NULL"`; free-string / unknown-predicate / unknown-field all rejected |
+| P3: charter header still `PROPOSED / doc-only` while D1 doc claims ratified | Charter header → `RATIFIED` (owner ruling 2026-07-21; ratify unlocks D1 only, not D2 runtime) |
+
+Corrective mutation battery **6/6 RED** (re-export a Set, drop the dup-group guard, restore the
+evidence argument, open the partial-predicate vocab, key dedup on the full tuple incl.
+multiplicity, open the partial-field check); full plugin CJS chain (70 suites) green.
+
 ## 4. Explicitly out of scope (per §7 gates)
 
 D2 (scenario/binding store, pointer CAS runtime, `SET LOCAL lock_timeout` claim mechanics with
