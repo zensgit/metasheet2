@@ -32,7 +32,12 @@ import { EventBus } from '../../src/integration/events/event-bus'
 import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../../src/multitable/system-sheet-predicate'
 import { precheckSheetHistoryIntegrity } from '../../src/multitable/history-integrity-precheck'
-import { PIT_RECOVERY_LOCK_NS } from '../../src/multitable/canonical-sheet-fence'
+import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
+import {
+  prepareExactAnchorHistoryFixture,
+  pruneSealedHistoryOperations,
+  type ExactAnchorHistoryFixture,
+} from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -43,8 +48,7 @@ const SHEET_PEOPLE = `sheet_hc_people_${TS}` // system sheet: description = peop
 const NAME = `fld_hc_name_${TS}`, SALARY = `fld_hc_salary_${TS}`
 const PNAME = `fld_hc_pname_${TS}`
 const ACTOR = `user_hc_${TS}`
-const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
-const NS = PIT_RECOVERY_LOCK_NS // single source of truth (canonical-sheet-fence.ts) — was a hand-copied literal
+const T0 = '2026-01-01T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 
 const HISTORY_INCOMPLETE_BODY = {
   ok: false,
@@ -56,15 +60,34 @@ const HISTORY_INCOMPLETE_BODY = {
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
-const revertPreview = (sheet: string, asOf = T1) => request(app).post(`/api/multitable/sheets/${sheet}/revert-preview`).send({ asOf })
-const revertExecute = (sheet: string, previewIdentity: string, asOf = T1) => request(app).post(`/api/multitable/sheets/${sheet}/revert-execute`).send({ asOf, previewIdentity })
-const resetPreview = (sheet: string, asOf = T1) => request(app).post(`/api/multitable/sheets/${sheet}/reset-preview`).send({ asOf })
-const resetExecute = (sheet: string, previewIdentity: string, asOf = T1) => request(app).post(`/api/multitable/sheets/${sheet}/reset-execute`).send({ asOf, previewIdentity, confirm: 'reset' })
+const fixtures = new Map<string, ExactAnchorHistoryFixture>()
+const fixtureFor = (sheet: string): ExactAnchorHistoryFixture => {
+  const fixture = fixtures.get(sheet)
+  if (!fixture) throw new Error(`exact-anchor fixture missing for ${sheet}`)
+  return fixture
+}
+const revertPreview = (sheet: string) => request(app).post(`/api/multitable/sheets/${sheet}/revert-preview`).send({ anchorOperationId: fixtureFor(sheet).anchorOperationId() })
+const revertExecute = (sheet: string, previewIdentity: string) => request(app).post(`/api/multitable/sheets/${sheet}/revert-execute`).send({ previewIdentity })
+const resetPreview = (sheet: string) => request(app).post(`/api/multitable/sheets/${sheet}/reset-preview`).send({ anchorOperationId: fixtureFor(sheet).anchorOperationId() })
+const resetExecute = (sheet: string, previewIdentity: string) => request(app).post(`/api/multitable/sheets/${sheet}/reset-execute`).send({ previewIdentity, confirm: 'reset' })
 const lockRecord = (id: string, locked: boolean) => request(app).post(`/api/multitable/records/${id}/lock`).send({ locked })
 
-const rev = (sheet: string, id: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
-  q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
-     VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[]::text[],'{}'::jsonb,$5::jsonb,$6)`, [sheet, id, version, action, JSON.stringify(snap), at])
+const rev = (
+  sheet: string,
+  id: string,
+  version: number,
+  action: 'create' | 'update' | 'delete',
+  snap: Record<string, unknown>,
+  at: string,
+  options?: { anchor?: boolean },
+) => fixtureFor(sheet).insertRevision({
+  recordId: id,
+  version,
+  action,
+  snapshot: snap,
+  createdAt: at,
+  phase: options?.anchor ? 'anchor' : at === T0 ? 'before' : 'after',
+})
 const insertLive = (sheet: string, id: string, data: Record<string, unknown>, version: number) =>
   q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,$4)', [id, sheet, JSON.stringify(data), version])
 const markerCount = async (sheet: string, id: string, version: number): Promise<number> =>
@@ -76,24 +99,38 @@ async function sheetWriteState(sheet: string) {
   const records = (await q('SELECT id, data, version FROM meta_records WHERE sheet_id = $1 ORDER BY id', [sheet])).rows
   const revisionCount = Number(((await q('SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1', [sheet])).rows[0] as { c: number }).c)
   const trashCount = Number(((await q('SELECT count(*)::int c FROM meta_records_trash WHERE sheet_id = $1', [sheet])).rows[0] as { c: number }).c)
-  return { records, revisionCount, trashCount }
+  const operationCount = Number(((await q('SELECT count(*)::int c FROM meta_record_history_operations WHERE sheet_id = $1', [sheet])).rows[0] as { c: number }).c)
+  const tokenBurnCount = Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [sheet])).rows[0] as { c: number }).c)
+  return { records, revisionCount, trashCount, operationCount, tokenBurnCount }
 }
 
-async function expectAllFourRefuseWithZeroWrites(sheet: string): Promise<void> {
+async function expectAllFourRefuseWithZeroWrites(sheet: string, mutate: () => Promise<void>): Promise<void> {
+  const healthyRevert = await revertPreview(sheet)
+  const healthyReset = await resetPreview(sheet)
+  expect(healthyRevert.status).toBe(200)
+  expect(healthyReset.status).toBe(200)
+  expect(healthyRevert.body?.data?.previewIdentity).toBeTruthy()
+  expect(healthyReset.body?.data?.previewIdentity).toBeTruthy()
+  await mutate()
   const before = await sheetWriteState(sheet)
   const pvRevert = await revertPreview(sheet)
   expect(pvRevert.status).toBe(409); expect(pvRevert.body).toEqual(HISTORY_INCOMPLETE_BODY)
-  const exRevert = await revertExecute(sheet, 'dummy-never-minted')
+  const exRevert = await revertExecute(sheet, healthyRevert.body.data.previewIdentity)
   expect(exRevert.status).toBe(409); expect(exRevert.body).toEqual(HISTORY_INCOMPLETE_BODY)
   const pvReset = await resetPreview(sheet)
   expect(pvReset.status).toBe(409); expect(pvReset.body).toEqual(HISTORY_INCOMPLETE_BODY)
-  const exReset = await resetExecute(sheet, 'dummy-never-minted')
+  const exReset = await resetExecute(sheet, healthyReset.body.data.previewIdentity)
   expect(exReset.status).toBe(409); expect(exReset.body).toEqual(HISTORY_INCOMPLETE_BODY)
   expect(await sheetWriteState(sheet)).toEqual(before)
 }
 
 function makeAutomationExecutor(): AutomationExecutor {
-  const deps: AutomationDeps = { eventBus: new EventBus(), queryFn: (sql: string, params?: unknown[]) => q(sql, params ?? []) }
+  const deps: AutomationDeps = {
+    eventBus: new EventBus(),
+    queryFn: (sql: string, params?: unknown[]) => q(sql, params ?? []),
+    transaction: async (handler) => poolManager.get().transaction(async ({ query }) =>
+      handler({ query: ((sql: string, params?: unknown[]) => query(sql, params)) as AutomationDeps['queryFn'] })),
+  }
   return new AutomationExecutor(deps)
 }
 const lockRule = (locked: boolean): AutomationRule => ({
@@ -129,8 +166,11 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     for (const sheet of [SHEET, SHEET_PROJ, SHEET_PEOPLE]) {
-      for (const t of ['meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
+      await pruneSealedHistoryOperations(sheet).catch(() => {})
+      for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [sheet]).catch(() => {})
     }
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
@@ -141,15 +181,23 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
     // #4261 (landed mid-flight on main) closes revert-execute by default behind this master gate;
     // these goldens assert the CONTIGUITY precheck's verdicts, so the interim gate must be open.
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+    fixtures.clear()
     for (const sheet of [SHEET, SHEET_PROJ, SHEET_PEOPLE]) {
+      await pruneSealedHistoryOperations(sheet)
+      await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_version_markers WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet])
       await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheet])
+      fixtures.set(sheet, await prepareExactAnchorHistoryFixture(sheet))
     }
     // H — the healthy captured record shared by scenarios (old@T0 → new@T2), contiguous chain.
     await insertLive(SHEET, `rec_h_${TS}`, { [NAME]: 'new', [SALARY]: 200 }, 2)
-    await rev(SHEET, `rec_h_${TS}`, 1, 'create', { [NAME]: 'old', [SALARY]: 100 }, T0)
+    await rev(SHEET, `rec_h_${TS}`, 1, 'create', { [NAME]: 'old', [SALARY]: 100 }, T0, { anchor: true })
     await rev(SHEET, `rec_h_${TS}`, 2, 'update', { [NAME]: 'new', [SALARY]: 200 }, T2)
   })
 
@@ -158,13 +206,13 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
   // ── HEALED-GAP (fail-first, ported verbatim from #4252 §6.1) ──────────────────────────────────────────────
   test('HEALED-GAP: v3 record with revisions {v1,v3} (v2 uncaptured) → all four surfaces refuse, zero writes', async () => {
     const HG = `rec_hi_healedgap_${TS}`
-    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [HG, SHEET, JSON.stringify({ [NAME]: 'hg-v3-healed', [SALARY]: 300 })])
-    await rev(SHEET, HG, 1, 'create', { [NAME]: 'hg-v1', [SALARY]: 100 }, T0)
-    await rev(SHEET, HG, 3, 'update', { [NAME]: 'hg-v3-healed', [SALARY]: 300 }, T2) // NO v2 — uncaptured mid-chain write
-    expect((await recordRow(HG))?.version).toBe(3)
-    expect(Number(((await q('SELECT count(*)::int c FROM meta_record_revisions WHERE record_id=$1', [HG])).rows[0] as { c: number }).c)).toBe(2)
-    // T1 ∈ (v1@T0, v3@T2) — the gap window. Contiguity refuses; a live-vs-latest comparator alone does not.
-    await expectAllFourRefuseWithZeroWrites(SHEET)
+    await expectAllFourRefuseWithZeroWrites(SHEET, async () => {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [HG, SHEET, JSON.stringify({ [NAME]: 'hg-v3-healed', [SALARY]: 300 })])
+      await rev(SHEET, HG, 1, 'create', { [NAME]: 'hg-v1', [SALARY]: 100 }, T0)
+      await rev(SHEET, HG, 3, 'update', { [NAME]: 'hg-v3-healed', [SALARY]: 300 }, T2) // NO v2 — uncaptured mid-chain write
+      expect((await recordRow(HG))?.version).toBe(3)
+      expect(Number(((await q('SELECT count(*)::int c FROM meta_record_revisions WHERE record_id=$1', [HG])).rows[0] as { c: number }).c)).toBe(2)
+    })
   })
 
   // ── LOCK-MARKERS positive control (all FOUR lock/unlock sites) ────────────────────────────────────────────
@@ -199,8 +247,9 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
     await insertLive(SHEET, L, { [NAME]: 'lk' }, 1)
     await rev(SHEET, L, 1, 'create', { [NAME]: 'lk' }, T0)
     expect((await lockRecord(L, true)).status).toBe(200) // 1→2, marker@2 written
-    await q('DELETE FROM meta_record_version_markers WHERE sheet_id=$1 AND record_id=$2', [SHEET, L]) // neuter the marker
-    await expectAllFourRefuseWithZeroWrites(SHEET) // v2 is now an unexplained hole
+    await expectAllFourRefuseWithZeroWrites(SHEET, async () => {
+      await q('DELETE FROM meta_record_version_markers WHERE sheet_id=$1 AND record_id=$2', [SHEET, L]) // neuter the marker
+    }) // v2 is now an unexplained hole
   })
 
   // ── SYSTEM-SHEET EXCLUSION ───────────────────────────────────────────────────────────────────────────────
@@ -227,7 +276,7 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
     const R = `rec_hc_people_${TS}`
     const f = `${NAME}_${SHEET_PEOPLE}`
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [R, SHEET_PEOPLE, JSON.stringify({ [f]: 'v3' })])
-    await rev(SHEET_PEOPLE, R, 1, 'create', { [f]: 'v1' }, T0)
+    await rev(SHEET_PEOPLE, R, 1, 'create', { [f]: 'v1' }, T0, { anchor: true })
     await rev(SHEET_PEOPLE, R, 3, 'update', { [f]: 'v3' }, T2)
     const pv = await revertPreview(SHEET_PEOPLE)
     expect(pv.status).toBe(200)
@@ -259,27 +308,45 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
     expect(identity).toBeTruthy()
     expect(pv.body?.data?.deleteRecordIds).toContain(D)
 
-    // Connection B holds the sheet's advisory fence open until we release it.
-    let release: () => void = () => {}
-    const held = new Promise<void>((r) => { release = r })
-    const bDone = poolManager.get().transaction(async ({ query }) => {
-      await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [NS, SHEET])
-      await held
-    })
-    const advisory = async (granted: boolean): Promise<number> =>
-      Number(((await q(`SELECT count(*)::int c FROM pg_locks WHERE locktype='advisory' AND classid=$1 AND granted=$2`, [NS, granted])).rows[0] as { c: number }).c)
-    const waitFor = async (pred: () => Promise<boolean>, label: string) => {
-      for (let i = 0; i < 300; i++) { if (await pred()) return; await sleep(15) }
-      throw new Error(`timeout waiting for ${label}`)
-    }
+    // Connection B holds the exact canonical fence used by L8 apply until the constructed phantom lands.
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
     let res: request.Response | undefined
     try {
-      await waitFor(async () => (await advisory(true)) >= 1, 'B holds the advisory lock')
+      await holder.query('BEGIN')
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)])
       // Fire reset-execute: it passes the OUTER precheck (history complete, no phantom yet), enters the
-      // destructive txn, and BLOCKS acquiring the advisory fence B holds. `.then((r) => r)` DISPATCHES the
-      // (lazy) supertest request immediately and returns a real Promise we can race/await.
-      const resetP: Promise<request.Response> = resetExecute(SHEET, identity).then((r) => r)
-      await waitFor(async () => (await advisory(false)) >= 1, 'reset-execute blocked on the fence')
+      // destructive txn, and BLOCKS acquiring the canonical fence B holds.
+      const resetP: Promise<request.Response> = Promise.resolve(resetExecute(SHEET, identity))
+      let sawExactWaiter = false
+      for (let i = 0; i < 100; i++) {
+        const waiters = await holder.query(
+          `SELECT count(*)::int AS c
+             FROM pg_locks waiter
+             JOIN pg_locks owner
+               ON owner.locktype = 'advisory'
+              AND owner.granted = true
+              AND owner.pid = $1
+              AND waiter.locktype = 'advisory'
+              AND waiter.granted = false
+              AND waiter.pid <> owner.pid
+              AND waiter.database IS NOT DISTINCT FROM owner.database
+              AND waiter.classid = owner.classid
+              AND waiter.objid = owner.objid
+              AND waiter.objsubid = owner.objsubid`,
+          [holderPid],
+        )
+        if (Number((waiters.rows[0] as { c: number }).c) > 0) {
+          sawExactWaiter = true
+          break
+        }
+        const settled = await Promise.race([resetP.then(() => true), sleep(0).then(() => false)])
+        if (settled) break
+        await sleep(50)
+      }
+      expect(sawExactWaiter).toBe(true)
       // PROVE the fence is on the destructive path: reset has NOT completed while B holds the lock.
       const pending = await Promise.race([resetP.then(() => 'done'), sleep(150).then(() => 'pending')])
       expect(pending).toBe('pending')
@@ -288,11 +355,11 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
       await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [PH, SHEET, JSON.stringify({ [NAME]: 'phantom' })])
       await rev(SHEET, PH, 1, 'create', { [NAME]: 'ph1' }, T0)
       await rev(SHEET, PH, 3, 'update', { [NAME]: 'phantom' }, T2) // hole at v2
-      release() // reset acquires the fence → runs the in-txn re-check → sees the phantom → refuses
+      await holder.query('COMMIT') // reset acquires the fence → runs the in-txn re-check → sees the phantom → refuses
       res = await resetP
     } finally {
-      release()
-      await bDone.catch(() => {})
+      await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
     }
     expect(res!.status).toBe(409)
     expect(res!.body).toEqual(HISTORY_INCOMPLETE_BODY)
