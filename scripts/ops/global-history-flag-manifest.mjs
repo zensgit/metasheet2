@@ -155,10 +155,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      'Interim revert-execute master gate (current-risk mitigation, owner-directed): first-cut generation-aware integrity checks (#4269) improve the older live-vs-latest precheck, but exact committed-event anchoring, the all-writer fence, trust checkpoints, target-generation validation, and Revert outer-transaction atomicity remain required before destructive recovery is enablement-ready. Therefore revert-execute (bulk-overwrites live record field values back to an anchored state across up to MULTITABLE_SHEET_REVERT_MAX_RECORDS records, and resurrects records deleted after that anchor — that resurrect sub-path additionally requires MULTITABLE_ENABLE_PIT_UNDELETE) stays closed by DEFAULT until the complete W0 trust correction lands and passes staging. Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive here too, unlike the config-revert family above which compares case-sensitively), same canManageSheetAccess (D2) floor. danger=high for the same reason as PIT_RESET, not the medium config-revert flags above: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED (read-only; the FE preview UI still needs to render even while the button that would call execute is hidden — capabilities.sheetRevertEnabled controls that visibility, same flag-derived-capability pattern as pitResetEnabled).',
+      'Revert-execute master gate (default OFF): exact-anchor recovery is WIRED (L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing in ONE transaction; authority is exactly one historyBatchId or anchorOperationId — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED, both ids refuse 400 AMBIGUOUS_ANCHOR). Execute is TOKEN-ONLY authority: the verified previewIdentity carries the mode, and a reset-minted token refuses on this surface before any write. At RUNTIME both preview and execute additionally require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; not modeled as a dependsOn rule — the refusal is enforced in-process, values-free). Restores the RESTORABLE projection only (canonical record-restore-diff; derived formula/lookup/rollup values recompute post-commit, never restored history). Exact-anchor undelete/resurrection is fail-closed (409 INBOUND_UNPROVABLE; no executable token is minted for resurrect-bearing plans). Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive), same canManageSheetAccess (D2) floor + conservative full-table-read gate. danger=high: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED by this flag (read-only; capabilities.sheetRevertEnabled controls FE button visibility) but still refuses without the trust pair before minting any token.',
     // Source symbols (line numbers intentionally omitted because this route is edited frequently):
-    // SHEET_REVERT_ENABLED, the /revert-execute REVERT_DISABLED guard, and capabilities.sheetRevertEnabled.
-    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,/revert-execute,capabilities.sheetRevertEnabled',
+    // SHEET_REVERT_ENABLED, the handleExactAnchorExecute REVERT_DISABLED guard, capabilities.sheetRevertEnabled.
+    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,handleExactAnchorExecute,capabilities.sheetRevertEnabled; packages/core-backend/src/multitable/exact-anchor-recovery-route.ts#checkExactAnchorRecoveryTrust',
   },
   {
     key: 'MULTITABLE_ENABLE_PIT_RESET',
@@ -169,13 +169,11 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED'],
     danger: 'high',
     purpose:
-      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 Reset-to-T (destructive whole-sheet PIT restore). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call PIT_RESET_RETENTION_BLOCKED() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
-    // source: packages/core-backend/src/routes/univer-meta.ts:10275 (PIT_RESET_ENABLED),
-    //         :10276 (PIT_RESET_RETENTION_BLOCKED — compares MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'),
-    //         :10287,:10328 (both preview and execute call the blocked-check)
-    // NOTE: the task brief cited univer-meta.ts:10264 for this; the verified line in this checkout is 10276
-    // (small file drift since the brief was written) — same function, same rule, confirmed by symbol name.
-    source: 'packages/core-backend/src/routes/univer-meta.ts:10275-10276,10287,10328',
+      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 / W0 L8 Reset-to-T (destructive whole-sheet EXACT-ANCHOR restore: historyBatchId/anchorOperationId only — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED). Execute is TOKEN-ONLY authority with the typed confirm:\'reset\' second step; a revert-minted token refuses on this surface before any write. At RUNTIME both preview and execute also require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; enforced in-process, not a dependsOn rule). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call PIT_RESET_RETENTION_BLOCKED() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
+    // Anchored by SYMBOL NAME (drift-proof): PIT_RESET_ENABLED + PIT_RESET_RETENTION_BLOCKED (compares
+    // MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'); both handleExactAnchorPreview('reset') and
+    // handleExactAnchorExecute('reset') call the blocked-check.
+    source: 'packages/core-backend/src/routes/univer-meta.ts#PIT_RESET_ENABLED,PIT_RESET_RETENTION_BLOCKED,handleExactAnchorPreview,handleExactAnchorExecute',
     rules: [
       {
         kind: 'conflicts',
@@ -194,10 +192,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. Requires canDeleteRecord (never canEditRecord) at execute plus a typed confirm:\'undelete\'. Inbound links are NOT rebuilt by this flag alone (design-lock L4 A) — see MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for that layer. The undelete face rides INSIDE revert-execute, whose SHEET_REVERT master gate (#4261) is checked FIRST — so undelete requires BOTH gates.',
-    // Anchored by SYMBOL NAME (drift-proof, no line numbers): PIT_UNDELETE_ENABLED helper + the undelete
-    // sub-gate inside revert-execute; the SHEET_REVERT master gate precedes it at the top of revert-execute.
-    source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_UNDELETE_ENABLED helper + the undelete sub-gate inside revert-execute; the SHEET_REVERT master gate precedes it at the top of revert-execute)',
+      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. On the exact-anchor surfaces (W0 L8) resurrection is currently FAIL-CLOSED regardless of this flag: at-anchor inbound link state cannot be proven, so the L8 apply whole-refuses resurrect-bearing plans (409 INBOUND_UNPROVABLE) and a resurrect-bearing preview never mints an executable token — the preview\'s undeleteBlockedReason merely distinguishes flag-off (UNDELETE_DISABLED) from flag-on-but-authority-missing (INBOUND_UNPROVABLE). Legacy terminal-vintage inbound replay remains under MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for non-exact-anchor surfaces (record-level restore) only. The undelete face still conceptually rides INSIDE revert-execute, whose SHEET_REVERT master gate is checked FIRST — so undelete requires BOTH gates (and, today, an inbound authority that does not yet exist).',
+    // Anchored by SYMBOL NAME (drift-proof, no line numbers): PIT_UNDELETE_ENABLED helper + the
+    // undeleteBlockedReason disclosure inside handleExactAnchorPreview.
+    source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_UNDELETE_ENABLED helper + the undeleteBlockedReason disclosure in handleExactAnchorPreview; the SHEET_REVERT master gate lives in handleExactAnchorExecute)',
     rules: [
       {
         kind: 'requires',
@@ -380,12 +378,11 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     // P3-2 FLAG-ON PRECONDITION (design lock §3/§9; L5). This flag — and later Revert/Reset enablement — MUST
     // NOT be relied upon for a sheet unless BOTH: (a) an ACTIVE trust checkpoint exists for the sheet, AND
     // (b) reconstruction causality is satisfied. The MECHANISM for (b) landed with Lane L6-b (the causal
-    // reconstructRecordsAtSeq, seq-anchored), but RECONSTRUCTION_CAUSALITY_LANDED is DELIBERATELY HELD false
-    // (owner ruling 2026-07-17): the seam flips only in the PR that wires legacy Revert/Reset onto the L8
-    // exact-anchor apply. Until then strict-on refuses EVERY sheet — checkpoint-bearing included
-    // (`reconstruction_non_causal`) — the last code-level fail-closed backstop is RETAINED. Gating the strict
-    // flag ON remains the operator's default-OFF decision ("migration/backfill presence alone never enables
-    // recovery"). WIRED
+    // reconstructRecordsAtSeq, seq-anchored), and RECONSTRUCTION_CAUSALITY_LANDED flips true in W2's SAME
+    // reviewable change that wires legacy Revert/Reset onto the L8 exact-anchor apply (owner ruling
+    // 2026-07-17). A checkpoint-bearing sheet can therefore pass this code precondition; gating the strict
+    // flag ON remains the operator's separate default-OFF decision ("migration/backfill presence alone never
+    // enables recovery"). WIRED
     // (L5 P2): enforced by checkStrictEnablementPrecondition, CALLED from precheckSheetHistoryIntegrity's
     // strict branch (the authoritative strict-mode entry the Revert/Reset routes traverse). The refusal is
     // UNCONDITIONAL on !canEnable (owner P2, 2026-07-16 — an earlier scope-seam exemption for no-checkpoint
@@ -393,7 +390,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     // precheckSheetHistoryIntegrityStrict directly. Do not weaken it to pass. (Not modeled as a cross-flag
     // rule: conditions (a)/(b) are runtime STATE, not other flag env values.)
     enablementPrecondition:
-      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED — DELIBERATELY HELD false (owner ruling 2026-07-17): the causal reconstructor mechanism landed with L6-b, but the seam flips only in the PR that wires legacy Revert/Reset onto the L8 exact-anchor apply. Until then strict-on refuses EVERY sheet (checkpoint-bearing included, reason reconstruction_non_causal) — the fail-closed backstop is retained. The flag itself stays the operator decision (default OFF).',
+      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED. W2 flips the seam true in the same reviewable change that wires legacy Revert/Reset onto the L8 exact-anchor apply (owner ruling 2026-07-17). Checkpoint-less sheets still refuse; checkpoint-bearing sheets can pass this code precondition. The flag itself stays the operator decision (default OFF).',
     enablementPreconditionSource:
       'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
     enablementEnforcedVia:

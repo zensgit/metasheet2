@@ -160,7 +160,8 @@ async function syncOneOutboundLinkField(
  *
  * KERNEL-OWNED: security adjudication, restorable projection, link integrity, both-direction reset cleanup,
  * tombstone/trash, anti-replay, trust substrate. Route-owned: presentation masking, size ceilings, realtime,
- * HTTP mapping. NOT wired; flags OFF; `RECONSTRUCTION_CAUSALITY_LANDED` stays false.
+ * HTTP mapping. WIRED by the univer-meta revert/reset routes (W2); env flags stay default-OFF and
+ * `RECONSTRUCTION_CAUSALITY_LANDED` flipped true in that same wiring change.
  */
 
 /** The apply's mode IS the token's mode (P1-1) — one vocabulary, defined with the identity claims. */
@@ -236,6 +237,32 @@ export type EvaluatePlanAuthorization = (
   context: ExactAnchorPlanAuthContext,
 ) => Promise<boolean>
 
+/**
+ * One APPLIED mutation fact, emitted through {@link ExactAnchorMutationTxnHook} INSIDE the destructive
+ * transaction, immediately after that mutation's own writes (row + links + revision) succeeded. The
+ * `patch` is the true restorable delta for EVENT-PAYLOAD use only (durable enqueue / post-commit
+ * automation emit) — route adapters must never serialize it into HTTP results (values-free contract).
+ */
+export type ExactAnchorAppliedMutation =
+  | {
+      kind: 'revert'
+      recordId: string
+      /** post-write version (CAS-returned, revision-emitted). */
+      version: number
+      changedFieldIds: string[]
+      patch: Record<string, unknown>
+      revisionId: string
+    }
+  | { kind: 'delete'; recordId: string; revisionId: string }
+
+/**
+ * OPTIONAL same-transaction seam for durable event enqueue (P1#2d family): the route adapter builds one
+ * stable event payload per mutation and enqueues it through `enqueueRecordEventIfDurable` on the SAME
+ * `query`, so the enqueue commits or rolls back atomically with the source writes. A hook throw
+ * propagates and forces the FULL rollback (atomicity is bidirectional — no half-enqueued recovery).
+ */
+export type ExactAnchorMutationTxnHook = (query: QueryFn, mutation: ExactAnchorAppliedMutation) => Promise<void>
+
 /** Typed control-flow error: thrown inside the txn to force a FULL rollback, mapped to a refusal outside. */
 class ApplyRefusalError extends Error {
   constructor(readonly reason: ExactAnchorApplyRefusal) {
@@ -279,6 +306,11 @@ export interface ExactAnchorApplyInput {
    * Omission is structurally impossible (typed required field). Full-read alone is insufficient.
    */
   evaluatePlanAuthorization: EvaluatePlanAuthorization
+  /**
+   * OPTIONAL same-transaction mutation seam (see {@link ExactAnchorMutationTxnHook}). Invoked once per
+   * applied revert/delete AFTER that mutation's writes, BEFORE sealOperation. A throw ⇒ full rollback.
+   */
+  onMutationApplied?: ExactAnchorMutationTxnHook
 }
 
 /**
@@ -754,6 +786,10 @@ export async function applyExactAnchorRecovery(
             [p.recordId, input.sheetId, p.live.version],
           )
           if (!del.rows[0]) throw new ApplyRefusalError('preview-drift')
+          // Same-txn mutation seam (durable event enqueue) — atomic with THIS delete's writes.
+          if (input.onMutationApplied) {
+            await input.onMutationApplied(query, { kind: 'delete', recordId: p.recordId, revisionId: p.revisionId })
+          }
           deletes++
         }
       }
@@ -783,10 +819,11 @@ export async function applyExactAnchorRecovery(
           await syncOneOutboundLinkField(query, rw.recordId, lu.fieldId, lu.targetIds)
         }
         // revision-emitted: L8 revert — true restorable delta only (never Object.keys(full target)).
-        await recordRecordRevision(query, {
+        const newVersion = requireLiveVersion(row.version)
+        const revisionId = await recordRecordRevision(query, {
           sheetId: input.sheetId,
           recordId: rw.recordId,
-          version: requireLiveVersion(row.version),
+          version: newVersion,
           action: 'update',
           source: 'restore',
           actorId: input.actorId,
@@ -795,6 +832,17 @@ export async function applyExactAnchorRecovery(
           snapshot: rw.projectedData,
           ledger: op,
         })
+        // Same-txn mutation seam (durable event enqueue) — atomic with THIS revert's writes.
+        if (input.onMutationApplied) {
+          await input.onMutationApplied(query, {
+            kind: 'revert',
+            recordId: rw.recordId,
+            version: newVersion,
+            changedFieldIds: rw.changedFieldIds,
+            patch: rw.patch,
+            revisionId,
+          })
+        }
         revertsApplied++
       }
 

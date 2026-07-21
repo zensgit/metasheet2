@@ -14,7 +14,8 @@
  *   LINK-INTEGRITY    missing target, wrong sheet, alias ambiguity, same-op delete target, hierarchy cycle.
  *   RESET two-phase   cross-linked delete candidates both get inbound tombstones.
  *
- * The module is NOT wired to any route. Flags toggled only inside this test process (default OFF real).
+ * W2 wires the module to the legacy revert/reset routes; production flags remain default OFF. This suite
+ * still exercises the kernel directly and toggles flags only inside the test process.
  * P2-C hygiene: seqs reserved via nextval() only (never setval on the shared chain sequence); own-row
  * cleanup. Two-point wiring: plugin-tests.yml real-DB run list + vitest glob; fail-not-skip sentinel.
  */

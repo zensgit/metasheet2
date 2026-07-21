@@ -34,7 +34,8 @@
  * the HTTP/execute wiring's obligations (L8): the route must (a) run this UNDER the canonical fence,
  * (b) apply the actor's field mask + denied-record filter to what it returns/executes (the T-path's PIT-3
  * discipline), and (c) enforce SHEET_REVERT_MAX_RECORDS-class ceilings. Consuming this module without those
- * layers is NOT a production path — it is not wired to any route in this lane (default-off by construction).
+ * layers is NOT a production path. The W2 integration now supplies them from the four legacy
+ * revert/reset routes; destructive execution remains default-OFF behind its route flags.
  * After retention has pruned raw revisions, production callers must also resolve the trusted checkpoint and
  * compose its baseline overlay before calling `classifyExactAnchorRecoveryPlan`. This module intentionally
  * exposes NO multi-query builder: assembling fields, live rows, and revisions from separate autocommit reads

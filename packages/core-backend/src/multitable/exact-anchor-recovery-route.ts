@@ -1,11 +1,11 @@
 /**
- * W2-A DRAFT — pure/near-pure request/response helpers for eventual exact-anchor recovery route
- * wiring onto L6 `resolveExactAnchor` + L7 plan classification + L8 `applyExactAnchorRecovery`.
+ * W2 — pure/near-pure request/response helpers for the exact-anchor recovery route wiring onto
+ * L6 `resolveExactAnchor` + L7 plan classification + L8 `applyExactAnchorRecovery`.
  *
- * DRAFT ONLY: this module is a route-helper foundation, not a production route. It does NOT mount
- * HTTP handlers, does NOT flip runtime flags, does NOT claim enablement, and is not wired into
- * `univer-meta` (or any live surface) in this slice. A later wiring PR owns flag/confirm gates,
- * canManage + presentation masking, size/ceiling policy at the HTTP edge, and enablement evidence.
+ * WIRED: `univer-meta`'s four recovery surfaces (revert/reset × preview/execute) consume these
+ * helpers. The route layer owns flag/confirm gates, canManage + presentation masking, and the
+ * primary size-ceiling call at the HTTP edge; env flags remain default-OFF (wiring is not
+ * enablement).
  *
  * Destructive authority remains exclusively `resolveExactAnchor` + `applyExactAnchorRecovery`. Free
  * wall-clock `asOf` is never a destructive authority (`exact-anchor-required`, no existence oracle).
@@ -33,6 +33,7 @@ import {
   applyExactAnchorRecovery,
   type ExactAnchorApplyRefusal,
   type ExactAnchorApplyResult,
+  type ExactAnchorMutationTxnHook,
   type EvaluatePlanAuthorization,
 } from './exact-anchor-recovery-execute'
 import {
@@ -437,6 +438,8 @@ export async function executeExactAnchorRecoveryApply(
     actorId: string
     evaluateFullReadAccess: EvaluateRecoveryFullReadAccess
     evaluatePlanAuthorization: EvaluatePlanAuthorization
+    /** optional same-transaction mutation seam (durable event enqueue) — see the L8 module. */
+    onMutationApplied?: ExactAnchorMutationTxnHook
   },
 ): Promise<ExactAnchorApplyResult> {
   return applyExactAnchorRecovery(transaction, input)

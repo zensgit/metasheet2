@@ -421,6 +421,10 @@ export default defineConfig({
       // no-DB default lane so it cannot skip-green; the shared exact-anchor CI wiring contract pins this
       // entry and its whole-file multitable real-DB invocation.
       'tests/integration/multitable-exact-anchor-apply-realdb.test.ts',
+      // W2 Express route wiring goldens: all four legacy revert/reset routes on L6/L7/L8,
+      // including auth races and post-commit side effects. Real Postgres only; the shared
+      // exact-anchor CI wiring contract pins both this exclusion and the whole-file CI entry.
+      'tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
