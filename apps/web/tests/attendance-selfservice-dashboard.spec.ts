@@ -714,6 +714,159 @@ describe('Attendance self-service dashboard', () => {
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
   })
 
+  // ---- Employee-overview task-first design-lock (RATIFIED 2026-07-21) ----
+  // docs/development/attendance-employee-overview-task-first-design-lock-20260716.md
+  // AttendanceEmployeeWorkspace.vue mounted coverage: Today/attention/tools
+  // band order (§4, §9.2), OD-O1 first-match precedence surfaced through the
+  // mount, OD-O2 collapsed-by-default history disclosure + expand without
+  // reset, OD-O3 requests/quick-actions-before-balance/rules ordering, and
+  // the statusMessage visibility guard (§5: "not part of the disclosure").
+
+  function domOrderIndex(container: HTMLElement, selector: string): number {
+    const el = container.querySelector(selector)
+    expect(el, `expected an element for ${selector}`).toBeTruthy()
+    return Array.from(container.querySelectorAll('*')).indexOf(el as Element)
+  }
+
+  it('W2/4355 DOM order: Today -> Needs-attention -> tools bands, and exactly one primary attention action', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const heroIndex = domOrderIndex(container!, '[data-testid="attendance-hero-punch"]')
+    const todayStatusIndex = domOrderIndex(container!, '[data-selfservice-card="status"]')
+    const attentionIndex = domOrderIndex(container!, '[data-attendance-overview-attention]')
+    const requestsIndex = domOrderIndex(container!, '[data-selfservice-card="requests"]')
+    const actionsIndex = domOrderIndex(container!, '[data-selfservice-card="actions"]')
+    const balanceIndex = domOrderIndex(container!, '[data-selfservice-card="annual-balance"]')
+    const rulesIndex = domOrderIndex(container!, '[data-selfservice-card="rules"]')
+    const filtersIndex = domOrderIndex(container!, '[data-attendance-history-filters]')
+    const summaryIndex = domOrderIndex(container!, '#attendance-overview-requests')
+    const guideIndex = domOrderIndex(container!, '[data-selfservice-card="guide"]')
+
+    expect(heroIndex).toBeLessThan(todayStatusIndex)
+    expect(todayStatusIndex).toBeLessThan(attentionIndex)
+    expect(attentionIndex).toBeLessThan(requestsIndex)
+    // OD-O3: request status + quick actions ahead of annual balance/rules.
+    expect(requestsIndex).toBeLessThan(actionsIndex)
+    expect(actionsIndex).toBeLessThan(balanceIndex)
+    expect(balanceIndex).toBeLessThan(rulesIndex)
+    expect(rulesIndex).toBeLessThan(filtersIndex)
+    // lock §5: the history disclosure sits immediately before historical content.
+    expect(filtersIndex).toBeLessThan(summaryIndex)
+    // lock §4.3 item 6: status guide is the last, lowest-frequency surface.
+    expect(summaryIndex).toBeLessThan(guideIndex)
+
+    // §9.2: exactly one primary recommended action across the whole page.
+    expect(container!.querySelectorAll('[data-attendance-overview-attention-action]')).toHaveLength(1)
+    expect(container!.querySelector('[data-attendance-overview-attention]')?.getAttribute('data-attendance-overview-attention-key')).toBe('anomaly')
+  })
+
+  it('W2/4355 OD-O1: an actionable punch failure outranks anomaly/pending in the attention band, with no second retry control', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch')) {
+        return jsonResponse(400, { ok: false, error: { code: 'PUNCH_TOO_SOON', message: 'PUNCH_TOO_SOON' } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check Out').click()
+    await flushUi(4)
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('punch_failure')
+    expect(attention?.textContent).not.toContain('Resolve anomaly reminders')
+    // The status banner (Today band) carries the one real retry for this
+    // state; the attention band must not render a second actionable control.
+    expect(container!.querySelectorAll('[data-attendance-overview-attention-action]')).toHaveLength(0)
+    expect(container!.textContent).toContain('Retry refresh')
+  })
+
+  it('W2/4355 OD-O2: history filters start collapsed, expand without resetting values or firing new requests', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const details = container!.querySelector('[data-attendance-history-filters]') as HTMLDetailsElement
+    expect(details).toBeTruthy()
+    expect(details.open).toBe(false)
+
+    const orgInput = container!.querySelector<HTMLInputElement>('input[name="orgId"]')
+    expect(orgInput).toBeTruthy()
+    orgInput!.value = 'collapsed-entry-org'
+    orgInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const callsBeforeExpand = vi.mocked(apiFetch).mock.calls.length
+    const summary = details.querySelector('summary') as HTMLElement
+    summary.click()
+    await flushUi()
+
+    expect(details.open).toBe(true)
+    expect(orgInput!.value).toBe('collapsed-entry-org')
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(callsBeforeExpand)
+
+    summary.click()
+    await flushUi()
+    expect(details.open).toBe(false)
+    expect(orgInput!.value).toBe('collapsed-entry-org')
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(callsBeforeExpand)
+  })
+
+  it('W2/4355 statusMessage visibility guard: stays outside the disclosure and visible while filters are collapsed', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch')) {
+        return jsonResponse(400, { ok: false, error: { code: 'PUNCH_TOO_SOON', message: 'PUNCH_TOO_SOON' } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const details = container!.querySelector('[data-attendance-history-filters]') as HTMLDetailsElement
+    expect(details.open).toBe(false)
+
+    findButton(container!, 'Check Out').click()
+    await flushUi(4)
+
+    expect(container!.textContent).toContain('Punch interval is too short. Try again shortly.')
+    const statusBlock = container!.querySelector('.attendance__status-block')
+    expect(statusBlock).toBeTruthy()
+    expect(details.contains(statusBlock)).toBe(false)
+    expect(details.open).toBe(false)
+  })
+
+  it('W2/4355 compatibility: the five reused state signals still surface through their preserved anchors', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // activeWorkbenchRecord — Today status card, unchanged anchor.
+    expect(container!.querySelector('[data-selfservice-card="status"]')?.textContent).toContain('Late + Early')
+    // heroTodayTimeline — unchanged data-testid.
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeTruthy()
+    // selfServiceRequestFollowup — unchanged anchor, still request-card-owned.
+    expect(container!.querySelector('[data-selfservice-request-followup]')?.textContent).toContain('Pending follow-up')
+    // selfServiceFocusItems / selfServicePrimaryAction — deliberately
+    // consolidated (lock §4.2) into the single attention-band anchor; the
+    // underlying facts (anomaly count) still surface, just once.
+    expect(container!.querySelector('[data-attendance-overview-attention]')?.textContent).toContain('Resolve anomaly reminders')
+    expect(container!.querySelector('[data-selfservice-focus-list]')).toBeNull()
+    expect(container!.querySelector('[data-selfservice-primary-action]')).toBeNull()
+  })
+
   it('updates self-service rules weekday labels when the locale changes', async () => {
     useLocale().setLocale('en')
     app = createApp(AttendanceView, { mode: 'overview' })
