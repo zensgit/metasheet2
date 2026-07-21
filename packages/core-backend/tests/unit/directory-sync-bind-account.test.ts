@@ -231,7 +231,16 @@ describe('bindDirectoryAccount', () => {
   })
 
   it('allows union-only pre-binding when DingTalk grant is disabled', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       .mockResolvedValueOnce({
@@ -434,7 +443,16 @@ describe('bindDirectoryAccount', () => {
   })
 
   it('prefers an exact local user id over cross-field identifier ambiguity', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       .mockResolvedValueOnce({
@@ -522,7 +540,16 @@ describe('bindDirectoryAccount', () => {
   })
 
   it('creates a local user and binds it to a directory account in one server-side admission flow', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       .mockResolvedValueOnce({
@@ -624,7 +651,16 @@ describe('bindDirectoryAccount', () => {
   })
 
   it('admits a no-email local user with username/mobile and skips invite issuance', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       .mockResolvedValueOnce({
@@ -709,7 +745,16 @@ describe('bindDirectoryAccount', () => {
   })
 
   it('admits a no-email union-only DingTalk account when grant is disabled', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       .mockResolvedValueOnce({
@@ -1000,7 +1045,16 @@ describe('bindDirectoryAccount', () => {
   // the first bad item, so the caller never learned which items had already COMMITTED —
   // and the route, auditing only after the whole batch returned, dropped their audit trail.
   it('isolates a failing item so already-committed items are still returned (batch unbind)', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       // account-1 loads, unbinds, and reloads its summary
@@ -1065,7 +1119,16 @@ describe('bindDirectoryAccount', () => {
   })
 
   it('batch-admits no-email directory accounts with generated usernames and grant disabled by default', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       // batch service preloads account-1 to derive name/username
@@ -1250,7 +1313,16 @@ describe('bindDirectoryAccount', () => {
   // loop would abort the whole batch on the first bad item, so a valid bind earlier in
   // the batch would never be reported (or even attempted, once the batch is reordered).
   it('isolates a failing item so already-committed items are still returned (batch bind)', async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+    // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing user_orgs.
+    // Tests that never reach admission (bind/unbind) never hit this branch, so this is a
+    // superset of the previous always-empty-rows default, not a behavior change for them.
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
       // account-1: loads with no previous link, resolves the local user, binds, and reloads its summary
