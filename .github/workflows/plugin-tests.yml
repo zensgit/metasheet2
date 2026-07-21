@@ -319,6 +319,23 @@ jobs:
             tests/unit/filesAcl.test.ts \
             --reporter=dot
 
+      - name: Run B3-07 approval-attachment unit canaries
+        # The approval-attachment pipeline's no-DB units (route contracts, storage containment + the
+        # shared-substrate object-store adapter, boot/O3 storage resolution, validation allowlist, GC
+        # drain, reconciler) ran in NO workflow before this step — vitest's default discovery is never
+        # invoked for tests/unit anywhere in CI, so these were green-by-never-running. Wired as WHOLE
+        # FILE runs (a name filter matching zero tests exits green and hides regressions).
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/approval-attachment-routes.test.ts \
+            tests/unit/approval-attachment-storage.test.ts \
+            tests/unit/approval-attachment-s3.test.ts \
+            tests/unit/approval-attachment-runtime.test.ts \
+            tests/unit/approval-attachment-validation.test.ts \
+            tests/unit/approval-attachment-gc-drain.test.ts \
+            tests/unit/approval-attachment-reconciler.test.ts \
+            --reporter=dot
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
@@ -633,6 +650,7 @@ jobs:
             tests/integration/multitable-fwb-activation-realdb.test.ts \
             tests/integration/approval-attachment-gc-realdb.test.ts \
             tests/integration/approval-attachment-bind-reconcile-realdb.test.ts \
+            tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \

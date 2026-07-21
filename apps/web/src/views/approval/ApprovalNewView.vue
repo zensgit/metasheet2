@@ -489,7 +489,13 @@ import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
 import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
-import { preValidateAttachments, uploadApprovalAttachment } from '../../approvals/attachmentUpload'
+import {
+  deleteApprovalAttachment,
+  fetchApprovalAttachmentRefs,
+  preValidateAttachments,
+  uploadApprovalAttachmentsAtomic,
+} from '../../approvals/attachmentUpload'
+import { collectAttachmentRefIds, dropStaleAttachmentRefs } from '../../approvals/attachmentRefs'
 import { useFeatureFlags } from '../../stores/featureFlags'
 
 const route = useRoute()
@@ -535,10 +541,14 @@ async function onAttachmentPick(field: FormField, event: Event): Promise<void> {
   }
   attachmentUploading.value = true
   try {
-    for (const file of picked) {
-      const uploaded = await uploadApprovalAttachment(file, templateId, field.id)
-      const list = uploadedAttachments[field.id] ?? (uploadedAttachments[field.id] = [])
-      list.push({ id: uploaded.id, name: file.name })
+    // Atomic multi-file selection: if a later authoritative server upload fails, successful
+    // uploads from THIS pick are compensated (DELETE) so the draft gains zero live/bindable refs
+    // from a refused selection. DELETE soft-deletes + enqueues a durable purge intent; physical
+    // blob deletion is eventual (GC worker). Files already staged from a prior pick stay untouched.
+    const uploaded = await uploadApprovalAttachmentsAtomic(picked, templateId, field.id)
+    const list = uploadedAttachments[field.id] ?? (uploadedAttachments[field.id] = [])
+    for (let i = 0; i < uploaded.length; i += 1) {
+      list.push({ id: uploaded[i].id, name: picked[i].name })
     }
     syncAttachmentFormValue(field.id)
   } catch (error) {
@@ -549,9 +559,26 @@ async function onAttachmentPick(field: FormField, event: Event): Promise<void> {
   }
 }
 
-function removeAttachment(fieldId: string, attachmentId: string): void {
+/**
+ * §4.3 removal. The server-side DELETE is the load-bearing half: it soft-deletes the staged row and
+ * enqueues the durable blob-purge intent, so a removed file's blob is actually reclaimed instead of
+ * lingering until the 7-day unbound TTL. Dropping the id from `formData` alone would leave the blob
+ * (and its row) live and orphaned — a client-only removal is not a removal.
+ *
+ * Ordering: the server call comes FIRST and the local drop happens only after it resolves. On failure
+ * the id STAYS in the list — a UI that showed the file as removed while it is still bound-able would
+ * be lying, and the user could not retry. `deleteApprovalAttachment` treats the values-free 404 as
+ * success (see its doc comment), so the only thing that keeps the entry is a genuine failure.
+ */
+async function removeAttachment(fieldId: string, attachmentId: string): Promise<void> {
   const list = uploadedAttachments[fieldId]
   if (!list) return
+  try {
+    await deleteApprovalAttachment(attachmentId)
+  } catch {
+    ElMessage.error('附件移除失败，请重试')
+    return
+  }
   const index = list.findIndex((item) => item.id === attachmentId)
   if (index >= 0) list.splice(index, 1)
   syncAttachmentFormValue(fieldId)
@@ -584,10 +611,60 @@ function offerDraftRestore(): void {
   draftRestoreVisible.value = true
 }
 
-function applyDraftRestore(): void {
-  if (pendingDraft.value) Object.assign(formData, pendingDraft.value)
+/**
+ * G13 / O2 — **stale attachment-reference detection on draft restore.**
+ *
+ * With the flag ON a draft persists its staged attachment ids (below), and those ids point at rows the
+ * 7-day unbound-retention GC may have swept in the meantime. Restoring them unmodified would carry a
+ * DANGLING id into the create, where the §4.4 bind fails the WHOLE submission closed — with nothing
+ * the user can act on. So the restore asks the server which of the draft's ids are still live (an
+ * uploader-scoped check that discloses nothing) and drops the rest, telling the user their staged
+ * files expired. Never silently kept as a dangling id; never resolved to a deleted blob.
+ *
+ * Fail-closed on a failed check: if the server cannot be reached we drop EVERY attachment ref rather
+ * than restore ids we could not confirm — an unverified ref is exactly the dangling-ref case this
+ * gate exists to prevent, and re-picking a file is cheap next to a rejected submission.
+ */
+async function applyDraftRestore(): Promise<void> {
+  const draft = pendingDraft.value
   pendingDraft.value = null
   draftRestoreVisible.value = false
+  if (!draft) return
+  const schema = template.value?.formSchema ?? null
+  if (!attachmentUploadEnabled.value || !schema) {
+    // Flag OFF: drafts never carried attachment ids in the first place (B2-28 strip) — restore as-is.
+    Object.assign(formData, draft)
+    return
+  }
+  const refIds = collectAttachmentRefIds(schema, draft)
+  if (refIds.length === 0) {
+    Object.assign(formData, draft)
+    return
+  }
+  let staleIds: string[] = refIds
+  let liveByIdName = new Map<string, string>()
+  try {
+    const refs = await fetchApprovalAttachmentRefs(refIds)
+    staleIds = refs.filter((ref) => ref.stale !== false).map((ref) => ref.id)
+    liveByIdName = new Map(
+      refs.filter((ref) => ref.stale === false).map((ref) => [ref.id, ref.fileName ?? ref.id]),
+    )
+  } catch {
+    // fail-closed: unverifiable ⇒ treat every ref as stale (staleIds already = every ref id).
+    liveByIdName = new Map()
+  }
+  const scan = dropStaleAttachmentRefs(schema, draft, staleIds)
+  Object.assign(formData, scan.data)
+  // Rebuild the uploader's display list from what the SERVER confirmed live — never from the draft's
+  // own remembered names, which could disagree with the row the id actually resolves to now.
+  for (const field of schema.fields ?? []) {
+    if (field.type !== 'attachment') continue
+    const kept = Array.isArray(scan.data[field.id]) ? (scan.data[field.id] as string[]) : []
+    uploadedAttachments[field.id] = kept.map((id) => ({ id, name: liveByIdName.get(id) ?? id }))
+  }
+  if (scan.staleIds.length > 0) {
+    ElMessage.warning(`${scan.staleIds.length} 个暂存附件已过期，已从草稿中移除，请重新上传`)
+  }
 }
 
 function discardDraftRestore(): void {
@@ -603,11 +680,14 @@ function scheduleDraftSave(): void {
   draftSaveTimer = setTimeout(() => {
     const key = draftStorageKey()
     if (!key || !template.value) return
-    // Attachment ids are stripped from DRAFTS in BOTH flag states (deliberately stricter than the
-    // submit path flag-ON): a persisted draft can outlive the 7-day unbound-retention GC (#4195 O2),
-    // and the G13 stale-reference detection on restore is not implemented yet — so a restored draft
-    // never carries a possibly-swept id; the user re-picks files (upload is cheap, dangling ids are not).
-    const data = stripAttachmentFields(template.value.formSchema, { ...formData })
+    // Flag ON (#4195 G13): attachment ids ARE persisted in the draft, because the restore path now
+    // detects stale refs (`applyDraftRestore` above) — a draft that outlives the 7-day unbound GC has
+    // its swept ids dropped and surfaced at restore instead of being carried into a submission. Flag
+    // OFF keeps the B2-28 strip byte-identical (there is no uploader, so an attachment key in a draft
+    // could only be junk).
+    const data = attachmentUploadEnabled.value
+      ? { ...formData }
+      : stripAttachmentFields(template.value.formSchema, { ...formData })
     saveFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema), data)
   }, 800)
 }

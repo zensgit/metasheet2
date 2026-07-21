@@ -281,7 +281,7 @@ export class MetaSheetServer {
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
-  private stopApprovalAttachmentWorkers?: () => void
+  private stopApprovalAttachmentWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
   // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
   // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
@@ -2105,9 +2105,10 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
-    shutdownTasks.push(Promise.resolve().then(() => {
+    shutdownTasks.push(Promise.resolve().then(async () => {
       try {
-        this.stopApprovalAttachmentWorkers?.()
+        // stop awaits any in-flight GC/purge/reconcile tick before the pool closes.
+        await this.stopApprovalAttachmentWorkers?.()
         this.stopApprovalAttachmentWorkers = undefined
       } catch (err) {
         this.logger.warn(`Approval attachment workers stop error: ${err instanceof Error ? err.message : String(err)}`)
@@ -2645,9 +2646,9 @@ export class MetaSheetServer {
     // B3-07 approval attachment pipeline (#4195 §7/§9) — flag-gated boot: route mount + GC sweep +
     // purge drain + bucket reconciler. APPROVAL_ATTACHMENTS_ENABLED OFF ⇒ bootApprovalAttachmentRuntime
     // returns null: nothing mounts, nothing ticks, byte-identical startup (D5/G1). Flag ON ⇒ the boot
-    // resolves storage per the ratified O3 decision (production requires an S3-compatible provider —
-    // none exists yet, so prod mounts with uploads/downloads fail-closed 503; dev/test probe a local-FS
-    // root) and a FAILED probe/boot ABORTS startup — the same fail-closed doctrine as
+    // resolves storage per the ratified O3 decision (production requires the built-in S3-compatible
+    // provider's complete bucket+region configuration; otherwise uploads/downloads fail closed 503;
+    // dev/test probe a local-FS root) and a FAILED probe/boot ABORTS startup — the same doctrine as
     // durableBootFailureDisposition (flag ON means a storage-less boot is an outage, not a degrade).
     try {
       const { bootApprovalAttachmentRuntime } = await import('./services/approval-attachment-runtime')

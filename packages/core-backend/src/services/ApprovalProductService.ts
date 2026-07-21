@@ -50,7 +50,11 @@ import {
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
-import { bindAttachmentsOnSubmit, collectAttachmentIdsByField } from './approval-attachment-reconciler'
+import {
+  ApprovalAttachmentBindError,
+  bindAttachmentsOnSubmit,
+  collectAttachmentIdsByField,
+} from './approval-attachment-reconciler'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -354,9 +358,9 @@ const FORM_FIELD_TYPES = new Set([
   'detail',
 ])
 
-// Leaf sub-field types allowed inside a `detail` group's columns (everything except `detail`
-// itself — one nesting level only). `attachment` is permitted at the type/contract layer;
-// the authoring UI (C-3) governs which are offered.
+// Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
+// this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
+// contract for existing templates.
 const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
 )
@@ -803,6 +807,13 @@ function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_V
   const fields = value.fields.map((field, index) => normalizeFormField(field, index, context))
   if (new Set(fields.map((field) => field.id)).size !== fields.length) {
     failValidation(context, 'formSchema field ids must be unique')
+  }
+  if (isApprovalAttachmentsEnabled()) {
+    for (const field of fields) {
+      if (field.type === 'detail' && field.columns?.some((column) => column.type === 'attachment')) {
+        failValidation(context, 'attachment fields are not allowed inside detail groups')
+      }
+    }
   }
   validateFormFieldVisibilityRules(fields, context)
 
@@ -3545,6 +3556,7 @@ export class ApprovalProductService {
     runtimeGraph: RuntimeGraph
     requesterSnapshot: ApprovalRequesterSnapshot
     executor: ApprovalGraphExecutor
+    attachmentsEnabled: boolean
   }> {
     if (!pool) throw new Error('Database not available')
 
@@ -3591,7 +3603,10 @@ export class ApprovalProductService {
         if (!allowedFieldIds.has(key)) delete normalizedFormData[key]
       }
     }
-    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData)
+    const attachmentsEnabled = isApprovalAttachmentsEnabled()
+    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData, {
+      attachmentValueMode: attachmentsEnabled ? 'ids' : 'legacy',
+    })
     if (validationErrors.length > 0) {
       throw new ServiceError(
         'Approval form data is invalid',
@@ -3835,7 +3850,15 @@ export class ApprovalProductService {
         roles: requesterSnapshot.directoryRoles ?? [],
       },
     })
-    return { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor }
+    return {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+    }
   }
 
   /**
@@ -3975,7 +3998,15 @@ export class ApprovalProductService {
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
     // RP-1: prefix extracted verbatim into assembleCreationContext (shared with previewApprovalRoute).
-    const { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
+    const {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+    } =
       await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
@@ -4037,7 +4068,7 @@ export class ApprovalProductService {
       // (fail-closed, G4). Flag OFF ⇒ zero behavior: no attachment values reach normalizedFormData
       // (B2-28 strips them client-side and no upload endpoint exists to mint ids), and this block
       // does not run.
-      if (isApprovalAttachmentsEnabled()) {
+      if (attachmentsEnabled) {
         const attachmentIdsByField = (() => {
           try {
             return collectAttachmentIdsByField(formSchema, normalizedFormData)
@@ -4047,10 +4078,21 @@ export class ApprovalProductService {
         })()
         if (Object.keys(attachmentIdsByField).length > 0) {
           try {
-            await bindAttachmentsOnSubmit(client, actor.userId, instanceId, attachmentIdsByField)
-          } catch {
-            // values-free: the reject reason (which id, whose row) is never echoed to the caller.
-            throw new ServiceError('Approval attachments could not be bound', 400, 'APPROVAL_ATTACHMENT_BIND_FAILED')
+            await bindAttachmentsOnSubmit(
+              client,
+              actor.userId,
+              actor.tenantId?.trim() || 'default',
+              instanceId,
+              attachmentIdsByField,
+            )
+          } catch (error) {
+            // Cap/count/total violations are 413; other unbindable ids stay 400. Values-free body either way.
+            const status = error instanceof ApprovalAttachmentBindError ? error.httpStatus : 400
+            throw new ServiceError(
+              'Approval attachments could not be bound',
+              status,
+              status === 413 ? 'APPROVAL_ATTACHMENT_CAP_EXCEEDED' : 'APPROVAL_ATTACHMENT_BIND_FAILED',
+            )
           }
         }
       }

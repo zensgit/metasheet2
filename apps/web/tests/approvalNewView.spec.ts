@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { formSchemaSignature } from '../src/approvals/formDraft'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import type { ApprovalGraph, FormField, FormSchema } from '../src/types/approval'
 import { mockPendingApproval, mockPublishedTemplate } from './helpers/approval-test-fixtures'
@@ -123,11 +125,34 @@ vi.mock('../src/stores/featureFlags', () => ({
 // B3-07 — the upload client is spied (network-free); preValidateAttachments stays REAL so the
 // client-mirror reject path is the actual predicate, not a stub.
 const uploadApprovalAttachmentSpy = vi.fn()
+// §4.3: removal now goes through the SERVER delete, so the spec drives that transport too — a
+// client-only removal would leave the staged row + blob live, which is the whole point of the call.
+const deleteApprovalAttachmentSpy = vi.fn().mockResolvedValue(undefined)
+const fetchApprovalAttachmentRefsSpy = vi.fn().mockResolvedValue([])
+// Atomic multi-file helper: reimplemented against the spies so a later failure compensates
+// earlier successes (mirrors the real uploadApprovalAttachmentsAtomic contract).
+const uploadApprovalAttachmentsAtomicSpy = vi.fn(async (files: File[], templateId: string, fieldId: string) => {
+  const uploaded: Array<{ id: string; sizeBytes: number }> = []
+  try {
+    for (const file of files) {
+      uploaded.push(await uploadApprovalAttachmentSpy(file, templateId, fieldId))
+    }
+    return uploaded
+  } catch (error) {
+    for (const item of [...uploaded].reverse()) {
+      await deleteApprovalAttachmentSpy(item.id).catch(() => {})
+    }
+    throw error
+  }
+})
 vi.mock('../src/approvals/attachmentUpload', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/attachmentUpload')>('../src/approvals/attachmentUpload')
   return {
     ...actual,
     uploadApprovalAttachment: (...args: unknown[]) => uploadApprovalAttachmentSpy(...args),
+    deleteApprovalAttachment: (...args: unknown[]) => deleteApprovalAttachmentSpy(...args),
+    fetchApprovalAttachmentRefs: (...args: unknown[]) => fetchApprovalAttachmentRefsSpy(...args),
+    uploadApprovalAttachmentsAtomic: (...args: unknown[]) => uploadApprovalAttachmentsAtomicSpy(...(args as [File[], string, string])),
   }
 })
 
@@ -265,7 +290,10 @@ const ElIcon = defineComponent({
 const ElAlert = defineComponent({
   name: 'ElAlert',
   props: { title: String, type: String, showIcon: Boolean, closable: Boolean },
-  render() { return h('div', { 'data-el-alert': this.type }, [this.title, this.$slots.default?.()]) },
+  // NOTE: renders the `title` SLOT as well as the `title` prop — real ElAlert does, and the
+  // draft-restore alert puts its 恢复/丢弃 buttons in `<template #title>`. A stub that dropped the
+  // slot silently hid those affordances from every test that tried to click them.
+  render() { return h('div', { 'data-el-alert': this.type }, [this.$slots.title?.(), this.title, this.$slots.default?.()]) },
 })
 const ElEmpty = defineComponent({
   name: 'ElEmpty',
@@ -479,10 +507,19 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     beforeEach(() => {
       approvalAttachmentsFlag = true
       uploadApprovalAttachmentSpy.mockReset()
+      deleteApprovalAttachmentSpy.mockReset()
+      deleteApprovalAttachmentSpy.mockResolvedValue(undefined)
+      uploadApprovalAttachmentsAtomicSpy.mockClear()
+      fetchApprovalAttachmentRefsSpy.mockReset()
+      fetchApprovalAttachmentRefsSpy.mockResolvedValue([])
+      messageWarningSpy.mockReset()
+      messageErrorSpy.mockReset()
+      window.localStorage.clear() // no draft residue between restore tests
     })
 
     afterEach(() => {
       approvalAttachmentsFlag = false
+      window.localStorage.clear()
     })
 
     function attachmentInput(): HTMLInputElement {
@@ -523,6 +560,37 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
       expect(payload.formData.proof).toEqual(['att_up_1']) // the id ARRAY — never a raw File
     })
 
+    it('multi-file atomic refuse: later server failure compensates the selection — zero live/bindable refs from the failed pick', async () => {
+      uploadApprovalAttachmentSpy
+        .mockResolvedValueOnce({ id: 'att_ok_1', sizeBytes: 4 })
+        .mockRejectedValueOnce(new Error('attachment rejected: infected'))
+      deleteApprovalAttachmentSpy.mockResolvedValue(undefined)
+      await mountView()
+      const input = attachmentInput()
+      Object.defineProperty(input, 'files', {
+        value: [
+          new File(['%PDF-1.4'], 'ok.pdf', { type: 'application/pdf' }),
+          new File(['%PDF-1.4'], 'bad.pdf', { type: 'application/pdf' }),
+        ],
+        configurable: true,
+      })
+      input.dispatchEvent(new Event('change'))
+      await flushUi()
+      await flushUi()
+
+      expect(uploadApprovalAttachmentSpy).toHaveBeenCalledTimes(2)
+      // Compensated via DELETE (row soft-delete + durable purge intent; blob reclamation eventual).
+      expect(deleteApprovalAttachmentSpy).toHaveBeenCalledWith('att_ok_1')
+      expect(container!.textContent).not.toContain('ok.pdf')
+      expect(messageErrorSpy.mock.calls.length + messageWarningSpy.mock.calls.length).toBeGreaterThan(0)
+      submitButton().click()
+      await flushUi()
+      expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      // zero live/bindable refs from the failed pick — not a claim about physical blob deletion
+      expect(payload.formData.proof ?? []).toEqual([])
+    })
+
     it('client mirror rejects a disallowed type BEFORE any upload — values-free code surfaced', async () => {
       await mountView()
       await pickFile(new File(['MZ'], 'x.exe', { type: 'application/x-msdownload' }))
@@ -544,10 +612,98 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
       removeBtn!.click()
       await flushUi()
 
+      // the SERVER delete is what reclaims the staged row + blob; a client-only drop is not a removal
+      expect(deleteApprovalAttachmentSpy).toHaveBeenCalledWith('att_up_2')
+
       submitButton().click()
       await flushUi()
       const payload = submitApprovalSpy.mock.calls[0][0]
       expect(payload.formData.proof ?? []).toEqual([]) // removed before submit
+    })
+
+    // -----------------------------------------------------------------------
+    // G13 / O2 — stale attachment-reference detection on DRAFT RESTORE. A draft can outlive the
+    // 7-day unbound-retention GC, so a restore must check its staged ids and drop the swept ones
+    // rather than carry a dangling id into a create the §4.4 bind would reject whole.
+    // -----------------------------------------------------------------------
+    function seedDraft(proofIds: string[]) {
+      // the signature EXCLUDES attachment fields (formSchemaSignature) — derived from the REAL helper
+      // so this stays correct if the fixture schema changes, instead of a hand-copied literal.
+      const signature = formSchemaSignature(mockActiveTemplate.value.formSchema)
+      window.localStorage.setItem(
+        'approval-form-draft:user_1:tpl_numfields',
+        JSON.stringify({ signature, savedAt: new Date().toISOString(), data: { proof: proofIds } }),
+      )
+    }
+
+    it('restore drops GC-swept attachment refs, warns, and keeps the live ones (positive control)', async () => {
+      seedDraft(['att_live', 'att_swept'])
+      fetchApprovalAttachmentRefsSpy.mockResolvedValue([
+        { id: 'att_live', stale: false, fileName: 'still-here.pdf' },
+        { id: 'att_swept', stale: true },
+      ])
+      await mountView()
+      const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+      expect(applyBtn).toBeTruthy() // the restore offer fired
+      applyBtn!.click()
+      await flushUi()
+
+      // the stale-check was uploader-scoped (NO instanceId — a draft has no instance yet)
+      expect(fetchApprovalAttachmentRefsSpy).toHaveBeenCalledWith(['att_live', 'att_swept'])
+      expect(messageWarningSpy).toHaveBeenCalledWith(expect.stringContaining('过期'))
+      // the live ref is restored (and rendered with the SERVER's filename, not the draft's memory)
+      expect(container!.textContent).toContain('still-here.pdf')
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof).toEqual(['att_live']) // the swept id is GONE, never submitted
+    })
+
+    it('restore FAILS CLOSED: when the stale-check errors, no unverified ref is carried forward', async () => {
+      seedDraft(['att_unverifiable'])
+      fetchApprovalAttachmentRefsSpy.mockRejectedValue(new Error('network down'))
+      await mountView()
+      const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement
+      applyBtn.click()
+      await flushUi()
+
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof ?? []).toEqual([]) // unverified ⇒ dropped, not submitted
+    })
+
+    it('a draft whose refs are ALL live restores them untouched and raises no stale warning', async () => {
+      seedDraft(['att_a', 'att_b'])
+      fetchApprovalAttachmentRefsSpy.mockResolvedValue([
+        { id: 'att_a', stale: false, fileName: 'a.pdf' },
+        { id: 'att_b', stale: false, fileName: 'b.pdf' },
+      ])
+      await mountView()
+      ;(container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement).click()
+      await flushUi()
+
+      expect(messageWarningSpy).not.toHaveBeenCalled()
+      submitButton().click()
+      await flushUi()
+      expect(submitApprovalSpy.mock.calls[0][0].formData.proof).toEqual(['att_a', 'att_b'])
+    })
+
+    it('a FAILED server delete keeps the file staged (never a UI-only removal the server disagrees with)', async () => {
+      uploadApprovalAttachmentSpy.mockResolvedValue({ id: 'att_up_3', sizeBytes: 8 })
+      deleteApprovalAttachmentSpy.mockRejectedValue(new Error('attachment delete failed: 503'))
+      await mountView()
+      await pickFile(new File(['%PDF-1.4'], 'keepme.pdf', { type: 'application/pdf' }))
+      const removeBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('移除'))
+      removeBtn!.click()
+      await flushUi()
+
+      expect(messageErrorSpy).toHaveBeenCalledWith(expect.stringContaining('移除失败'))
+      expect(container!.textContent).toContain('keepme.pdf') // still listed — the user can retry
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof).toEqual(['att_up_3']) // still staged, honestly
     })
   })
 })

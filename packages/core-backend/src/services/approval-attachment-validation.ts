@@ -64,6 +64,33 @@ export type AttachmentValidationResult =
   | { ok: true }
   | { ok: false; rejected: Array<{ fileName: string; code: AttachmentRejectCode }> }
 
+/** Cap / count rejects → HTTP 413 (§5 / G3). */
+const CAP_REJECT_CODES: ReadonlySet<AttachmentRejectCode> = new Set([
+  'file_too_large',
+  'too_many_files',
+  'submission_too_large',
+])
+
+/** Type / signature rejects → HTTP 415 (§5 / G3). */
+const TYPE_REJECT_CODES: ReadonlySet<AttachmentRejectCode> = new Set([
+  'mime_not_allowed',
+  'extension_not_allowed',
+  'extension_mime_mismatch',
+  'content_mime_mismatch',
+])
+
+/**
+ * Map validation reject codes to the lock's HTTP semantics. Cap codes win over type codes when both
+ * appear in one batch (size/count is a 413 regardless of type). Unknown codes fall through to 400.
+ */
+export function httpStatusForAttachmentRejects(
+  rejected: ReadonlyArray<{ code: string }>,
+): 400 | 413 | 415 {
+  if (rejected.some((entry) => CAP_REJECT_CODES.has(entry.code as AttachmentRejectCode))) return 413
+  if (rejected.some((entry) => TYPE_REJECT_CODES.has(entry.code as AttachmentRejectCode))) return 415
+  return 400
+}
+
 function extOf(name: string): string {
   const i = name.lastIndexOf('.')
   return i < 0 ? '' : name.slice(i + 1).toLowerCase()

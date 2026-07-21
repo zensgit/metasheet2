@@ -9,7 +9,11 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { bindAttachmentsOnSubmit, reconcileBucket } from '../../src/services/approval-attachment-reconciler'
+import {
+  bindAttachmentsOnSubmit,
+  reconcileBucket,
+  RECONCILER_ORPHAN_GRACE_MS,
+} from '../../src/services/approval-attachment-reconciler'
 import { sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -26,14 +30,14 @@ async function ensureInstance(id: string) {
   await db().query(`INSERT INTO approval_instances (id, status) VALUES ($1,'pending') ON CONFLICT (id) DO NOTHING`, [id])
 }
 
-async function seed(over: { uploader?: string; status?: string; key?: string; size?: number; ageHours?: number } = {}) {
+async function seed(over: { uploader?: string; status?: string; key?: string; size?: number; ageHours?: number; scanState?: string } = {}) {
   const id = `att6_${RUN}_${ids.length}`
   ids.push(id)
   if (over.status === 'bound') await ensureInstance(BOUND_INSTANCE)
   await db().query(
-    `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, instance_id, created_at)
-     VALUES ($1,'org1',$2,'fldA',$3,'a.pdf','application/pdf',$4,$5,$6, now() - ($7::int * interval '1 hour'))`,
-    [id, over.uploader ?? 'u1', over.key ?? `key_${id}`, over.size ?? 1024, over.status ?? 'unbound', over.status === 'bound' ? BOUND_INSTANCE : null, over.ageHours ?? 0],
+    `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, instance_id, scan_state, created_at)
+     VALUES ($1,'org1',$2,'fldA',$3,'a.pdf','application/pdf',$4,$5,$6,$7, now() - ($8::int * interval '1 hour'))`,
+    [id, over.uploader ?? 'u1', over.key ?? `key_${id}`, over.size ?? 1024, over.status ?? 'unbound', over.status === 'bound' ? BOUND_INSTANCE : null, over.scanState ?? 'unscanned', over.ageHours ?? 0],
   )
   return id
 }
@@ -57,7 +61,7 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const c = await raw.connect()
     try {
       await c.query('BEGIN')
-      await expect(bindAttachmentsOnSubmit(c, 'u1', `apr_${RUN}`, { fldA: [mine, theirs] })).rejects.toThrow(/1\/2.*rejected/)
+      await expect(bindAttachmentsOnSubmit(c, 'u1', 'org1', `apr_${RUN}`, { fldA: [mine, theirs] })).rejects.toThrow(/1\/2.*rejected/)
       await c.query('ROLLBACK')
     } finally {
       c.release()
@@ -69,13 +73,56 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const c2 = await raw.connect()
     try {
       await c2.query('BEGIN')
-      expect(await bindAttachmentsOnSubmit(c2, 'u1', `apr_${RUN}`, { fldA: [mine] })).toEqual({ bound: 1 })
+      expect(await bindAttachmentsOnSubmit(c2, 'u1', 'org1', `apr_${RUN}`, { fldA: [mine] })).toEqual({ bound: 1 })
       await c2.query('COMMIT')
     } finally {
       c2.release()
     }
     const st2 = await db().query('SELECT status, instance_id FROM approval_attachments WHERE id=$1', [mine])
     expect(st2.rows[0]).toMatchObject({ status: 'bound', instance_id: `apr_${RUN}` })
+  })
+
+  test('bind is org-pinned: the same uploader cannot capture a staged row from another tenant', async () => {
+    const id = await seed()
+    const instanceId = `apr_${RUN}_cross_org`
+    await ensureInstance(instanceId)
+    const raw = db().getInternalPool()
+    const client = await raw.connect()
+    try {
+      await client.query('BEGIN')
+      await expect(bindAttachmentsOnSubmit(client, 'u1', 'org2', instanceId, { fldA: [id] }))
+        .rejects.toThrow(/bindable|rejected/)
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+    const row = await db().query('SELECT status, instance_id FROM approval_attachments WHERE id=$1', [id])
+    expect(row.rows[0]).toMatchObject({ status: 'unbound', instance_id: null })
+  })
+
+  test('bind refuses an infected staged row and rolls the whole submission back', async () => {
+    const clean = await seed({ scanState: 'clean' })
+    const infected = await seed({ scanState: 'infected' })
+    const instanceId = `apr_${RUN}_infected`
+    await ensureInstance(instanceId)
+    const raw = db().getInternalPool()
+    const client = await raw.connect()
+    try {
+      await client.query('BEGIN')
+      await expect(bindAttachmentsOnSubmit(client, 'u1', 'org1', instanceId, { fldA: [clean, infected] }))
+        .rejects.toThrow(/1\/2.*rejected/)
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+    const rows = await db().query(
+      'SELECT id, status, instance_id FROM approval_attachments WHERE id = ANY($1) ORDER BY id',
+      [[clean, infected]],
+    )
+    expect(rows.rows).toEqual([
+      { id: clean, status: 'unbound', instance_id: null },
+      { id: infected, status: 'unbound', instance_id: null },
+    ].sort((a, b) => a.id.localeCompare(b.id)))
   })
 
   test('bind re-checks the ratified caps: total-bytes violation throws (defense vs parallel-upload race)', async () => {
@@ -87,7 +134,7 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const c = await raw.connect()
     try {
       await c.query('BEGIN')
-      await expect(bindAttachmentsOnSubmit(c, 'u1', `apr_${RUN}_big`, { fldA: [a, b, c3] })).rejects.toThrow(/total-bytes cap/)
+      await expect(bindAttachmentsOnSubmit(c, 'u1', 'org1', `apr_${RUN}_big`, { fldA: [a, b, c3] })).rejects.toThrow(/total-bytes cap/)
       await c.query('ROLLBACK')
     } finally {
       c.release()
@@ -120,6 +167,30 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     expect(Number(pi.rows[0].c)).toBe(0)
   })
 
+  test('G15 dead-letter shield: an existing terminal intent blocks every reconciler re-entry for that blob', async () => {
+    const key = `key_att6_${RUN}_dead_letter_shield`
+    await db().query(
+      `INSERT INTO approval_attachment_purge_intents
+         (id, storage_key, reason, status, attempts, fence, last_error)
+       VALUES ($1,$2,'row_deleted','dead_letter',9,9,'delete_failed')`,
+      [`pi_att6_${RUN}_dead`, key],
+    )
+
+    const result = await reconcileBucket(db(), async () => [{ key, ageMs: RECONCILER_ORPHAN_GRACE_MS + 1 }])
+    expect(result.orphanBlobsQueued).toBe(0)
+    const intents = await db().query(
+      'SELECT id, status FROM approval_attachment_purge_intents WHERE storage_key=$1',
+      [key],
+    )
+    expect(intents.rows).toEqual([{ id: `pi_att6_${RUN}_dead`, status: 'dead_letter' }])
+
+    await expect(db().query(
+      `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+       VALUES ($1,$2,'reconciler_orphan')`,
+      [`pi_att6_${RUN}_duplicate`, key],
+    )).rejects.toMatchObject({ constraint: 'uq_approval_purge_storage_key' })
+  })
+
   // §12 item 4 / G4 — CONSTRUCTED concurrent double-submit: two create-instance binds RACE on the same
   // unbound id. The row-locked `WHERE status='unbound'` serializes them → EXACTLY ONE binds; the loser
   // sees a bound row (0 rows updated) and its whole submission throws. A sequential rebind-refused check
@@ -136,10 +207,10 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     try {
       await a.query('BEGIN')
       // A binds first: acquires the row lock and sets status='bound' in A's uncommitted txn
-      expect(await bindAttachmentsOnSubmit(a, 'u1', instA, { fldA: [id] })).toEqual({ bound: 1 })
+      expect(await bindAttachmentsOnSubmit(a, 'u1', 'org1', instA, { fldA: [id] })).toEqual({ bound: 1 })
       await b.query('BEGIN')
       // B races on the SAME id — its UPDATE blocks on A's row lock (promise stays pending)
-      const bBind = bindAttachmentsOnSubmit(b, 'u1', instB, { fldA: [id] })
+      const bBind = bindAttachmentsOnSubmit(b, 'u1', 'org1', instB, { fldA: [id] })
       // release A → B unblocks, re-reads the now-committed bound row, matches 0 rows, throws
       await a.query('COMMIT')
       await expect(bBind).rejects.toThrow(/bindable|rejected/)
@@ -164,7 +235,7 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const conn = await raw.connect()
     try {
       await conn.query('BEGIN')
-      await bindAttachmentsOnSubmit(conn, 'u1', winInst, { fldA: [winId] }) // row locked + bound (uncommitted)
+      await bindAttachmentsOnSubmit(conn, 'u1', 'org1', winInst, { fldA: [winId] }) // row locked + bound (uncommitted)
       const swept = await sweepUnboundAttachments(db(), 168) // separate connection → SKIP LOCKED skips the locked row
       void swept
       await conn.query('COMMIT')
@@ -185,7 +256,7 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const conn2 = await raw.connect()
     try {
       await conn2.query('BEGIN')
-      await expect(bindAttachmentsOnSubmit(conn2, 'u1', loseInst, { fldA: [loseId] })).rejects.toThrow(/bindable|rejected/)
+      await expect(bindAttachmentsOnSubmit(conn2, 'u1', 'org1', loseInst, { fldA: [loseId] })).rejects.toThrow(/bindable|rejected/)
       await conn2.query('ROLLBACK')
     } finally {
       conn2.release()

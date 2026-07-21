@@ -24,6 +24,19 @@ export interface BindResult {
 }
 
 /**
+ * Bind-time failure with the lock's HTTP status. Cap/count/total violations are 413; other
+ * unbindable ids (foreign / missing / infected / already bound) stay 400 (fail-closed create).
+ */
+export class ApprovalAttachmentBindError extends Error {
+  readonly httpStatus: 400 | 413
+  constructor(message: string, httpStatus: 400 | 413 = 400) {
+    super(message)
+    this.name = 'ApprovalAttachmentBindError'
+    this.httpStatus = httpStatus
+  }
+}
+
+/**
  * Extract the attachment-id arrays from a submission's normalized form data, keyed by the schema's
  * `attachment`-typed field ids (§4.4: the frozen snapshot value IS the id array). Fail-closed on shape:
  * a present value that is not an array of non-blank strings throws (the whole create must fail — a
@@ -51,26 +64,39 @@ export function collectAttachmentIdsByField(
 export async function bindAttachmentsOnSubmit(
   trx: Queryable,
   submitterId: string,
+  orgId: string,
   instanceId: string,
   attachmentIdsByField: Readonly<Record<string, readonly string[]>>,
 ): Promise<BindResult> {
+  if (!/[!-~]/.test(orgId ?? '')) throw new RangeError('bindAttachmentsOnSubmit: orgId required')
   if (!/[!-~]/.test(instanceId ?? '')) throw new RangeError('bindAttachmentsOnSubmit: instanceId required')
   let bound = 0
   for (const [fieldId, ids] of Object.entries(attachmentIdsByField)) {
     if (ids.length === 0) continue
     if (ids.length > APPROVAL_ATTACHMENT_LIMITS.maxFilesPerField) {
-      throw new RangeError(`field ${fieldId}: ${ids.length} attachments exceeds the ratified per-field cap`)
+      // bind-time per-field count cap → 413 (same semantics as upload-time too_many_files).
+      throw new ApprovalAttachmentBindError(
+        `field ${fieldId}: ${ids.length} attachments exceeds the ratified per-field cap`,
+        413,
+      )
     }
+    // §4.4 / §6: only unbound, non-infected, submitter-owned, org-pinned, field-matched rows bind.
+    // `scan_state <> 'infected'` is load-bearing — infected is never bindable even if still unbound.
     const res = await trx.query(
       `UPDATE approval_attachments
           SET status='bound', instance_id=$1, bound_at=now()
-        WHERE id = ANY($2) AND field_id = $3 AND uploader_id = $4 AND status = 'unbound'`,
-      [instanceId, [...ids], fieldId, submitterId],
+        WHERE id = ANY($2) AND field_id = $3 AND uploader_id = $4 AND org_id = $5
+          AND status = 'unbound'
+          AND scan_state <> 'infected'`,
+      [instanceId, [...ids], fieldId, submitterId, orgId],
     )
     const n = Number(res.rowCount ?? 0)
     if (n !== ids.length) {
-      // some id was missing / someone else's / already bound or deleted → fail the WHOLE submission.
-      throw new RangeError(`field ${fieldId}: only ${n}/${ids.length} attachments bindable — submission rejected`)
+      // some id was missing / someone else's / already bound / deleted / infected → fail the WHOLE submission.
+      throw new ApprovalAttachmentBindError(
+        `field ${fieldId}: only ${n}/${ids.length} attachments bindable — submission rejected`,
+        400,
+      )
     }
     bound += n
   }
@@ -80,7 +106,7 @@ export async function bindAttachmentsOnSubmit(
     [instanceId],
   )
   if (Number(tot.rows[0].t) > APPROVAL_ATTACHMENT_LIMITS.maxSubmissionBytes) {
-    throw new RangeError('submission exceeds the ratified total-bytes cap — rejected')
+    throw new ApprovalAttachmentBindError('submission exceeds the ratified total-bytes cap — rejected', 413)
   }
   return { bound }
 }
@@ -135,7 +161,7 @@ export async function reconcileBucket(
     const res = await db.query(
       `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
        VALUES ('pi_rec_' || md5($1), $1, 'reconciler_orphan')
-       ON CONFLICT (id) DO NOTHING`,
+       ON CONFLICT (storage_key) DO NOTHING`,
       [key],
     )
     result.orphanBlobsQueued += Number(res.rowCount ?? 0)

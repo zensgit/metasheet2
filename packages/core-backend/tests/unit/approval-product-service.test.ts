@@ -1242,6 +1242,20 @@ describe('ApprovalProductService', () => {
       }))).rejects.toThrow(/detail cannot be nested inside a detail group/)
     })
 
+    it('rejects attachment fields inside detail rows (attachment v1 is top-level only)', async () => {
+      const previous = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+      try {
+        await expect(create(wrap({
+          id: 'items', type: 'detail', label: '明细',
+          columns: [{ id: 'proof', type: 'attachment', label: '附件' }],
+        }))).rejects.toThrow(/attachment fields are not allowed inside detail groups/)
+      } finally {
+        if (previous === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        else process.env.APPROVAL_ATTACHMENTS_ENABLED = previous
+      }
+    })
+
     it('rejects an unknown sub-field type', async () => {
       await expect(create(wrap({
         id: 'items', type: 'detail', label: '明细', columns: [{ id: 'x', type: 'bogus', label: 'x' }],

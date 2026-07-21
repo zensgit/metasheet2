@@ -1,7 +1,11 @@
 /** Approval attachments slice ① — validation goldens (#4195: 20/10/50 + PDF/JPEG/PNG/TXT/CSV, reject-by-default). */
 import { describe, expect, test } from 'vitest'
 
-import { APPROVAL_ATTACHMENT_LIMITS, validateApprovalAttachments } from '../../src/services/approval-attachment-validation'
+import {
+  APPROVAL_ATTACHMENT_LIMITS,
+  httpStatusForAttachmentRejects,
+  validateApprovalAttachments,
+} from '../../src/services/approval-attachment-validation'
 
 const F = (over: Partial<{ fileName: string; mimeType: string; sizeBytes: number }> = {}) => ({
   fileName: 'a.pdf',
@@ -79,6 +83,18 @@ describe('approval attachment validation (v1)', () => {
     }
     // no content supplied → the content check is skipped (name/type/size validation unchanged)
     expect(validateApprovalAttachments([F({ fileName: 'c.png', mimeType: 'image/png' })])).toEqual({ ok: true })
+  })
+
+  test('HTTP semantics map: type rejects → 415; cap rejects → 413', () => {
+    expect(httpStatusForAttachmentRejects([{ code: 'mime_not_allowed' }])).toBe(415)
+    expect(httpStatusForAttachmentRejects([{ code: 'extension_mime_mismatch' }])).toBe(415)
+    expect(httpStatusForAttachmentRejects([{ code: 'content_mime_mismatch' }])).toBe(415)
+    expect(httpStatusForAttachmentRejects([{ code: 'file_too_large' }])).toBe(413)
+    expect(httpStatusForAttachmentRejects([{ code: 'too_many_files' }])).toBe(413)
+    expect(httpStatusForAttachmentRejects([{ code: 'submission_too_large' }])).toBe(413)
+    // mixed: cap wins (size still 413 even if type is also wrong)
+    expect(httpStatusForAttachmentRejects([{ code: 'mime_not_allowed' }, { code: 'file_too_large' }])).toBe(413)
+    expect(httpStatusForAttachmentRejects([{ code: 'invalid_size' }])).toBe(400)
   })
 
   test('prototype-pollution guard: an Object.prototype-name MIME must reject as unknown, never throw', () => {

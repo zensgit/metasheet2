@@ -325,7 +325,19 @@ function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): b
   }
 }
 
-function validateFieldType(field: FormField, value: unknown): string | null {
+export interface ApprovalFormValidationOptions {
+  /**
+   * The attachment runtime is default-OFF. Keep the pre-feature string/object contract while it is
+   * disabled; only the enabled production path accepts the staged attachment-id array.
+   */
+  attachmentValueMode?: 'legacy' | 'ids'
+}
+
+function validateFieldType(
+  field: FormField,
+  value: unknown,
+  options: ApprovalFormValidationOptions,
+): string | null {
   if (value === undefined || value === null) {
     return null
   }
@@ -336,6 +348,9 @@ function validateFieldType(field: FormField, value: unknown): string | null {
     case 'user':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
     case 'attachment':
+      if (options.attachmentValueMode !== 'ids') {
+        return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+      }
       // #4195 §4.4/§8: an attachment field's submitted value IS the ordered array of staged
       // approval_attachments.id strings (frozen verbatim into form_snapshot at create; the create
       // txn then binds exactly these ids or fails whole). Anything else is rejected fail-closed —
@@ -462,7 +477,15 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
 // fields; per-row `visibilityRule` decides which cells are required; messages are row-addressed
 // (`items[1].qty is required`). Unknown cells are dropped by pruneHiddenFormData before this
 // runs, matching the top-level prune-then-validate behavior.
-function validateDetailFieldValue(field: FormField, value: unknown): string[] {
+//
+// Attachment top-level-only (flag-ON / attachmentValueMode:'ids'): an attachment-typed leaf inside
+// a detail group is rejected. Flag-OFF / legacy mode keeps detail-leaf attachment values
+// legacy-valid (string/record) for byte compatibility with pre-feature snapshots.
+function validateDetailFieldValue(
+  field: FormField,
+  value: unknown,
+  options: ApprovalFormValidationOptions,
+): string[] {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) return [`${field.id} must be a list`]
   const errors: string[] = []
@@ -473,6 +496,15 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
     errors.push(`${field.id} allows at most ${field.maxRows} row(s)`)
   }
   const columns = field.columns ?? []
+  // Control 2 of "both controls" when attachments are ON: attachment leaves are top-level only.
+  if (options.attachmentValueMode === 'ids') {
+    for (const column of columns) {
+      if (column.type === 'attachment') {
+        errors.push(`${field.id}.${column.id} attachment fields are not allowed inside detail rows`)
+      }
+    }
+    if (errors.length > 0) return errors
+  }
   const subSchema: FormSchema = { fields: columns }
   value.forEach((row, rowIndex) => {
     const prefix = `${field.id}[${rowIndex}]`
@@ -488,7 +520,7 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
         errors.push(`${prefix}.${column.id} is required`)
         continue
       }
-      const typeError = validateFieldType(column, cell)
+      const typeError = validateFieldType(column, cell, options)
       if (typeError) {
         errors.push(`${prefix}.${typeError}`)
         continue
@@ -499,7 +531,11 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
   return errors
 }
 
-export function validateApprovalFormData(formSchema: FormSchema, formData: Record<string, unknown>): string[] {
+export function validateApprovalFormData(
+  formSchema: FormSchema,
+  formData: Record<string, unknown>,
+  options: ApprovalFormValidationOptions = {},
+): string[] {
   const errors: string[] = []
   const visibleFieldIds = getVisibleFormFieldIds(formSchema, formData)
 
@@ -513,10 +549,10 @@ export function validateApprovalFormData(formSchema: FormSchema, formData: Recor
       continue
     }
     if (field.type === 'detail') {
-      errors.push(...validateDetailFieldValue(field, value))
+      errors.push(...validateDetailFieldValue(field, value, options))
       continue
     }
-    const typeError = validateFieldType(field, value)
+    const typeError = validateFieldType(field, value, options)
     if (typeError) {
       errors.push(typeError)
       continue

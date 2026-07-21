@@ -43,7 +43,7 @@ export async function sweepUnboundAttachments(db: Queryable, ttlHours: number = 
      )
      INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
      SELECT 'pi_' || f.id, f.storage_key, 'unbound_ttl' FROM flipped f
-     ON CONFLICT (id) DO NOTHING`,
+     ON CONFLICT (storage_key) DO NOTHING`,
     [ttlHours],
   )
   return { swept: Number(res.rowCount ?? 0) }

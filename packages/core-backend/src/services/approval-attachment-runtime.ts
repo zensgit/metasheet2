@@ -6,14 +6,17 @@
  * no-op while `APPROVAL_ATTACHMENTS_ENABLED` is OFF (`bootApprovalAttachmentRuntime` returns null).
  *
  * Flag ON:
- *   - STORAGE (owner-DECIDED O3): production REQUIRES an S3-compatible object store; none is
- *     implemented yet (explicitly-named follow-up), so in `NODE_ENV=production` the resolution is
- *     `s3-required` — the routes mount with `storageAvailable:false` and upload/download return a
- *     values-free 503 (the ratified prod fail-close; approval blobs never land on the deploy host's
- *     local filesystem). Dev/test resolve a `LocalFsApprovalAttachmentStore` under a DEDICATED root
- *     and PROBE it (put→delete) — a failed probe THROWS, and the caller aborts startup (fail-closed
- *     boot doctrine, mirroring `durableBootFailureDisposition`: flag ON means a storage-less boot is
- *     an outage, not a degrade).
+ *   - STORAGE (owner-DECIDED O3): production REQUIRES the built-in official-SDK S3 adapter,
+ *     selected only by a complete
+ *     `APPROVAL_ATTACHMENT_S3_BUCKET` + `APPROVAL_ATTACHMENT_S3_REGION` configuration; deployments
+ *     cannot satisfy this boundary with a caller-declared local/non-local provider. Without complete
+ *     configuration, `NODE_ENV=production` resolves `s3-required` —
+ *     the routes mount with `storageAvailable:false` and upload/download return a values-free 503 (the
+ *     ratified prod fail-close; approval blobs never land on the deploy host's local filesystem).
+ *     Dev/test resolve a `LocalFsApprovalAttachmentStore` under a DEDICATED root. Every resolved store
+ *     is PROBED (put→delete) — a failed probe THROWS and the caller aborts startup (fail-closed boot
+ *     doctrine, mirroring `durableBootFailureDisposition`: flag ON means a storage-less boot is an
+ *     outage, not a degrade).
  *   - ROUTES: `authenticate` guards the `/api/approval/attachments` prefix; the DI seams are backed
  *     by the REAL predicates (participant visibility, `collectHiddenFieldIds` for the byte-path
  *     redaction gate, `applyTemplateVisibilityFilter` for the §4.1 template-access gate, template
@@ -36,23 +39,44 @@ import { applyTemplateVisibilityFilter } from './ApprovalProductService'
 import { collectActiveNodeKeys, collectHiddenFieldIds, type RedactableRuntimeGraph } from './approval-form-redaction'
 import { drainPurgeIntents, sweepUnboundAttachments, UNBOUND_ATTACHMENT_TTL_HOURS } from './approval-attachment-gc'
 import { reconcileBucket } from './approval-attachment-reconciler'
-import { LocalFsApprovalAttachmentStore, type ApprovalAttachmentStore } from './approval-attachment-storage'
+import {
+  APPROVAL_STORAGE_PREFIX,
+  LocalFsApprovalAttachmentStore,
+  ObjectStoreApprovalAttachmentStore,
+  type ApprovalAttachmentStore,
+} from './approval-attachment-storage'
+import { createApprovalAttachmentS3Provider, type S3CommandSender } from './approval-attachment-s3'
 
 export type ApprovalAttachmentStorageResolution =
   | { kind: 'local-fs'; store: LocalFsApprovalAttachmentStore; rootDir: string }
+  /** production with the built-in official-SDK S3-compatible provider. */
+  | { kind: 'object-store'; store: ObjectStoreApprovalAttachmentStore }
   /** production without an S3-compatible provider — the ratified O3 fail-close (503) posture. */
   | { kind: 's3-required'; store: null }
 
 /**
- * O3 storage decision (§7/§9): production = S3-compatible object store ONLY; the S3 adapter is an
- * explicitly-named follow-up, so today `NODE_ENV=production` always resolves `s3-required`
- * (fail-closed 503 uploads — never a local write on the deploy host, issue #159). Dev/test resolve
- * a local-FS store under `APPROVAL_ATTACHMENT_STORAGE_DIR` (default `<cwd>/storage/approval-attachments`,
- * a DEDICATED root — the reconciler's scope containment rests on this directory holding approval
- * blobs and nothing else).
+ * O3 storage decision (§7/§9): production = S3-compatible object store ONLY.
+ *
+ *   - production + complete approval S3 config ⇒ `object-store`.
+ *   - production + incomplete config ⇒ **`s3-required`**: the routes
+ *     mount with `storageAvailable:false` and upload/download return a values-free 503. This is the
+ *     ratified fail-close; no caller-declared provider can bypass it (issue #159).
+ *   - dev/test ⇒ a local-FS store under `APPROVAL_ATTACHMENT_STORAGE_DIR` (default
+ *     `<cwd>/storage/approval-attachments`), a DEDICATED root — the reconciler's scope containment
+ *     rests on that directory holding approval blobs and nothing else.
  */
-export function resolveApprovalAttachmentStorage(env: NodeJS.ProcessEnv = process.env): ApprovalAttachmentStorageResolution {
+export function resolveApprovalAttachmentStorage(
+  env: NodeJS.ProcessEnv = process.env,
+  s3Sender?: S3CommandSender,
+): ApprovalAttachmentStorageResolution {
   if (String(env.NODE_ENV ?? '').trim() === 'production') {
+    const builtInS3 = createApprovalAttachmentS3Provider(env, s3Sender)
+    if (builtInS3) {
+      return {
+        kind: 'object-store',
+        store: new ObjectStoreApprovalAttachmentStore(builtInS3),
+      }
+    }
     return { kind: 's3-required', store: null }
   }
   const configured = typeof env.APPROVAL_ATTACHMENT_STORAGE_DIR === 'string' ? env.APPROVAL_ATTACHMENT_STORAGE_DIR.trim() : ''
@@ -60,11 +84,37 @@ export function resolveApprovalAttachmentStorage(env: NodeJS.ProcessEnv = proces
   return { kind: 'local-fs', store: new LocalFsApprovalAttachmentStore(rootDir), rootDir }
 }
 
-/** Boot probe: prove the store can round-trip a blob (put→delete). Throws on failure (fail-closed boot). */
+/**
+ * Boot probe: prove the store can put, get exact bytes, list under the approval prefix, then delete.
+ * Throws on failure (fail-closed boot). The probe key MUST live under the approval scope prefix — the
+ * object-store adapter refuses anything outside it, so a probe key outside the partition would make
+ * every object-store boot fail closed for the wrong reason (a scope refusal misread as unreachable).
+ *
+ * VALUES-FREE: any underlying storage error (hosts, buckets, credentials, stack text) is swallowed and
+ * rethrown as a fixed message so production probe/boot logs never echo raw provider errors.
+ */
 export async function probeApprovalAttachmentStore(store: ApprovalAttachmentStore): Promise<void> {
-  const probeKey = `approval/boot-probe-${Date.now()}-${Math.floor(Math.random() * 1e9)}.txt`
-  await store.put(probeKey, Buffer.from('approval-attachment boot probe'))
-  await store.delete(probeKey)
+  const payload = Buffer.from('approval-attachment boot probe')
+  const probeKey = `${APPROVAL_STORAGE_PREFIX}boot-probe-${Date.now()}-${Math.floor(Math.random() * 1e9)}.txt`
+  try {
+    await store.put(probeKey, payload)
+    const got = await store.get(probeKey)
+    if (!Buffer.isBuffer(got) || !got.equals(payload)) {
+      throw new Error('probe get mismatch')
+    }
+    // G15 listing: the probe object must be visible under the approval prefix before we delete it.
+    if (typeof store.list === 'function') {
+      const listed = await store.list()
+      if (!listed.some((entry) => entry.key === probeKey)) {
+        throw new Error('probe list miss')
+      }
+    }
+    await store.delete(probeKey)
+  } catch {
+    // Best-effort cleanup so a failed mid-probe leave-behind does not accumulate.
+    await store.delete(probeKey).catch(() => false)
+    throw new Error('Approval attachment storage probe failed')
+  }
 }
 
 /** DB-rebuilt viewer roles (users.role + user_roles ids/names) — for role-typed assignment/CC matching. */
@@ -87,15 +137,33 @@ async function viewerRoles(db: Queryable, viewerId: string): Promise<string[]> {
 /**
  * Instance-visibility predicate for the auth-proxied download (§4.2 gate 1): initiator, current-or-past
  * assignee (user- or role-typed), past actor, CC recipient (user- or role-typed), or admin — the SAME
- * membership sources the bridge list tabs (`todo`/`mine`/`cc`/`completed`) read. Fail-closed: any
- * lookup error denies (the route maps a throw to the values-free 404 via `authorizeAttachmentDownload`).
+ * membership sources the bridge list tabs (`todo`/`mine`/`cc`/`completed`) read. **Org-pinned**: the
+ * caller's org must match the attachment row's org (passed as `orgId`); a cross-org stale membership
+ * fails closed. Fail-closed: any lookup error denies (the route maps a throw to the values-free 404
+ * via `authorizeAttachmentDownload`).
  */
-export async function isInstanceParticipant(db: Queryable, viewerId: string, instanceId: string): Promise<boolean> {
+export async function isInstanceParticipant(
+  db: Queryable,
+  viewerId: string,
+  instanceId: string,
+  orgId: string,
+): Promise<boolean> {
+  if (!orgId || !/[!-~]/.test(orgId)) return false
   const roles = await viewerRoles(db, viewerId)
   const rolesParam = roles.length > 0 ? roles : ['__approval_attachment_no_role__']
+  // Org pin: require at least one attachment on this instance stamped with the caller's org —
+  // INCLUDING deleted/tombstoned rows. A deleted-only bound attachment must still let an authorized
+  // participant/admin reach the lifecycle 410 (gone), while an outsider/cross-org stays 404. Filtering
+  // `status <> 'deleted'` here would turn a pure-tombstone instance into a false not_participant and
+  // leak a 404 instead of the authorized 410. Cross-org stale relations (viewer still appears on
+  // assignments from another tenant's instance while their principal org differs) still fail closed.
   const result = await db.query(
     `SELECT 1 FROM approval_instances i
       WHERE i.id = $1
+        AND EXISTS (
+          SELECT 1 FROM approval_attachments att
+           WHERE att.instance_id = i.id AND att.org_id = $4
+        )
         AND (
           i.requester_snapshot->>'id' = $2
           OR EXISTS (
@@ -114,7 +182,7 @@ export async function isInstanceParticipant(db: Queryable, viewerId: string, ins
           OR EXISTS (SELECT 1 FROM users u WHERE u.id = $2 AND u.is_active = TRUE AND (u.is_admin = TRUE OR u.role = 'admin'))
         )
       LIMIT 1`,
-    [instanceId, viewerId, rolesParam],
+    [instanceId, viewerId, rolesParam, orgId],
   )
   return result.rows.length > 0
 }
@@ -143,13 +211,18 @@ export async function isFieldHiddenAtActiveNode(db: Queryable, instanceId: strin
   return hidden.has(fieldId)
 }
 
-/** G2 field resolve: is `fieldId` an `attachment`-typed field in the template's ACTIVE form schema? */
+/**
+ * G2 field resolve: is `fieldId` an `attachment`-typed field in the template's ACTIVE *published*
+ * form schema? Draft/latest-only versions are never upload targets — same freeze the create path uses.
+ */
 export async function isAttachmentFieldInTemplate(db: Queryable, templateId: string, fieldId: string): Promise<boolean> {
   const result = await db.query(
     `SELECT v.form_schema
        FROM approval_templates t
-       JOIN approval_template_versions v ON v.id = COALESCE(t.active_version_id, t.latest_version_id)
-      WHERE t.id = $1`,
+       JOIN approval_template_versions v ON v.id = t.active_version_id
+       JOIN approval_published_definitions pd
+         ON pd.template_version_id = v.id AND pd.is_active = TRUE
+      WHERE t.id = $1 AND t.status = 'published'`,
     [templateId],
   )
   const schema = (result.rows[0] as { form_schema?: unknown } | undefined)?.form_schema
@@ -162,18 +235,65 @@ export async function isAttachmentFieldInTemplate(db: Queryable, templateId: str
 }
 
 /**
- * §4.1 template-access gate: the request-derived visibility actor (the SAME derivation the approvals
- * router uses) evaluated through `applyTemplateVisibilityFilter` — the exact predicate the template
- * list/detail/create paths enforce. No actor (unauthenticated shape) or no matching row ⇒ false.
+ * §4.1 template-access gate — EXACTLY like approval creation: the template must be visible to the
+ * requester AND published with an active published definition. No actor, no matching row, draft /
+ * archived / inactive-definition → false (values-free 404 at the route; no existence leakage).
+ *
+ * Uses the unaliased `approval_templates` relation so `applyTemplateVisibilityFilter`'s bare
+ * `visibility_scope` / subquery `id` references stay valid without fragile string rewriting.
  */
 export async function templateVisibleToRequester(db: Queryable, req: Request, templateId: string): Promise<boolean> {
   const actor = resolveApprovalTemplateVisibilityActor(req)
   if (!actor) return false
-  const conditions: string[] = ['id = $1']
+  const conditions: string[] = [
+    'id = $1',
+    `status = 'published'`,
+    'active_version_id IS NOT NULL',
+    `EXISTS (
+       SELECT 1 FROM approval_published_definitions pd
+        WHERE pd.template_id = approval_templates.id
+          AND pd.template_version_id = approval_templates.active_version_id
+          AND pd.is_active = TRUE
+     )`,
+  ]
   const params: unknown[] = [templateId]
   applyTemplateVisibilityFilter(conditions, params, 2, actor)
-  const result = await db.query(`SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`, params)
+  const result = await db.query(
+    `SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`,
+    params,
+  )
   return result.rows.length > 0
+}
+
+function principalPermissionCodes(req: Request): Set<string> | 'admin' | null {
+  const user = req.user
+  if (!user) return null
+  if (user.role === 'admin' || (Array.isArray(user.roles) && user.roles.includes('admin'))) return 'admin'
+  const codes = new Set<string>()
+  if (Array.isArray(user.permissions)) {
+    for (const p of user.permissions) if (typeof p === 'string' && p.trim()) codes.add(p.trim())
+  }
+  const tokenPerms = (user as { perms?: unknown }).perms
+  if (Array.isArray(tokenPerms)) {
+    for (const p of tokenPerms) if (typeof p === 'string' && p.trim()) codes.add(p.trim())
+  }
+  return codes
+}
+
+/** Bound list/download RBAC: approvals:read (or admin / approvals:* / *:* wildcards). Fail-closed. */
+export function principalHasApprovalsRead(req: Request): boolean {
+  const codes = principalPermissionCodes(req)
+  if (codes === null) return false
+  if (codes === 'admin') return true
+  return codes.has('approvals:read') || codes.has('approvals:*') || codes.has('*:*')
+}
+
+/** Draft upload RBAC: approvals:write (or admin / approvals:* / *:* wildcards). Fail-closed. */
+export function principalHasApprovalsWrite(req: Request): boolean {
+  const codes = principalPermissionCodes(req)
+  if (codes === null) return false
+  if (codes === 'admin') return true
+  return codes.has('approvals:write') || codes.has('approvals:*') || codes.has('*:*')
 }
 
 function parsePositiveIntMs(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -191,8 +311,12 @@ export interface ApprovalAttachmentRuntimeLogger {
 export interface ApprovalAttachmentRuntime {
   router: ExpressRouter
   storage: ApprovalAttachmentStorageResolution
-  /** Start the flag-gated GC sweep + purge drain + bucket reconciler timers; returns the stop fn. */
-  startWorkers(): () => void
+  /**
+   * Start the flag-gated GC sweep + purge drain + bucket reconciler timers.
+   * Returns an async stop that clears timers AND awaits any in-flight tick so shutdown does not
+   * race a half-finished sweep/drain against a closing pool.
+   */
+  startWorkers(): () => Promise<void>
 }
 
 export interface ApprovalAttachmentRuntimeOptions {
@@ -201,6 +325,8 @@ export interface ApprovalAttachmentRuntimeOptions {
   env?: NodeJS.ProcessEnv
   /** test seams — production uses the env-derived defaults. */
   intervals?: { gcSweepMs?: number; purgeDrainMs?: number; reconcileMs?: number }
+  /** test seam for the built-in S3 provider; production constructs the official SDK client. */
+  s3Sender?: S3CommandSender
 }
 
 /**
@@ -212,15 +338,21 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
   if (!isApprovalAttachmentsEnabled(env)) return null
   const { db, logger } = opts
 
-  const storage = resolveApprovalAttachmentStorage(env)
+  const storage = resolveApprovalAttachmentStorage(env, opts.s3Sender)
   if (storage.kind === 'local-fs') {
     // Fail-closed boot: flag ON with an unusable store is an outage, not a degrade — throw so the
     // caller aborts startup (the durableBootFailureDisposition doctrine; nothing was started yet).
+    // Values-free: never log the root path or raw probe error (probe already wraps provider errors).
     await probeApprovalAttachmentStore(storage.store)
-    logger.info(`Approval attachment storage: local-fs at ${storage.rootDir} (dev/test only — O3 prod requires S3)`)
+    logger.info('Approval attachment storage: local-fs (dev/test only — O3 prod requires S3; probe ok)')
+  } else if (storage.kind === 'object-store') {
+    // Same fail-closed boot probe as local-fs: an S3-compatible provider that cannot round-trip a blob
+    // is an outage. Values-free log — never the bucket/endpoint/credentials or raw storage error text.
+    await probeApprovalAttachmentStore(storage.store)
+    logger.info('Approval attachment storage: built-in S3 object-store provider (probe ok)')
   } else {
     logger.warn(
-      'Approval attachment storage: NO S3-compatible provider configured in production — uploads/downloads fail closed (503) per the ratified O3 decision; the S3 adapter is the named follow-up',
+      'Approval attachment storage: incomplete S3 configuration in production — uploads/downloads fail closed (503) per the ratified O3 decision',
     )
   }
 
@@ -243,7 +375,7 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     store: storage.store ?? unavailableStore,
     storageAvailable: storage.store != null,
     authChecks: {
-      isInstanceParticipant: (viewerId, instanceId) => isInstanceParticipant(db, viewerId, instanceId),
+      isInstanceParticipant: (viewerId, instanceId, orgId) => isInstanceParticipant(db, viewerId, instanceId, orgId),
       isFieldHiddenAtActiveNode: (instanceId, fieldId) => isFieldHiddenAtActiveNode(db, instanceId, fieldId),
     },
     viewerId: (req) => {
@@ -256,6 +388,8 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
       const tenant = req.user?.tenantId
       return typeof tenant === 'string' && tenant.trim() ? tenant.trim() : 'default'
     },
+    hasApprovalsRead: (req) => principalHasApprovalsRead(req),
+    hasApprovalsWrite: (req) => principalHasApprovalsWrite(req),
     resolveAttachmentField: (templateId, fieldId) => isAttachmentFieldInTemplate(db, templateId, fieldId),
     templateVisible: (req, templateId) => templateVisibleToRequester(db, req, templateId),
     env,
@@ -271,19 +405,30 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
   const reconcileMs = opts.intervals?.reconcileMs ?? parsePositiveIntMs(env.APPROVAL_ATTACHMENT_RECONCILE_INTERVAL_MS, 6 * 60 * 60 * 1000, 1_000, 7 * 24 * 60 * 60 * 1000)
   const ttlHours = parsePositiveIntMs(env.APPROVAL_ATTACHMENT_UNBOUND_RETENTION_HOURS, UNBOUND_ATTACHMENT_TTL_HOURS, 1, 8760)
 
-  const startWorkers = (): (() => void) => {
-    if (storage.kind !== 'local-fs') {
+  const startWorkers = (): (() => Promise<void>) => {
+    if (storage.kind === 's3-required') {
       // O3 fail-closed posture: no store ⇒ no blobs can exist ⇒ nothing to sweep/purge/reconcile.
       logger.warn('Approval attachment workers NOT started (no usable store — O3 prod fail-close)')
-      return () => {}
+      return async () => {}
     }
     const store = storage.store
+    // G15 object enumeration is mandatory for every accepted store. Both the local store and the
+    // built-in S3 adapter implement it; there is no production provider-registration escape hatch.
     let stopped = false
+    /** In-flight tick promises — stop() awaits these so shutdown never races a half-finished drain. */
+    const activeTicks = new Set<Promise<unknown>>()
     const safeTick = (name: string, run: () => Promise<unknown>) => (): void => {
       if (stopped) return
-      void run().catch((err) => {
-        logger.warn(`Approval attachment ${name} tick error: ${err instanceof Error ? err.message : String(err)}`)
-      })
+      const tick = run()
+        .catch(() => {
+          // Values-free by construction: driver and object-store errors can contain hosts, buckets,
+          // endpoints, or credentials. Operators get the worker name; detailed values stay out of logs.
+          logger.warn(`Approval attachment ${name} tick failed`)
+        })
+        .finally(() => {
+          activeTicks.delete(tick)
+        })
+      activeTicks.add(tick)
     }
     const gcTick = safeTick('GC sweep', async () => {
       await sweepUnboundAttachments(db, ttlHours)
@@ -311,12 +456,15 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     // NOTE: no initial reconcile tick — the first reconcile runs after a full interval, so a boot
     // never races an in-flight upload younger than the grace window under a cold cache (G15 is
     // age-guarded anyway; this just avoids pointless full-bucket lists on every boot loop).
-    const timers = [setInterval(gcTick, gcSweepMs), setInterval(drainTick, purgeDrainMs), setInterval(reconcileTick, reconcileMs)]
+    const timers = [setInterval(gcTick, gcSweepMs), setInterval(drainTick, purgeDrainMs)]
+    timers.push(setInterval(reconcileTick, reconcileMs))
     for (const t of timers) t.unref?.()
     logger.info(`Approval attachment workers started (gcSweepMs=${gcSweepMs}, purgeDrainMs=${purgeDrainMs}, reconcileMs=${reconcileMs}, ttlHours=${ttlHours})`)
-    return () => {
+    return async () => {
       stopped = true
       for (const t of timers) clearInterval(t)
+      // Await every in-flight tick before returning — stop must not leave a dangling claim/delete.
+      await Promise.allSettled([...activeTicks])
       logger.info('Approval attachment workers stopped')
     }
   }

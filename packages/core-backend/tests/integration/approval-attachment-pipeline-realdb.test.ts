@@ -212,22 +212,68 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
     expect(existsSync(path.join(storageRoot, row.storage_key))).toBe(true) // blob physically under the dedicated root
   })
 
+  it('DELETE atomically soft-deletes the staged row and records its durable purge intent', async () => {
+    const adminToken = await authToken(`aatt-admin-${RUN}`)
+    const requesterToken = await authToken(REQUESTER)
+    const templateId = await publishAttachmentTemplate(adminToken)
+    const upload = await uploadPdf(requesterToken, templateId, 'files')
+    expect(upload.status, await upload.clone().text()).toBe(201)
+    const body = (await upload.json()) as { id: string }
+    createdAttachmentIds.add(body.id)
+
+    const before = (await pool().query(
+      'SELECT status, storage_key FROM approval_attachments WHERE id=$1',
+      [body.id],
+    )).rows[0] as { status: string; storage_key: string }
+    expect(before.status).toBe('unbound')
+
+    const removed = await jsonRequest(`/api/approval/attachments/${body.id}`, requesterToken, { method: 'DELETE' })
+    expect(removed.status, await removed.clone().text()).toBe(204)
+
+    const row = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [body.id])).rows[0]
+    expect(row).toEqual({ status: 'deleted' })
+    expect(existsSync(path.join(storageRoot, before.storage_key))).toBe(true)
+    const intents = await pool().query(
+      `SELECT reason, status FROM approval_attachment_purge_intents
+        WHERE storage_key=$1`,
+      [before.storage_key],
+    )
+    expect(intents.rows).toEqual([{ reason: 'row_deleted', status: 'pending' }])
+  })
+
   // §4.1 template-access gate (G2/authorization): visibility_scope is enforced ON UPLOAD with the same
   // predicate the create path uses — an outsider gets a values-free 404 (no template-existence oracle).
+  // Callers hold approvals:write so the write-before-Multer gate is not the signal under test here.
   it('template-access: outsider upload against a user-scoped template → 404 values-free; a scoped-in NON-admin uploads fine', async () => {
     const adminToken = await authToken(`aatt-admin-${RUN}`)
     const restrictedId = await publishAttachmentTemplate(adminToken, {
       visibilityScope: { type: 'user', ids: [REQUESTER] },
     })
-    const outsiderToken = await authToken(OUTSIDER, 'user', 'approvals:read')
+    const outsiderToken = await authToken(OUTSIDER, 'user', 'approvals:write')
     const denied = await uploadPdf(outsiderToken, restrictedId, 'files')
     expect(denied.status).toBe(404)
     expect(await denied.json()).toEqual({ error: 'not_found' }) // values-free — same shape as a nonexistent template
     // positive control: the scoped-in requester (NON-admin token — visibility via the user scope, not a bypass)
-    const requesterToken = await authToken(REQUESTER, 'user', 'approvals:read')
+    const requesterToken = await authToken(REQUESTER, 'user', 'approvals:write')
     const allowed = await uploadPdf(requesterToken, restrictedId, 'files')
     expect(allowed.status, await allowed.clone().text()).toBe(201)
     createdAttachmentIds.add(((await allowed.json()) as { id: string }).id)
+  })
+
+  it('upload without approvals:write is refused before body work — 403, no blob/row', async () => {
+    const adminToken = await authToken(`aatt-admin-${RUN}`)
+    const templateId = await publishAttachmentTemplate(adminToken)
+    const before = Number(
+      (await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c,
+    )
+    const noWrite = await authToken(REQUESTER, 'user', 'approvals:read')
+    const denied = await uploadPdf(noWrite, templateId, 'files')
+    expect(denied.status).toBe(403)
+    expect(await denied.json()).toEqual({ error: 'forbidden' })
+    const after = Number(
+      (await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c,
+    )
+    expect(after).toBe(before) // no durable row from the refused upload
   })
 
   // §4.4 / G4: the submit txn freezes the id array into form_snapshot AND binds the rows atomically.
@@ -301,8 +347,70 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
     expect(outsider.status).toBe(404) // not the uploader, not a participant — values-free denial
   })
 
-  // D5/G1: without the flag the runtime returns null — the surface simply does not exist.
-  it('flag OFF: a boot without APPROVAL_ATTACHMENTS_ENABLED does not mount the upload surface (404)', async () => {
+  it('deleted-only bound attachment: authorized participant/admin → 410; outsider/cross-org → 404 (no live sibling required)', async () => {
+    const adminId = `aatt-admin-${RUN}`
+    const adminToken = await authToken(adminId)
+    // isInstanceParticipant reads the users table for admin — stamp the real row, not only the JWT role.
+    await ensureUsers(adminId)
+    await pool().query(
+      `UPDATE users SET role = 'admin', is_admin = TRUE WHERE id = $1`,
+      [adminId],
+    )
+    const requesterToken = await authToken(REQUESTER, 'user', 'approvals:read,approvals:write')
+    const templateId = await publishAttachmentTemplate(adminToken)
+    const up = await uploadPdf(requesterToken, templateId, 'files')
+    expect(up.status).toBe(201)
+    const attId = ((await up.json()) as { id: string }).id
+    createdAttachmentIds.add(attId)
+    const create = await jsonRequest('/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'deleted-only 410', files: [attId] } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const inst = (await create.json()) as { id: string }
+    createdApprovalIds.add(inst.id)
+
+    // Soft-delete the ONLY bound attachment — no live sibling remains on the instance.
+    await pool().query(`UPDATE approval_attachments SET status = 'deleted' WHERE id = $1`, [attId])
+    const remaining = await pool().query(
+      `SELECT status FROM approval_attachments WHERE instance_id = $1`,
+      [inst.id],
+    )
+    expect(remaining.rows.every((r: { status: string }) => r.status === 'deleted')).toBe(true)
+
+    // Authorized participant (requester) reaches the lifecycle tombstone — 410, not 404.
+    const participant = await fetch(`${baseUrl}/api/approval/attachments/${attId}/download`, {
+      headers: { Authorization: `Bearer ${await authToken(REQUESTER, 'user', 'approvals:read')}` },
+    })
+    expect(participant.status).toBe(410)
+    expect(await participant.json()).toEqual({ error: 'gone' })
+
+    // Admin reaches the same 410 (authorized) even without a live sibling attachment.
+    const adminDl = await fetch(`${baseUrl}/api/approval/attachments/${attId}/download`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    expect(adminDl.status).toBe(410)
+
+    // Outsider stays values-free 404 (no existence/lifecycle oracle) even with approvals:read.
+    const outsider = await fetch(`${baseUrl}/api/approval/attachments/${attId}/download`, {
+      headers: { Authorization: `Bearer ${await authToken(OUTSIDER, 'user', 'approvals:read')}` },
+    })
+    expect(outsider.status).toBe(404)
+    expect(await outsider.json()).toEqual({ error: 'not_found' })
+
+    // Cross-org: stamp a foreign org on the row and keep the same principal org — still 404.
+    await pool().query(`UPDATE approval_attachments SET org_id = 'other-org' WHERE id = $1`, [attId])
+    const cross = await fetch(`${baseUrl}/api/approval/attachments/${attId}/download`, {
+      headers: { Authorization: `Bearer ${await authToken(REQUESTER, 'user', 'approvals:read')}` },
+    })
+    expect(cross.status).toBe(404)
+  })
+
+  // D5/G1: without the flag the runtime returns null, preserves the pre-feature form-value contract,
+  // and cannot freeze an attachment-id array without running the same-transaction bind.
+  it('flag OFF: upload is unmounted, legacy values still create, and id arrays cannot form phantom snapshots', async () => {
+    const adminToken = await authToken(`aatt-admin-${RUN}`)
+    const templateId = await publishAttachmentTemplate(adminToken)
     delete process.env.APPROVAL_ATTACHMENTS_ENABLED
     offServer = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     try {
@@ -322,6 +430,42 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
         body: form,
       })
       expect(res.status).toBe(404) // unmounted — not 401/403/503: the route does not exist flag-OFF
+
+      const legacyCreate = await fetch(`${offBase}/api/approvals`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          templateId,
+          formData: { reason: 'flag-off legacy value', files: 'legacy-file-reference' },
+        }),
+      })
+      expect(legacyCreate.status, await legacyCreate.clone().text()).toBe(201)
+      const legacy = (await legacyCreate.json()) as { id: string }
+      createdApprovalIds.add(legacy.id)
+      const snapshot = (await pool().query(
+        `SELECT form_snapshot->>'files' AS files FROM approval_instances WHERE id=$1`,
+        [legacy.id],
+      )).rows[0]
+      expect(snapshot.files).toBe('legacy-file-reference')
+
+      const beforePhantom = Number((await pool().query(
+        'SELECT count(*)::int AS c FROM approval_instances WHERE template_id=$1',
+        [templateId],
+      )).rows[0].c)
+      const phantom = await fetch(`${offBase}/api/approvals`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          templateId,
+          formData: { reason: 'must not freeze unbound ids', files: ['att_phantom'] },
+        }),
+      })
+      expect(phantom.status).toBe(400)
+      const afterPhantom = Number((await pool().query(
+        'SELECT count(*)::int AS c FROM approval_instances WHERE template_id=$1',
+        [templateId],
+      )).rows[0].c)
+      expect(afterPhantom).toBe(beforePhantom)
     } finally {
       process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
       // offServer is stopped in afterAll AFTER the DB cleanup (stop() ends the shared pool).

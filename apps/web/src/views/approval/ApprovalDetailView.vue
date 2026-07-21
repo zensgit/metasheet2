@@ -159,6 +159,37 @@
               <span class="approval-detail__label">{{ field.label }}</span>
               <span>{{ field.value }}</span>
             </div>
+            <!-- B3-07 §8 (#4195): attachments frozen into the snapshot as an ordered id array,
+                 resolved BY THE FROZEN ID through the shared pure resolver (desktop/mobile parity).
+                 A ref whose row is gone/soft-deleted renders as a tombstone — never a silent swap to
+                 a different file; a ref on a field hidden at the active node is omitted by the server
+                 and so renders as nothing at all (redaction inheritance, G7). Downloads go through
+                 the auth-proxied endpoint only. -->
+            <div
+              v-for="group in attachmentFields"
+              :key="`att_${group.fieldId}`"
+              class="approval-detail__field"
+              data-testid="approval-detail-attachments"
+            >
+              <span class="approval-detail__label">{{ group.label }}</span>
+              <ul class="approval-detail__attachments">
+                <li v-for="ref in group.refs" :key="ref.id">
+                  <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">附件已删除</span>
+                  <template v-else>
+                    <a
+                      v-if="ref.downloadUrl"
+                      :href="ref.downloadUrl"
+                      data-testid="approval-attachment-download"
+                      @click.prevent="handleAttachmentDownload(ref)"
+                    >{{ ref.fileName }}</a>
+                    <span v-else class="approval-detail__attachment-unavailable">附件暂不可用</span>
+                    <span v-if="formatAttachmentSize(ref.sizeBytes)" class="approval-detail__attachment-size">
+                      {{ formatAttachmentSize(ref.sizeBytes) }}
+                    </span>
+                  </template>
+                </li>
+              </ul>
+            </div>
             <!-- detail / sub-form (明细): render the frozen rows × columns as a read-only
                  table driven by the instance's FROZEN formSchema columns (never the live
                  template). -->
@@ -806,6 +837,15 @@ import {
   type DetailDisplayTable,
   type DisplayField,
 } from '../../approvals/detailField'
+import {
+  collectAttachmentRefIds,
+  formatAttachmentSize,
+  resolveAttachmentFields,
+  type AttachmentFieldDisplay,
+  type AttachmentRefMetadata,
+} from '../../approvals/attachmentRefs'
+import { fetchApprovalAttachmentRefs } from '../../approvals/attachmentUpload'
+import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
@@ -826,9 +866,13 @@ const { canAct } = useApprovalPermissions()
 // remind) are hidden. The flag is loaded by the app shell; this view only reads
 // it, so with the flag OFF the desktop action bar is unchanged for every
 // viewport.
-const { hasFeature } = useFeatureFlags()
+const { hasFeature, features: productFeatures } = useFeatureFlags()
 const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
+// B3-07: the new attachment pipeline is default OFF. Flag OFF still renders legacy
+// attachment string/object snapshot values inline (no refs endpoint); flag ON uses the
+// auth-proxied refs resolver + download block below.
+const attachmentPipelineEnabled = computed(() => productFeatures.value.approvalAttachments === true)
 
 const approval = computed(() => store.activeApproval)
 // PageHeader requires a non-optional title; before the detail loads (or on error) fall back to
@@ -866,9 +910,75 @@ const detailTables = computed<Record<string, DetailDisplayTable>>(() => {
 
 // B1-02: humanized scalar fields (label + formatted value, schema-ordered) — see
 // `buildDisplayFields` for the full contract. `detail` fields are excluded; they render via
-// `detailTables` above.
+// `detailTables` above. Attachment fields are included ONLY while the pipeline flag is OFF
+// (legacy string/object values); flag ON excludes them so the refs block owns rendering.
 const displayFields = computed<DisplayField[]>(() =>
-  buildDisplayFields(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null),
+  buildDisplayFields(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null, {
+    attachmentPipelineEnabled: attachmentPipelineEnabled.value,
+  }),
+)
+
+// B3-07 §8 (#4195): resolve the snapshot's frozen attachment ids → metadata for the authorized
+// participants of THIS instance. The server applies the same visibility + hidden-field predicates the
+// byte path uses, so this view never has to (and never could) re-derive them. Fail-closed and quiet:
+// any failure leaves `attachmentMetadata` empty, which renders no attachment block at all rather than
+// a block of ids with fabricated names. Flag OFF: never call the new endpoint — legacy values render
+// via `displayFields` above.
+const attachmentMetadata = ref<AttachmentRefMetadata[]>([])
+const attachmentFields = computed<AttachmentFieldDisplay[]>(() => {
+  if (!attachmentPipelineEnabled.value) return []
+  return resolveAttachmentFields(
+    approval.value?.formSchema ?? null,
+    approval.value?.formSnapshot ?? null,
+    attachmentMetadata.value,
+  )
+})
+
+async function handleAttachmentDownload(ref: AttachmentFieldDisplay['refs'][number]): Promise<void> {
+  if (!ref.downloadUrl || !ref.fileName) return
+  try {
+    const blob = await fetchApprovalAttachmentBlob({ downloadUrl: ref.downloadUrl, fileName: ref.fileName })
+    const objectUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = ref.fileName
+    link.rel = 'noopener'
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+  } catch {
+    ElMessage.error('附件下载失败，请稍后重试')
+  }
+}
+
+async function loadAttachmentMetadata(): Promise<void> {
+  // Flag OFF (default): never hit the new refs endpoint — legacy values stay on the scalar path.
+  if (!attachmentPipelineEnabled.value) {
+    attachmentMetadata.value = []
+    return
+  }
+  const instance = approval.value
+  if (!instance) {
+    attachmentMetadata.value = []
+    return
+  }
+  const ids = collectAttachmentRefIds(instance.formSchema ?? null, instance.formSnapshot ?? null)
+  if (ids.length === 0) {
+    attachmentMetadata.value = []
+    return
+  }
+  try {
+    attachmentMetadata.value = await fetchApprovalAttachmentRefs(ids, instance.id)
+  } catch {
+    attachmentMetadata.value = [] // fail-closed: render nothing rather than unresolved ids
+  }
+}
+
+watch(
+  () => [approval.value?.id, approval.value?.formSnapshot, attachmentPipelineEnabled.value] as const,
+  () => {
+    void loadAttachmentMetadata()
+  },
+  { immediate: true },
 )
 
 // B1-01: real session identity — the previous `=== 'user_1'` mock meant production requesters
@@ -1788,6 +1898,27 @@ watch(
 
 .approval-detail__detail-table {
   margin-top: 4px;
+}
+
+/* B3-07 §8: frozen attachment refs — download links + tombstones for deleted refs. */
+.approval-detail__attachments {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.approval-detail__attachment-size {
+  margin-left: 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.approval-detail__attachment-tombstone {
+  color: var(--ms-text-3);
+  font-style: italic;
 }
 
 .approval-detail__quick-phrases {

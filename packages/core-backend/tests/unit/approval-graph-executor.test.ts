@@ -916,6 +916,45 @@ describe('ApprovalGraphExecutor', () => {
 })
 
 describe('validateApprovalFormData', () => {
+  it('keeps the pre-feature attachment contract while the runtime flag is OFF', () => {
+    const schema: FormSchema = { fields: [{ id: 'files', type: 'attachment', label: 'Files' }] }
+    expect(validateApprovalFormData(schema, { files: 'legacy-file-reference' })).toEqual([])
+    expect(validateApprovalFormData(schema, { files: ['att_new'] }))
+      .toEqual(['files must be a string'])
+  })
+
+  it('accepts only staged attachment-id arrays in the enabled attachment mode', () => {
+    const schema: FormSchema = { fields: [{ id: 'files', type: 'attachment', label: 'Files' }] }
+    expect(validateApprovalFormData(schema, { files: ['att_a', 'att_b'] }, { attachmentValueMode: 'ids' }))
+      .toEqual([])
+    expect(validateApprovalFormData(schema, { files: 'legacy-file-reference' }, { attachmentValueMode: 'ids' }))
+      .toEqual(['files must be an array of attachment ids'])
+  })
+
+  it('detail-leaf attachment: legacy-valid while OFF; top-level-only enforced when ON (both controls)', () => {
+    // A historical/frozen schema that somehow carries attachment inside a detail group.
+    const schema: FormSchema = {
+      fields: [{
+        id: 'items',
+        type: 'detail',
+        label: '明细',
+        columns: [
+          { id: 'name', type: 'text', label: 'name' },
+          { id: 'proof', type: 'attachment', label: 'proof' },
+        ],
+      }],
+    }
+    // Flag OFF / legacy: detail-leaf attachment values remain legacy-valid (string/record).
+    expect(validateApprovalFormData(schema, {
+      items: [{ name: 'row', proof: 'legacy-file-reference' }],
+    })).toEqual([])
+    // Flag ON / ids: top-level-only control rejects attachment leaves inside detail.
+    const on = validateApprovalFormData(schema, {
+      items: [{ name: 'row', proof: ['att_1'] }],
+    }, { attachmentValueMode: 'ids' })
+    expect(on).toContain('items.proof attachment fields are not allowed inside detail rows')
+  })
+
   it('reports required, type, and option errors', () => {
     const formSchema: FormSchema = {
       fields: [
