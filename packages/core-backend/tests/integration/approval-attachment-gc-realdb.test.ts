@@ -85,10 +85,15 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
   // not-found stays terminal-success. The transient-recovers control is covered by the drain test above.
   test('purge-worker dead-letter: persistent EACCES → terminal dead_letter after the cap + values-free alert', async () => {
     const deadRow = await seed({ status: 'deleted', key: `key_att_${RUN}_dl` }) // deleted ⇒ unreferenced ⇒ claimable
+    const key = `key_att_${RUN}_dl`
     await db().query(
       `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason) VALUES ($1,$2,'reconciler_orphan')`,
-      [`pi_dl_${RUN}`, `key_att_${RUN}_dl`],
+      [`pi_dl_${RUN}`, key],
     )
+    const intentId = String((await db().query(
+      'SELECT id FROM approval_attachment_purge_intents WHERE storage_key=$1',
+      [key],
+    )).rows[0].id)
     const alerts: Array<[string, string]> = []
     const persistentDeleter = async () => {
       throw Object.assign(new Error('permission denied /secret/blob/path'), { code: 'EACCES' })
@@ -99,19 +104,19 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
         maxAttempts: 2,
         onDeadLetter: (id, key, code) => alerts.push([id, code]),
       })
-      const st = (await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`])).rows[0]
+      const st = (await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [intentId])).rows[0]
       if (st.status === 'dead_letter') break
     }
-    const final = (await db().query('SELECT status, last_error FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`])).rows[0]
+    const final = (await db().query('SELECT status, last_error FROM approval_attachment_purge_intents WHERE id=$1', [intentId])).rows[0]
     expect(final.status).toBe('dead_letter')
     expect(final.last_error).toBe('EACCES') // values-free code — NOT the raw message with the path
     expect(alerts.some(([, code]) => code === 'EACCES')).toBe(true) // alert seam fired once
     // a dead_letter intent is NEVER re-claimed by a later drain (no unbounded retry)
     const before = final.status
     await drainPurgeIntents(db(), persistentDeleter, { maxAttempts: 2 })
-    const after = (await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`])).rows[0].status
+    const after = (await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [intentId])).rows[0].status
     expect(after).toBe(before)
-    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`]).catch(() => {})
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [intentId]).catch(() => {})
     void deadRow
   })
 
@@ -127,6 +132,10 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
        VALUES ($1,$2,'reconciler_orphan','in_progress',$3,7, now() - interval '1 hour')`,
       [`pi_poison_${RUN}`, key, PURGE_MAX_ATTEMPTS],
     )
+    const intentId = String((await db().query(
+      'SELECT id FROM approval_attachment_purge_intents WHERE storage_key=$1',
+      [key],
+    )).rows[0].id)
     const deleterKeys: string[] = []
     const alerts: Array<[string, string, string]> = []
     const r = await drainPurgeIntents(db(), async (k) => (deleterKeys.push(k), true), {
@@ -134,10 +143,10 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
     })
     expect(r.deadLettered).toBeGreaterThanOrEqual(1)
     expect(deleterKeys).not.toContain(key) // the deleter was NEVER called for the poisoned intent
-    expect(alerts.some(([id, , code]) => id === `pi_poison_${RUN}` && code === 'max_attempts_exhausted')).toBe(true)
+    expect(alerts.some(([id, , code]) => id === intentId && code === 'max_attempts_exhausted')).toBe(true)
     const row = (await db().query(
       'SELECT status, attempts, fence::text AS fence, last_error, lease_expires_at FROM approval_attachment_purge_intents WHERE id=$1',
-      [`pi_poison_${RUN}`],
+      [intentId],
     )).rows[0]
     expect(row.status).toBe('dead_letter')
     expect(Number(row.attempts)).toBe(PURGE_MAX_ATTEMPTS) // NOT bumped by the poison transition
@@ -148,8 +157,8 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
     const again = await drainPurgeIntents(db(), async (k) => (deleterKeys.push(k), true))
     void again
     expect(deleterKeys).not.toContain(key)
-    expect((await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [`pi_poison_${RUN}`])).rows[0].status).toBe('dead_letter')
-    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [`pi_poison_${RUN}`]).catch(() => {})
+    expect((await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [intentId])).rows[0].status).toBe('dead_letter')
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [intentId]).catch(() => {})
   })
 
   // CONSTRUCTED crash-at-claim loop (the P1 scenario): a worker that dies after EVERY claim — before the
@@ -164,6 +173,10 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
       `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason) VALUES ($1,$2,'reconciler_orphan')`,
       [`pi_crash_${RUN}`, key],
     )
+    const intentId = String((await db().query(
+      'SELECT id FROM approval_attachment_purge_intents WHERE storage_key=$1',
+      [key],
+    )).rows[0].id)
     // A db wrapper that dies on any post-claim outcome write (SET status='…' — the claim's SET is a
     // spaced CASE, so only the three fence-CAS outcome writes match): the claim COMMITS (autocommit
     // statement), then the "process" is gone before recording anything — exactly the crash window.
@@ -179,22 +192,22 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
           throw new Error('simulated worker death before the deleter ran to completion')
         }),
       ).rejects.toThrow(/simulated worker death/)
-      const st = (await db().query('SELECT status, attempts FROM approval_attachment_purge_intents WHERE id=$1', [`pi_crash_${RUN}`])).rows[0]
+      const st = (await db().query('SELECT status, attempts FROM approval_attachment_purge_intents WHERE id=$1', [intentId])).rows[0]
       expect(st.status).toBe('in_progress') // the crashed claim left no outcome…
       expect(Number(st.attempts)).toBe(i) // …but DID durably consume an attempt (bumped at claim)
       // the crashed worker's lease eventually expires
-      await db().query(`UPDATE approval_attachment_purge_intents SET lease_expires_at = now() - interval '1 second' WHERE id=$1`, [`pi_crash_${RUN}`])
+      await db().query(`UPDATE approval_attachment_purge_intents SET lease_expires_at = now() - interval '1 second' WHERE id=$1`, [intentId])
     }
     // next (healthy) drain: the claim poisons the at-ceiling row — the deleter is NOT called for it
     const deleterKeys: string[] = []
     const r = await drainPurgeIntents(db(), async (k) => (deleterKeys.push(k), true))
     expect(r.deadLettered).toBeGreaterThanOrEqual(1)
     expect(deleterKeys).not.toContain(key)
-    const final = (await db().query('SELECT status, attempts, last_error FROM approval_attachment_purge_intents WHERE id=$1', [`pi_crash_${RUN}`])).rows[0]
+    const final = (await db().query('SELECT status, attempts, last_error FROM approval_attachment_purge_intents WHERE id=$1', [intentId])).rows[0]
     expect(final.status).toBe('dead_letter') // the loop TERMINATED in a surfaced terminal state
     expect(Number(final.attempts)).toBe(PURGE_MAX_ATTEMPTS)
     expect(final.last_error).toBe('max_attempts_exhausted')
-    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [`pi_crash_${RUN}`]).catch(() => {})
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [intentId]).catch(() => {})
   })
 
   test('SAFETY: a blob still referenced by a live row is NEVER deleted — skipped and surfaced', async () => {
@@ -207,7 +220,7 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
     const r = await drainPurgeIntents(db(), async (k) => (deleted.push(k), true))
     expect(r.skippedStillReferenced).toContain(`key_shared_${RUN}`)
     expect(deleted).not.toContain(`key_shared_${RUN}`) // live blob untouched
-    const pi = await db().query(`SELECT status FROM approval_attachment_purge_intents WHERE id=$1`, [`pi_manual_${RUN}`])
+    const pi = await db().query(`SELECT status FROM approval_attachment_purge_intents WHERE storage_key=$1`, [`key_shared_${RUN}`])
     expect(pi.rows[0].status).toBe('pending') // left for the reconciler
     void live
   })
