@@ -15,6 +15,8 @@ export type FormCommandFailureReason =
   | 'field_not_found'
   | 'target_not_found'
   | 'unsupported_field_type'
+  | 'invalid_field_identity'
+  | 'field_identity_conflict'
   | 'reference_inventory_missing'
   | 'field_is_referenced'
 
@@ -48,6 +50,24 @@ export interface CompleteFormReferenceInventory {
 export interface FormExternalReference {
   readonly fieldId: string
   readonly location: string
+}
+
+/**
+ * An identity allocated by the authoring session's durable identity owner. It is
+ * an internal command input, not a normal-user field-id API. The pure command
+ * deliberately never derives persistent IDs from the current draft: a deleted
+ * maximum suffix must not become a later field's identity.
+ *
+ * Detail fields need an explicit first-column identity because column IDs are
+ * also persisted and may not collide with any live field or column identity.
+ */
+export interface FormFieldIdentity {
+  readonly persistentId: string
+  readonly localId: string
+  readonly detailColumn?: {
+    readonly persistentId: string
+    readonly localId: string
+  }
 }
 
 export type FormCommandResult =
@@ -92,20 +112,12 @@ function rejected(
   return { ok: false, reason, dependencies }
 }
 
-function nextNumericSuffix(values: readonly string[], prefix: string): number {
-  const matcher = new RegExp(`^${prefix}(\\d+)$`)
-  return (
-    values.reduce((max, value) => {
-      const match = matcher.exec(value)
-      return match ? Math.max(max, Number(match[1])) : max
-    }, 0) + 1
-  )
-}
-
-function newDetailColumn(fieldNumber: number): DetailColumnDraft {
+function newDetailColumn(
+  identity: NonNullable<FormFieldIdentity['detailColumn']>,
+): DetailColumnDraft {
   return {
-    localId: `form_detail_column_${fieldNumber}_1`,
-    id: 'col_1',
+    localId: identity.localId,
+    id: identity.persistentId,
     type: 'text',
     label: '子字段 1',
     required: false,
@@ -113,37 +125,90 @@ function newDetailColumn(fieldNumber: number): DetailColumnDraft {
   }
 }
 
+function nonBlank(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function isUsableIdentity(
+  fieldType: AuthorableFieldType,
+  identity: FormFieldIdentity | undefined,
+): identity is FormFieldIdentity {
+  if (
+    !identity ||
+    !nonBlank(identity.persistentId) ||
+    !nonBlank(identity.localId)
+  )
+    return false
+  if (fieldType !== 'detail') return identity.detailColumn === undefined
+  return Boolean(
+    identity.detailColumn &&
+      nonBlank(identity.detailColumn.persistentId) &&
+      nonBlank(identity.detailColumn.localId),
+  )
+}
+
+function identityConflicts(
+  draft: TemplateAuthoringDraft,
+  identity: FormFieldIdentity,
+): boolean {
+  const existingPersistentIds = new Set<string>()
+  const existingLocalIds = new Set<string>()
+  draft.fields.forEach((field) => {
+    existingPersistentIds.add(field.id)
+    existingLocalIds.add(field.localId)
+    field.detailColumns.forEach((column) => {
+      existingPersistentIds.add(column.id)
+      existingLocalIds.add(column.localId)
+    })
+  })
+  const candidates = [
+    { persistentId: identity.persistentId, localId: identity.localId },
+    ...(identity.detailColumn ? [identity.detailColumn] : []),
+  ]
+  if (
+    new Set(candidates.map((candidate) => candidate.persistentId)).size !==
+      candidates.length ||
+    new Set(candidates.map((candidate) => candidate.localId)).size !==
+      candidates.length
+  ) {
+    return true
+  }
+  return candidates.some(
+    (candidate) =>
+      existingPersistentIds.has(candidate.persistentId) ||
+      existingLocalIds.has(candidate.localId),
+  )
+}
+
 /**
- * Add a supported top-level field at the selected location. IDs are generated
- * deterministically from the draft, so retrying the same pure command has the
- * same result and callers never ask an ordinary user to type an identifier.
+ * Add a supported top-level field at the selected location. The caller supplies
+ * a durable identity, making this pure command deterministic for retries while
+ * preventing the old max-suffix allocator from reusing deleted persistent IDs.
  */
 export function addFormField(
   draft: TemplateAuthoringDraft,
   fieldType: AuthorableFieldType,
+  identity: FormFieldIdentity,
   afterLocalId?: string,
 ): FormCommandResult {
   if (!AUTHORABLE_FIELD_TYPES.has(fieldType))
     return rejected('unsupported_field_type')
+  if (!isUsableIdentity(fieldType, identity))
+    return rejected('invalid_field_identity')
+  if (identityConflicts(draft, identity))
+    return rejected('field_identity_conflict')
 
-  const fieldNumber = nextNumericSuffix(
-    draft.fields.map((field) => field.id),
-    'field_',
-  )
-  const localNumber = nextNumericSuffix(
-    draft.fields.map((field) => field.localId),
-    'form_field_',
-  )
   const field: FieldAuthoringDraft = {
-    localId: `form_field_${localNumber}`,
-    id: `field_${fieldNumber}`,
+    localId: identity.localId,
+    id: identity.persistentId,
     type: fieldType,
     label: FIELD_LABELS[fieldType],
     required: false,
     placeholder: '',
     optionsText: '',
     visibility: { dependsOnFieldId: '', operator: 'eq', valueText: '' },
-    detailColumns: fieldType === 'detail' ? [newDetailColumn(fieldNumber)] : [],
+    detailColumns:
+      fieldType === 'detail' ? [newDetailColumn(identity.detailColumn!)] : [],
     minRowsText: '',
     maxRowsText: '',
   }

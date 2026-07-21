@@ -9,6 +9,7 @@ import {
   removeFormField,
   type CompleteFormReferenceInventory,
   type FormCommandResult,
+  type FormFieldIdentity,
 } from '../src/approvals/approvalFormCommands'
 import {
   AUTHORABLE_FIELD_TYPES,
@@ -49,6 +50,21 @@ function draftWith(fields: FieldAuthoringDraft[]): TemplateAuthoringDraft {
   }
 }
 
+function identity(index: number, detail = false): FormFieldIdentity {
+  return {
+    persistentId: `new_field_${index}`,
+    localId: `new_local_${index}`,
+    ...(detail
+      ? {
+          detailColumn: {
+            persistentId: `new_column_${index}`,
+            localId: `new_column_local_${index}`,
+          },
+        }
+      : {}),
+  }
+}
+
 function assertOk<T extends FormCommandResult>(
   result: T,
 ): asserts result is Extract<T, { ok: true }> {
@@ -61,22 +77,23 @@ describe('approvalFormCommands - add', () => {
     'adds each supported %s field with deterministic internal identity',
     (type) => {
       const source = draftWith([field(1)])
-      const first = addFormField(source, type)
-      const replay = addFormField(source, type)
+      const fieldIdentity = identity(2, type === 'detail')
+      const first = addFormField(source, type, fieldIdentity)
+      const replay = addFormField(source, type, fieldIdentity)
       assertOk(first)
       assertOk(replay)
 
       const created = first.draft.fields.at(-1)!
       expect(created.type).toBe(type)
-      expect(created.id).toBe('field_2')
-      expect(created.localId).toBe('form_field_1')
+      expect(created.id).toBe('new_field_2')
+      expect(created.localId).toBe('new_local_2')
       expect(replay.draft.fields.at(-1)).toEqual(created)
       expect(source.fields).toHaveLength(1)
       if (type === 'detail') {
         expect(created.detailColumns).toEqual([
           expect.objectContaining({
-            id: 'col_1',
-            localId: 'form_detail_column_2_1',
+            id: 'new_column_2',
+            localId: 'new_column_local_2',
             type: 'text',
           }),
         ])
@@ -90,24 +107,119 @@ describe('approvalFormCommands - add', () => {
     const result = addFormField(
       draftWith([field(1), field(2)]),
       'number',
+      identity(3),
       'local_1',
     )
     assertOk(result)
     expect(result.draft.fields.map((entry) => entry.id)).toEqual([
       'field_1',
-      'field_3',
+      'new_field_3',
       'field_2',
     ])
-    expect(result.focusLocalId).toBe('form_field_1')
+    expect(result.focusLocalId).toBe('new_local_3')
   })
 
-  it('fails closed for an unsupported field kind or missing insertion target', () => {
+  it('fails closed for unsupported kinds, missing identities, and missing insertion targets', () => {
     expect(
-      addFormField(draftWith([field(1)]), 'attachment' as never),
+      addFormField(draftWith([field(1)]), 'attachment' as never, identity(2)),
     ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
     expect(
-      addFormField(draftWith([field(1)]), 'text', 'missing'),
+      addFormField(draftWith([field(1)]), 'text', undefined as never),
+    ).toMatchObject({ ok: false, reason: 'invalid_field_identity' })
+    expect(
+      addFormField(draftWith([field(1)]), 'text', identity(2), 'missing'),
     ).toMatchObject({ ok: false, reason: 'target_not_found' })
+  })
+
+  it('rejects blank and field/detail-column identity collisions before it changes the draft', () => {
+    const source = draftWith([
+      field(1, {
+        localId: 'existing_local',
+        id: 'existing_field',
+        type: 'detail',
+        detailColumns: [
+          {
+            localId: 'existing_column_local',
+            id: 'existing_column',
+            type: 'text',
+            label: '已有子字段',
+            required: false,
+            optionsText: '',
+          },
+        ],
+      }),
+    ])
+    expect(
+      addFormField(source, 'text', { persistentId: ' ', localId: 'new_local' }),
+    ).toMatchObject({
+      ok: false,
+      reason: 'invalid_field_identity',
+    })
+    expect(
+      addFormField(source, 'text', {
+        persistentId: 'new_field',
+        localId: ' ',
+      }),
+    ).toMatchObject({ ok: false, reason: 'invalid_field_identity' })
+    expect(
+      addFormField(source, 'text', {
+        persistentId: 'existing_field',
+        localId: 'new_local',
+      }),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    expect(
+      addFormField(source, 'text', {
+        persistentId: 'existing_column',
+        localId: 'new_local',
+      }),
+    ).toMatchObject({
+      ok: false,
+      reason: 'field_identity_conflict',
+    })
+    expect(
+      addFormField(source, 'text', {
+        persistentId: 'new_field',
+        localId: 'existing_column_local',
+      }),
+    ).toMatchObject({
+      ok: false,
+      reason: 'field_identity_conflict',
+    })
+    expect(
+      addFormField(source, 'detail', {
+        persistentId: 'new_detail',
+        localId: 'new_detail_local',
+        detailColumn: { persistentId: 'new_column', localId: 'existing_local' },
+      }),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    expect(
+      addFormField(source, 'detail', {
+        persistentId: 'new_detail',
+        localId: 'new_detail_local',
+        detailColumn: {
+          persistentId: 'existing_column',
+          localId: 'new_column_local',
+        },
+      }),
+    ).toMatchObject({ ok: false, reason: 'field_identity_conflict' })
+    expect(source.fields).toHaveLength(1)
+  })
+
+  it('does not reuse the deleted final field identity because identity allocation is explicit', () => {
+    const source = draftWith([
+      field(1, { id: 'retired_field', localId: 'retired_local' }),
+    ])
+    const deleted = removeFormField(source, 'retired_local', EMPTY_INVENTORY)
+    assertOk(deleted)
+    const added = addFormField(deleted.draft, 'text', {
+      persistentId: 'fresh_field_after_delete',
+      localId: 'fresh_local_after_delete',
+    })
+    assertOk(added)
+    expect(added.draft.fields.map((entry) => entry.id)).toEqual([
+      'fresh_field_after_delete',
+    ])
+    expect(added.draft.fields[0].id).not.toBe('retired_field')
   })
 })
 
