@@ -76,6 +76,8 @@ const live = (id: string, data: Record<string, unknown>, version = 1) =>
   q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,$4)', [id, SHEET, JSON.stringify(data), version])
 const liveRow = async (id: string) =>
   (await q('SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2', [id, SHEET])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
+const modifiedBy = async (id: string) =>
+  ((await q('SELECT modified_by FROM meta_records WHERE id = $1 AND sheet_id = $2', [id, SHEET])).rows[0] as { modified_by: string | null } | undefined)?.modified_by
 const burnCount = async () => Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
 const trashCount = async (recordId: string) => Number(((await q('SELECT count(*)::int c FROM meta_records_trash WHERE record_id = $1 AND sheet_id = $2', [recordId, SHEET])).rows[0] as { c: number }).c)
 const linkTargets = async (fieldId: string, recordId: string) =>
@@ -258,6 +260,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
 
     expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-at-anchor' }) // reverted
     expect((await liveRow(R_REV))?.version).toBe(3) // version+1, never rewound
+    expect(await modifiedBy(R_REV)).toBe(ACTOR) // restore is the visible modifying action
     expect(await liveRow(R_NEW)).toBeDefined() // revert KEEPS created-after-anchor
 
     const revRows = (await q(

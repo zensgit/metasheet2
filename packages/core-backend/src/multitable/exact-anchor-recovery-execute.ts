@@ -150,12 +150,13 @@ async function syncOneOutboundLinkField(
  *  12. APPLY: restorable reverts (data + meta_links, version-CAS) + RESET canonical delete parity
  *      (version-CAS delete) — any CAS miss ⇒ `preview-drift`, full rollback; seal last.
  *
- * THREAT-MODEL HONESTY (ratified all-writer-fence, v3.7 §2): every legitimate writer takes the canonical
- * fence, so once this transaction holds it no fenced writer can commit until we do. The full-set FOR UPDATE
- * + fresh re-hash + write-time CAS additionally catch fence-BYPASSING direct SQL that committed up to that
- * final recheck. Arbitrary direct SQL committed AFTER the final recheck (e.g. an INSERT while validation
- * runs) is indistinguishable from a hostile DB session and is OUTSIDE the model — no READ COMMITTED
- * in-transaction recheck can close it; that class would require SERIALIZABLE or triggers.
+ * THREAT-MODEL HONESTY (ratified all-writer-fence, v3.7 §2): every writer in the recovery trust model takes
+ * the canonical fence. Named revision-exempt provisioning writers remain outside that model; a user-content
+ * mismatch they leave behind is refused by the strict precheck before apply. The full-set FOR UPDATE + fresh
+ * re-hash + write-time CAS additionally catch fence-BYPASSING direct SQL that committed up to that final
+ * recheck. Arbitrary direct SQL committed AFTER the final recheck (e.g. an INSERT while validation runs) is
+ * indistinguishable from a hostile DB session and is OUTSIDE the model — no READ COMMITTED in-transaction
+ * recheck can close it; that class would require SERIALIZABLE or triggers.
  *
  * KERNEL-OWNED: security adjudication, restorable projection, link integrity, both-direction reset cleanup,
  * tombstone/trash, anti-replay, trust substrate. Route-owned: presentation masking, size ceilings, realtime,
@@ -496,8 +497,8 @@ export async function applyExactAnchorRecovery(
       }
 
       // Row locks were taken over the FULL live set (ORDER BY id FOR UPDATE) before the liveSetHash check,
-      // so liveById already IS in-lock truth for ensureRecordNotLocked + apply. Re-pin the write intents
-      // against it (fail closed, no coercion) — a mismatch here means broken plan/projection invariants.
+      // so liveById already IS in-lock truth for ensureRecordNotLocked + apply. This assertion pins the
+      // plan/projection invariant locally; write-time CAS remains the concurrency guard.
       for (const rw of revertWrites) {
         const live = liveById.get(rw.recordId)
         if (!live || live.version !== rw.liveVersion) throw new ApplyRefusalError('preview-drift')
@@ -770,10 +771,10 @@ export async function applyExactAnchorRecovery(
         // lock-guarded: L8 revert apply — ensureRecordNotLocked just above, same txn.
         // revision-emitted: L8 revert apply — recordRecordRevision below, same txn (source 'restore').
         const upd = await query(
-          `UPDATE meta_records SET data = $1::jsonb, version = version + 1, updated_at = now()
+          `UPDATE meta_records SET data = $1::jsonb, version = version + 1, updated_at = now(), modified_by = $5
            WHERE id = $2 AND sheet_id = $3 AND version = $4
            RETURNING version`,
-          [JSON.stringify(rw.projectedData), rw.recordId, input.sheetId, rw.liveVersion],
+          [JSON.stringify(rw.projectedData), rw.recordId, input.sheetId, rw.liveVersion, input.actorId],
         )
         // CAS miss ⇒ the locked row moved under us ⇒ preview-drift, full rollback (never a bare Error).
         const row = upd.rows[0] as { version?: unknown } | undefined
