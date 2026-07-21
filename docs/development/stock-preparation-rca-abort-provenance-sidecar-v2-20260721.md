@@ -24,7 +24,7 @@ closed set (values-free — the server's own error codes, not business data):
 | ~~401~~ | ~~`UNAUTHENTICATED`~~ | plugin requireAccess | unreachable behind the global JWT gate — NOT a recognized branch (folds to `OTHER`) |
 | 403 | `FORBIDDEN` | plugin requireAccess | valid token, no forced-change, but lacks `integration:read` (permission) |
 | 404 | — | — | not reachable for auth failures (route mounted); a 404 would mean route/base-URL/deploy |
-| 2XX | — | — | healthy — the fast-track condition |
+| 2XX | — | — | healthy **only if `authReadContractClass=VALID`** (§4b P1); a bare 2XX is NOT the fast-track condition — a 200 login/HTML page is `RESPONSE_CONTRACT_INVALID` |
 
 (Sources: `packages/core-backend/src/auth/jwt-middleware.ts` UNAUTHORIZED/PASSWORD_CHANGE_REQUIRED;
 `plugins/plugin-integration-core/lib/http-routes.cjs` requireAccess UNAUTHENTICATED/FORBIDDEN.)
