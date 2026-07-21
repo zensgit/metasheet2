@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
 
@@ -8,6 +9,8 @@ import { auditLog } from '../../src/audit/audit'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import { dataSourcesRouter, getDataSourceManager, isReadOnlySql } from '../../src/routes/data-sources'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
+
+const pinned = usePinnedServer()
 
 function sqlConfig(id: string, readOnly?: boolean): DataSourceConfig {
   return {
@@ -125,28 +128,29 @@ describe('data-sources /query read-only gate (A-RO)', () => {
   })
   app.use(dataSourcesRouter())
   const admin = (id: string) => ({ id, role: 'admin' })
+  beforeAll(() => { pinned.setApp(app) })
 
   it('rejects write SQL on a read-only SQL source with 403 READ_ONLY', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send(sqlConfig('ro-sql'))
-    const res = await request(app).post('/api/data-sources/ro-sql/query').send({ sql: 'DELETE FROM t' })
+    await request(pinned.url()).post('/api/data-sources').send(sqlConfig('ro-sql'))
+    const res = await request(pinned.url()).post('/api/data-sources/ro-sql/query').send({ sql: 'DELETE FROM t' })
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('READ_ONLY')
   })
 
   it('disables the raw query path entirely for a read-only non-SQL source', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send(httpConfig('ro-http'))
-    const res = await request(app).post('/api/data-sources/ro-http/query').send({ sql: 'GET /whatever' })
+    await request(pinned.url()).post('/api/data-sources').send(httpConfig('ro-http'))
+    const res = await request(pinned.url()).post('/api/data-sources/ro-http/query').send({ sql: 'GET /whatever' })
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('READ_ONLY')
   })
 
   it('disables raw /query for a C6 write-gated target before SQL execution', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send(c6WriteTargetConfig('c6-route-target'))
+    await request(pinned.url()).post('/api/data-sources').send(c6WriteTargetConfig('c6-route-target'))
     const querySpy = vi.spyOn(DataSourceManager.prototype, 'query')
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/data-sources/c6-route-target/query')
       .send({ sql: 'DELETE FROM target_table WHERE id = 1' })
     expect(res.status).toBe(403)
@@ -166,17 +170,18 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
   })
   app.use(dataSourcesRouter())
   const admin = (id: string) => ({ id, role: 'admin' })
+  beforeAll(() => { pinned.setApp(app) })
 
   it('a partial options update preserves sibling option keys', async () => {
     currentUser = admin('alice')
-    await request(app)
+    await request(pinned.url())
       .post('/api/data-sources')
       .send({ ...sqlConfig('pm'), options: { autoConnect: true, readOnly: false } })
 
-    const put = await request(app).put('/api/data-sources/pm').send({ options: { timeout: 5 } })
+    const put = await request(pinned.url()).put('/api/data-sources/pm').send({ options: { timeout: 5 } })
     expect(put.status).toBe(200)
 
-    const got = await request(app).get('/api/data-sources/pm')
+    const got = await request(pinned.url()).get('/api/data-sources/pm')
     expect(got.status).toBe(200)
     // shallow merge would have wiped readOnly/autoConnect; deep merge keeps them
     expect(got.body.data.options).toMatchObject({ autoConnect: true, readOnly: false, timeout: 5 })
@@ -185,7 +190,7 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
   it('a partial connection update preserves hidden security keys (P1 regression)', async () => {
     currentUser = admin('alice')
     // A source whose connection carries security-sensitive keys an edit UI does NOT surface.
-    await request(app).post('/api/data-sources').send({
+    await request(pinned.url()).post('/api/data-sources').send({
       id: 'tlsmerge', name: 'tlsmerge', type: 'postgres',
       connection: {
         host: 'old-host', database: 'db',
@@ -197,10 +202,10 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
 
     // The edit flow re-sends connection with only the visible field {host}. Wholesale replace would
     // drop encrypt/trustServerCertificate/tlsMinVersion (weakening cert validation / breaking TLS).
-    const put = await request(app).put('/api/data-sources/tlsmerge').send({ connection: { host: 'new-host' } })
+    const put = await request(pinned.url()).put('/api/data-sources/tlsmerge').send({ connection: { host: 'new-host' } })
     expect(put.status).toBe(200)
 
-    const got = await request(app).get('/api/data-sources/tlsmerge')
+    const got = await request(pinned.url()).get('/api/data-sources/tlsmerge')
     expect(got.status).toBe(200)
     expect(got.body.data.connection).toMatchObject({
       host: 'new-host',        // visible edit applied
@@ -216,21 +221,21 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
 
   it('rotates credentials without exposing them or wiping omitted keys', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send({
+    await request(pinned.url()).post('/api/data-sources').send({
       id: 'rotate-creds', name: 'rotate-creds', type: 'postgres',
       connection: { host: 'db', database: 'erp' },
       credentials: { username: 'old-user', password: 'old-password', apiKey: 'kept-key' },
       options: { autoConnect: false, readOnly: true },
     })
 
-    const put = await request(app)
+    const put = await request(pinned.url())
       .put('/api/data-sources/rotate-creds/credentials')
       .send({ credentials: { password: 'new-password' } })
     expect(put.status).toBe(200)
     expect(put.body.data).not.toHaveProperty('credentials')
     expect(put.body.data.hasCredentials).toBe(true)
 
-    const got = await request(app).get('/api/data-sources/rotate-creds')
+    const got = await request(pinned.url()).get('/api/data-sources/rotate-creds')
     expect(got.body.data).not.toHaveProperty('credentials')
     expect(got.body.data.hasCredentials).toBe(true)
 
@@ -248,20 +253,20 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
 
   it('fails closed on empty credential rotation payloads', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send({
+    await request(pinned.url()).post('/api/data-sources').send({
       id: 'rotate-empty', name: 'rotate-empty', type: 'postgres',
       connection: { host: 'db', database: 'erp' },
       credentials: { username: 'u', password: 'p' },
       options: { autoConnect: false, readOnly: true },
     })
 
-    const empty = await request(app)
+    const empty = await request(pinned.url())
       .put('/api/data-sources/rotate-empty/credentials')
       .send({ credentials: {} })
     expect(empty.status).toBe(400)
     expect(empty.body.error.code).toBe('VALIDATION_ERROR')
 
-    const blank = await request(app)
+    const blank = await request(pinned.url())
       .put('/api/data-sources/rotate-empty/credentials')
       .send({ credentials: { password: '' } })
     expect(blank.status).toBe(400)
@@ -270,7 +275,7 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
 
   it('scopes credential rotation to the source owner', async () => {
     currentUser = admin('alice')
-    await request(app).post('/api/data-sources').send({
+    await request(pinned.url()).post('/api/data-sources').send({
       id: 'rotate-scope', name: 'rotate-scope', type: 'postgres',
       connection: { host: 'db', database: 'erp' },
       credentials: { username: 'u', password: 'alice-password' },
@@ -278,7 +283,7 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
     })
 
     currentUser = admin('bob')
-    const denied = await request(app)
+    const denied = await request(pinned.url())
       .put('/api/data-sources/rotate-scope/credentials')
       .send({ credentials: { password: 'bob-password' } })
     expect(denied.status).toBe(404)

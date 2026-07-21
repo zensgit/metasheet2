@@ -18,6 +18,7 @@
  * univerMetaRouter, poolManager.get() stubbed with an in-memory store.
  */
 import { describe, expect, it, vi, afterEach } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 import express from 'express'
 import request from 'supertest'
 
@@ -186,6 +187,8 @@ async function createApp(
   return { app, mockPool }
 }
 
+const pinned = usePinnedServer()
+
 describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -195,8 +198,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T1: clean store → installable=true, wouldCreate matches the descriptor', async () => {
     const store = createStore()
     const { app } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/dry-run')
       .send({ baseName: 'Launch Plan' })
 
@@ -237,8 +241,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T1: baseName defaults to the template name (install parity)', async () => {
     const store = createStore()
     const { app } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/templates/sales-crm/dry-run')
       .send({})
 
@@ -249,8 +254,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T2: base occupancy → base_exists conflict AND install 409s in the same scenario', async () => {
     const store = createStore({ occupyAllBases: true })
     const { app } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const dryRun = await request(app)
+    const dryRun = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/dry-run')
       .send({ baseName: 'Launch Plan' })
 
@@ -261,7 +267,7 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
     expect(conflict.message).toMatch(/^Base already exists: base_/)
     expect(conflict.message).toContain(conflict.id)
 
-    const install = await request(app)
+    const install = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/install')
       .send({ baseName: 'Launch Plan' })
 
@@ -273,8 +279,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T2: sheet occupancy → sheet_exists conflict AND install 409s in the same scenario', async () => {
     const store = createStore({ occupyAllSheets: true })
     const { app } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const dryRun = await request(app)
+    const dryRun = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/dry-run')
       .send({})
 
@@ -284,7 +291,7 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
     expect(conflict).toMatchObject({ severity: 'error', kind: 'sheet_exists', name: 'Tasks' })
     expect(conflict.message).toMatch(/^Sheet already exists: sheet_/)
 
-    const install = await request(app)
+    const install = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/install')
       .send({})
 
@@ -296,8 +303,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T2: view occupancy → view_exists conflicts (one per view) AND install 409s in the same scenario', async () => {
     const store = createStore({ occupyAllViews: true })
     const { app } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const dryRun = await request(app)
+    const dryRun = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/dry-run')
       .send({})
 
@@ -309,7 +317,7 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
     ])
     expect(dryRun.body.data.conflicts[0].message).toMatch(/^View already exists: view_/)
 
-    const install = await request(app)
+    const install = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/install')
       .send({})
 
@@ -321,8 +329,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T3: ZERO-WRITE proof — dry-run issues SELECTs only, no transaction', async () => {
     const store = createStore({ occupyAllSheets: true })
     const { app, mockPool } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/templates/contract-management/dry-run')
       .send({ baseName: 'Q3 Contracts' })
 
@@ -344,10 +353,11 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('F5: emits [multitable.template.dry-run] events on success and failure paths', async () => {
     const store = createStore({ occupyAllSheets: true })
     const { app } = await createApp(store.handler)
+    pinned.setApp(app)
     const { Logger } = await import('../../src/core/logger')
     const infoSpy = vi.spyOn(Logger.prototype, 'info')
 
-    await request(app)
+    await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/dry-run')
       .send({ baseName: 'Launch Plan' })
       .expect(200)
@@ -368,7 +378,7 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
     expect(successMeta).not.toHaveProperty('baseName')
     expect(JSON.stringify(successMeta)).not.toContain('Launch Plan')
 
-    await request(app)
+    await request(pinned.url())
       .post('/api/multitable/templates/no-such-template/dry-run')
       .send({})
       .expect(404)
@@ -389,8 +399,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T4: read-only user gets 403', async () => {
     const store = createStore()
     const { app, mockPool } = await createApp(store.handler, { perms: ['multitable:read'] })
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/dry-run')
       .send({})
 
@@ -401,8 +412,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('S2-T4: unknown template → 404 with the install-shaped error body, no DB queries', async () => {
     const store = createStore()
     const { app, mockPool } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/templates/no-such-template/dry-run')
       .send({})
 
@@ -417,8 +429,9 @@ describe('S2 — POST /templates/:templateId/dry-run (route)', () => {
   it('rejects an invalid body (empty baseName) like install does', async () => {
     const store = createStore()
     const { app } = await createApp(store.handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/templates/project-tracker/dry-run')
       .send({ baseName: '' })
 

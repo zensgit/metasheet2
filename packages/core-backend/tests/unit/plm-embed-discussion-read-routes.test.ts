@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // Controllable DataSourceManager mock.
 const dsMocks = vi.hoisted(() => ({ getDataSource: vi.fn() }))
@@ -122,6 +123,8 @@ const THREADS_URL = '/api/plm-embed/discussion/threads'
 const THREAD_URL = (threadId = 't1') => `/api/plm-embed/discussion/threads/${threadId}`
 
 describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 2)', () => {
+  const pinned = usePinnedServer()
+
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
     jtiMocks.consume.mockReset()
@@ -131,6 +134,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     process.env.PLM_EMBED_AUDIENCE = AUD
     process.env.PLM_EMBED_ALLOWED_ORIGINS = ORIGIN
     process.env.PLM_EMBED_DATA_SOURCE_ID = DS_ID
+    pinned.setApp(buildApp())
   })
   afterEach(() => {
     for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
@@ -148,7 +152,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const exchangeDiscussionReadSession = vi.fn().mockResolvedValue(credentialResult())
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionsWithReadToken, exchangeDiscussionReadSession }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual(THREADS_LIST)
@@ -166,7 +170,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionThreadWithReadToken = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionThreadWithReadToken }))
 
-    const res = await request(buildApp()).get(THREAD_URL('t1')).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREAD_URL('t1')).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual(THREAD_DETAIL)
@@ -182,11 +186,11 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionsWithReadToken = vi.fn().mockResolvedValue({ data: [THREADS_LIST], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession, getDiscussionsWithReadToken }))
 
-    const app = buildApp()
+    pinned.setApp(buildApp())
     const token1 = mint()
     const token2 = mint()
-    const res1 = await request(app).get(THREADS_URL).set('X-PLM-Embed-Token', token1)
-    const res2 = await request(app).get(THREADS_URL).set('X-PLM-Embed-Token', token2)
+    const res1 = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', token1)
+    const res2 = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', token2)
 
     expect(res1.status).toBe(200)
     expect(res2.status).toBe(200)
@@ -203,7 +207,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionsWithReadToken = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession, getDiscussionsWithReadToken }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('EMBED_SESSION_EXCHANGE_FAILED')
@@ -214,7 +218,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const exchangeDiscussionReadSession = vi.fn().mockResolvedValue({ data: [] })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('EMBED_SESSION_EXCHANGE_FAILED')
@@ -228,7 +232,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionsWithReadToken = vi.fn().mockResolvedValue({ data: [], error: providerError(404, 'sensitive-provider-detail-xyz') })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionsWithReadToken }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(404)
     expect(res.body.ok).toBe(false)
@@ -239,7 +243,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionThreadWithReadToken = vi.fn().mockResolvedValue({ data: [], error: providerError(404) })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionThreadWithReadToken }))
 
-    const res = await request(buildApp()).get(THREAD_URL('missing-thread')).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREAD_URL('missing-thread')).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(404)
   })
@@ -248,7 +252,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionsWithReadToken = vi.fn().mockResolvedValue({ data: [], error: new Error('fetch failed') })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionsWithReadToken }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(502)
   })
@@ -260,7 +264,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const exchangeDiscussionReadSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('EMBED_TOKEN_REPLAYED')
@@ -271,7 +275,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const exchangeDiscussionReadSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ jti: undefined }))
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ jti: undefined }))
 
     expect(res.status).toBe(401)
     expect(jtiMocks.consume).not.toHaveBeenCalled()
@@ -287,7 +291,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession, getDiscussionsWithReadToken }))
     const now = Math.floor(Date.now() / 1000)
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ exp: now - 10 }))
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ exp: now - 10 }))
 
     expect(res.status).toBe(401)
     expect(exchangeDiscussionReadSession).not.toHaveBeenCalled()
@@ -300,7 +304,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const exchangeDiscussionReadSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ feature_key: 'approval_automation' }))
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ feature_key: 'approval_automation' }))
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_FEATURE_MISMATCH')
@@ -309,7 +313,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
 
   it('embed_origin not in the allowlist -> 403', async () => {
     dsMocks.getDataSource.mockReturnValue(fullAdapter())
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example.com' }))
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example.com' }))
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_ORIGIN_NOT_ALLOWED')
   })
@@ -318,7 +322,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const exchangeDiscussionReadSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ tenant: 'tenant-b', exchangeDiscussionReadSession }))
 
-    const res = await request(buildApp()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' }))
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' }))
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
@@ -327,7 +331,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
   })
 
   it('no embed token -> 401 (embedTokenAuth itself)', async () => {
-    const res = await request(buildApp()).get(THREADS_URL)
+    const res = await request(pinned.url()).get(THREADS_URL)
     expect(res.status).toBe(401)
   })
 
@@ -337,7 +341,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionsWithReadToken = vi.fn().mockResolvedValue({ data: [THREADS_LIST], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionsWithReadToken }))
 
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .get(`${THREADS_URL}?target_type=eco&target_id=EVIL-OTHER-PART&include_children=true&include_resolved=true`)
       .set('X-PLM-Embed-Token', mint({ part_id: 'P1' }))
 
@@ -351,7 +355,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionsWithReadToken = vi.fn().mockResolvedValue({ data: [THREADS_LIST], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionsWithReadToken }))
 
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .get(`${THREADS_URL}?target_id=someone-elses-part`)
       .set('X-PLM-Embed-Token', mint({ part_id: 'P-mine' }))
 
@@ -365,7 +369,7 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
     const getDiscussionThreadWithReadToken = vi.fn().mockResolvedValue({ data: [{ ...THREAD_DETAIL, id: 't9' }], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ getDiscussionThreadWithReadToken }))
 
-    const res = await request(buildApp()).get(THREAD_URL('t9')).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).get(THREAD_URL('t9')).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(200)
     expect(res.body.data.id).toBe('t9')

@@ -24,6 +24,7 @@
  *     those edges no longer point at a live formula consumer.
  */
 import { describe, expect, it, vi, afterEach } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 import express from 'express'
 import request from 'supertest'
 
@@ -175,6 +176,8 @@ function field(over: Partial<StoredField> & { id: string; type: string }): Store
   return { sheet_id: SHEET_ID, name: over.id, property: {}, order: 0, ...over }
 }
 
+const pinned = usePinnedServer()
+
 describe('A2-defense — formula reference guard', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -186,8 +189,9 @@ describe('A2-defense — formula reference guard', () => {
       field({ id: 'fld_a', type: 'formula', property: { expression: '=1+1' } }),
     ])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app).post('/api/multitable/fields').send({
+    const res = await request(pinned.url()).post('/api/multitable/fields').send({
       sheetId: SHEET_ID,
       id: 'fld_b',
       name: 'B',
@@ -204,8 +208,9 @@ describe('A2-defense — formula reference guard', () => {
   it('rejects a formula that references itself', async () => {
     const { handler } = createStore([])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app).post('/api/multitable/fields').send({
+    const res = await request(pinned.url()).post('/api/multitable/fields').send({
       sheetId: SHEET_ID,
       id: 'fld_self',
       name: 'Self',
@@ -223,8 +228,9 @@ describe('A2-defense — formula reference guard', () => {
       field({ id: 'fld_look', type: 'lookup', property: {} }),
     ])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app).post('/api/multitable/fields').send({
+    const res = await request(pinned.url()).post('/api/multitable/fields').send({
       sheetId: SHEET_ID,
       id: 'fld_f',
       name: 'F',
@@ -239,8 +245,9 @@ describe('A2-defense — formula reference guard', () => {
   it('ALLOWS a formula that references a nonexistent field (preserves current tolerance)', async () => {
     const { fields, handler } = createStore([])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app).post('/api/multitable/fields').send({
+    const res = await request(pinned.url()).post('/api/multitable/fields').send({
       sheetId: SHEET_ID,
       id: 'fld_g',
       name: 'G',
@@ -258,8 +265,9 @@ describe('A2-defense — formula reference guard', () => {
       field({ id: 'fld_b', type: 'formula', property: { expression: '=1' } }),
     ])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_b')
       .send({ property: { expression: '={fld_a} + 1' } })
 
@@ -277,8 +285,9 @@ describe('A2-defense — formula reference guard', () => {
       field({ id: 'fld_b', type: 'formula', property: { expression: '={fld_a} + 1' } }),
     ])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_b')
       .send({ name: 'Renamed B' })
 
@@ -292,9 +301,10 @@ describe('A2-defense — formula reference guard', () => {
       field({ id: 'fld_x', type: 'string', property: {} }),
     ])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
     // B (formula) references X (string) — allowed, records the B→X edge.
-    await request(app).post('/api/multitable/fields').send({
+    await request(pinned.url()).post('/api/multitable/fields').send({
       sheetId: SHEET_ID,
       id: 'fld_b',
       name: 'B',
@@ -303,7 +313,7 @@ describe('A2-defense — formula reference guard', () => {
     }).expect(201)
 
     // Now converting X to a formula would make B→X a formula→formula edge.
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_x')
       .send({ type: 'formula', property: { expression: '=5' } })
 
@@ -317,8 +327,9 @@ describe('A2-defense — formula reference guard', () => {
       field({ id: 'fld_x', type: 'string', property: {} }),
     ])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_x')
       .send({ type: 'formula', property: { expression: '=5' } })
 
@@ -331,9 +342,10 @@ describe('A2-defense — formula reference guard', () => {
       field({ id: 'fld_x', type: 'string', property: {} }),
     ])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
     // B (formula) references X — records B→X edge.
-    await request(app).post('/api/multitable/fields').send({
+    await request(pinned.url()).post('/api/multitable/fields').send({
       sheetId: SHEET_ID,
       id: 'fld_b',
       name: 'B',
@@ -342,7 +354,7 @@ describe('A2-defense — formula reference guard', () => {
     }).expect(201)
 
     // Convert B away from formula → its B→X edge is NOT cleaned up (matches prod).
-    await request(app)
+    await request(pinned.url())
       .patch('/api/multitable/fields/fld_b')
       .send({ type: 'string' })
       .expect(200)
@@ -350,7 +362,7 @@ describe('A2-defense — formula reference guard', () => {
 
     // Converting X to a formula must SUCCEED: the lingering edge points at B,
     // which is no longer a formula, so it must not block.
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_x')
       .send({ type: 'formula', property: { expression: '=9' } })
 

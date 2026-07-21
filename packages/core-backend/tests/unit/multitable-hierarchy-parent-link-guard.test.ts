@@ -30,6 +30,7 @@
  *     single-value, and can still convert unreferenced links to multi-value.
  */
 import { describe, expect, it, vi, afterEach } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 import express from 'express'
 import request from 'supertest'
 
@@ -219,6 +220,8 @@ const HIERARCHY_VIEW_USING_SINGLE_PARENT: StoredView = {
   config: { parentFieldId: 'fld_parent_single' },
 }
 
+const pinned = usePinnedServer()
+
 describe('S4 — hierarchy parent link single-value guard', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -228,8 +231,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('PATCH rejects a hierarchy parentFieldId that resolves to a multi-value link field', async () => {
     const { updates, handler } = createStore([MULTI_LINK, SINGLE_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(`/api/multitable/views/${VIEW_ID}`)
       .send({ config: { parentFieldId: 'fld_parent_multi', orphanMode: 'root' } })
 
@@ -244,8 +248,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('PATCH accepts a hierarchy parentFieldId that resolves to a single-value link field', async () => {
     const { updates, handler } = createStore([MULTI_LINK, SINGLE_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(`/api/multitable/views/${VIEW_ID}`)
       .send({ config: { parentFieldId: 'fld_parent_single', orphanMode: 'root' } })
 
@@ -258,8 +263,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('PATCH normalizes a hierarchy parentFieldId before persisting config', async () => {
     const { updates, handler } = createStore([SINGLE_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch(`/api/multitable/views/${VIEW_ID}`)
       .send({ config: { parentFieldId: '\u00A0fld_parent_single\u00A0', orphanMode: 'root' } })
 
@@ -272,8 +278,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('POST normalizes a hierarchy parentFieldId before persisting config', async () => {
     const { inserts, handler } = createStore([SINGLE_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/views')
       .send({
         sheetId: SHEET_ID,
@@ -291,8 +298,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('POST rejects a hierarchy parentFieldId that resolves to a link targeting another sheet', async () => {
     const { inserts, handler } = createStore([EXTERNAL_SINGLE_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/views')
       .send({ sheetId: SHEET_ID, name: 'Tree', type: 'hierarchy', config: { parentFieldId: 'fld_parent_external' } })
 
@@ -307,8 +315,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('POST rejects a hierarchy parentFieldId that resolves to a non-link field', async () => {
     const { inserts, handler } = createStore([TEXT_FIELD])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/views')
       .send({ sheetId: SHEET_ID, name: 'Tree', type: 'hierarchy', config: { parentFieldId: 'fld_notes' } })
 
@@ -323,8 +332,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('POST rejects a hierarchy parentFieldId that resolves to no field at all', async () => {
     const { inserts, handler } = createStore([SINGLE_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/views')
       .send({ sheetId: SHEET_ID, name: 'Tree', type: 'hierarchy', config: { parentFieldId: 'fld_ghost' } })
 
@@ -339,8 +349,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('POST ALLOWS a hierarchy view without an explicit parentFieldId (auto mode preserved)', async () => {
     const { inserts, handler } = createStore([MULTI_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/views')
       .send({ sheetId: SHEET_ID, name: 'Tree', type: 'hierarchy', config: { orphanMode: 'hidden' } })
 
@@ -352,8 +363,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('POST ALLOWS a non-hierarchy view whose config carries a stray parentFieldId (guard is hierarchy-scoped)', async () => {
     const { inserts, handler } = createStore([MULTI_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/multitable/views')
       .send({ sheetId: SHEET_ID, name: 'Grid', type: 'grid', config: { parentFieldId: 'fld_parent_multi' } })
 
@@ -368,8 +380,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       [HIERARCHY_VIEW_USING_SINGLE_PARENT],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({
         property: { foreignSheetId: SHEET_ID, limitSingleRecord: false },
@@ -392,8 +405,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       }],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({
         property: { foreignSheetId: SHEET_ID, limitSingleRecord: false },
@@ -416,8 +430,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       }],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({
         property: { foreignSheetId: SHEET_ID, limitSingleRecord: false },
@@ -440,8 +455,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       }],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({
         property: { foreignSheetId: SHEET_ID, limitSingleRecord: false },
@@ -461,8 +477,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       [HIERARCHY_VIEW_USING_SINGLE_PARENT],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({ type: 'string', property: {} })
 
@@ -480,8 +497,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       [HIERARCHY_VIEW_USING_SINGLE_PARENT],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({
         property: { limitSingleRecord: true },
@@ -501,8 +519,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       [HIERARCHY_VIEW_USING_SINGLE_PARENT],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({
         property: { foreignSheetId: OTHER_SHEET_ID, limitSingleRecord: true },
@@ -522,8 +541,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       [HIERARCHY_VIEW_USING_SINGLE_PARENT],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({ name: 'Parent link' })
 
@@ -541,8 +561,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
       [HIERARCHY_VIEW_USING_SINGLE_PARENT],
     )
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_unrelated_single')
       .send({
         property: { foreignSheetId: OTHER_SHEET_ID, limitSingleRecord: true },
@@ -560,8 +581,9 @@ describe('S4 — hierarchy parent link single-value guard', () => {
   it('PATCH /fields allows multi-value conversion when no hierarchy view references the field', async () => {
     const { fieldUpdates, handler } = createStore([SINGLE_LINK])
     const app = await createApp(handler)
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .patch('/api/multitable/fields/fld_parent_single')
       .send({
         property: { foreignSheetId: SHEET_ID, limitSingleRecord: false },
