@@ -152,6 +152,16 @@ partial-field check to template-only). One equivalent mutant noted honestly: reo
 spread `{ multiplicityBound, ...group }` is behaviourally identical because the hasOwnProperty
 guard already strips any group-level bound before the encode call.
 
+## 3e. Owner corrective review round-3 — absorption (2026-07-21)
+
+**1 P2**: `computeSnapshotContentDigest([])` succeeded WITHOUT a bound (the bound was only checked
+inside the group loop, which never runs for an empty snapshot), contradicting the PR's
+"missing snapshot bound fails closed" claim. Fixed: the snapshot-level `multiplicityBound` is
+validated BEFORE the loop. `computeSnapshotContentDigest([], validBound)` still succeeds (empty
+snapshot is the chartered §8.2-4 positive control); `computeSnapshotContentDigest([])` with no /
+zero / over-range bound now throws `MULTIPLICITY_OUT_OF_BOUNDS`. Mutation: dropping the pre-loop
+guard → RED. Header comment reconciled.
+
 ## 4. Explicitly out of scope (per §7 gates)
 
 D2 (scenario/binding store, pointer CAS runtime, `SET LOCAL lock_timeout` claim mechanics with
