@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 import type { QueryFn } from './permission-service'
+import { assertInTransaction } from './pg-transaction-guard'
 import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
 import { selectCheckpointByAnchorSeq } from './history-trust-checkpoint'
 import { reconstructRecordsAtSeq } from './record-reconstructor'
@@ -17,7 +18,11 @@ import {
   type ExactAnchorRecoveryMode,
 } from './restore-preview-identity'
 import { composeBaselineOverlay, type EvaluateRecoveryFullReadAccess } from './exact-anchor-recovery'
-import { classifyExactAnchorRecoveryPlan, type ExactAnchorRecoveryPlan } from './exact-anchor-recovery-plan'
+import {
+  classifyExactAnchorRecoveryPlan,
+  ExactAnchorPlanDataError,
+  type ExactAnchorRecoveryPlan,
+} from './exact-anchor-recovery-plan'
 import {
   assertWithinCaptureCap,
   countInboundLinkCaptureRows,
@@ -116,6 +121,10 @@ async function syncOneOutboundLinkField(
  * formula/lookup/rollup/auto-number non-restorable) + L6-b/L7 stack.
  *
  * THE SHAPE — one outer transaction, COMMIT once, any failure ⇒ FULL ROLLBACK (incl. burn):
+ *   0. TRANSACTION PROOF: `assertInTransaction` (pg_current_xact_id probe, pg-transaction-guard) before
+ *      ANY fence/burn/write. A forged `transaction` wrapper running autocommit statements would make
+ *      "all-or-nothing" a lie (a committed burn over a failed apply, half-applied writes); the probe asks
+ *      Postgres itself. Failure ⇒ the same values-free `recovery-trust-required` (non-oracular).
  *   1. fenceWriterEntry (L4, fence-FIRST).
  *   2. TRUSTED SUBSTRATE (kernel fail-closed): BOTH `MULTITABLE_ENABLE_WRITER_FENCE` and
  *      `MULTITABLE_HISTORY_CONTIGUITY_STRICT` must be on, then `precheckSheetHistoryIntegrityStrict` under
@@ -124,18 +133,29 @@ async function syncOneOutboundLinkField(
  *   3. BURN the token (anti-replay PK).
  *   4. IN-FENCE full-read + authorizedScopeHash (P1-2).
  *   5. IN-FENCE checkpoint re-resolution (never trust the token echo).
- *   6. Dual-hash drift (composed scopeHash + live liveSetHash) + plan (L7).
- *   7. schema-drift whole-reject; RESURRECT fail-closed (`inbound-unprovable` — D1c link history unsolved;
- *      temporary kernel boundary, not route-deferred replay).
+ *   6. Composed scopeHash drift, then §5 step 7 ROW LOCKS over the FULL current live set
+ *      (`ORDER BY id FOR UPDATE`, deterministic — never only the delta: a RESET delete-set escape or a
+ *      version bump on a "non-affected" row is still live-set drift) + liveSetHash check from the LOCKED
+ *      rows, then a FRESH id/version re-hash in a NEW statement snapshot (catches an unfenced CREATE or a
+ *      not-yet-locked bump committed while the lock statement was PARKED behind a concurrent writer).
+ *      Malformed live truth (non-object data, non-integer/negative version) is NEVER coerced — it refuses
+ *      `recovery-trust-required`, as does `ExactAnchorPlanDataError` from the plan classifier.
+ *   7. Plan (L7); schema-drift whole-reject; RESURRECT fail-closed (`inbound-unprovable` — D1c link history
+ *      unsolved; temporary kernel boundary, not route-deferred replay).
  *   8. Canonical restorable PROJECTION only (projectRestorableOntoLive) — derived-only ⇒ no-op. Builds the
  *      exact write delta WITHOUT scalar/link validation (no-oracle: value/existence must not leak before auth).
- *   9. §5 step 7 ROW LOCKS: SELECT … FOR UPDATE the exact affected live ids (revertWrites ∪ reset deletes)
- *      in deterministic id order; recheck each still exists at the bound live version ⇒ else preview-drift;
- *      refresh liveById from locked rows (later ensureRecordNotLocked / writes use in-lock truth).
  *  10. REQUIRED `evaluatePlanAuthorization` over that delta (person membership + foreign-target read/edit
  *      authority belong here in the route adapter). Deny ⇒ uniform `forbidden` before any sensitive validator.
  *  11. AFTER planAuth=true: scalar/whole-record CURRENT validation, foreign-target existence, hierarchy cycle.
- *  12. APPLY: restorable reverts (data + meta_links) + RESET canonical delete parity; seal last.
+ *  12. APPLY: restorable reverts (data + meta_links, version-CAS) + RESET canonical delete parity
+ *      (version-CAS delete) — any CAS miss ⇒ `preview-drift`, full rollback; seal last.
+ *
+ * THREAT-MODEL HONESTY (ratified all-writer-fence, v3.7 §2): every legitimate writer takes the canonical
+ * fence, so once this transaction holds it no fenced writer can commit until we do. The full-set FOR UPDATE
+ * + fresh re-hash + write-time CAS additionally catch fence-BYPASSING direct SQL that committed up to that
+ * final recheck. Arbitrary direct SQL committed AFTER the final recheck (e.g. an INSERT while validation
+ * runs) is indistinguishable from a hostile DB session and is OUTSIDE the model — no READ COMMITTED
+ * in-transaction recheck can close it; that class would require SERIALIZABLE or triggers.
  *
  * KERNEL-OWNED: security adjudication, restorable projection, link integrity, both-direction reset cleanup,
  * tombstone/trash, anti-replay, trust substrate. Route-owned: presentation masking, size ceilings, realtime,
@@ -227,8 +247,23 @@ class ApplyRefusalError extends Error {
 const isUniqueViolation = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && (e as { code?: unknown }).code === '23505'
 
-const asRec = (v: unknown): Record<string, unknown> =>
-  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+/**
+ * Live-state truth must be WELL-FORMED — a malformed row is corrupt substrate, not a value to coerce.
+ * (The old `asRec`/`Number(...) || 0` coercions could hash a corrupt row into a "matching" live set and
+ * then destructively write over it.) Refusal is the values-free `recovery-trust-required`.
+ */
+const requireLiveData = (v: unknown): Record<string, unknown> => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    throw new ApplyRefusalError('recovery-trust-required')
+  }
+  return v as Record<string, unknown>
+}
+const requireLiveVersion = (v: unknown): number => {
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
+    throw new ApplyRefusalError('recovery-trust-required')
+  }
+  return v
+}
 
 export interface ExactAnchorApplyInput {
   token: string
@@ -260,6 +295,23 @@ export async function applyExactAnchorRecovery(
 
   try {
     return await transaction(async (query) => {
+      // 0. PROVE a real ongoing transaction (pg_current_xact_id probe) before any fence/burn/write. A
+      //    forged wrapper over a pool/autocommit client is caught by Postgres itself, not a marker; the
+      //    refusal is the same values-free substrate refusal as every other trust failure (non-oracular).
+      try {
+        await assertInTransaction(
+          {
+            query: async (sql: string, params?: unknown[]) => {
+              const res = await query(sql, params)
+              return { rows: res.rows as Array<Record<string, unknown>>, rowCount: res.rowCount ?? null }
+            },
+          },
+          'exact-anchor destructive apply',
+        )
+      } catch {
+        throw new ApplyRefusalError('recovery-trust-required')
+      }
+
       // 1. Fence-first (L4).
       await fenceWriterEntry(query, input.sheetId)
 
@@ -302,6 +354,11 @@ export async function applyExactAnchorRecovery(
       )
       if (anchorHash !== scopeHash) throw new ApplyRefusalError('preview-drift')
 
+      // §5 step 7 ROW LOCKS — the FULL current live set, deterministic id order (multi-writer deadlock
+      // safety). Locking only the write delta is NOT enough under the ratified all-writer-fence model's
+      // direct-SQL hardening: a RESET's stale delete set and a version bump on a "non-affected" row are
+      // both live-set drift the token's liveSetHash must veto, so every live row is locked and hashed
+      // from the LOCKED (EvalPlanQual-fresh) truth. Malformed rows fail closed — never coerced.
       const liveById = new Map<string, {
         data: Record<string, unknown>
         version: number
@@ -312,7 +369,10 @@ export async function applyExactAnchorRecovery(
         updated_at?: unknown
       }>()
       for (const r of (await query(
-        'SELECT id, data, version, locked, locked_by, created_by, created_at, updated_at FROM meta_records WHERE sheet_id = $1',
+        `SELECT id, data, version, locked, locked_by, created_by, created_at, updated_at
+         FROM meta_records WHERE sheet_id = $1
+         ORDER BY id
+         FOR UPDATE`,
         [input.sheetId],
       )).rows as Array<{
         id: unknown
@@ -325,8 +385,8 @@ export async function applyExactAnchorRecovery(
         updated_at?: unknown
       }>) {
         liveById.set(String(r.id), {
-          data: asRec(r.data),
-          version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0,
+          data: requireLiveData(r.data),
+          version: requireLiveVersion(r.version),
           locked: r.locked,
           locked_by: r.locked_by,
           created_by: r.created_by,
@@ -339,6 +399,19 @@ export async function applyExactAnchorRecovery(
       )
       if (liveHash !== liveSetHash) throw new ApplyRefusalError('preview-drift')
 
+      // FRESH id/version re-hash in a NEW statement snapshot. If the lock above PARKED behind a concurrent
+      // writer, rows that writer committed AFTER the lock statement's snapshot began — an unfenced CREATE
+      // (FOR UPDATE cannot lock a phantom) or a bump on a row not yet locked — are visible only to a fresh
+      // statement. Any divergence from the token ⇒ preview-drift, full rollback (burn included).
+      // HONESTY: fence-bypassing direct SQL committed AFTER this recheck is outside the all-writer-fence
+      // model (see module doc); fenced writers cannot commit while we hold the fence.
+      const recheckHash = hashAnchorRecoveryScope(
+        ((await query('SELECT id, version FROM meta_records WHERE sheet_id = $1', [input.sheetId]))
+          .rows as Array<{ id: unknown; version: unknown }>)
+          .map((r) => ({ recordId: String(r.id), exists: true, version: requireLiveVersion(r.version) })),
+      )
+      if (recheckHash !== liveSetHash) throw new ApplyRefusalError('preview-drift')
+
       // 6b. G-SCHEMA-BEFORE-FENCE — CURRENT field surface must match the token-bound schemaHash.
       // Catches retype (string→longText) and property-only edits that leave record ids/versions unchanged
       // and may still leave historical values "valid" under the new type (scope/live hashes cannot see this).
@@ -349,10 +422,17 @@ export async function applyExactAnchorRecovery(
       )
       if (liveSchemaHash !== schemaHash) throw new ApplyRefusalError('schema-drift')
 
-      // 7. Plan (L7).
+      // 7. Plan (L7). A malformed at-anchor/live snapshot (ExactAnchorPlanDataError) is corrupt
+      //    substrate — the same values-free recovery-trust-required, never a coerced-through plan.
       const fieldIds = new Set(schemaRows.map((r) => String(r.id)))
       const rawTypeById = new Map(schemaRows.map((r) => [String(r.id), String(r.type ?? '')]))
-      const plan: ExactAnchorRecoveryPlan = classifyExactAnchorRecoveryPlan(composed, liveById, fieldIds)
+      let plan: ExactAnchorRecoveryPlan
+      try {
+        plan = classifyExactAnchorRecoveryPlan(composed, liveById, fieldIds)
+      } catch (e) {
+        if (e instanceof ExactAnchorPlanDataError) throw new ApplyRefusalError('recovery-trust-required')
+        throw e
+      }
 
       if (plan.driftCount > 0) throw new ApplyRefusalError('schema-drift')
 
@@ -415,75 +495,12 @@ export async function applyExactAnchorRecovery(
         })
       }
 
-      // §5 step 7 — lock affected live rows BEFORE planAuth / sensitive validation / writes.
-      // Sheet advisory fence is necessary but not sufficient: an unfenced concurrent writer can still
-      // UPDATE/DELETE between liveSetHash and apply (especially RESET deletes, which have no version CAS).
-      // Deterministic id order avoids multi-row deadlock with other writers.
-      {
-        const affectedIdSet = new Set<string>()
-        for (const rw of revertWrites) affectedIdSet.add(rw.recordId)
-        for (const id of deleteRecordIds) {
-          if (liveById.has(id)) affectedIdSet.add(id)
-        }
-        const affectedIds = [...affectedIdSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-        if (affectedIds.length > 0) {
-          const expectedVersionById = new Map<string, number>()
-          for (const id of affectedIds) {
-            const live = liveById.get(id)
-            if (!live) throw new ApplyRefusalError('preview-drift')
-            expectedVersionById.set(id, live.version)
-          }
-          const lockedRes = await query(
-            `SELECT id, data, version, locked, locked_by, created_by, created_at, updated_at
-             FROM meta_records
-             WHERE sheet_id = $1 AND id = ANY($2::text[])
-             ORDER BY id
-             FOR UPDATE`,
-            [input.sheetId, affectedIds],
-          )
-          const lockedById = new Map<string, {
-            data: Record<string, unknown>
-            version: number
-            locked?: unknown
-            locked_by?: unknown
-            created_by?: unknown
-            created_at?: unknown
-            updated_at?: unknown
-          }>()
-          for (const r of lockedRes.rows as Array<{
-            id: unknown
-            data: unknown
-            version: unknown
-            locked?: unknown
-            locked_by?: unknown
-            created_by?: unknown
-            created_at?: unknown
-            updated_at?: unknown
-          }>) {
-            lockedById.set(String(r.id), {
-              data: asRec(r.data),
-              version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0,
-              locked: r.locked,
-              locked_by: r.locked_by,
-              created_by: r.created_by,
-              created_at: r.created_at,
-              updated_at: r.updated_at,
-            })
-          }
-          for (const id of affectedIds) {
-            const locked = lockedById.get(id)
-            if (!locked) throw new ApplyRefusalError('preview-drift') // deleted under us
-            if (locked.version !== expectedVersionById.get(id)) {
-              throw new ApplyRefusalError('preview-drift') // concurrent version bump
-            }
-            liveById.set(id, locked) // in-lock truth for ensureRecordNotLocked + later apply
-          }
-          // Keep revert write intents aligned with the locked versions (must already match; re-pin).
-          for (const rw of revertWrites) {
-            const live = liveById.get(rw.recordId)
-            if (!live || live.version !== rw.liveVersion) throw new ApplyRefusalError('preview-drift')
-          }
-        }
+      // Row locks were taken over the FULL live set (ORDER BY id FOR UPDATE) before the liveSetHash check,
+      // so liveById already IS in-lock truth for ensureRecordNotLocked + apply. Re-pin the write intents
+      // against it (fail closed, no coercion) — a mismatch here means broken plan/projection invariants.
+      for (const rw of revertWrites) {
+        const live = liveById.get(rw.recordId)
+        if (!live || live.version !== rw.liveVersion) throw new ApplyRefusalError('preview-drift')
       }
 
       // REQUIRED in-fence WRITE authorization over the true restorable delta (BEFORE scalar/link validation).
@@ -728,11 +745,14 @@ export async function applyExactAnchorRecovery(
           )
           // lock-guarded: L8 reset delete — ensureRecordNotLocked earlier in this txn.
           // revision-emitted: L8 reset delete — recordRecordRevision(action:'delete', id=pre-gen) above.
+          // Version-CAS on the LOCKED expected version: a zero-row delete means the row moved under us
+          // (fence-bypassing direct SQL / same-txn side effect) ⇒ preview-drift, full rollback — never a
+          // bare Error and never an unconditional delete of a row the token did not hash.
           const del = await query(
-            'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2 RETURNING version',
-            [p.recordId, input.sheetId],
+            'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2 AND version = $3 RETURNING version',
+            [p.recordId, input.sheetId, p.live.version],
           )
-          if (!del.rows[0]) throw new Error(`exact-anchor apply: reset delete found no row for ${p.recordId}`)
+          if (!del.rows[0]) throw new ApplyRefusalError('preview-drift')
           deletes++
         }
       }
@@ -755,8 +775,9 @@ export async function applyExactAnchorRecovery(
            RETURNING version`,
           [JSON.stringify(rw.projectedData), rw.recordId, input.sheetId, rw.liveVersion],
         )
+        // CAS miss ⇒ the locked row moved under us ⇒ preview-drift, full rollback (never a bare Error).
         const row = upd.rows[0] as { version?: unknown } | undefined
-        if (!row) throw new Error(`exact-anchor apply: optimistic version guard failed for ${rw.recordId}`)
+        if (!row) throw new ApplyRefusalError('preview-drift')
         for (const lu of rw.linkUpdates) {
           await syncOneOutboundLinkField(query, rw.recordId, lu.fieldId, lu.targetIds)
         }
@@ -764,7 +785,7 @@ export async function applyExactAnchorRecovery(
         await recordRecordRevision(query, {
           sheetId: input.sheetId,
           recordId: rw.recordId,
-          version: Number(row.version),
+          version: requireLiveVersion(row.version),
           action: 'update',
           source: 'restore',
           actorId: input.actorId,

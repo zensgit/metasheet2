@@ -432,7 +432,8 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
 
   test('ROW-LOCK-RACE (constructed): external FOR UPDATE on affected row parks L8; unfenced concurrent version bump ⇒ preview-drift, zero burn/writes; undo ⇒ same token applies', async () => {
     // v3.7 §5 step 7: sheet advisory fence alone is not enough — an unfenced writer can still UPDATE the
-    // target row between liveSetHash and apply. Targeted SELECT … FOR UPDATE + version recheck must catch it.
+    // target row between liveSetHash and apply. The FULL live-set SELECT … FOR UPDATE + hash-from-locked-rows
+    // must catch it.
     //
     // Construction: hold the target row FOR UPDATE (no sheet fence) → launch L8 → prove L8 is still in-flight
     // after a budget that is long enough for an unblocked apply to finish (so missing FOR UPDATE fails here)
@@ -1344,6 +1345,234 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     )).rows as Array<{ record_id: string; foreign_record_id: string }>
     expect(tombsA).toEqual([{ record_id: R_B, foreign_record_id: R_A }])
     expect(tombsB).toEqual([{ record_id: R_A, foreign_record_id: R_B }])
+  })
+
+  // ── W1-C hardening: txn proof, malformed live truth fail-closed, full-set lock races, write-time CAS ───
+  test('TXN-PROOF: a fake `transaction` wrapper running autocommit statements ⇒ recovery-trust-required, zero burn/writes; the SAME token over a real txn applies', async () => {
+    const { R_REV, anchorOp } = await seedWorld()
+    const pv = await preview(anchorOp)
+    const before = await liveRow(R_REV)
+    // Forged wrapper: no BEGIN — every statement autocommits on the pool. The pg_current_xact_id probe
+    // must refuse BEFORE the fence/burn: an autocommitted burn row would survive its own "rollback".
+    const fakeTxn = <T>(fn: (query: QueryFn) => Promise<T>): Promise<T> => fn(q as unknown as QueryFn)
+    expect(await applyExactAnchorRecovery(fakeTxn, applyArgs(pv.token)))
+      .toEqual({ ok: false, reason: 'recovery-trust-required' })
+    expect(await liveRow(R_REV)).toEqual(before)
+    expect(await burnCount()).toBe(0) // nothing ran before the probe — no autocommitted burn
+    expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+    // POSITIVE control (anti-vacuous): the same unburned token over a REAL transaction applies.
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+  })
+
+  test('MALFORMED-LIVE data: a scalar-data live row the strict precheck cannot see (all user fields absent from the latest snapshot) ⇒ recovery-trust-required — the old asRec coercion would have destructively applied over it', async () => {
+    // World: at-anchor {F_STR:'at'}; the LATEST snapshot is {} (user field removed), so the precheck's
+    // content layer compares undefined===undefined and PASSES even over a corrupt scalar-data row. Only
+    // the apply's fail-closed shape validation stands between this row and a destructive revert.
+    const R = `rec_maldata_${TS}`
+    const [sCreate, sUpdate] = await seqBand(2)
+    const anchorOp = await sealAnchorOp(R, [
+      { seq: sCreate, version: 1, action: 'create', snap: { [F_STR]: 'at' } },
+    ])
+    await revSeq(R, 2, 'update', {}, sUpdate)
+    await live(R, {}, 2)
+    const pv = await preview(anchorOp)
+    // Corrupt AFTER preview: the id/version fingerprint is unchanged, so no hash can refuse this.
+    await q(`UPDATE meta_records SET data = '"corrupt"'::jsonb WHERE id = $1 AND sheet_id = $2`, [R, SHEET])
+    expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
+      .toEqual({ ok: false, reason: 'recovery-trust-required' })
+    expect(await burnCount()).toBe(0)
+    // Repair ⇒ the same unburned token applies and the revert lands.
+    await q(`UPDATE meta_records SET data = '{}'::jsonb WHERE id = $1 AND sheet_id = $2`, [R, SHEET])
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+    expect((await liveRow(R))?.data).toEqual({ [F_STR]: 'at' })
+  })
+
+  test('MALFORMED-LIVE version (injected past the precheck): version corrupted to -1 AFTER the strict precheck ⇒ recovery-trust-required — the old Number()||0 path would have misclassified it as preview-drift', async () => {
+    const { R_REV, anchorOp } = await seedWorld()
+    const pv = await preview(anchorOp)
+    // The burn INSERT runs after the strict precheck and before the live-set lock: an AFTER INSERT trigger
+    // there corrupts the version in the SAME txn, past every upstream integrity layer.
+    const fn = `eaa_neg_ver_${TS}`
+    const trg = `trg_eaa_neg_ver_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN
+      UPDATE meta_records SET version = -1 WHERE id = '${R_REV}' AND sheet_id = NEW.sheet_id;
+      RETURN NEW; END $$ LANGUAGE plpgsql`)
+    await q(`CREATE TRIGGER ${trg} AFTER INSERT ON meta_recovery_token_burns FOR EACH ROW
+      WHEN (NEW.sheet_id = '${SHEET}') EXECUTE FUNCTION ${fn}()`)
+    try {
+      // Fail-closed SHAPE classification, not drift: a negative version is corrupt substrate.
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
+        .toEqual({ ok: false, reason: 'recovery-trust-required' })
+      expect((await liveRow(R_REV))?.version).toBe(2) // the injected corruption rolled back too
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${trg} ON meta_recovery_token_burns`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+    }
+    // POSITIVE control: trigger removed ⇒ the same unburned token applies.
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+  })
+
+  test('MALFORMED-ANCHOR snapshot: an at-anchor snapshot that is a jsonb array ⇒ ExactAnchorPlanDataError maps to recovery-trust-required, zero burn/writes', async () => {
+    const R = `rec_mal_${TS}`
+    const [sCreate] = await seqBand(1)
+    const anchorOp = await sealAnchorOp(R, [
+      { seq: sCreate, version: 1, action: 'create', snap: ['not-an-object'] as unknown as Record<string, unknown> },
+    ])
+    // Live data {} content-matches the precheck's coerced view of the array snapshot (no user field on
+    // either side), so the strict precheck PASSES — only the plan classifier sees the malformed target.
+    await live(R, {}, 1)
+    const pv = await preview(anchorOp)
+    expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
+      .toEqual({ ok: false, reason: 'recovery-trust-required' })
+    expect((await liveRow(R))?.data).toEqual({})
+    expect(await burnCount()).toBe(0)
+  })
+
+  test('PARKED-CREATE (constructed race): an unfenced INSERT committed while the apply is PARKED on the full live-set lock ⇒ preview-drift, zero burn/writes — a stale RESET delete set never commits around a new record', async () => {
+    const { R_REV, R_NEW, anchorOp } = await seedWorld()
+    const pv = await preview(anchorOp, 'reset')
+    expect(pool).toBeTruthy()
+    const R_X = `rec_parked_new_${TS}`
+    const holder = await pool!.connect()
+    try {
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [R_REV, SHEET])
+      let applySettled = false
+      const applying = applyExactAnchorRecovery(txn, applyArgs(pv.token)).finally(() => { applySettled = true })
+      await new Promise((r) => setTimeout(r, 2500))
+      expect(applySettled).toBe(false) // parked on the full-set lock behind our row hold
+      // Unfenced CREATE commits while the lock statement is parked. FOR UPDATE cannot lock a phantom and
+      // the lock statement's snapshot predates this commit — ONLY the fresh post-lock re-hash can see it.
+      const sX = String((await holder.query(`SELECT nextval('meta_record_chain_seq')::text AS s`)).rows[0].s)
+      await holder.query(
+        `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq)
+         VALUES (gen_random_uuid(), $1, $2, 1, 'create', 'rest', ARRAY[]::text[], '{}'::jsonb, $3::jsonb, $4::bigint)`,
+        [SHEET, R_X, JSON.stringify({ [F_STR]: 'parked-newbie' }), sX],
+      )
+      await holder.query(
+        'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+        [R_X, SHEET, JSON.stringify({ [F_STR]: 'parked-newbie' })],
+      )
+      await holder.query('COMMIT')
+      const out = await applying
+      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
+      expect(await liveRow(R_X)).toBeDefined() // the concurrent create SURVIVED untouched
+      expect(await liveRow(R_NEW)).toBeDefined() // the reset delete set did NOT partially apply
+      expect(await burnCount()).toBe(0)
+      expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* committed above */ }
+      holder.release()
+    }
+    // POSITIVE control: remove the concurrent create ⇒ the same unburned token applies (reset deletes R_NEW).
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2', [SHEET, R_X])
+    await q('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_X, SHEET])
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+    expect(await liveRow(R_NEW)).toBeUndefined()
+  })
+
+  test('PARKED-BUMP non-affected (constructed race): a version bump on a row OUTSIDE the write delta committed while the apply is PARKED ⇒ preview-drift, zero burn/writes — a delta-only lock would sail past it', async () => {
+    const { R_REV, R_NEW, anchorOp, seqs } = await seedWorld()
+    const pv = await preview(anchorOp, 'revert') // R_NEW is created-after: revert KEEPS it — no write intent
+    expect(pool).toBeTruthy()
+    const holder = await pool!.connect()
+    try {
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [R_NEW, SHEET])
+      let applySettled = false
+      const applying = applyExactAnchorRecovery(txn, applyArgs(pv.token)).finally(() => { applySettled = true })
+      await new Promise((r) => setTimeout(r, 2500))
+      // A write-delta-only lock never waits on R_NEW (it is not written), and the old plain-read hash ran
+      // before this bump committed — only the FULL live-set lock parks here and re-reads the bumped truth.
+      expect(applySettled).toBe(false)
+      const sBump = String(BigInt(seqs.sNew) + 3000n)
+      await holder.query(
+        `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq)
+         VALUES (gen_random_uuid(), $1, $2, 2, 'update', 'rest', ARRAY[]::text[], '{}'::jsonb, $3::jsonb, $4::bigint)`,
+        [SHEET, R_NEW, JSON.stringify({ [F_STR]: 'newbie-bumped' }), sBump],
+      )
+      await holder.query('UPDATE meta_records SET version = 2 WHERE id = $1 AND sheet_id = $2', [R_NEW, SHEET])
+      await holder.query('COMMIT')
+      const out = await applying
+      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
+      expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-now' }) // the revert did NOT land
+      expect(await burnCount()).toBe(0)
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* committed above */ }
+      holder.release()
+    }
+    // POSITIVE control: rewind the bump ⇒ the same unburned token applies.
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2 AND version = 2', [SHEET, R_NEW])
+    await q('UPDATE meta_records SET version = 1 WHERE id = $1 AND sheet_id = $2', [R_NEW, SHEET])
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+    expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-at-anchor' })
+  })
+
+  test('RESET-DELETE-CAS (injected same-txn drift): version bumped after the delete revision but before the CAS delete ⇒ preview-drift (never a bare Error), full rollback incl. the injected bump', async () => {
+    const { R_REV, R_NEW, anchorOp } = await seedWorld()
+    const pv = await preview(anchorOp, 'reset')
+    const fn = `eaa_del_cas_bump_${TS}`
+    const trg = `trg_eaa_del_cas_bump_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN
+      UPDATE meta_records SET version = version + 1 WHERE id = NEW.record_id AND sheet_id = NEW.sheet_id;
+      RETURN NEW; END $$ LANGUAGE plpgsql`)
+    await q(`CREATE TRIGGER ${trg} AFTER INSERT ON meta_record_revisions FOR EACH ROW
+      WHEN (NEW.sheet_id = '${SHEET}' AND NEW.action = 'delete' AND NEW.source = 'restore') EXECUTE FUNCTION ${fn}()`)
+    try {
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'preview-drift' })
+      expect(await liveRow(R_NEW)).toBeDefined()
+      expect((await liveRow(R_NEW))?.version).toBe(1) // the injected bump rolled back with the refusal
+      expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-now' })
+      expect(await trashCount(R_NEW)).toBe(0)
+      expect(await burnCount()).toBe(0)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${trg} ON meta_record_revisions`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+    }
+    // POSITIVE control: trigger removed ⇒ the same unburned token applies and the reset delete lands.
+    expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
+    expect(await liveRow(R_NEW)).toBeUndefined()
+  })
+
+  test('REVERT-CAS (injected same-txn drift): sibling version bumped between the full-set lock and its CAS UPDATE ⇒ preview-drift (never a bare Error), full rollback', async () => {
+    const R1 = `rec_cas_a_${TS}`
+    const R2 = `rec_cas_b_${TS}`
+    const [s1, s2, s3, s4] = await seqBand(4)
+    await revSeq(R2, 1, 'create', { [F_STR]: 'r2-at-anchor' }, s1)
+    const anchorOp = await sealAnchorOp(R1, [
+      { seq: s2, version: 1, action: 'create', snap: { [F_STR]: 'r1-at-anchor' } },
+    ])
+    await revSeq(R1, 2, 'update', { [F_STR]: 'r1-now' }, s3)
+    await revSeq(R2, 2, 'update', { [F_STR]: 'r2-now' }, s4)
+    await live(R1, { [F_STR]: 'r1-now' }, 2)
+    await live(R2, { [F_STR]: 'r2-now' }, 2)
+    const pv = await preview(anchorOp, 'revert')
+    // R1 sorts before R2: R1's restore revision insert bumps R2 inside the SAME txn, so R2's later CAS
+    // UPDATE (WHERE version = locked expected) misses — the refusal must be preview-drift, not a throw.
+    const fn = `eaa_rev_cas_bump_${TS}`
+    const trg = `trg_eaa_rev_cas_bump_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN
+      UPDATE meta_records SET version = version + 1 WHERE id = '${R2}' AND sheet_id = NEW.sheet_id;
+      RETURN NEW; END $$ LANGUAGE plpgsql`)
+    await q(`CREATE TRIGGER ${trg} AFTER INSERT ON meta_record_revisions FOR EACH ROW
+      WHEN (NEW.sheet_id = '${SHEET}' AND NEW.action = 'update' AND NEW.source = 'restore' AND NEW.record_id = '${R1}') EXECUTE FUNCTION ${fn}()`)
+    try {
+      expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token))).toEqual({ ok: false, reason: 'preview-drift' })
+      expect((await liveRow(R1))?.data).toEqual({ [F_STR]: 'r1-now' }) // R1's landed revert rolled back too
+      expect((await liveRow(R2))?.data).toEqual({ [F_STR]: 'r2-now' })
+      expect((await liveRow(R2))?.version).toBe(2) // the injected bump rolled back
+      expect(await burnCount()).toBe(0)
+      expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${trg} ON meta_record_revisions`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+    }
+    // POSITIVE control: trigger removed ⇒ the same unburned token applies; both reverts land.
+    const ok = await applyExactAnchorRecovery(txn, applyArgs(pv.token))
+    expect(ok.ok).toBe(true)
+    expect((await liveRow(R1))?.data).toEqual({ [F_STR]: 'r1-at-anchor' })
+    expect((await liveRow(R2))?.data).toEqual({ [F_STR]: 'r2-at-anchor' })
   })
 
   // ── G1 (pre-wiring gate list): burn-retention sweep ─────────────────────────────────────────────────────
