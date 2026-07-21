@@ -612,6 +612,18 @@ function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
   }
 }
 
+// W4-PRE-1 policy (§3.3 item 2 of the Wave-4 onboarding design lock, docs/development/
+// attendance-vnext-wave4-onboarding-design-lock-20260721.md): DingTalk OAuth JIT admission has
+// no per-org context anywhere in this module — `readDingTalkOauthConfig()` reads a single
+// deployment-wide `DINGTALK_CORP_ID` env var, not an org-scoped value, and there is no
+// existing corp_id→org resolution primitive elsewhere in this codebase this call could reuse
+// (the directory-sync admission path resolves org from a `directory_integrations` ROW, which
+// this login flow never touches). Inventing a new corp_id→org inference here would be new
+// design surface, not a wiring fix, and risks a WRONG org being silently attached (worse than
+// none). Per the explicit ticket instruction, org-unknowable paths record policy and do NOT
+// guess. Deliberately: this function does NOT write user_orgs. Verified by
+// tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts (zero user_orgs rows for a
+// user created via this path).
 async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow> {
   const userId = crypto.randomUUID()
   // unionId first (review #3771 P2-1): the container surface has no openId, and
@@ -1114,4 +1126,14 @@ export async function bindDingTalkIdentityToUser(input: {
       )
     }
   })
+}
+
+/**
+ * W4-PRE-1 (§3.3 item 2): test-only seam so the "org-unknowable path does not silently write
+ * user_orgs" policy (see the comment on createProvisionedUser above) can be verified against a
+ * real admission, not just read as a comment. Mirrors the __directorySyncInternalsForTests
+ * pattern in directory-sync.ts — not a new production surface.
+ */
+export const __dingtalkOAuthInternalsForTests = {
+  createProvisionedUser,
 }

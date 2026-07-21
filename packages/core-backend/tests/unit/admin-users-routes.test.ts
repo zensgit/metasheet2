@@ -55,6 +55,12 @@ vi.mock('../../src/middleware/auth', () => ({
 
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
+  // W4-PRE-1: POST /api/admin/users now wraps its write sequence in transaction() (the
+  // user_orgs atomicity requirement, §3.3). The handler's client.query is backed by the SAME
+  // pgMocks.query mock so every existing test's call-order/count scripting (mockResolvedValueOnce
+  // chains) is unaffected — transaction() is transparent here, not a second mock surface.
+  transaction: vi.fn(async (handler: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
+    handler({ query: pgMocks.query })),
 }))
 
 vi.mock('../../src/rbac/service', () => ({

@@ -373,6 +373,15 @@ export default defineConfig({
       // authz + flag-off. DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot
       // skip-green it; wired whole-file into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
+      // W4-PRE-1 real-DB (§3.3 of attendance-vnext-wave4-onboarding-design-lock-20260721.md):
+      // user_orgs admission write-site suites (fresh-DB/atomicity/two-org/upgrade across
+      // POST /api/admin/users + directory-sync admission, plus the org-unknowable policy
+      // negative controls). DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB
+      // job cannot skip-green them; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts',
+      'tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts',
+      'tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
