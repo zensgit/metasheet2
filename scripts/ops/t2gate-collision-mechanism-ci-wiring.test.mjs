@@ -26,7 +26,9 @@ import {
 //       (a comment / coverage.exclude / nested exclude / free-text hit is NOT enough)
 //   (2) the suite is a whole-file vitest arg of the real-DB step located by its EXACT stable
 //       `id:` — and that step is EXECUTABLE: `if: matrix.node-version == '20.x'`, a real
-//       `env.DATABASE_URL`, and `--config vitest.integration.config.ts`
+//       `env.DATABASE_URL` with a NON-EMPTY value, and a REAL vitest invocation under
+//       `--config vitest.integration.config.ts` that carries the suite path as its OWN argument
+//       (pins (c) and (d) are judged on the same command, so a decoy line cannot supply either)
 //
 // THIS FILE ALSO HOSTS the shared helper's synthetic mutation coverage (owner ruling on #4496).
 // `scripts/ops/ci-realdb-step-contract.mjs` is imported by all fifteen `*-ci-wiring.test.mjs`
@@ -350,15 +352,19 @@ function craftWorkflow({
   stepId = STEP_ID,
   withIdStep = true,
   withPrefixDecoy = false,
+  runPrefixLines = [],
+  runSuffixLines = [],
 } = {}) {
   const payload = [
     ...ifLines,
     ...envLines,
     '        run: |',
     '          : "${DATABASE_URL:?DATABASE_URL is required}"',
+    ...runPrefixLines,
     `          pnpm --filter @metasheet/core-backend exec vitest --config ${config} run \\`,
     `            ${file} \\`,
     '            --reporter=dot',
+    ...runSuffixLines,
   ]
   const lines = ['jobs:', '  test:', '    steps:']
   // The decoy is placed EARLIER, exactly as the reproduced bypass did.
@@ -446,6 +452,100 @@ test('synthetic MUTATION 4: config swapped to the default vitest.config.ts must 
     /vitest\.integration\.config\.ts/,
     'the default config must not satisfy the contract',
   )
+})
+
+test('synthetic MUTATION 5: empty / whitespace-only / bare env.DATABASE_URL must RED', () => {
+  // Owner repro (a) on the id-anchored contract: `DATABASE_URL: ''` is a PRESENT YAML key, so a
+  // "key exists" pin greened it — but an empty DATABASE_URL makes every describeIfDatabase suite
+  // skip, i.e. exactly the skip-green pin (b) exists to stop.
+  for (const value of ["''", '""', '"   "', "'  '", '']) {
+    const wf = craftWorkflow({ envLines: ['        env:', `          DATABASE_URL: ${value}`] })
+    assert.ok(wf.includes('DATABASE_URL'), 'the env key is still present — presence alone must not pass')
+    assert.ok(wf.includes(FILE), 'the suite path is still listed')
+    const step = extractStepById(wf, STEP_ID)
+    assert.notEqual(step, null, 'the id step still exists; only the env VALUE was mutated')
+    assert.equal(stepHasEnvDatabaseUrl(step), false, `DATABASE_URL: ${value} must not count`)
+    assert.throws(
+      () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+      /env\.DATABASE_URL/,
+      `DATABASE_URL: ${value} must not satisfy the contract`,
+    )
+  }
+  // Positive control: the pin is not "reject every env value" — a real URL, and an inline-commented
+  // real URL, both still pass.
+  for (const value of [
+    'postgresql://postgres@localhost:5432/metasheet_test',
+    "'postgresql://postgres@localhost:5432/metasheet_test'",
+    'postgresql://postgres@localhost:5432/metasheet_test # real DB',
+  ]) {
+    const ok = craftWorkflow({ envLines: ['        env:', `          DATABASE_URL: ${value}`] })
+    assert.equal(stepHasEnvDatabaseUrl(extractStepById(ok, STEP_ID)), true, `value ${value}`)
+    assert.equal(isSuiteWiredInRealDbStep(ok, STEP_ID, FILE), true, `value ${value}`)
+  }
+})
+
+test('synthetic MUTATION 6: an echo decoy carrying the integration config while the real command uses the default config must RED', () => {
+  // Owner repro (b) on the id-anchored contract: the config token and the file arguments were
+  // matched across the WHOLE step body, so a decoy command line satisfied pin (c) while the only
+  // real vitest invocation ran under the default config (which excludes every DB-gated suite).
+  for (const decoy of [
+    '          echo vitest --config vitest.integration.config.ts',
+    '          echo "vitest --config vitest.integration.config.ts run"',
+    '          pnpm --filter @metasheet/core-backend exec echo vitest --config vitest.integration.config.ts',
+    '          # pnpm exec vitest --config vitest.integration.config.ts',
+  ]) {
+    const wf = craftWorkflow({ config: 'vitest.config.ts', runPrefixLines: [decoy] })
+    assert.ok(
+      wf.includes('vitest.integration.config.ts') && wf.includes(FILE),
+      'the config token AND the suite path are both still present in the step body',
+    )
+    const step = extractStepById(wf, STEP_ID)
+    assert.equal(stepInvokesVitestIntegrationConfig(step), false, `decoy: ${decoy.trim()}`)
+    assert.deepEqual(wholeFileVitestArgs(step), [], `decoy: ${decoy.trim()}`)
+    assert.throws(
+      () => isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+      /vitest\.integration\.config\.ts/,
+      `a non-vitest decoy command must not satisfy pin (c): ${decoy.trim()}`,
+    )
+  }
+})
+
+test('synthetic MUTATION 6b: config on one real command + suite file on another must RED for that file', () => {
+  // The same split-across-commands hole with TWO real vitest invocations: pin (c) is genuinely
+  // satisfied by the first command, but FILE is only ever an argument of the default-config
+  // command, so it never runs. Pins (c) and (d) must be judged on the SAME invocation.
+  const wf = craftWorkflow({
+    file: 'tests/integration/other.db.test.ts',
+    runSuffixLines: [
+      '          pnpm --filter @metasheet/core-backend exec vitest --config vitest.config.ts run \\',
+      `            ${FILE} \\`,
+      '            --reporter=dot',
+    ],
+  })
+  assert.ok(wf.includes(FILE), 'FILE is still an argument of a REAL vitest command in the step')
+  const step = extractStepById(wf, STEP_ID)
+  // Positive control: pin (c) holds and the integration-config command's own file IS reported —
+  // the miss below is joint-scoping, not a collapsed parse.
+  assert.equal(stepInvokesVitestIntegrationConfig(step), true)
+  assert.deepEqual(wholeFileVitestArgs(step), ['tests/integration/other.db.test.ts'])
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), false)
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, 'tests/integration/other.db.test.ts'), true)
+})
+
+test('synthetic CONTROL: a benign echo mentioning vitest next to the REAL integration-config command still passes', () => {
+  // Positive control for MUTATION 6: the fix is "resolve the executed binary", not "reject any step
+  // whose body mentions vitest twice". A logging/echo line is inert, and the real command still
+  // satisfies (c)+(d) jointly. Without this control MUTATION 6 could pass by rejecting everything.
+  const wf = craftWorkflow({
+    runPrefixLines: [
+      '          echo "about to run vitest --config vitest.integration.config.ts"',
+      '          echo vitest',
+    ],
+  })
+  const step = extractStepById(wf, STEP_ID)
+  assert.equal(stepInvokesVitestIntegrationConfig(step), true)
+  assert.deepEqual(wholeFileVitestArgs(step), [FILE])
+  assert.equal(isSuiteWiredInRealDbStep(wf, STEP_ID, FILE), true)
 })
 
 test('synthetic: suite relocated out of the id-located step is not membership anywhere else', () => {
