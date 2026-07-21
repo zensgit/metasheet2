@@ -107,7 +107,7 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 
 | 步 | 完成信号（values-free 计数/布尔） | 现有原料（file:line） | 修复动作深链（§6，query 形） |
 |---|---|---|---|
-| ① | **完成条件 = `orgActiveMemberCount>0`**（真源 = `user_orgs` 该 org 的 active 成员数；绝不用考勤组成员数——与步骤②循环依赖）；`directoryLinked` 仅作「同步来源已连接」**辅助状态**，不参与完成判定（round-3 P2-1：「同步**或**创建」——手工创建用户无 directory link，AND 会让百人手工组织永远未完成） | `attendance-admin.ts:336-360`；`user_orgs` 表（S7-5 门已查同表 `:367-379`） | `attendance-admin-user-access` |
+| ① | **完成条件 = `orgActiveMemberCount>0`**（真源 = `user_orgs` 该 org 的 active 成员数；绝不用考勤组成员数——与步骤②循环依赖）；`directoryLinked` 仅作「同步来源已连接」**辅助状态**，不参与完成判定（round-3 P2-1：「同步**或**创建」——手工创建用户无 directory link，合取语义会让百人手工组织永远未完成） | `attendance-admin.ts:336-360`；`user_orgs` 表（S7-5 门已查同表 `:367-379`） | `attendance-admin-user-access` |
 | ② | `groupCount>0 && groupsWithMembers>0` | `index.cjs:37718`（含 member_count 子查询） | `attendance-admin-groups` |
 | ③ | `shiftCount>0`；排班制组存在时另需 `hasRotationRules`（`rotationRuleCount>0`，round-2 闭合项） | `index.cjs:39710`；`attendance_rotation_rules`（`index.cjs:14192`） | `attendance-admin-shifts` |
 | ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**——`attendance.settings` 为部署级单键（`index.cjs:291`），保存写入完整 normalized defaults，key 存在≠本组织配置过；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：与 normalized defaults 比对，前端只收枚举）；round-3 裁定 (b)：`default→ready` 并显示**「使用平台默认策略」**、`customized→ready` 显示「已自定义」、
@@ -117,8 +117,8 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 | ⑦ | 前六步全绿 ⇒ `previewReady`；步名 = **「预览影响范围（preview-ready）」**——向导只做只读预览 + 展示**人工 canonical activation checklist**（逐项列出真人要去哪些 canonical 面完成启用），**绝不暗示已启用**（round-2）；影响人数=①②计数派生 | 聚合派生 | （无——预览在向导内，只读） |
 
 判别值域（纯模块判别矩阵的行）：`ready / missing / forbidden / unknown / db_not_ready`（5 值，与 §7
-纯模块全值域一致；round-1 曾引入 `manual_review_required`，round-2 ④ 改 posture 枚举后该值无生产者，
-遂删——**④ 的 posture→判别值映射显式锁定（round-3）**：`customized→ready`（「已自定义」）、
+纯模块全值域一致；round-1 曾引入的第 6 值因 round-2 ④ 改 posture 枚举后无生产者而删，删除记录见
+header round-2/3 历史块——**④ 的 posture→判别值映射显式锁定（round-3）**：`customized→ready`（「已自定义」）、
 `default→ready`（「使用平台默认策略」）、`unknown→unknown`），且每信号携带 `scope: 'org' | 'deployment'`（全局信号显式标 `deployment`，追加门禁 2）——
 `forbidden` 为 per-surface（§4.3），`unknown` fail-closed 显示为「未知，去核查」，绝不显示为已完成
 （章程 L232 未知态红线）；`db_not_ready`
