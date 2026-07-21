@@ -286,6 +286,14 @@ export function validateConditionEdits(
         errors.push(...validateFormulaReferences(branch.formulaExpression, formSchema, formulaLabel))
         return
       }
+      // A rules-mode branch with ZERO rules is never legitimate: the runtime evaluates
+      // `rules.every(...)`, vacuously TRUE over `[]`, so an empty branch would silently capture ALL
+      // traffic (first-match-wins) and dead-code the default edge — the fall-through "else" is the
+      // node's `defaultEdgeKey`, a separate mechanism, never an empty branch. Fail closed here so a
+      // legacy/hand-built `rules: []` branch can never reach save looking green.
+      if (branch.rules.length === 0) {
+        errors.push(`条件节点 ${nodeLabel} 分支 ${branchIndex + 1} 需要至少一条规则`)
+      }
       branch.rules.forEach((rule, ruleIndex) => {
         const ruleLabel = `条件节点 ${nodeLabel} 分支 ${branchIndex + 1} 规则 ${ruleIndex + 1}`
         const fieldId = rule.fieldId.trim()
