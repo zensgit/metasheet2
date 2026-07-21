@@ -10,7 +10,7 @@
 >
 > **Amendment round-1（2026-07-21，owner 审阅 = CHANGES REQUESTED，0 P1 / 4 P2 + 五条追加门禁；
 > 措辞取自 owner 审阅原文）**：P2-1 步骤① memberCount 真源改 `user_orgs`（原考勤组成员数与步骤②
-> 循环依赖）→ §3①/§4.2；P2-2 步骤④ `attendance.settings` 为部署级单键（`index.cjs:135`
+> 循环依赖）→ §3①/§4.2；P2-2 步骤④ `attendance.settings` 为部署级单键（`index.cjs:291`
 > SETTINGS_KEY 无 org 维度，保存写入完整 normalized defaults）——「key 存在」会跨组织假绿 →
 > 重定义为「平台级打卡策略已显式确认」+ `scope=deployment` 显式标记，无法证明人工确认 ⇒
 > `manual_review_required`，绝不 `ready`（§3④/§4.2）；P2-3 步骤⑥历史 delivery 行非配置真源 →
@@ -100,15 +100,17 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 | ① | `directoryLinked`（S7-5 原样复用）+ `orgActiveMemberCount>0`（**真源 = `user_orgs` 该 org 的 active 成员数**，P2-1：绝不用考勤组成员数——那与步骤②循环依赖） | `attendance-admin.ts:336-360`；`user_orgs` 表（S7-5 门已查同表 `:367-379`） | `attendance-admin-user-access` |
 | ② | `groupCount>0 && groupsWithMembers>0` | `index.cjs:37718`（含 member_count 子查询） | `attendance-admin-groups` |
 | ③ | `shiftCount>0`；排班制组存在时另需 `hasRotationRules`（`rotationRuleCount>0`，round-2 闭合项） | `index.cjs:39710`；`attendance_rotation_rules`（`index.cjs:14192`） | `attendance-admin-shifts` |
-| ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**——`attendance.settings` 为部署级单键（`index.cjs:135`），保存写入完整 normalized defaults，key 存在≠本组织配置过；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：与 normalized defaults 比对，前端只收枚举）；`default` 显示「待确认」**绝不伪装已配置**，`unknown` fail-closed） | `system_configs key='attendance.settings'`（`index.cjs:135,291-295,13733-13760`） | `attendance-admin-settings` |
+| ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**——`attendance.settings` 为部署级单键（`index.cjs:291`），保存写入完整 normalized defaults，key 存在≠本组织配置过；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：与 normalized defaults 比对，前端只收枚举）；`default` 显示「待确认」**绝不伪装已配置**，`unknown` fail-closed） | `system_configs key='attendance.settings'`（`index.cjs:291-295,13733-13760`） | `attendance-admin-settings` |
 | ⑤ | `approvalFlowCount>0`（含 active 判定） | `index.cjs:30924` | `attendance-admin-approval-flows` |
 | ⑥ | 经 §4.5 runtime readiness port：`workerEnabled` + `defaultChannelAvailable` + `availableChannelCount` + `orgRecipientBindingReady`（P2-3：历史 delivery 行**不是**配置真源，settings 亦不注册渠道；port 缺失 ⇒ `unknown`） | `AttendanceNotificationDeliveryWorker.ts:370+`（渠道逐个 env-gated、worker 按名路由） | `attendance-admin-notification-deliveries` |
 | ⑦ | 前六步全绿 ⇒ `previewReady`；步名 = **「预览影响范围（preview-ready）」**——向导只做只读预览 + 展示**人工 canonical activation checklist**（逐项列出真人要去哪些 canonical 面完成启用），**绝不暗示已启用**（round-2）；影响人数=①②计数派生 | 聚合派生 | （无——预览在向导内，只读） |
 
-判别值域（纯模块判别矩阵的行）：`ready / missing / forbidden / unknown / manual_review_required / db_not_ready`，
-且每信号携带 `scope: 'org' | 'deployment'`（全局信号显式标 `deployment`，追加门禁 2）——
+判别值域（纯模块判别矩阵的行）：`ready / missing / forbidden / unknown / db_not_ready`（5 值，与 §7
+纯模块全值域一致；round-1 曾引入 `manual_review_required`，round-2 ④ 改 posture 枚举后该值无生产者，
+遂删——**④ 的 posture→判别值映射显式锁定**：`customized→ready`、`default→missing`（显示「待确认」）、
+`unknown→unknown`），且每信号携带 `scope: 'org' | 'deployment'`（全局信号显式标 `deployment`，追加门禁 2）——
 `forbidden` 为 per-surface（§4.3），`unknown` fail-closed 显示为「未知，去核查」，绝不显示为已完成
-（章程 L232 未知态红线）；`manual_review_required` 显示为「需人工确认」并给出确认入口；`db_not_ready`
+（章程 L232 未知态红线）；`db_not_ready`
 对应各端点统一 503 `DB_NOT_READY` 档（`index.cjs:37752` 等）。
 **「计划生效时间」逐步来源规则（追加门禁 4 + round-2 结构闭合）**：生效时间入响应结构为逐步 posture
 `effectiveTime: {source: <权威来源标识>, posture: 'known'|'undeterminable'}`——有权威来源（如排班生效日、
@@ -125,8 +127,8 @@ core-backend `attendance-admin.ts` router——继承 router 级 `rbacGuard('att
 `{directoryLinked, orgActiveMemberCount, groupCount, groupsWithMembers, shiftCount, rotationRuleCount,
 hasRotationRules, approvalFlowCount, punchPolicyPosture(default|customized|unknown, scope=deployment),
 notify:{workerEnabled, defaultChannelAvailable, availableChannelCount, orgRecipientBindingReady},
-perStep.effectiveTime:{source, posture(known|undeterminable)}}` ——聚合实现采用**单条 CTE 或短 TTL
-org-scoped cache**（owner 非阻断项）——
+perStep.effectiveTime:{source, posture(known|undeterminable)}}` ——聚合实现采用**单条 CTE（限 ①②③⑤ 及 group-membership 等 org-scoped 计数——④ 为部署级 settings 读、
+⑥ 为运行时 port 非 DB，均在 CTE 之外）或短 TTL org-scoped cache**（owner 非阻断项）——
 契约测试断言 SQL 文本不含任何标识列（S7-5 单测先例：`attendance-admin-directory-readiness-s7-5.test.ts:82-191`）,
 且响应键集合恒等锁定。错误档：400 `ORG_ID_REQUIRED` / 401 / 403 / 503 `DB_NOT_READY` / 500 泛化文案。
 **4.3 权限信号**：端点级 403 = 整面 `forbidden`；不复用 `adminForbidden` 全局 flag（§1-6）。FE 纯模块
@@ -238,9 +240,9 @@ ratify 时调整）。不做首次进入自动拦截（现状无 first-run 逻�
 ## 9. 切片（严格串行，全部 RATIFY 后开工；每片完成门 = 章程 §8.1 十一门 + 本锁红线负向断言 + Opus 对抗审 0 P1/P2 + PR 门禁记录）
 
 - **W4-0 readiness 底座**：纯模块 + `setup-readiness` 端点 + §4.5 通知 readiness port + 契约/判别
-  矩阵测试。红线与追加门禁断言（owner round-1）：R1 + §4.3 per-surface 403 + **两组织真库矩阵**
+  矩阵测试。红线与追加门禁断言（owner round-1）：R1 + §4.3 per-surface 403 + **两组织真库矩阵（追加门禁 1）**
   （A org 管理员伪造 `orgId=B` ⇒ 在任何聚合 SQL 执行前 403）+ **计数 SQL 逐项含 `org_id=$1` 审计**
-  （全局信号显式 `scope=deployment`）+ **query seam 只接受 SELECT**（写语句 mutation ⇒ 契约测试
+  （全局信号显式 `scope=deployment`）+ **query seam 只接受 SELECT（追加门禁 3）**（写语句 mutation ⇒ 契约测试
   精确翻红）+ 生效时间来源逐行登记。**W4-0 无 UI：三视口门标 N/A**（视觉证据从 W4-1 起，
   避免形式化假验收——owner 追加门禁 5）。
 - **W4-1 向导壳与七步导航**：`AttendanceSetupReadiness.vue` + section 注册 + 任务首页 action + 帮助。
