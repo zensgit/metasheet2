@@ -1116,6 +1116,12 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-graph-node-row"]').length).toBe(rowsBefore + 1) // a new approval node appeared
 
+    const branchFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newBranchField = branchFields.item(branchFields.length - 1) as HTMLSelectElement
+    newBranchField.value = 'amount'
+    newBranchField.dispatchEvent(new Event('change'))
+    await flushUi()
+
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
@@ -1283,6 +1289,13 @@ describe('TemplateAuthoringView', () => {
     ;(container!.querySelector('[data-testid="approval-canvas-add-condition-cond_1"]') as HTMLButtonElement).click()
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(before + 1) // new node on canvas
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const branchFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newBranchField = branchFields.item(branchFields.length - 1) as HTMLSelectElement
+    newBranchField.value = 'amount'
+    newBranchField.dispatchEvent(new Event('change'))
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
