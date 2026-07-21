@@ -47,6 +47,13 @@ vi.mock('../src/approvals/permissions', () => ({
   }),
 }))
 
+const approvalCanvasV2 = ref(false)
+vi.mock('../src/stores/featureFlags', () => ({
+  useFeatureFlags: () => ({
+    features: ref({ approvalCanvasV2: approvalCanvasV2.value }),
+  }),
+}))
+
 const createTemplateSpy = vi.fn()
 const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
@@ -669,6 +676,7 @@ describe('TemplateAuthoringView', () => {
   beforeEach(() => {
     routeParams = {}
     canManageTemplates.value = true
+    approvalCanvasV2.value = false
     createTemplateSpy.mockReset()
     updateTemplateSpy.mockReset()
     publishTemplateSpy.mockReset()
@@ -1294,7 +1302,19 @@ describe('TemplateAuthoringView', () => {
     }
   }
 
+  it('keeps the experimental Canvas V2 surface absent while its explicit feature flag is off', async () => {
+    routeParams = { id: 'tpl_canvas_off' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-graph-canvas"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
+  })
+
   it('D-1 canvas: toggling to 画布视图 renders the graph visually (nodes + SVG edges), no false validity warning', async () => {
+    approvalCanvasV2.value = true
     routeParams = { id: 'tpl_canvas' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
@@ -1307,6 +1327,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('D-1/D-3 canvas: adding a condition branch ON THE CANVAS grows it and saves the new structure', async () => {
+    approvalCanvasV2.value = true
     routeParams = { id: 'tpl_canvas2' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()

@@ -11,3 +11,15 @@ describe('approval attachment feature flag parsing', () => {
     expect(extractFeaturesFromPayload(payload).approvalAttachments).toBe(expected)
   })
 })
+
+describe('approval Canvas V2 feature flag parsing', () => {
+  it.each([
+    [{ data: { user: { features: { approvalCanvasV2: true } } } }, true],
+    [{ data: { user: { features: { approval_canvas_v2: true } } } }, true],
+    [{ data: { user: { features: { approvalCanvasV2: false, approval_canvas_v2: true } } } }, false],
+    [{ data: { user: { features: { approvalCanvasV2: 'true' } } } }, undefined],
+    [{ data: { user: { features: {} } } }, undefined],
+  ])('parses only an explicit boolean from supported payload keys', (payload, expected) => {
+    expect(extractFeaturesFromPayload(payload).approvalCanvasV2).toBe(expected)
+  })
+})

@@ -464,7 +464,7 @@
              READ-ONLY summaries (G-3 / G-4), and every non-condition node + all edges are preserved
              byte-for-byte on save. Nothing renders as a bare "unsupported". -->
         <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
-        <div v-if="graphReadOnly" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
+        <div v-if="graphReadOnly && canvasV2Enabled" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
           <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
           <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
         </div>
@@ -472,7 +472,7 @@
         <!-- D-1/D-5 visual canvas: auto-laid-out nodes + SVG edges + topology toolbar + live validity.
              The mouse-drag GESTURE is manual/E2E QA; everything else is unit-covered. Node config is
              edited in the「结构列表」view (D-6 toggle). -->
-        <div v-if="graphReadOnly && canvasViewMode === 'canvas'">
+        <div v-if="graphReadOnly && canvasV2Enabled && canvasViewMode === 'canvas'">
           <el-alert
             v-if="canvasValidity.length"
             type="warning"
@@ -535,7 +535,7 @@
           <p class="template-authoring__hint">画布用于查看与编排结构（增删节点 / 分支、拖动布局）。各节点的审批人 / 规则配置请切换到「结构列表」编辑。</p>
         </div>
 
-        <div v-if="graphReadOnly && canvasViewMode === 'list'" data-testid="approval-graph-readonly-list">
+        <div v-if="graphReadOnly && (!canvasV2Enabled || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
             :key="node.key"
@@ -1548,6 +1548,7 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { useFeatureFlags } from '../../stores/featureFlags'
 import { summarizeConditionBranch } from '../../approvals/conditionSummary'
 import {
   createTemplate,
@@ -1633,6 +1634,8 @@ import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 const route = useRoute()
 const router = useRouter()
 const { canManageTemplates } = useApprovalPermissions()
+const { features: productFeatures } = useFeatureFlags()
+const canvasV2Enabled = computed(() => productFeatures.value.approvalCanvasV2 === true)
 
 const loading = ref(false)
 const saving = ref(false)

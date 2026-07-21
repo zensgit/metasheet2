@@ -27,6 +27,11 @@ export interface ProductFeatures {
    * placeholder + submit-time strip byte-identical.
    */
   approvalAttachments: boolean
+  /**
+   * Approval Canvas V2 authoring surface. Default OFF and enabled only by an explicit backend
+   * session value or the existing authorized development override.
+   */
+  approvalCanvasV2: boolean
   mode: ProductMode
 }
 
@@ -59,6 +64,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   plm: false,
   approvalMobile: false,
   approvalAttachments: false,
+  approvalCanvasV2: false,
   mode: 'platform',
 }
 
@@ -188,6 +194,12 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.approval_attachments === 'boolean'
           ? featuresNode.approval_attachments
           : undefined,
+    approvalCanvasV2:
+      typeof featuresNode.approvalCanvasV2 === 'boolean'
+        ? featuresNode.approvalCanvasV2
+        : typeof featuresNode.approval_canvas_v2 === 'boolean'
+          ? featuresNode.approval_canvas_v2
+          : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -296,6 +308,12 @@ function resolveFeatures(
     backend.approvalAttachments,
   )
 
+  // Canvas V2 follows the same explicit-only rollout discipline as approval attachments/mobile.
+  const approvalCanvasV2 = boolOrDefault(
+    override.approvalCanvasV2,
+    backend.approvalCanvasV2,
+  )
+
   return {
     attendance,
     workflow,
@@ -304,6 +322,7 @@ function resolveFeatures(
     plm,
     approvalMobile,
     approvalAttachments,
+    approvalCanvasV2,
     mode,
   }
 }
