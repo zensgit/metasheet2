@@ -93,19 +93,26 @@ export type MetaRecordLabelKey =
   | 'notification.eventNotificationSent'
   // --- MetaFormView multi-page nav chrome (A4) ---
   | 'form.previousPage' | 'form.nextPage'
-  // --- T8-2 Reset UI T-source picker (R5b strict-zero closeout) ---
+  // --- T8-2 Reset UI T-source picker (R5b strict-zero closeout; W2 exact-anchor: manual/free-time keys
+  //     retired — the picker only ever sources an exact Global History batch) ---
   | 'record.resetPickerHeading' | 'record.resetPickerHistoryLabel' | 'record.resetPickerHistoryPlaceholder'
   | 'record.resetPickerRefresh' | 'record.resetPickerHistoryLoading'
   | 'record.resetPickerHistoryEmpty' | 'record.resetPickerHistoryUnavailable'
-  | 'record.resetPickerManualSummary' | 'record.resetPickerManualLabel' | 'record.resetPickerFutureWarn'
+  | 'record.resetPickerExactAnchorNote'
   | 'record.resetPickerTargetPrefix' | 'record.resetPickerTargetSuffix' | 'record.resetPickerFromBatch'
   | 'record.resetPickerErrorLoad' | 'record.resetPickerSystemActor' | 'record.resetPickerDefaultAction'
   // --- T8-2 Reset UI confirm dialog (R5c strict-zero closeout, final microslice of this line) ---
   | 'record.resetConfirmDialogAria' | 'record.resetConfirmCancelAria' | 'record.resetConfirmLoading'
+  | 'record.resetConfirmSubmitting' | 'record.resetConfirmNoChanges'
   | 'record.resetConfirmViewInTrash'
   | 'record.resetConfirmErrorDisabled' | 'record.resetConfirmErrorForbidden' | 'record.resetConfirmErrorBlocked'
   | 'record.resetConfirmErrorStale' | 'record.resetConfirmErrorTooLarge' | 'record.resetConfirmErrorTypeMismatch'
   | 'record.resetConfirmErrorGeneric'
+  // --- W2 exact-anchor kernel refusal mapping (L6-b/L7/L8 reason vocabulary) ---
+  | 'record.resetConfirmErrorAnchorInvalid' | 'record.resetConfirmErrorCheckpoint'
+  | 'record.resetConfirmErrorTrustRequired' | 'record.resetConfirmErrorSchemaDrift'
+  | 'record.resetConfirmErrorLinkIntegrity' | 'record.resetConfirmErrorValueInvalid'
+  | 'record.resetConfirmErrorInboundUnprovable'
   | 'record.resetConfirmWarnResetWord' | 'record.resetConfirmWarnNotWord' | 'record.resetConfirmRevertWord'
   | 'record.resetConfirmWarnBeforeNot' | 'record.resetConfirmWarnInstead'
   | 'record.resetConfirmTypePrefix' | 'record.resetConfirmTypeSuffix' | 'record.resetConfirmTypeAria'
@@ -260,9 +267,10 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetPickerHistoryLoading': { en: 'Loading history points...', zh: '正在加载历史点...' },
   'record.resetPickerHistoryEmpty': { en: 'No recent history batches found.', zh: '未找到最近的历史批次。' },
   'record.resetPickerHistoryUnavailable': { en: 'History points unavailable.', zh: '历史点不可用。' },
-  'record.resetPickerManualSummary': { en: 'Advanced manual time', zh: '高级：手动指定时间' },
-  'record.resetPickerManualLabel': { en: 'Manual point in time', zh: '手动指定时间点' },
-  'record.resetPickerFutureWarn': { en: 'Pick a time in the past — you can only reset to an earlier state.', zh: '请选择过去的时间——只能重置到更早的状态。' },
+  'record.resetPickerExactAnchorNote': {
+    en: 'Reset uses an exact, audited point from Global History only — free time entry is not supported.',
+    zh: '重置仅使用来自全局历史的精确、可审计的时间点——不支持自由输入时间。',
+  },
   'record.resetPickerTargetPrefix': { en: 'Target:', zh: '目标：' },
   'record.resetPickerTargetSuffix': { en: '(your local time)', zh: '（你的本地时间）' },
   'record.resetPickerFromBatch': { en: 'from history batch', zh: '来自历史批次' },
@@ -276,6 +284,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetConfirmDialogAria': { en: 'Reset sheet to a point in time', zh: '将数据表重置到某个时间点' },
   'record.resetConfirmCancelAria': { en: 'Cancel', zh: '取消' },
   'record.resetConfirmLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
+  'record.resetConfirmSubmitting': { en: 'Applying the recovery…', zh: '正在执行恢复…' },
+  'record.resetConfirmNoChanges': { en: 'This history point already matches the current sheet.', zh: '当前数据表已与该历史点一致。' },
   'record.resetConfirmViewInTrash': { en: 'View in Trash', zh: '在回收站中查看' },
   'record.resetConfirmErrorDisabled': { en: 'Reset is not enabled here.', zh: '此处未启用重置。' },
   'record.resetConfirmErrorForbidden': { en: 'You do not have permission to reset this sheet.', zh: '你没有权限重置此数据表。' },
@@ -287,6 +297,34 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   // untranslated in both locales.
   'record.resetConfirmErrorTypeMismatch': { en: 'Type "reset" to confirm.', zh: '请输入 "reset" 以确认。' },
   'record.resetConfirmErrorGeneric': { en: 'Reset could not be completed. Please re-preview and try again.', zh: '重置未能完成。请重新预览后再试。' },
+  'record.resetConfirmErrorAnchorInvalid': {
+    en: "This isn't a valid exact history point. Refresh and choose a batch from the list.",
+    zh: '这不是一个有效的精确历史点。请刷新并从列表中重新选择一个批次。',
+  },
+  'record.resetConfirmErrorCheckpoint': {
+    en: 'No trusted history checkpoint covers this point any more — choose a more recent one.',
+    zh: '没有可信的历史检查点覆盖该时间点了——请选择一个更近的时间点。',
+  },
+  'record.resetConfirmErrorTrustRequired': {
+    en: "Reset is unavailable — this sheet's history trust could not be verified.",
+    zh: '重置不可用——无法验证此数据表的历史可信度。',
+  },
+  'record.resetConfirmErrorSchemaDrift': {
+    en: 'The schema changed since this point — re-preview or choose a different point.',
+    zh: '自该时间点以来结构已发生变化——请重新预览或选择其他时间点。',
+  },
+  'record.resetConfirmErrorLinkIntegrity': {
+    en: 'A related link target is missing or invalid — nothing was changed.',
+    zh: '相关联的链接目标缺失或无效——未做任何更改。',
+  },
+  'record.resetConfirmErrorValueInvalid': {
+    en: 'A target value is no longer valid for the current schema — nothing was changed.',
+    zh: '某个目标值对当前结构已不再有效——未做任何更改。',
+  },
+  'record.resetConfirmErrorInboundUnprovable': {
+    en: "This reset can't restore deleted records safely — nothing was changed.",
+    zh: '此次重置无法安全地恢复已删除的记录——未做任何更改。',
+  },
   // The three inline-bold words in the destructive warning paragraph. Word-for-word bold placement doesn't
   // map 1:1 to Chinese, so the zh values are chosen so the concatenated sentence (built from these plus the
   // resetConfirmWarn* helpers below, in the same fixed template slots) still reads naturally.
@@ -387,10 +425,12 @@ export function inactivePersonDisplay(display: string, isZh: boolean): string {
   return isZh ? `${display}（已停用）` : `${display} (deactivated)`
 }
 
-// --- ResetConfirmDialog.vue interpolation helpers (R5c) ---
-// `asOf` is the wire point-in-time value (display + API `asOf`) and record counts are wire summary
-// numbers — both always interpolated raw, never translated. Each helper below reconstructs one
-// EN sentence byte-for-byte (verified against a before/after DOM snapshot diff) plus its zh counterpart.
+// --- ResetConfirmDialog.vue interpolation helpers (R5c; W2 exact-anchor) ---
+// `asOf` here is DISPLAY TEXT ONLY (the selected anchor's createdAt, snapshotted when the dialog opens) —
+// it is never sent over the wire; the destructive authority is the exclusive historyBatchId/anchorOperationId
+// anchor. Record counts are wire summary numbers. Both are always interpolated raw, never translated. Each
+// helper below reconstructs one EN sentence byte-for-byte (verified against a before/after DOM snapshot diff)
+// plus its zh counterpart.
 
 // resetConfirmEntryLabel: the destructive entry button ("Reset to <T>…").
 export function resetConfirmEntryLabel(asOf: string, isZh: boolean): string {
@@ -402,8 +442,23 @@ export function resetConfirmTitle(asOf: string, isZh: boolean): string {
   return isZh ? `将数据表重置到 ${asOf}` : `Reset sheet to ${asOf}`
 }
 
-// resetConfirmResultSummary: the post-execute result line (deleted + reverted counts + asOf).
+// resetConfirmBlockedResurrectMessage: preview-time block — a preview whose plan would need to restore
+// `resurrectCount` deleted record(s) can never become executable (exact-anchor kernel fails RESURRECT closed
+// as `inbound-unprovable`). Rendered INSTEAD of the revert/destructive confirm branches, never alongside them.
+export function resetConfirmBlockedResurrectMessage(resurrectCount: number, isZh: boolean): string {
+  return isZh
+    ? `无法重置到该时间点——这需要恢复 ${resurrectCount} 条已删除的记录，当前不支持该操作。请选择一个更近的历史点。`
+    : `Can't reset to this point — it would require restoring ${resurrectCount} deleted record(s), which isn't supported. Choose a more recent history point.`
+}
+
+// resetConfirmResultSummary: the post-execute result line. A non-destructive Revert-equivalent
+// does not mention the recycle bin; destructive Reset reports both deleted and reverted counts.
 export function resetConfirmResultSummary(deletedCount: number, revertedCount: number, asOf: string, isZh: boolean): string {
+  if (deletedCount === 0) {
+    return isZh
+      ? `${revertedCount} 条记录已回退到 ${asOf}。`
+      : `${revertedCount} record(s) reverted to ${asOf}.`
+  }
   return isZh
     ? `${deletedCount} 条记录已移至回收站 · ${revertedCount} 条记录已回退到 ${asOf}。`
     : `${deletedCount} record(s) moved to the recycle bin · ${revertedCount} reverted to ${asOf}.`

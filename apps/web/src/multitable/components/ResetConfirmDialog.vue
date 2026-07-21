@@ -1,45 +1,64 @@
 <template>
-  <!-- Entry: rendered ONLY when the flag-derived capability is on (true flag-off hidden — the FE half of
-       "inert until enabled"; pitResetEnabled already encodes canManageSheetAccess). Destructive styling, distinct
-       from any Revert affordance. -->
-  <button v-if="pitResetEnabled" class="reset-entry" data-test="reset-entry" @click="openDialog">{{ ' ' }}{{ resetConfirmEntryLabel(asOf, isZh) }}{{ ' ' }}</button>
+  <!-- Entry: rendered ONLY when the flag-derived capability is on AND a valid exact anchor is selected
+       (true flag-off / no-anchor hidden — the FE half of "inert until enabled"; pitResetEnabled already
+       encodes canManageSheetAccess). Destructive styling, distinct from any Revert affordance. -->
+  <button v-if="pitResetEnabled && anchor" class="reset-entry" data-test="reset-entry" @click="openDialog">{{ ' ' }}{{ resetConfirmEntryLabel(asOf, isZh) }}{{ ' ' }}</button>
 
   <teleport to="body">
     <div v-if="open" class="reset-confirm-overlay" data-test="reset-confirm" @click.self="onCancel">
+      <!-- Body copy below reads `openedLabel`/`openedAnchor` — a SNAPSHOT taken at openDialog(), never the
+           live `asOf`/`anchor` props. If the caller's selection changes while this modal is open (picker
+           re-render, re-fetch, etc.), the visible target and the preview/execute wire both stay pinned to
+           what was open when preview ran — they can never diverge (the TOCTOU this dialog must not allow). -->
       <div class="reset-confirm-modal reset-confirm-modal--destructive" role="dialog" :aria-label="l('record.resetConfirmDialogAria')">
         <div class="reset-confirm__header">
-          <h3 class="reset-confirm__title">{{ resetConfirmTitle(asOf, isZh) }}</h3>
-          <button class="reset-confirm__close" :aria-label="l('record.resetConfirmCancelAria')" @click="onCancel">&times;</button>
+          <h3 class="reset-confirm__title">{{ resetConfirmTitle(openedLabel, isZh) }}</h3>
+          <button class="reset-confirm__close" :aria-label="l('record.resetConfirmCancelAria')" :disabled="submitting" @click="onCancel">&times;</button>
         </div>
         <div class="reset-confirm__body">
           <p v-if="loading" class="reset-confirm__hint" data-test="reset-confirm-loading">{{ l('record.resetConfirmLoading') }}</p>
 
+          <p v-else-if="submitting" class="reset-confirm__hint" data-test="reset-confirm-submitting">{{ l('record.resetConfirmSubmitting') }}</p>
+
           <p v-else-if="result" class="reset-confirm__hint" data-test="reset-confirm-result">
-            {{ resetConfirmResultSummary(deletedCount, result.revertedCount ?? 0, asOf, isZh) }}
-            <a href="#trash" class="reset-confirm__trash-link" data-test="reset-confirm-trash-link">{{ l('record.resetConfirmViewInTrash') }}</a>
+            {{ resetConfirmResultSummary(deletedCount, result.revertedCount ?? 0, openedLabel, isZh) }}
+            <a v-if="deletedCount > 0" href="#trash" class="reset-confirm__trash-link" data-test="reset-confirm-trash-link">{{ l('record.resetConfirmViewInTrash') }}</a>
           </p>
 
           <p v-else-if="error" class="reset-confirm__hint reset-confirm__hint--warn" role="alert" data-test="reset-confirm-error">{{ errorCopy }}</p>
 
           <template v-else-if="preview">
-            <!-- Non-destructive path: nothing created after T → plain Revert-equivalent, no typed confirm. -->
-            <template v-if="deleteCount === 0">
-              <p class="reset-confirm__hint" data-test="reset-confirm-revert-equiv">{{ ' ' }}{{ resetConfirmRevertEquivIntro(asOf, revertCount, isZh) }} <strong>{{ l('record.resetConfirmRevertWord') }}</strong>.{{ ' ' }}</p>
-              <MtButton class="reset-confirm__btn" data-test="reset-confirm-btn" :disabled="!hasIdentity" @click="onConfirm">{{ ' ' }}{{ resetConfirmRevertButtonLabel(asOf, isZh) }}</MtButton>
+            <!-- Defense in depth: the backend withholds tokens for both refusal classes. The client also
+                 refuses a malformed/incompatible response that combines either class with an identity. -->
+            <p v-if="resurrectBlocked" class="reset-confirm__hint reset-confirm__hint--warn" role="alert" data-test="reset-confirm-blocked">
+              {{ resetConfirmBlockedResurrectMessage(resurrectCount, isZh) }}
+            </p>
+            <p v-else-if="driftBlocked" class="reset-confirm__hint reset-confirm__hint--warn" role="alert" data-test="reset-confirm-drift-blocked">
+              {{ l('record.resetConfirmErrorSchemaDrift') }}
+            </p>
+            <p v-else-if="noChanges" class="reset-confirm__hint" data-test="reset-confirm-no-changes">
+              {{ l('record.resetConfirmNoChanges') }}
+            </p>
+            <!-- Non-destructive path: nothing created after the anchor → plain Revert-equivalent, no typed confirm. -->
+            <template v-else-if="deleteCount === 0">
+              <p class="reset-confirm__hint" data-test="reset-confirm-revert-equiv">{{ ' ' }}{{ resetConfirmRevertEquivIntro(openedLabel, revertCount, isZh) }} <strong>{{ l('record.resetConfirmRevertWord') }}</strong>.{{ ' ' }}</p>
+              <MtButton class="reset-confirm__btn" data-test="reset-confirm-btn" :disabled="!hasIdentity || submitting" @click="onConfirm">{{ ' ' }}{{ resetConfirmRevertButtonLabel(openedLabel, isZh) }}</MtButton>
             </template>
 
             <!-- Destructive path: typed two-step confirm (type `reset` AND acknowledge the deleted-count). -->
             <template v-else>
-              <p class="reset-confirm__warn" role="alert" data-test="reset-confirm-warn"><strong>{{ l('record.resetConfirmWarnResetWord') }}</strong> {{ resetConfirmWarnRevertsAt(asOf, isZh) }} <strong>{{ resetConfirmWarnDeleteClause(deleteCount, asOf, isZh) }}</strong> {{ l('record.resetConfirmWarnBeforeNot') }} <strong>{{ l('record.resetConfirmWarnNotWord') }}</strong> {{ resetConfirmWarnAfterNot(asOf, isZh) }} <strong>{{ l('record.resetConfirmRevertWord') }}</strong> {{ l('record.resetConfirmWarnInstead') }}{{ ' ' }}</p>
+              <p class="reset-confirm__warn" role="alert" data-test="reset-confirm-warn"><strong>{{ l('record.resetConfirmWarnResetWord') }}</strong> {{ resetConfirmWarnRevertsAt(openedLabel, isZh) }} <strong>{{ resetConfirmWarnDeleteClause(deleteCount, openedLabel, isZh) }}</strong> {{ l('record.resetConfirmWarnBeforeNot') }} <strong>{{ l('record.resetConfirmWarnNotWord') }}</strong> {{ resetConfirmWarnAfterNot(openedLabel, isZh) }} <strong>{{ l('record.resetConfirmRevertWord') }}</strong> {{ l('record.resetConfirmWarnInstead') }}{{ ' ' }}</p>
               <label class="reset-confirm__ack" data-test="reset-confirm-ack">
-                <input type="checkbox" v-model="ackCount" />
+                <input type="checkbox" v-model="ackCount" :disabled="submitting" />
                 {{ resetConfirmAckLabel(deleteCount, isZh) }}{{ ' ' }}
               </label>
               <label class="reset-confirm__type">{{ ' ' }}{{ l('record.resetConfirmTypePrefix') }} <code>reset</code> {{ l('record.resetConfirmTypeSuffix') }}
-                <input data-test="reset-confirm-type" v-model="typed" :aria-label="l('record.resetConfirmTypeAria')" />
+                <input data-test="reset-confirm-type" v-model="typed" :aria-label="l('record.resetConfirmTypeAria')" :disabled="submitting" />
               </label>
-              <MtButton class="reset-confirm__btn reset-confirm__btn--destructive" variant="danger" data-test="reset-confirm-btn"
-                      :disabled="!canConfirm" @click="onConfirm">{{ ' ' }}{{ resetConfirmDestructiveButtonLabel(deleteCount, isZh) }}{{ ' ' }}</MtButton>
+              <MtButton
+                class="reset-confirm__btn reset-confirm__btn--destructive" variant="danger" data-test="reset-confirm-btn"
+                :disabled="!canConfirm || submitting" @click="onConfirm"
+              >{{ ' ' }}{{ resetConfirmDestructiveButtonLabel(deleteCount, isZh) }}{{ ' ' }}</MtButton>
             </template>
           </template>
         </div>
@@ -51,25 +70,32 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import type { ResetPreview, ResetResult } from '../api/client'
+import type { ExactAnchorRequest, ResetPreview, ResetResult } from '../api/client'
 import { useLocale } from '../../composables/useLocale'
 import { MtButton } from '../ui'
 import {
   recordLabel, resetConfirmEntryLabel, resetConfirmTitle, resetConfirmResultSummary,
   resetConfirmRevertEquivIntro, resetConfirmRevertButtonLabel, resetConfirmDestructiveButtonLabel,
   resetConfirmAckLabel, resetConfirmWarnRevertsAt, resetConfirmWarnDeleteClause, resetConfirmWarnAfterNot,
+  resetConfirmBlockedResurrectMessage,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 
 const props = defineProps<{
   /** flag-derived capability (MULTITABLE_ENABLE_PIT_RESET on AND canManageSheetAccess). Off/absent ⇒ entry hidden. */
   pitResetEnabled?: boolean
-  /** the point-in-time T to reset to (display + API asOf). */
+  /** DISPLAY TEXT ONLY for the currently selected anchor (e.g. the history batch's createdAt) — never sent
+   *  over the wire; the destructive authority is `anchor` below. */
   asOf: string
-  /** smart callbacks (bind to the client + sheetId in the workbench) so the wire is testable end-to-end. */
-  resetPreview: (asOf: string) => Promise<ResetPreview>
-  resetExecute: (asOf: string, previewIdentity: string) => Promise<ResetResult>
-  onDone?: () => void
+  /** the EXACT anchor currently selected upstream (historyBatchId XOR anchorOperationId). null ⇒ nothing
+   *  selected yet, entry hidden. This prop is LIVE (reactive); the dialog snapshots it at open time so a
+   *  later change here cannot retarget an in-flight preview/execute (see openDialog). */
+  anchor: ExactAnchorRequest | null
+  /** smart callbacks (bind to the client + sheetId upstream) so the wire is testable end-to-end. Execute is
+   *  TOKEN-ONLY — the client adds `confirm:'reset'`; no anchor/asOf is ever re-sent here. */
+  resetPreview: (anchor: ExactAnchorRequest) => Promise<ResetPreview>
+  resetExecute: (previewIdentity: string) => Promise<ResetResult>
+  onDone?: () => void | Promise<void>
 }>()
 
 const { isZh } = useLocale()
@@ -77,23 +103,64 @@ const l = (key: MetaRecordLabelKey): string => recordLabel(key, isZh.value)
 
 const open = ref(false)
 const loading = ref(false)
+const submitting = ref(false)
 const preview = ref<ResetPreview | null>(null)
 const result = ref<ResetResult | null>(null)
 const error = ref<{ status?: number; code?: string } | null>(null)
 const typed = ref('')
 const ackCount = ref(false)
 
+// The open-time snapshot (TOCTOU guard): frozen the instant the dialog opens, read by every render/wire
+// call below instead of the live props. `openedAnchor` starts null only before the first open.
+const openedAnchor = ref<ExactAnchorRequest | null>(null)
+const openedLabel = ref('')
+
 const deleteCount = computed(() => preview.value?.summary.deleteCount ?? 0)
 const revertCount = computed(() => preview.value?.summary.visibleRevertCount ?? 0)
-const deletedCount = computed(() => result.value?.deletedRecordIds?.length ?? 0)
-const hasIdentity = computed(() => Boolean(preview.value?.previewIdentity))
+const resurrectCount = computed(() => preview.value?.summary.resurrectCount ?? 0)
+const driftCount = computed(() => preview.value?.summary.driftCount ?? 0)
+const resurrectBlocked = computed(() => resurrectCount.value > 0)
+const driftBlocked = computed(() => driftCount.value > 0)
+const blocked = computed(() => resurrectBlocked.value || driftBlocked.value)
+const noChanges = computed(() =>
+  preview.value !== null &&
+  preview.value.summary.effectiveWriteCount === 0 &&
+  !blocked.value,
+)
+const deletedCount = computed(() => result.value?.deletedCount ?? result.value?.deletedRecordIds?.length ?? 0)
+const hasIdentity = computed(() => Boolean(preview.value?.previewIdentity) && !blocked.value)
 // Destructive path requires BOTH gates; non-destructive (deleteCount===0) only needs an executable identity.
 const canConfirm = computed(() => hasIdentity.value && typed.value.trim() === 'reset' && ackCount.value)
 
+// Invalidates every preview/execute continuation from an earlier open. This covers close+reopen races,
+// not just mutation of the live parent props while one modal instance remains open.
+let dialogEpoch = 0
+
 const errorCopy = computed(() => {
   const s = error.value?.status, c = error.value?.code
-  if (s === 403) return c === 'RESET_DISABLED' ? l('record.resetConfirmErrorDisabled') : l('record.resetConfirmErrorForbidden')
-  if (s === 409) return c === 'RESET_BLOCKED' ? l('record.resetConfirmErrorBlocked') : l('record.resetConfirmErrorStale')
+  switch (c) {
+    case 'RESET_DISABLED': return l('record.resetConfirmErrorDisabled')
+    case 'RESET_BLOCKED':
+    case 'RECORD_LOCKED': return l('record.resetConfirmErrorBlocked')
+    case 'EXACT_ANCHOR_REQUIRED':
+    case 'INVALID_ANCHOR':
+    case 'UNKNOWN_ANCHOR': return l('record.resetConfirmErrorAnchorInvalid')
+    case 'NO_COVERING_CHECKPOINT':
+    case 'CHECKPOINT_CHANGED': return l('record.resetConfirmErrorCheckpoint')
+    case 'RECOVERY_TRUST_REQUIRED':
+    case 'HISTORY_INCOMPLETE': return l('record.resetConfirmErrorTrustRequired')
+    case 'SCHEMA_DRIFT': return l('record.resetConfirmErrorSchemaDrift')
+    case 'LINK_INTEGRITY': return l('record.resetConfirmErrorLinkIntegrity')
+    case 'VALUE_INVALID': return l('record.resetConfirmErrorValueInvalid')
+    case 'INBOUND_UNPROVABLE': return l('record.resetConfirmErrorInboundUnprovable')
+    case 'TOKEN_REPLAYED':
+    case 'IDENTITY_INVALID':
+    case 'PREVIEW_IDENTITY_INVALID': return l('record.resetConfirmErrorStale')
+    case 'SHEET_TOO_LARGE': return l('record.resetConfirmErrorTooLarge')
+    default: break
+  }
+  if (s === 403) return l('record.resetConfirmErrorForbidden')
+  if (s === 409) return l('record.resetConfirmErrorStale')
   if (s === 413) return l('record.resetConfirmErrorTooLarge')
   if (s === 400) return l('record.resetConfirmErrorTypeMismatch')
   return l('record.resetConfirmErrorGeneric')
@@ -105,23 +172,61 @@ const asErr = (e: unknown): { status?: number; code?: string } => ({
 })
 
 function openDialog(): void {
+  if (!props.anchor) return // no valid exact anchor selected — never open on nothing
+  const epoch = ++dialogEpoch
+  openedAnchor.value = { ...props.anchor } as ExactAnchorRequest
+  openedLabel.value = props.asOf
   open.value = true
-  void loadPreview()
+  void loadPreview(epoch)
 }
 
-async function loadPreview(): Promise<void> {
+async function loadPreview(epoch: number): Promise<void> {
+  const anchor = openedAnchor.value
+  if (!anchor) return
   loading.value = true; error.value = null; result.value = null; preview.value = null; typed.value = ''; ackCount.value = false
-  try { preview.value = await props.resetPreview(props.asOf) } catch (e) { error.value = asErr(e) } finally { loading.value = false }
+  try {
+    const nextPreview = await props.resetPreview({ ...anchor } as ExactAnchorRequest)
+    if (open.value && epoch === dialogEpoch) preview.value = nextPreview
+  } catch (e) {
+    if (open.value && epoch === dialogEpoch) error.value = asErr(e)
+  } finally {
+    if (epoch === dialogEpoch) loading.value = false
+  }
 }
 
 async function onConfirm(): Promise<void> {
+  if (submitting.value) return
   const id = preview.value?.previewIdentity
-  if (!id) return // empty revert+delete set → no executable token
+  if (!id || blocked.value) return // no token, or a fail-closed preview class → no executable action
   if (deleteCount.value > 0 && !canConfirm.value) return // destructive double-gate not satisfied
-  try { result.value = await props.resetExecute(props.asOf, id); props.onDone?.() } catch (e) { error.value = asErr(e) }
+  const epoch = dialogEpoch
+  submitting.value = true
+  error.value = null
+  try {
+    const nextResult = await props.resetExecute(id)
+    if (open.value && epoch === dialogEpoch) result.value = nextResult
+  } catch (e) {
+    if (open.value && epoch === dialogEpoch) error.value = asErr(e)
+    return
+  } finally {
+    if (epoch === dialogEpoch) submitting.value = false
+  }
+
+  // Execute has committed at this point. A refresh failure must never rewrite that outcome as a
+  // recovery failure; the visible result remains authoritative and the next normal refresh can converge.
+  try {
+    await props.onDone?.()
+  } catch {
+    // Deliberately isolated post-commit best effort.
+  }
 }
 
-function onCancel(): void { open.value = false }
+function onCancel(): void {
+  if (submitting.value) return
+  ++dialogEpoch
+  open.value = false
+  loading.value = false
+}
 </script>
 
 <style scoped>
