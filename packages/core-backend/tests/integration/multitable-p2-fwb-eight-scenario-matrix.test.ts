@@ -83,6 +83,7 @@ const txn = (client: { query(sql: string, params?: unknown[]): Promise<unknown> 
 let svc: AutomationService
 let approvals: ApprovalProductService
 let templateId = ''
+let templateVersionId = ''
 let ruleId = ''
 
 const MAPPINGS = [
@@ -148,7 +149,7 @@ function completionEvent(instanceId: string, eventId: string) {
     eventType: 'approval.approved',
     eventId,
     occurredAt: new Date().toISOString(),
-    approval: { instanceId, templateId, status: 'approved' },
+    approval: { instanceId, templateId, templateVersionId, status: 'approved' },
     transition: { action: 'approve', fromStatus: 'pending', toStatus: 'approved', fromVersion: 1, toVersion: 2, nodeKey: 'approval_1' },
     requester: { id: REQUESTER, name: REQUESTER },
     actor: null, // §2.2: system completion carries no human actor — the write identity is the rule creator
@@ -334,6 +335,8 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
     const template = await approvals.createTemplate(approvalTemplateRequest() as never)
     templateId = (template as { id: string }).id
     await approvals.publishTemplate(templateId, { policy: { allowRevoke: true } } as never)
+    const activeVersion = await q('SELECT active_version_id FROM approval_templates WHERE id = $1', [templateId])
+    templateVersionId = String((activeVersion.rows[0] as { active_version_id: string }).active_version_id)
 
     svc = new AutomationService(integrationEventBus, kyselyDb as never, queryFn)
     // REAL save gate: placement, D1 outcome lock, mapping validation, Q6 confirmation hash + creator
@@ -343,7 +346,16 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       triggerType: 'approval.completed',
       triggerConfig: { templateId, outcomes: ['approved'] },
       actionType: 'write_approval_form_values',
-      actionConfig: { mappings: MAPPINGS, confirmationHash: deriveFwbConfirmationHash({ templateId, targetSheetId: SHEET_ID, mappings: MAPPINGS as never }) },
+      actionConfig: {
+        mappings: MAPPINGS,
+        sourceTemplateVersionId: templateVersionId,
+        confirmationHash: deriveFwbConfirmationHash({
+          templateId,
+          sourceTemplateVersionId: templateVersionId,
+          targetSheetId: SHEET_ID,
+          mappings: MAPPINGS,
+        }),
+      },
       createdBy: CREATOR,
     } as never)
     ruleId = (rule as { id: string }).id
@@ -400,7 +412,8 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       await waitForExecutionCount(3)
       let exec = await lastExecution()
       expect(exec?.steps?.[0]?.status).toBe('failed')
-      expect(String(exec?.steps?.[0]?.error ?? '')).toMatch(/injected mid-FWB crash/)
+      expect(exec?.steps?.[0]?.error).toBe('fwb_execution_failed')
+      expect(JSON.stringify(exec?.steps?.[0] ?? {})).not.toContain('injected mid-FWB crash')
       // all four gone together: no record, no revision, no claim, no outbox row
       expect(await sheetRecordCount()).toBe(1) // unchanged — only S6's record exists
       expect(await sheetRevisionCount()).toBe(1)
