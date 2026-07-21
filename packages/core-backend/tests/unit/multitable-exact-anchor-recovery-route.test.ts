@@ -731,14 +731,18 @@ describe('previewExactAnchorRecovery — no-oracle ordering + structural guards 
     expect(calls).toEqual(['full-read'])
   })
 
-  test('structural: preview calls precheckSheetHistoryIntegrity, never precheckSheetHistoryIntegrityStrict', () => {
+  test('structural: preview and execute call the production precheck, never the strict test seam', () => {
     // Production path MUST go through the authoritative entry so checkStrictEnablementPrecondition
     // (RECONSTRUCTION_CAUSALITY_LANDED + active checkpoint) is not bypassed.
     const routePath = join(
       dirname(fileURLToPath(import.meta.url)),
       '../../src/multitable/exact-anchor-recovery-route.ts',
     )
-    const src = readFileSync(routePath, 'utf8')
+    const executePath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../src/multitable/exact-anchor-recovery-execute.ts',
+    )
+    const src = `${readFileSync(routePath, 'utf8')}\n${readFileSync(executePath, 'utf8')}`
     // Strip block + line comments so a mention in a "do not call Strict" note does not false-green.
     const stripped = src
       .replace(/\/\*[\s\S]*?\*\//g, '')

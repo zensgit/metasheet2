@@ -52,6 +52,7 @@ import {
 import { isWriterFenceEnabled } from './canonical-sheet-fence'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import { projectRestorableOntoLive } from './record-restore-diff'
+import { isLiveLinkProjectionConsistent } from './live-link-projection-integrity'
 
 export type ExactAnchorBody = {
   historyBatchId?: unknown
@@ -305,11 +306,13 @@ export async function loadFieldSurfaceForPreview(
   fieldIds: Set<string>
   fieldById: Map<string, { type: string }>
   rawTypeById: Map<string, string>
+  writableLinkFieldIds: Set<string>
 }> {
   const res = await query('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [sheetId])
   const fieldIds = new Set<string>()
   const fieldById = new Map<string, { type: string }>()
   const rawTypeById = new Map<string, string>()
+  const writableLinkFieldIds = new Set<string>()
   for (const r of res.rows as Array<{ id: unknown; type: unknown; property: unknown }>) {
     const id = String(r.id)
     const type = String(r.type ?? '')
@@ -318,9 +321,10 @@ export async function loadFieldSurfaceForPreview(
     const property = parseFieldProperty(r.property)
     // Exclude only mirror-owned links from the projection surface (same as L8 apply).
     if (type === 'link' && isFieldAlwaysReadOnly({ type, property })) continue
+    if (type === 'link') writableLinkFieldIds.add(id)
     fieldById.set(id, { type })
   }
-  return { fieldIds, fieldById, rawTypeById }
+  return { fieldIds, fieldById, rawTypeById, writableLinkFieldIds }
 }
 
 /** Thin field-id set helper (delegates to {@link loadFieldSurfaceForPreview}). */
@@ -450,6 +454,13 @@ export async function previewExactAnchorRecovery(
   if (!liveLoaded.ok) return { ok: false as const, reason: 'recovery-trust-required' as const }
 
   const surface = await loadFieldSurfaceForPreview(query, input.sheetId)
+  if (!(await isLiveLinkProjectionConsistent(
+    query,
+    liveLoaded.liveById,
+    surface.writableLinkFieldIds,
+  ))) {
+    return { ok: false as const, reason: 'recovery-trust-required' as const }
+  }
   let details: PreviewPlanDetails
   try {
     details = buildPreviewPlanDetails(

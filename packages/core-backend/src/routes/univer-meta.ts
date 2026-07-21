@@ -87,6 +87,7 @@ import {
   pruneExpiredRecoveryTokenBurns,
   resolveForeignSheetIdFromProperty,
   type ExactAnchorAppliedMutation,
+  type ExactAnchorLinkInvalidation,
   type ExactAnchorPlanAuthContext,
 } from '../multitable/exact-anchor-recovery-execute'
 import {
@@ -10392,9 +10393,8 @@ export function univerMetaRouter(): Router {
     sheetId: string,
     actorId: string,
     appliedReverts: AppliedRevertFact[],
+    linkInvalidations: ExactAnchorLinkInvalidation[],
   ): Promise<{ yjsRecordIds: string[] }> => {
-    if (appliedReverts.length === 0) return { yjsRecordIds: [] }
-
     const formulaByRecord = new Map<string, Record<string, unknown>>()
     let relatedRecords: RelatedComputedRecord[] = []
     try {
@@ -10438,23 +10438,25 @@ export function univerMetaRouter(): Router {
 
     // Source-sheet realtime: true-delta patches + recomputed formula keys. The shared publisher strips
     // recordPatches before broadcast — receivers refetch under their own mask (RWS parity).
-    try {
-      const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
-      publishMultitableSheetRealtime({
-        spreadsheetId: sheetId,
-        actorId,
-        source: 'multitable',
-        kind: 'record-updated',
-        recordIds: appliedReverts.map((r) => r.recordId),
-        fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
-        recordPatches: appliedReverts.map((r) => ({
-          recordId: r.recordId,
-          version: r.version,
-          patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
-        })),
-      })
-    } catch (err) {
-      console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
+    if (appliedReverts.length > 0) {
+      try {
+        const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
+        publishMultitableSheetRealtime({
+          spreadsheetId: sheetId,
+          actorId,
+          source: 'multitable',
+          kind: 'record-updated',
+          recordIds: appliedReverts.map((r) => r.recordId),
+          fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
+          recordPatches: appliedReverts.map((r) => ({
+            recordId: r.recordId,
+            version: r.version,
+            patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
+          })),
+        })
+      } catch (err) {
+        console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
+      }
     }
 
     for (const r of appliedReverts) {
@@ -10476,6 +10478,24 @@ export function univerMetaRouter(): Router {
       }
       group.recordIds.push(record.recordId)
       for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
+    }
+    // Link-table invalidations are collected from the authoritative edge mutation INSIDE the recovery
+    // transaction. They cover two-way mirror targets changed by a forward-link revert and surviving
+    // source records whose inbound edge to a Reset-deleted target disappeared. IDs only; receivers refetch
+    // under their own masks, matching RecordWriteService's mirror/FOL invalidation contract.
+    for (const invalidation of linkInvalidations) {
+      let group = affectedRelatedBySheet.get(invalidation.sheetId)
+      if (!group) {
+        group = { recordIds: [], fieldIds: new Set<string>() }
+        affectedRelatedBySheet.set(invalidation.sheetId, group)
+      }
+      const seen = new Set(group.recordIds)
+      for (const recordId of invalidation.recordIds) {
+        if (seen.has(recordId)) continue
+        seen.add(recordId)
+        group.recordIds.push(recordId)
+      }
+      for (const fieldId of invalidation.fieldIds) group.fieldIds.add(fieldId)
     }
     try {
       for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
@@ -10691,6 +10711,7 @@ export function univerMetaRouter(): Router {
       // legacy emit. A refusal rolls everything back — the collected arrays are then simply discarded.
       const appliedReverts: AppliedRevertFact[] = []
       const appliedDeleteIds: string[] = []
+      const appliedLinkInvalidations: ExactAnchorLinkInvalidation[] = []
       const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
       const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
       const result = await executeExactAnchorRecoveryApply(
@@ -10702,6 +10723,7 @@ export function univerMetaRouter(): Router {
           evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),
           evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
           onMutationApplied: async (query, mutation: ExactAnchorAppliedMutation) => {
+            appliedLinkInvalidations.push(...mutation.linkInvalidations)
             const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
               const r = await query(sql, params)
               return { rows: r.rows as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
@@ -10733,7 +10755,14 @@ export function univerMetaRouter(): Router {
 
       // Post-commit: recompute/realtime/subscribers/Yjs/legacy-emit are best-effort — NEVER a 500 after commit.
       try {
-        const side = await runRecoveryPostCommitSideEffects(req, pool, sheetId, actorId, appliedReverts)
+        const side = await runRecoveryPostCommitSideEffects(
+          req,
+          pool,
+          sheetId,
+          actorId,
+          appliedReverts,
+          appliedLinkInvalidations,
+        )
         // Flag OFF ⇒ legacy post-commit emits (the SAME prebuilt payload objects the durable enqueue used);
         // flag ON ⇒ suppressed (the same-txn enqueues above are the delivery path).
         for (const p of updatedEventPayloads) emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', p)
@@ -11005,13 +11034,19 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      await pool.query(
-        `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (record_id, subject_type, subject_id)
-         DO UPDATE SET access_level = EXCLUDED.access_level`,
-        [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
-      )
+      await pool.transaction(async ({ query }) => {
+        // Exact-anchor recovery holds this authority row through COMMIT. Serialize every record-level
+        // grant/revoke with that final adjudication so a permission change cannot land after the in-fence
+        // authorization check but before the destructive write commits.
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        await query(
+          `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (record_id, subject_type, subject_id)
+           DO UPDATE SET access_level = EXCLUDED.access_level`,
+          [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
+        )
+      })
 
       return res.json({
         ok: true,
@@ -11042,10 +11077,13 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
 
-      const result = await pool.query(
-        'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
-        [permissionId, sheetId, recordId],
-      )
+      const result = await pool.transaction(async ({ query }) => {
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        return query(
+          'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
+          [permissionId, sheetId, recordId],
+        )
+      })
       if ((result.rowCount ?? 0) === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
       }

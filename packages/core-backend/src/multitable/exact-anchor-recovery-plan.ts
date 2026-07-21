@@ -30,12 +30,12 @@
  * before they ever mint/spend a token.
  *
  * LAYERING CONTRACT (deliberate, loud): this is the CORE set-classification only — it performs NO
- * permission masking, NO row-level-deny filtering, NO size ceilings, and NO fence acquisition. Those are
- * the HTTP/execute wiring's obligations (L8): the route must (a) run this UNDER the canonical fence,
- * (b) apply the actor's field mask + denied-record filter to what it returns/executes (the T-path's PIT-3
- * discipline), and (c) enforce SHEET_REVERT_MAX_RECORDS-class ceilings. Consuming this module without those
- * layers is NOT a production path. The W2 integration now supplies them from the four legacy
- * revert/reset routes; destructive execution remains default-OFF behind its route flags.
+ * authorization, NO presentation masking, NO size ceilings, and NO fence acquisition. A production caller
+ * must (a) assemble and execute it under the canonical fence, (b) WHOLE-refuse unless the actor has current
+ * full-table read plus source-row/field and foreign-target write authority over the complete plan, and
+ * (c) enforce SHEET_REVERT_MAX_RECORDS-class ceilings. It must never turn a denied row/field into a filtered
+ * partial recovery. Presentation-only preview details may be masked after the whole-plan authorization
+ * boundary; destructive execution remains all-or-nothing and default-OFF behind its route flags.
  * After retention has pruned raw revisions, production callers must also resolve the trusted checkpoint and
  * compose its baseline overlay before calling `classifyExactAnchorRecoveryPlan`. This module intentionally
  * exposes NO multi-query builder: assembling fields, live rows, and revisions from separate autocommit reads

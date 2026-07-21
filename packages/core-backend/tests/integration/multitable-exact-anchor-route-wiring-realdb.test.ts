@@ -40,10 +40,12 @@ const F_SRC_LINK = `fld_earw_src_link_${TS}`
 const F_SRC_LOOKUP = `fld_earw_src_lu_${TS}`
 const F_FOL = `fld_earw_fol_${TS}`
 const F_TGT_NUM = `fld_earw_tgt_num_${TS}`
+const F_TGT_MIRROR = `fld_earw_tgt_mirror_${TS}`
 const F_REL_LINK = `fld_earw_rel_link_${TS}`
 const F_REL_LOOKUP = `fld_earw_rel_lu_${TS}`
 const TGT_SHEET = `sheet_earw_tgt_${TS}`
 const ACTOR = `user_earw_${TS}`
+const ROLE_RACE = `role_earw_race_${TS}`
 const REC_A = `rec_earw_a_${TS}`
 const REC_B = `rec_earw_b_${TS}`
 const REC_C = `rec_earw_c_${TS}`
@@ -110,6 +112,7 @@ async function wipe(): Promise<void> {
       await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheetId]).catch(() => {})
     await q('DELETE FROM meta_record_history_operations WHERE sheet_id = $1', [sheetId]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM record_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
     await q('DELETE FROM formula_dependencies WHERE sheet_id = $1', [sheetId]).catch(() => {})
     await q('DELETE FROM meta_record_subscriptions WHERE sheet_id = $1', [sheetId]).catch(() => {})
     await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [sheetId]).catch(() => {})
@@ -119,6 +122,7 @@ async function wipe(): Promise<void> {
     `DELETE FROM meta_links WHERE record_id = ANY($1::text[]) OR foreign_record_id = ANY($1::text[])`,
     [[REC_A, REC_B, REC_REL, REC_REL_UNRELATED, REC_TGT_ANCHOR, REC_TGT_LIVE]],
   ).catch(() => {})
+  await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
 }
 
 /**
@@ -251,7 +255,14 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     await q(
       `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
        ON CONFLICT DO NOTHING`,
-      [F_SRC_LINK, SHEET, 'SrcLink', 'link', JSON.stringify({ foreignSheetId: TGT_SHEET }), 5],
+      [
+        F_SRC_LINK,
+        SHEET,
+        'SrcLink',
+        'link',
+        JSON.stringify({ foreignSheetId: TGT_SHEET, twoWay: true, mirrorFieldId: F_TGT_MIRROR }),
+        5,
+      ],
     )
     await q(
       `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
@@ -267,6 +278,18 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
        ON CONFLICT DO NOTHING`,
       [F_TGT_NUM, TGT_SHEET, 'TgtNum', 'number', '{}', 1],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [
+        F_TGT_MIRROR,
+        TGT_SHEET,
+        'SrcLink mirror',
+        'link',
+        JSON.stringify({ foreignSheetId: SHEET, twoWay: true, mirrorOf: F_SRC_LINK }),
+        2,
+      ],
     )
     await q('DELETE FROM formula_dependencies WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q(
@@ -597,6 +620,17 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       expect(relatedUpdated!.fieldIds).toContain(F_REL_LOOKUP)
       expect(relatedUpdated!.recordPatches).toBeUndefined()
 
+      // Two-way mirror targets whose authoritative edge changed get a pure invalidation on the target
+      // sheet for BOTH the removed live target and added anchor target. Removing the recovery-specific
+      // link invalidation fan-out leaves every prior formula/related assertion green but this one red.
+      const targetUpdated = rtCalls.find(
+        (c) => c && c.kind === 'record-updated' && c.spreadsheetId === TGT_SHEET,
+      ) as { recordIds: string[]; fieldIds: string[]; recordPatches?: unknown } | undefined
+      expect(targetUpdated).toBeTruthy()
+      expect(new Set(targetUpdated!.recordIds)).toEqual(new Set([REC_TGT_ANCHOR, REC_TGT_LIVE]))
+      expect(targetUpdated!.fieldIds).toContain(F_TGT_MIRROR)
+      expect(targetUpdated!.recordPatches).toBeUndefined()
+
       // eventBus true-delta only (user-facing recovery patch — not a second formula-only revision event)
       const updatedEvents = busSpy.mock.calls.filter((c) => c[0] === 'multitable.record.updated')
       expect(updatedEvents.length).toBe(1)
@@ -623,6 +657,8 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       const yjsIds = new Set((yjsSpy.mock.calls as Array<[string[]]>).flatMap((c) => c[0] ?? []))
       expect(yjsIds.has(REC_A)).toBe(true)
       expect(yjsIds.has(REC_REL)).toBe(true)
+      expect(yjsIds.has(REC_TGT_ANCHOR)).toBe(true)
+      expect(yjsIds.has(REC_TGT_LIVE)).toBe(true)
       expect(yjsIds.has(REC_REL_UNRELATED)).toBe(false)
       expect(yjsIds.has(REC_B)).toBe(false)
 
@@ -640,6 +676,90 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       setYjsInvalidatorForRoutes(null)
       rtSpy.mockRestore()
       busSpy.mockRestore()
+    }
+  })
+
+  test('LIVE-LINK-DRIFT: preview and execute both refuse a JSON/meta_links split with no token burn', async () => {
+    enableRecoveryExecute()
+
+    const first = await seedWorld({ withSideEffects: true })
+    await q('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_SRC_LINK, REC_A])
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_SRC_LINK,
+      REC_A,
+      REC_TGT_ANCHOR,
+    ])
+    const refusedPreview = await revertPreview({ anchorOperationId: first.anchorOp })
+    expect(refusedPreview.status).toBe(409)
+    expect(refusedPreview.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect(refusedPreview.body?.data?.previewIdentity).toBeUndefined()
+
+    const second = await seedWorld({ withSideEffects: true })
+    const preview = await revertPreview({ anchorOperationId: second.anchorOp })
+    expect(preview.status).toBe(200)
+    const token = preview.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+    await q('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_SRC_LINK, REC_A])
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_SRC_LINK,
+      REC_A,
+      REC_TGT_ANCHOR,
+    ])
+
+    const refusedExecute = await revertExecute({ previewIdentity: token })
+    expect(refusedExecute.status).toBe(409)
+    expect(refusedExecute.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_SRC_LINK])
+      .toEqual([REC_TGT_LIVE])
+    expect((await q(
+      'SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1',
+      [SHEET],
+    )).rows[0]?.c).toBe(0)
+  })
+
+  test('RESET LINK INVALIDATION: deleting a target invalidates the surviving inbound source record', async () => {
+    enableRecoveryExecute()
+    const rtSpy = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime')
+    const yjsSpy = vi.fn(async (_ids: string[]) => {})
+    setYjsInvalidatorForRoutes(yjsSpy)
+    try {
+      const { anchorOp } = await seedWorld({ withSideEffects: true })
+      await q('DELETE FROM meta_links WHERE field_id = $1', [F_REL_LINK])
+      await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+        F_REL_LINK,
+        REC_REL,
+        REC_B,
+      ])
+      await q(
+        'UPDATE meta_records SET data = data || jsonb_build_object($1::text, $2::jsonb) WHERE id = $3',
+        [F_REL_LINK, JSON.stringify([REC_B]), REC_REL],
+      )
+
+      const preview = await resetPreview({ anchorOperationId: anchorOp })
+      expect(preview.status).toBe(200)
+      const token = preview.body?.data?.previewIdentity as string
+      const executed = await resetExecute({ previewIdentity: token, confirm: 'reset' })
+      expect(executed.status).toBe(200)
+      expect(executed.body?.data?.deletedRecordIds).toContain(REC_B)
+
+      const related = rtSpy.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .find((payload) => payload.kind === 'record-updated' && payload.spreadsheetId === REL_SHEET) as
+        | { recordIds: string[]; fieldIds: string[]; recordPatches?: unknown }
+        | undefined
+      expect(related).toBeTruthy()
+      expect(related!.recordIds).toContain(REC_REL)
+      expect(related!.fieldIds).toContain(F_REL_LINK)
+      expect(related!.recordPatches).toBeUndefined()
+      const yjsIds = new Set((yjsSpy.mock.calls as Array<[string[]]>).flatMap((call) => call[0] ?? []))
+      expect(yjsIds.has(REC_REL)).toBe(true)
+      expect((await q(
+        'SELECT 1 FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+        [F_REL_LINK, REC_REL, REC_B],
+      )).rowCount).toBe(0)
+    } finally {
+      setYjsInvalidatorForRoutes(null)
+      rtSpy.mockRestore()
     }
   })
 
@@ -772,6 +892,168 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       try { await holder.query('ROLLBACK') } catch { /* already committed/released */ }
       holder.release()
       await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    }
+  })
+
+  test('AUTH-COMMIT-RACE: source and foreign permission writers park after final auth until recovery commits', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld({ withSideEffects: true })
+    // This deny is dormant until ROLE_RACE membership is added. A membership INSERT after final auth but
+    // before recovery COMMIT would therefore be a real authorization revocation, not a cosmetic table write.
+    await q(
+      `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+       VALUES ($1,$2,'role',$3,false,true)`,
+      [SHEET, F_STR, ROLE_RACE],
+    )
+    const preview = await revertPreview({ anchorOperationId: anchorOp })
+    expect(preview.status).toBe(200)
+    const token = preview.body?.data?.previewIdentity as string
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const barrier = await livePool!.connect()
+    const membershipWriter = await livePool!.connect()
+    const barrierClass = 731_928
+    const barrierObject = Math.max(1, TS % 2_000_000_000)
+    const functionName = `earw_auth_commit_pause_${TS}`
+    const triggerName = `earw_auth_commit_pause_trg_${TS}`
+    let applying: Promise<Awaited<ReturnType<typeof revertExecute>>> | null = null
+    let sourcePermission: Promise<request.Response> | null = null
+    let foreignPermission: Promise<request.Response> | null = null
+    let membershipChange: Promise<void> | null = null
+    let sourceSettled = false
+    let foreignSettled = false
+    let membershipSettled = false
+    try {
+      await barrier.query('SELECT pg_advisory_lock($1::int, $2::int)', [barrierClass, barrierObject])
+      const barrierPid = Number((await barrier.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      await q(`
+        CREATE OR REPLACE FUNCTION ${functionName}() RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(${barrierClass}, ${barrierObject});
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await q(`
+        CREATE TRIGGER ${triggerName}
+        BEFORE UPDATE ON meta_records
+        FOR EACH ROW WHEN (OLD.id = '${REC_A}')
+        EXECUTE FUNCTION ${functionName}()
+      `)
+
+      // The trigger is AFTER both final authorization callbacks. Once parked here, any permission write
+      // that commits would be a genuine revoke-after-check/before-recovery-COMMIT race.
+      applying = Promise.resolve(revertExecute({ previewIdentity: token }))
+      let recoveryParked = false
+      for (let i = 0; i < 100; i++) {
+        const parked = await q(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_locks held
+               JOIN pg_locks waiter
+                 ON waiter.locktype = held.locktype
+                AND waiter.database IS NOT DISTINCT FROM held.database
+                AND waiter.classid IS NOT DISTINCT FROM held.classid
+                AND waiter.objid IS NOT DISTINCT FROM held.objid
+                AND waiter.objsubid IS NOT DISTINCT FROM held.objsubid
+              WHERE held.pid = $1
+                AND held.locktype = 'advisory'
+                AND held.granted = true
+                AND waiter.granted = false
+           ) AS parked`,
+          [barrierPid],
+        )
+        recoveryParked = parked.rows[0]?.parked === true
+        if (recoveryParked) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(recoveryParked).toBe(true)
+
+      sourcePermission = Promise.resolve(
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/field-permissions/${F_STR}/user/${ACTOR}`)
+          .send({ visible: true, readOnly: true }),
+      ).finally(() => { sourceSettled = true })
+      foreignPermission = Promise.resolve(
+        request(app)
+          .put(`/api/multitable/sheets/${TGT_SHEET}/records/${REC_TGT_ANCHOR}/permissions`)
+          .send({ subjectType: 'user', subjectId: ACTOR, accessLevel: 'read' }),
+      ).finally(() => { foreignSettled = true })
+      const membershipWriterPid = Number((await membershipWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      membershipChange = (async () => {
+        await membershipWriter.query('BEGIN')
+        try {
+          await membershipWriter.query(
+            'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+            [ACTOR, ROLE_RACE],
+          )
+          await membershipWriter.query('COMMIT')
+        } catch (error) {
+          await membershipWriter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { membershipSettled = true })
+
+      // Both production writers must be blocked on their owning meta_sheets row. Removing the source
+      // authority lock makes the first settle; omitting foreign sheets makes the second settle.
+      let authorityWaiters = 0
+      for (let i = 0; i < 100; i++) {
+        const waiting = await q(
+          `SELECT count(*)::int AS c
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND state = 'active'
+              AND wait_event_type = 'Lock'
+              AND query LIKE 'SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE%'`,
+        )
+        authorityWaiters = Number(waiting.rows[0]?.c ?? 0)
+        if (authorityWaiters >= 2 || sourceSettled || foreignSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(sourceSettled).toBe(false)
+      expect(foreignSettled).toBe(false)
+      expect(authorityWaiters).toBeGreaterThanOrEqual(2)
+      let membershipParked = false
+      for (let i = 0; i < 100; i++) {
+        const state = await q(
+          'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1',
+          [membershipWriterPid],
+        )
+        membershipParked = state.rows[0]?.wait_event_type === 'Lock'
+        if (membershipParked || membershipSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(membershipSettled).toBe(false)
+      expect(membershipParked).toBe(true)
+
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject])
+      expect((await applying).status).toBe(200)
+      expect((await sourcePermission).status).toBe(200)
+      expect((await foreignPermission).status).toBe(200)
+      await membershipChange
+      expect((await q(
+        'SELECT read_only FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3',
+        [SHEET, F_STR, ACTOR],
+      )).rows[0]?.read_only).toBe(true)
+      expect((await q(
+        'SELECT access_level FROM record_permissions WHERE sheet_id = $1 AND record_id = $2 AND subject_id = $3',
+        [TGT_SHEET, REC_TGT_ANCHOR, ACTOR],
+      )).rows[0]?.access_level).toBe('read')
+    } finally {
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject]).catch(() => {})
+      if (applying) await applying.catch(() => {})
+      if (sourcePermission) await sourcePermission.catch(() => {})
+      if (foreignPermission) await foreignPermission.catch(() => {})
+      if (membershipChange) await membershipChange.catch(() => {})
+      await membershipWriter.query('ROLLBACK').catch(() => {})
+      membershipWriter.release()
+      barrier.release()
+      await q(`DROP TRIGGER IF EXISTS ${triggerName} ON meta_records`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${functionName}()`).catch(() => {})
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+      await q('DELETE FROM record_permissions WHERE sheet_id = $1', [TGT_SHEET]).catch(() => {})
+      await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
     }
   })
 

@@ -32,7 +32,7 @@ import {
 import { projectRestorableOntoLive } from './record-restore-diff'
 import {
   isContiguityStrictMode,
-  precheckSheetHistoryIntegrityStrict,
+  precheckSheetHistoryIntegrity,
 } from './history-integrity-precheck'
 import type { MultitableField } from './field-codecs'
 import {
@@ -48,6 +48,7 @@ import {
   loadHierarchyParentFieldIds,
   type HierarchyCycleLinkGuard,
 } from './hierarchy-cycle-guard'
+import { isLiveLinkProjectionConsistent } from './live-link-projection-integrity'
 
 /** Normalize a link-field cell (array | single | null) to a string[] of foreign record ids. */
 function normalizeLinkIds(value: unknown): string[] {
@@ -85,7 +86,7 @@ async function syncOneOutboundLinkField(
   recordId: string,
   fieldId: string,
   ids: readonly string[],
-): Promise<void> {
+): Promise<string[]> {
   const current = await query(
     'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
     [fieldId, recordId],
@@ -111,6 +112,160 @@ async function syncOneOutboundLinkField(
   if (ids.length === 0) {
     await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
   }
+  return [...new Set([...toDelete, ...toInsert])]
+}
+
+type TwoWayMirrorConfig = { foreignSheetId: string; mirrorFieldId: string }
+
+function twoWayMirrorConfig(property: Record<string, unknown> | null | undefined): TwoWayMirrorConfig | null {
+  const p = property ?? {}
+  const foreignSheetId = resolveForeignSheetIdFromProperty(p)
+  const mirrorFieldId = typeof p.mirrorFieldId === 'string' ? p.mirrorFieldId.trim() : ''
+  if (p.twoWay !== true || !foreignSheetId || !mirrorFieldId) return null
+  return { foreignSheetId, mirrorFieldId }
+}
+
+export interface ExactAnchorLinkInvalidation {
+  sheetId: string
+  recordIds: string[]
+  fieldIds: string[]
+}
+
+function addLinkInvalidation(
+  groups: Map<string, { recordIds: Set<string>; fieldIds: Set<string> }>,
+  sheetId: string,
+  recordId: string,
+  fieldId: string,
+): void {
+  const group = groups.get(sheetId) ?? { recordIds: new Set<string>(), fieldIds: new Set<string>() }
+  group.recordIds.add(recordId)
+  group.fieldIds.add(fieldId)
+  groups.set(sheetId, group)
+}
+
+function serializeLinkInvalidations(
+  groups: Map<string, { recordIds: Set<string>; fieldIds: Set<string> }>,
+): ExactAnchorLinkInvalidation[] {
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([sheetId, group]) => ({
+      sheetId,
+      recordIds: [...group.recordIds].sort(),
+      fieldIds: [...group.fieldIds].sort(),
+    }))
+}
+
+async function collectResetLinkInvalidations(
+  query: QueryFn,
+  deleteRecordIds: readonly string[],
+): Promise<ExactAnchorLinkInvalidation[]> {
+  if (deleteRecordIds.length === 0) return []
+  const deleteIds = [...new Set(deleteRecordIds)]
+  const deleteSet = new Set(deleteIds)
+  const rows = (await query(
+    `SELECT ml.record_id, ml.foreign_record_id,
+            f.id AS field_id, f.sheet_id AS source_sheet_id, f.property,
+            source_sheet.base_id AS source_base_id
+       FROM meta_links ml
+       JOIN meta_fields f ON f.id = ml.field_id
+       JOIN meta_sheets source_sheet ON source_sheet.id = f.sheet_id
+      WHERE ml.record_id = ANY($1::text[])
+         OR ml.foreign_record_id = ANY($1::text[])
+      ORDER BY f.sheet_id, f.id, ml.record_id, ml.foreign_record_id`,
+    [deleteIds],
+  )).rows as Array<{
+    record_id: unknown
+    foreign_record_id: unknown
+    field_id: unknown
+    source_sheet_id: unknown
+    property: unknown
+    source_base_id: unknown
+  }>
+
+  const foreignSheetIds = new Set<string>()
+  for (const row of rows) {
+    const property = row.property && typeof row.property === 'object' && !Array.isArray(row.property)
+      ? row.property as Record<string, unknown>
+      : {}
+    const cfg = twoWayMirrorConfig(property)
+    if (cfg) foreignSheetIds.add(cfg.foreignSheetId)
+  }
+  const baseBySheetId = new Map<string, string | null>()
+  if (foreignSheetIds.size > 0) {
+    const baseRows = (await query(
+      'SELECT id, base_id FROM meta_sheets WHERE id = ANY($1::text[])',
+      [[...foreignSheetIds]],
+    )).rows as Array<{ id: unknown; base_id: unknown }>
+    for (const row of baseRows) {
+      baseBySheetId.set(String(row.id), typeof row.base_id === 'string' ? row.base_id : null)
+    }
+  }
+
+  const groups = new Map<string, { recordIds: Set<string>; fieldIds: Set<string> }>()
+  for (const row of rows) {
+    const sourceRecordId = String(row.record_id)
+    const targetRecordId = String(row.foreign_record_id)
+    const fieldId = String(row.field_id)
+    const sourceSheetId = String(row.source_sheet_id)
+    const sourceBaseId = typeof row.source_base_id === 'string' ? row.source_base_id : null
+    const property = row.property && typeof row.property === 'object' && !Array.isArray(row.property)
+      ? row.property as Record<string, unknown>
+      : {}
+
+    // An inbound edge disappears when its target is reset-deleted. The surviving source record's
+    // authoritative link projection changed, so invalidate that source field/record.
+    if (deleteSet.has(targetRecordId) && !deleteSet.has(sourceRecordId)) {
+      addLinkInvalidation(groups, sourceSheetId, sourceRecordId, fieldId)
+    }
+
+    // An outbound two-way edge disappears with its source record. Match RecordWriteService's
+    // same-base mirror nudge; cross-base mirror reads remain pull/refetch only by existing design.
+    if (deleteSet.has(sourceRecordId)) {
+      const cfg = twoWayMirrorConfig(property)
+      if (
+        cfg &&
+        baseBySheetId.has(cfg.foreignSheetId) &&
+        sourceBaseId === baseBySheetId.get(cfg.foreignSheetId)
+      ) {
+        addLinkInvalidation(groups, cfg.foreignSheetId, targetRecordId, cfg.mirrorFieldId)
+      }
+    }
+  }
+  return serializeLinkInvalidations(groups)
+}
+
+async function loadSameBaseMirrorConfigByField(
+  query: QueryFn,
+  sourceSheetId: string,
+  rawPropById: ReadonlyMap<string, Record<string, unknown>>,
+  writableLinkFieldIds: ReadonlySet<string>,
+): Promise<Map<string, TwoWayMirrorConfig>> {
+  const configByField = new Map<string, TwoWayMirrorConfig>()
+  const sheetIds = new Set<string>([sourceSheetId])
+  for (const fieldId of writableLinkFieldIds) {
+    const cfg = twoWayMirrorConfig(rawPropById.get(fieldId))
+    if (!cfg) continue
+    configByField.set(fieldId, cfg)
+    sheetIds.add(cfg.foreignSheetId)
+  }
+  if (configByField.size === 0) return configByField
+
+  const baseRows = (await query(
+    'SELECT id, base_id FROM meta_sheets WHERE id = ANY($1::text[])',
+    [[...sheetIds]],
+  )).rows as Array<{ id: unknown; base_id: unknown }>
+  const baseBySheetId = new Map<string, string | null>()
+  for (const row of baseRows) {
+    baseBySheetId.set(String(row.id), typeof row.base_id === 'string' ? row.base_id : null)
+  }
+  if (!baseBySheetId.has(sourceSheetId)) return new Map()
+  const sourceBaseId = baseBySheetId.get(sourceSheetId)
+  for (const [fieldId, cfg] of configByField) {
+    if (!baseBySheetId.has(cfg.foreignSheetId) || baseBySheetId.get(cfg.foreignSheetId) !== sourceBaseId) {
+      configByField.delete(fieldId)
+    }
+  }
+  return configByField
 }
 
 /**
@@ -128,9 +283,11 @@ async function syncOneOutboundLinkField(
  *   1. fenceWriterEntry (L4, fence-FIRST).
  *   2. ENV-ONLY TRUST FLAGS (kernel fail-closed): BOTH `MULTITABLE_ENABLE_WRITER_FENCE` and
  *      `MULTITABLE_HISTORY_CONTIGUITY_STRICT` must be on.
- *   3. IN-FENCE full-read + authorizedScopeHash (P1-2), BEFORE any sheet-state integrity/anchor
- *      adjudication. A revoke while parked on the fence must get uniform `forbidden`, never an oracle.
- *   4. `precheckSheetHistoryIntegrityStrict` under the fence; any non-ok ⇒ `history-incomplete`, zero writes.
+ *   3. PRELIMINARY in-fence full-read + authorizedScopeHash (P1-2), BEFORE any sheet-state
+ *      integrity/anchor adjudication. A revoke while parked on the fence must get uniform
+ *      `forbidden`, never an oracle.
+ *   4. Production `precheckSheetHistoryIntegrity` under the fence; any non-ok ⇒
+ *      `history-incomplete`, zero writes. The direct strict seam is test-only and must not be used here.
  *   5. BURN the token (anti-replay PK; rolled back on every later refusal).
  *   6. IN-FENCE checkpoint re-resolution (never trust the token echo).
  *   7. Composed scopeHash drift, then §5 step 7 ROW LOCKS over the FULL current live set
@@ -144,8 +301,10 @@ async function syncOneOutboundLinkField(
  *      unsolved; temporary kernel boundary, not route-deferred replay).
  *   9. Canonical restorable PROJECTION only (projectRestorableOntoLive) — derived-only ⇒ no-op. Builds the
  *      exact write delta WITHOUT scalar/link validation (no-oracle: value/existence must not leak before auth).
- *  10. REQUIRED `evaluatePlanAuthorization` over that delta (person membership + foreign-target read/edit
- *      authority belong here in the route adapter). Deny ⇒ uniform `forbidden` before any sensitive validator.
+ *  10. Lock the source/changed-foreign sheet authority rows plus actor membership tables through COMMIT,
+ *      then repeat full-read and run REQUIRED `evaluatePlanAuthorization` over that delta (person membership
+ *      + foreign-target read/edit authority belong here in the route adapter). Deny ⇒ uniform `forbidden`
+ *      before any sensitive validator.
  *  11. AFTER planAuth=true: scalar/whole-record CURRENT validation, foreign-target existence, hierarchy cycle.
  *  12. APPLY: restorable reverts (data + meta_links, version-CAS) + RESET canonical delete parity
  *      (version-CAS delete) — any CAS miss ⇒ `preview-drift`, full rollback; seal last.
@@ -253,8 +412,14 @@ export type ExactAnchorAppliedMutation =
       changedFieldIds: string[]
       patch: Record<string, unknown>
       revisionId: string
+      linkInvalidations: ExactAnchorLinkInvalidation[]
     }
-  | { kind: 'delete'; recordId: string; revisionId: string }
+  | {
+      kind: 'delete'
+      recordId: string
+      revisionId: string
+      linkInvalidations: ExactAnchorLinkInvalidation[]
+    }
 
 /**
  * OPTIONAL same-transaction seam for durable event enqueue (P1#2d family): the route adapter builds one
@@ -355,16 +520,17 @@ export async function applyExactAnchorRecovery(
         throw new ApplyRefusalError('recovery-trust-required')
       }
 
-      // 3. IN-FENCE full-read + authorizedScopeHash (P1-2), FIRST among sheet-state checks. If the
-      //    actor loses full-read while parked on the fence, return uniform `forbidden` before
-      //    history/checkpoint/anchor state can become an oracle.
+      // 3. PRELIMINARY in-fence full-read + authorizedScopeHash (P1-2), FIRST among sheet-state checks.
+      //    This preserves the no-oracle ordering while the plan is assembled. The authoritative full-read
+      //    and plan checks run again below while holding every relevant permission-authority lock through
+      //    COMMIT, closing a revoke-after-check race without exposing history/checkpoint state.
       if (!(await input.evaluateFullReadAccess(query))) throw new ApplyRefusalError('forbidden')
       if (authorizedScopeHash !== hashRecoveryAuthorizationScope({ sheetId: input.sheetId, actorId: input.actorId })) {
         throw new ApplyRefusalError('forbidden')
       }
 
       // 4. Strict history under the fence, after authority is freshly established.
-      const trust = await precheckSheetHistoryIntegrityStrict(query, input.sheetId)
+      const trust = await precheckSheetHistoryIntegrity(query, input.sheetId)
       if (!trust.ok) throw new ApplyRefusalError('history-incomplete')
 
       // 5. Burn — at-most-once barrier (rolled back on any later refusal).
@@ -466,26 +632,10 @@ export async function applyExactAnchorRecovery(
       )
       if (liveSchemaHash !== schemaHash) throw new ApplyRefusalError('schema-drift')
 
-      // 7. Plan (L7). A malformed at-anchor/live snapshot (ExactAnchorPlanDataError) is corrupt
-      //    substrate — the same values-free recovery-trust-required, never a coerced-through plan.
-      const fieldIds = new Set(schemaRows.map((r) => String(r.id)))
-      const rawTypeById = new Map(schemaRows.map((r) => [String(r.id), String(r.type ?? '')]))
-      let plan: ExactAnchorRecoveryPlan
-      try {
-        plan = classifyExactAnchorRecoveryPlan(composed, liveById, fieldIds)
-      } catch (e) {
-        if (e instanceof ExactAnchorPlanDataError) throw new ApplyRefusalError('recovery-trust-required')
-        throw e
-      }
-
-      if (plan.driftCount > 0) throw new ApplyRefusalError('schema-drift')
-
-      // RESURRECT fail-closed: D1c leaves link-edge history unsolved; terminal tombstones/current neighbors
-      // cannot prove the inbound relation set AT the requested anchor. Whole-apply refuse — never partial.
-      if (plan.resurrects.length > 0) throw new ApplyRefusalError('inbound-unprovable')
-
       // Field surface for restorable projection (exclude mirror-owned link fields — spine invariant).
       // Also load RAW property blobs so link alias ambiguity is not collapsed by serializeFieldRow.
+      const fieldIds = new Set(schemaRows.map((r) => String(r.id)))
+      const rawTypeById = new Map(schemaRows.map((r) => [String(r.id), String(r.type ?? '')]))
       const fields = await loadFieldsForSheet(query, input.sheetId)
       const rawPropRes = await query('SELECT id, property FROM meta_fields WHERE sheet_id = $1', [input.sheetId])
       const rawPropById = new Map<string, Record<string, unknown>>()
@@ -503,11 +653,42 @@ export async function applyExactAnchorRecovery(
       }
       const fieldById = new Map<string, MultitableField>()
       const projectionFieldById = new Map<string, { type: string }>()
+      const writableLinkFieldIds = new Set<string>()
       for (const f of fields) {
         fieldById.set(f.id, f)
         if (f.type === 'link' && isFieldAlwaysReadOnly(f)) continue
+        if (f.type === 'link') writableLinkFieldIds.add(f.id)
         projectionFieldById.set(f.id, { type: f.type })
       }
+
+      // meta_links is authoritative for writable forward links; meta_records.data is only its JSON mirror.
+      // Planning from a diverged mirror can classify an actually-wrong edge set as unchanged, so fail closed
+      // before plan authorization/token consumption instead of preserving or rewriting an invented state.
+      if (!(await isLiveLinkProjectionConsistent(query, liveById, writableLinkFieldIds))) {
+        throw new ApplyRefusalError('recovery-trust-required')
+      }
+      const sameBaseMirrorConfigByField = await loadSameBaseMirrorConfigByField(
+        query,
+        input.sheetId,
+        rawPropById,
+        writableLinkFieldIds,
+      )
+
+      // 7. Plan (L7). A malformed at-anchor/live snapshot (ExactAnchorPlanDataError) is corrupt
+      //    substrate — the same values-free recovery-trust-required, never a coerced-through plan.
+      let plan: ExactAnchorRecoveryPlan
+      try {
+        plan = classifyExactAnchorRecoveryPlan(composed, liveById, fieldIds)
+      } catch (e) {
+        if (e instanceof ExactAnchorPlanDataError) throw new ApplyRefusalError('recovery-trust-required')
+        throw e
+      }
+
+      if (plan.driftCount > 0) throw new ApplyRefusalError('schema-drift')
+
+      // RESURRECT fail-closed: D1c leaves link-edge history unsolved; terminal tombstones/current neighbors
+      // cannot prove the inbound relation set AT the requested anchor. Whole-apply refuse — never partial.
+      if (plan.resurrects.length > 0) throw new ApplyRefusalError('inbound-unprovable')
 
       const deleteRecordIds =
         mode === 'reset' ? [...plan.deletedAtAnchorLiveNow, ...plan.createdAfterAnchor] : []
@@ -547,17 +728,59 @@ export async function applyExactAnchorRecovery(
         if (!live || live.version !== rw.liveVersion) throw new ApplyRefusalError('preview-drift')
       }
 
-      // REQUIRED in-fence WRITE authorization over the true restorable delta (BEFORE scalar/link validation).
-      // Route adapter: person membership + foreign-target read/edit authority must live here so deny is
-      // uniform `forbidden` and value-invalid / missing-target cannot oracle write/target authority.
-      if (!(await input.evaluatePlanAuthorization(query, {
+      const authorizationContext: ExactAnchorPlanAuthContext = {
         mode,
         sheetId: input.sheetId,
         actorId: input.actorId,
         plan,
         revertWrites,
         deleteRecordIds,
-      }))) {
+      }
+
+      // Stabilize the COMPLETE permission authority before the final adjudication:
+      //   - lock source + every changed forward-link target sheet in one deterministic order; all
+      //     production sheet/field/record permission writers take that same owning-sheet row lock;
+      //   - hold SHARE locks on the two mutable actor-membership relations so a role/group add or revoke
+      //     cannot change which subject-scoped grants/denies apply after the final read but before COMMIT.
+      // The canonical sheet fence covers record/schema writers, not this permission plane. Acquiring all
+      // sheet rows in one ORDER BY avoids A->B / B->A recovery deadlocks caused by source-first locking.
+      const authoritySheetIds = new Set<string>([input.sheetId])
+      for (const rw of revertWrites) {
+        for (const lu of rw.linkUpdates) {
+          const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(lu.fieldId))
+          if (!foreignSheetId) throw new ApplyRefusalError('forbidden')
+          authoritySheetIds.add(foreignSheetId)
+        }
+      }
+      const orderedAuthoritySheetIds = [...authoritySheetIds].sort()
+      const authorityRows = await query(
+        `SELECT id FROM meta_sheets
+          WHERE id = ANY($1::text[])
+          ORDER BY id
+          FOR UPDATE`,
+        [orderedAuthoritySheetIds],
+      )
+      const lockedAuthorityIds = new Set(
+        (authorityRows.rows as Array<{ id: unknown }>).map((row) => String(row.id)),
+      )
+      if (orderedAuthoritySheetIds.some((id) => !lockedAuthorityIds.has(id))) {
+        throw new ApplyRefusalError('forbidden')
+      }
+      try {
+        await query('LOCK TABLE user_roles, platform_member_group_members IN SHARE MODE')
+      } catch (error) {
+        if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '42P01') {
+          throw new ApplyRefusalError('recovery-trust-required')
+        }
+        throw error
+      }
+
+      // REQUIRED FINAL authorization over the true restorable delta (BEFORE scalar/link validation).
+      // Full-read is repeated under the authority locks; the route adapter then covers source row/field,
+      // person membership, and foreign target read/edit authority. Every denial is the same `forbidden`,
+      // so value-invalid / missing-target cannot become an authorization oracle.
+      if (!(await input.evaluateFullReadAccess(query))) throw new ApplyRefusalError('forbidden')
+      if (!(await input.evaluatePlanAuthorization(query, authorizationContext))) {
         throw new ApplyRefusalError('forbidden')
       }
 
@@ -722,6 +945,9 @@ export async function applyExactAnchorRecovery(
           | undefined
         sheetBaseId = baseRow && typeof baseRow.base_id === 'string' ? baseRow.base_id : null
       }
+      const resetLinkInvalidations = mode === 'reset'
+        ? await collectResetLinkInvalidations(query, deleteRecordIds)
+        : []
 
       // RESET: two-phase delete inside the same txn so cross-links between delete candidates are captured
       // against the ORIGINAL graph (not order-dependent after the first link wipe).
@@ -759,7 +985,8 @@ export async function applyExactAnchorRecovery(
           }
         }
         // Phase 2: destroy links + revise + trash + live delete.
-        for (const p of pending) {
+        for (let pendingIndex = 0; pendingIndex < pending.length; pendingIndex++) {
+          const p = pending[pendingIndex]!
           await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [p.recordId])
           // lock-guarded: L8 reset delete — ensureRecordNotLocked in phase-1 loop, same txn.
           // revision-emitted: L8 reset delete — pre-gen id so trash + tombstones share the causal anchor.
@@ -807,7 +1034,12 @@ export async function applyExactAnchorRecovery(
           if (!del.rows[0]) throw new ApplyRefusalError('preview-drift')
           // Same-txn mutation seam (durable event enqueue) — atomic with THIS delete's writes.
           if (input.onMutationApplied) {
-            await input.onMutationApplied(query, { kind: 'delete', recordId: p.recordId, revisionId: p.revisionId })
+            await input.onMutationApplied(query, {
+              kind: 'delete',
+              recordId: p.recordId,
+              revisionId: p.revisionId,
+              linkInvalidations: pendingIndex === 0 ? resetLinkInvalidations : [],
+            })
           }
           deletes++
         }
@@ -834,8 +1066,20 @@ export async function applyExactAnchorRecovery(
         // CAS miss ⇒ the locked row moved under us ⇒ preview-drift, full rollback (never a bare Error).
         const row = upd.rows[0] as { version?: unknown } | undefined
         if (!row) throw new ApplyRefusalError('preview-drift')
+        const linkInvalidationGroups = new Map<string, { recordIds: Set<string>; fieldIds: Set<string> }>()
         for (const lu of rw.linkUpdates) {
-          await syncOneOutboundLinkField(query, rw.recordId, lu.fieldId, lu.targetIds)
+          const changedTargetIds = await syncOneOutboundLinkField(query, rw.recordId, lu.fieldId, lu.targetIds)
+          const mirror = sameBaseMirrorConfigByField.get(lu.fieldId)
+          if (mirror) {
+            for (const recordId of changedTargetIds) {
+              addLinkInvalidation(
+                linkInvalidationGroups,
+                mirror.foreignSheetId,
+                recordId,
+                mirror.mirrorFieldId,
+              )
+            }
+          }
         }
         // revision-emitted: L8 revert — true restorable delta only (never Object.keys(full target)).
         const newVersion = requireLiveVersion(row.version)
@@ -860,6 +1104,7 @@ export async function applyExactAnchorRecovery(
             changedFieldIds: rw.changedFieldIds,
             patch: rw.patch,
             revisionId,
+            linkInvalidations: serializeLinkInvalidations(linkInvalidationGroups),
           })
         }
         revertsApplied++
