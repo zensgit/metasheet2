@@ -406,10 +406,15 @@ function normalizeMaterialReconciliationUniqueness(input, index, fieldIdSet) {
       )
     }
     const predicateField = assertSafeSchemaString(input.partial.field, `${at}.partial.field`)
-    if (!fieldIdSet.has(predicateField)) {
-      throw new MaterialReconciliationTemplateError(`${at}.partial.field references unknown field ${predicateField}`, {
+    // Corrective-review P2: the predicate field must be a member of THIS
+    // uniqueness constraint's own fields (a partial index's predicate ranges
+    // over the indexed columns). A run_identity_key unique with an attempt_id
+    // predicate is incoherent — reject it.
+    if (!fields.includes(predicateField)) {
+      throw new MaterialReconciliationTemplateError(`${at}.partial.field must be one of ${at}.fields`, {
         field: `${at}.partial.field`,
-        missing: predicateField,
+        value: predicateField,
+        uniquenessFields: fields,
       })
     }
     out.partial = { predicate, field: predicateField }

@@ -367,8 +367,15 @@ function computeSnapshotContentDigest(groups, multiplicityBound) {
     if (!isPlainObject(group)) {
       throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'each identity group must be a plain object')
     }
-    const bound = group.multiplicityBound === undefined ? multiplicityBound : group.multiplicityBound
-    const tuple = encodeIdentitySortTuple({ ...group, multiplicityBound: bound })
+    // Corrective-review P2: the snapshot-level multiplicityBound is the SOLE
+    // read-upper-bound authority (Charter unified read bound). A group may NOT
+    // carry its own multiplicityBound — that would let one group exceed the
+    // snapshot cap (snapshot bound 1 + group bound 10 + multiplicity 2). Reject
+    // any per-group override fail-closed.
+    if (Object.prototype.hasOwnProperty.call(group, 'multiplicityBound')) {
+      throw new MaterialReconciliationDigestError('UNSUPPORTED_KIND', 'per-group multiplicityBound is forbidden: the snapshot-level bound is authoritative')
+    }
+    const tuple = encodeIdentitySortTuple({ ...group, multiplicityBound })
     // Group identity = the tuple WITHOUT its trailing fixed 4-byte multiplicity:
     // (classByte || len4+key || len4+digest). A repeat is a non-canonical multiset.
     const groupKey = tuple.subarray(0, tuple.length - 4).toString('hex')

@@ -547,6 +547,19 @@ function main() {
   const badPartialField = clone(byObjectId.material_reconciliation_run)
   badPartialField.uniqueness = [{ scope: 'tenant', fields: ['run_identity_key'], partial: { predicate: 'not_null', field: 'nonexistent' } }]
   assertThrowsTemplateError(() => normalizeMaterialReconciliationTemplate(badPartialField), 'partial predicate on unknown field rejected')
+  // Corrective round-2 P2: the predicate field must be in THIS uniqueness's own
+  // fields, not merely a template field — run unique on run_identity_key with an
+  // attempt_id predicate (attempt_id IS a run field) must be rejected.
+  const partialFieldNotInUnique = clone(byObjectId.material_reconciliation_run)
+  partialFieldNotInUnique.uniqueness = [{ scope: 'tenant', fields: ['run_identity_key'], partial: { predicate: 'not_null', field: 'attempt_id' } }]
+  assert.ok(
+    partialFieldNotInUnique.fields.some((f) => f.id === 'attempt_id'),
+    'fixture: attempt_id IS a template field (so only the uniqueness-membership check can reject it)',
+  )
+  assertThrowsTemplateError(
+    () => normalizeMaterialReconciliationTemplate(partialFieldNotInUnique),
+    'partial predicate field not in the uniqueness fields rejected',
+  )
   // Reference targeting a foreign-prefix object.
   const badReference = clone(byObjectId.material_reconciliation_scenario)
   badReference.references = [
