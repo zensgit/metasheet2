@@ -21,7 +21,7 @@ closed set (values-free — the server's own error codes, not business data):
 |---|---|---|---|
 | 401 | `UNAUTHORIZED` | global JWT gate | token still missing / invalid / expired (token problem persists) |
 | 403 | `PASSWORD_CHANGE_REQUIRED` | global JWT gate | the token's account is flagged for forced password change (account state) |
-| 401 | `UNAUTHENTICATED` | plugin requireAccess | no user resolved at the plugin layer (structurally odd token) |
+| ~~401~~ | ~~`UNAUTHENTICATED`~~ | plugin requireAccess | unreachable behind the global JWT gate — NOT a recognized branch (folds to `OTHER`) |
 | 403 | `FORBIDDEN` | plugin requireAccess | valid token, no forced-change, but lacks `integration:read` (permission) |
 | 404 | — | — | not reachable for auth failures (route mounted); a 404 would mean route/base-URL/deploy |
 | 2XX | — | — | healthy — the fast-track condition |
@@ -36,10 +36,12 @@ Two closed-vocabulary, values-free fields added to
 
 - `authReadStatusClass = HTTP_2XX | HTTP_401 | HTTP_403 | HTTP_404 | HTTP_409 | HTTP_4XX_OTHER |
   HTTP_5XX | OTHER | UNAVAILABLE` — from the numeric HTTP status (a closed protocol enum).
-- `authReadReasonClass = NONE | UNAUTHORIZED | PASSWORD_CHANGE_REQUIRED | UNAUTHENTICATED |
-  FORBIDDEN | OTHER | UNAVAILABLE` — the server's own `body.error.code` matched against the
-  four-code allowlist; anything else (or absent) folds to `OTHER`, so no free-text can reach the
-  output. `NONE` on 2xx; `UNAVAILABLE` when a transport/abort rejection produced no HTTP response.
+- `authReadReasonClass = NONE | UNAUTHORIZED | PASSWORD_CHANGE_REQUIRED | FORBIDDEN | INCONSISTENT
+  | OTHER | UNAVAILABLE` — bound to the exact `(status, code)` pair (see §4b): the three real pairs
+  pass through, a recognized code with the wrong status is `INCONSISTENT`, anything else folds to
+  `OTHER` (no free-text). `NONE` on 2xx; `UNAVAILABLE` on non-integer status / no HTTP response.
+- `authReadContractClass = VALID | RESPONSE_CONTRACT_INVALID | UNAVAILABLE` — the 2xx success
+  contract (see §4b P1): `VALID` only for `{ok:true,data:{adapters:[],routes:[]}}`.
 
 Everything else about the client is unchanged (exact-SHA helper binding, fixed `timeoutMs=15000`,
 one internal read-only GET, DIAGNOSTIC_COMPLETE contract, token scrub).
@@ -55,6 +57,28 @@ one internal read-only GET, DIAGNOSTIC_COMPLETE contract, token scrub).
 - CI: covered by the existing `stock-preparation-prep-line-extended-smoke.yml` contract job
   (Node 20 path filter already lists this client + its test).
 
+## 4b. Corrective-review absorption (2026-07-21)
+
+Owner review found **1 P1 / 2 P2** the green tests missed; both closed:
+
+- **P1: a 200 login/HTML page could read as a healthy API and unlock the RC-A fast-track.**
+  A 200 with an HTML body parses to `body=null` but still reported `HTTP_2XX`/`NONE`. New field
+  `authReadContractClass = VALID | RESPONSE_CONTRACT_INVALID | UNAVAILABLE`: a 2xx is `VALID` only
+  when `body.ok === true` AND `body.data.adapters`/`body.data.routes` are arrays; otherwise
+  `RESPONSE_CONTRACT_INVALID`. The fast-track condition (§5) now requires `VALID`, so a 200-HTML or
+  `200 {ok:false}` can never authorize a window. Tests: 200-HTML, 200 `{ok:false}`, and
+  arrays-missing all → `RESPONSE_CONTRACT_INVALID`; a real `{ok:true,data:{adapters,routes}}` →
+  `VALID`.
+- **P2: `authReadReasonClass` was keyed on the code alone**, so a `404 + FORBIDDEN` read as
+  `FORBIDDEN`. Now bound to the exact `(status, code)` pair — only `401+UNAUTHORIZED`,
+  `403+PASSWORD_CHANGE_REQUIRED`, `403+FORBIDDEN` are recognized; a recognized code with the wrong
+  status is `INCONSISTENT`; a non-integer status is `UNAVAILABLE`.
+- **P2: the plugin `401 UNAUTHENTICATED` is unreachable behind the global JWT gate** — removed as a
+  named branch (folds to `OTHER`); §2 table annotated accordingly.
+
+Suite 45 → 46; corrective mutation battery 6/6 RED (contract always-VALID, drop ok-check, drop
+array-checks, reason-by-code-alone, non-integer-not-UNAVAILABLE, INCONSISTENT-off).
+
 ## 5. Operating the single dispositive run (owner-directed; operator action)
 
 Publish a sidecar **v2** (this client + the byte-exact RC-A helpers, same packaging as the v1
@@ -69,7 +93,7 @@ node scripts/ops/stock-preparation-rca-abort-provenance.mjs \
 
 Routing from that single run (owner-court):
 
-- `authReadStatusClass=HTTP_2XX` + hygiene PASS ⇒ the conditional RC-A flag-ON window is authorized.
+- `authReadStatusClass=HTTP_2XX` **and `authReadContractClass=VALID`** + hygiene PASS ⇒ the conditional RC-A flag-ON window is authorized. A 200 whose `authReadContractClass=RESPONSE_CONTRACT_INVALID` (login/HTML page) must NOT fast-track.
 - `HTTP_401` / `UNAUTHORIZED` ⇒ token still invalid (re-issue).
 - `HTTP_403` / `PASSWORD_CHANGE_REQUIRED` ⇒ clear the account's forced-password-change, re-run.
 - `HTTP_403` / `FORBIDDEN` ⇒ grant `integration:read` to the token's principal, re-run.
