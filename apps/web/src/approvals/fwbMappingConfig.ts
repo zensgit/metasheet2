@@ -1,11 +1,12 @@
 /**
- * FWB-1 config UI — the mapping-config MODEL (fail-closed validation the editor binds to).
+ * FWB-1 authoring contract — the mapping-config MODEL an ordinary-user editor must bind to.
  *
  * A saved config maps template form fields → target sheet fields for `write_approval_form_values`.
- * The editor may only offer valid choices, but the model re-validates the WHOLE draft before save
+ * A future editor may only offer valid choices, but the model re-validates the WHOLE draft before save
  * (edit-safety = fail-closed allowlist, same doctrine as template authoring):
  *   - every mapping must reference an EXISTING template field and an EXISTING target field;
- *   - the target field's type must be one of the ratified v1 four (text/number/date/select);
+ *   - text/date/select are authorable; number remains unavailable until the
+ *     exact-decimal D0-D4 contract is implemented end to end;
  *   - a select target must carry a non-empty option set (the executor enforces the closed vocabulary);
  *   - no two mappings may write the same target field (last-write ambiguity is a config bug);
  *   - an empty mapping list is invalid (a no-op rule must not be saveable as if it did something).
@@ -34,7 +35,7 @@ export interface TargetFieldInfo {
 
 export type FwbConfigIssue =
   | { code: 'empty_config' }
-  | { code: 'unknown_form_field' | 'unknown_target_field' | 'unsupported_target_type' | 'select_options_missing' | 'duplicate_target'; index: number }
+  | { code: 'unknown_form_field' | 'unknown_target_field' | 'unsupported_target_type' | 'exact_number_mapping_unavailable' | 'select_options_missing' | 'duplicate_target'; index: number }
 
 const V1_TYPES: readonly string[] = ['text', 'number', 'date', 'select']
 
@@ -63,6 +64,7 @@ export function validateFwbMappingConfig(
     }
     const targetType = toFwbTargetType(t.type)
     if (!targetType) issues.push({ code: 'unsupported_target_type', index })
+    if (targetType === 'number') issues.push({ code: 'exact_number_mapping_unavailable', index })
     if (targetType === 'select' && (!t.selectOptions || t.selectOptions.length === 0)) issues.push({ code: 'select_options_missing', index })
     if (seenTargets.has(m.targetFieldId)) issues.push({ code: 'duplicate_target', index })
     seenTargets.add(m.targetFieldId)
@@ -79,7 +81,7 @@ export function toExecutorMappings(
   return draft.map((m) => {
     const t = tgt.get(m.targetFieldId)
     const targetType = t ? toFwbTargetType(t.type) : null
-    if (!t || !targetType) throw new RangeError('toExecutorMappings called on an unvalidated draft')
+    if (!t || !targetType || targetType === 'number') throw new RangeError('toExecutorMappings called on an unvalidated draft')
     return {
       formFieldId: m.formFieldId,
       targetFieldId: m.targetFieldId,

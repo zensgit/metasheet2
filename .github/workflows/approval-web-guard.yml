@@ -29,6 +29,7 @@ on:
       - 'apps/web/src/approvals/commonTemplatePresets.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/approvals/amountAutoSum.ts'
+      - 'apps/web/src/approvals/fwbMappingConfig.ts'
       - 'apps/web/src/approvals/attachmentUpload.ts'
       - 'apps/web/src/approvals/attachmentRefs.ts'
       - 'apps/web/src/approvals/attachmentDownload.ts'
@@ -101,6 +102,7 @@ on:
       # ApprovalNewView (same rounding family as amountAutoSum).
       - 'apps/web/src/approvals/amountInWords.ts'
       - 'apps/web/tests/approval-amount-in-words.test.ts'
+      - 'apps/web/tests/approval-fwb-mapping-config.test.ts'
       # G-B2-14: 填单草稿自动保存 — formDraft.ts pure helpers + ApprovalNewView restore alert.
       - 'apps/web/src/approvals/formDraft.ts'
       - 'apps/web/tests/approval-form-draft.test.ts'
@@ -204,6 +206,7 @@ on:
       - 'apps/web/src/approvals/commonTemplatePresets.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/approvals/amountAutoSum.ts'
+      - 'apps/web/src/approvals/fwbMappingConfig.ts'
       - 'apps/web/src/approvals/attachmentUpload.ts'
       - 'apps/web/src/approvals/attachmentRefs.ts'
       - 'apps/web/src/approvals/attachmentDownload.ts'
@@ -259,6 +262,7 @@ on:
       # ApprovalNewView (same rounding family as amountAutoSum).
       - 'apps/web/src/approvals/amountInWords.ts'
       - 'apps/web/tests/approval-amount-in-words.test.ts'
+      - 'apps/web/tests/approval-fwb-mapping-config.test.ts'
       # G-B2-14: 填单草稿自动保存 — formDraft.ts pure helpers + ApprovalNewView restore alert.
       - 'apps/web/src/approvals/formDraft.ts'
       - 'apps/web/tests/approval-form-draft.test.ts'
@@ -388,6 +392,9 @@ jobs:
 
       - name: Run Canvas V2 command canaries
         run: pnpm --filter @metasheet/web exec vitest run approval-canvas-commands approval-form-commands --reporter=dot
+
+      - name: Run FWB mapping authoring contract
+        run: pnpm --filter @metasheet/web exec vitest run approval-fwb-mapping-config --reporter=dot
 
       - name: Run approval web guard specs (targeted)
         # detail/sub-form (明细) FE helpers: frozen-schema row render + fill-row seeding +

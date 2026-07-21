@@ -41,6 +41,7 @@ import {
   canUserWriteFwbTargetFields,
   collectFwbActionConfigs,
   deriveFwbConfirmationHash,
+  hasUnavailableFwbNumberMapping,
   isFwbTargetFieldTypeCompatible,
   normalizeFwbMappings,
 } from './approval-fwb-activation'
@@ -1465,27 +1466,15 @@ export class AutomationService {
   }
 
   /**
-   * Enable or disable a rule.
+   * Enable or disable a rule through the same resulting-shape validation as every other edit.
    */
-  async setRuleEnabled(ruleId: string, enabled: boolean): Promise<AutomationRule | null> {
-    const result = await this.db
-      .updateTable('automation_rules')
-      .set({ enabled, updated_at: new Date().toISOString() } as never)
-      .where('id', '=', ruleId)
-      .returningAll()
-      .execute()
-
-    if (result.length === 0) return null
-
-    const rule = this.mapRow(result[0])
-
-    if (enabled) {
-      this.registerSchedule(rule)
-    } else {
-      this.unregisterSchedule(ruleId)
-    }
-
-    return rule
+  async setRuleEnabled(
+    ruleId: string,
+    sheetId: string,
+    enabled: boolean,
+    authoringActorId?: string | null,
+  ): Promise<AutomationRule | null> {
+    return this.updateRule(ruleId, sheetId, { enabled }, authoringActorId)
   }
 
   // ── Schedule registration ───────────────────────────────────────────────
@@ -2014,6 +2003,9 @@ export class AutomationService {
       const normalized = normalizeFwbMappings(config.mappings)
       if (!normalized.ok) {
         return `${FWB_ACTION_TYPE} mapping config invalid: ${(normalized as { issue: string }).issue}`
+      }
+      if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+        return `${FWB_ACTION_TYPE} mapping invalid: exact_number_mapping_unavailable`
       }
       for (const mapping of normalized.mappings) {
         if (!sourceFieldIds.has(mapping.formFieldId)) {

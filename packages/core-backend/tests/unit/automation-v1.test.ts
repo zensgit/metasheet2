@@ -3976,6 +3976,13 @@ describe('AutomationService — Rule CRUD', () => {
   })
 
   it('setRuleEnabled enables a rule', async () => {
+    const existingRow = {
+      id: 'atr_1', sheet_id: 'sheet_1', name: 'Rule',
+      trigger_type: 'schedule.cron', trigger_config: { expression: '*/5 * * * *' },
+      action_type: 'update_record', action_config: {},
+      enabled: false, created_at: new Date(), updated_at: new Date(),
+      created_by: 'u1', conditions: null, actions: null,
+    }
     const updatedRow = {
       id: 'atr_1', sheet_id: 'sheet_1', name: 'Rule',
       trigger_type: 'schedule.cron', trigger_config: { expression: '*/5 * * * *' },
@@ -3983,15 +3990,16 @@ describe('AutomationService — Rule CRUD', () => {
       enabled: true, created_at: new Date(), updated_at: new Date(),
       created_by: 'u1', conditions: null, actions: null,
     }
+    dbExecuteTakeFirstResults.push(existingRow)
     dbExecuteResults.push([updatedRow])
-    const rule = await service.setRuleEnabled('atr_1', true)
+    const rule = await service.setRuleEnabled('atr_1', 'sheet_1', true, 'u1')
     expect(rule).not.toBeNull()
     expect(rule!.enabled).toBe(true)
   })
 
   it('setRuleEnabled returns null when rule not found', async () => {
-    dbExecuteResults.push([])
-    const rule = await service.setRuleEnabled('nonexistent', false)
+    dbExecuteTakeFirstResults.push(undefined)
+    const rule = await service.setRuleEnabled('nonexistent', 'sheet_1', false, 'u1')
     expect(rule).toBeNull()
   })
 
