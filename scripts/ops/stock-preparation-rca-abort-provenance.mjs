@@ -86,6 +86,8 @@ export const RESULT_VOCABULARY = Object.freeze({
   networkRequestCount: Object.freeze(['0', '1', 'OTHER']),
   networkTarget: Object.freeze(['INTERNAL_API_ONLY', 'OTHER', 'UNAVAILABLE']),
   authReadResult: Object.freeze(['HTTP_2XX', 'HTTP_4XX', 'HTTP_5XX', 'TYPE_ERROR', 'ABORT_ERROR', 'OTHER', 'UNAVAILABLE']),
+  authReadStatusClass: Object.freeze(['HTTP_2XX', 'HTTP_401', 'HTTP_403', 'HTTP_404', 'HTTP_409', 'HTTP_4XX_OTHER', 'HTTP_5XX', 'OTHER', 'UNAVAILABLE']),
+  authReadReasonClass: Object.freeze(['NONE', 'UNAUTHORIZED', 'PASSWORD_CHANGE_REQUIRED', 'UNAUTHENTICATED', 'FORBIDDEN', 'OTHER', 'UNAVAILABLE']),
   elapsedClass: Object.freeze(['LT_1S', '1_TO_14S', '15_TO_20S', 'GT_20S', 'UNAVAILABLE']),
   typeErrorBoundary: Object.freeze(['INVALID_URL', 'REQUEST_HEADERS', 'CONNECT', 'DNS', 'TLS', 'FETCH_API', 'RESPONSE_READ', 'OTHER', 'NONE', 'UNAVAILABLE']),
   abortErrorNameClass: Object.freeze(['ABORT_ERROR', 'TIMEOUT_ERROR', 'OTHER', 'NONE']),
@@ -291,6 +293,42 @@ export function classifyHttpStatusClass(status) {
   return 'OTHER'
 }
 
+// v2 acceleration: a finer HTTP status class so ONE run with a known-good token
+// is dispositive. 401 vs 403 splits token-invalid from account/permission
+// failures without a second sidecar. Values-free: HTTP status is a closed
+// protocol enum, not business data.
+export function classifyAuthReadStatusClass(status) {
+  if (!Number.isInteger(status)) return 'UNAVAILABLE'
+  if (status >= 200 && status <= 299) return 'HTTP_2XX'
+  if (status === 401) return 'HTTP_401'
+  if (status === 403) return 'HTTP_403'
+  if (status === 404) return 'HTTP_404'
+  if (status === 409) return 'HTTP_409'
+  if (status >= 400 && status <= 499) return 'HTTP_4XX_OTHER'
+  if (status >= 500 && status <= 599) return 'HTTP_5XX'
+  return 'OTHER'
+}
+
+// The server's OWN closed error-code vocabulary for GET /api/integration/status
+// auth failures (mapped from the codebase, not business values): the global JWT
+// gate emits UNAUTHORIZED (missing/invalid/expired token) and
+// PASSWORD_CHANGE_REQUIRED (must_change_password); the plugin requireAccess gate
+// emits UNAUTHENTICATED (no user) and FORBIDDEN (lacks integration:read). Any
+// other/absent code folds to OTHER, so no free-text ever reaches the surface.
+export const AUTH_READ_REASON_ALLOWLIST = Object.freeze([
+  'UNAUTHORIZED',
+  'PASSWORD_CHANGE_REQUIRED',
+  'UNAUTHENTICATED',
+  'FORBIDDEN',
+])
+const AUTH_READ_REASON_SET = new Set(AUTH_READ_REASON_ALLOWLIST)
+
+export function classifyAuthReadReasonClass(status, body) {
+  if (Number.isInteger(status) && status >= 200 && status <= 299) return 'NONE'
+  const code = body && body.error && typeof body.error.code === 'string' ? body.error.code : ''
+  return AUTH_READ_REASON_SET.has(code) ? code : 'OTHER'
+}
+
 // Error codes are collected from a small closed set of locations: the error itself, its cause,
 // the cause's AggregateError members (Node >=20 wraps connection failures this way), and one
 // nested cause level. Values are never printed — they only feed the closed classification below.
@@ -467,6 +505,8 @@ export function baselineFields() {
     networkRequestCount: '0',
     networkTarget: 'UNAVAILABLE',
     authReadResult: 'UNAVAILABLE',
+    authReadStatusClass: 'UNAVAILABLE',
+    authReadReasonClass: 'UNAVAILABLE',
     elapsedClass: 'UNAVAILABLE',
     typeErrorBoundary: 'UNAVAILABLE',
     abortErrorNameClass: 'NONE',
@@ -536,7 +576,11 @@ export async function runDiagnostic({
     fields.networkRequestCount = state.requestCount === 0 ? '0' : state.requestCount === 1 ? '1' : 'OTHER'
     fields.networkTarget = state.requestCount === 0 ? 'UNAVAILABLE' : state.networkTarget
     if (outcome.resolved) {
-      fields.authReadResult = classifyHttpStatusClass(outcome.response ? outcome.response.status : undefined)
+      const status = outcome.response ? outcome.response.status : undefined
+      const body = outcome.response ? outcome.response.body : undefined
+      fields.authReadResult = classifyHttpStatusClass(status)
+      fields.authReadStatusClass = classifyAuthReadStatusClass(status)
+      fields.authReadReasonClass = classifyAuthReadReasonClass(status, body)
       fields.typeErrorBoundary = 'NONE'
       fields.abortErrorNameClass = 'NONE'
     } else {
@@ -544,6 +588,9 @@ export async function runDiagnostic({
       fields.authReadResult = rejection.authReadResult
       fields.typeErrorBoundary = rejection.typeErrorBoundary
       fields.abortErrorNameClass = rejection.abortErrorNameClass
+      // A transport/abort rejection produced no HTTP response to classify.
+      fields.authReadStatusClass = 'UNAVAILABLE'
+      fields.authReadReasonClass = 'UNAVAILABLE'
     }
     fields.abortProvenance = deriveAbortProvenance({
       authReadResult: fields.authReadResult,

@@ -27,6 +27,9 @@ import {
   buildProvenanceFetchImpl,
   classifyElapsedNs,
   classifyHttpStatusClass,
+  classifyAuthReadStatusClass,
+  classifyAuthReadReasonClass,
+  AUTH_READ_REASON_ALLOWLIST,
   classifyNodeMajor,
   classifyRejection,
   classifyTypeErrorBoundary,
@@ -698,6 +701,82 @@ test('runDiagnostic classifies 4xx/5xx and TypeError CONNECT outcomes', async ()
   assert.equal(refused.authReadResult, 'TYPE_ERROR')
   assert.equal(refused.typeErrorBoundary, 'CONNECT')
   assert.equal(refused.abortProvenance, 'NONE')
+})
+
+// ── v2 acceleration: 4XX sub-classification (one dispositive run) ─────────────────────────────────
+
+test('classifyAuthReadStatusClass splits 401/403/404/409 from other 4xx', () => {
+  assert.equal(classifyAuthReadStatusClass(200), 'HTTP_2XX')
+  assert.equal(classifyAuthReadStatusClass(204), 'HTTP_2XX')
+  assert.equal(classifyAuthReadStatusClass(401), 'HTTP_401')
+  assert.equal(classifyAuthReadStatusClass(403), 'HTTP_403')
+  assert.equal(classifyAuthReadStatusClass(404), 'HTTP_404')
+  assert.equal(classifyAuthReadStatusClass(409), 'HTTP_409')
+  assert.equal(classifyAuthReadStatusClass(400), 'HTTP_4XX_OTHER')
+  assert.equal(classifyAuthReadStatusClass(429), 'HTTP_4XX_OTHER')
+  assert.equal(classifyAuthReadStatusClass(500), 'HTTP_5XX')
+  assert.equal(classifyAuthReadStatusClass(302), 'OTHER')
+  assert.equal(classifyAuthReadStatusClass(undefined), 'UNAVAILABLE')
+})
+
+test('classifyAuthReadReasonClass maps ONLY the server closed error codes; anything else -> OTHER', () => {
+  // 2xx has no reason.
+  assert.equal(classifyAuthReadReasonClass(200, { ok: true }), 'NONE')
+  // the four codebase-mapped codes pass through verbatim.
+  assert.deepEqual([...AUTH_READ_REASON_ALLOWLIST], ['UNAUTHORIZED', 'PASSWORD_CHANGE_REQUIRED', 'UNAUTHENTICATED', 'FORBIDDEN'])
+  assert.equal(classifyAuthReadReasonClass(401, { ok: false, error: { code: 'UNAUTHORIZED' } }), 'UNAUTHORIZED')
+  assert.equal(classifyAuthReadReasonClass(403, { ok: false, error: { code: 'PASSWORD_CHANGE_REQUIRED' } }), 'PASSWORD_CHANGE_REQUIRED')
+  assert.equal(classifyAuthReadReasonClass(401, { ok: false, error: { code: 'UNAUTHENTICATED' } }), 'UNAUTHENTICATED')
+  assert.equal(classifyAuthReadReasonClass(403, { ok: false, error: { code: 'FORBIDDEN' } }), 'FORBIDDEN')
+  // values-free by construction: an unknown or business-shaped code folds to OTHER.
+  assert.equal(classifyAuthReadReasonClass(403, { ok: false, error: { code: 'MAT-001-SECRET' } }), 'OTHER')
+  assert.equal(classifyAuthReadReasonClass(404, { ok: false, error: {} }), 'OTHER')
+  assert.equal(classifyAuthReadReasonClass(404, null), 'OTHER')
+  assert.equal(classifyAuthReadReasonClass(400, { error: { code: 42 } }), 'OTHER')
+})
+
+test('runDiagnostic v2: one run is dispositive — the four 4XX sub-classes come through end to end', async () => {
+  const run = (status, code) =>
+    runDiagnostic({
+      args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+      verifyImpl: VERIFY_PASS,
+      importImpl: REAL_HELPER_IMPORT,
+      fetchDelegate: async () => jsonResponse(status, JSON.stringify({ ok: false, error: { code } })),
+      timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+    })
+  const tokenBad = await run(401, 'UNAUTHORIZED')
+  assert.equal(tokenBad.authReadStatusClass, 'HTTP_401')
+  assert.equal(tokenBad.authReadReasonClass, 'UNAUTHORIZED')
+  const pwChange = await run(403, 'PASSWORD_CHANGE_REQUIRED')
+  assert.equal(pwChange.authReadStatusClass, 'HTTP_403')
+  assert.equal(pwChange.authReadReasonClass, 'PASSWORD_CHANGE_REQUIRED')
+  const forbidden = await run(403, 'FORBIDDEN')
+  assert.equal(forbidden.authReadStatusClass, 'HTTP_403')
+  assert.equal(forbidden.authReadReasonClass, 'FORBIDDEN')
+
+  // success arm: 2xx -> NONE, and the run reports DIAGNOSTIC_COMPLETE (fast-track eligible).
+  const ok = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
+    importImpl: REAL_HELPER_IMPORT,
+    fetchDelegate: async () => jsonResponse(200, JSON.stringify({ ok: true, data: {} })),
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(ok.authReadResult, 'HTTP_2XX')
+  assert.equal(ok.authReadStatusClass, 'HTTP_2XX')
+  assert.equal(ok.authReadReasonClass, 'NONE')
+  assert.equal(ok.executionState, 'DIAGNOSTIC_COMPLETE')
+
+  // transport rejection: no HTTP response to sub-classify.
+  const aborted = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
+    importImpl: REAL_HELPER_IMPORT,
+    fetchDelegate: async () => { throw makeDomError('AbortError') },
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(aborted.authReadStatusClass, 'UNAVAILABLE')
+  assert.equal(aborted.authReadReasonClass, 'UNAVAILABLE')
 })
 
 // ── Pathname shape ───────────────────────────────────────────────────────────────────────────────
