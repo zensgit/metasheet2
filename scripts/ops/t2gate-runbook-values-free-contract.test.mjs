@@ -140,16 +140,29 @@ export function splitTopLevelProjections(selectList) {
  * For each SELECT in `sql`, yield the raw projection-list text between SELECT and the
  * matching FROM / WHERE / GROUP / ORDER / LIMIT / ; terminator at depth 0.
  * Handles multi-line runbook SQL.
+ *
+ * The terminator may only be recognised at a TOKEN BOUNDARY. Scanning character by character and
+ * anchoring `\bUNION\b` at the slice start makes every slice look like the start of a string, so
+ * the middle of an identifier matched a keyword: the runbook's own alias `has_union` truncated the
+ * projection list right there, and everything after it — `…, union_id, open_id, mobile, raw` —
+ * became invisible to every projection guard (verified: that list returned ok:true). A keyword is
+ * only a terminator when the character before it is not a word character.
  * @param {string} sql
  * @returns {string[]}
  */
 export function extractSelectLists(sql) {
   const lists = []
+  const isWordChar = (ch) => ch !== undefined && /[A-Za-z0-9_]/.test(ch)
   let fromIdx = 0
   while (fromIdx < sql.length) {
     const selectMatch = /\bSELECT\b/i.exec(sql.slice(fromIdx))
     if (!selectMatch) break
-    const selectStart = fromIdx + selectMatch.index + selectMatch[0].length
+    const selectAbs = fromIdx + selectMatch.index
+    if (isWordChar(sql[selectAbs - 1])) {
+      fromIdx = selectAbs + selectMatch[0].length
+      continue
+    }
+    const selectStart = selectAbs + selectMatch[0].length
 
     let depth = 0
     let i = selectStart
@@ -166,7 +179,7 @@ export function extractSelectLists(sql) {
         i += 1
         continue
       }
-      if (depth === 0) {
+      if (depth === 0 && !isWordChar(sql[i - 1])) {
         const rest = sql.slice(i)
         const term = /^(?:\s|;)*(?:\bFROM\b|\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b|;)/i.exec(
           rest,
@@ -417,6 +430,76 @@ export function reduceValuesFreeContexts(expr) {
 }
 
 /**
+ * Owner ruling (review of PR #4500): a DENYLIST of column names / serializer names keeps leaking
+ * shapes it was never told about — `SELECT raw FROM directory_accounts` (the column that persists
+ * `JSON.stringify(user.source)`, i.e. the provider's raw business record) and
+ * `SELECT array_agg(a) FROM directory_accounts a` (whole-row export through an aggregate the
+ * serializer list does not name) both passed. The guard is therefore a CLOSED ALLOWLIST of the
+ * projection FORMS this runbook is allowed to use; everything else is rejected by default.
+ *
+ * The allowlist is expressed as a reduction: a projection is legal iff it reduces WHOLE to a
+ * scalar kind (`NUM` / `BOOL`) through the forms §2 actually uses, or is one of the named
+ * non-identity columns below. Whatever fails to reduce keeps its own text and is rejected — so a
+ * form nobody anticipated (`raw`, `array_agg(a)`, `metadata->>'x'`, a subselect, …) REDs without
+ * anyone having to have enumerated it.
+ */
+
+/** Bare columns this runbook may project as-is (non-identity, closed classification values). */
+const ALLOWED_BARE_PROJECTION_COLUMNS = new Set(['status'])
+
+/**
+ * Calls whose RESULT is a number and therefore cannot carry a raw value, regardless of argument.
+ * These are exactly the reductions §2 uses (`count`, `count(DISTINCT …)`, `length`, and the
+ * `position('<needle>' in error_message)` inside the two pinned closed booleans).
+ */
+const REDUCES_TO_NUMBER_RE =
+  /\b(?:count|length|char_length|octet_length|bit_length|position)\s*\(/i
+
+/**
+ * Reduce a projection to its values-free KIND (`NUM` / `BOOL`), or leave the irreducible text in
+ * place. Only the closed set of forms below reduces:
+ *   count(…) / count(*) FILTER (WHERE …) / length(…) / position(… in …)  -> NUM
+ *   <operand> IS [NOT] NULL                                              -> BOOL
+ *   <operand> <cmp> <operand>                                            -> BOOL
+ *   NOT BOOL, BOOL AND BOOL, BOOL OR BOOL                                -> BOOL
+ *   ( NUM ) / ( BOOL )                                                   -> NUM / BOOL
+ * @param {string} expr
+ * @returns {string} `'NUM'` / `'BOOL'` when fully reduced, otherwise the irreducible remainder
+ */
+export function reduceProjectionToKind(expr) {
+  let s = normalizeSqlWs(stripTrailingAlias(expr))
+  let previous = null
+  for (let guard = 0; previous !== s && guard < 100; guard++) {
+    previous = s
+    // A FILTER predicate is never projected — its result cannot leave the aggregate.
+    s = replaceBalancedCalls(s, /\bFILTER\s*\(/i, ' ')
+    s = replaceBalancedCalls(s, REDUCES_TO_NUMBER_RE, ' NUM ')
+    s = s.replace(/(?:'[^']*'|\b[A-Za-z_][A-Za-z0-9_]*\b)\s+IS\s+(?:NOT\s+)?NULL\b/gi, ' BOOL ')
+    s = s.replace(
+      /(?:'[^']*'|\b[A-Za-z_][A-Za-z0-9_]*\b|\b\d+\b)\s*(?:<>|!=|>=|<=|=|>|<)\s*(?:'[^']*'|\b[A-Za-z_][A-Za-z0-9_]*\b|\b\d+\b)/g,
+      ' BOOL ',
+    )
+    s = s.replace(/\bNOT\s+BOOL\b/gi, ' BOOL ')
+    s = s.replace(/\bBOOL\s+(?:AND|OR)\s+BOOL\b/gi, ' BOOL ')
+    s = s.replace(/\(\s*(NUM|BOOL)\s*\)/g, ' $1 ')
+    s = normalizeSqlWs(s)
+  }
+  return s
+}
+
+/**
+ * True iff a projection is inside the closed allowlist of forms.
+ * @param {string} expr
+ * @returns {{ allowed: boolean, reduced: string }}
+ */
+export function inspectProjectionAgainstAllowlist(expr) {
+  const bare = normalizeSqlWs(stripTrailingAlias(expr)).toLowerCase()
+  if (ALLOWED_BARE_PROJECTION_COLUMNS.has(bare)) return { allowed: true, reduced: bare }
+  const reduced = reduceProjectionToKind(expr)
+  return { allowed: reduced === 'NUM' || reduced === 'BOOL', reduced }
+}
+
+/**
  * A bare `*` / `<alias>.*` projection selects EVERY column, identity ones included — naming no
  * column, so a column-name allow/deny list can never see it. `count(*)` is unaffected: its
  * projection text is `count(*)`, not `*`.
@@ -507,13 +590,29 @@ export function assertNoRawIdentityProjections(markdownOrSql, opts = {}) {
           )
           continue
         }
-        if (!RAW_IDENTITY_SQL_COLUMN_RE.test(proj)) continue
-        const reduced = reduceValuesFreeContexts(proj)
-        const leaked = RAW_IDENTITY_SQL_COLUMN_RE.exec(reduced)
-        if (leaked) {
+        if (RAW_IDENTITY_SQL_COLUMN_RE.test(proj)) {
+          const reduced = reduceValuesFreeContexts(proj)
+          const leaked = RAW_IDENTITY_SQL_COLUMN_RE.exec(reduced)
+          if (leaked) {
+            violations.push(
+              `raw identity/PII column "${leaked[0]}" is projected (values-free requires ` +
+                `length()/count()/boolean/equality output only): ${normalizeSqlWs(proj)}`,
+            )
+            continue
+          }
+        }
+
+        // Closed allowlist (owner ruling): the denylist above can only ever reject shapes it was
+        // told about. Anything that is not one of the runbook's own values-free projection forms
+        // is rejected by default — including columns nobody listed (`raw`) and whole-row exports
+        // through un-named aggregates (`array_agg(a)`).
+        const { allowed, reduced: kind } = inspectProjectionAgainstAllowlist(proj)
+        if (!allowed) {
           violations.push(
-            `raw identity/PII column "${leaked[0]}" is projected (values-free requires ` +
-              `length()/count()/boolean/equality output only): ${normalizeSqlWs(proj)}`,
+            `projection is outside the closed values-free allowlist ` +
+              `(count()/length()/position() reductions, IS [NOT] NULL, comparisons, AND/OR of ` +
+              `those, or the named non-identity columns [${[...ALLOWED_BARE_PROJECTION_COLUMNS].join(', ')}]) ` +
+              `— irreducible remainder "${kind}": ${normalizedProj}`,
           )
         }
       }
@@ -617,6 +716,28 @@ const EVIDENCE_PLACEHOLDER =
 
 const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/**
+ * COMPLETE, ANCHORED named-field formats for the two composite §4 fields (owner ruling, review of
+ * PR #4500). Both §3 rows are decided field by field, so each composite value must parse WHOLE:
+ * every named field present, in the template's own order, with a value of the right kind.
+ *
+ * Positional guesswork ("the second number on the line") and silently skipping an unreadable
+ * field are what let two contradictory blocks ground a verdict at the previous head:
+ *   - `present_in_a=0 / present_in_b=1 / keys_all_distinct=true` grounded DISPROVED, although §3
+ *     requires present_in_a=1 AND present_in_b=1 AND keys_all_distinct=true;
+ *   - `corp_a_rows=214 / corp_b_rows=99 / distinct_keys=313` grounded CONFIRMED, although §3
+ *     requires corp B row count 0 (a wholesale-failed corp-B sync writes nothing).
+ * A missing or malformed field is now REJECTED outright — "cannot tell" must never mean "accept".
+ */
+const KEY_COMPARISON_FORMAT = {
+  re: /^corp_a_rows\s*[=:]\s*(\d+)\s*\/\s*corp_b_rows\s*[=:]\s*(\d+)\s*\/\s*distinct_keys\s*[=:]\s*(\d+)$/i,
+  hint: 'corp_a_rows=<n> / corp_b_rows=<n> / distinct_keys=<n>',
+}
+const PRESENCE_FORMAT = {
+  re: /^present_in_a\s*[=:]\s*(\d+)\s*\/\s*present_in_b\s*[=:]\s*(\d+)\s*\/\s*keys_all_distinct\s*[=:]\s*(true|false)$/i,
+  hint: 'present_in_a=<n> / present_in_b=<n> / keys_all_distinct=<true|false>',
+}
+
 /** Shape a filled dependency must have before it can ground a verdict (junk is not evidence). */
 const EVIDENCE_VALUE_SHAPES = new Map([
   ['staging sha', { re: /^[0-9a-f]{7,40}$/i, hint: 'a 7-40 character git SHA' }],
@@ -624,8 +745,14 @@ const EVIDENCE_VALUE_SHAPES = new Map([
   ['corp b integration id', { re: UUID_SHAPE_RE, hint: 'a UUID' }],
   ['corp a run status', { re: /\b(?:completed|failed)\b/i, hint: 'completed or failed' }],
   ['corp b run status', { re: /\b(?:completed|failed)\b/i, hint: 'completed or failed' }],
-  ['key comparison', { re: /\d/, hint: 'the numeric query output' }],
-  ['presence', { re: /\d|\b(?:true|false)\b/i, hint: 'the query output' }],
+  [
+    'key comparison',
+    { re: KEY_COMPARISON_FORMAT.re, hint: `the complete named form "${KEY_COMPARISON_FORMAT.hint}"` },
+  ],
+  [
+    'presence',
+    { re: PRESENCE_FORMAT.re, hint: `the complete named form "${PRESENCE_FORMAT.hint}"` },
+  ],
   ['corp b duplicate_key_detected', { re: /^(?:true|false)$/i, hint: 'true or false' }],
   ['corp b expected_constraint_detected', { re: /^(?:true|false)$/i, hint: 'true or false' }],
 ])
@@ -671,69 +798,111 @@ function isEvidencePlaceholder(value) {
 }
 
 /**
- * The §3 decision matrix, as code. Returns the verdict the recorded evidence IMPLIES (or null
- * when the evidence is too incomplete/ambiguous to imply anything), plus a human-readable reason.
+ * The §3 decision matrix, as code — every condition of every row, computed FIELD BY FIELD from a
+ * completely parsed evidence block.
  *
- * §3 rows, verbatim:
- *  - corp-B run failed + duplicate_key_detected=true + expected_constraint_detected=true  → CONFIRMED
- *  - both runs completed + present_in_a=1 AND present_in_b=1 AND keys_all_distinct=true   → DISPROVED
- *  - anything else (both completed but present_in_b=0; failed without both flags true)    → INCONCLUSIVE
+ * §3 rows as landed:
+ *  - CONFIRMED:    corp-B run failed + duplicate_key_detected=true
+ *                  + expected_constraint_detected=true + corp B row count 0
+ *  - DISPROVED:    both runs completed + present_in_a=1 AND present_in_b=1
+ *                  AND keys_all_distinct=true
+ *  - INCONCLUSIVE: everything else
+ *
+ * `problems` is non-empty when the evidence needed to DECIDE the row cannot be read at all. That
+ * is never an acceptance: the caller turns each problem into a violation, so an unparseable block
+ * can ground no verdict.
  * @param {Map<string, {value: string}>} byLabel
- * @returns {{ verdict: string | null, because: string }}
+ * @returns {{ verdict: string | null, because: string, problems: string[] }}
  */
 function impliedVerdictFromEvidence(byLabel) {
+  const problems = []
   const read = (label) => {
     const f = byLabel.get(label)
     if (!f || isEvidencePlaceholder(f.value)) return null
     return normalizeEvidenceValue(f.value).toLowerCase()
   }
+  /** Parse a composite field with its COMPLETE anchored named format, or record a problem. */
+  const parseComposite = (label, format) => {
+    const raw = read(label)
+    if (raw === null) {
+      problems.push(
+        `§4 evidence field "${label}" is missing/blank, so the §3 row cannot be computed`,
+      )
+      return null
+    }
+    const m = format.re.exec(raw)
+    if (!m) {
+      problems.push(
+        `§4 evidence field "${label}" is not the complete named form "${format.hint}" ` +
+          `(got "${raw}") — an unreadable field is rejected, never skipped`,
+      )
+      return null
+    }
+    return m
+  }
+
   const runA = read('corp a run status')
   const runB = read('corp b run status')
+  if (!runA || !runB) {
+    problems.push('§4 corp A / corp B run status is missing/blank, so the §3 row cannot be computed')
+  }
   const dup = read('corp b duplicate_key_detected')
   const constraintHit = read('corp b expected_constraint_detected')
-  const presence = read('presence')
-  if (!runA || !runB) return { verdict: null, because: '' }
+  const keyComparison = parseComposite('key comparison', KEY_COMPARISON_FORMAT)
+  const presence = parseComposite('presence', PRESENCE_FORMAT)
+  if (problems.length > 0) return { verdict: null, because: '', problems }
 
-  const failedB = /\bfailed\b/.test(runB)
-  const bothCompleted = /\bcompleted\b/.test(runA) && /\bcompleted\b/.test(runB)
   const isTrue = (v) => v !== null && /^true$/.test(v)
+  const corpBRows = Number(keyComparison[2])
+  const presentInA = Number(presence[1])
+  const presentInB = Number(presence[2])
+  const keysAllDistinct = /^true$/i.test(presence[3])
 
-  if (failedB) {
-    return isTrue(dup) && isTrue(constraintHit)
-      ? { verdict: 'CONFIRMED', because: 'a failed corp-B run with both closed classifications true' }
-      : {
-          verdict: 'INCONCLUSIVE',
-          because: 'a failed corp-B run WITHOUT both closed classifications true',
-        }
+  // §3 row 1 — CONFIRMED. All four conditions, none of them optional.
+  const confirmedRow = {
+    "corp-B run status='failed'": /\bfailed\b/.test(runB),
+    'duplicate_key_detected=true': isTrue(dup),
+    'expected_constraint_detected=true': isTrue(constraintHit),
+    'corp B row count 0': corpBRows === 0,
   }
-  if (bothCompleted) {
-    if (presence === null) return { verdict: null, because: '' }
-    // present_in_b is the discriminator §3 names; keys_all_distinct must also hold for DISPROVED.
-    const presentInB = /present_in_b\s*[=:]?\s*([01])/.exec(presence)
-    const allDistinct = /keys_all_distinct\s*[=:]?\s*(true|false)/i.exec(presence)
-    const numbers = presence.match(/\b[01]\b|\btrue\b|\bfalse\b/gi) || []
-    const bMissing = presentInB ? presentInB[1] === '0' : numbers[1] === '0'
-    const distinctFalse = allDistinct
-      ? /false/i.test(allDistinct[1])
-      : numbers.some((n) => /^false$/i.test(n))
-    if (bMissing) {
-      return {
-        verdict: 'INCONCLUSIVE',
-        because: 'both runs completed but the overlap person is absent under corp B (present_in_b=0)',
-      }
+  if (Object.values(confirmedRow).every(Boolean)) {
+    return {
+      verdict: 'CONFIRMED',
+      because:
+        'a failed corp-B run with both closed classifications true and zero corp-B rows written',
+      problems: [],
     }
-    if (distinctFalse) {
-      return {
-        verdict: 'INCONCLUSIVE',
-        because: 'both runs completed but the keys are not all distinct',
-      }
-    }
+  }
+
+  // §3 row 2 — DISPROVED. All four conditions, none of them optional.
+  const disprovedRow = {
+    'both runs completed': /\bcompleted\b/.test(runA) && /\bcompleted\b/.test(runB),
+    'present_in_a=1': presentInA === 1,
+    'present_in_b=1': presentInB === 1,
+    'keys_all_distinct=true': keysAllDistinct,
+  }
+  if (Object.values(disprovedRow).every(Boolean)) {
     return {
       verdict: 'DISPROVED',
-      because: 'both runs completed with the overlap person present on both sides and all keys distinct',
+      because:
+        'both runs completed with the overlap person present on BOTH sides and all keys distinct',
+      problems: [],
     }
   }
-  return { verdict: 'INCONCLUSIVE', because: 'a run-status combination outside the two closed §3 rows' }
+
+  // §3 row 3 — everything else.
+  const unmet = (row) =>
+    Object.entries(row)
+      .filter(([, met]) => !met)
+      .map(([condition]) => condition)
+      .join(', ')
+  return {
+    verdict: 'INCONCLUSIVE',
+    because:
+      `evidence matching neither closed §3 row (CONFIRMED unmet: ${unmet(confirmedRow)}; ` +
+      `DISPROVED unmet: ${unmet(disprovedRow)})`,
+    problems: [],
+  }
 }
 
 /**
@@ -869,6 +1038,13 @@ export function assertEvidenceVerdictIsGrounded(markdown) {
     // DISPROVED" passes — recording the CONFIRMED row as its exact opposite, which is what
     // unlocks T3 and skips the T2.5 tenant-scoped key migration.
     const implied = impliedVerdictFromEvidence(byLabel)
+    // "Cannot tell" must never mean "accept": when the evidence needed to decide the §3 row is
+    // missing or unparseable, the verdict is ungrounded and the guard REDs.
+    for (const problem of implied.problems) {
+      violations.push(
+        `§4 verdict "${ruled}" cannot be grounded — ${problem}`,
+      )
+    }
     if (implied.verdict && implied.verdict !== ruled) {
       violations.push(
         `§4 verdict "${ruled}" contradicts its own evidence — the §3 decision matrix routes ` +
@@ -1165,6 +1341,20 @@ const COMPLETED_EVIDENCE = {
   verdict: 'DISPROVED',
 }
 
+/**
+ * The CONFIRMED counterpart, self-consistent by §3: a wholesale-failed corp-B sync writes NOTHING,
+ * so `corp_b_rows` is 0 and the overlap person is absent under corp B.
+ */
+const CONFIRMED_EVIDENCE = {
+  ...COMPLETED_EVIDENCE,
+  'corp B run status': 'failed',
+  'corp B duplicate_key_detected': 'true',
+  'corp B expected_constraint_detected': 'true',
+  'key comparison': 'corp_a_rows=214 / corp_b_rows=0 / distinct_keys=214',
+  presence: 'present_in_a=1 / present_in_b=0 / keys_all_distinct=true',
+  verdict: 'CONFIRMED',
+}
+
 test('synthetic: fabricated verdict with the evidence still TBD is rejected', () => {
   const result = assertEvidenceVerdictIsGrounded(evidenceDoc({ verdict: 'DISPROVED' }))
   assert.equal(result.ok, false, 'verdict filled with blank evidence must fail')
@@ -1215,16 +1405,11 @@ test('synthetic: a legitimately COMPLETED evidence block passes (no _TBD_ left a
     result.ok ? 'ok' : `completed evidence must pass:\n- ${result.violations.join('\n- ')}`,
   )
 
-  const confirmed = assertEvidenceVerdictIsGrounded(
-    evidenceDoc({
-      ...COMPLETED_EVIDENCE,
-      'corp B run status': 'failed',
-      'corp B duplicate_key_detected': 'true',
-      'corp B expected_constraint_detected': 'true',
-      'presence': 'present_in_a=1 / present_in_b=0 / keys_all_distinct=false',
-      verdict: 'CONFIRMED',
-    }),
-  )
+  // The CONFIRMED positive control must itself be a block §3 admits: a wholesale-failed corp-B
+  // sync writes NOTHING, so corp_b_rows is 0 and the overlap person is absent under B. (The
+  // previous fixture recorded corp_b_rows=187 alongside a failed run — self-contradictory
+  // evidence that the pre-fix matrix accepted because it never read `key comparison`.)
+  const confirmed = assertEvidenceVerdictIsGrounded(evidenceDoc(CONFIRMED_EVIDENCE))
   assert.equal(
     confirmed.ok,
     true,
@@ -1261,6 +1446,143 @@ test('synthetic: raw identity/PII inside the evidence block is rejected', () => 
     result.violations.some((v) => /raw identity\/PII/i.test(v)),
     `expected evidence-field identity violation, got: ${result.violations?.join(' | ')}`,
   )
+})
+
+// ---------------------------------------------------------------------------
+// Owner reproductions (review of PR #4500) — a contradictory evidence block must not be able to
+// fabricate a T2-Gate verdict. Both of these returned ok:true before the fix.
+// ---------------------------------------------------------------------------
+
+test('owner repro (i): present_in_a=0 cannot ground DISPROVED', () => {
+  const result = assertEvidenceVerdictIsGrounded(
+    evidenceDoc({
+      ...COMPLETED_EVIDENCE,
+      presence: 'present_in_a=0 / present_in_b=1 / keys_all_distinct=true',
+      verdict: 'DISPROVED',
+    }),
+  )
+  assert.equal(result.ok, false, 'DISPROVED without present_in_a=1 must fail')
+  assert.ok(
+    result.violations.some(
+      (v) => /contradicts its own evidence/i.test(v) && /present_in_a=1/.test(v) && /INCONCLUSIVE/.test(v),
+    ),
+    `expected a present_in_a contradiction routed to INCONCLUSIVE, got: ${result.violations?.join(' | ')}`,
+  )
+})
+
+test('owner repro (ii): a CONFIRMED whose key comparison shows corp-B rows written is rejected', () => {
+  const result = assertEvidenceVerdictIsGrounded(
+    evidenceDoc({
+      ...CONFIRMED_EVIDENCE,
+      'key comparison': 'corp_a_rows=214 / corp_b_rows=99 / distinct_keys=313',
+    }),
+  )
+  assert.equal(result.ok, false, 'CONFIRMED with corp_b_rows>0 must fail')
+  assert.ok(
+    result.violations.some(
+      (v) => /contradicts its own evidence/i.test(v) && /corp B row count 0/.test(v),
+    ),
+    `expected a corp-B-row-count contradiction, got: ${result.violations?.join(' | ')}`,
+  )
+})
+
+test('synthetic: every §3 CONFIRMED condition is load-bearing', () => {
+  const flips = [
+    ['corp-B run failed', { 'corp B run status': 'completed' }],
+    ['duplicate_key_detected=true', { 'corp B duplicate_key_detected': 'false' }],
+    ['expected_constraint_detected=true', { 'corp B expected_constraint_detected': 'false' }],
+    ['corp B row count 0', { 'key comparison': 'corp_a_rows=214 / corp_b_rows=1 / distinct_keys=215' }],
+  ]
+  for (const [condition, override] of flips) {
+    const result = assertEvidenceVerdictIsGrounded(
+      evidenceDoc({ ...CONFIRMED_EVIDENCE, ...override }),
+    )
+    assert.equal(result.ok, false, `CONFIRMED must fail when "${condition}" does not hold`)
+    assert.ok(
+      result.violations.some((v) => /contradicts its own evidence/i.test(v)),
+      `expected a §3 contradiction for "${condition}", got: ${result.violations?.join(' | ')}`,
+    )
+  }
+})
+
+test('synthetic: every §3 DISPROVED condition is load-bearing', () => {
+  const flips = [
+    ['corp A completed', { 'corp A run status': 'failed' }],
+    ['corp B completed', { 'corp B run status': 'failed' }],
+    ['present_in_a=1', { presence: 'present_in_a=0 / present_in_b=1 / keys_all_distinct=true' }],
+    ['present_in_b=1', { presence: 'present_in_a=1 / present_in_b=0 / keys_all_distinct=true' }],
+    ['keys_all_distinct=true', { presence: 'present_in_a=1 / present_in_b=1 / keys_all_distinct=false' }],
+  ]
+  for (const [condition, override] of flips) {
+    const result = assertEvidenceVerdictIsGrounded(
+      evidenceDoc({ ...COMPLETED_EVIDENCE, ...override }),
+    )
+    assert.equal(result.ok, false, `DISPROVED must fail when "${condition}" does not hold`)
+    assert.ok(
+      result.violations.some((v) => /contradicts its own evidence/i.test(v)),
+      `expected a §3 contradiction for "${condition}", got: ${result.violations?.join(' | ')}`,
+    )
+  }
+})
+
+test('synthetic: an unparseable composite field grounds NOTHING (cannot tell ≠ accept)', () => {
+  const malformed = [
+    // positional guesswork is exactly what the previous cut relied on
+    { 'key comparison': '214 / 187 / 401' },
+    { 'key comparison': 'corp_a_rows=214 / corp_b_rows=187' },
+    { 'key comparison': 'corp_a_rows=214 / distinct_keys=401 / corp_b_rows=187' },
+    { 'key comparison': 'as recorded in the ops ticket' },
+    { presence: '1 / 1 / true' },
+    { presence: 'present_in_a=1 / keys_all_distinct=true' },
+    { presence: 'present_in_a=1 / present_in_b=1 / keys_all_distinct=yes' },
+    { presence: 'present_in_a=1 / present_in_b=1 / keys_all_distinct=true / notes=looks fine' },
+  ]
+  for (const override of malformed) {
+    const [label] = Object.keys(override)
+    const result = assertEvidenceVerdictIsGrounded(
+      evidenceDoc({ ...COMPLETED_EVIDENCE, ...override }),
+    )
+    assert.equal(result.ok, false, `malformed "${label}" (${override[label]}) must fail`)
+    assert.ok(
+      result.violations.some((v) => /complete named form/i.test(v) && v.includes(label)),
+      `expected a complete-named-form rejection for "${label}", got: ${result.violations?.join(' | ')}`,
+    )
+    assert.ok(
+      !result.violations.some((v) => /contradicts its own evidence/i.test(v)),
+      `an unparseable block must not be routed to a §3 row at all, got: ${result.violations?.join(' | ')}`,
+    )
+  }
+})
+
+test('positive control: honest CONFIRMED / DISPROVED / INCONCLUSIVE blocks all pass', () => {
+  const honest = [
+    ['DISPROVED', COMPLETED_EVIDENCE],
+    ['CONFIRMED', CONFIRMED_EVIDENCE],
+    // §3 row 3: both completed but the overlap person is absent under corp B.
+    [
+      'INCONCLUSIVE (present_in_b=0)',
+      {
+        ...COMPLETED_EVIDENCE,
+        presence: 'present_in_a=1 / present_in_b=0 / keys_all_distinct=true',
+        verdict: 'INCONCLUSIVE',
+      },
+    ],
+    // §3 row 3: failed corp B WITHOUT both closed classifications true.
+    [
+      'INCONCLUSIVE (failed without both flags)',
+      { ...CONFIRMED_EVIDENCE, 'corp B expected_constraint_detected': 'false', verdict: 'INCONCLUSIVE' },
+    ],
+  ]
+  for (const [name, evidence] of honest) {
+    const doc = evidenceDoc(evidence)
+    assert.doesNotMatch(doc, /_TBD_/, `${name} block must contain no placeholder at all`)
+    const result = assertEvidenceVerdictIsGrounded(doc)
+    assert.equal(
+      result.ok,
+      true,
+      result.ok ? 'ok' : `honest ${name} evidence must pass:\n- ${result.violations.join('\n- ')}`,
+    )
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -1312,6 +1634,107 @@ test('synthetic: raw identity/PII projections are rejected', () => {
     assert.ok(
       result.violations.some((v) => /raw identity\/PII column/i.test(v) && needle.test(v)),
       `expected identity-projection violation for ${sql}, got: ${result.violations?.join(' | ')}`,
+    )
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Owner reproduction (review of PR #4500) — the values-free guard must be a CLOSED ALLOWLIST of
+// projection forms, not a denylist of shapes someone happened to think of. Both of these
+// returned ok:true before the fix.
+// ---------------------------------------------------------------------------
+
+/** Every SQL projection §2 of the runbook actually uses — all must be inside the allowlist. */
+const RUNBOOK_PROJECTIONS = [
+  'length(external_key) AS key_len',
+  '(union_id IS NOT NULL) AS has_union',
+  '(external_key = union_id) AS key_is_bare_union',
+  'status',
+  ALLOWED_DUP,
+  ALLOWED_CONSTRAINT,
+  `count(*) FILTER (WHERE integration_id = '<A>') AS corp_a_rows`,
+  `count(*) FILTER (WHERE integration_id = '<B>') AS corp_b_rows`,
+  'count(DISTINCT external_key) AS distinct_keys',
+  `(count(*) FILTER (WHERE integration_id = '<A>' AND external_user_id = '<overlap userId in A>')) AS present_in_a`,
+  `(count(*) FILTER (WHERE integration_id = '<B>' AND external_user_id = '<overlap userId in B>')) AS present_in_b`,
+  '(count(DISTINCT external_key) = count(*)) AS keys_all_distinct',
+]
+
+test('owner repro: whole-row / un-named exports outside the allowlist are rejected', () => {
+  const rejected = [
+    // `raw` persists JSON.stringify(user.source) — the provider's raw business record. No
+    // column-name denylist ever named it.
+    `SELECT raw FROM directory_accounts;`,
+    `SELECT a.raw FROM directory_accounts a;`,
+    // whole-row export through an aggregate the serializer list does not name
+    `SELECT array_agg(a) FROM directory_accounts a;`,
+    `SELECT jsonb_build_object('row', a) FROM directory_accounts a;`,
+    `SELECT string_agg(status, ',') FROM directory_sync_runs;`,
+    `SELECT metadata->>'source' FROM directory_accounts;`,
+    `SELECT source FROM directory_accounts;`,
+  ]
+  for (const sql of rejected) {
+    const result = assertNoRawIdentityProjections(sql, { bareSql: true })
+    assert.equal(result.ok, false, `must reject: ${sql}`)
+    assert.ok(
+      result.violations.some((v) => /outside the closed values-free allowlist/i.test(v)),
+      `expected an allowlist violation for ${sql}, got: ${result.violations?.join(' | ')}`,
+    )
+  }
+})
+
+test('synthetic: a keyword inside an identifier does not truncate the projection list', () => {
+  // The runbook's own alias `has_union` used to end extraction (mid-identifier `\bUNION\b`), so
+  // every projection AFTER it was invisible to all three projection guards.
+  const sql = [
+    'SELECT length(external_key) AS key_len,',
+    '       (union_id IS NOT NULL) AS has_union,',
+    '       union_id, open_id, mobile, raw',
+    '  FROM directory_accounts;',
+  ].join('\n')
+  const lists = extractSelectLists(sql)
+  assert.equal(lists.length, 1, 'one SELECT list expected')
+  assert.match(lists[0], /raw$/, `projection list was truncated: ${JSON.stringify(lists[0])}`)
+
+  const result = assertNoRawIdentityProjections(sql, { bareSql: true })
+  assert.equal(result.ok, false, 'identity columns after has_union must be seen and rejected')
+  for (const needle of [/union_id/, /open_id/, /mobile/]) {
+    assert.ok(
+      result.violations.some((v) => /raw identity\/PII column/i.test(v) && needle.test(v)),
+      `expected ${needle} to be reported, got: ${result.violations?.join(' | ')}`,
+    )
+  }
+  assert.ok(
+    result.violations.some((v) => /outside the closed values-free allowlist/i.test(v) && /raw/.test(v)),
+    `expected the trailing "raw" column to be reported, got: ${result.violations?.join(' | ')}`,
+  )
+})
+
+test('positive control: every projection the runbook uses is expressible in the allowlist', () => {
+  for (const proj of RUNBOOK_PROJECTIONS) {
+    const { allowed, reduced } = inspectProjectionAgainstAllowlist(proj)
+    assert.equal(
+      allowed,
+      true,
+      `runbook projection must be inside the allowlist (reduced to "${reduced}"): ${proj}`,
+    )
+  }
+
+  // Anti-vacuity: the guard must actually be SEEING the runbook's projections, not passing on an
+  // empty list because extraction silently found nothing.
+  const seen = extractFencedSqlBlocks(loadRunbook())
+    .flatMap((b) => extractSelectLists(b))
+    .flatMap((l) => splitTopLevelProjections(l))
+  assert.ok(
+    seen.length >= RUNBOOK_PROJECTIONS.length,
+    `expected >=${RUNBOOK_PROJECTIONS.length} extracted runbook projections, got ${seen.length}`,
+  )
+  for (const proj of seen) {
+    const { allowed, reduced } = inspectProjectionAgainstAllowlist(proj)
+    assert.equal(
+      allowed,
+      true,
+      `extracted runbook projection is outside the allowlist (reduced to "${reduced}"): ${proj}`,
     )
   }
 })
