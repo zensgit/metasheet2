@@ -13,6 +13,8 @@ import {
   bindAttachmentsOnSubmit,
   reconcileBucket,
   RECONCILER_ORPHAN_GRACE_MS,
+  type ReconcilerBlob,
+  type ReconcilerBlobSource,
 } from '../../src/services/approval-attachment-reconciler'
 import { sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
 
@@ -40,6 +42,19 @@ async function seed(over: { uploader?: string; status?: string; key?: string; si
     [id, over.uploader ?? 'u1', over.key ?? `key_${id}`, over.size ?? 1024, over.status ?? 'unbound', over.status === 'bound' ? BOUND_INSTANCE : null, over.scanState ?? 'unscanned', over.ageHours ?? 0],
   )
   return id
+}
+
+function blobSource(blobs: ReconcilerBlob[]): ReconcilerBlobSource {
+  const existing = new Set(blobs.map((blob) => blob.key))
+  return {
+    listPage: async (cursor, limit) => {
+      const offset = cursor === undefined ? 0 : Number(cursor)
+      const page = blobs.slice(offset, offset + limit)
+      const next = offset + page.length
+      return { blobs: page, ...(next < blobs.length ? { nextCursor: String(next) } : {}) }
+    },
+    hasBlob: async (storageKey) => existing.has(storageKey),
+  }
 }
 
 describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () => {
@@ -146,11 +161,11 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const orphanKey = `key_att6_${RUN}_orphan`
     const OLD = 2 * 60 * 60 * 1000 // 2h, past the 1h default grace
     // bucket has the orphan (past grace) but NOT the live row's blob
-    const listBlobs = async () => [{ key: orphanKey, ageMs: OLD }]
-    const r1 = await reconcileBucket(db(), listBlobs)
+    const source = blobSource([{ key: orphanKey, ageMs: OLD }])
+    const r1 = await reconcileBucket(db(), source)
     expect(r1.orphanBlobsQueued).toBe(1)
     expect(r1.missingBlobs).toContain(`key_att6_${RUN}_live`)
-    const r2 = await reconcileBucket(db(), listBlobs)
+    const r2 = await reconcileBucket(db(), source)
     expect(r2.orphanBlobsQueued).toBe(0) // idempotent — no duplicate intents
     const row = await db().query('SELECT status FROM approval_attachments WHERE id=$1', [live])
     expect(row.rows[0].status).toBe('unbound') // never auto-deleted
@@ -161,7 +176,7 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
   test('reconciler grace window (G15): an in-flight upload YOUNGER than the grace is NEVER purged', async () => {
     const inflightKey = `key_att6_${RUN}_inflight`
     const YOUNG = 5 * 60 * 1000 // 5m, well inside the 1h default grace — a blob still mid-upload/commit
-    const r = await reconcileBucket(db(), async () => [{ key: inflightKey, ageMs: YOUNG }])
+    const r = await reconcileBucket(db(), blobSource([{ key: inflightKey, ageMs: YOUNG }]))
     expect(r.orphanBlobsQueued).toBe(0) // positive control: the just-uploaded blob is left alone
     const pi = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [inflightKey])
     expect(Number(pi.rows[0].c)).toBe(0)
@@ -176,19 +191,21 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
       [`pi_att6_${RUN}_dead`, key],
     )
 
-    const result = await reconcileBucket(db(), async () => [{ key, ageMs: RECONCILER_ORPHAN_GRACE_MS + 1 }])
+    const result = await reconcileBucket(db(), blobSource([{ key, ageMs: RECONCILER_ORPHAN_GRACE_MS + 1 }]))
     expect(result.orphanBlobsQueued).toBe(0)
     const intents = await db().query(
       'SELECT id, status FROM approval_attachment_purge_intents WHERE storage_key=$1',
       [key],
     )
-    expect(intents.rows).toEqual([{ id: `pi_att6_${RUN}_dead`, status: 'dead_letter' }])
+    expect(intents.rows).toHaveLength(1)
+    expect(intents.rows[0]).toMatchObject({ status: 'dead_letter' })
+    expect(String(intents.rows[0].id)).toMatch(/^pi_key_[a-f0-9]{32}$/)
 
     await expect(db().query(
       `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
        VALUES ($1,$2,'reconciler_orphan')`,
       [`pi_att6_${RUN}_duplicate`, key],
-    )).rejects.toMatchObject({ constraint: 'uq_approval_purge_storage_key' })
+    )).rejects.toMatchObject({ constraint: 'approval_attachment_purge_intents_pkey' })
   })
 
   // §12 item 4 / G4 — CONSTRUCTED concurrent double-submit: two create-instance binds RACE on the same

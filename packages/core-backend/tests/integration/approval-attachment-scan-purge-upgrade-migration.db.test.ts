@@ -7,9 +7,8 @@
  *   2. Pre-existing rows get scan_state='unscanned' without data loss
  *   3. Pre-existing DUPLICATE storage_key purge intents are collapsed BEFORE the unique index
  *      (dead_letter wins; one terminal row remains so the reconciler cannot bypass it)
- *   4. Unique storage_key on purge intents makes a deterministic second insert fail (dedup)
- *   5. Row-delete trigger enqueues ON CONFLICT (storage_key) — a second delete of a re-inserted
- *      row with the same key does not create a second intent
+ *   4. Legacy ON CONFLICT(id) and new ON CONFLICT(storage_key) workers coexist after the unique index
+ *   5. Row-delete trigger uses the compatibility path, so a re-delete cannot create a second intent
  *
  * Isolated schema + search_path (house rule for shared-DB integration).
  */
@@ -89,7 +88,7 @@ describeDb('approval attachments scan/purge-dedup upgrade path (real DB, isolate
     return r.rows.map((row) => row.name)
   }
 
-  it('UPGRADE PATH: create-shape DB gains scan_state + unique purge storage_key; pre-existing duplicates collapse with dead_letter winning; ledger records forward name', async () => {
+  it('UPGRADE PATH: scan_state + key uniqueness preserve old/new worker coexistence and dead-letter identity', async () => {
     // Pre-forward row: no scan_state column yet (create migration shape).
     await sql`
       INSERT INTO approval_attachments
@@ -139,13 +138,16 @@ describeDb('approval attachments scan/purge-dedup upgrade path (real DB, isolate
     `.execute(testDb)
     expect(scan.rows[0].scan_state).toBe('unscanned')
 
-    // dead_letter wins: exactly one retained row, the terminal one — reconciler cannot re-enter.
+    // dead_letter wins and its id is canonicalized from storage_key so legacy ON CONFLICT(id)
+    // sees the same identity as new ON CONFLICT(storage_key).
     const intents = await sql<{ id: string; status: string }>`
       SELECT id, status FROM approval_attachment_purge_intents
       WHERE storage_key = ${dupKey}
       ORDER BY id
     `.execute(testDb)
-    expect(intents.rows).toEqual([{ id: 'pi_dead', status: 'dead_letter' }])
+    expect(intents.rows).toHaveLength(1)
+    expect(intents.rows[0].status).toBe('dead_letter')
+    expect(intents.rows[0].id).toMatch(/^pi_key_[a-f0-9]{32}$/)
 
     // Post-unique: a second id for the SAME storage_key is refused.
     await expect(
@@ -155,8 +157,64 @@ describeDb('approval attachments scan/purge-dedup upgrade path (real DB, isolate
       `.execute(testDb),
     ).rejects.toThrow(/uq_approval_purge_storage_key|duplicate key/i)
 
-    // Trigger evolution: hard-delete enqueues by storage_key; a re-insert + re-delete of the same
-    // key does NOT create a second intent (ON CONFLICT (storage_key) DO NOTHING).
+    // MUTATION CONTROL: removing the canonical-id BEFORE INSERT trigger makes the legacy statement
+    // fail on uq_approval_purge_storage_key because its ON CONFLICT(id) cannot catch that conflict.
+    await expect(
+      sql`
+        INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+        VALUES ('legacy_worker_different_id', ${dupKey}, 'unbound_ttl')
+        ON CONFLICT (id) DO NOTHING
+      `.execute(testDb),
+    ).resolves.toMatchObject({ numAffectedRows: 0n })
+
+    // Both rollout orders converge: old-first/new-second and new-first/old-second.
+    for (const [key, firstTarget, secondTarget] of [
+      ['approval-attachments/2026-07/old-first.pdf', 'id', 'storage_key'],
+      ['approval-attachments/2026-07/new-first.pdf', 'storage_key', 'id'],
+    ] as const) {
+      await testPool.query(
+        `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+         VALUES ($1, $2, 'reconciler_orphan') ON CONFLICT (${firstTarget}) DO NOTHING`,
+        [`first_${firstTarget}`, key],
+      )
+      await expect(testPool.query(
+        `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+         VALUES ($1, $2, 'row_deleted') ON CONFLICT (${secondTarget}) DO NOTHING`,
+        [`second_${secondTarget}`, key],
+      )).resolves.toMatchObject({ rowCount: 0 })
+      const count = await testPool.query<{ c: string }>(
+        'SELECT count(*)::text AS c FROM approval_attachment_purge_intents WHERE storage_key=$1',
+        [key],
+      )
+      expect(Number(count.rows[0].c)).toBe(1)
+      expect(await testPool.query<{ ok: boolean }>(
+        "SELECT id = 'pi_key_' || md5(storage_key) AS ok FROM approval_attachment_purge_intents WHERE storage_key=$1",
+        [key],
+      ).then((r) => r.rows[0].ok)).toBe(true)
+    }
+
+    // Concurrent old/new inserts also share the canonical PK; neither rollout shape errors.
+    const concurrentKey = 'approval-attachments/2026-07/concurrent.pdf'
+    await expect(Promise.all([
+      testPool.query(
+        `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+         VALUES ('legacy_concurrent', $1, 'unbound_ttl') ON CONFLICT (id) DO NOTHING`,
+        [concurrentKey],
+      ),
+      testPool.query(
+        `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+         VALUES ('new_concurrent', $1, 'reconciler_orphan') ON CONFLICT (storage_key) DO NOTHING`,
+        [concurrentKey],
+      ),
+    ])).resolves.toHaveLength(2)
+    const concurrentCount = await testPool.query<{ c: string }>(
+      'SELECT count(*)::text AS c FROM approval_attachment_purge_intents WHERE storage_key=$1',
+      [concurrentKey],
+    )
+    expect(Number(concurrentCount.rows[0].c)).toBe(1)
+
+    // Trigger compatibility: hard-delete goes through ON CONFLICT(id), while the BEFORE INSERT
+    // canonicalizer makes a re-insert + re-delete of the same key converge to one intent.
     const key = 'approval-attachments/2026-07/trg-dedup.pdf'
     await sql`
       INSERT INTO approval_attachments

@@ -1,3 +1,4 @@
+import { HeadObjectCommand } from '@aws-sdk/client-s3'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -45,7 +46,7 @@ describe('approval attachment built-in S3 provider', () => {
     expect(String(thrown)).not.toContain('AKIASECRET999')
   })
 
-  it('uses conditional put, authenticated get, idempotent delete and paginated prefix listing', async () => {
+  it('uses conditional put/get/delete and one bounded S3 request per listing page', async () => {
     const calls: Array<{ name: string; input: Record<string, unknown> }> = []
     let listPage = 0
     const sender: S3CommandSender = {
@@ -65,6 +66,9 @@ describe('approval attachment built-in S3 provider', () => {
               }
             : { Contents: [], IsTruncated: false }
         }
+        if (typed.constructor.name === 'HeadObjectCommand' && typed.input.Key === 'approval-attachments/missing') {
+          throw Object.assign(new Error('not found'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } })
+        }
         return {}
       },
     }
@@ -78,14 +82,33 @@ describe('approval attachment built-in S3 provider', () => {
     await provider.uploadByKey(key, Buffer.from('%PDF'), 'application/pdf')
     expect(await provider.downloadByKey(key)).toEqual(Buffer.from([1, 2, 3]))
     await provider.deleteByKey(key)
-    expect(await provider.listApprovalBlobs(() => 1000)).toEqual([{ key, ageMs: 100 }])
+    const firstPage = await provider.listApprovalBlobsPage(undefined, 1, () => 1000)
+    expect(firstPage).toEqual({ blobs: [{ key, ageMs: 100 }], nextCursor: 'next' })
+    expect(calls.filter((call) => call.name === 'ListObjectsV2Command')).toHaveLength(1)
+    const secondPage = await provider.listApprovalBlobsPage(firstPage.nextCursor, 1, () => 1000)
+    expect(secondPage).toEqual({ blobs: [] })
+    expect(await provider.hasApprovalBlob(key)).toBe(true)
+    expect(await provider.hasApprovalBlob('approval-attachments/missing')).toBe(false)
 
     expect(calls[0]).toMatchObject({
       name: 'PutObjectCommand',
       input: { Bucket: 'private-bucket', Key: key, IfNoneMatch: '*', ContentType: 'application/pdf' },
     })
     expect(calls.filter((call) => call.name === 'ListObjectsV2Command')).toHaveLength(2)
-    expect(calls.at(-1)?.input).toMatchObject({ Prefix: 'approval-attachments/', ContinuationToken: 'next' })
+    const listCalls = calls.filter((call) => call.name === 'ListObjectsV2Command')
+    expect(listCalls[0].input).toMatchObject({ Prefix: 'approval-attachments/', MaxKeys: 1 })
+    expect(listCalls[1].input).toMatchObject({ Prefix: 'approval-attachments/', MaxKeys: 1, ContinuationToken: 'next' })
+    expect(calls.filter((call) => call.name === HeadObjectCommand.name)).toHaveLength(2)
+  })
+
+  it('rejects oversized pages and truncated responses without a continuation token', async () => {
+    const provider = new ApprovalAttachmentS3Provider({
+      bucket: 'private-bucket',
+      region: 'us-east-1',
+      forcePathStyle: false,
+    }, { send: async () => ({ IsTruncated: true }) })
+    await expect(provider.listApprovalBlobsPage(undefined, 1_001)).rejects.toThrow(/page size/)
+    await expect(provider.listApprovalBlobsPage(undefined, 1)).rejects.toThrow(/continuation token/)
   })
 
   it('refuses keys outside the approval prefix before the SDK is called', async () => {
@@ -109,4 +132,3 @@ describe('approval attachment built-in S3 provider', () => {
     } as NodeJS.ProcessEnv, sender)).toBeInstanceOf(ApprovalAttachmentS3Provider)
   })
 })
-

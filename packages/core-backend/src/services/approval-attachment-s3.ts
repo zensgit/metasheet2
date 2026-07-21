@@ -1,6 +1,7 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
@@ -23,6 +24,13 @@ export interface ApprovalAttachmentS3Config {
 export interface S3CommandSender {
   send(command: unknown): Promise<unknown>
 }
+
+export interface ApprovalAttachmentS3ListPage {
+  blobs: Array<{ key: string; ageMs: number }>
+  nextCursor?: string
+}
+
+export const APPROVAL_ATTACHMENT_S3_MAX_PAGE_SIZE = 1_000
 
 function readNonblank(env: NodeJS.ProcessEnv, key: string): string | null {
   const value = env[key]
@@ -111,28 +119,68 @@ export class ApprovalAttachmentS3Provider implements KeyAddressedObjectStore, Li
     }))
   }
 
+  /** One bounded S3 LIST request. The continuation token stays opaque to callers. */
+  async listApprovalBlobsPage(
+    cursor: string | undefined,
+    limit: number,
+    now: () => number = Date.now,
+  ): Promise<ApprovalAttachmentS3ListPage> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > APPROVAL_ATTACHMENT_S3_MAX_PAGE_SIZE) {
+      throw new RangeError(`approval attachment S3 page size must be in [1, ${APPROVAL_ATTACHMENT_S3_MAX_PAGE_SIZE}]`)
+    }
+    const response = await this.client.send(new ListObjectsV2Command({
+      Bucket: this.config.bucket,
+      Prefix: APPROVAL_STORAGE_PREFIX,
+      MaxKeys: limit,
+      ...(cursor ? { ContinuationToken: cursor } : {}),
+    })) as {
+      Contents?: Array<{ Key?: string; LastModified?: Date }>
+      IsTruncated?: boolean
+      NextContinuationToken?: string
+    }
+    const blobs: Array<{ key: string; ageMs: number }> = []
+    for (const object of response.Contents ?? []) {
+      if (!object.Key || !object.LastModified) continue
+      assertApprovalKey(object.Key)
+      blobs.push({ key: object.Key, ageMs: Math.max(0, now() - object.LastModified.getTime()) })
+    }
+    if (response.IsTruncated && !response.NextContinuationToken) {
+      throw new Error('approval attachment S3 listing truncated without continuation token')
+    }
+    return {
+      blobs,
+      ...(response.IsTruncated ? { nextCursor: response.NextContinuationToken } : {}),
+    }
+  }
+
+  /** Metadata-only existence check used by the bounded DB-side reconciliation page. */
+  async hasApprovalBlob(storageKey: string): Promise<boolean> {
+    assertApprovalKey(storageKey)
+    try {
+      await this.client.send(new HeadObjectCommand({
+        Bucket: this.config.bucket,
+        Key: storageKey,
+      }))
+      return true
+    } catch (error) {
+      const candidate = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } } | null
+      const status = candidate?.$metadata?.httpStatusCode
+      if (status === 404 || candidate?.name === 'NotFound' || candidate?.name === 'NoSuchKey') return false
+      throw error
+    }
+  }
+
   async listApprovalBlobs(now: () => number = Date.now): Promise<Array<{ key: string; ageMs: number }>> {
     const blobs: Array<{ key: string; ageMs: number }> = []
     let continuationToken: string | undefined
     do {
-      const response = await this.client.send(new ListObjectsV2Command({
-        Bucket: this.config.bucket,
-        Prefix: APPROVAL_STORAGE_PREFIX,
-        ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
-      })) as {
-        Contents?: Array<{ Key?: string; LastModified?: Date }>
-        IsTruncated?: boolean
-        NextContinuationToken?: string
-      }
-      for (const object of response.Contents ?? []) {
-        if (!object.Key || !object.LastModified) continue
-        assertApprovalKey(object.Key)
-        blobs.push({ key: object.Key, ageMs: Math.max(0, now() - object.LastModified.getTime()) })
-      }
-      continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined
-      if (response.IsTruncated && !continuationToken) {
-        throw new Error('approval attachment S3 listing truncated without continuation token')
-      }
+      const page = await this.listApprovalBlobsPage(
+        continuationToken,
+        APPROVAL_ATTACHMENT_S3_MAX_PAGE_SIZE,
+        now,
+      )
+      blobs.push(...page.blobs)
+      continuationToken = page.nextCursor
     } while (continuationToken)
     return blobs
   }

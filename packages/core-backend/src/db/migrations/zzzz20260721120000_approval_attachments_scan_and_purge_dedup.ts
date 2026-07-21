@@ -7,8 +7,8 @@
  * evolution here:
  *   - `scan_state` on `approval_attachments` (unscanned|clean|infected; default unscanned)
  *   - unique `storage_key` on `approval_attachment_purge_intents` (one durable lifecycle per blob)
- *   - trigger function evolves from `ON CONFLICT (id)` → `ON CONFLICT (storage_key)` so cascade
- *     deletes and reconciler re-entries dedup by blob key rather than fabricating a second intent
+ *   - compatibility trigger canonicalizes ids from storage_key, so old workers using
+ *     `ON CONFLICT (id)` and new workers using `ON CONFLICT (storage_key)` can coexist safely
  */
 import { sql, type Kysely } from 'kysely'
 
@@ -48,6 +48,28 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     )
   `.execute(db)
 
+  // Phase 1 rolling-deploy bridge: canonical ids make storage-key identity visible through the old
+  // primary-key conflict target too. Keep this BEFORE INSERT trigger until every pre-migration worker
+  // has been retired; a later owner-gated migration may remove it after that rollout proof.
+  await sql`
+    UPDATE approval_attachment_purge_intents
+       SET id = 'pi_key_' || md5(storage_key)
+  `.execute(db)
+  await sql`
+    CREATE OR REPLACE FUNCTION approval_attachment_canonicalize_purge_intent_id() RETURNS trigger AS $$
+    BEGIN
+      NEW.id := 'pi_key_' || md5(NEW.storage_key);
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+  `.execute(db)
+  await sql`DROP TRIGGER IF EXISTS approval_attachment_canonicalize_purge_intent_id ON approval_attachment_purge_intents`.execute(db)
+  await sql`
+    CREATE TRIGGER approval_attachment_canonicalize_purge_intent_id
+    BEFORE INSERT ON approval_attachment_purge_intents
+    FOR EACH ROW EXECUTE FUNCTION approval_attachment_canonicalize_purge_intent_id()
+  `.execute(db)
+
   // G15: one durable lifecycle per blob key. An operator-visible dead_letter must block the
   // reconciler from creating a second id for the same object and bypassing that terminal.
   await sql`
@@ -55,14 +77,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     ON approval_attachment_purge_intents (storage_key)
   `.execute(db)
 
-  // Evolve the row-delete trigger: conflict target is storage_key (after the unique index), not id.
-  // Deterministic id remains `pi_trg_` + md5(key) so replaying the same cascade stays idempotent.
+  // The DB trigger deliberately retains the legacy conflict target. The BEFORE INSERT bridge rewrites
+  // its caller-supplied id to the canonical key id, proving the old SQL shape remains valid.
   await sql`
     CREATE OR REPLACE FUNCTION approval_attachment_enqueue_purge_on_delete() RETURNS trigger AS $$
     BEGIN
       INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
       VALUES ('pi_trg_' || md5(OLD.storage_key), OLD.storage_key, 'row_deleted')
-      ON CONFLICT (storage_key) DO NOTHING;
+      ON CONFLICT (id) DO NOTHING;
       RETURN OLD;
     END;
     $$ LANGUAGE plpgsql
@@ -76,7 +98,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
-  // Restore the create-migration trigger body (ON CONFLICT (id)) before dropping the unique index.
+  // Restore the create-migration trigger body before removing the compatibility bridge/index.
   await sql`
     CREATE OR REPLACE FUNCTION approval_attachment_enqueue_purge_on_delete() RETURNS trigger AS $$
     BEGIN
@@ -88,6 +110,8 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     $$ LANGUAGE plpgsql
   `.execute(db)
   await sql`DROP INDEX IF EXISTS uq_approval_purge_storage_key`.execute(db)
+  await sql`DROP TRIGGER IF EXISTS approval_attachment_canonicalize_purge_intent_id ON approval_attachment_purge_intents`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS approval_attachment_canonicalize_purge_intent_id()`.execute(db)
   await sql`ALTER TABLE approval_attachments DROP CONSTRAINT IF EXISTS approval_att_scan_state_valid`.execute(db)
   await sql`ALTER TABLE approval_attachments DROP COLUMN IF EXISTS scan_state`.execute(db)
 }

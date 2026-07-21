@@ -8,8 +8,8 @@
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
-import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3'
-import { describe, expect, test } from 'vitest'
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   bootApprovalAttachmentRuntime,
@@ -20,6 +20,10 @@ import { APPROVAL_ATTACHMENT_SCANNER_MISSING_MESSAGE } from '../../src/services/
 import { deriveStorageKey } from '../../src/services/approval-attachment-storage'
 
 const logger = { info: () => {}, warn: () => {}, error: () => {} }
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 function fakeDb() {
   const queries: string[] = []
@@ -192,6 +196,29 @@ describe('approval attachment runtime boot', () => {
     expect(queries.length).toBe(before) // stopped: no further ticks
   })
 
+  test('reconcile continuation delay accepts only safe integers in [1, 60000]', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'aatt-'))
+    const base = {
+      db: fakeDb().db,
+      logger,
+      env: { APPROVAL_ATTACHMENTS_ENABLED: 'true', APPROVAL_ATTACHMENT_STORAGE_DIR: dir } as NodeJS.ProcessEnv,
+    }
+    for (const value of [0, 60_001, 1.5, Number.NaN]) {
+      await expect(bootApprovalAttachmentRuntime({
+        ...base,
+        intervals: { reconcileContinuationMs: value },
+      })).rejects.toThrow(/reconcileContinuationMs/)
+    }
+    await expect(bootApprovalAttachmentRuntime({
+      ...base,
+      intervals: { reconcileContinuationMs: 1 },
+    })).resolves.not.toBeNull()
+    await expect(bootApprovalAttachmentRuntime({
+      ...base,
+      intervals: { reconcileContinuationMs: 60_000 },
+    })).resolves.not.toBeNull()
+  })
+
   test('S3 probe failure is values-free: raw storage error text never escapes the probe throw', async () => {
     const PROD = {
       NODE_ENV: 'production',
@@ -280,6 +307,12 @@ describe('O3 built-in production S3 storage', () => {
             blobs.delete(String(command.input.Key))
             return {}
           }
+          if (command instanceof HeadObjectCommand) {
+            if (!blobs.has(String(command.input.Key))) {
+              throw Object.assign(new Error('not found'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } })
+            }
+            return {}
+          }
           if (command instanceof ListObjectsV2Command) {
             return {
               IsTruncated: false,
@@ -322,20 +355,113 @@ describe('O3 built-in production S3 storage', () => {
     })
     expect(runtime!.storage.kind).toBe('object-store')
     expect(blobs.size).toBe(0) // probe cleaned up
-    // Probe sequence: Put, Get (exact bytes), List under approval prefix, Delete.
+    // Probe sequence: Put, Get (exact bytes), one bounded List, Head, Delete.
     const kinds = commands.map((command) => command.constructor.name)
     expect(kinds.filter((name) => name === 'PutObjectCommand').length).toBeGreaterThanOrEqual(1)
     expect(kinds.filter((name) => name === 'GetObjectCommand').length).toBeGreaterThanOrEqual(1)
     expect(kinds.filter((name) => name === 'ListObjectsV2Command').length).toBeGreaterThanOrEqual(1)
+    expect(kinds.filter((name) => name === 'HeadObjectCommand').length).toBeGreaterThanOrEqual(1)
     expect(kinds.filter((name) => name === 'DeleteObjectCommand').length).toBeGreaterThanOrEqual(1)
     const listCmd = commands.find((command) => command instanceof ListObjectsV2Command) as ListObjectsV2Command
     expect(listCmd.input.Prefix).toBe('approval-attachments/')
+    expect(listCmd.input.MaxKeys).toBe(1)
     const stop = runtime!.startWorkers()
     await new Promise((r) => setTimeout(r, 60))
     expect(queries.some((q) => q.includes("status = 'unbound'"))).toBe(true)
     expect(queries.some((q) => q.includes('FOR UPDATE SKIP LOCKED'))).toBe(true)
     expect(commands.some((command) => command instanceof ListObjectsV2Command)).toBe(true)
     await stop()
+  })
+
+  test('bounded continuation advances 3+ pages quickly, never overlaps, and stop cancels the next page', async () => {
+    vi.useFakeTimers()
+    const blobs = new Map<string, Buffer>()
+    const objectKeys = Array.from(
+      { length: 751 },
+      (_, index) => `approval-attachments/2026-07/page-${String(index).padStart(4, '0')}.pdf`,
+    )
+    let reconciliationStarted = false
+    let listCalls = 0
+    let activeLists = 0
+    let maxActiveLists = 0
+    const sender: S3CommandSender = {
+      send: async (command) => {
+        if (command instanceof PutObjectCommand) {
+          blobs.set(String(command.input.Key), Buffer.from(command.input.Body as Uint8Array))
+          return {}
+        }
+        if (command instanceof GetObjectCommand) {
+          const bytes = blobs.get(String(command.input.Key))
+          if (!bytes) throw new Error('NoSuchKey')
+          return { Body: { transformToByteArray: async () => bytes } }
+        }
+        if (command instanceof HeadObjectCommand) return {}
+        if (command instanceof DeleteObjectCommand) {
+          blobs.delete(String(command.input.Key))
+          return {}
+        }
+        if (command instanceof ListObjectsV2Command) {
+          const keys = reconciliationStarted ? objectKeys : [...blobs.keys()]
+          const offset = Number(command.input.ContinuationToken ?? 0)
+          const limit = Number(command.input.MaxKeys)
+          if (reconciliationStarted) {
+            listCalls += 1
+            activeLists += 1
+            maxActiveLists = Math.max(maxActiveLists, activeLists)
+            await new Promise<void>((resolve) => setTimeout(resolve, 20))
+            activeLists -= 1
+          }
+          const page = keys.slice(offset, offset + limit)
+          const next = offset + page.length
+          return {
+            Contents: page.map((Key) => ({ Key, LastModified: new Date(0) })),
+            IsTruncated: next < keys.length,
+            ...(next < keys.length ? { NextContinuationToken: String(next) } : {}),
+          }
+        }
+        throw new Error('unexpected command')
+      },
+    }
+    const runtime = await bootApprovalAttachmentRuntime({
+      db: {
+        query: async (sql: string, params?: unknown[]) => {
+          if (sql.includes('WHERE storage_key = ANY')) {
+            const keys = params?.[0] as string[]
+            return { rows: keys.map((storage_key) => ({ storage_key })), rowCount: keys.length }
+          }
+          return { rows: [], rowCount: 0 }
+        },
+      },
+      logger,
+      env: { ...PROD, APPROVAL_ATTACHMENTS_ENABLED: 'true' },
+      s3Sender: sender,
+      intervals: {
+        gcSweepMs: 60_000,
+        purgeDrainMs: 60_000,
+        reconcileMs: 1_000,
+        reconcileContinuationMs: 10,
+      },
+    })
+    reconciliationStarted = true
+    const stop = runtime!.startWorkers()
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(listCalls).toBe(0) // initial delayed-start semantics
+    await vi.advanceTimersByTimeAsync(1)
+    expect(activeLists).toBe(1)
+    await vi.advanceTimersByTimeAsync(20)
+    expect(listCalls).toBe(1)
+    await vi.advanceTimersByTimeAsync(10)
+    await vi.advanceTimersByTimeAsync(20)
+    await vi.advanceTimersByTimeAsync(10)
+    await vi.advanceTimersByTimeAsync(20)
+
+    expect(listCalls).toBe(3)
+    expect(maxActiveLists).toBe(1)
+    const stopPromise = stop()
+    await stopPromise
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(listCalls).toBe(3) // pending fourth-page continuation was cancelled
   })
 
   test('flag ON production aborts startup when the S3 boot probe fails (values-free)', async () => {
@@ -349,7 +475,7 @@ describe('O3 built-in production S3 storage', () => {
     })).rejects.toThrow('Approval attachment storage probe failed')
   })
 
-  test('denied GET and LIST fail the production boot probe closed (values-free)', async () => {
+  test('denied GET, LIST, or HEAD fails the production boot probe closed (values-free)', async () => {
     const { db } = fakeDb()
     // GET denied after put succeeds
     await expect(bootApprovalAttachmentRuntime({
@@ -377,6 +503,24 @@ describe('O3 built-in production S3 storage', () => {
             return { Body: { transformToByteArray: async () => Buffer.from('approval-attachment boot probe') } }
           }
           if (command instanceof ListObjectsV2Command) throw new Error('AccessDenied ListBucket')
+          return {}
+        },
+      },
+    })).rejects.toThrow('Approval attachment storage probe failed')
+
+    // HEAD denied after put+get+bounded-list succeeds
+    await expect(bootApprovalAttachmentRuntime({
+      db,
+      logger,
+      env: { ...PROD, APPROVAL_ATTACHMENTS_ENABLED: 'true' },
+      s3Sender: {
+        send: async (command) => {
+          if (command instanceof PutObjectCommand) return {}
+          if (command instanceof GetObjectCommand) {
+            return { Body: { transformToByteArray: async () => Buffer.from('approval-attachment boot probe') } }
+          }
+          if (command instanceof ListObjectsV2Command) return { Contents: [], IsTruncated: false }
+          if (command instanceof HeadObjectCommand) throw new Error('AccessDenied HeadObject')
           return {}
         },
       },

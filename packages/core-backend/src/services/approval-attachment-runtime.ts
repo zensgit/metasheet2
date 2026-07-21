@@ -38,7 +38,11 @@ import { resolveApprovalTemplateVisibilityActor } from '../routes/approvals'
 import { applyTemplateVisibilityFilter } from './ApprovalProductService'
 import { collectActiveNodeKeys, collectHiddenFieldIds, type RedactableRuntimeGraph } from './approval-form-redaction'
 import { drainPurgeIntents, sweepUnboundAttachments, UNBOUND_ATTACHMENT_TTL_HOURS } from './approval-attachment-gc'
-import { reconcileBucket } from './approval-attachment-reconciler'
+import {
+  reconcileBucket,
+  type ReconcileCursor,
+  type ReconcilerBlobSource,
+} from './approval-attachment-reconciler'
 import {
   APPROVAL_STORAGE_PREFIX,
   LocalFsApprovalAttachmentStore,
@@ -52,9 +56,18 @@ import {
 } from './approval-attachment-scan'
 
 export type ApprovalAttachmentStorageResolution =
-  | { kind: 'local-fs'; store: LocalFsApprovalAttachmentStore; rootDir: string }
+  | {
+      kind: 'local-fs'
+      store: LocalFsApprovalAttachmentStore
+      rootDir: string
+      reconcileSource: ReconcilerBlobSource
+    }
   /** production with the built-in official-SDK S3-compatible provider. */
-  | { kind: 'object-store'; store: ObjectStoreApprovalAttachmentStore }
+  | {
+      kind: 'object-store'
+      store: ObjectStoreApprovalAttachmentStore
+      reconcileSource: ReconcilerBlobSource
+    }
   /** production without an S3-compatible provider — the ratified O3 fail-close (503) posture. */
   | { kind: 's3-required'; store: null }
 
@@ -79,17 +92,49 @@ export function resolveApprovalAttachmentStorage(
       return {
         kind: 'object-store',
         store: new ObjectStoreApprovalAttachmentStore(builtInS3),
+        reconcileSource: {
+          listPage: (cursor, limit) => builtInS3.listApprovalBlobsPage(cursor, limit),
+          hasBlob: (storageKey) => builtInS3.hasApprovalBlob(storageKey),
+        },
       }
     }
     return { kind: 's3-required', store: null }
   }
   const configured = typeof env.APPROVAL_ATTACHMENT_STORAGE_DIR === 'string' ? env.APPROVAL_ATTACHMENT_STORAGE_DIR.trim() : ''
   const rootDir = configured || path.resolve(process.cwd(), 'storage', 'approval-attachments')
-  return { kind: 'local-fs', store: new LocalFsApprovalAttachmentStore(rootDir), rootDir }
+  const store = new LocalFsApprovalAttachmentStore(rootDir)
+  return {
+    kind: 'local-fs',
+    store,
+    rootDir,
+    // Local FS is dev/test only. It adapts the existing directory walk to the same keyset contract;
+    // production S3 uses one native ListObjectsV2 request per page above.
+    reconcileSource: {
+      listPage: async (cursor, limit) => {
+        const remaining = (await store.list())
+          .filter((blob) => cursor === undefined || blob.key > cursor)
+          .sort((a, b) => a.key.localeCompare(b.key))
+        const blobs = remaining.slice(0, limit)
+        return {
+          blobs,
+          ...(remaining.length > limit && blobs.length > 0 ? { nextCursor: blobs[blobs.length - 1].key } : {}),
+        }
+      },
+      hasBlob: async (storageKey) => {
+        try {
+          await store.get(storageKey)
+          return true
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+          throw error
+        }
+      },
+    },
+  }
 }
 
 /**
- * Boot probe: prove the store can put, get exact bytes, list under the approval prefix, then delete.
+ * Boot probe: prove the store can put, get exact bytes, run a bounded prefix list, HEAD, then delete.
  * Throws on failure (fail-closed boot). The probe key MUST live under the approval scope prefix — the
  * object-store adapter refuses anything outside it, so a probe key outside the partition would make
  * every object-store boot fail closed for the wrong reason (a scope refusal misread as unreachable).
@@ -97,7 +142,10 @@ export function resolveApprovalAttachmentStorage(
  * VALUES-FREE: any underlying storage error (hosts, buckets, credentials, stack text) is swallowed and
  * rethrown as a fixed message so production probe/boot logs never echo raw provider errors.
  */
-export async function probeApprovalAttachmentStore(store: ApprovalAttachmentStore): Promise<void> {
+export async function probeApprovalAttachmentStore(
+  store: ApprovalAttachmentStore,
+  reconcileSource?: ReconcilerBlobSource,
+): Promise<void> {
   const payload = Buffer.from('approval-attachment boot probe')
   const probeKey = `${APPROVAL_STORAGE_PREFIX}boot-probe-${Date.now()}-${Math.floor(Math.random() * 1e9)}.txt`
   try {
@@ -106,8 +154,12 @@ export async function probeApprovalAttachmentStore(store: ApprovalAttachmentStor
     if (!Buffer.isBuffer(got) || !got.equals(payload)) {
       throw new Error('probe get mismatch')
     }
-    // G15 listing: the probe object must be visible under the approval prefix before we delete it.
-    if (typeof store.list === 'function') {
+    // Production reconciliation capabilities are probed without aggregating the bucket: one bounded
+    // LIST request proves prefix access, and HEAD proves the just-written object is visible.
+    if (reconcileSource) {
+      await reconcileSource.listPage(undefined, 1)
+      if (!(await reconcileSource.hasBlob(probeKey))) throw new Error('probe head miss')
+    } else if (typeof store.list === 'function') {
       const listed = await store.list()
       if (!listed.some((entry) => entry.key === probeKey)) {
         throw new Error('probe list miss')
@@ -328,7 +380,12 @@ export interface ApprovalAttachmentRuntimeOptions {
   logger: ApprovalAttachmentRuntimeLogger
   env?: NodeJS.ProcessEnv
   /** test seams — production uses the env-derived defaults. */
-  intervals?: { gcSweepMs?: number; purgeDrainMs?: number; reconcileMs?: number }
+  intervals?: {
+    gcSweepMs?: number
+    purgeDrainMs?: number
+    reconcileMs?: number
+    reconcileContinuationMs?: number
+  }
   /** test seam for the built-in S3 provider; production constructs the official SDK client. */
   s3Sender?: S3CommandSender
   /**
@@ -339,6 +396,19 @@ export interface ApprovalAttachmentRuntimeOptions {
   scanHook?: ApprovalAttachmentScanHook
 }
 
+export const APPROVAL_ATTACHMENT_RECONCILE_CONTINUATION_MS = 1_000
+export const APPROVAL_ATTACHMENT_RECONCILE_CONTINUATION_MAX_MS = 60_000
+
+function readReconcileContinuationMs(value: number | undefined): number {
+  if (value === undefined) return APPROVAL_ATTACHMENT_RECONCILE_CONTINUATION_MS
+  if (!Number.isSafeInteger(value) || value < 1 || value > APPROVAL_ATTACHMENT_RECONCILE_CONTINUATION_MAX_MS) {
+    throw new RangeError(
+      `reconcileContinuationMs must be a safe integer in [1, ${APPROVAL_ATTACHMENT_RECONCILE_CONTINUATION_MAX_MS}]`,
+    )
+  }
+  return value
+}
+
 /**
  * Flag OFF → null (nothing mounts, nothing ticks, byte-identical startup — D5/G1).
  * Flag ON → throws when the resolved store fails its probe (caller aborts startup, fail-closed).
@@ -347,6 +417,7 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
   const env = opts.env ?? process.env
   if (!isApprovalAttachmentsEnabled(env)) return null
   const { db, logger } = opts
+  const reconcileContinuationMs = readReconcileContinuationMs(opts.intervals?.reconcileContinuationMs)
 
   // §6 scan fail-closed: flag ON without a real injected scanner is a misconfiguration outage, not a
   // degrade-to-clean. Values-free throw (assert message carries no paths/credentials/filenames).
@@ -357,12 +428,12 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     // Fail-closed boot: flag ON with an unusable store is an outage, not a degrade — throw so the
     // caller aborts startup (the durableBootFailureDisposition doctrine; nothing was started yet).
     // Values-free: never log the root path or raw probe error (probe already wraps provider errors).
-    await probeApprovalAttachmentStore(storage.store)
+    await probeApprovalAttachmentStore(storage.store, storage.reconcileSource)
     logger.info('Approval attachment storage: local-fs (dev/test only — O3 prod requires S3; probe ok)')
   } else if (storage.kind === 'object-store') {
     // Same fail-closed boot probe as local-fs: an S3-compatible provider that cannot round-trip a blob
     // is an outage. Values-free log — never the bucket/endpoint/credentials or raw storage error text.
-    await probeApprovalAttachmentStore(storage.store)
+    await probeApprovalAttachmentStore(storage.store, storage.reconcileSource)
     logger.info('Approval attachment storage: built-in S3 object-store provider (probe ok)')
   } else {
     logger.warn(
@@ -428,9 +499,13 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
       return async () => {}
     }
     const store = storage.store
+    const reconcileSource = storage.reconcileSource
     // G15 object enumeration is mandatory for every accepted store. Both the local store and the
     // built-in S3 adapter implement it; there is no production provider-registration escape hatch.
     let stopped = false
+    let reconcileCursor: ReconcileCursor | undefined
+    let reconcileRunning = false
+    let reconcileTimer: ReturnType<typeof setTimeout> | undefined
     /** In-flight tick promises — stop() awaits these so shutdown never races a half-finished drain. */
     const activeTicks = new Set<Promise<unknown>>()
     const safeTick = (name: string, run: () => Promise<unknown>) => (): void => {
@@ -460,11 +535,31 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
         logger.warn(`Approval attachment purge drain: ${r.skippedStillReferenced.length} intent(s) still referenced by live rows — left for the reconciler`)
       }
     })
+    const scheduleReconcile = (delayMs: number): void => {
+      if (stopped) return
+      reconcileTimer = setTimeout(() => {
+        reconcileTimer = undefined
+        reconcileTick()
+      }, delayMs)
+      reconcileTimer.unref?.()
+    }
     const reconcileTick = safeTick('bucket reconcile', async () => {
-      const r = await reconcileBucket(db, () => store.list())
-      if (r.missingBlobs.length > 0) {
-        // values-free count only — a live row whose blob vanished is an alert, never an auto-delete.
-        logger.error(`Approval attachment reconciler: ${r.missingBlobs.length} live row(s) missing their blob`)
+      if (reconcileRunning) return
+      reconcileRunning = true
+      let nextDelayMs = reconcileMs
+      try {
+        const r = await reconcileBucket(db, reconcileSource, { cursor: reconcileCursor })
+        reconcileCursor = r.nextCursor
+        nextDelayMs = r.nextCursor ? reconcileContinuationMs : reconcileMs
+        if (r.missingBlobs.length > 0) {
+          // values-free count only — a live row whose blob vanished is an alert, never an auto-delete.
+          logger.error(`Approval attachment reconciler: ${r.missingBlobs.length} live row(s) missing their blob`)
+        }
+      } finally {
+        reconcileRunning = false
+        // One page per tick. A cursor schedules another bounded page after a short delay; a completed
+        // cycle returns to the normal cadence. Failures also back off to the normal cadence.
+        scheduleReconcile(nextDelayMs)
       }
     })
     gcTick()
@@ -473,12 +568,13 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     // never races an in-flight upload younger than the grace window under a cold cache (G15 is
     // age-guarded anyway; this just avoids pointless full-bucket lists on every boot loop).
     const timers = [setInterval(gcTick, gcSweepMs), setInterval(drainTick, purgeDrainMs)]
-    timers.push(setInterval(reconcileTick, reconcileMs))
     for (const t of timers) t.unref?.()
-    logger.info(`Approval attachment workers started (gcSweepMs=${gcSweepMs}, purgeDrainMs=${purgeDrainMs}, reconcileMs=${reconcileMs}, ttlHours=${ttlHours})`)
+    scheduleReconcile(reconcileMs)
+    logger.info(`Approval attachment workers started (gcSweepMs=${gcSweepMs}, purgeDrainMs=${purgeDrainMs}, reconcileMs=${reconcileMs}, reconcileContinuationMs=${reconcileContinuationMs}, ttlHours=${ttlHours})`)
     return async () => {
       stopped = true
       for (const t of timers) clearInterval(t)
+      if (reconcileTimer) clearTimeout(reconcileTimer)
       // Await every in-flight tick before returning — stop must not leave a dangling claim/delete.
       await Promise.allSettled([...activeTicks])
       logger.info('Approval attachment workers stopped')

@@ -1,75 +1,175 @@
 /**
- * Attachment slice ⑥ — bucket-reconciler GRACE-WINDOW goldens (G15, §7). Pure unit lane (fake db) so
- * the load-bearing "an in-flight upload's blob is NEVER purged" invariant runs in the always-on
- * required lane and is mutation-provable without a real DB.
+ * Attachment bucket reconciler boundedness + grace-window goldens (G15, §7).
  */
 import { describe, expect, test } from 'vitest'
 
 import {
   reconcileBucket,
   RECONCILER_ORPHAN_GRACE_MS,
+  type ReconcileCursor,
   type ReconcilerBlob,
+  type ReconcilerBlobSource,
 } from '../../src/services/approval-attachment-reconciler'
 
-/** Minimal Queryable stub: serves the row snapshot on SELECT, records enqueued keys on INSERT. */
-function fakeDb(rows: Array<{ storage_key: string; status: string }>) {
-  const enqueued: string[] = []
-  const db = {
-    query: async (sql: string, params?: unknown[]) => {
-      if (sql.startsWith('SELECT storage_key, status')) return { rows, rowCount: rows.length }
-      if (sql.includes('INSERT INTO approval_attachment_purge_intents')) {
-        enqueued.push(String(params?.[0]))
-        return { rows: [], rowCount: 1 }
-      }
-      return { rows: [], rowCount: 0 }
-    },
-  }
-  return { db, enqueued }
+interface AttachmentRow {
+  id: string
+  storage_key: string
+  status: string
 }
 
-const OLD = RECONCILER_ORPHAN_GRACE_MS + 60_000 // comfortably past the grace window
-const YOUNG = RECONCILER_ORPHAN_GRACE_MS - 60_000 // still inside the grace window (mid-upload/commit)
+function fakeDb(seedRows: AttachmentRow[]) {
+  const rows = [...seedRows].sort((a, b) => a.id.localeCompare(b.id))
+  const enqueued: string[] = []
+  const rowPageLimits: number[] = []
+  const db = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (sql.includes('WHERE storage_key = ANY')) {
+        const keys = new Set(params?.[0] as string[])
+        const found = rows.filter((row) => keys.has(row.storage_key)).map(({ storage_key }) => ({ storage_key }))
+        return { rows: found, rowCount: found.length }
+      }
+      if (sql.startsWith('SELECT id, storage_key, status')) {
+        const cursor = String(params?.[0] ?? '')
+        const limit = Number(params?.[1])
+        rowPageLimits.push(limit)
+        const page = rows.filter((row) => row.id > cursor).slice(0, limit)
+        return { rows: page, rowCount: page.length }
+      }
+      if (sql.includes('INSERT INTO approval_attachment_purge_intents')) {
+        const key = String(params?.[0])
+        if (enqueued.includes(key)) return { rows: [], rowCount: 0 }
+        enqueued.push(key)
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+  }
+  return { db, enqueued, rowPageLimits }
+}
 
-describe('reconciler grace window (G15)', () => {
-  test('an orphan blob OLDER than the grace window is enqueued for purge', async () => {
-    const { db, enqueued } = fakeDb([]) // no rows at all
-    const blobs: ReconcilerBlob[] = [{ key: 'approval/2026-07/orphan', ageMs: OLD }]
-    const r = await reconcileBucket(db, async () => blobs)
-    expect(r.orphanBlobsQueued).toBe(1)
-    expect(enqueued).toContain('approval/2026-07/orphan')
+function fakeSource(blobs: ReconcilerBlob[], existingKeys: ReadonlySet<string> = new Set()) {
+  const listLimits: number[] = []
+  const listCursors: Array<string | undefined> = []
+  const headKeys: string[] = []
+  const source: ReconcilerBlobSource = {
+    listPage: async (cursor, limit) => {
+      listLimits.push(limit)
+      listCursors.push(cursor)
+      const offset = cursor === undefined ? 0 : Number(cursor)
+      const page = blobs.slice(offset, offset + limit)
+      const next = offset + page.length
+      return {
+        blobs: page,
+        ...(next < blobs.length ? { nextCursor: String(next) } : {}),
+      }
+    },
+    hasBlob: async (key) => {
+      headKeys.push(key)
+      return existingKeys.has(key)
+    },
+  }
+  return { source, listLimits, listCursors, headKeys }
+}
+
+const OLD = RECONCILER_ORPHAN_GRACE_MS + 60_000
+const YOUNG = RECONCILER_ORPHAN_GRACE_MS - 60_000
+
+describe('approval attachment reconciler bounded passes', () => {
+  test('MUTATION CONTROL: advances multiple bucket/DB pages without an all-at-once list or table snapshot', async () => {
+    const blobs = Array.from({ length: 5 }, (_, i) => ({
+      key: `approval-attachments/2026-07/orphan-${i}`,
+      ageMs: OLD,
+    }))
+    const rows = Array.from({ length: 5 }, (_, i) => ({
+      id: `att-${i}`,
+      storage_key: `approval-attachments/2026-07/live-${i}`,
+      status: 'bound',
+    }))
+    const { db, enqueued, rowPageLimits } = fakeDb(rows)
+    const { source, listLimits, listCursors, headKeys } = fakeSource(
+      blobs,
+      new Set(rows.map((row) => row.storage_key)),
+    )
+
+    let cursor: ReconcileCursor | undefined
+    let passes = 0
+    do {
+      const result = await reconcileBucket(db, source, {
+        cursor,
+        maxBlobsPerPass: 2,
+        maxRowsPerPass: 2,
+      })
+      expect(result.scannedBlobs).toBeLessThanOrEqual(2)
+      expect(result.scannedRows).toBeLessThanOrEqual(2)
+      cursor = result.nextCursor
+      passes += 1
+    } while (cursor)
+
+    expect(passes).toBe(3)
+    expect(listLimits).toEqual([2, 2, 2])
+    expect(listCursors).toEqual([undefined, '2', '4'])
+    expect(rowPageLimits).toEqual([2, 2, 2])
+    expect(headKeys).toEqual(rows.map((row) => row.storage_key))
+    expect(enqueued).toEqual(blobs.map((blob) => blob.key))
   })
 
-  test('POSITIVE CONTROL: an in-flight upload YOUNGER than the grace window is NEVER purged', async () => {
-    // The upload path is store.put(blob) THEN INSERT row: a blob with no row that is younger than the
-    // grace window is a normal upload mid-commit, not an orphan. Purging it would be silent data loss.
-    const { db, enqueued } = fakeDb([]) // row not yet committed
-    const blobs: ReconcilerBlob[] = [{ key: 'approval/2026-07/inflight', ageMs: YOUNG }]
-    const r = await reconcileBucket(db, async () => blobs)
-    expect(r.orphanBlobsQueued).toBe(0)
-    expect(enqueued).toEqual([]) // the just-uploaded blob is left alone
+  test('a completed scan side waits while the other cursor advances', async () => {
+    const { db, rowPageLimits } = fakeDb([])
+    const { source, listCursors } = fakeSource([
+      { key: 'approval-attachments/2026-07/a', ageMs: OLD },
+      { key: 'approval-attachments/2026-07/b', ageMs: OLD },
+      { key: 'approval-attachments/2026-07/c', ageMs: OLD },
+    ])
+    const first = await reconcileBucket(db, source, { maxBlobsPerPass: 2, maxRowsPerPass: 2 })
+    expect(first.nextCursor).toMatchObject({ blobCursor: '2', rowComplete: true })
+    const second = await reconcileBucket(db, source, {
+      cursor: first.nextCursor,
+      maxBlobsPerPass: 2,
+      maxRowsPerPass: 2,
+    })
+    expect(second.nextCursor).toBeUndefined()
+    expect(listCursors).toEqual([undefined, '2'])
+    expect(rowPageLimits).toEqual([2])
   })
 
-  test('POSITIVE CONTROL: a committed row’s blob is never enqueued, regardless of age', async () => {
-    const { db, enqueued } = fakeDb([{ storage_key: 'approval/2026-07/committed', status: 'unbound' }])
-    const blobs: ReconcilerBlob[] = [{ key: 'approval/2026-07/committed', ageMs: OLD }]
-    const r = await reconcileBucket(db, async () => blobs)
-    expect(r.orphanBlobsQueued).toBe(0)
+  test('POSITIVE CONTROL: a young in-flight blob and an old live blob are never queued', async () => {
+    const liveKey = 'approval-attachments/2026-07/live'
+    const youngKey = 'approval-attachments/2026-07/inflight'
+    const { db, enqueued } = fakeDb([{ id: 'att-live', storage_key: liveKey, status: 'unbound' }])
+    const { source } = fakeSource([
+      { key: liveKey, ageMs: OLD },
+      { key: youngKey, ageMs: YOUNG },
+    ], new Set([liveKey, youngKey]))
+    const result = await reconcileBucket(db, source)
+    expect(result.orphanBlobsQueued).toBe(0)
     expect(enqueued).toEqual([])
   })
 
-  test('a live row whose blob vanished is SURFACED (missingBlobs), never deleted', async () => {
-    const { db, enqueued } = fakeDb([{ storage_key: 'approval/2026-07/lost', status: 'bound' }])
-    const r = await reconcileBucket(db, async () => []) // bucket empty
-    expect(r.missingBlobs).toContain('approval/2026-07/lost')
-    expect(enqueued).toEqual([]) // never enqueues a missing-blob's key
+  test('POSITIVE CONTROL: a missing live blob is surfaced but never queued for deletion', async () => {
+    const missingKey = 'approval-attachments/2026-07/missing'
+    const { db, enqueued } = fakeDb([{ id: 'att-missing', storage_key: missingKey, status: 'bound' }])
+    const { source, headKeys } = fakeSource([])
+    const result = await reconcileBucket(db, source)
+    expect(result.missingBlobs).toEqual([missingKey])
+    expect(headKeys).toEqual([missingKey])
+    expect(enqueued).toEqual([])
   })
 
-  test('a custom graceMs is honored; a negative graceMs is rejected', async () => {
-    const { db, enqueued } = fakeDb([])
-    const blobs: ReconcilerBlob[] = [{ key: 'k', ageMs: 5_000 }]
-    // with a 1s grace, a 5s-old orphan IS past grace
-    expect((await reconcileBucket(db, async () => blobs, { graceMs: 1_000 })).orphanBlobsQueued).toBe(1)
-    expect(enqueued).toContain('k')
-    await expect(reconcileBucket(db, async () => blobs, { graceMs: -1 })).rejects.toThrow(/non-negative/)
+  test('rejects invalid pass bounds and a source that violates the requested page ceiling', async () => {
+    const { db } = fakeDb([])
+    const { source } = fakeSource([])
+    await expect(reconcileBucket(db, source, { maxBlobsPerPass: 0 })).rejects.toThrow(/maxBlobsPerPass/)
+    await expect(reconcileBucket(db, source, { maxRowsPerPass: 1_001 })).rejects.toThrow(/maxRowsPerPass/)
+    await expect(reconcileBucket(db, source, { graceMs: -1 })).rejects.toThrow(/non-negative/)
+
+    await expect(reconcileBucket(db, {
+      listPage: async () => ({
+        blobs: [
+          { key: 'approval-attachments/a', ageMs: OLD },
+          { key: 'approval-attachments/b', ageMs: OLD },
+        ],
+      }),
+      hasBlob: async () => true,
+    }, { maxBlobsPerPass: 1 })).rejects.toThrow(/exceeded the requested page bound/)
   })
 })

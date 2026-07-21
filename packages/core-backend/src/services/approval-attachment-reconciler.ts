@@ -7,7 +7,7 @@
  *     the ratified per-field count and per-submission byte caps are re-checked AT BIND (defense in depth —
  *     upload-time checks can be raced by parallel uploads); any violation throws → the whole submission
  *     rolls back. Once bound, rows are frozen (the GC never touches bound rows; slice ③).
- *   - `reconcileBucket(db, listBlobs)` — the BIDIRECTIONAL drift sweep:
+ *   - `reconcileBucket(db, source)` — the bounded, cursor-driven BIDIRECTIONAL drift sweep:
  *       (a) blob WITHOUT a live row (upload crashed between blob-put and row-insert, slice ⑤ ordering) →
  *           enqueue a `reconciler_orphan` purge intent (idempotent by intent id), drained by slice ③;
  *       (b) live row WITHOUT a blob (store lost data) → surfaced values-free for alerting, NEVER auto-deleted
@@ -115,6 +115,10 @@ export interface ReconcileResult {
   orphanBlobsQueued: number
   /** live rows whose blob is missing — values-free storage keys, for alerting. NEVER auto-deleted. */
   missingBlobs: string[]
+  scannedBlobs: number
+  scannedRows: number
+  /** Absent only when both bounded scans completed their current full cycle. */
+  nextCursor?: ReconcileCursor
 }
 
 /**
@@ -133,43 +137,129 @@ export interface ReconcilerBlob {
   ageMs: number
 }
 
+export interface ReconcilerBlobPage {
+  blobs: ReconcilerBlob[]
+  nextCursor?: string
+}
+
+export interface ReconcilerBlobSource {
+  listPage(cursor: string | undefined, limit: number): Promise<ReconcilerBlobPage>
+  hasBlob(storageKey: string): Promise<boolean>
+}
+
+export interface ReconcileCursor {
+  blobCursor?: string
+  rowCursor?: string
+  /** A completed side waits here while the other side advances, then both restart next cycle. */
+  blobComplete?: boolean
+  rowComplete?: boolean
+}
+
+export const RECONCILER_DEFAULT_BATCH_SIZE = 250
+export const RECONCILER_MAX_BATCH_SIZE = 1_000
+
+function readBatchSize(value: number | undefined, name: string): number {
+  const resolved = value ?? RECONCILER_DEFAULT_BATCH_SIZE
+  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > RECONCILER_MAX_BATCH_SIZE) {
+    throw new RangeError(`${name} must be a safe integer in [1, ${RECONCILER_MAX_BATCH_SIZE}]`)
+  }
+  return resolved
+}
+
 /**
- * Bidirectional bucket⇄table reconciliation. `listBlobs` yields every object currently in the approval
- * bucket WITH its age. An orphan is enqueued ONLY when it has no row AND is older than the grace window
- * (G15): a row-less object younger than the grace is treated as a possibly-mid-upload/commit object and
- * is NEVER purged — the load-bearing guard against deleting a live upload's blob on the happy path.
+ * Bidirectional bucket⇄table reconciliation. Each invocation advances at most one bounded object-store
+ * page and one bounded DB keyset page. Callers persist `nextCursor` between ticks until it is absent,
+ * then the full cycle is complete. No invocation materializes the whole bucket or attachment table.
  */
 export async function reconcileBucket(
   db: Queryable,
-  listBlobs: () => Promise<ReconcilerBlob[]>,
-  opts: { graceMs?: number } = {},
+  source: ReconcilerBlobSource,
+  opts: {
+    graceMs?: number
+    maxBlobsPerPass?: number
+    maxRowsPerPass?: number
+    cursor?: ReconcileCursor
+  } = {},
 ): Promise<ReconcileResult> {
   const graceMs = opts.graceMs ?? RECONCILER_ORPHAN_GRACE_MS
   if (!Number.isSafeInteger(graceMs) || graceMs < 0) {
     throw new RangeError(`graceMs must be a non-negative safe integer (got ${graceMs})`)
   }
-  const blobs = await listBlobs()
-  const { rows } = await db.query(`SELECT storage_key, status FROM approval_attachments`)
-  const rowByKey = new Map((rows as Array<{ storage_key: string; status: string }>).map((r) => [r.storage_key, r.status]))
-  const result: ReconcileResult = { orphanBlobsQueued: 0, missingBlobs: [] }
+  const maxBlobs = readBatchSize(opts.maxBlobsPerPass, 'maxBlobsPerPass')
+  const maxRows = readBatchSize(opts.maxRowsPerPass, 'maxRowsPerPass')
+  const cursor = opts.cursor ?? {}
+  const result: ReconcileResult = {
+    orphanBlobsQueued: 0,
+    missingBlobs: [],
+    scannedBlobs: 0,
+    scannedRows: 0,
+  }
+  let blobComplete = cursor.blobComplete === true
+  let rowComplete = cursor.rowComplete === true
+  let nextBlobCursor = cursor.blobCursor
+  let nextRowCursor = cursor.rowCursor
+
   // (a) blob with NO row at all AND older than the grace window → orphan (crashed upload); queue
   //     an idempotent purge intent. A row-less object younger than the grace is skipped: it may be a
   //     normal upload still between store.put and the row INSERT — purging it would be silent data loss.
-  for (const { key, ageMs } of blobs) {
-    if (rowByKey.has(key)) continue
-    if (ageMs < graceMs) continue // younger than grace ⇒ possibly mid-upload/commit; NEVER an orphan (G15)
-    const res = await db.query(
-      `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
-       VALUES ('pi_rec_' || md5($1), $1, 'reconciler_orphan')
-       ON CONFLICT (storage_key) DO NOTHING`,
-      [key],
-    )
-    result.orphanBlobsQueued += Number(res.rowCount ?? 0)
+  if (!blobComplete) {
+    const page = await source.listPage(cursor.blobCursor, maxBlobs)
+    if (page.blobs.length > maxBlobs) {
+      throw new Error('approval attachment blob source exceeded the requested page bound')
+    }
+    result.scannedBlobs = page.blobs.length
+    const keys = [...new Set(page.blobs.map((blob) => blob.key))]
+    const referenced = keys.length === 0
+      ? new Set<string>()
+      : new Set((await db.query(
+        `SELECT storage_key FROM approval_attachments WHERE storage_key = ANY($1::text[])`,
+        [keys],
+      )).rows.map((row) => String((row as { storage_key: unknown }).storage_key)))
+    for (const { key, ageMs } of page.blobs) {
+      if (referenced.has(key)) continue
+      if (ageMs < graceMs) continue // younger than grace ⇒ possibly mid-upload/commit; NEVER an orphan (G15)
+      const res = await db.query(
+        `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+         VALUES ('pi_rec_' || md5($1), $1, 'reconciler_orphan')
+         ON CONFLICT (storage_key) DO NOTHING`,
+        [key],
+      )
+      result.orphanBlobsQueued += Number(res.rowCount ?? 0)
+    }
+    nextBlobCursor = page.nextCursor
+    blobComplete = !page.nextCursor
   }
+
   // (b) live row whose blob vanished → surface, never delete.
-  const blobSet = new Set(blobs.map((b) => b.key))
-  for (const [key, status] of rowByKey) {
-    if (status !== 'deleted' && !blobSet.has(key)) result.missingBlobs.push(key)
+  if (!rowComplete) {
+    const { rows } = await db.query(
+      `SELECT id, storage_key, status FROM approval_attachments
+        WHERE id > $1
+        ORDER BY id
+        LIMIT $2`,
+      [cursor.rowCursor ?? '', maxRows],
+    )
+    const pageRows = rows as Array<{ id: string; storage_key: string; status: string }>
+    if (pageRows.length > maxRows) {
+      throw new Error('approval attachment DB page exceeded the requested row bound')
+    }
+    result.scannedRows = pageRows.length
+    for (const row of pageRows) {
+      if (row.status !== 'deleted' && !(await source.hasBlob(row.storage_key))) {
+        result.missingBlobs.push(row.storage_key)
+      }
+    }
+    rowComplete = pageRows.length < maxRows
+    nextRowCursor = rowComplete ? undefined : pageRows.at(-1)?.id
+  }
+
+  if (!(blobComplete && rowComplete)) {
+    result.nextCursor = {
+      ...(nextBlobCursor ? { blobCursor: nextBlobCursor } : {}),
+      ...(nextRowCursor ? { rowCursor: nextRowCursor } : {}),
+      ...(blobComplete ? { blobComplete: true } : {}),
+      ...(rowComplete ? { rowComplete: true } : {}),
+    }
   }
   return result
 }
