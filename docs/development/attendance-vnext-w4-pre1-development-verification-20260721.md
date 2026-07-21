@@ -22,7 +22,7 @@
 
 | 套件 | 结果 |
 |---|---|
-| 三新文件（独立库 `metasheet_test_w4pre1fix20260721`） | **15/15** |
+| 三新文件（独立库 `metasheet_test_w4pre1fix20260721`） | **15/15**（门记录 comment 完成门对账段为修复轮前快照 13/13、505 为 503——差值 = 修复轮 +2 条 inactive→reactivate/upgrade 腿；正门独立复跑确认 15） |
 | plugin-tests.yml「Run attendance integration tests」CI 步逐字复跑（35 文件） | **505/505** |
 | 受影响真库面（directory-sync/admin-users 相关 11 文件） | 80/80 |
 | 受影响单测面（admin-users-routes 等 5 文件） | 109/109 |
@@ -63,7 +63,7 @@
 
 1. 基线 SHA：`57d89bc1d`（errata #4513 合入后 main）。漂移账：`6ea0ccfab..749ba92d0` 考勤面零漂移（预检）；`749ba92d0..57d89bc1d` 即 errata 本身（docs-only）；`57d89bc1d..e20371b1a` 即 #4521 本身。
 2. 查重：全仓双语法扫 `user_orgs` 写面——#4521 之前唯一生产写者 = 一次性迁移回填 `zzzz20260114110000`；之后 = 回填 + 本票两写者，正门完备性扫描确认无其他。
-3. 修改文件：core-backend 两写点 + 两策略注释 + 三 .db.test.ts + CI 双点；零迁移、零 apps/web、零 plugin-attendance。
+3. 修改文件：core-backend 两写点 + 两策略注释 + 三 .db.test.ts + CI 双点 + 受影响单测 mock 同步 3 文件；零迁移、零 apps/web、零 plugin-attendance。
 4. IN/OUT：票面五项全 IN；①闭合宣布/re-ratify/W4-0 明示 OUT（锁 §10 序）。
 5. 唯一写路径：`user_orgs` 生产写者 = admin-users:3295 + directory-sync:5097（+历史回填）；权限真源不变。
 6. 完成门：票面五项 + 三件套 + G3 预跑 + Opus 门 0 P1/P2 —— 全过（见 §2-§4）。
