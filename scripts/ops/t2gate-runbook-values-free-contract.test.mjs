@@ -101,14 +101,22 @@ function loadRunbook() {
  *   - tilde fences     `~~~[info] … ~~~`                     character at least as many times)
  *   - HTML blocks      `<pre …> … </pre>` / `<code …> … </code>`
  *
+ * Owner ruling (round 3 of PR #4500): the COMPLETE info string is part of the fence, not just a
+ * bare language word. The first cut required the info string to be a single `[A-Za-z0-9_+-]*`
+ * token, so ```` ```sql linenums ```` and `~~~sql title=probe` — both of which GitHub renders as
+ * ordinary SQL blocks — did not match the open-fence pattern at all, and their bodies were never
+ * scanned by any guard (verified: both returned ok:true). Any language tag plus arbitrary
+ * attributes is now accepted, on either delimiter; the language tag is merely the first token of
+ * that info string and is used for reporting, never to decide whether the body is scanned.
+ *
  * Leading whitespace is allowed on the fence lines: the runbook's own SQL fences are indented
  * three spaces inside a numbered list, and dropping them would make the runbook-level guards
  * silently vacuous.
  *
  * `start`/`end` are offsets into `markdown`, so the same scan can also REMOVE the venues (used by
- * the indented-SQL extractor, which must not re-read a tilde-fenced body as "indented SQL").
+ * the unfenced-SQL extractor, which must not re-read a tilde-fenced body as "unfenced SQL").
  * @param {string} markdown
- * @returns {{ kind: 'fence' | 'html', info: string, body: string, start: number, end: number }[]}
+ * @returns {{ kind: 'fence' | 'html', info: string, tag: string, body: string, start: number, end: number }[]}
  */
 export function scanCodeVenues(markdown) {
   const lines = markdown.split('\n')
@@ -122,12 +130,21 @@ export function scanCodeVenues(markdown) {
   const venues = []
   let i = 0
   while (i < lines.length) {
-    const open = /^[ \t]*(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)[ \t]*$/.exec(lines[i])
+    // The COMPLETE info string, whatever it holds: `sql`, `sql linenums`, `sql title=probe`,
+    // `{.sql #probe}`, … A fence is a fence regardless of what an editor wrote after the marker.
+    const open = /^[ \t]*(`{3,}|~{3,})[ \t]*(.*)$/.exec(lines[i])
     if (!open) {
       i += 1
       continue
     }
     const marker = open[1]
+    const infoString = open[2].trim()
+    // CommonMark: a BACKTICK fence's info string may not contain a backtick (that is what keeps
+    // an inline code span at the start of a line from being read as a fence).
+    if (marker[0] === '`' && infoString.includes('`')) {
+      i += 1
+      continue
+    }
     // Close fence: same character, at least as long, on its own line (or EOF — an unterminated
     // fence swallows the rest of the document rather than disappearing from the guards).
     const closeRe = new RegExp(`^[ \\t]*[${marker[0]}]{${marker.length},}[ \\t]*$`)
@@ -139,7 +156,8 @@ export function scanCodeVenues(markdown) {
     }
     venues.push({
       kind: 'fence',
-      info: open[2].toLowerCase(),
+      info: infoString.toLowerCase(),
+      tag: fenceLanguageTag(infoString),
       body: body.length > 0 ? `${body.join('\n')}\n` : '',
       start: lineStart[i],
       end: j < lines.length ? lineStart[j] + lines[j].length : markdown.length,
@@ -154,22 +172,51 @@ export function scanCodeVenues(markdown) {
     const end = start + m[0].length
     // Skip HTML that merely LIVES inside a fence (e.g. a ```html sample) — already covered.
     if (venues.some((v) => v.kind === 'fence' && start >= v.start && start < v.end)) continue
-    venues.push({ kind: 'html', info: '', body: m[2], start, end })
+    venues.push({ kind: 'html', info: '', tag: '', body: m[2], start, end })
   }
 
   return venues.sort((a, b) => a.start - b.start)
 }
 
 /**
- * Extract SQL-tagged code-block bodies across every recognised venue (case-insensitive tag).
- * HTML `<pre>`/`<code>` blocks carry no language tag at all, so they are always included: an
- * untagged venue must fail closed, never be skipped.
+ * The language tag of a fence = the FIRST token of its info string, with the attribute syntaxes
+ * markdown dialects use (`{.sql}`, `{#id .sql}`, `"sql"`) unwrapped. Reporting only: nothing is
+ * skipped because of its tag.
+ * @param {string} infoString
+ * @returns {string}
+ */
+export function fenceLanguageTag(infoString) {
+  for (const token of infoString.split(/[\s,;]+/)) {
+    const cleaned = token.replace(/^[{."'#]+/, '').replace(/[}."']+$/, '')
+    if (cleaned) return cleaned.toLowerCase()
+  }
+  return ''
+}
+
+/**
+ * A code-block body counts as SQL when it CONTAINS a SELECT — inside a code venue there is no
+ * prose to confuse it with, so the tag is irrelevant. (`extractUnfencedSqlStatements` applies the
+ * stricter, structure-based test that ordinary body text needs.)
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function blockContainsSql(text) {
+  return /\bSELECT\b/i.test(text)
+}
+
+/**
+ * Code-block bodies that hold SQL, across every recognised venue.
+ *
+ * The decision is "is this SQL?", never "is the fence tagged sql": an untagged fence, a
+ * `postgresql`/`psql` tag, `sql linenums`, `sql title=probe` and an HTML `<pre>` all reach the
+ * projection guards through the same path. HTML blocks carry no language tag at all and are
+ * therefore always included — an untagged venue must fail closed, never be skipped.
  * @param {string} markdown
  * @returns {string[]}
  */
 export function extractFencedSqlBlocks(markdown) {
   return scanCodeVenues(markdown)
-    .filter((v) => v.kind === 'html' || v.info === 'sql')
+    .filter((v) => v.kind === 'html' || blockContainsSql(v.body))
     .map((v) => v.body)
 }
 
@@ -323,9 +370,14 @@ export function isClosedBooleanBodyForAlias(body, alias) {
  * @returns {{ ok: true } | { ok: false, violations: string[] }}
  */
 export function assertErrorMessageProjectionsAreClosed(markdownOrSql, opts = {}) {
+  // Every venue body PLUS every SQL statement outside them: the question is "is this SQL?", never
+  // "which delimiter is it in?".
   const sqlBlocks = opts.bareSql
     ? [markdownOrSql]
-    : extractFencedSqlBlocks(markdownOrSql)
+    : [
+        ...extractFencedCodeBlocks(markdownOrSql),
+        ...extractUnfencedSqlStatements(markdownOrSql),
+      ]
   const violations = []
 
   for (const block of sqlBlocks) {
@@ -581,44 +633,80 @@ const WILDCARD_PROJECTION_RE = /^(?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)?\*$/
 const WHOLE_ROW_SERIALIZER_RE = /\b(?:to_json|to_jsonb|row_to_json|json_agg|jsonb_agg)\s*\(/i
 
 /**
- * Extract indented (4-space / tab) code blocks that read as SQL, OUTSIDE fenced blocks.
- *
- * Gate finding (audit follow-up): the projection guards only ever saw fenced blocks, so the same
- * identity SELECT indented by four spaces passed untouched. Markdown renders both identically —
- * the guard's visibility must not depend on which one an editor happens to use.
+ * Everything OUTSIDE the recognised code venues, with the venue regions removed.
  * @param {string} markdown
- * @returns {string[]}
+ * @returns {string}
  */
-export function extractIndentedSqlBlocks(markdown) {
+function textOutsideCodeVenues(markdown) {
   // Remove EVERY recognised code venue, not just backtick fences: a tilde-fenced or <pre> block
   // whose body happens to be indented must be read as that block (and rejected by the projection
-  // guards), never re-reported here as an "indented SQL block".
-  let withoutFences = ''
+  // guards), never re-reported here as "unfenced SQL".
+  let outside = ''
   let cursor = 0
   for (const venue of scanCodeVenues(markdown)) {
     if (venue.start < cursor) continue
-    withoutFences += `${markdown.slice(cursor, venue.start)}\n`
+    outside += `${markdown.slice(cursor, venue.start)}\n`
     cursor = venue.end
   }
-  withoutFences += markdown.slice(cursor)
-  const blocks = []
-  let current = []
-  for (const line of withoutFences.split('\n')) {
-    if (/^(?: {4,}|\t)\S/.test(line)) {
-      current.push(line.replace(/^(?: {4}|\t)/, ''))
-      continue
-    }
-    if (line.trim() === '' && current.length > 0) {
-      current.push('')
-      continue
-    }
-    if (current.length > 0) {
-      blocks.push(current.join('\n'))
-      current = []
+  outside += markdown.slice(cursor)
+  return outside
+}
+
+/**
+ * English function words that cannot appear in a SQL projection list. Their presence is what
+ * separates a SENTENCE ("select the corp A rows from directory_accounts by hand") from a
+ * STATEMENT (`SELECT union_id FROM directory_accounts`).
+ *
+ * Deliberately excludes every word that is also SQL: `a` (table alias), `all`, `and`, `or`, `not`,
+ * `in`, `is`, `as`, `on`, `of`… — a word that could legitimately occur in SQL may not be used to
+ * excuse a statement from the guards.
+ */
+const PROSE_FUNCTION_WORDS =
+  /\b(?:the|an|any|each|every|those|these|both|its|their|our|your|my|his|her|manually|please|if|when|whether|should|must|can|cannot|will|would|you|we|they|he|she|there|here|again|instead|below|above|to)\b/i
+
+/**
+ * Extract SQL statements that sit OUTSIDE every recognised code venue — anywhere in the document,
+ * not only in four-space-indented blocks.
+ *
+ * Owner ruling (round 3 of PR #4500): the guard must ask "is this SQL?", not "is it in a delimiter
+ * I happen to know". The previous cut only reconstructed four-space/tab indented blocks, so a
+ * plain `SELECT union_id, open_id, mobile, raw FROM directory_accounts;` sitting in ordinary body
+ * text was scanned by nothing at all (verified: it returned ok:true).
+ *
+ * Prose must keep passing, so the detection is structural, not lexical: a candidate must be a
+ * SELECT … FROM <identifier> whose PROJECTION LIST contains no English function word. A prose
+ * MENTION of a column ("PostgreSQL duplicate-key text can embed the real `external_key`") has no
+ * SELECT at all and is never a candidate; an English sentence that happens to use the words
+ * select/from ("select the corp A rows from directory_accounts") is rejected by the function-word
+ * test. Everything else is treated AS SQL and goes through the projection guards — when in doubt
+ * the statement is scanned, never skipped.
+ *
+ * Inline code spans are prose venues, not code venues: `` `SELECT union_id …` `` renders inside the
+ * paragraph, so the backticks are dropped and the statement is read as the SQL it is.
+ * @param {string} markdown
+ * @returns {string[]}
+ */
+export function extractUnfencedSqlStatements(markdown) {
+  const outside = textOutsideCodeVenues(markdown).replace(/`/g, ' ')
+  const statements = []
+  const selectRe = /\bSELECT\b/gi
+  let m
+  while ((m = selectRe.exec(outside)) !== null) {
+    const rest = outside.slice(m.index)
+    // A statement runs to its terminator: `;`, a blank line, or the end of the text.
+    const semi = rest.indexOf(';')
+    const blank = rest.search(/\n[ \t]*\n/)
+    const candidates = [semi >= 0 ? semi + 1 : -1, blank >= 0 ? blank : -1].filter((n) => n >= 0)
+    const stop = candidates.length > 0 ? Math.min(...candidates) : rest.length
+    const statement = rest.slice(0, stop).trim()
+
+    const shape = /^SELECT\b([\s\S]*?)\bFROM\s+[A-Za-z_"][A-Za-z0-9_".]*/i.exec(statement)
+    if (shape && !PROSE_FUNCTION_WORDS.test(shape[1])) {
+      statements.push(statement)
+      selectRe.lastIndex = m.index + statement.length
     }
   }
-  if (current.length > 0) blocks.push(current.join('\n'))
-  return blocks.filter((b) => /\bSELECT\b[\s\S]*\bFROM\b/i.test(b))
+  return statements
 }
 
 /**
@@ -626,7 +714,9 @@ export function extractIndentedSqlBlocks(markdown) {
  *
  * Covers rather than enumerates: besides the column-name list, a projection is rejected when it
  * is a wildcard or a whole-row serializer (both leak every column while naming none), and SQL is
- * required to live in a fenced block so it cannot hide from these checks by being indented.
+ * required to live in a code block — SQL found anywhere else in the document is itself a
+ * violation AND is parsed through the same projection guards, so it cannot hide by choosing a
+ * delimiter (or none at all).
  * @param {string} markdownOrSql
  * @param {{ bareSql?: boolean }} [opts]
  * @returns {{ ok: true } | { ok: false, violations: string[] }}
@@ -637,14 +727,14 @@ export function assertNoRawIdentityProjections(markdownOrSql, opts = {}) {
   if (opts.bareSql) {
     blocks = [markdownOrSql]
   } else {
-    const indented = extractIndentedSqlBlocks(markdownOrSql)
-    for (const block of indented) {
+    const unfenced = extractUnfencedSqlStatements(markdownOrSql)
+    for (const block of unfenced) {
       violations.push(
         `runbook SQL must live in a fenced code block so the values-free guards can read it — ` +
-          `found an indented SQL block: ${normalizeSqlWs(block).slice(0, 120)}`,
+          `found unfenced SQL: ${normalizeSqlWs(block).slice(0, 120)}`,
       )
     }
-    blocks = [...extractFencedCodeBlocks(markdownOrSql), ...indented].filter((b) =>
+    blocks = [...extractFencedCodeBlocks(markdownOrSql), ...unfenced].filter((b) =>
       /\bSELECT\b/i.test(b),
     )
   }
@@ -2070,9 +2160,9 @@ test('anti-vacuity (F2): the venue scanner still sees the runbook’s own indent
     'the closed-classification SQL block must still be extracted',
   )
   assert.equal(
-    extractIndentedSqlBlocks(runbook).length,
+    extractUnfencedSqlStatements(runbook).length,
     0,
-    'the runbook’s fenced SQL must not be misread as indented SQL',
+    'the runbook’s fenced SQL must not be misread as unfenced SQL',
   )
 })
 
@@ -2087,12 +2177,195 @@ test('verifier repro (F3.1): an indented (unfenced) identity SELECT is rejected,
   assert.equal(result.ok, false, 'indented SQL must not be invisible to the projection guards')
   assert.ok(
     result.violations.some((v) => /must live in a fenced code block/i.test(v)),
-    `expected an indented-SQL violation, got: ${result.violations.join(' | ')}`,
+    `expected an unfenced-SQL violation, got: ${result.violations.join(' | ')}`,
   )
   assert.ok(
     result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
     `indented SQL must also be PARSED, not merely flagged: ${result.violations.join(' | ')}`,
   )
+})
+
+// ---------------------------------------------------------------------------
+// Owner reproductions (round 3 of PR #4500) — the guard was still VENUE-BLIND. All three samples
+// below returned ok:true at head 2a481b974:
+//   (a) a fence whose info string carries extra words (```sql linenums) was not scanned;
+//   (b) `~~~sql title=probe` (tilde fence + attribute) was not scanned;
+//   (c) a plain SELECT in ordinary body text — not indented, not fenced — was not scanned at all.
+// Owner ruling: support the COMPLETE fence info string on either delimiter, and scan ALL SQL
+// outside fences. The venue question is now "is this SQL?".
+// ---------------------------------------------------------------------------
+
+/** The owner's three samples, plus the near neighbours of each. */
+const OWNER_VENUE_SAMPLES = [
+  // (a) — info string carrying extra words after the language tag
+  ['(a) ```sql linenums', (sql) => ['```sql linenums', sql, '```'].join('\n')],
+  ['(a) ```sql linenums title="probe"', (sql) => ['```sql linenums title="probe"', sql, '```'].join('\n')],
+  ['(a) ```postgresql linenums', (sql) => ['```postgresql linenums', sql, '```'].join('\n')],
+  ['(a) ```{.sql #probe}', (sql) => ['```{.sql #probe}', sql, '```'].join('\n')],
+  ['(a) indented ```sql linenums', (sql) => ['   ```sql linenums', `   ${sql}`, '   ```'].join('\n')],
+  // (b) — tilde fence with a title attribute
+  ['(b) ~~~sql title=probe', (sql) => ['~~~sql title=probe', sql, '~~~'].join('\n')],
+  ['(b) ~~~~sql title=probe {.highlight}', (sql) => ['~~~~sql title=probe {.highlight}', sql, '~~~~'].join('\n')],
+  // (c) — ordinary body text: no fence, no four-space indent
+  [
+    '(c) plain body text',
+    (sql) => `Run this on staging and record the outcome:\n\n${sql}\n\nThen continue with step 4.\n`,
+  ],
+  ['(c) inline code span in a sentence', (sql) => `Run \`${sql}\` on staging, then continue.\n`],
+  ['(c) markdown list item', (sql) => `Steps:\n\n- ${sql}\n- record the outcome\n`],
+  ['(c) blockquote', (sql) => `> ${sql}\n`],
+  ['(c) table cell', (sql) => `| step | query |\n|---|---|\n| 2 | ${sql} |\n`],
+]
+
+test('owner repro (round 3): identity projections are rejected in EVERY venue — full info strings and no venue at all', () => {
+  for (const [name, wrap] of OWNER_VENUE_SAMPLES) {
+    const md = wrap(IDENTITY_SELECT)
+    const result = assertNoRawIdentityProjections(md)
+    assert.equal(result.ok, false, `venue "${name}" must not bypass the identity guard`)
+    assert.ok(
+      result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+      `venue "${name}" must report the projection itself, got: ${result.violations.join(' | ')}`,
+    )
+    assert.ok(
+      result.violations.some((v) => /outside the closed values-free allowlist/i.test(v) && /raw/.test(v)),
+      `venue "${name}" must also report the un-named "raw" column, got: ${result.violations.join(' | ')}`,
+    )
+  }
+})
+
+test('owner repro (round 3): error_message projections stay closed in EVERY venue', () => {
+  for (const [name, wrap] of OWNER_VENUE_SAMPLES) {
+    const result = assertErrorMessageProjectionsAreClosed(wrap(RAW_ERROR_SELECT))
+    assert.equal(result.ok, false, `venue "${name}" must not bypass the error_message guard`)
+    assert.ok(
+      result.violations.some((v) => /direct\/unaliased error_message projection forbidden/i.test(v)),
+      `venue "${name}" expected a direct/unaliased violation, got: ${result.violations.join(' | ')}`,
+    )
+  }
+  // …and alias-smuggling is equally closed in the same venues.
+  for (const [name, wrap] of OWNER_VENUE_SAMPLES) {
+    const smuggle = assertErrorMessageProjectionsAreClosed(
+      wrap('SELECT substring(error_message,1,120) AS duplicate_key_detected FROM directory_sync_runs;'),
+    )
+    assert.equal(smuggle.ok, false, `venue "${name}" must not bypass the alias-smuggle guard`)
+  }
+})
+
+test('owner repro (round 3, c): unfenced SQL is BOTH flagged as unfenced and parsed', () => {
+  const md = `Run this on staging and record the outcome:\n\n${IDENTITY_SELECT}\n\nThen continue.\n`
+  // Anti-vacuity: the scanner must actually return the statement, not silently match nothing.
+  const statements = extractUnfencedSqlStatements(md)
+  assert.equal(statements.length, 1, `expected exactly one unfenced statement, got ${statements.length}`)
+  assert.equal(statements[0], IDENTITY_SELECT)
+
+  const result = assertNoRawIdentityProjections(md)
+  assert.ok(
+    result.violations.some((v) => /must live in a fenced code block/i.test(v)),
+    `expected an unfenced-SQL violation, got: ${result.violations.join(' | ')}`,
+  )
+  assert.ok(
+    result.violations.some((v) => /raw identity\/PII column "union_id" is projected/i.test(v)),
+    `unfenced SQL must also be PARSED, not merely flagged: ${result.violations.join(' | ')}`,
+  )
+})
+
+test('positive control (round 3): a prose MENTION of a column is not a SQL projection', () => {
+  // The runbook's own values-free ban lines and operator prose — every one of them names banned
+  // columns IN WORDS. If the SQL detection ever degrades into a bare column-name matcher, or the
+  // unfenced scanner starts swallowing sentences, these red.
+  const prose = [
+    'PostgreSQL duplicate-key text can embed the real `external_key` / `unionId`; **never** ' +
+      'project, print, grep, copy, or persist `error_message` / err-head into the evidence pack.',
+    '**Values-free** here means: no raw **provider identity** (unionId / openId / userId / corpId), ' +
+      'no **business values**, and no **raw SQL error text**.',
+    'Record the overlap person’s key shape under A (values-free — length/equality booleans only; ' +
+      'do **not** paste provider union/open/user IDs into the evidence pack).',
+    'The sync derives `external_key` as the bare `unionId || openId || userId` — no corp scoping.',
+    '**No** names, raw provider union/open/user IDs, DingTalk corp IDs, credentials, URLs, SQL ' +
+      'error strings, or business values in operator evidence.',
+    // An English sentence that happens to use the words select/from is prose, not a statement.
+    'If the admin API is unavailable, select the corp A rows from directory_accounts by hand and ' +
+      'record only the counts.',
+    'Every row in the table above should be read from directory_sync_runs.',
+  ]
+  for (const line of prose) {
+    assert.equal(
+      extractUnfencedSqlStatements(line).length,
+      0,
+      `prose must not be read as a SQL statement: ${line}`,
+    )
+    const identity = assertNoRawIdentityProjections(line)
+    assert.equal(
+      identity.ok,
+      true,
+      identity.ok ? 'ok' : `prose must stay legal:\n- ${identity.violations.join('\n- ')}`,
+    )
+    const errMessage = assertErrorMessageProjectionsAreClosed(line)
+    assert.equal(
+      errMessage.ok,
+      true,
+      errMessage.ok ? 'ok' : `prose must stay legal:\n- ${errMessage.violations.join('\n- ')}`,
+    )
+  }
+
+  // The whole runbook is the real positive control: it discusses every banned column in words and
+  // must keep passing untouched.
+  const runbook = loadRunbook()
+  assert.equal(assertNoRawIdentityProjections(runbook).ok, true, 'the live runbook must keep passing')
+  assert.equal(
+    assertErrorMessageProjectionsAreClosed(runbook).ok,
+    true,
+    'the live runbook must keep passing',
+  )
+})
+
+test('positive control (round 3): a full info string does not stop a LEGITIMATE block from passing', () => {
+  const body = [
+    `SELECT status, ${ALLOWED_DUP}, ${ALLOWED_CONSTRAINT}`,
+    '  FROM directory_sync_runs',
+    " WHERE integration_id = '<B>'",
+    ' ORDER BY started_at DESC LIMIT 1;',
+  ].join('\n')
+  for (const [name, wrap] of OWNER_VENUE_SAMPLES) {
+    if (name.startsWith('(c)')) continue // unfenced SQL is a venue violation by construction
+    const md = wrap(body)
+    const errMessage = assertErrorMessageProjectionsAreClosed(md)
+    assert.equal(
+      errMessage.ok,
+      true,
+      errMessage.ok ? 'ok' : `venue "${name}" must still pass:\n- ${errMessage.violations.join('\n- ')}`,
+    )
+    const identity = assertNoRawIdentityProjections(md)
+    assert.equal(
+      identity.ok,
+      true,
+      identity.ok ? 'ok' : `venue "${name}" must still pass:\n- ${identity.violations.join('\n- ')}`,
+    )
+  }
+})
+
+test('anti-vacuity (round 3): the full info string is parsed, and the runbook’s own venues still resolve', () => {
+  const venues = scanCodeVenues(
+    ['```sql linenums title="probe"', 'SELECT 1 FROM t;', '```', '', '~~~sql title=probe', 'SELECT 2 FROM t;', '~~~'].join('\n'),
+  )
+  assert.equal(venues.length, 2, `expected 2 venues, got ${venues.length}`)
+  assert.deepEqual(
+    venues.map((v) => v.info),
+    ['sql linenums title="probe"', 'sql title=probe'],
+    'the COMPLETE info string must be preserved',
+  )
+  assert.deepEqual(venues.map((v) => v.tag), ['sql', 'sql'], 'the language tag is the first token')
+  assert.deepEqual(
+    venues.map((v) => v.body.trim()),
+    ['SELECT 1 FROM t;', 'SELECT 2 FROM t;'],
+    'the bodies must be captured, not swallowed by an unrecognised fence',
+  )
+
+  // The runbook itself: 4 SQL venues + the §4 evidence block, all still resolved by the relaxed
+  // scanner (a scanner that stopped matching would make every runbook-level guard vacuous).
+  const runbook = loadRunbook()
+  assert.equal(scanCodeVenues(runbook).length, 5, 'the runbook has 5 code venues')
+  assert.equal(extractFencedSqlBlocks(runbook).length, 4, 'the runbook has 4 SQL venues')
 })
 
 test('synthetic: paste-raw-identity instructions are rejected, negated bans are kept', () => {
