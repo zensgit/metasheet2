@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { isAdmin } from '../../src/rbac/service'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: vi.fn().mockResolvedValue(true),
@@ -54,6 +55,8 @@ function buildApp(user?: { id: string }) {
   return app
 }
 
+const pinned = usePinnedServer()
+
 describe('GET /api/multitable/ai/readiness (internal, admin-only)', () => {
   const savedEnv = new Map<string, string | undefined>()
 
@@ -80,7 +83,8 @@ describe('GET /api/multitable/ai/readiness (internal, admin-only)', () => {
     process.env.MULTITABLE_AI_API_KEY = 'test-key-placeholder'
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
 
-    const res = await request(buildApp({ id: 'admin-1' }))
+    pinned.setApp(buildApp({ id: 'admin-1' }))
+    const res = await request(pinned.url())
       .get('/api/multitable/ai/readiness')
       .expect(200)
 
@@ -96,7 +100,8 @@ describe('GET /api/multitable/ai/readiness (internal, admin-only)', () => {
   })
 
   it('A1-T7: default deployment reports disabled (still 200 for admin)', async () => {
-    const res = await request(buildApp({ id: 'admin-1' }))
+    pinned.setApp(buildApp({ id: 'admin-1' }))
+    const res = await request(pinned.url())
       .get('/api/multitable/ai/readiness')
       .expect(200)
 
@@ -105,7 +110,8 @@ describe('GET /api/multitable/ai/readiness (internal, admin-only)', () => {
   })
 
   it('A1-T8: request without user is rejected 403 by requireAdminRole', async () => {
-    await request(buildApp())
+    pinned.setApp(buildApp())
+    await request(pinned.url())
       .get('/api/multitable/ai/readiness')
       .expect(403)
   })
@@ -113,7 +119,8 @@ describe('GET /api/multitable/ai/readiness (internal, admin-only)', () => {
   it('A1-T8: authenticated non-admin is rejected 403', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
 
-    const res = await request(buildApp({ id: 'user-1' }))
+    pinned.setApp(buildApp({ id: 'user-1' }))
+    const res = await request(pinned.url())
       .get('/api/multitable/ai/readiness')
       .expect(403)
 
@@ -123,7 +130,8 @@ describe('GET /api/multitable/ai/readiness (internal, admin-only)', () => {
   it('A1-T8: RBAC service failure fails closed with 503', async () => {
     vi.mocked(isAdmin).mockRejectedValue(new Error('rbac down'))
 
-    const res = await request(buildApp({ id: 'user-1' }))
+    pinned.setApp(buildApp({ id: 'user-1' }))
+    const res = await request(pinned.url())
       .get('/api/multitable/ai/readiness')
       .expect(503)
 
@@ -137,7 +145,8 @@ describe('GET /api/multitable/ai/readiness (internal, admin-only)', () => {
     process.env.MULTITABLE_AI_BASE_URL = `https://ops:${URL_PASSWORD_SENTINEL}@proxy.example.com/v1`
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
 
-    const res = await request(buildApp({ id: 'admin-1' }))
+    pinned.setApp(buildApp({ id: 'admin-1' }))
+    const res = await request(pinned.url())
       .get('/api/multitable/ai/readiness')
       .expect(200)
 

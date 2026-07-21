@@ -9,6 +9,9 @@ vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import { dataSourcesRouter } from '../../src/routes/data-sources'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 function pgConfig(id: string): DataSourceConfig {
   return {
@@ -210,26 +213,28 @@ describe('data-sources route ownership scope (A0.1)', () => {
 
   it('a non-owner gets 404 on another user’s data source; the owner gets 200', async () => {
     currentUser = admin('alice')
-    const create = await request(app).post('/api/data-sources').send(pgConfig('ds-get-1'))
+    pinned.setApp(app)
+    const create = await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-get-1'))
     expect(create.status).toBe(201)
 
     currentUser = admin('bob')
-    const asBob = await request(app).get('/api/data-sources/ds-get-1')
+    const asBob = await request(pinned.url()).get('/api/data-sources/ds-get-1')
     expect(asBob.status).toBe(404)
 
     currentUser = admin('alice')
-    const asAlice = await request(app).get('/api/data-sources/ds-get-1')
+    const asAlice = await request(pinned.url()).get('/api/data-sources/ds-get-1')
     expect(asAlice.status).toBe(200)
   })
 
   it('list returns only the caller’s own data sources', async () => {
     currentUser = admin('alice2')
-    await request(app).post('/api/data-sources').send(pgConfig('ds-list-a'))
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-list-a'))
     currentUser = admin('bob2')
-    await request(app).post('/api/data-sources').send(pgConfig('ds-list-b'))
+    await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-list-b'))
 
     currentUser = admin('alice2')
-    const list = await request(app).get('/api/data-sources')
+    const list = await request(pinned.url()).get('/api/data-sources')
     expect(list.status).toBe(200)
     const ids = (list.body.data.items as Array<{ id: string }>).map((i) => i.id)
     expect(ids).toContain('ds-list-a')
@@ -238,12 +243,13 @@ describe('data-sources route ownership scope (A0.1)', () => {
 
   it('health route is reachable and returns only the caller’s own data sources', async () => {
     currentUser = admin('alice-health')
-    await request(app).post('/api/data-sources').send(pgConfig('ds-health-a'))
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-health-a'))
     currentUser = admin('bob-health')
-    await request(app).post('/api/data-sources').send(pgConfig('ds-health-b'))
+    await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-health-b'))
 
     currentUser = admin('alice-health')
-    const res = await request(app).get('/api/data-sources/health')
+    const res = await request(pinned.url()).get('/api/data-sources/health')
     expect(res.status).toBe(200)
     const ids = (res.body.data.items as Array<{ id: string }>).map((i) => i.id)
     expect(ids).toContain('ds-health-a')
@@ -252,31 +258,34 @@ describe('data-sources route ownership scope (A0.1)', () => {
 
   it('PUT preserves the owner — a non-owner still gets 404 after the update', async () => {
     currentUser = admin('alice3')
-    const create = await request(app).post('/api/data-sources').send(pgConfig('ds-put-1'))
+    pinned.setApp(app)
+    const create = await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-put-1'))
     expect(create.status).toBe(201)
 
-    const put = await request(app).put('/api/data-sources/ds-put-1').send({ name: 'renamed' })
+    const put = await request(pinned.url()).put('/api/data-sources/ds-put-1').send({ name: 'renamed' })
     expect(put.status).toBe(200)
 
     // Without owner preservation the re-add would revert to 'system' and leak
     currentUser = admin('bob3')
-    expect((await request(app).get('/api/data-sources/ds-put-1')).status).toBe(404)
+    expect((await request(pinned.url()).get('/api/data-sources/ds-put-1')).status).toBe(404)
 
     currentUser = admin('alice3')
-    expect((await request(app).get('/api/data-sources/ds-put-1')).status).toBe(200)
+    expect((await request(pinned.url()).get('/api/data-sources/ds-put-1')).status).toBe(200)
   })
 
   it('rejects an unauthenticated request', async () => {
     currentUser = undefined
-    const res = await request(app).post('/api/data-sources').send(pgConfig('ds-unauth'))
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-unauth'))
     expect(res.status).toBe(401)
   })
 
   it('rejects unsupported create types at validation time', async () => {
     currentUser = admin('alice4')
     // mysql is now supported (#2227); mongodb/redis/elasticsearch remain out of the verified runtime set.
+    pinned.setApp(app)
     for (const unsupportedType of ['mongodb', 'redis', 'elasticsearch']) {
-      const res = await request(app)
+      const res = await request(pinned.url())
         .post('/api/data-sources')
         .send({ ...pgConfig(`bad-${unsupportedType}`), type: unsupportedType })
       expect(res.status).toBe(400)
@@ -288,7 +297,8 @@ describe('data-sources route ownership scope (A0.1)', () => {
   it('accepts a mysql create type and constructs a read-only MySQLAdapter (#2227)', async () => {
     // Route accepts type=mysql (no longer "Unsupported data source type").
     currentUser = admin('alice-mysql')
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/data-sources')
       .send({ ...pgConfig('legacy-stockorder'), type: 'mysql' })
     expect(res.status).toBe(201)

@@ -22,6 +22,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 type QueryResult = {
   rows: any[]
@@ -156,6 +157,8 @@ async function createApp(handler: QueryHandler) {
   return { app, mockPool }
 }
 
+const pinned = usePinnedServer()
+
 describe('field validation wiring — PATCH → GET → submit', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -172,11 +175,12 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       order: 0,
     })
     const { app } = await createApp(handler)
+    pinned.setApp(app)
 
     // The panel emits `{ type, value, message }`. The backend must
     // normalise that to the engine's `{ type, params, message }`
     // before persisting.
-    const patchRes = await request(app)
+    const patchRes = await request(pinned.url())
       .patch(`/api/multitable/fields/${FIELD_ID}`)
       .send({
         property: {
@@ -201,7 +205,7 @@ describe('field validation wiring — PATCH → GET → submit', () => {
 
     // GET returns the same engine shape so the frontend can load it
     // back into the panel.
-    const getRes = await request(app).get(`/api/multitable/fields?sheetId=${SHEET_ID}`)
+    const getRes = await request(pinned.url()).get(`/api/multitable/fields?sheetId=${SHEET_ID}`)
     expect(getRes.status).toBe(200)
     expect(getRes.body.ok).toBe(true)
     expect(getRes.body.data.fields[0].property.validation).toEqual([
@@ -221,10 +225,11 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       order: 0,
     })
     const { app } = await createApp(handler)
+    pinned.setApp(app)
 
     // A client that already speaks engine shape must NOT get
     // double-wrapped into `params: { value: { value: 0 } }` or similar.
-    const patchRes = await request(app)
+    const patchRes = await request(pinned.url())
       .patch(`/api/multitable/fields/${FIELD_ID}`)
       .send({
         property: {
@@ -252,11 +257,12 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       order: 0,
     })
     const { app } = await createApp(handler)
+    pinned.setApp(app)
 
     // Mixing a valid rule with two malformed entries should keep the
     // valid one and silently drop the rest — not reject the whole
     // request and corrupt unrelated property keys.
-    const patchRes = await request(app)
+    const patchRes = await request(pinned.url())
       .patch(`/api/multitable/fields/${FIELD_ID}`)
       .send({
         property: {
@@ -275,7 +281,7 @@ describe('field validation wiring — PATCH → GET → submit', () => {
 
     // A non-array `validation` value is dropped entirely so the engine
     // defaults kick back in — the rest of `property` survives.
-    const patchRes2 = await request(app)
+    const patchRes2 = await request(pinned.url())
       .patch(`/api/multitable/fields/${FIELD_ID}`)
       .send({ property: { options: [{ value: 'keep-me' }], validation: 'nope' } })
 
@@ -300,13 +306,14 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       order: 0,
     })
     const { app } = await createApp(handler)
+    pinned.setApp(app)
 
-    await request(app)
+    await request(pinned.url())
       .patch(`/api/multitable/fields/${FIELD_ID}`)
       .send({ property: { validation: [{ type: 'minLength', value: 5 }] } })
       .expect(200)
 
-    const tooShort = await request(app)
+    const tooShort = await request(pinned.url())
       .post(`/api/multitable/views/${VIEW_ID}/submit`)
       .send({ data: { [FIELD_ID]: 'hi' } })
 
@@ -318,7 +325,7 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       ]),
     )
 
-    const okRes = await request(app)
+    const okRes = await request(pinned.url())
       .post(`/api/multitable/views/${VIEW_ID}/submit`)
       .send({ data: { [FIELD_ID]: 'hello world' } })
 
@@ -335,8 +342,9 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       order: 0,
     })
     const { app } = await createApp(handler)
+    pinned.setApp(app)
 
-    await request(app)
+    await request(pinned.url())
       .patch(`/api/multitable/fields/${FIELD_ID}`)
       .send({
         property: {
@@ -347,7 +355,7 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       })
       .expect(200)
 
-    const bad = await request(app)
+    const bad = await request(pinned.url())
       .post(`/api/multitable/views/${VIEW_ID}/submit`)
       .send({ data: { [FIELD_ID]: 'not-an-email' } })
 
@@ -358,7 +366,7 @@ describe('field validation wiring — PATCH → GET → submit', () => {
       message: 'Invalid email',
     })
 
-    const good = await request(app)
+    const good = await request(pinned.url())
       .post(`/api/multitable/views/${VIEW_ID}/submit`)
       .send({ data: { [FIELD_ID]: 'user@example.com' } })
 

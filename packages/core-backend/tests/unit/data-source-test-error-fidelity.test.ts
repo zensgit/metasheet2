@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // auditLog hits the DB; no-op it for these in-memory tests.
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
@@ -59,6 +60,8 @@ function appAs(userId: string) {
 
 afterEach(() => { vi.restoreAllMocks() })
 
+const pinned = usePinnedServer()
+
 describe('data-source /test error fidelity (A3)', () => {
   it('surfaces a redacted failure cause (ok:true, success:false, error.message) and never the secret', async () => {
     const manager = getDataSourceManager()
@@ -74,7 +77,8 @@ describe('data-source /test error fidelity (A3)', () => {
       { ownerId: 'tester', persist: false }
     )
 
-    const res = await request(appAs('tester')).get(`/api/data-sources/${id}/test`)
+    pinned.setApp(appAs('tester'))
+    const res = await request(pinned.url()).get(`/api/data-sources/${id}/test`)
 
     expect(res.status).toBe(200)                       // the request itself completed
     expect(res.body.ok).toBe(true)                     // backward-compatible: request layer stays ok:true

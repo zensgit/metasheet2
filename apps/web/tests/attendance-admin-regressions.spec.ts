@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
 import {
   canRunBatchAnomalyResolution,
@@ -1263,6 +1264,51 @@ describe('Attendance admin regressions', () => {
     const meCall = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).find(u => u.includes('/leave-balances/me'))
     expect(meCall).toBeTruthy()
     expect(meCall).not.toContain('userId=')
+  })
+
+  it('W3/4353 admin-forbidden: a 403 admin surface shows the permission notice and never renders the task home (charter §7)', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance') || url.includes('/api/admin') || url.includes('/api/permissions')) {
+        return jsonResponse(403, { ok: false, error: { code: 'FORBIDDEN', message: 'forbidden' } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(32)
+
+    expect(container!.textContent).toContain('Admin permissions required to manage attendance settings.')
+    expect(container!.querySelector('[data-admin-task-home]')).toBeNull()
+    expect(container!.querySelector('[data-admin-task-action]')).toBeNull()
+  })
+
+  it('W3/4353 wiring: AttendanceAdminCenter re-emits clear-section from the real return-home flow (review P3-1)', async () => {
+    // Mounts the REAL wrapper (not a mock): entering with an explicit section keeps the task home
+    // closed; clicking Management home must propagate clear-section through AdminCenter to its
+    // parent. A regression that drops the template re-emit turns exactly this leg red.
+    const onClearSection = vi.fn()
+    app = createApp(AttendanceAdminCenter, {
+      initialSectionId: 'attendance-admin-groups',
+      onClearSection,
+    })
+    app.mount(container!)
+    await flushUi(16)
+
+    // Task home lives under v-show: with an explicit section it must be present-but-hidden.
+    const homeContext = container!.querySelector('[data-admin-home-context]') as HTMLElement
+    expect(homeContext).toBeTruthy()
+    expect(homeContext.style.display).toBe('none')
+    const returnHome = [...container!.querySelectorAll('button')].find(b => (b.textContent || '').includes('Management home'))
+    expect(returnHome, 'expected the Management home button').toBeTruthy()
+    returnHome!.click()
+    await flushUi(4)
+
+    expect(onClearSection).toHaveBeenCalledTimes(1)
+    expect((container!.querySelector('[data-admin-home-context]') as HTMLElement).style.display).not.toBe('none')
   })
 
   it('admin notification deliveries — reminds selected owed-punch candidates with an authoritative confirm snapshot', async () => {

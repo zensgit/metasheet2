@@ -14,6 +14,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import { isAdmin } from '../../src/rbac/service'
 
 vi.mock('../../src/rbac/service', () => ({
@@ -77,6 +78,8 @@ const DESTRUCTIVE: Array<{
   { name: 'cleanup (HIGH)', method: 'post', path: '/api/snapshots/cleanup', body: {}, service: 'cleanupExpired' },
 ]
 
+const pinned = usePinnedServer()
+
 describe('snapshots router — legacy destructive endpoints sit behind the SafetyGuard (GHSA-h8mf)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -87,7 +90,8 @@ describe('snapshots router — legacy destructive endpoints sit behind the Safet
     'platform-admin WITHOUT a safety token cannot $name — 403 SAFETY_CHECK_REQUIRED and the service is NOT called',
     async ({ method, path, body, service }) => {
       const app = buildApp({ id: 'u-admin' })
-      const req = request(app)[method](path)
+      pinned.setApp(app)
+      const req = request(pinned.url())[method](path)
       const res = await (body !== undefined ? req.send(body as object) : req)
 
       // Admin alone is not enough: the SafetyGuard demands a confirmation token.
@@ -100,7 +104,8 @@ describe('snapshots router — legacy destructive endpoints sit behind the Safet
 
   it('the SafetyGuard 403 hands back a confirmation token (the real second factor, not confirm_full)', async () => {
     const app = buildApp({ id: 'u-admin' })
-    const res = await request(app)
+    pinned.setApp(app)
+    const res = await request(pinned.url())
       .post('/api/snapshots/s1/restore')
       .send({ restore_type: 'full', confirm_full: true })
       .expect(403)
@@ -113,7 +118,8 @@ describe('snapshots router — legacy destructive endpoints sit behind the Safet
 
   it('a NON-destructive mutation (create) is not gated by the SafetyGuard — the gate is scoped, not blanket', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/snapshots').send({ view_id: 'v1', name: 'n' }).expect(201)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots').send({ view_id: 'v1', name: 'n' }).expect(201)
     expect(snapshotService.createSnapshot).toHaveBeenCalledTimes(1)
   })
 })

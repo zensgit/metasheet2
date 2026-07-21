@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // Controllable DataSourceManager.getDataSource mock (configured per test).
 const dsMocks = vi.hoisted(() => ({
@@ -51,6 +52,8 @@ const MANIFEST = {
   features: { approval_automation: { supported: true, api_version: 'v1', entitled: true } },
 }
 
+const pinned = usePinnedServer()
+
 describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
   const app = express()
   app.use(express.json())
@@ -66,7 +69,8 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
       .mockResolvedValue({ available: true, manifest: MANIFEST })
     dsMocks.getDataSource.mockReturnValue({ getIntegrationCapabilities })
 
-    const res = await request(app).get('/api/plm-workbench/data-sources/ds-1/capabilities')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/ds-1/capabilities')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, manifest: MANIFEST })
@@ -78,7 +82,8 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
       throw new Error('Data source not found: nope')
     })
 
-    const res = await request(app).get('/api/plm-workbench/data-sources/nope/capabilities')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/nope/capabilities')
 
     expect(res.status).toBe(404)
     expect(res.body.data_source_id).toBe('nope')
@@ -89,7 +94,8 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
     const getRuntimeStatus = vi.fn()
     dsMocks.getDataSource.mockReturnValue({ getRuntimeStatus })
 
-    const res = await request(app).get('/api/plm-workbench/data-sources/pg-1/capabilities')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/pg-1/capabilities')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
@@ -106,7 +112,8 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
       .mockResolvedValue({ available: false, reason: 'unavailable' })
     dsMocks.getDataSource.mockReturnValue({ getIntegrationCapabilities })
 
-    const res = await request(app).get('/api/plm-workbench/data-sources/ds-2/capabilities')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/ds-2/capabilities')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-2', available: false, reason: 'unavailable' })
@@ -116,7 +123,8 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
     const getIntegrationCapabilities = vi.fn().mockRejectedValue(new Error('boom'))
     dsMocks.getDataSource.mockReturnValue({ getIntegrationCapabilities })
 
-    const res = await request(app).get('/api/plm-workbench/data-sources/ds-3/capabilities')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/ds-3/capabilities')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-3', available: false, reason: 'unavailable' })
