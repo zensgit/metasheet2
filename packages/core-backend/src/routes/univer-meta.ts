@@ -6616,6 +6616,11 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
   // →undelete cycle can never rehydrate from the WRONG cycle's captures.
   const deleteRevisionId = opts.deleteRevisionId ?? null
   if (deleteRevisionId) {
+    // W0 L6: this config-restore branch already holds the canonical sheet fence at its caller. Mint one
+    // record-history operation for every record revision produced by this field rehydration so the restored
+    // state becomes a selectable exact anchor. With the fence flag OFF the ledger is inert and the legacy
+    // write shape stays unchanged; with it ON, schema absence fails the enclosing transaction closed.
+    const operation = await mintOperation(query, sheetId)
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
@@ -6675,6 +6680,7 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
         patch: { [fieldId]: row.rehydrated_value as unknown },
         snapshot: normalizeJson(row.data),
         batchId: recordBatchId,
+        ledger: operation,
       }))
       await recordRecordRevisionsBatch(query, revisionInputs)
     }
@@ -6708,6 +6714,10 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
         [fieldId, sheetId, lastValue],
       )
     }
+    // Seal after every record/link/sequence write. A zero-row rehydration tracks no events and therefore
+    // intentionally produces no record anchor; otherwise the deferred FK + endpoint validation make an
+    // unsealed or miscounted operation fail the whole field-undelete transaction at COMMIT.
+    await sealOperation(query, operation)
   }
 }
 

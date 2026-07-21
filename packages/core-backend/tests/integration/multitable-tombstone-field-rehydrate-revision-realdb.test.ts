@@ -97,6 +97,10 @@ const revertPreview = (sheetId: string, anchorOperationId: string, as: Actor = M
   actor = as
   return request(app).post(`/api/multitable/sheets/${sheetId}/revert-preview`).send({ anchorOperationId })
 }
+const revertPreviewByBatch = (sheetId: string, historyBatchId: string, as: Actor = MANAGER) => {
+  actor = as
+  return request(app).post(`/api/multitable/sheets/${sheetId}/revert-preview`).send({ historyBatchId })
+}
 
 async function lastFieldDeleteRevisionId(sheetId: string, fieldId: string): Promise<string> {
   const r = await q(
@@ -110,9 +114,9 @@ async function recordRow(recordId: string): Promise<{ version: number; data: Rec
   const r = await q('SELECT version, data FROM meta_records WHERE id = $1', [recordId])
   return r.rows[0] as { version: number; data: Record<string, unknown> } | undefined
 }
-type RevisionRow = { version: number; action: string; source: string; actor_id: string | null; changed_field_ids: string[]; patch: Record<string, unknown>; snapshot: Record<string, unknown> | null; batch_id: string | null }
+type RevisionRow = { version: number; action: string; source: string; actor_id: string | null; changed_field_ids: string[]; patch: Record<string, unknown>; snapshot: Record<string, unknown> | null; batch_id: string | null; operation_id: string | null; seq: string }
 async function revisionsFor(recordId: string): Promise<RevisionRow[]> {
-  const r = await q('SELECT version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id FROM meta_record_revisions WHERE record_id = $1 ORDER BY version', [recordId])
+  const r = await q('SELECT version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id, operation_id::text, seq::text FROM meta_record_revisions WHERE record_id = $1 ORDER BY version', [recordId])
   return r.rows as RevisionRow[]
 }
 /** meta_fields uses HARD delete (no `deleted_at` column) — "still deleted" for a field means "still absent". */
@@ -177,8 +181,6 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
 
   test('happy path: two rehydrated records each get version+1 and a revision AT THE NEW version (full snapshot, shared batch), reconstructRecordsAtT sees the before/after boundary, and revert-preview (W0-1 contiguity + content-projection) 200s — the positive control', async () => {
     const s = await freshSheet('happy')
-    // Field-undelete rehydration does not mint a sealed operation endpoint (ledger not wired on that path),
-    // so recovery-preview authority uses the shared exact-anchor fixture rather than free wall-clock asOf.
     const fixture: ExactAnchorHistoryFixture = await prepareExactAnchorHistoryFixture(s)
     const F = mkFieldId('happy')
     await insertField(s, F, 'HappyVal', 'string', 1)
@@ -238,6 +240,19 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     expect(rehydrateRev1?.batch_id).toBeTruthy()
     expect(rehydrateRev1?.batch_id).toBe(rehydrateRev2?.batch_id)
 
+    // L6 exact-anchor closure: one fenced field-undelete is one sealed operation. Both the direct operation
+    // id and the History Center batch resolver must select the same post-rehydration boundary.
+    expect(rehydrateRev1?.operation_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(rehydrateRev1?.operation_id).toBe(rehydrateRev2?.operation_id)
+    const endpoint = await q(
+      'SELECT endpoint_seq::text, event_count FROM meta_record_history_operations WHERE sheet_id = $1 AND operation_id = $2::uuid',
+      [s, rehydrateRev1?.operation_id],
+    )
+    expect(endpoint.rows).toEqual([{
+      endpoint_seq: [rehydrateRev1?.seq, rehydrateRev2?.seq].sort((a, b) => BigInt(a ?? '0') < BigInt(b ?? '0') ? -1 : 1).at(-1),
+      event_count: 2,
+    }])
+
     // ---- reconstructRecordsAtT: before the rehydration (field absent) vs after (rehydrated value) ----
     const beforeState = (await reconstructRecordsAtT(q, s, tBeforeRehydrate, [R1])).get(R1)
     expect(beforeState).toMatchObject({ exists: true, version: 1, data: { other: 'x1' } })
@@ -249,9 +264,34 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     // this fix, `history-integrity-precheck.ts`'s own docstring named this exact site as a DEFERRED content-
     // integrity gap — the rehydrated live data had no matching revision, so the content-projection layer would
     // have refused (content_mismatch) the very next revert/reset-preview on this sheet.
-    // Exact-anchor authority: fixture-sealed create endpoint (rehydration itself is not a sealed-op producer).
-    const pv = await revertPreview(s, fixture.anchorOperationId())
-    expect(pv.status).toBe(200)
+    const direct = await revertPreview(s, rehydrateRev1?.operation_id ?? '')
+    expect(direct.status).toBe(200)
+    expect(direct.body?.data?.anchorOperationId).toBe(rehydrateRev1?.operation_id)
+    const byBatch = await revertPreviewByBatch(s, rehydrateRev1?.batch_id ?? '')
+    expect(byBatch.status).toBe(200)
+    expect(byBatch.body?.data?.anchorOperationId).toBe(rehydrateRev1?.operation_id)
+    // The older fixture anchor remains valid too; adding the new endpoint never invalidates prior anchors.
+    expect((await revertPreview(s, fixture.anchorOperationId())).status).toBe(200)
+  })
+
+  test('flag-off parity: rehydration keeps operation_id NULL and creates no sealed endpoint', async () => {
+    const s = await freshSheet('inert-ledger')
+    const F = mkFieldId('inert-ledger')
+    const R = mkRecordId('inert-ledger')
+    await insertField(s, F, 'InertLedger', 'string', 1)
+    await insertRecord(s, R, { [F]: 'restored' })
+    await seedCreateRevision(s, R, {}, new Date(Date.now() - 60_000).toISOString())
+    expect((await deleteField(F)).status).toBe(200)
+    const revF = await lastFieldDeleteRevisionId(s, F)
+    const p = await preview(s, revF)
+    expect(p.status).toBe(200)
+
+    delete process.env[FENCE_FLAG]
+    const ok = await execute(s, { revisionId: revF, previewToken: p.body.data.previewToken, confirm: 'undelete' })
+    expect(ok.status).toBe(200)
+    const rehydrated = (await revisionsFor(R)).find((row) => row.version === 2)
+    expect(rehydrated?.operation_id).toBeNull()
+    expect((await q('SELECT 1 FROM meta_record_history_operations WHERE sheet_id = $1', [s])).rows).toHaveLength(0)
   })
 
   test('zero-row / concurrent-delete leg: a record hard-deleted between field-delete and field-undelete gets NO ghost revision; its live sibling still rehydrates correctly', async () => {
