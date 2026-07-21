@@ -276,7 +276,12 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
     if (!res.ok) return
 
     // cross-sheet replay: the token is bound to SHEET; another sheet re-binds sheetId fresh ⇒ identity-invalid.
-    expect(await executeExactAnchorRecovery(q, { token: res.token, sheetId: `${SHEET}_other`, actorId: ACTOR }))
+    expect(await executeExactAnchorRecovery(q, {
+      token: res.token,
+      sheetId: `${SHEET}_other`,
+      actorId: ACTOR,
+      evaluateFullReadAccess: ALLOW_FULL_READ,
+    }))
       .toEqual({ ok: false, reason: 'identity-invalid' })
     // cross-actor replay: a preview minted for ACTOR is unusable by another actor ⇒ identity-invalid.
     expect(await executeExactAnchorRecovery(q, { token: res.token, sheetId: SHEET, actorId: `${ACTOR}_other`, evaluateFullReadAccess: ALLOW_FULL_READ }))

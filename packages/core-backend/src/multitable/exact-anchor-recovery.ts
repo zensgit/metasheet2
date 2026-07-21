@@ -122,7 +122,7 @@ const asRecord = (v: unknown): Record<string, unknown> =>
  * in-fence re-hash are computed over this COMPOSED map, the actor previews EXACTLY the set the apply will
  * plan over — a baseline-only record can no longer appear in the apply without having been shown at preview
  * (what-you-see-is-what-applies). Baseline rows are immutable post-activation and the token binds
- * `checkpointId` (re-resolved in-fence at apply), so composing does not weaken the drift tripwire.
+ * `checkpointId`; the unwired L8 apply must re-resolve it in-fence before this seam can be enabled.
  */
 export async function composeBaselineOverlay(
   query: QueryFn,
