@@ -8,18 +8,28 @@
  * snapshot-rebuild paths that were safe only by hygiene. These goldens lock that EVERY meta_links-writing path
  * rejects / does not create a mirror edge. Spine assertion per attempt: `meta_links WHERE field_id = mirror` === 0.
  *
+ * Exact-anchor migration (W0 L8): free wall-clock `asOf` is refused. PIT undelete/resurrection is
+ * categorically fail-closed (`INBOUND_UNPROVABLE`, no executable token, no write). Reset still runs on
+ * exact anchors; restorable projection EXCLUDES mirror-owned link fields, so a reset whose at-anchor
+ * snapshot carried a bogus mirror value restores only restorable scalars and never writes a mirror edge.
+ *
  * FAIL-FIRST (verified manually, see dev-verification MD): revert the records.ts guard → SD-1a/1b RED (a row
  * appears); revert the index.ts guard → the SD-2 derivation flips; revert the restoreRecord skip → SNAP RED.
  * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { createRecord, patchRecord } from '../../src/multitable/records'
 import { isFieldAlwaysReadOnly } from '../../src/multitable/permission-derivation'
+import {
+  prepareExactAnchorHistoryFixture,
+  pruneSealedHistoryOperations,
+  type ExactAnchorHistoryFixture,
+} from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -32,20 +42,42 @@ const FLD_B_NAME = `fld_mro_b_name_${TS}` // a writable string on B (control)
 const REC_A1 = `rec_mro_a1_${TS}`
 const REC_B1 = `rec_mro_b1_${TS}`
 const USER = `u_mro_${TS}`
+const T0 = '2026-01-01T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const pool = () => poolManager.get()
 let app: Express
 // share → canManageSheetAccess (PIT reset floor); write → canDeleteRecord (PIT undelete floor).
 let currentUser = { id: USER, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }
-const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
-const rev = (id: string, sheet: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
-  q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
-     VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[$5]::text[],'{}'::jsonb,$6::jsonb,$7)`, [sheet, id, version, action, FLD_B_NAME, JSON.stringify(snap), at])
+let fixtureB: ExactAnchorHistoryFixture
 
 /** Spine assertion: how many canonical edges are keyed by the MIRROR field (must always be 0). */
 const mirrorRows = async (): Promise<number> =>
   Number(((await q('SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1', [FLD_B_MIRROR])).rows[0] as { n: number }).n)
+
+async function resetSheetBHistory(): Promise<void> {
+  await pruneSealedHistoryOperations(SB).catch(() => {})
+  await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SB]).catch(() => {})
+  await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SB]).catch(() => {})
+  await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SB]).catch(() => {})
+  await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [SB]).catch(() => {})
+  await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SB]).catch(() => {})
+  // Keep the baseline live REC_B1 (and REC_A1 on SA); wipe only transient records used by SNAP tests.
+  await q('DELETE FROM meta_records WHERE sheet_id = $1 AND id <> $2', [SB, REC_B1]).catch(() => {})
+  await q('UPDATE meta_records SET data = $1::jsonb, version = 1 WHERE id = $2', [JSON.stringify({ [FLD_B_NAME]: 'b1' }), REC_B1]).catch(() => {})
+  fixtureB = await prepareExactAnchorHistoryFixture(SB)
+  // Stable survivor so the sheet always has a covering checkpoint + a sealed endpoint for exact-anchor
+  // recovery tests that layer additional records on top.
+  await fixtureB.insertRevision({
+    recordId: REC_B1,
+    version: 1,
+    action: 'create',
+    snapshot: { [FLD_B_NAME]: 'b1' },
+    createdAt: T0,
+    phase: 'anchor',
+    changedFieldIds: [FLD_B_NAME],
+  })
+}
 
 describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration (real DB)', () => {
   beforeAll(async () => {
@@ -59,6 +91,8 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
     // suite's SD-2/G5-style revert-route enumeration goldens, unchanged behavior.
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '50'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
     app.use('/api/multitable', univerMetaRouter())
 
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [USER])
@@ -72,19 +106,34 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
       [FLD_B_NAME, SB, 'BName', 'string', JSON.stringify({}), 2])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1),($4,$5,$6::jsonb,1)',
       [REC_A1, SA, JSON.stringify({}), REC_B1, SB, JSON.stringify({ [FLD_B_NAME]: 'b1' })])
-    // Give REC_B1 a clean create@T0 revision so it reconstructs as a plain survivor for the PIT preview/reset
-    // below (a sheet-wide reset over a no-history live row is the one reconstruction edge worth avoiding here).
-    await rev(REC_B1, SB, 1, 'create', { [FLD_B_NAME]: 'b1' }, T0)
+    await resetSheetBHistory()
   })
 
   afterAll(async () => {
+    await pruneSealedHistoryOperations(SB).catch(() => {})
     await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR]]).catch(() => {})
-    for (const t of ['meta_records_trash', 'meta_record_revisions', 'meta_records']) await q(`DELETE FROM ${t} WHERE sheet_id = ANY($1::text[])`, [[SA, SB]]).catch(() => {})
+    for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_records_trash', 'meta_record_revisions', 'meta_records']) {
+      await q(`DELETE FROM ${t} WHERE sheet_id = ANY($1::text[])`, [[SA, SB]]).catch(() => {})
+    }
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SA, SB]]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SA, SB]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [USER]).catch(() => {})
-    delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE; delete process.env.MULTITABLE_ENABLE_PIT_RESET; delete process.env.MULTITABLE_ENABLE_SHEET_REVERT; delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+    delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE
+    delete process.env.MULTITABLE_ENABLE_PIT_RESET
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+    delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+  })
+
+  beforeEach(async () => {
+    process.env.MULTITABLE_ENABLE_PIT_UNDELETE = 'true'
+    process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR]]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
@@ -141,45 +190,95 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
     // Fix-3 skip: the mirror field is excluded from the link replay → no edge for it.
     expect(await mirrorRows()).toBe(before)
     await q('DELETE FROM meta_records WHERE id = $1', [RB2]).catch(() => {})
+    await q('DELETE FROM meta_records_trash WHERE record_id = $1', [RB2]).catch(() => {})
   })
 
-  // ── Snapshot path — PIT undelete/resurrect (univer-meta.ts:9427 skip). A DELETED record whose T-snapshot carries a
-  //    bogus mirror value: the outbound-link rebuild on resurrect must NOT recreate the mirror edge. ──
-  test('SNAP-undelete (PIT resurrect) of a record whose T-snapshot carries a bogus mirror value → mirror NOT rebuilt, NO edge', async () => {
+  // ── Snapshot path — exact-anchor resurrect is FAIL-CLOSED. A DELETED record whose at-anchor snapshot
+  //    carries a bogus mirror value must never become an executable undelete plan (and never write). ──
+  test('SNAP-undelete (exact-anchor resurrect) of a record whose at-anchor snapshot carries a bogus mirror value → fail-closed, NO token, NO edge', async () => {
+    await resetSheetBHistory()
     const RU = `rec_mro_undel_${TS}`
-    const snap = { [FLD_B_NAME]: 'u-at-T1', [FLD_B_MIRROR]: [REC_A1] } // bogus mirror value in the resurrect snapshot
-    await rev(RU, SB, 1, 'create', snap, T0)
-    await rev(RU, SB, 2, 'delete', snap, T2) // deleted now, NO live row → an undelete target at T1
+    const snap = { [FLD_B_NAME]: 'u-at-anchor', [FLD_B_MIRROR]: [REC_A1] } // bogus mirror value in the resurrect snapshot
+    await fixtureB.insertRevision({
+      recordId: RU,
+      version: 1,
+      action: 'create',
+      snapshot: snap,
+      createdAt: T0,
+      phase: 'before',
+      changedFieldIds: [FLD_B_NAME],
+    })
+    await fixtureB.insertRevision({
+      recordId: RU,
+      version: 1,
+      action: 'delete',
+      snapshot: snap,
+      createdAt: T2,
+      phase: 'after',
+      changedFieldIds: [FLD_B_NAME],
+    })
     const before = await mirrorRows()
-    const pv = await request(app).post(`/api/multitable/sheets/${SB}/revert-preview`).send({ asOf: T1 })
+    const beforeLive = (await q('SELECT 1 FROM meta_records WHERE id = $1', [RU])).rows.length
+    const beforeTrash = (await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [RU])).rows.length
+    const beforeRevs = Number(((await q('SELECT count(*)::int AS c FROM meta_record_revisions WHERE sheet_id = $1', [SB])).rows[0] as { c: number }).c)
+
+    const pv = await request(app).post(`/api/multitable/sheets/${SB}/revert-preview`).send({ anchorOperationId: fixtureB.anchorOperationId() })
     expect(pv.status).toBe(200)
     expect(pv.body?.data?.undeleteRecordIds).toContain(RU)
-    const x = await request(app).post(`/api/multitable/sheets/${SB}/revert-execute`)
-      .send({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'undelete' })
-    expect(x.status).toBe(200)
-    // Fix-3 (univer-meta.ts:9427): the read-only mirror field is excluded from the outbound-link rebuild → no mirror edge.
+    // Exact-anchor kernel categorically refuses resurrection: disclosed, but not executable.
+    expect(pv.body?.data?.undeleteSupported).toBe(false)
+    expect(pv.body?.data?.undeleteBlockedReason).toBe('INBOUND_UNPROVABLE')
+    expect(pv.body?.data?.executable).toBe(false)
+    expect(pv.body?.data?.previewIdentity).toBeNull()
+
+    // No write surface exists without a token; spine + sheet state unchanged.
     expect(await mirrorRows()).toBe(before)
-    await q('DELETE FROM meta_records WHERE id = $1', [RU]).catch(() => {})
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [RU])).rows.length).toBe(beforeLive)
+    expect((await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [RU])).rows.length).toBe(beforeTrash)
+    expect(Number(((await q('SELECT count(*)::int AS c FROM meta_record_revisions WHERE sheet_id = $1', [SB])).rows[0] as { c: number }).c)).toBe(beforeRevs)
+
     await q('DELETE FROM meta_record_revisions WHERE record_id = $1', [RU]).catch(() => {})
   })
 
-  // ── Snapshot path — PIT reset-to-T (univer-meta.ts:9649 skip). A SURVIVOR whose revert-to-T diff would set a mirror
-  //    link value: the reset replay must skip the read-only mirror field. ──
-  test('SNAP-reset (PIT reset-to-T) whose revert diff would write the mirror field → REFUSED at the all-or-nothing preflight (RESET_BLOCKED), NO mirror edge', async () => {
+  // ── Snapshot path — exact-anchor reset-to-anchor. A SURVIVOR whose at-anchor snapshot carried a bogus
+  //    mirror value: restorable projection excludes the mirror field; only restorable scalars are restored.
+  //    Spine: no mirror edge is ever written. ──
+  test('SNAP-reset (exact-anchor reset) whose at-anchor snapshot carried a bogus mirror value → mirror NEVER written, NO edge', async () => {
+    await resetSheetBHistory()
     const RR = `rec_mro_reset_${TS}`
-    // live now = no mirror; the T1 (create@T0) snapshot HAD a bogus mirror value → reset-to-T1's diff would set it.
+    // live now = no mirror; the at-anchor (create) snapshot HAD a bogus mirror value → projection skips it.
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [RR, SB, JSON.stringify({ [FLD_B_NAME]: 'now' })])
-    await rev(RR, SB, 1, 'create', { [FLD_B_NAME]: 'at-T1', [FLD_B_MIRROR]: [REC_A1] }, T0)
-    await rev(RR, SB, 2, 'update', { [FLD_B_NAME]: 'now' }, T2)
+    await fixtureB.insertRevision({
+      recordId: RR,
+      version: 1,
+      action: 'create',
+      snapshot: { [FLD_B_NAME]: 'at-anchor', [FLD_B_MIRROR]: [REC_A1] },
+      createdAt: T0,
+      phase: 'before',
+      changedFieldIds: [FLD_B_NAME],
+    })
+    await fixtureB.insertRevision({
+      recordId: RR,
+      version: 2,
+      action: 'update',
+      snapshot: { [FLD_B_NAME]: 'now' },
+      createdAt: T2,
+      phase: 'after',
+      changedFieldIds: [FLD_B_NAME],
+    })
     const before = await mirrorRows()
-    // The reset's all-or-nothing PREFLIGHT (univer-meta.ts:9322; readOnly via isFieldAlwaysReadOnly ⇒ mirrorOf) REFUSES
-    // a revert that would write the read-only mirror field → nothing written. This pre-existing preflight, NOT the 9649
-    // replay skip, is the reset path's reachable spine guard (the 9649 skip is defense-in-depth, unreachable while the
-    // preflight holds). Either way the spine invariant holds: no mirror edge is ever written by a reset.
-    const pv = await request(app).post(`/api/multitable/sheets/${SB}/reset-preview`).send({ asOf: T1 })
-    expect(pv.status).toBe(409)
-    expect(pv.body?.error?.code).toBe('RESET_BLOCKED')
-    expect(await mirrorRows()).toBe(before) // 0 — spine holds, nothing written
+    const pv = await request(app).post(`/api/multitable/sheets/${SB}/reset-preview`).send({ anchorOperationId: fixtureB.anchorOperationId() })
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.executable).toBe(true)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+    const ex = await request(app).post(`/api/multitable/sheets/${SB}/reset-execute`).send({ previewIdentity: token, confirm: 'reset' })
+    expect(ex.status).toBe(200)
+    // Restorable name is restored; mirror field is excluded from projection → spine holds.
+    const live = (await q('SELECT data FROM meta_records WHERE id = $1', [RR])).rows[0] as { data: Record<string, unknown> }
+    expect(live.data[FLD_B_NAME]).toBe('at-anchor')
+    expect(live.data[FLD_B_MIRROR]).toBeUndefined()
+    expect(await mirrorRows()).toBe(before)
     await q('DELETE FROM meta_records WHERE id = $1', [RR]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE record_id = $1', [RR]).catch(() => {})
   })
