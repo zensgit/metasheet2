@@ -126,23 +126,23 @@ async function syncOneOutboundLinkField(
  *      "all-or-nothing" a lie (a committed burn over a failed apply, half-applied writes); the probe asks
  *      Postgres itself. Failure ⇒ the same values-free `recovery-trust-required` (non-oracular).
  *   1. fenceWriterEntry (L4, fence-FIRST).
- *   2. TRUSTED SUBSTRATE (kernel fail-closed): BOTH `MULTITABLE_ENABLE_WRITER_FENCE` and
- *      `MULTITABLE_HISTORY_CONTIGUITY_STRICT` must be on, then `precheckSheetHistoryIntegrityStrict` under
- *      the fence — any non-ok ⇒ `recovery-trust-required`, zero writes. Prevents an accidental route wire
- *      from running destructive apply with the fence as a flag-off no-op.
- *   3. BURN the token (anti-replay PK).
- *   4. IN-FENCE full-read + authorizedScopeHash (P1-2).
- *   5. IN-FENCE checkpoint re-resolution (never trust the token echo).
- *   6. Composed scopeHash drift, then §5 step 7 ROW LOCKS over the FULL current live set
+ *   2. ENV-ONLY TRUST FLAGS (kernel fail-closed): BOTH `MULTITABLE_ENABLE_WRITER_FENCE` and
+ *      `MULTITABLE_HISTORY_CONTIGUITY_STRICT` must be on.
+ *   3. IN-FENCE full-read + authorizedScopeHash (P1-2), BEFORE any sheet-state integrity/anchor
+ *      adjudication. A revoke while parked on the fence must get uniform `forbidden`, never an oracle.
+ *   4. `precheckSheetHistoryIntegrityStrict` under the fence; any non-ok ⇒ `history-incomplete`, zero writes.
+ *   5. BURN the token (anti-replay PK; rolled back on every later refusal).
+ *   6. IN-FENCE checkpoint re-resolution (never trust the token echo).
+ *   7. Composed scopeHash drift, then §5 step 7 ROW LOCKS over the FULL current live set
  *      (`ORDER BY id FOR UPDATE`, deterministic — never only the delta: a RESET delete-set escape or a
  *      version bump on a "non-affected" row is still live-set drift) + liveSetHash check from the LOCKED
  *      rows, then a FRESH id/version re-hash in a NEW statement snapshot (catches an unfenced CREATE or a
  *      not-yet-locked bump committed while the lock statement was PARKED behind a concurrent writer).
  *      Malformed live truth (non-object data, non-integer/negative version) is NEVER coerced — it refuses
  *      `recovery-trust-required`, as does `ExactAnchorPlanDataError` from the plan classifier.
- *   7. Plan (L7); schema-drift whole-reject; RESURRECT fail-closed (`inbound-unprovable` — D1c link history
+ *   8. Plan (L7); schema-drift whole-reject; RESURRECT fail-closed (`inbound-unprovable` — D1c link history
  *      unsolved; temporary kernel boundary, not route-deferred replay).
- *   8. Canonical restorable PROJECTION only (projectRestorableOntoLive) — derived-only ⇒ no-op. Builds the
+ *   9. Canonical restorable PROJECTION only (projectRestorableOntoLive) — derived-only ⇒ no-op. Builds the
  *      exact write delta WITHOUT scalar/link validation (no-oracle: value/existence must not leak before auth).
  *  10. REQUIRED `evaluatePlanAuthorization` over that delta (person membership + foreign-target read/edit
  *      authority belong here in the route adapter). Deny ⇒ uniform `forbidden` before any sensitive validator.
@@ -349,15 +349,25 @@ export async function applyExactAnchorRecovery(
       // 1. Fence-first (L4).
       await fenceWriterEntry(query, input.sheetId)
 
-      // 2. TRUSTED SUBSTRATE — before burn/write. Fence alone is a flag-off no-op; refuse unless the
-      //    trusted recovery substrate is actually armed, then re-check history under the fence.
+      // 2. ENV-ONLY TRUST FLAGS — before any sheet-state adjudication, burn, or write. Fence alone is
+      //    a flag-off no-op; refuse unless the trusted recovery substrate is actually armed.
       if (!isWriterFenceEnabled() || !isContiguityStrictMode()) {
         throw new ApplyRefusalError('recovery-trust-required')
       }
+
+      // 3. IN-FENCE full-read + authorizedScopeHash (P1-2), FIRST among sheet-state checks. If the
+      //    actor loses full-read while parked on the fence, return uniform `forbidden` before
+      //    history/checkpoint/anchor state can become an oracle.
+      if (!(await input.evaluateFullReadAccess(query))) throw new ApplyRefusalError('forbidden')
+      if (authorizedScopeHash !== hashRecoveryAuthorizationScope({ sheetId: input.sheetId, actorId: input.actorId })) {
+        throw new ApplyRefusalError('forbidden')
+      }
+
+      // 4. Strict history under the fence, after authority is freshly established.
       const trust = await precheckSheetHistoryIntegrityStrict(query, input.sheetId)
       if (!trust.ok) throw new ApplyRefusalError('history-incomplete')
 
-      // 3. Burn — at-most-once barrier (rolled back on any later refusal).
+      // 5. Burn — at-most-once barrier (rolled back on any later refusal).
       const tokenSha = createHash('sha256').update(input.token).digest('hex')
       try {
         await query(
@@ -369,13 +379,7 @@ export async function applyExactAnchorRecovery(
         throw e
       }
 
-      // 4. IN-FENCE full-read + authorizedScopeHash (P1-2).
-      if (!(await input.evaluateFullReadAccess(query))) throw new ApplyRefusalError('forbidden')
-      if (authorizedScopeHash !== hashRecoveryAuthorizationScope({ sheetId: input.sheetId, actorId: input.actorId })) {
-        throw new ApplyRefusalError('forbidden')
-      }
-
-      // 5. In-fence checkpoint re-resolution.
+      // 6. In-fence checkpoint re-resolution.
       const checkpoint = await selectCheckpointByAnchorSeq(query, input.sheetId, anchorSeq)
       if (!checkpoint) throw new ApplyRefusalError('no-covering-checkpoint')
       if (checkpoint.id !== checkpointId) throw new ApplyRefusalError('checkpoint-changed')

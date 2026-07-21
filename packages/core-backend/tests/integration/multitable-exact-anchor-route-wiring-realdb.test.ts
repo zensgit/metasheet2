@@ -8,7 +8,7 @@
  *   - preview + in-fence full-read auth
  *   - size ceiling
  *   - revert vs reset semantics
- *   - resurrection removes trash
+ *   - resurrection remains values-free and fail-closed without at-anchor inbound authority
  *   - route tests prove the real L8 apply is invoked (token burn + sealed operation)
  *
  * Requires DATABASE_URL. Flags toggled only inside this process (default OFF everywhere real).
@@ -749,6 +749,110 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       expect(Number(
         ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
       )).toBe(burnsBefore + 1)
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* already committed/released */ }
+      holder.release()
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    }
+  })
+
+  test('NO-ORACLE AUTH-RACE: fence-parked full-read revoke outranks concurrent HISTORY_INCOMPLETE, zero writes', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(typeof token).toBe('string')
+
+    const liveBefore = (await q(
+      'SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      [REC_A, SHEET],
+    )).rows[0] as { data: Record<string, unknown>; version: number }
+    const burnsBefore = Number(
+      ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
+    )
+    const restoreRevsBefore = Number(
+      ((await q(
+        `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+        [SHEET],
+      )).rows[0] as { c: number }).c,
+    )
+
+    // Corrupt the sealed anchor after preview without changing the live row. The operation endpoint now
+    // advertises one event while its revision set is empty, so strict history would return
+    // HISTORY_INCOMPLETE if it ran before the fresh in-fence full-read adjudication.
+    await q(
+      'DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND operation_id = $2::uuid',
+      [SHEET, anchorOp],
+    )
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    try {
+      await holder.query('BEGIN')
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+      expect(Number.isFinite(holderPid) && holderPid > 0).toBe(true)
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)])
+
+      const applying = Promise.resolve(revertExecute({ previewIdentity: token }))
+      let sawExactWaiter = false
+      for (let i = 0; i < 100; i++) {
+        const waiters = await holder.query(
+          `SELECT count(*)::int AS c
+             FROM pg_locks waiter
+             JOIN pg_locks held
+               ON held.locktype = 'advisory'
+              AND held.granted = true
+              AND held.pid = $1
+              AND waiter.locktype = 'advisory'
+              AND waiter.granted = false
+              AND waiter.pid <> held.pid
+              AND waiter.database IS NOT DISTINCT FROM held.database
+              AND waiter.classid = held.classid
+              AND waiter.objid = held.objid
+              AND waiter.objsubid = held.objsubid`,
+          [holderPid],
+        )
+        if (Number((waiters.rows[0] as { c: number }).c) > 0) {
+          sawExactWaiter = true
+          break
+        }
+        const settled = await Promise.race([
+          applying.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 0)),
+        ])
+        if (settled) break
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(sawExactWaiter).toBe(true)
+
+      // Revoke full-table read on a separate connection while execute is parked. The actor still has
+      // canManageSheetAccess, so only the conservative field-read adjudication changes.
+      await q(
+        `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1,$2,'user',$3,false,false)`,
+        [SHEET, F_STR, ACTOR],
+      )
+
+      await holder.query('COMMIT')
+      const ex = await applying
+      expect(ex.status).toBe(403)
+      expect(ex.body?.error?.code).toBe('FORBIDDEN')
+      expect(ex.body?.error?.code).not.toBe('HISTORY_INCOMPLETE')
+      expect((await q(
+        'SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [REC_A, SHEET],
+      )).rows[0]).toEqual(liveBefore)
+      expect(Number(
+        ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
+      )).toBe(burnsBefore)
+      expect(Number(
+        ((await q(
+          `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+          [SHEET],
+        )).rows[0] as { c: number }).c,
+      )).toBe(restoreRevsBefore)
     } finally {
       try { await holder.query('ROLLBACK') } catch { /* already committed/released */ }
       holder.release()
