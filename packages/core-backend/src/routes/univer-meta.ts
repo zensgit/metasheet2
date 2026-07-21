@@ -10550,11 +10550,11 @@ export function univerMetaRouter(): Router {
   const parseAnchorBody = (req: Request): ExactAnchorBody => {
     const b = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>
     return {
-      historyBatchId: typeof b.historyBatchId === 'string' ? b.historyBatchId : undefined,
-      anchorOperationId: typeof b.anchorOperationId === 'string' ? b.anchorOperationId : undefined,
-      asOf: typeof b.asOf === 'string' ? b.asOf : undefined,
-      previewIdentity: typeof b.previewIdentity === 'string' ? b.previewIdentity : undefined,
-      confirm: typeof b.confirm === 'string' ? b.confirm : undefined,
+      ...(Object.prototype.hasOwnProperty.call(b, 'historyBatchId') ? { historyBatchId: b.historyBatchId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'anchorOperationId') ? { anchorOperationId: b.anchorOperationId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'asOf') ? { asOf: b.asOf } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'previewIdentity') ? { previewIdentity: b.previewIdentity } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'confirm') ? { confirm: b.confirm } : {}),
     }
   }
 
@@ -10727,6 +10727,7 @@ export function univerMetaRouter(): Router {
         actorId: access.userId,
         mode,
         evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),
+        evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
       })
       if (preview.ok === false) {
         const m = httpForPreviewFailure(preview, mode)
@@ -10791,12 +10792,17 @@ export function univerMetaRouter(): Router {
     }
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const body = parseAnchorBody(req)
-    if (!sheetId || !body.previewIdentity) {
+    const previewIdentity = typeof body.previewIdentity === 'string' ? body.previewIdentity : ''
+    const confirm = typeof body.confirm === 'string' ? body.confirm : ''
+    if (!sheetId || !previewIdentity) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: mode === 'reset' ? 'sheetId, previewIdentity and confirm:"reset" are required' : 'sheetId and previewIdentity are required' } })
     }
     // No free wall-clock authority survives on ANY destructive surface: a nonblank asOf refuses even at
     // execute (the token is the only authority; a wall-clock echo is never silently ignored).
-    if ((body.asOf ?? '').trim()) {
+    if (Object.prototype.hasOwnProperty.call(body, 'asOf') && typeof body.asOf !== 'string') {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a string when present.' } })
+    }
+    if (typeof body.asOf === 'string' && body.asOf.trim()) {
       const m = mapParseRefusal('exact-anchor-required')
       return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
     }
@@ -10818,7 +10824,7 @@ export function univerMetaRouter(): Router {
       })
     }
     // D4: Reset keeps the typed two-step confirm — a stray Revert-shaped call cannot trigger a Reset.
-    if (mode === 'reset' && (body.confirm ?? '').trim() !== 'reset') {
+    if (mode === 'reset' && confirm.trim() !== 'reset') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, previewIdentity and confirm:"reset" are required' } })
     }
     try {
@@ -10832,7 +10838,7 @@ export function univerMetaRouter(): Router {
       }
 
       // TOKEN-ONLY authority (P1-1): verify + MODE-ISOLATE before any transaction or write.
-      const verified = verifyExactAnchorRecoveryIdentity(body.previewIdentity, { sheetId, actorId: access.userId })
+      const verified = verifyExactAnchorRecoveryIdentity(previewIdentity, { sheetId, actorId: access.userId })
       if (!verified.valid || !verified.claims) {
         const status = verified.reason === 'expired' ? 410 : 409
         return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `${mode === 'reset' ? 'Reset' : 'Revert'} preview identity rejected (${verified.reason ?? 'invalid'}); the sheet changed since preview — re-preview` } })
@@ -10859,7 +10865,7 @@ export function univerMetaRouter(): Router {
       const result = await executeExactAnchorRecoveryApply(
         (fn) => pool.transaction(async ({ query }) => fn(query as unknown as TrustCheckpointQueryFn)),
         {
-          token: body.previewIdentity,
+          token: previewIdentity,
           sheetId,
           actorId,
           evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),

@@ -179,7 +179,8 @@ export type ExactAnchorApplyRefusal =
   | 'link-integrity' // missing/ambiguous foreign sheet, missing/wrong-sheet target, same-op delete target, mirror, or hierarchy parent cycle
   | 'value-invalid' // current-schema scalar exactness OR whole-record validateRecord fails
   | 'record-locked' // in-fence lock check: record locked by another actor (values-free)
-  | 'recovery-trust-required' // fence+strict substrate missing or HISTORY_INCOMPLETE under the fence
+  | 'history-incomplete' // strict in-fence chain/content precheck failed; established values-free 409 contract
+  | 'recovery-trust-required' // fence/strict/txn substrate missing or malformed
 
 export interface ExactAnchorApplySuccess {
   ok: true
@@ -354,7 +355,7 @@ export async function applyExactAnchorRecovery(
         throw new ApplyRefusalError('recovery-trust-required')
       }
       const trust = await precheckSheetHistoryIntegrityStrict(query, input.sheetId)
-      if (!trust.ok) throw new ApplyRefusalError('recovery-trust-required')
+      if (!trust.ok) throw new ApplyRefusalError('history-incomplete')
 
       // 3. Burn — at-most-once barrier (rolled back on any later refusal).
       const tokenSha = createHash('sha256').update(input.token).digest('hex')

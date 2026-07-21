@@ -14,6 +14,7 @@ import {
   httpForPreviewFailure,
   loadLiveByIdForPreview,
   mapApplyRefusal,
+  mapHistoryIncompleteRefusal,
   mapParseRefusal,
   mapRecoveryTrustRefusal,
   mapResolveRefusal,
@@ -109,6 +110,17 @@ describe('parseRecoveryAnchorRequest — exactly one anchor, no silent prefer', 
         asOf: '2026-01-01T00:00:00.000Z',
       }),
     ).toEqual({ ok: false, reason: 'validation' })
+  })
+
+  test('rejects malformed authority fields instead of silently treating them as absent', () => {
+    expect(parseRecoveryAnchorRequest({ anchorOperationId: 'op-1', asOf: 123 })).toEqual({
+      ok: false,
+      reason: 'invalid-request',
+    })
+    expect(parseRecoveryAnchorRequest({ anchorOperationId: 'op-1', historyBatchId: false })).toEqual({
+      ok: false,
+      reason: 'invalid-request',
+    })
   })
 })
 
@@ -553,6 +565,7 @@ describe('HTTP mapping — every current ExactAnchorApplyRefusal is values-free'
     'link-integrity',
     'value-invalid',
     'record-locked',
+    'history-incomplete',
     'recovery-trust-required',
   ]
 
@@ -571,6 +584,7 @@ describe('HTTP mapping — every current ExactAnchorApplyRefusal is values-free'
     expect(valueInvalid.code).toBe('VALUE_INVALID')
     expect(valueInvalid.message).toMatch(/invalid under the current schema/i)
     expect(mapApplyRefusal('recovery-trust-required')).toEqual(mapRecoveryTrustRefusal())
+    expect(mapApplyRefusal('history-incomplete')).toEqual(mapHistoryIncompleteRefusal())
   })
 
   test('mapResolveRefusal covers every ResolveAnchorRefusal', () => {
@@ -588,18 +602,23 @@ describe('HTTP mapping — every current ExactAnchorApplyRefusal is values-free'
     }
   })
 
-  test('mapParseRefusal: validation is AMBIGUOUS_ANCHOR; empty/asOf maps to EXACT_ANCHOR_REQUIRED', () => {
+  test('mapParseRefusal: ambiguity, malformed fields, and missing exact authority remain distinct', () => {
     const validation = mapParseRefusal('validation')
     expect(validation.status).toBe(400)
     expect(validation.code).toBe('AMBIGUOUS_ANCHOR')
     expect(validation.message).toMatch(/exactly one/i)
+    expect(mapParseRefusal('invalid-request').code).toBe('VALIDATION_ERROR')
     expect(mapParseRefusal('exact-anchor-required').code).toBe('EXACT_ANCHOR_REQUIRED')
   })
 
-  test('httpForPreviewFailure collapses recovery-trust-required and sizes too-large', () => {
+  test('httpForPreviewFailure distinguishes history-incomplete from missing trust and maps sizes too-large', () => {
+    const trust = httpForPreviewFailure({ ok: false, reason: 'recovery-trust-required' }, 'revert')
+    expect(trust).toEqual(mapRecoveryTrustRefusal())
+    expect(trust.message).not.toMatch(/requires both MULTITABLE_ENABLE_WRITER_FENCE/i)
+    expect(trust.message).toMatch(/active checkpoint/i)
     expect(
-      httpForPreviewFailure({ ok: false, reason: 'recovery-trust-required' }, 'revert'),
-    ).toEqual(mapRecoveryTrustRefusal())
+      httpForPreviewFailure({ ok: false, reason: 'history-incomplete' }, 'revert'),
+    ).toEqual(mapHistoryIncompleteRefusal())
     expect(
       httpForPreviewFailure(
         { ok: false, reason: 'too-large', recordCount: 9, maxRecords: 5 },
@@ -628,6 +647,7 @@ describe('previewExactAnchorRecovery — no-oracle ordering + structural guards 
         calls.push('full-read')
         return false
       },
+      evaluatePlanAuthorization: async () => true,
     })
     expect(result).toEqual({ ok: false, reason: 'forbidden' })
     expect(calls).toEqual(['full-read'])
@@ -647,6 +667,7 @@ describe('previewExactAnchorRecovery — no-oracle ordering + structural guards 
         fullReadCalled = true
         return true
       },
+      evaluatePlanAuthorization: async () => true,
     })
     expect(result).toEqual({ ok: false, reason: 'exact-anchor-required' })
     expect(fullReadCalled).toBe(false)
@@ -674,6 +695,7 @@ describe('previewExactAnchorRecovery — no-oracle ordering + structural guards 
         calls.push('full-read')
         return true
       },
+      evaluatePlanAuthorization: async () => true,
     })
     expect(result).toEqual({ ok: false, reason: 'recovery-trust-required' })
     expect(calls).toEqual(['full-read'])

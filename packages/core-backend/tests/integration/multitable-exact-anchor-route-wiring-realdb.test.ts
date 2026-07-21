@@ -337,6 +337,10 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(wall.status).toBe(400)
     expect(wall.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
 
+    const malformed = await revertPreview({ anchorOperationId: '00000000-0000-4000-8000-000000000001', asOf: 123 })
+    expect(malformed.status).toBe(400)
+    expect(malformed.body?.error?.code).toBe('VALIDATION_ERROR')
+
     const execOff = await revertExecute({ previewIdentity: 'x', confirm: 'undelete' })
     expect(execOff.status).toBe(403)
     expect(execOff.body?.error?.code).toBe('REVERT_DISABLED')
@@ -398,6 +402,12 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     })
     expect(rejected.status).toBe(400)
     expect(rejected.body?.error?.code).toBe('VALIDATION_ERROR')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
+    expect((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0]?.c).toBe(0)
+
+    const malformed = await revertExecute({ previewIdentity: token, asOf: 123 })
+    expect(malformed.status).toBe(400)
+    expect(malformed.body?.error?.code).toBe('VALIDATION_ERROR')
     expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
     expect((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0]?.c).toBe(0)
 
@@ -813,7 +823,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(pv.body?.data?.previewIdentity).toBeNull()
   })
 
-  test('healed-gap trust failure is collapsed to RECOVERY_TRUST_REQUIRED before minting a token', async () => {
+  test('healed-gap trust failure preserves HISTORY_INCOMPLETE before minting a token', async () => {
     enableRecoveryExecute()
     const { anchorOp, seqBase } = await seedWorld()
     // Healed gap: live at version 3 with only v1+v3 revisions (delete v2) on REC_A
@@ -826,7 +836,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     await q('DELETE FROM meta_record_revisions WHERE record_id = $1 AND version = 2 AND sheet_id = $2', [REC_A, SHEET])
     const pv = await revertPreview({ anchorOperationId: anchorOp })
     expect(pv.status).toBe(409)
-    expect(pv.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect(pv.body?.error?.code).toBe('HISTORY_INCOMPLETE')
     expect(pv.body?.data?.previewIdentity).toBeUndefined()
     expect(JSON.stringify(pv.body)).not.toMatch(/healed-v3|A-live-now/) // values-free
   })
@@ -852,6 +862,22 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     const exact = await revertPreview({ anchorOperationId: anchorOp })
     expect(exact.status).toBe(403)
     expect(JSON.stringify(exact.body)).not.toMatch(/A-live-now|A-at-anchor|previewIdentity/)
+  })
+
+  test('share-capable read-only admin cannot mint a token for a plan execute would already forbid', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    curPerms = ['multitable:read', 'multitable:share']
+
+    const revert = await revertPreview({ anchorOperationId: anchorOp })
+    expect(revert.status).toBe(403)
+    expect(revert.body?.error?.code).toBe('FORBIDDEN')
+    expect(revert.body?.data?.previewIdentity).toBeUndefined()
+
+    const reset = await resetPreview({ anchorOperationId: anchorOp })
+    expect(reset.status).toBe(403)
+    expect(reset.body?.error?.code).toBe('FORBIDDEN')
+    expect(reset.body?.data?.previewIdentity).toBeUndefined()
   })
 
   test('NO-ORACLE: canManage + field visible=false full-read fail ⇒ 403 FORBIDDEN, never HISTORY_INCOMPLETE/token', async () => {

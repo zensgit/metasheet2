@@ -141,8 +141,10 @@ const errorCopy = computed(() => {
   switch (c) {
     case 'RESET_DISABLED': return l('record.resetConfirmErrorDisabled')
     case 'RESET_BLOCKED':
-    case 'RECORD_LOCKED': return l('record.resetConfirmErrorBlocked')
+    case 'RECORD_LOCKED':
+    case 'RECOVERY_IN_PROGRESS': return l('record.resetConfirmErrorBlocked')
     case 'EXACT_ANCHOR_REQUIRED':
+    case 'AMBIGUOUS_ANCHOR':
     case 'INVALID_ANCHOR':
     case 'UNKNOWN_ANCHOR': return l('record.resetConfirmErrorAnchorInvalid')
     case 'NO_COVERING_CHECKPOINT':
@@ -153,6 +155,7 @@ const errorCopy = computed(() => {
     case 'LINK_INTEGRITY': return l('record.resetConfirmErrorLinkIntegrity')
     case 'VALUE_INVALID': return l('record.resetConfirmErrorValueInvalid')
     case 'INBOUND_UNPROVABLE': return l('record.resetConfirmErrorInboundUnprovable')
+    case 'RESET_RETENTION_CONFLICT': return l('record.resetConfirmErrorRetentionConflict')
     case 'TOKEN_REPLAYED':
     case 'IDENTITY_INVALID':
     case 'PREVIEW_IDENTITY_INVALID': return l('record.resetConfirmErrorStale')

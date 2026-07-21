@@ -112,7 +112,7 @@ export type MetaRecordLabelKey =
   | 'record.resetConfirmErrorAnchorInvalid' | 'record.resetConfirmErrorCheckpoint'
   | 'record.resetConfirmErrorTrustRequired' | 'record.resetConfirmErrorSchemaDrift'
   | 'record.resetConfirmErrorLinkIntegrity' | 'record.resetConfirmErrorValueInvalid'
-  | 'record.resetConfirmErrorInboundUnprovable'
+  | 'record.resetConfirmErrorInboundUnprovable' | 'record.resetConfirmErrorRetentionConflict'
   | 'record.resetConfirmWarnResetWord' | 'record.resetConfirmWarnNotWord' | 'record.resetConfirmRevertWord'
   | 'record.resetConfirmWarnBeforeNot' | 'record.resetConfirmWarnInstead'
   | 'record.resetConfirmTypePrefix' | 'record.resetConfirmTypeSuffix' | 'record.resetConfirmTypeAria'
@@ -324,6 +324,10 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetConfirmErrorInboundUnprovable': {
     en: "This reset can't restore deleted records safely — nothing was changed.",
     zh: '此次重置无法安全地恢复已删除的记录——未做任何更改。',
+  },
+  'record.resetConfirmErrorRetentionConflict': {
+    en: 'Reset is unavailable while revision retention is running. Try again after retention is disabled.',
+    zh: '修订保留任务运行期间无法执行重置。请在停用保留任务后重试。',
   },
   // The three inline-bold words in the destructive warning paragraph. Word-for-word bold placement doesn't
   // map 1:1 to Chinese, so the zh values are chosen so the concatenated sentence (built from these plus the

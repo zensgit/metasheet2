@@ -34,11 +34,14 @@ import {
   type ExactAnchorApplyRefusal,
   type ExactAnchorApplyResult,
   type ExactAnchorMutationTxnHook,
+  type ExactAnchorPlanAuthContext,
+  type ExactAnchorRevertWriteIntent,
   type EvaluatePlanAuthorization,
 } from './exact-anchor-recovery-execute'
 import {
   classifyExactAnchorRecoveryPlan,
   ExactAnchorPlanDataError,
+  type ExactAnchorRecoveryPlan,
 } from './exact-anchor-recovery-plan'
 import type { ExactAnchorRecoveryMode } from './restore-preview-identity'
 import { resolveSheetRevertMaxRecords } from './restore-caps'
@@ -51,12 +54,12 @@ import { isFieldAlwaysReadOnly } from './permission-derivation'
 import { projectRestorableOntoLive } from './record-restore-diff'
 
 export type ExactAnchorBody = {
-  historyBatchId?: string
-  anchorOperationId?: string
+  historyBatchId?: unknown
+  anchorOperationId?: unknown
   /** free wall-clock T — refused for destructive recovery (exact-anchor-required). */
-  asOf?: string
-  previewIdentity?: string
-  confirm?: string
+  asOf?: unknown
+  previewIdentity?: unknown
+  confirm?: unknown
 }
 
 /**
@@ -69,7 +72,15 @@ export type ExactAnchorBody = {
  */
 export function parseRecoveryAnchorRequest(body: ExactAnchorBody):
   | { ok: true; request: RecoveryAnchorRequest }
-  | { ok: false; reason: 'validation' | 'exact-anchor-required' } {
+  | { ok: false; reason: 'validation' | 'invalid-request' | 'exact-anchor-required' } {
+  const has = (key: keyof ExactAnchorBody) => Object.prototype.hasOwnProperty.call(body, key)
+  if (
+    (has('anchorOperationId') && typeof body.anchorOperationId !== 'string') ||
+    (has('historyBatchId') && typeof body.historyBatchId !== 'string') ||
+    (has('asOf') && typeof body.asOf !== 'string')
+  ) {
+    return { ok: false, reason: 'invalid-request' }
+  }
   const opId = typeof body.anchorOperationId === 'string' ? body.anchorOperationId.trim() : ''
   const batchId = typeof body.historyBatchId === 'string' ? body.historyBatchId.trim() : ''
   const asOf = typeof body.asOf === 'string' ? body.asOf.trim() : ''
@@ -128,6 +139,13 @@ export interface PreviewPlanSummary {
   driftCount: number
 }
 
+interface PreviewPlanDetails {
+  summary: PreviewPlanSummary
+  plan: ExactAnchorRecoveryPlan
+  revertWrites: ExactAnchorRevertWriteIntent[]
+  deleteRecordIds: string[]
+}
+
 /** Normalize a link-field cell (array | single | null) to string[] of foreign record ids. */
 function normalizeLinkIds(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string' && v.length > 0)
@@ -143,6 +161,71 @@ function normalizeLinkIds(value: unknown): string[] {
  * snapshots). May throw `ExactAnchorPlanDataError` on malformed at-anchor/live substrate —
  * callers map that to `recovery-trust-required`.
  */
+function buildPreviewPlanDetails(
+  stateMap: Map<
+    string,
+    {
+      recordId: string
+      exists: boolean
+      data: Record<string, unknown> | null
+      version: number | null
+    }
+  >,
+  liveById: ReadonlyMap<string, { data: Record<string, unknown>; version: number }>,
+  fieldIds: ReadonlySet<string>,
+  mode: ExactAnchorRecoveryMode,
+  projection: {
+    fieldById: ReadonlyMap<string, { type: string }>
+    rawTypeById: ReadonlyMap<string, string>
+  },
+): PreviewPlanDetails {
+  const plan = classifyExactAnchorRecoveryPlan(stateMap, liveById, fieldIds)
+  const reverts: Array<{ recordId: string; fieldIds: string[] }> = []
+  const revertWrites: ExactAnchorRevertWriteIntent[] = []
+  for (const r of plan.reverts) {
+    const live = liveById.get(r.recordId)
+    if (!live) continue
+    const projected = projectRestorableOntoLive({
+      fieldById: projection.fieldById,
+      rawTypeById: projection.rawTypeById,
+      targetSnapshot: r.targetData,
+      currentData: live.data,
+      recordId: r.recordId,
+      currentVersion: live.version,
+      normalizeLinkIds,
+    })
+    if (projected.isNoOp) continue
+    reverts.push({ recordId: r.recordId, fieldIds: projected.changedFieldIds })
+    revertWrites.push({
+      recordId: r.recordId,
+      liveVersion: r.liveVersion,
+      changedFieldIds: projected.changedFieldIds,
+      patch: projected.patch,
+      projectedData: projected.data,
+      linkUpdates: projected.linkUpdates,
+    })
+  }
+  const resurrectIds = plan.resurrects.map((r) => r.recordId)
+  const deleteIds = mode === 'reset' ? [...plan.deletedAtAnchorLiveNow, ...plan.createdAfterAnchor] : []
+  const effectiveWriteCount = reverts.length + resurrectIds.length + deleteIds.length
+  // Revert keeps post-anchor creates + later-resurrected rows; Reset deletes them (see deleteIds).
+  const keptCreatedAfterAnchorCount =
+    mode === 'revert' ? plan.createdAfterAnchor.length + plan.deletedAtAnchorLiveNow.length : 0
+  return {
+    summary: {
+      reverts,
+      resurrectIds,
+      deleteIds,
+      effectiveWriteCount,
+      keptCreatedAfterAnchorCount,
+      driftCount: plan.driftCount,
+    },
+    plan,
+    revertWrites,
+    deleteRecordIds: deleteIds,
+  }
+}
+
 export function summarizePreviewPlan(
   stateMap: Map<
     string,
@@ -161,37 +244,7 @@ export function summarizePreviewPlan(
     rawTypeById: ReadonlyMap<string, string>
   },
 ): PreviewPlanSummary {
-  const plan = classifyExactAnchorRecoveryPlan(stateMap, liveById, fieldIds)
-  const reverts: Array<{ recordId: string; fieldIds: string[] }> = []
-  for (const r of plan.reverts) {
-    const live = liveById.get(r.recordId)
-    if (!live) continue
-    const projected = projectRestorableOntoLive({
-      fieldById: projection.fieldById,
-      rawTypeById: projection.rawTypeById,
-      targetSnapshot: r.targetData,
-      currentData: live.data,
-      recordId: r.recordId,
-      currentVersion: live.version,
-      normalizeLinkIds,
-    })
-    if (projected.isNoOp) continue
-    reverts.push({ recordId: r.recordId, fieldIds: projected.changedFieldIds })
-  }
-  const resurrectIds = plan.resurrects.map((r) => r.recordId)
-  const deleteIds = mode === 'reset' ? [...plan.deletedAtAnchorLiveNow, ...plan.createdAfterAnchor] : []
-  const effectiveWriteCount = reverts.length + resurrectIds.length + deleteIds.length
-  // Revert keeps post-anchor creates + later-resurrected rows; Reset deletes them (see deleteIds).
-  const keptCreatedAfterAnchorCount =
-    mode === 'revert' ? plan.createdAfterAnchor.length + plan.deletedAtAnchorLiveNow.length : 0
-  return {
-    reverts,
-    resurrectIds,
-    deleteIds,
-    effectiveWriteCount,
-    keptCreatedAfterAnchorCount,
-    driftCount: plan.driftCount,
-  }
+  return buildPreviewPlanDetails(stateMap, liveById, fieldIds, mode, projection).summary
 }
 
 /**
@@ -353,11 +406,14 @@ export async function previewExactAnchorRecovery(
     actorId: string
     mode: ExactAnchorRecoveryMode
     evaluateFullReadAccess: EvaluateRecoveryFullReadAccess
+    /** Preview-time advisory copy of the authoritative in-fence write gate; execute re-runs it. */
+    evaluatePlanAuthorization: EvaluatePlanAuthorization
   },
 ): Promise<
   | ExactAnchorPreviewSuccess
   | { ok: false; reason: ResolveAnchorRefusal }
   | { ok: false; reason: 'too-large'; recordCount: number; maxRecords: number }
+  | { ok: false; reason: 'history-incomplete' }
   | { ok: false; reason: 'recovery-trust-required' }
 > {
   // 1. Exact shape — wall-clock never reaches here via parseRecoveryAnchorRequest, but refuse
@@ -380,9 +436,10 @@ export async function previewExactAnchorRecovery(
 
   // 4. History integrity via the AUTHORITATIVE production entry (NOT precheckSheetHistoryIntegrityStrict
   //    directly — that bypasses checkStrictEnablementPrecondition / RECONSTRUCTION_CAUSALITY_LANDED /
-  //    active-checkpoint gating). Failures collapse to the same values-free recovery-trust-required.
+  //    active-checkpoint gating). A real chain failure keeps the established values-free
+  //    HISTORY_INCOMPLETE contract; missing/malformed trust substrate remains a separate refusal.
   const integrity = await precheckSheetHistoryIntegrity(query, input.sheetId)
-  if (!integrity.ok) return { ok: false as const, reason: 'recovery-trust-required' as const }
+  if (!integrity.ok) return { ok: false as const, reason: 'history-incomplete' as const }
 
   // 5. Exact-anchor resolution + token mint (token is gated at finalize — not returned when doomed).
   const resolved = await resolveExactAnchor(query, input)
@@ -393,9 +450,9 @@ export async function previewExactAnchorRecovery(
   if (!liveLoaded.ok) return { ok: false as const, reason: 'recovery-trust-required' as const }
 
   const surface = await loadFieldSurfaceForPreview(query, input.sheetId)
-  let summary: PreviewPlanSummary
+  let details: PreviewPlanDetails
   try {
-    summary = summarizePreviewPlan(
+    details = buildPreviewPlanDetails(
       resolved.stateMap,
       liveLoaded.liveById,
       surface.fieldIds,
@@ -408,6 +465,22 @@ export async function previewExactAnchorRecovery(
     }
     throw e
   }
+
+  // Preview must not mint a token that is already known to be unusable. Reuse the SAME route adapter
+  // as execute over the true projected delta; execute repeats this check under the canonical fence.
+  const previewAuth: ExactAnchorPlanAuthContext = {
+    mode: input.mode,
+    sheetId: input.sheetId,
+    actorId: input.actorId,
+    plan: details.plan,
+    revertWrites: details.revertWrites,
+    deleteRecordIds: details.deleteRecordIds,
+  }
+  if (!(await input.evaluatePlanAuthorization(query, previewAuth))) {
+    return { ok: false as const, reason: 'forbidden' as const }
+  }
+
+  const { summary } = details
 
   // Secondary ceiling on the effective write set (parity with the old T8-1 effective_write_set guard).
   const maxRecords = resolveSheetRevertMaxRecords()
@@ -447,8 +520,15 @@ export async function executeExactAnchorRecoveryApply(
 
 /** Map parse-shape refusals to HTTP-ish code + status (before any DB). */
 export function mapParseRefusal(
-  reason: 'validation' | 'exact-anchor-required',
+  reason: 'validation' | 'invalid-request' | 'exact-anchor-required',
 ): { status: number; code: string; message: string } {
+  if (reason === 'invalid-request') {
+    return {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'historyBatchId, anchorOperationId, and asOf must be strings when present.',
+    }
+  }
   if (reason === 'validation') {
     return {
       status: 400,
@@ -507,7 +587,17 @@ export function mapRecoveryTrustRefusal(): { status: number; code: string; messa
     status: 409,
     code: 'RECOVERY_TRUST_REQUIRED',
     message:
-      'Exact-anchor recovery requires both MULTITABLE_ENABLE_WRITER_FENCE and MULTITABLE_HISTORY_CONTIGUITY_STRICT to be enabled (canonical fence + strict history integrity); nothing was written and no token was minted.',
+      'Exact-anchor recovery trust is unavailable or invalid; verify the canonical writer fence, strict history mode, and active checkpoint before retrying. Nothing was written and no token was minted.',
+  }
+}
+
+/** Values-free HTTP envelope for a concrete incomplete/inconsistent history chain. */
+export function mapHistoryIncompleteRefusal(): { status: number; code: string; message: string } {
+  return {
+    status: 409,
+    code: 'HISTORY_INCOMPLETE',
+    message:
+      'Record history for this sheet is incomplete or inconsistent with its live data; destructive recovery is refused and nothing was written. History must be trustworthy before revert/reset can run.',
   }
 }
 
@@ -584,6 +674,8 @@ export function mapApplyRefusal(reason: ExactAnchorApplyRefusal): { status: numb
         message:
           'A target record is locked; exact-anchor recovery is all-or-nothing and nothing was written. Unlock and re-preview.',
       }
+    case 'history-incomplete':
+      return mapHistoryIncompleteRefusal()
     case 'recovery-trust-required':
       return mapRecoveryTrustRefusal()
     default: {
@@ -607,6 +699,9 @@ export function httpForPreviewFailure(
   }
   if (failure.reason === 'recovery-trust-required') {
     return mapRecoveryTrustRefusal()
+  }
+  if (failure.reason === 'history-incomplete') {
+    return mapHistoryIncompleteRefusal()
   }
   return mapResolveRefusal(failure.reason)
 }
