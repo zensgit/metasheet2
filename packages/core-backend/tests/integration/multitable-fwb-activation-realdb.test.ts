@@ -179,7 +179,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     setFlags(false, false)
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'FWB Act Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'FWB Act Sheet'])
-    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_TITLE, SHEET_ID, 'Title', 'text', '{}', 1])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_TITLE, SHEET_ID, 'Title', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_AMOUNT, SHEET_ID, 'Amount', 'number', '{}', 2])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [
       F_STATUS, SHEET_ID, 'Status', 'select', JSON.stringify({ options: [{ value: 'A' }, { value: 'B' }] }), 3,
@@ -437,7 +437,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     state = await stateFor(instanceId, ruleId)
     expect(state.records.length).toBe(1)
     expect(state.claims).toBe(1)
-    expect(state.records[0].data).toMatchObject({ [F_TITLE]: 'FWB run', [F_AMOUNT]: 42 })
+    expect(state.records[0].data).toMatchObject({ [F_TITLE]: 'FWB run', [F_AMOUNT]: '42' }) // D7: canonical decimal STRING
     expect(await revisionCountFor(state.records[0].id)).toBe(1)
     expect(await outboxCountLike(`${evtOn}::fwb::`)).toBe(1)
     expect(legacyChainedEmits).toBe(0) // REPLACE, not keep-both
@@ -565,6 +565,121 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     } finally {
       setFlags(false, false)
       await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', ['{}', F_AMOUNT])
+    }
+  })
+
+  test('execute-time number precision rejects coercible malformed metadata before claim or record write', async () => {
+    const ruleId = ruleIds[0]
+    const instanceId = await startInstance({ summary: 'invalid precision metadata', amount: 12.3 })
+    await approveInstance(instanceId)
+    const beforeExecutions = await waitForExecutionCount(ruleId, 0)
+    const beforeRecords = Number(((await q(
+      'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
+      [SHEET_ID],
+    )).rows[0] as { c: number }).c)
+    await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', [JSON.stringify({ decimals: true }), F_AMOUNT])
+    try {
+      setFlags(true, true)
+      await svc.handleApprovalCompletionTrigger(completionEvent(instanceId, `evt_fwbact_${TS}_precision_invalid_metadata`))
+      await waitForExecutionCount(ruleId, beforeExecutions + 1)
+      const exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('failed')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:mapping_target_changed')
+      expect((await stateFor(instanceId, ruleId)).claims).toBe(0)
+      const afterRecords = Number(((await q(
+        'SELECT COUNT(*)::int AS c FROM meta_records WHERE sheet_id = $1',
+        [SHEET_ID],
+      )).rows[0] as { c: number }).c)
+      expect(afterRecords).toBe(beforeRecords)
+    } finally {
+      setFlags(false, false)
+      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', ['{}', F_AMOUNT])
+    }
+  })
+
+  test('execute-time select recheck uses confirmed-current intersection; additions require re-confirmation (D6/Q6)', async () => {
+    // A dedicated rule whose select mapping's SAVED selectOptions include 'B' (valid at save time).
+    const selectMappings = [{ formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select' as const, selectOptions: ['A', 'B'] }]
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'fwb select staleness',
+      triggerType: 'approval.completed',
+      triggerConfig: { templateId, outcomes: ['approved'] },
+      actionType: 'write_approval_form_values',
+      actionConfig: fwbConfig(selectMappings),
+      createdBy: CREATOR,
+    } as never)
+    const ruleId = (rule as { id: string }).id
+    ruleIds.push(ruleId)
+    // Per-rule write observability: the main MAPPINGS rule fires on the SAME completions, so sheet-wide
+    // record counts and unqualified outbox prefixes are NOT discriminating — every "zero writes" and
+    // "exactly one record" assertion below is scoped to THIS rule via the ledger (instance-scoped claim
+    // precedes the record write in the same txn) and the rule-qualified outbox event id.
+    const ruleOutbox = async (eventPrefix: string) => {
+      const r = await q('SELECT payload FROM meta_automation_outbox WHERE event_id LIKE $1', [`${eventPrefix}::fwb::${ruleId}::%`])
+      return r.rows as Array<{ payload: { recordId?: string } }>
+    }
+    const before = await waitForExecutionCount(ruleId, 0)
+    setFlags(true, true)
+    try {
+      // 1) option REMOVED from the field after save: the stale saved mapping still lists 'B', but the
+      //    execute-time recheck re-derives options from meta_fields → 'B' is rejected, zero writes.
+      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', [JSON.stringify({ options: [{ value: 'A' }] }), F_STATUS])
+      const removedInstance = await startInstance({ summary: 'B', amount: 1 })
+      await approveInstance(removedInstance)
+      await svc.handleApprovalCompletionTrigger(completionEvent(removedInstance, `evt_fwbact_${TS}_sel_removed`))
+      await waitForExecutionCount(ruleId, before + 1)
+      let exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('failed')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:mapping')
+      expect((await stateFor(removedInstance, ruleId)).claims).toBe(0)
+      expect(await ruleOutbox(`evt_fwbact_${TS}_sel_removed`)).toEqual([])
+
+      // 2) an option ADDED after save is not in the confirmation subject and must reject. Replacing
+      //    the saved options with the complete current set would silently widen a confirmed mapping.
+      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', [JSON.stringify({ options: [{ value: 'A' }, { value: 'C' }] }), F_STATUS])
+      const addedInstance = await startInstance({ summary: 'C', amount: 2 })
+      await approveInstance(addedInstance)
+      await svc.handleApprovalCompletionTrigger(completionEvent(addedInstance, `evt_fwbact_${TS}_sel_added`))
+      await waitForExecutionCount(ruleId, before + 2)
+      exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('failed')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:mapping')
+      expect((await stateFor(addedInstance, ruleId)).claims).toBe(0)
+      expect(await ruleOutbox(`evt_fwbact_${TS}_sel_added`)).toEqual([])
+
+      // Positive control: update the persisted mapping to include C with a fresh server-derived
+      // confirmation hash. The same value is now authorized and writes exactly once.
+      const reconfirmedMappings = [{ formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select' as const, selectOptions: ['A', 'C'] }]
+      await svc.updateRule(ruleId, SHEET_ID, {
+        actionConfig: fwbConfig(reconfirmedMappings),
+      }, CREATOR)
+      const reconfirmedInstance = await startInstance({ summary: 'C', amount: 2 })
+      await approveInstance(reconfirmedInstance)
+      await svc.handleApprovalCompletionTrigger(completionEvent(reconfirmedInstance, `evt_fwbact_${TS}_sel_reconfirmed`))
+      await waitForExecutionCount(ruleId, before + 3)
+      exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('success')
+      expect((await stateFor(reconfirmedInstance, ruleId)).claims).toBe(1)
+      const reconfirmedOutbox = await ruleOutbox(`evt_fwbact_${TS}_sel_reconfirmed`)
+      expect(reconfirmedOutbox.length).toBe(1)
+      const recordId = reconfirmedOutbox[0].payload.recordId
+      const record = await q('SELECT data FROM meta_records WHERE id = $1', [recordId])
+      expect((record.rows[0] as { data: Record<string, unknown> }).data).toEqual({ [F_STATUS]: 'C' })
+
+      // 3) options ABSENT from the field metadata → fail closed BEFORE the claim (no open vocabulary).
+      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', ['{}', F_STATUS])
+      const absentInstance = await startInstance({ summary: 'A', amount: 3 })
+      await approveInstance(absentInstance)
+      await svc.handleApprovalCompletionTrigger(completionEvent(absentInstance, `evt_fwbact_${TS}_sel_absent`))
+      await waitForExecutionCount(ruleId, before + 4)
+      exec = await lastExecution(ruleId)
+      expect(exec?.steps?.[0]?.status).toBe('failed')
+      expect(String(exec?.steps?.[0]?.error ?? '')).toBe('fwb_rejected:mapping_target_changed')
+      expect((await stateFor(absentInstance, ruleId)).claims).toBe(0)
+      expect(await ruleOutbox(`evt_fwbact_${TS}_sel_absent`)).toEqual([])
+    } finally {
+      setFlags(false, false)
+      await q('UPDATE meta_fields SET property = $1::jsonb WHERE id = $2', [JSON.stringify({ options: [{ value: 'A' }, { value: 'B' }] }), F_STATUS])
     }
   })
 

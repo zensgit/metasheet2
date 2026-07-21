@@ -38,6 +38,11 @@ export type FwbConfigIssue =
 
 const V1_TYPES: readonly string[] = ['text', 'number', 'date', 'select']
 
+function toFwbTargetType(type: string): FwbTargetType | null {
+  if (type === 'string' || type === 'text') return 'text'
+  return V1_TYPES.includes(type) ? type as FwbTargetType : null
+}
+
 /** Validate the whole draft; [] = saveable. Editor disables save while non-empty. */
 export function validateFwbMappingConfig(
   draft: readonly FwbMappingDraft[],
@@ -56,8 +61,9 @@ export function validateFwbMappingConfig(
       issues.push({ code: 'unknown_target_field', index })
       return
     }
-    if (!V1_TYPES.includes(t.type)) issues.push({ code: 'unsupported_target_type', index })
-    if (t.type === 'select' && (!t.selectOptions || t.selectOptions.length === 0)) issues.push({ code: 'select_options_missing', index })
+    const targetType = toFwbTargetType(t.type)
+    if (!targetType) issues.push({ code: 'unsupported_target_type', index })
+    if (targetType === 'select' && (!t.selectOptions || t.selectOptions.length === 0)) issues.push({ code: 'select_options_missing', index })
     if (seenTargets.has(m.targetFieldId)) issues.push({ code: 'duplicate_target', index })
     seenTargets.add(m.targetFieldId)
   })
@@ -72,12 +78,13 @@ export function toExecutorMappings(
   const tgt = new Map(targetFields.map((f) => [f.id, f]))
   return draft.map((m) => {
     const t = tgt.get(m.targetFieldId)
-    if (!t || !V1_TYPES.includes(t.type)) throw new RangeError('toExecutorMappings called on an unvalidated draft')
+    const targetType = t ? toFwbTargetType(t.type) : null
+    if (!t || !targetType) throw new RangeError('toExecutorMappings called on an unvalidated draft')
     return {
       formFieldId: m.formFieldId,
       targetFieldId: m.targetFieldId,
-      targetType: t.type as FwbTargetType,
-      ...(t.type === 'select' ? { selectOptions: t.selectOptions } : {}),
+      targetType,
+      ...(targetType === 'select' ? { selectOptions: t.selectOptions } : {}),
     }
   })
 }

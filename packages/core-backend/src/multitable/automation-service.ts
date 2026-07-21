@@ -41,6 +41,7 @@ import {
   canUserWriteFwbTargetFields,
   collectFwbActionConfigs,
   deriveFwbConfirmationHash,
+  isFwbTargetFieldTypeCompatible,
   normalizeFwbMappings,
   normalizeFwbUpdateRecordLinkFieldId,
   parseFwbWriteMode,
@@ -2103,7 +2104,9 @@ export class AutomationService {
       for (const m of normalized.mappings) {
         const field = byId.get(m.targetFieldId)
         if (!field) return `${FWB_ACTION_TYPE} mapping invalid: unknown_target_field`
-        if (field.type !== m.targetType) return `${FWB_ACTION_TYPE} mapping invalid: target_type_mismatch`
+        if (!isFwbTargetFieldTypeCompatible(field.type, m.targetType)) {
+          return `${FWB_ACTION_TYPE} mapping invalid: target_type_mismatch`
+        }
         if (m.targetType === 'select') {
           const property = typeof field.property === 'string'
             ? (() => { try { return JSON.parse(field.property as string) as Record<string, unknown> } catch { return {} } })()

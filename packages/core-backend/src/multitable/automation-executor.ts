@@ -34,7 +34,11 @@ import {
   parseFwbWriteMode,
   resolveRecordLinkTargetFromSchema,
 } from './approval-fwb-activation'
-import { executeWriteApprovalFormValues, type FwbRecordWriteSeam } from './approval-fwb-write-action'
+import {
+  executeWriteApprovalFormValues,
+  resolveFwbRuntimeMappings,
+  type FwbRecordWriteSeam,
+} from './approval-fwb-write-action'
 import {
   executeUpdateBoundRecord,
   type FwbUpdateSeam,
@@ -3058,33 +3062,9 @@ export class AutomationExecutor {
         })
       }
       const gates = this.fwbGateChecksFor(query)
-      const targetFieldResult = await query(
-        `SELECT id, type, property
-           FROM meta_fields
-          WHERE sheet_id = $1 AND id = ANY($2::text[])
-          FOR SHARE`,
-        [context.sheetId, normalized.mappings.map((mapping) => mapping.targetFieldId)],
-      )
-      const targetFields = new Map(
-        (targetFieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
-          .filter((row): row is { id: string; type: string; property?: unknown } => (
-            typeof row.id === 'string' && typeof row.type === 'string'
-          ))
-          .map((row) => [row.id, { type: row.type, property: normalizeJson(row.property) }] as const),
-      )
-      if (targetFields.size !== normalized.mappings.length) throw new Error('fwb_rejected:mapping_target_changed')
-      const runtimeMappings = normalized.mappings.map((mapping) => {
-        const field = targetFields.get(mapping.targetFieldId)
-        if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
-        if (mapping.targetType !== 'number') return mapping
-        const precision = field.property.decimals
-        return {
-          ...mapping,
-          ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
-            ? { numberPrecision: precision }
-            : {}),
-        }
-      })
+      const runtime = await resolveFwbRuntimeMappings(query, context.sheetId, normalized.mappings)
+      if (!runtime.ok) throw new Error('fwb_rejected:mapping_target_changed')
+      const runtimeMappings = runtime.mappings
       // D4: the immutable form snapshot is the ONLY value source, read server-side inside the txn.
       const snapRes = await query(
         `SELECT form_snapshot FROM approval_instances
@@ -3263,33 +3243,9 @@ export class AutomationExecutor {
       }
 
       // Fire-time type recheck on the DERIVED target sheet (field retype/delete since save → reject).
-      const targetFieldResult = await query(
-        `SELECT id, type, property
-           FROM meta_fields
-          WHERE sheet_id = $1 AND id = ANY($2::text[])
-          FOR SHARE`,
-        [derived.sheetId, normalized.mappings.map((mapping) => mapping.targetFieldId)],
-      )
-      const targetFields = new Map(
-        (targetFieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
-          .filter((row): row is { id: string; type: string; property?: unknown } => (
-            typeof row.id === 'string' && typeof row.type === 'string'
-          ))
-          .map((row) => [row.id, { type: row.type, property: normalizeJson(row.property) }] as const),
-      )
-      if (targetFields.size !== normalized.mappings.length) throw new Error('fwb_rejected:mapping_target_changed')
-      const runtimeMappings = normalized.mappings.map((mapping) => {
-        const field = targetFields.get(mapping.targetFieldId)
-        if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
-        if (mapping.targetType !== 'number') return mapping
-        const precision = field.property.decimals
-        return {
-          ...mapping,
-          ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
-            ? { numberPrecision: precision }
-            : {}),
-        }
-      })
+      const runtime = await resolveFwbRuntimeMappings(query, derived.sheetId, normalized.mappings)
+      if (!runtime.ok) throw new Error('fwb_rejected:mapping_target_changed')
+      const runtimeMappings = runtime.mappings
 
       const trx = { query, isTransaction: true } as unknown as TransactionalQueryable
       const queryFn = query as AutomationDeps['queryFn']
