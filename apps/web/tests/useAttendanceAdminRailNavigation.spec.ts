@@ -84,7 +84,7 @@ describe('useAttendanceAdminRailNavigation', () => {
     }
   }
 
-  function mountHost(options?: { focused?: boolean }) {
+  function mountHost(options?: { focused?: boolean; navigationEnabled?: boolean }) {
     const items: AdminSectionNavItem[] = [
       { id: 'attendance-admin-settings', label: 'Settings' },
       { id: 'attendance-admin-approval-flows', label: 'Approval Flows' },
@@ -93,6 +93,7 @@ describe('useAttendanceAdminRailNavigation', () => {
       setup() {
         const showAdmin = ref(true)
         const adminForbidden = ref(false)
+        const adminNavigationEnabled = ref(options?.navigationEnabled ?? true)
         const adminFocusCurrentSectionOnly = ref(options?.focused ?? false)
         const adminNavStorageScope = ref('default')
         const adminActiveSectionId = ref(items[0].id)
@@ -111,6 +112,7 @@ describe('useAttendanceAdminRailNavigation', () => {
         const { adminSectionBinding, scrollToAdminSection } = useAttendanceAdminRailNavigation({
           showAdmin,
           adminForbidden,
+          adminNavigationEnabled,
           adminFocusCurrentSectionOnly,
           previousAdminSectionId,
           nextAdminSectionId,
@@ -125,6 +127,8 @@ describe('useAttendanceAdminRailNavigation', () => {
         return {
           adminActiveSectionId,
           adminCompactNavOpen,
+          adminNavStorageScope,
+          adminNavigationEnabled,
           adminSectionBinding,
           isCompactAdminNav,
           scrollToAdminSection,
@@ -262,5 +266,83 @@ describe('useAttendanceAdminRailNavigation', () => {
 
     expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
     expect(window.location.hash).toBe('')
+  })
+
+  // vNext charter §7 Wave 3 (issue #4353): `adminNavigationEnabled` keeps a
+  // hidden section workspace (admin task home open) inert — no restore from
+  // a remembered section, no keyboard nav, no hash-sync side effects.
+  describe('adminNavigationEnabled gate (Wave 3 task-home suppression)', () => {
+    it('falls back to the first element instead of the remembered section when navigation is disabled', async () => {
+      window.localStorage.setItem('metasheet_attendance_admin_nav_last_section:default', 'attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      expect(window.location.hash).toBe('')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(false)
+    })
+
+    // Positive control: the same stored last-section IS honored once navigation is enabled,
+    // proving the disabled-case above comes from the gate and not a broken fixture.
+    it('restores the remembered section when navigation is enabled (positive control)', async () => {
+      window.localStorage.setItem('metasheet_attendance_admin_nav_last_section:default', 'attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: true })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+      expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    })
+
+    it('still honors an explicit hash even while navigation is disabled', async () => {
+      window.history.replaceState({}, '', '/attendance#attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+      expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    })
+
+    it('ignores Alt+ArrowDown/ArrowUp keyboard navigation while navigation is disabled', async () => {
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      expect(window.location.hash).toBe('')
+    })
+
+    it('does not sync the hash or nav-link scroll when the active section changes programmatically while navigation is disabled', async () => {
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+      scrollIntoViewSpy.mockClear()
+
+      vm.adminActiveSectionId = 'attendance-admin-approval-flows'
+      await flushUi()
+
+      expect(window.location.hash).toBe('')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-approval-flows')).toBe(false)
+    })
+
+    it('does not re-restore the remembered section on a storage-scope change while navigation is disabled', async () => {
+      // This fixture's readLastAdminSection ignores its scope argument (unlike the real
+      // useAttendanceAdminRail), so the remembered id is stored under the one key it reads;
+      // cross-org key isolation itself is covered by the AttendanceView.vue integration test
+      // ('isolates admin rail persistence by org id' in attendance-admin-anchor-nav.spec.ts).
+      window.localStorage.setItem('metasheet_attendance_admin_nav_last_section:default', 'attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+      scrollIntoViewSpy.mockClear()
+
+      vm.adminNavStorageScope = 'org-b'
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(false)
+    })
   })
 })
