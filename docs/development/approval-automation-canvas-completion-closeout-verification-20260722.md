@@ -1,113 +1,100 @@
-# 审批、自动化与 Canvas 本轮收尾验证（2026-07-22）
+# 审批、自动化与 Canvas 组合收口验证（2026-07-22）
 
-**结论：CODE COMPLETE FOR THE NAMED CANVAS AND FWB STACKS; PENDING REVIEW, LANDING, PROGRAM UAT AND FLAGS**
+**结论：ENGINEERING COMPOSITION VERIFIED ON DRAFT #4540; NOT MERGED, UAT'D OR ENABLED**
 
-本文只对 #4531/#4532/#4533/#4536/#4537/#4538/#4539 的 exact heads 与命名组合树负责。它不把 Draft PR、CI、合入 main、
-真实租户 UAT 或生产启用混为一件事。
+本文只对 #4540 exact head `7b54908c9e7194991403cdb8962186c17e0415ed` 的本地组合验证负责。
+Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独立状态。
 
-## 1. 审阅结论
+## 1. 为什么需要组合 PR
 
-### #4531 — FWB-2 更新已有记录
+数据根 #4510 与 Canvas 顶部 #4538 没有 patch-equivalent commit，但重叠 22 个关键文件，包括：
 
-- Head：`b0fbd827fcc4c1539420679c016e681f94528db4`。
-- ReClaude Opus 4.8 独立审阅：无 P1/P2。
-- Codex 复核 capability resolver 和 projection 行为；不存在把任意 record id 当作写入目标的旁路。
-- 缺失/越权/锁定/不可写统一持久化为 `fwb_rejected:linked_record_unavailable`，关闭记录存在性 oracle。
-- 真库 15/15，单元 14/14，backend typecheck 通过；oracle mutation RED 后恢复 GREEN。
+- `TemplateAuthoringView.vue` 和共享 node editor；
+- `graphTopologyEdit.ts`、`parallelEdit.ts`、`ApprovalProductService.ts`；
+- approval routes、automation executor、CI run-list。
 
-### #4532 — 并行条件路径汇合
+直接分别合入会让后落分支覆盖先落行为。#4540 在最新 main 上保留两边语义，并对组合态重新验证。
 
-- Head：`5c2c73f57dba25dba6175cd5aad231a450c38eae`。
-- ReClaude Opus 4.8 独立审阅：APPROVE，无 P1/P2。
-- 后端 authority 128/128，前端相关 31/31，前后端 typecheck 通过。
-- 变异删除 all-path join guard 后命名测试 RED；恢复后 GREEN。
-- 第二轮修复把相同校验应用到 cloned workflow draft，避免只保护新模板。
+## 2. exact-head 验证证据
 
-### #4533 — Canvas V2 节点检查器
+### 2.1 新库与真链
 
-- Head：`f98791b647bc1fa2f28bca29a365afd0ae66fc41`。
-- Kimi K3 只读对抗审阅发现并推动关闭：可见内部 edge/node keys、节点 mouse-only 两项 P2。
-- Codex 后续发现并关闭未命名节点标题回退到 raw key 的残余。
-- inspector 10/10；authoring/topology 159/159；web typecheck 与生产构建通过。
-- 三个判别 mutation 分别钉住 Enter 选择、业务标签和未命名节点类型回退。
-- Playwright 证据：桌面 400px inspector；390px 视口内无页面级横向溢出并自动揭示检查器。
+使用独立 PostgreSQL 数据库从空库运行全部迁移，迁移成功到：
 
-### #4536/#4537/#4538 — 版本、导航与语义重排
+- approval template version restore；
+- FWB action/ledger；
+- durable outbox；
+- approval attachment scan/purge。
 
-- Heads：#4536 `e338bce439b14bcf2aa54e393386ebc7646a7fc7`；#4537
-  `2a5c4b91600c58f6d60ea81c8ed63cb12627d977`；#4538 `c43ee9fa494fdde25c59ec486a02878116d90cc3`。
-- #4536 将版本 diff/restore 接入当前 Canvas，并确保恢复生成新 draft 后重新执行拓扑校验。
-- #4537 交付 zoom/pan/minimap、版本 overlay 与窄屏导航，不改变 graph authority。
-- #4538 交付同一区域内 topology-backed reorder；required web gate 353 files / 4207 tests、生产构建通过。
-- 两个重排 mutation 分别钉住 same-region guard 与 rewire；ReClaude 调用返回 `Execution error`，未记独立 verdict。
-
-### #4539 — FWB 生产 authoring 与写回组合
-
-- Head：`6f6ebcfce54b92426199f05943035e457c9b831f`，stacked on #4531。
-- UI 支持新建当前表记录与更新审批表单 record-link 指向记录；普通用户全程使用选择器和映射表，不接触 JSON。
-- update target 只由服务端从模板顶层 pinned record-link 推导；跨表确认要求目标表管理能力，保存要求同 actor receipt。
-- 目标 schema 在执行时重读；create/update 都复用 claim + mutation + revision + chained outbox 同事务合同。
-- Kimi K3 找到并推动关闭 3 个 P2：失效 link 显示 raw id、瞬时加载失败无恢复、切换模式静默清空映射。
-- required web gate 355 files / 4277 tests，focused frontend 68/68，生产构建与双端 typecheck 通过。
-- fresh Postgres 完整迁移后 FWB create 18/18、update 15/15、正式矩阵 9/9，共 42/42；确认路由 14/14。
-- 八个判别 mutation 分别钉住 target permission、update hash subject、actor receipt、date lexical guard、
-  stale-link marker、linked-schema retry、destructive-switch confirmation 与旧抽屉 linked-schema generation guard。
-- 精确 number mapping 仍明确不可选；这不是遗漏，而是普通编辑/查询/公式/汇总/导出全链精度尚未证明。
-
-## 2. 组合树验证
-
-Canvas 使用严格 stacked PR：#4532 -> #4533 -> #4536 -> #4537 -> #4538。数据闭环使用
-#4524 -> #4531 -> #4539。每层保留自己的 exact-head gate；没有把一个车道的绿灯冒充另一个车道或 merged-main 证据。
+随后运行：
 
 | Gate | 结果 | 证明范围 |
 |---|---:|---|
-| backend approval product service | 128/128 | graph authority 与 clone/all-path join |
-| Canvas required web gate | 353 files / 4207 tests | #4538 最终 Canvas 头 |
-| FWB required web gate | 355 files / 4277 tests | #4539 最终 FWB 头 |
-| FWB real-DB composition | 42/42 | create、update、S1-S8 matrix |
-| backend/frontend typecheck | pass | 两车道 exact heads |
-| web production build | pass | 两车道 Vite 生产产物可生成 |
+| FWB production activation | 14/14 | 真实 rule save、审批完成、executor、权限与同事务写回 |
+| S1-S8 matrix | 9/9 | 崩溃窗、reclaim、zombie fencing、FWB chained outbox |
+| FWB write action | 4/4 | claim + record + revision/outbox 原子性与 duplicate net-once |
+| attachment integration | 30/30 | bind/GC、pipeline、upgrade migration、flag OFF 正控 |
+| template restore UAT API | 6/6 | concurrent restore、stale/cross-template 拒绝、规则重校验 |
+| fresh-DB combined integration | **63/63** | 上述联合范围 |
 
-构建中的既有 chunk-size warning 与测试期间非阻塞 WebSocket port warning 未被误报为产品失败。
+### 2.2 前端与后端
 
-## 3. CI 与 PR 状态（记录时点）
+| Gate | 结果 |
+|---|---:|
+| Canvas/authoring/version focused | 8 files / 157 tests |
+| approval/topology/FWB focused backend unit | 6 files / 182 tests |
+| required web | 357 files / 4276 tests |
+| full backend unit | 433 files / 5961 tests |
+| frontend `vue-tsc --noEmit` | pass |
+| backend `tsc --noEmit` | pass |
+| frontend production build | pass |
 
-| PR | Draft | Base | Checks observed |
-|---|---|---|---|
-| #4531 | yes | `codex/approval-record-link-layer2-20260721`（#4524 head branch） | `pr-validate` success；真库证据来自本地 exact-head gate |
-| #4532 | yes | `codex/approval-tree-authoring-v1-clean` | `approval-web-guard`、`pr-validate` success |
-| #4533 | yes | #4532 head branch | exact-head local gate；远端 checks 独立结算 |
-| #4536 | yes | #4533 head branch | exact-head local gate；远端 checks 独立结算 |
-| #4537 | yes | #4536 head branch | exact-head local gate；远端 checks 独立结算 |
-| #4538 | yes | #4537 head branch | required web 353/4207；生产构建 pass |
-| #4539 | yes | #4531 head branch | required web 355/4277；真库 42/42；生产构建 pass |
+构建中的既有 chunk-size warning、测试桩的未注册 Element Plus 组件 warning 和预期 fail-closed 日志均未被当作失败。
 
-PR 仍为 Draft，因此本轮没有 merge、deploy 或 flag 变更。
-各 slice 与合成树使用的文件集合不同，31/159/211 是各自收集结果，不应做加法推导。
+## 3. 数值写回的真实边界
 
-## 4. 剩余开发与 owner 门
+当前不是“number 未实现”。生产链已经：
 
-### 工程侧仍未完成
+- 在 UI/config allowlist 中允许 `text | number | date | select`；
+- 在执行时从目标 number 字段读取 `property.decimals`；
+- 在真审批完成链中把 amount 写入多维表，并由 S1-S8 联合矩阵覆盖。
 
-1. 当前 Draft stacks 尚未按父子顺序落 main；每次 retarget/rebase 后必须重跑命名门。
-2. 精确数字写回尚未开发完成，当前门应继续拒绝 number mapping。
-3. 任意边重连、跨区域拖排、大图虚拟化、逐节点版本 cherry-pick 和完整移动 bottom sheet 属后续新锁。
+承诺范围是安全整数，或不超过 15 位有效数字且不超过目标小数位上限的数值。以下输入 fail closed：
+
+- 超过 JS safe integer 的整数；
+- 超过可靠十进制 envelope 的高精度值；
+- 小数位超过目标字段 `decimals`；
+- 无法解析的数字字符串。
+
+因此常规金额/数量可写回；任意精度财务 decimal 仍是独立产品与存储设计，不得在本轮冒充支持。
+
+## 4. CI 状态
+
+#4540 推送后远端 checks 已启动。记录本文时 contracts、pr-validate 等部分检查成功，required web、test (20.x)、
+migration-replay 等仍在运行；本文不把“已启动”写成“CI 全绿”。最终合入前必须以 #4540 当前 head 重新读取全部 required checks。
+
+## 5. 尚未完成
+
+### 工程/落地
+
+1. #4540 仍为 Draft，未合入 main；远端 CI 尚未全部结算。
+2. #4524 -> #4531 -> #4539 仍需在 #4540 落地后重排，才能形成最终 FWB create/update 组合头。
+3. merged-main 上的 8 场景、附件、版本恢复与 required web 仍需正式复跑。
 
 ### Owner-only
 
-1. 审阅并决定 #4510 是整包落地还是拆成来源 PR + residual delta，避免与来源 PR 重复落地。
-2. 按台账序列审合 Canvas 与 FWB stacks；本 MD 不构成 merge authorization。
-3. 在真实企业、真实模板和真实数据上执行 UAT。
-4. 观察指标后按 durable -> Class A -> Class B -> FWB 分级开启 flags。
+1. 审阅并合入组合 PR，处置被吸收的来源 PR；
+2. 真实租户 UAT：独立表单、审批节点确认值、结果写回、新建/更新记录、附件、版本恢复；
+3. 按 durable -> Class A -> Class B -> FWB -> attachments/Canvas 分级开启并观察；
+4. 决定下一轮是否投资任意精度 decimal、自由连线、大图虚拟化和移动端原生编排。
 
-## 5. 最终验收条款
+## 6. FINAL 条件
 
-只有同时满足以下条件，审批/自动化数据闭环才可标记为 `FINAL`：
+只有以下条件全部满足，才能把这两条线标记为 `FINAL`：
 
-- 所有命名 PR 已在 `main`，最终组合头的 required checks 全绿；
-- S1-S8 在 merged main 上使用生产调用链 8/8；
-- 审批值新建记录、更新指定已有记录、decision-value writeback 均有真实租户正反例；
-- 并行/条件组合模板可保存、发布、运行、版本恢复，恢复后的非法图被拒绝；
-- flags 分级开启后没有重复写入、poison、stuck lease、权限 oracle 或回退到 legacy 丢事件。
+- #4540 与后续 FWB child delta 已在 main，最终 required checks 全绿；
+- merged main 新库迁移和 S1-S8 生产链通过；
+- 新建记录、更新 record-link 记录、decision-value、常规数值、附件与版本恢复均有真实租户正反例；
+- flags 分级开启后没有重复写、poison、stuck lease、权限 oracle、raw-id 泄露或 legacy 丢事件。
 
-在这些门完成前，准确状态是“命名 Canvas/FWB stacks 代码完成并验证，审批线尚未生产收官”。
+在此之前，准确状态是“工程组合已在 Draft exact head 上验证；等待审合、merged-main gate、UAT 与启用”。

@@ -1,80 +1,66 @@
-# 审批、自动化与 Canvas 收口执行台账（2026-07-22）
+# 审批、自动化与 Canvas 组合收口执行台账（2026-07-22）
 
-**状态：IMPLEMENTED ON REVIEW BRANCHES / NOT LANDED AS A PROGRAM**
+**状态：COMPOSED AND LOCALLY VERIFIED / DRAFT #4540 / NOT LANDED**
 
-记录基线：`origin/main@3d1b6cfa`。本台账是 SHA 级证据，不是合并或启用授权。
+记录基线：`origin/main@7a64424d109a`。组合候选：#4540 `7b54908c9e7194991403cdb8962186c17e0415ed`。
+本台账记录实现和证据，不构成合并、UAT 或启用授权。
 
 ## 1. 已在 main 的底座
 
-| 能力 | 状态 | 证据 |
+| 能力 | 状态 | 证据边界 |
 |---|---|---|
-| durable delivery S1-S5/S7 | 已合入 | #4337，`dfc9318fc` |
-| FWB 映射、record-link executor、decision-value freeze | 已合入 | #4341/#4343/#4344 |
-| FWB 幂等与事务底座 | 已合入 | FWB ledger 与既有 revision/outbox 合同 |
+| durable delivery S1-S5/S7 | 已合入 | #4337；代码存在不等于 flag ON |
+| FWB ledger、mapping、record-link executor、decision-value freeze | 已合入底座 | #4341/#4343/#4344；生产 authoring/activation 由数据栈补齐 |
+| revision/outbox 事务模式 | 已合入 | FWB create/update 复用，不另造状态机 |
 
-“底座已合入”不代表 action 注册、普通用户 record-link authoring、完整 Canvas 或 flag 已启用。
+## 2. 来源栈与组合头
 
-## 2. 当前实现队列
-
-| 顺序 | PR / head | 内容 | 当前门 |
-|---:|---|---|---|
-| 1 | #4433 `8ef543af1` | 分支编排与纵向流程画布基础 | owner review/merge；后续 Canvas PR 的 base |
-| 2a | #4532 `5c2c73f57` | 所有并行条件路径汇合校验 | Draft；基于 #4433 |
-| 2b | #4533 `f98791b64` | 画布节点检查器、业务标签、键盘操作 | Draft；stacked on #4532 |
-| 3 | #4536 `e338bce43` | 模板版本 diff/恢复接入当前拓扑校验 | Draft；stacked on #4533 |
-| 4 | #4537 `2a5c4b916` | zoom/pan/minimap 与版本 overlay | Draft；stacked on #4536 |
-| 5 | #4538 `c43ee9fa4` | 同区域语义重排与 topology rewire | Draft；stacked on #4537 |
-| A | #4510 `f6d05814a` | 数据闭环与 Canvas foundation 集成候选 | Draft；大集成 PR，不能与来源 PR 重复落地 |
-| B | #4524 `f52c58545` | 安全 record-link 表单字段与普通用户选择器 | Draft；基于 #4510 |
-| C | #4531 `b0fbd827f` | FWB-2 更新选择的已有记录 | Draft；基于 #4524 |
-| D | #4539 `6f6ebcfce` | FWB 新建/更新生产 authoring、server confirmation 与全链组合 | Draft；stacked on #4531 |
-| Docs | #4535 `b49f8f244` | 本设计锁、执行台账、收尾验证 | Draft；本次更新后 SHA 另记 |
-
-历史来源 PR #4491、#4342、#4489 的产品内容已被 #4510 吸收并进一步修正。落地时只能选择：
-
-1. 审阅并落 #4510，随后关闭/标记被吸收的来源 PR；或
-2. 先落来源 PR，再把 #4510 重建成只含剩余差异的 PR。
-
-禁止同时 squash 整个 #4510 与完整来源 PR；那会产生重复迁移、重复接线和不可审阅历史。
-
-## 3. 推荐落地序列
-
-### 3.1 Canvas 车道
-
-1. 复审并合入 #4433。
-2. 依次 retarget/rebase #4532 -> #4533 -> #4536 -> #4537 -> #4538；每一层只在父层落 main 后移动。
-3. 每层重跑其命名 guard；最终 Canvas 头重跑 topology/authoring、required web gate、生产构建和桌面/窄屏截图。
-4. 不把 #4538 的同区域语义重排描述为任意边重连；跨区域重排和大图虚拟化另开锁。
-
-### 3.2 数据闭环车道
-
-1. owner 先裁决 #4510 的整包落地形态。
-2. #4510 落地或拆解完成后，依次 rebase #4524 -> #4531 -> #4539。
-3. 在 #4539 最终组合头运行正式 S1-S8 矩阵，特别核对 approval completed -> durable adapter -> FWB -> revision/outbox。
-4. flags 保持 OFF；真实租户 UAT 后再分级开启。
-
-Canvas 与数据闭环可以并行审阅和落地，因为当前文件所有权不重叠；各车道内部必须按上述 base 顺序串行。
-
-## 4. 多模型分工与验收边界
-
-| 模型/角色 | 本轮使用 | 最适合的后续任务 | 不承担 |
+| Lane | PR / exact head | 内容 | 组合处置 |
 |---|---|---|---|
-| Kimi K3 | Canvas UX/可访问性与 FWB authoring 长上下文审阅；本轮 FWB 找到 3 个 P2 并由 `a22f2a04b` 关闭；Codex 末轮再补旧抽屉异步响应代际守卫 `6f6ebcfce` | 信息架构、画布密度、响应式交互、设计一致性 | 安全/并发最终 verdict |
-| ReClaude Opus 4.8 | #4531 authz/oracle 与 #4532 拓扑审阅；#4538/#4539 调用发生 `Execution error`，不计 verdict | transaction、authz、并发、恢复、启动 fail-closed | 自己实现后的唯一审阅者 |
-| Grok | 通过已授权 CLI 发起 #4539 只读审阅；只有产生 exact-head 结论后才记录 verdict | 有明确文件所有权的实现与测试 | 合并授权或不完整审计的“APPROVE” |
-| Codex | 实现修复、合成树、真实测试、最终判定和文档 | hot-file 集成与最终证据归档 | owner 的 ratify/UAT/flag 决定 |
-| Sonnet/Fable | 本轮未放在关键路径 | Sonnet 做中型 Vue 切片；Fable 做非敏感台账初稿 | 锁、authz、并发终审 |
+| Data root | #4510 `f6d05814a8` | 附件、FWB activation、画布基础和 CI | 被 #4540 吸收 |
+| Record-link | #4524 `f52c58545a` | 安全 record-link 字段与选择器 | 后续 child，待按 #4540 重排 |
+| FWB update | #4531 `b0fbd827fc` | 更新受约束已有记录 | 后续 child，待按 #4540 重排 |
+| FWB composition | #4539 `6f6ebcfce5` | 新建/更新 authoring 与生产组合 | 后续 child，待按 #4540 重排 |
+| Canvas root | #4433 `fc5477d7e4` | 分支编排与纵向画布 | 被 #4540 吸收 |
+| Canvas all-path | #4532 `762dc0fd5` | 条件内并行路径全部汇合 | 被 #4540 吸收 |
+| Canvas inspector | #4533 `babc6d975` | 共享检查器、键盘和响应式 | 被 #4540 吸收 |
+| Version restore | #4536 `3bb327a93` | diff/restore 与当前校验 | 被 #4540 吸收 |
+| Navigation | #4537 `b2f69116b` | zoom/pan/minimap/overlay | 被 #4540 吸收 |
+| Reorder | #4538 `a3562083af` | 同区域语义重排 | 被 #4540 吸收 |
+| Integration | #4540 `7b54908c9e` | 两条线的唯一联合解析与测试面 | Draft，owner review |
 
-任何代理的结论都必须绑定 exact head；rebase 后需重跑命名测试，不能沿用旧 verdict。
+## 3. 组合审阅发现与修复
 
-## 5. 下一轮并行编排
+1. `graphTopologyEdit.ts` 自动合并产生重复 helper；去重并由 web typecheck/35 项拓扑测试钉住。
+2. 数据线默认关闭 `approvalCanvasV2` 后，Canvas 规格没有显式开 flag；改为响应式 feature mock，并保留 flag-OFF 正控。
+3. 共享检查器重新显示 raw user/role/field id 和 per-branch JSON 样例；改为 typed picker、业务标签和测试发布样例。
+4. 字段权限行和 form-field-user 选项回退到 field id；改为“未命名字段”，不再泄露内部标识。
+5. 前后端并行路径遍历冲突；保留运行时配置边/default/fallback 的镜像语义，忽略 stray edge。
+6. 5 个 Canvas 源码和 3 个规格不触发 `approval-web-guard`；补齐 pull_request/push 两套路径，required 常驻门不变。
 
-| Lane | 可并行工作 | 写入范围 | 退出条件 |
-|---|---|---|---|
-| C1 | 大图虚拟化与跨区域语义移动（新锁） | graph command + canvas renderer 独占 | 键盘等价路径、无非法拓扑、撤销/重做 |
-| C2 | 移动 bottom sheet（新锁） | inspector/mobile chrome 独占 | 390px 触控、焦点恢复、无横向溢出 |
-| V1 | 逐节点版本 cherry-pick（新锁） | history/version components 独占 | 不覆盖历史、冲突可解释、恢复后重校验 |
-| D1 | 精确数字写回（新锁） | mapping + query/formula/export 全链 | 全链 decimal 语义证明后才能移除禁用门 |
-| Q | 对抗审阅 | 只读 | P1/P2 清零或明确 REQUEST CHANGES |
+## 4. 多模型使用与最终责任
 
-C1、C2、V1 在拆开组件后可并行；D1 与前端车道可并行。当前 Draft stack 必须先按顺序落地，不能与这些新锁混合。
+| 模型/角色 | 本轮用途 | 结论边界 |
+|---|---|---|
+| Kimi K3 | 只读 UI 冲突审阅 | 找到共享 editor 的 raw-id 回退和合并重复；Codex 独立修复并复测 |
+| Grok | 只读后端冲突审阅 | 建议后端冲突保留 Canvas runtime-path 校验及数据线附件/FWB 非冲突内容 |
+| ReClaude | 尝试关键审阅 | 多次返回 `Execution error`，不记录 verdict |
+| Codex | 冲突解析、代码修复、真库与全量 gate、最终台账 | 对 #4540 的工程结论负责 |
+
+代理结论只绑定其读取的 exact head；不能跨 rebase 或替代测试、CI 和 owner 决策。
+
+## 5. 推荐落地顺序
+
+1. 先审阅 #4540 的组合差异和 CI；不要同时合入它已吸收的 #4510/#4433-#4538 完整内容。
+2. #4540 落 main 后，把 #4524 -> #4531 -> #4539 逐层 rebase/retarget 到新 main，解决剩余 FWB-2 child delta。
+3. 在最终 child 头重跑 fresh-DB migration、FWB activation、S1-S8、附件、版本恢复、required web 和生产构建。
+4. 更新本三件套为 merged-main exact heads 后，才进入真实租户 UAT。
+5. flags 按 durable -> Class A -> Class B -> FWB -> attachments/Canvas staged rollout 分级开启。
+
+## 6. 当前 owner 门
+
+- #4540 与后续 FWB child 栈的审阅/合入；
+- 来源 PR 的 supersede/关闭处置，避免重复落地；
+- 真实企业、真实模板、真实附件和真实多维表 UAT；
+- 分级 flag 与观察窗口；
+- 任意精度 decimal、自由重连、大图虚拟化、移动 bottom sheet 等下一轮 opt-in。

@@ -1,88 +1,80 @@
-# 审批、自动化与 Canvas 收口设计锁（2026-07-22）
+# 审批、自动化与 Canvas 组合收口设计锁（2026-07-22）
 
-**状态：EXECUTION CONTRACT / OWNER REVIEW REQUIRED**
+**状态：IMPLEMENTED ON DRAFT #4540 / OWNER REVIEW REQUIRED**
 
-本文把已经实现但尚未全部合入 `main` 的审批数据闭环与 Canvas V2 工作收敛为一个可复核边界。
-它不替代各专题锁，也不授权合并、UAT 或 flag 变更。
+本文锁定两条必须一起验证的产品线：可视化审批 Canvas，以及审批表单/过程/结果写回多维表的数据闭环。
+它不授权合并、UAT、部署或 flag 变更，也不把来源 PR 的独立绿灯当成组合态证明。
 
-第 3 节是最终组合头必须满足的规范合同，不代表每条组合证据已经完成；第 4 节才是本轮已实现范围，
-第 5 节记录尚未闭合的组合门和后续产品切片。
+## 1. 产品验收目标
 
-## 1. 产品目标
+普通用户无需接触 JSON、节点 key、边 key 或目录对象 id，即可：
 
-普通用户应只在可视化画布和业务字段表单中完成以下工作，不需要接触 JSON、节点 key 或边 key：
-
-1. 建立串行、条件和并行审批流程；每条并行路径必须显式到达同一汇合节点。
-2. 从画布直接选择节点并编辑审批、条件、并行和抄送配置。
-3. 查看模板版本差异，并通过“创建新版本”恢复历史版本，绝不原地覆盖历史。
-4. 将独立审批表单、审批过程确认值或审批结果映射到多维表新记录或指定已有记录。
-5. 在重投、崩溃恢复和并发执行下保持业务净效果一次，并保留 revision/outbox 审计链。
+1. 在画布上建立串行、条件和并行审批，配置审批人、条件、抄送、字段权限与汇合策略；
+2. 查看模板版本差异，把历史版本恢复成新的 draft，并再次通过当前校验；
+3. 把独立审批表单值、审批节点确认值和最终结果映射到多维表新记录或受约束的已有记录；
+4. 在崩溃、重投和并发执行下维持业务净效果一次，并留下 revision、ledger 和 outbox 证据。
 
 ## 2. 权威边界
 
-- `ApprovalGraph` 与后端 graph normalization/validation 是唯一流程语义；画布和列表编辑器不得各造一套模型。
-- 画布只编辑同一份 draft。列表编辑器与右侧检查器共用一个 node-config editor。
-- 后端重新验证所有拓扑、权限和字段约束；前端校验只用于及时反馈，不是授权边界。
-- FWB 写入必须复用自动化执行链、事务、revision、outbox 和幂等台账，不新增旁路状态机。
+- `ApprovalGraph` 与后端 normalization/validation 是唯一流程语义；画布、列表和检查器只编辑同一 draft。
+- 保存、发布、克隆后编辑和历史恢复都必须经过相同的后端拓扑校验。
+- FWB 只走自动化执行链，复用同事务 claim + record mutation + revision + chained outbox；不得新增旁路写入。
+- 前端选择器和校验用于可用性，权限、记录存在性、字段类型和映射确认均由服务端重新判定。
+- durable、Class A、Class B、FWB、attachments 与 Canvas V2 的默认值保持 OFF。
 
 ## 3. 锁定不变量
 
-### 3.1 流程拓扑
+### 3.1 拓扑与画布
 
-1. 条件分支和并行分支可以组合，但每条 parallel path 都必须到达声明的 join。
-2. 校验必须覆盖保存、发布、克隆后编辑和历史恢复生成的新 draft；不得只校验新建模板。
-3. 空分支、直达 fork-to-join、跨汇合和部分路径遗漏均 fail closed，并返回不含内部 key 的错误。
-4. 兼容已有合法存量图；不能用更严校验把历史模板整体变成不可编辑。
+1. 条件分支和并行分支可组合；每条运行时可达的 parallel path 都必须到达声明的 join。
+2. 校验按运行时配置边、默认边和真实 fallback 遍历，忽略无配置的 stray edge；前后端规则必须镜像。
+3. 空分支、直达 fork-to-join、跨汇合和部分路径遗漏 fail closed，普通错误不泄露内部 key。
+4. 画布节点显示业务名称或业务类型；审批人、角色、表单字段和抄送只用 typed picker，不显示原始 id。
+5. 鼠标、Enter、Space 和受约束的语义重排必须等价；不提供运行时无法接受的跨区域拖排。
+6. 桌面检查器保持窄栏；窄屏改为全宽且自动揭示，不产生页面级横向滚动。
 
-### 3.2 普通用户画布
+### 3.2 模板版本
 
-1. 节点卡片显示业务名称或业务类型，不显示 `node_key`、`edge_key`、join key。
-2. 节点选择支持鼠标、Enter 和 Space，提供 `aria-label`、`aria-pressed` 和可见焦点。
-3. 节点内命令按钮不能嵌套在另一个交互控件中；键盘选择不能误触删除/新增命令。
-4. 桌面检查器固定为可扫描窄栏；窄屏降为全宽并自动滚入视野，不产生页面级横向溢出。
-5. 节点配置只通过共享 editor 写回 draft，画布表面不得保留第二份临时配置。
+1. 已发布版本不可变；恢复历史只能创建新版本，不能覆盖旧版本或切换当前已发布指针。
+2. diff/restore 按管理权限、组织、模板 id 和版本归属绑定，拒绝跨模板恢复和 stale restore。
+3. 恢复产生的新 draft 必须重新执行当前拓扑、表单和规则校验。
 
-### 3.3 模板版本
+### 3.3 数据写回
 
-1. 已发布版本不可变；恢复历史版本必须生成新版本并重新通过当前校验。
-2. diff/restore 路由必须按模板管理权限、组织和模板 id 绑定，拒绝跨模板恢复。
-3. 历史视图区分结构、节点配置和表单字段变化；原始 JSON 只允许诊断/管理员面，不作为普通用户主交互。
+1. 仅 approved 且模板版本匹配的实例可执行写回；拒绝、撤回、跳转、超时和半完成节点不得半写入。
+2. 新建记录和更新已有记录是显式模式；已有记录只能来自模板固定的 record-link 字段。
+3. 保存时验证配置者权限与确认哈希，执行时重查目标记录、锁、目标 schema 和字段写权限。
+4. 缺失、越权、锁定和不可写统一为 values-free 的 `linked_record_unavailable`，不得形成存在性 oracle。
+5. 映射是 all-or-nothing。隐藏、未映射、未知选项、非法日期或失配字段不得进入记录、日志或错误正文。
+6. v1 数值支持限定在 JS 可无损表示的范围：安全整数，或不超过 15 位有效数字且符合目标字段 `decimals`。
+   不安全整数、超精度值和任意精度十进制必须 fail closed；不得把近似值写成业务事实。
+7. claim、record mutation、revision 与 chained outbox 同事务；重复事件和重复 action identity 不得二次写入。
 
-### 3.4 表单与结果写回（FWB）
+### 3.4 附件
 
-1. 只有已批准且模板版本匹配的实例可写回；拒绝、撤回、跳转、超时和未完成节点不得产生半写入。
-2. 新记录和已有记录是显式模式。已有记录必须来自受约束的 record-link 字段，不接受调用方任意 record id。
-3. 提交时验证填写人可读源记录；执行时再次验证目标记录存在、未锁定、rule creator 可写且目标字段可写。
-4. 缺失、越权、锁定和不可写对持久化结果统一为 `fwb_rejected:linked_record_unavailable`，不得形成存在性 oracle。
-5. claim、record mutation、revision 和 chained outbox 必须在同一事务；重复事件不得产生第二次业务写入。
-6. 日期、单选和 record-link 按目标字段契约无损转换；非法日期和未知选项 fail closed。精确数字映射在
-   普通编辑、查询、公式、汇总和导出链路全部证明不丢精度前保持不可选，不得用 operator 开关绕过。
-7. 隐藏或未映射字段不得进入目标记录、日志或错误正文。
+1. production 只允许 S3；本地存储在 production fail closed 为 503。
+2. 每文件 20 MB、每字段 10 个、每次提交 50 MB；SVG/HTML/XML/可执行文件永久拒绝。
+3. bind 与 GC 使用对称状态守卫；任何竞态最多留下可回收 orphan，不得留下“引用存活但 blob 已删”。
+4. poison-at-claim、fence-CAS、prefix-scoped reconciler 和 object-store 删除都必须有真库正反例。
 
-### 3.5 启用纪律
+## 4. 组合纪律
 
-- durable delivery、Class A、Class B、FWB、attachments 与 Canvas V2 的既有默认值保持 OFF。
-- 代码合入不等于启用；正式矩阵、真实租户 UAT 和分级 flag 变更是三个独立 owner 门。
-- 推荐启用顺序：durable delivery -> Class A -> Class B -> FWB -> attachments/Canvas staged rollout。
+#4510 数据根与 #4433 -> #4538 Canvas 栈重叠 22 个关键文件，包括 `TemplateAuthoringView.vue`、拓扑工具、
+`ApprovalProductService`、路由、executor 和 CI run-list。因此二者不能作为“文件不重叠”的独立落地线处理。
 
-## 4. 本轮实现范围
+Draft #4540 是唯一经过组合冲突解析和联合测试的落地候选。来源 PR 可以保留为审阅证据，但不得与 #4540 重复 squash。
+组合解析必须保留：
 
-| Slice | PR | 锁定结果 |
-|---|---:|---|
-| FWB-2 精确更新已有记录 | #4531 | record-link 选定记录、双时点权限、统一无 oracle 拒绝、事务写回 |
-| 并行条件路径闭合 | #4532 | 所有路径到 join，兼容存量图，并覆盖 clone 后 draft |
-| Canvas V2 节点检查器 | #4533 | 画布内共享配置编辑、业务标签、键盘与响应式可用性 |
-| 版本 diff/恢复集成 | #4536 | 历史恢复生成新 draft，复用当前拓扑校验；画布内版本变化可视化 |
-| 画布导航层 | #4537 | zoom/pan/minimap、版本 overlay、窄屏导航，不改变 graph authority |
-| 语义重排 | #4538 | 只允许同一区域合法重排，通过 graph command 重连并保持 undo/redo |
-| FWB 生产组合 | #4539 | 新建/更新 UI、server-owned confirmation、actor receipt、runtime mapping 与正式矩阵 |
+- 数据线的附件、FWB、typed picker、values-first dry-run 与安全门；
+- Canvas 线的共享检查器、运行时路径遍历、版本恢复、导航和语义重排；
+- required web 常驻门，以及源码/规格对 `approval-web-guard` 的双路径触发。
 
-## 5. 明确不在本轮宣称完成的范围
+## 5. 本轮明确不宣称
 
-- 任意边自由拖拽重连、跨条件/并行区域拖排和大型流程虚拟化；#4538 只交付受约束的语义重排。
-- 版本逐节点 cherry-pick、跨版本三方合并；#4536/#4537 只交付差异、恢复和 overlay。
-- 手机端完整 bottom-sheet 编辑体验；当前为响应式导航与检查器，不宣称原生移动编排完成。
-- 精确数字写回；当前 UI、确认路由和保存门均显式拒绝 number mapping。
-- 真实钉钉/飞书租户 UAT、生产 flag 开启和运行指标观察。
+- 任意边自由重连、跨条件/并行区域拖排、大图虚拟化；
+- 逐节点版本 cherry-pick、三方版本合并；
+- 原生移动端 bottom-sheet 编排；
+- 任意精度 decimal；当前只承诺第 3.3.6 节的无损数值范围；
+- 真实企业 UAT、生产 flag 开启和运行指标达标。
 
-这些是下一轮 Canvas parity/enablement 工作，不得由本轮 MD 宣称覆盖。
+这些项目需要独立设计锁，不能由本组合 MD 宣称完成。
