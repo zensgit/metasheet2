@@ -49,6 +49,9 @@ export interface ApprovalNodeConfigEditorApi {
   conditionFormulaDryRunLoading: (nodeKey: string, edgeKey: string) => boolean
   dryRunConditionFormula: (nodeKey: string, branch: ConditionBranchEdit) => void | Promise<void>
   conditionOutgoingEdgeKeys: (nodeKey: string) => string[]
+  conditionEdgeLabel: (nodeKey: string, edgeKey: string) => string
+  graphEdgeTargetLabel: (nodeKey: string, edgeKey: string) => string
+  graphNodeLabel: (nodeKey: string) => string
   parallelJoinModeLabel: (mode: ParallelJoinMode) => string
   ccTargetTypeLabel: (targetType: ApprovalAssigneeType) => string
   approvalSourceKind: (nodeKey: string) => ApprovalAssigneeSourceKind

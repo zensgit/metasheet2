@@ -524,10 +524,22 @@
                   @dragstart="onCanvasNodeDragStart(pos.key)"
                   @dragend="onCanvasNodeDragEnd($event)"
                 >
-                  <strong>{{ canvasNodeByKey(pos.key)?.name || pos.key }}</strong>
-                  <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
-                    {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
-                  </span>
+                  <div
+                    class="template-authoring__canvas-node-selector"
+                    role="button"
+                    tabindex="0"
+                    :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
+                    :aria-pressed="selectedCanvasNode === pos.key"
+                    data-testid="approval-canvas-node-select"
+                    @click.stop="selectCanvasNode(pos.key)"
+                    @keydown.enter.stop.prevent="selectCanvasNode(pos.key)"
+                    @keydown.space.stop.prevent="selectCanvasNode(pos.key)"
+                  >
+                    <strong>{{ graphNodeLabel(pos.key) }}</strong>
+                    <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
+                      {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+                    </span>
+                  </div>
                   <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
                     <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
                     <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
@@ -1591,6 +1603,24 @@ function conditionOutgoingEdgeKeys(nodeKey: string): string[] {
     .map((edge) => edge.key)
 }
 
+function graphNodeLabel(nodeKey: string): string {
+  const node = canvasEffectiveGraph.value.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node) return '流程节点'
+  return node.name?.trim() || nodeTypeLabel(node.type)
+}
+
+function graphEdgeTargetLabel(nodeKey: string, edgeKey: string): string {
+  const edge = canvasEffectiveGraph.value.edges.find(
+    (candidate) => candidate.source === nodeKey && candidate.key === edgeKey,
+  )
+  return edge ? graphNodeLabel(edge.target) : '流程分支'
+}
+
+function conditionEdgeLabel(nodeKey: string, edgeKey: string): string {
+  const branch = conditionEditFor(nodeKey)?.branches.find((candidate) => candidate.edgeKey === edgeKey)
+  return branch ? liveBranchSummary(branch) : graphEdgeTargetLabel(nodeKey, edgeKey)
+}
+
 // ── G-3 parallel editor (joinMode ONLY; branches / joinNodeKey are preserved topology, read-only) ──
 // The editable model lives on `draft.parallelEdits[nodeKey]`, seeded 1:1 from the preserved parallel
 // nodes. The select below mutates ONLY `joinMode`; `buildApprovalGraph` re-applies it onto a COPY of
@@ -2026,6 +2056,9 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionFormulaDryRunLoading,
   dryRunConditionFormula,
   conditionOutgoingEdgeKeys,
+  conditionEdgeLabel,
+  graphEdgeTargetLabel,
+  graphNodeLabel,
   parallelJoinModeLabel,
   ccTargetTypeLabel,
   approvalSourceKind,
@@ -2965,6 +2998,18 @@ pre {
 }
 .template-authoring__canvas-node.is-selected {
   border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
+.template-authoring__canvas-node-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+}
+.template-authoring__canvas-node-selector:focus-visible {
   box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
 }
 .template-authoring__canvas-node-actions {

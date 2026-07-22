@@ -444,6 +444,58 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(inspector.querySelector('[data-testid="approval-parallel-join-mode"]')).not.toBeNull()
   })
 
+  it('opens the inspector from the keyboard-accessible node selector', async () => {
+    routeParams = { id: 'tpl_inspector_keyboard' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const node = container!.querySelector(
+      '[data-canvas-node="cond_1"] [data-testid="approval-canvas-node-select"]',
+    ) as HTMLElement
+    expect(node.getAttribute('role')).toBe('button')
+    expect(node.tabIndex).toBe(0)
+    expect(node.getAttribute('aria-label')).toContain('金额判断')
+
+    node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector?.getAttribute('data-inspector-node')).toBe('cond_1')
+    expect(node.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('shows business labels instead of internal topology keys in the inspector', async () => {
+    routeParams = { id: 'tpl_inspector_labels' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    clickCanvasNode('cond_1')
+    await flushUi()
+    let inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.textContent).toContain('金额')
+    expect(inspector.textContent).toContain('抄送财务')
+    expect(inspector.textContent).not.toContain('e-high')
+    expect(inspector.textContent).not.toContain('e-low')
+
+    clickCanvasNode('fork_1')
+    await flushUi()
+    inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.textContent).toContain('分支 A')
+    expect(inspector.textContent).toContain('分支 B')
+    expect(inspector.textContent).toContain('汇聚')
+    expect(inspector.textContent).not.toContain('e-fork-a')
+    expect(inspector.textContent).not.toContain('e-fork-b')
+    expect(inspector.textContent).not.toContain('join_1')
+  })
+
   it('a representative inspector edit writes through to the existing draft save payload', async () => {
     routeParams = { id: 'tpl_inspector_edit' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))

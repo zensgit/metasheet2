@@ -21,7 +21,7 @@
         data-testid="approval-condition-branch"
       >
         <div class="template-authoring__condition-branch-head">
-          <span>分支「{{ liveBranchSummary(branch) }}」→ {{ branch.edgeKey }}</span>
+          <span>分支「{{ liveBranchSummary(branch) }}」</span>
           <el-select
             :model-value="branch.predicateMode"
             size="small"
@@ -216,7 +216,7 @@
           <el-option
             v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
             :key="edgeKey"
-            :label="edgeKey"
+            :label="conditionEdgeLabel(node.key, edgeKey)"
             :value="edgeKey"
           />
         </el-select>
@@ -250,8 +250,8 @@
       </el-form-item>
       <!-- branches + join target are preserved topology (not editable here). -->
       <ul class="template-authoring__node-summary" data-testid="approval-parallel-topology">
-        <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.join('、') || '（无）' }}</li>
-        <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey || '（无）' }}</li>
+        <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.map((edgeKey) => graphEdgeTargetLabel(node.key, edgeKey)).join('、') || '（无）' }}</li>
+        <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey ? graphNodeLabel((node.config as ParallelNodeConfig).joinNodeKey) : '（无）' }}</li>
       </ul>
     </div>
 
@@ -553,6 +553,9 @@ const conditionFormulaDryRunResult = api.conditionFormulaDryRunResult
 const conditionFormulaDryRunLoading = api.conditionFormulaDryRunLoading
 const dryRunConditionFormula = api.dryRunConditionFormula
 const conditionOutgoingEdgeKeys = api.conditionOutgoingEdgeKeys
+const conditionEdgeLabel = api.conditionEdgeLabel
+const graphEdgeTargetLabel = api.graphEdgeTargetLabel
+const graphNodeLabel = api.graphNodeLabel
 const parallelJoinModeLabel = api.parallelJoinModeLabel
 const ccTargetTypeLabel = api.ccTargetTypeLabel
 const approvalSourceKind = api.approvalSourceKind
