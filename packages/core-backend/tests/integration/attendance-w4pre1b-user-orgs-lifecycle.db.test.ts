@@ -32,6 +32,17 @@ import { poolManager } from '../../src/integration/db/connection-pool'
  * And local-provider coverage (item A/B's OTHER writer pair, `local-directory-org.ts`):
  * createLocalAccount binds an existing user; archiveLocalAccount deactivates their membership
  * when it was their last local binding in the org.
+ *
+ * Post-gate fix (PR #4526 review, P2 — cross-org negative regression, added 2026-07-21):
+ * `deactivateUserOrgMembershipIfNoOtherActiveBinding`'s tenant-isolation predicate
+ * (`AND i.org_id = $2::text`, `directory-sync.ts:4977`) had zero coverage — every existing case
+ * above (F1/F2/F4/local-provider = single-org; F3/F3-race = same-org sibling) exercises the
+ * "other active binding" NOT EXISTS check with only ONE org in play, so none of them can tell the
+ * predicate apart from an unscoped "does this user have ANY other active binding anywhere" check.
+ * The "cross-org tenant-isolation regression" case below closes that gap: same user, DingTalk
+ * binding in org A + local binding in org B, unbind A, assert org A deactivates (the predicate
+ * must NOT be fooled by org B's still-active sibling) AND org B stays active (the predicate must
+ * not reach into org B either).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -205,6 +216,37 @@ describeIfDatabase('W4-PRE-1b — user_orgs lifecycle: bind/unbind/rebind/local 
 
       expect(await membershipRow(userId, orgA)).toEqual({ is_active: false })
       expect(await membershipRow(userId, orgB)).toEqual({ is_active: true })
+    })
+  })
+
+  describe('cross-org tenant-isolation regression — unbind in org A must not be gated by org B\'s active binding (#4526 P2)', () => {
+    it('unbinding org A\'s DingTalk account deactivates ONLY org A membership; org B\'s local binding for the same user stays untouched and active', async () => {
+      const orgA = `${NS}_org_xorga`
+      const orgB = `${NS}_org_xorgb`
+      const userId = await seedUser('xorg')
+      const intA = await seedIntegration(orgA, 'xorga')
+      const dingtalkAccount = await seedAccount(intA, 'xorga')
+
+      await bindDirectoryAccount(dingtalkAccount, { localUserRef: userId, adminUserId, enableDingTalkGrant: false })
+      const localAccountB = await createLocalAccount({ orgId: orgB, localUserId: userId, name: 'Cross-org Local B', email: null, mobile: null, title: null })
+
+      expect(await membershipRow(userId, orgA)).toEqual({ is_active: true })
+      expect(await membershipRow(userId, orgB)).toEqual({ is_active: true })
+
+      await unbindDirectoryAccount(dingtalkAccount, { adminUserId })
+
+      // Tenant-isolation predicate (`AND i.org_id = $2::text`, directory-sync.ts:4977): the "does
+      // this user hold another active binding" sibling check inside
+      // `deactivateUserOrgMembershipIfNoOtherActiveBinding` must be SCOPED to org A. Without that
+      // scoping the NOT EXISTS would find org B's still-linked+active local account as a
+      // "sibling", skip org A's deactivation, and leave org A's membership stuck ACTIVE with ZERO
+      // org-A bindings — cross-org stale access.
+      expect(await membershipRow(userId, orgA)).toEqual({ is_active: false })
+      // Dual proof (the predicate must not be so broad it reaches INTO org B either, i.e. this is
+      // not just "always deactivate everything"): org B's membership, untouched by an org-A
+      // unbind, must remain ACTIVE.
+      expect(await membershipRow(userId, orgB)).toEqual({ is_active: true })
+      expect(localAccountB.localUserId).toBe(userId)
     })
   })
 
