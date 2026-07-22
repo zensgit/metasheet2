@@ -1,6 +1,6 @@
 # 审批、自动化与 Canvas 组合收口设计锁（2026-07-22）
 
-**状态：IMPLEMENTED ON DRAFT #4540 / OWNER REVIEW REQUIRED**
+**状态：IMPLEMENTED ON DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / OWNER REVIEW REQUIRED**
 
 本文锁定两条必须一起验证的产品线：可视化审批 Canvas，以及审批表单/过程/结果写回多维表的数据闭环。
 它不授权合并、UAT、部署或 flag 变更，也不把来源 PR 的独立绿灯当成组合态证明。
@@ -62,7 +62,8 @@
 #4510 数据根与 #4433 -> #4538 Canvas 栈重叠 22 个关键文件，包括 `TemplateAuthoringView.vue`、拓扑工具、
 `ApprovalProductService`、路由、executor 和 CI run-list。因此二者不能作为“文件不重叠”的独立落地线处理。
 
-Draft #4540 是唯一经过组合冲突解析和联合测试的落地候选。来源 PR 可以保留为审阅证据，但不得与 #4540 重复 squash。
+Draft #4540 是 Canvas 与数据根唯一经过组合冲突解析的根；#4524 -> #4531 -> #4539 是重排到该根上的唯一 FWB child
+序列。来源 PR 可以保留为审阅证据，但不得与 #4540 重复 squash，也不得跳过 child 依赖顺序。
 组合解析必须保留：
 
 - 数据线的附件、FWB、typed picker、values-first dry-run 与安全门；

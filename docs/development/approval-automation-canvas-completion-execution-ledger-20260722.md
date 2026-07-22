@@ -1,8 +1,9 @@
 # 审批、自动化与 Canvas 组合收口执行台账（2026-07-22）
 
-**状态：COMPOSED AND LOCALLY VERIFIED / DRAFT #4540 / NOT LANDED**
+**状态：COMPOSED AND LOCALLY VERIFIED / DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / NOT LANDED**
 
-记录基线：`origin/main@7a64424d109a`。组合候选：#4540 `7b54908c9e7194991403cdb8962186c17e0415ed`。
+记录基线：`origin/main@7a64424d109a`。组合根：#4540 `7b54908c9e7194991403cdb8962186c17e0415ed`；
+最终数据栈头：#4539 `c2e5d134f84cb5d131a0c1f855e81e187860f7ee`。
 本台账记录实现和证据，不构成合并、UAT 或启用授权。
 
 ## 1. 已在 main 的底座
@@ -18,9 +19,9 @@
 | Lane | PR / exact head | 内容 | 组合处置 |
 |---|---|---|---|
 | Data root | #4510 `f6d05814a8` | 附件、FWB activation、画布基础和 CI | 被 #4540 吸收 |
-| Record-link | #4524 `f52c58545a` | 安全 record-link 字段与选择器 | 后续 child，待按 #4540 重排 |
-| FWB update | #4531 `b0fbd827fc` | 更新受约束已有记录 | 后续 child，待按 #4540 重排 |
-| FWB composition | #4539 `6f6ebcfce5` | 新建/更新 authoring 与生产组合 | 后续 child，待按 #4540 重排 |
+| Record-link | #4524 `72ecbbb35b` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
+| FWB update | #4531 `510738c9e` | 更新受约束已有记录 | 已叠到 #4524 |
+| FWB composition | #4539 `c2e5d134f` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
 | Canvas root | #4433 `fc5477d7e4` | 分支编排与纵向画布 | 被 #4540 吸收 |
 | Canvas all-path | #4532 `762dc0fd5` | 条件内并行路径全部汇合 | 被 #4540 吸收 |
 | Canvas inspector | #4533 `babc6d975` | 共享检查器、键盘和响应式 | 被 #4540 吸收 |
@@ -37,6 +38,8 @@
 4. 字段权限行和 form-field-user 选项回退到 field id；改为“未命名字段”，不再泄露内部标识。
 5. 前后端并行路径遍历冲突；保留运行时配置边/default/fallback 的镜像语义，忽略 stray edge。
 6. 5 个 Canvas 源码和 3 个规格不触发 `approval-web-guard`；补齐 pull_request/push 两套路径，required 常驻门不变。
+7. record-link 的事务内 DB 权限复查使旧 authoring UAT 只凭 JWT wildcard 的正控返回 403；不降级产品门，改为在
+   fixture 中建立并清理真实 `approvals:write` DB 授权，最终 record-link + authoring UAT 45/45。
 
 ## 4. 多模型使用与最终责任
 
@@ -51,9 +54,9 @@
 
 ## 5. 推荐落地顺序
 
-1. 先审阅 #4540 的组合差异和 CI；不要同时合入它已吸收的 #4510/#4433-#4538 完整内容。
-2. #4540 落 main 后，把 #4524 -> #4531 -> #4539 逐层 rebase/retarget 到新 main，解决剩余 FWB-2 child delta。
-3. 在最终 child 头重跑 fresh-DB migration、FWB activation、S1-S8、附件、版本恢复、required web 和生产构建。
+1. 审阅并串行合入 #4540 -> #4524 -> #4531 -> #4539；不要再合入 #4540 已吸收的 #4510/#4433-#4538 完整内容。
+2. 每个 child 落地后把下一 PR retarget 到 main，并确认产品提交 range-diff 不漂移、required checks 重新过绿。
+3. 最终 child 落 main 后，在 merged main 重跑新库迁移、FWB activation、S1-S8、附件、版本恢复、required web 和生产构建。
 4. 更新本三件套为 merged-main exact heads 后，才进入真实租户 UAT。
 5. flags 按 durable -> Class A -> Class B -> FWB -> attachments/Canvas staged rollout 分级开启。
 

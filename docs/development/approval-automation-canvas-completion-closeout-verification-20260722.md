@@ -1,8 +1,9 @@
 # 审批、自动化与 Canvas 组合收口验证（2026-07-22）
 
-**结论：ENGINEERING COMPOSITION VERIFIED ON DRAFT #4540; NOT MERGED, UAT'D OR ENABLED**
+**结论：ENGINEERING STACK VERIFIED THROUGH DRAFT #4539; NOT MERGED, UAT'D OR ENABLED**
 
-本文只对 #4540 exact head `7b54908c9e7194991403cdb8962186c17e0415ed` 的本地组合验证负责。
+本文对组合根 #4540 `7b54908c9e7194991403cdb8962186c17e0415ed` 及其重排后的最终数据栈头
+#4539 `c2e5d134f84cb5d131a0c1f855e81e187860f7ee` 的本地验证负责。
 Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独立状态。
 
 ## 1. 为什么需要组合 PR
@@ -37,14 +38,23 @@ Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独�
 | template restore UAT API | 6/6 | concurrent restore、stale/cross-template 拒绝、规则重校验 |
 | fresh-DB combined integration | **63/63** | 上述联合范围 |
 
+在重排后的最终数据栈头另行复验：
+
+| Gate | 结果 | 证明范围 |
+|---|---:|---|
+| record-link + FWB create/update + S1-S8 | **85/85** | record-link 39、update 15、activation 18、matrix 9、write action 4 |
+| attachment + template authoring/restore UAT | **25/25** | attachment 19、authoring/restore 6 |
+
 ### 2.2 前端与后端
 
 | Gate | 结果 |
 |---|---:|
-| Canvas/authoring/version focused | 8 files / 157 tests |
-| approval/topology/FWB focused backend unit | 6 files / 182 tests |
-| required web | 357 files / 4276 tests |
-| full backend unit | 433 files / 5961 tests |
+| Canvas/authoring/version focused on #4540 | 8 files / 157 tests |
+| approval/topology/FWB focused backend unit on #4540 | 6 files / 182 tests |
+| final FWB/record-link focused web | 8 files / 152 tests |
+| final FWB/record-link focused backend unit | 9 files / 56 tests |
+| required web on final stack head | 359 files / 4310 tests |
+| full backend on final stack head | 525 files / 7183 passed; 182 files / 1633 configured skipped |
 | frontend `vue-tsc --noEmit` | pass |
 | backend `tsc --noEmit` | pass |
 | frontend production build | pass |
@@ -70,15 +80,16 @@ Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独�
 
 ## 4. CI 状态
 
-#4540 推送后远端 checks 已启动。记录本文时 contracts、pr-validate 等部分检查成功，required web、test (20.x)、
-migration-replay 等仍在运行；本文不把“已启动”写成“CI 全绿”。最终合入前必须以 #4540 当前 head 重新读取全部 required checks。
+#4540 首轮远端 checks 中除 `test (20.x)` 外均成功；该 job 的唯一失败为既有
+`multitable-oapi-scope-guard-realdb` 异步审计正控未在 flush 后读到行。本地 exact-head 单独复跑 15/15，通过后仅重跑该
+失败 job。记录本文时重跑仍在结算，因此不写成“CI 全绿”。#4524/#4531/#4539 的新 heads 也必须分别结算自己的 checks。
 
 ## 5. 尚未完成
 
 ### 工程/落地
 
-1. #4540 仍为 Draft，未合入 main；远端 CI 尚未全部结算。
-2. #4524 -> #4531 -> #4539 仍需在 #4540 落地后重排，才能形成最终 FWB create/update 组合头。
+1. #4540 -> #4524 -> #4531 -> #4539 均为 Draft/未合入；远端 CI 尚未全部结算。
+2. 子栈已完成重排与本地 exact-head 复验，但仍须按依赖顺序串行审合并逐层 retarget 到 main。
 3. merged-main 上的 8 场景、附件、版本恢复与 required web 仍需正式复跑。
 
 ### Owner-only
@@ -92,7 +103,7 @@ migration-replay 等仍在运行；本文不把“已启动”写成“CI 全绿
 
 只有以下条件全部满足，才能把这两条线标记为 `FINAL`：
 
-- #4540 与后续 FWB child delta 已在 main，最终 required checks 全绿；
+- #4540 -> #4524 -> #4531 -> #4539 已按序在 main，最终 required checks 全绿；
 - merged main 新库迁移和 S1-S8 生产链通过；
 - 新建记录、更新 record-link 记录、decision-value、常规数值、附件与版本恢复均有真实租户正反例；
 - flags 分级开启后没有重复写、poison、stuck lease、权限 oracle、raw-id 泄露或 legacy 丢事件。
