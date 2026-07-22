@@ -56,7 +56,7 @@ import {
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
-  buildObjectFieldsRepairSurface,
+  runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
 import {
@@ -585,21 +585,25 @@ export class MetaSheetServer {
           // only because the wired write is append-only DO NOTHING) to a true atomic
           // fail-close — the W3-entry gate for wiring repair into production routes.
           runObjectFieldsRepairTransaction: async (fn) => {
-            return poolManager.get().transaction(async ({ query }) => {
-              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
-                const result = await query(sql, params)
-                return {
-                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
-                    ? (result as { rows: unknown[] }).rows
-                    : [],
-                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
-                }
-              }
-              // Single shared surface-builder (provisioning.ts): every method is bound to the
-              // one tx `query`, so no method can escape to a fresh connection and break
-              // atomicity. The real-DB rollback test exercises this same builder.
-              return fn(buildObjectFieldsRepairSurface(txQuery))
-            })
+            // The whole runner is the tested glue runObjectFieldsRepairTransactionWith over
+            // the poolManager transaction primitive: ONE transaction, surface built from its
+            // query, throw ⇒ rollback. No atomicity logic lives inline here.
+            return runObjectFieldsRepairTransactionWith(
+              (run) =>
+                poolManager.get().transaction(async ({ query }) => {
+                  const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                    const result = await query(sql, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                    }
+                  }
+                  return run(txQuery)
+                }),
+              fn,
+            )
           },
           ensureView: async ({ projectId, sheetId, descriptor }) => {
             return poolManager.get().transaction(async ({ query }) => {

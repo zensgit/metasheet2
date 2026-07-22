@@ -655,6 +655,22 @@ export function buildObjectFieldsRepairSurface(
   }
 }
 
+// W2/P2-3: the atomic-repair GLUE, extracted so it is unit-testable independently of the
+// MetaSheetServer/poolManager bootstrap. `withTxQuery` is the caller's transaction runner —
+// it must invoke `run` exactly once with a SINGLE tx-bound query and roll back if `run`
+// throws. This function builds the repair surface from that one query and hands it to `fn`;
+// a throw from `fn` (a verify failure) propagates straight out so the caller's transaction
+// rolls back. index.ts wires `withTxQuery` to poolManager.get().transaction, so the shipped
+// runner IS this tested function over the (independently-correct) transaction primitive —
+// closing the runner-vs-prod gap the review flagged (P3): a rework that split the write and
+// verify into two transactions, or swallowed the throw, is caught by this function's tests.
+export async function runObjectFieldsRepairTransactionWith<T>(
+  withTxQuery: <R>(run: (query: MultitableProvisioningQueryFn) => Promise<R>) => Promise<R>,
+  fn: (surface: MultitableRepairTransactionSurface) => Promise<T>,
+): Promise<T> {
+  return withTxQuery((txQuery) => fn(buildObjectFieldsRepairSurface(txQuery)))
+}
+
 export async function ensureObject(
   input: EnsureObjectInput,
 ): Promise<{

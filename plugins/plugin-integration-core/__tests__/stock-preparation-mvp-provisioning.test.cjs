@@ -525,6 +525,17 @@ async function main() {
     assert.ok(denied, 'non-admin repair rejected')
     assert.equal(rbacCtx.calls.findObjectSheet.length, 0, 'admin gate precedes all provisioning access')
 
+    // (c2) API contract pin (round-5 review P3): a provisioning WITHOUT the atomic runner
+    //      runObjectFieldsRepairTransaction must fail closed with a clean 503, never reach
+    //      the repair body. Guards the getMvpRepairApi contract.
+    const noRunner = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+    delete noRunner.context.api.multitable.provisioning.runObjectFieldsRepairTransaction
+    await rejectsWith(
+      () => repairStockPreparationMvpTargets({ context: noRunner.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
+      StockPreparationTargetProvisioningError,
+      'MVP_REPAIR_API_UNAVAILABLE',
+    )
+
     // (d) nothing missing → already-ready, zero adds.
     const readyCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice() })
     const already = await repairStockPreparationMvpTargets({ context: readyCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] })

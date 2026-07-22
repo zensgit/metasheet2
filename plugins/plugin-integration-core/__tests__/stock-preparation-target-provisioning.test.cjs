@@ -556,6 +556,21 @@ async function main() {
     }
     assert.ok(deniedErr, 'non-admin canonical repair rejected')
     assert.equal(rbacCtx.calls.findObjectSheet.length, 0, 'admin gate precedes provisioning reads')
+
+    // (e) API contract pin (round-5 review P3): a provisioning WITHOUT the atomic runner
+    //     runObjectFieldsRepairTransaction must fail closed with a clean 503, never reach
+    //     the repair body and call `undefined(...)`. Guards the getCanonicalRepairApi contract.
+    const noRunner = createContext({ sheetExists: true, missingFields: ['path'] })
+    delete noRunner.context.api.multitable.provisioning.runObjectFieldsRepairTransaction
+    let unavailErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: noRunner.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      unavailErr = error
+    }
+    assert.ok(unavailErr instanceof StockPreparationTargetProvisioningError, 'missing atomic runner fails closed')
+    assert.equal(unavailErr.code, 'CANONICAL_REPAIR_API_UNAVAILABLE')
+    assert.equal(noRunner.calls.findObjectSheet.length, 0, 'API check precedes any provisioning read')
   }
 
   console.log('stock-preparation-target-provisioning.test.cjs OK')
