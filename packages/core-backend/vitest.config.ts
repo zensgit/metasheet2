@@ -408,6 +408,15 @@ export default defineConfig({
       'tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts',
       'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts',
+      // W4-0 real-DB (§9 of attendance-vnext-wave4-onboarding-design-lock-20260721.md): the
+      // setup-readiness aggregate's G1 (two-org forgery + platform-admin bypass), G2 (SET
+      // TRANSACTION READ ONLY actually rejecting a bare write / writable CTE / multi-statement
+      // batch against real Postgres — a mock cannot prove this), G3 (① two positive controls), G4
+      // (⑥ three notify signals + previewReady independence), and G5 (④ closed-set posture
+      // against a real system_configs row) matrices. DATABASE_URL-gated describeIfDatabase;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
