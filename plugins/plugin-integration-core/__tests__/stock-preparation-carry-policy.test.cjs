@@ -93,6 +93,31 @@ function frozenVocabularies() {
   ])
 }
 
+// Round-5 review P3 (advisor pin): SOURCE-LEVEL invariant — every `fail('REASON', …)` call
+// site in the module MUST use a reason declared in CARRY_POLICY_ERROR_REASONS. This pins the
+// practical invariant (no call site drifts to an undeclared reason, e.g. a future
+// `fail('TYPO')` on an untested path) AND finally makes the round-4 runtime fail()-guard
+// load-bearing — the previous coarse-token edit had no test, so reverting it went unnoticed.
+function everyFailCallSiteUsesADeclaredReason() {
+  const fs = require('node:fs')
+  const src = fs
+    .readFileSync(path.join(__dirname, '..', 'lib', 'stock-preparation-carry-policy.cjs'), 'utf8')
+    // Strip line comments so the guard's OWN doc example (`// A fail('SOME_NEW_REASON') …`)
+    // is not mistaken for a real, undeclared call site.
+    .replace(/\/\/.*$/gm, '')
+  const declared = new Set(CARRY_POLICY_ERROR_REASONS)
+  const re = /\bfail\(\s*['"]([A-Z_]+)['"]/g
+  const seen = []
+  const undeclared = []
+  let m
+  while ((m = re.exec(src))) {
+    seen.push(m[1])
+    if (!declared.has(m[1])) undeclared.push(m[1])
+  }
+  assert.ok(seen.length >= 13, `expected to locate the fail() call sites (found ${seen.length})`)
+  assert.deepEqual(undeclared, [], 'every fail() reason must be declared in CARRY_POLICY_ERROR_REASONS')
+}
+
 // Round-4 review P3: the out-of-vocab conflictType branch must fail with COARSE details —
 // it must NOT echo the offending value back into the thrown error. Without this test the
 // coarse-details fix is regressible (reverting to fail(..., { conflictType }) stayed green).
@@ -465,6 +490,7 @@ function sameKeyConflictingContentHolds() {
 
 function main() {
   frozenVocabularies()
+  everyFailCallSiteUsesADeclaredReason()
   manualConfirmOutOfVocabIsCoarse()
   sameKeyConflictingContentHolds()
   policyNormalization()
