@@ -85,6 +85,13 @@ W2 首版推送后经独立审阅(codex,exact head 8e107),抓出 **4 个真缺�
 
 教训:「真库测试直调原语 = wire-vs-fixture 自欺」再次自证——已入 [[feedback_triggered_is_not_verified]] / [[feedback_mock_is_not_the_contract]]。
 
+**第二轮审阅(codex,head 9ae761;HOLD)——又 1P1+2P2,全修:**
+- **P1(repair 假报 ready)**:repair 写后**不复核**、无条件 return ready → 删列探针得 schemaComplete=false 但 reportedReady=true。修:MVP/canonical 写后**重读 + `missingLogicalFields` 复核**,仍缺 → `*_REPAIR_INCOMPLETE` fail-closed(never ready unproven);加 INCOMPLETE 探针测试。
+- **P2(scoped 测试仍绕真实 scope)**:facade 手搓、未过 `createPluginScopedMultitableApi`;删 assertObjectScope 仍 10/10 绿。修:scope 单测调两新方法 + 断言 assertObjectScope(**变异删转发→红**);realdb 测试改**走真实 scope wrapper** + 断言 hook 被调。
+- **P2(P4 conflictType 越词表)**:`carry_conflicting_source_content` 不在冻结 `CARRY_CONFLICT_TYPES`。修:入词表 + `makeManualConfirm` 校验(越词表 fail-closed)+ 测试钉住。
+
+教训升级:**动核心+跨包接线的刀,推送前必过独立对抗审**——本刀跳过首审,连吃两轮 HOLD。
+
 ## 6. 验证纪律记录
 
 - **独立对抗审阅**:两份计划先经 Fable5 独立审(refute-first,对 origin/main 逐 file:line),打掉我 2 个基于陈旧注释/记忆的 P1 前提(P0 已接线、drift 单向),6 个 P2 缺口全吸收进 rev-2。**教训**:「对旧基点断言把已落地写成 gap」再次自证,已入台账。

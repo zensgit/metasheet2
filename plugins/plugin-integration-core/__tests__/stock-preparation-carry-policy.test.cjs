@@ -18,6 +18,7 @@ const {
   MANUAL_ROW_REATTACH_MODES,
   CARRY_DECISIONS,
   CARRY_WRITE_VIA,
+  CARRY_CONFLICT_TYPES,
   StockPreparationCarryPolicyError,
   normalizeCarryPolicy,
   classifyCarry,
@@ -393,6 +394,9 @@ function sameKeyConflictingContentHolds() {
   const forward = planCarry([rowA, rowB], newAdd('k-new', 'c1'), policy)
   assert.equal(forward.decision, CARRY_DECISIONS.MANUAL_CONFIRM, 'same-key conflicting content → hold (forward order)')
   assert.equal(forward.carry, false, 'a conflicting hold never carries any human field')
+  // The conflictType must be in the FROZEN vocabulary (an out-of-vocab value fails closed).
+  assert.ok(CARRY_CONFLICT_TYPES.includes(forward.conflictSummary.type), 'conflictType ∈ frozen CARRY_CONFLICT_TYPES')
+  assert.equal(forward.conflictSummary.type, 'carry_conflicting_source_content')
 
   const reversed = planCarry([rowB, rowA], newAdd('k-new', 'c1'), policy)
   assert.equal(reversed.decision, CARRY_DECISIONS.MANUAL_CONFIRM, 'same-key conflicting content → hold (reversed order)')

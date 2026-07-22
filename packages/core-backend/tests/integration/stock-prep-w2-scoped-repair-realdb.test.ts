@@ -16,6 +16,8 @@ import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
+import { vi } from 'vitest'
+
 import {
   findObjectSheet,
   getObjectSheetId,
@@ -23,6 +25,7 @@ import {
   ensureMissingObjectFields,
   ensureObject,
 } from '../../src/multitable/provisioning'
+import { createPluginScopedMultitableApi } from '../../src/multitable/plugin-scope'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const targetProvisioning = require(
@@ -42,7 +45,10 @@ const PLM_FIELD = templates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.find(
 ).id
 
 describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', () => {
-  const projectId = `w2scoped_${randomUUID().replace(/-/g, '').slice(0, 10)}`
+  // projectId must carry the plugin namespace suffix so the scope wrapper allows it.
+  const PLUGIN = 'plugin-w2test'
+  const projectId = `w2scoped_${randomUUID().replace(/-/g, '').slice(0, 10)}:${PLUGIN}`
+  const assertObjectScope = vi.fn(async () => {})
   let pool: Pool
   let context: unknown
 
@@ -59,7 +65,8 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
     pool = new Pool({ connectionString: dbUrl })
     // A provisioning surface wired to the real DB (mirrors the index.ts surface shape
     // the plugin actually receives), exposing the three methods repair uses.
-    const provisioning = {
+    const rawProvisioning = {
+      getObjectSheetId,
       findObjectSheet: ({ projectId: p, objectId }: { projectId: string; objectId: string }) =>
         withClient((q) => findObjectSheet(q as never, p, objectId)),
       resolveExistingObjectFieldIds: ({ projectId: p, objectId, fieldIds }: { projectId: string; objectId: string; fieldIds: string[] }) =>
@@ -72,7 +79,15 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
           return r
         }),
     }
-    context = { api: { multitable: { provisioning } } }
+    // Route repair through the REAL scope wrapper (not a hand-built facade): repair
+    // must reach the DB-backed methods THROUGH createPluginScopedMultitableApi, and
+    // the write must pass hooks.assertObjectScope (review P2).
+    const scoped = createPluginScopedMultitableApi(
+      { provisioning: rawProvisioning, records: {} } as never,
+      PLUGIN,
+      { assertObjectScope },
+    )
+    context = { api: { multitable: scoped } }
 
     // Provision the canonical main table (all template fields) via the real ensureObject.
     const descriptor = targetProvisioning.buildStockPreparationTargetDescriptor({})
@@ -108,9 +123,16 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
     expect(afterDelete[PLM_FIELD]).toBeUndefined()
 
     // Repair through the plugin function → it must discover + re-add the missing column.
+    assertObjectScope.mockClear()
     const result = await targetProvisioning.repairStockPreparationCanonicalTarget({ context, projectId, permission: 'admin' })
     expect(result.mode).toBe('canonical_repaired')
     expect(result.evidence.addedFieldCount).toBe(1)
+    expect(result.evidence.schemaCompleteAfter).toBe(true)
+    // The scoped write passed through the object-scope hook (proves it went through
+    // the real scope wrapper, not a bare facade).
+    expect(assertObjectScope).toHaveBeenCalledWith(
+      expect.objectContaining({ pluginName: PLUGIN, objectId: MAIN_OBJECT_ID }),
+    )
 
     // The column is back.
     const afterRepair = await withClient((q) =>

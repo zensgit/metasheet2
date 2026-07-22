@@ -387,6 +387,17 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
       objectId: template.objectId,
       fields: missingDescriptors,
     })
+    // POST-WRITE completeness re-verify (never report ready unproven).
+    const resolvedAfter = await provisioning.resolveExistingObjectFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
+    const stillMissing = missingLogicalFields(template, resolvedAfter)
+    if (stillMissing.length) {
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'MVP_REPAIR_INCOMPLETE',
+        'MVP repair did not reach a complete schema; a field is still missing after the additive write',
+        { objectId: template.objectId, missingFieldCount: stillMissing.length },
+      )
+    }
     tables.push({
       objectId: template.objectId,
       role: template.role,
@@ -394,6 +405,7 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
       mode: result.addedFieldIds.length > 0 ? 'mvp_repaired' : 'mvp_already_ready',
       addedFieldCount: result.addedFieldIds.length,
       skippedExistingFieldCount: result.skippedExistingFieldIds.length,
+      schemaCompleteAfter: true,
       templateVersion: template.version,
     })
   }

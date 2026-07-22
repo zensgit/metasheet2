@@ -437,6 +437,21 @@ async function main() {
     assert.equal(humanErr.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
     assert.equal((humanCtx.calls.ensureMissingObjectFields || []).length, 0, 'no additive write when a human field is in the repair set')
 
+    // (b2) POST-WRITE completeness re-verify: if the additive write does NOT actually
+    //      leave the schema complete (a field still missing on re-read), repair must
+    //      FAIL CLOSED — never report ready:true unproven (review P1).
+    const incompleteCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    // Neuter the additive write so 'path' stays missing after "repair".
+    incompleteCtx.context.api.multitable.provisioning.ensureMissingObjectFields = async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] })
+    let incompleteErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: incompleteCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      incompleteErr = error
+    }
+    assert.ok(incompleteErr instanceof StockPreparationTargetProvisioningError, 'incomplete repair fails closed')
+    assert.equal(incompleteErr.code, 'CANONICAL_REPAIR_INCOMPLETE')
+
     // (c) absent target fails closed.
     const absentCtx = createContext({ sheetExists: false })
     let absentErr = null

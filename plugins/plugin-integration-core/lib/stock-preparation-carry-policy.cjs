@@ -96,7 +96,9 @@ const CARRY_NO_CARRY_REASONS = Object.freeze([
 const CARRY_CONFLICT_TYPES = Object.freeze([
   'carry_ambiguous_component_source',
   'carry_reattach_requires_confirm',
+  'carry_conflicting_source_content',
 ])
+const CARRY_CONFLICT_TYPE_SET = new Set(CARRY_CONFLICT_TYPES)
 
 const CARRY_POLICY_ERROR_REASONS = Object.freeze([
   'CARRY_POLICY_NOT_OBJECT',
@@ -313,6 +315,10 @@ function makeCarryViaConfirm(newAddRow, source, carryPolicy, carryFields) {
 }
 
 function makeManualConfirm(newAddRow, carryPolicy, conflictType, matchCount) {
+  // conflictType is a CLOSED vocabulary — an out-of-vocab value never surfaces.
+  if (!CARRY_CONFLICT_TYPE_SET.has(conflictType)) {
+    fail('UNKNOWN_CONFLICT_TYPE', 'manual_confirm conflictType is outside the frozen vocabulary', { conflictType })
+  }
   return {
     decision: CARRY_DECISIONS.MANUAL_CONFIRM,
     idempotencyKey: keyOf(newAddRow),

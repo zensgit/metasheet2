@@ -502,6 +502,20 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     objectId: template.objectId,
     fields: missingDescriptors,
   })
+  // POST-WRITE completeness re-verify: `ready:true` must be PROVEN, never asserted.
+  // Each provisioning method is its own transaction, so re-read the object's fields
+  // and fail closed if ANY template field is still absent (a concurrent drop, a
+  // partial write, or a discovery race). Never return ready without confirming it.
+  const resolvedAfter = await provisioning.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
+  const stillMissing = missingLogicalFields(template, resolvedAfter)
+  if (stillMissing.length) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'CANONICAL_REPAIR_INCOMPLETE',
+      'canonical repair did not reach a complete schema; a field is still missing after the additive write',
+      { objectId: template.objectId, missingFieldCount: stillMissing.length },
+    )
+  }
   return {
     ready: true,
     mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
@@ -510,6 +524,7 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
       mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
       addedFieldCount: result.addedFieldIds.length,
       skippedExistingFieldCount: result.skippedExistingFieldIds.length,
+      schemaCompleteAfter: true,
       templateVersion: template.version,
     },
   }

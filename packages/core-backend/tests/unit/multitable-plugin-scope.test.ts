@@ -125,6 +125,8 @@ describe('multitable plugin scope helper', () => {
           property: { options: [{ value: 'open' }] },
           order: 1,
         })),
+        resolveExistingObjectFieldIds: vi.fn(async () => ({ status: 'fld_1' })),
+        ensureMissingObjectFields: vi.fn(async () => ({ addedFieldIds: ['fld_2'], skippedExistingFieldIds: ['fld_1'] })),
       },
       records: {
         listRecords: vi.fn(),
@@ -173,6 +175,44 @@ describe('multitable plugin scope helper', () => {
         propertyPatch: { options: [{ value: 'open' }] },
       }),
     ).resolves.toMatchObject({ id: 'fld_1' })
+
+    // W2: the two new provisioning methods MUST forward through the scoped wrapper
+    // AND pass the object-scope check (a write capability is never bare-forwarded).
+    assertObjectScope.mockClear()
+    await expect(
+      scoped.provisioning.resolveExistingObjectFieldIds({
+        projectId: 'tenant_42:after-sales',
+        objectId: 'serviceTicket',
+        fieldIds: ['status'],
+      }),
+    ).resolves.toEqual({ status: 'fld_1' })
+    expect(assertObjectScope).toHaveBeenCalledWith({
+      pluginName: 'plugin-after-sales',
+      projectId: 'tenant_42:after-sales',
+      objectId: 'serviceTicket',
+    })
+    assertObjectScope.mockClear()
+    await expect(
+      scoped.provisioning.ensureMissingObjectFields({
+        projectId: 'tenant_42:after-sales',
+        objectId: 'serviceTicket',
+        fields: [{ id: 'newField', name: 'New', type: 'date' }],
+      } as any),
+    ).resolves.toMatchObject({ addedFieldIds: ['fld_2'] })
+    // Load-bearing: removing this assertObjectScope forwarding must fail the suite.
+    expect(assertObjectScope).toHaveBeenCalledWith({
+      pluginName: 'plugin-after-sales',
+      projectId: 'tenant_42:after-sales',
+      objectId: 'serviceTicket',
+    })
+    // A cross-namespace project id is rejected before any forward.
+    await expect(
+      scoped.provisioning.ensureMissingObjectFields({
+        projectId: 'tenant_42:attendance',
+        objectId: 'serviceTicket',
+        fields: [],
+      } as any),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
 
     expect(() =>
       scoped.provisioning.getObjectSheetId('tenant_42:attendance', 'serviceTicket'),
