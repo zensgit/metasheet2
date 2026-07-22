@@ -128,12 +128,15 @@ Behavior tests additionally prove:
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
 
-Fourteen committed-head mutations were applied one at a time in detached worktrees and all were
+Twenty-three committed-head mutations were applied one at a time in detached worktrees and all were
 killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
 removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
 archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
 redirect refusal removal, plus removal of the artifact checkout ref pin and checkout-SHA runtime
-guard. Each mutation was restored before the next; the source worktree remained clean.
+guard. The final nine mutations disabled the PM2 stability loop, weakened its baseline comparison,
+broadened the health status, bypassed logout boolean/status checks, removed the SHA-qualified artifact
+name, accepted duplicate smoke headers, accepted zero created lines, and accepted URL query/fragment
+inputs. Each mutation ran in its own disposable worktree; the source worktree remained clean.
 
 ## 7. Independent Adversarial Review
 
