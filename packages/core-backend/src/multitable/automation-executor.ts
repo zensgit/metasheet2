@@ -3364,7 +3364,7 @@ export class AutomationExecutor {
           const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
           // Fail closed if the locked row vanished between FOR UPDATE and UPDATE (should be impossible
           // under FOR UPDATE, but never report success with a missing mutation).
-          if (!updatedRow) throw new Error('fwb_rejected:record_missing')
+          if (!updatedRow) throw new Error('fwb_rejected:linked_record_unavailable')
           const nextVersion = Number(updatedRow.version)
           await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
             sheetId,
@@ -3420,8 +3420,10 @@ export class AutomationExecutor {
     if (result.reason === 'mapping') {
       return { actionType, status: 'failed', error: 'fwb_rejected:mapping' }
     }
-    // record_missing | record_locked | record_not_writable — values-free stable codes.
-    return { actionType, status: 'failed', error: `fwb_rejected:${result.reason}` }
+    // Do not expose whether the filler-selected id is missing, locked, or merely
+    // unwritable through the persisted execution log. The internal reason still
+    // selects the fail-closed control path; the observable code is deliberately uniform.
+    return { actionType, status: 'failed', error: 'fwb_rejected:linked_record_unavailable' }
   }
 
   private async executeSendWebhook(

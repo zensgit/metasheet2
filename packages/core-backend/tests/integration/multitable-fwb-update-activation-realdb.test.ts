@@ -8,7 +8,7 @@
  *   - same-base update happy path through AutomationExecutor → executeUpdateBoundRecord;
  *   - exact linked-record extraction (malformed → fwb_rejected:linked_record, zero writes);
  *   - cross-base deny (rule creator lacks target base write) / allow;
- *   - locked / deleted / write-revoked fail-closed;
+ *   - locked / deleted / write-revoked fail closed behind one non-oracular error code;
  *   - duplicate net-once under a new eventId;
  *   - rollback atomicity (injected post-handler abort erases claim + update + revision + outbox);
  *   - discriminating mutation target (updates bound record A, never sibling record B).
@@ -741,7 +741,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
     }
   })
 
-  test('locked / deleted fail-closed with stable reasons and zero mutation', async () => {
+  test('locked / deleted fail closed behind one non-oracular reason with zero mutation', async () => {
     setFlags(true, true)
     try {
       // Locked: ensureRecordNotLocked lets locker/owner through. Construct a row whose created_by
@@ -766,7 +766,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
           triggerPayload(lockedId, `evt_fwb2_lock_${TS}`),
         )
         expect(run.steps[0]?.status).toBe('failed')
-        expect(String(run.steps[0]?.error ?? '')).toBe('fwb_rejected:record_locked')
+        expect(String(run.steps[0]?.error ?? '')).toBe('fwb_rejected:linked_record_unavailable')
         expect(await recordData(lockedRec)).toEqual(before)
         expect(await claimCount(lockedId, ruleId)).toBe(0)
       } finally {
@@ -792,7 +792,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         triggerPayload(delId, `evt_fwb2_del_${TS}`),
       )
       expect(run2.steps[0]?.status).toBe('failed')
-      expect(String(run2.steps[0]?.error ?? '')).toBe('fwb_rejected:record_missing')
+      expect(String(run2.steps[0]?.error ?? '')).toBe('fwb_rejected:linked_record_unavailable')
       expect(await claimCount(delId, ruleId2)).toBe(0)
     } finally {
       setFlags(false, false)
@@ -839,7 +839,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
 
       const run = await runPromise
       expect(run.steps[0]?.status).toBe('failed')
-      expect(String(run.steps[0]?.error ?? '')).toBe('fwb_rejected:record_locked')
+      expect(String(run.steps[0]?.error ?? '')).toBe('fwb_rejected:linked_record_unavailable')
       expect(await recordData(raceRecord)).toMatchObject({ [F_TITLE]: 'race-before', [F_AMOUNT]: 0 })
       expect(await claimCount(instanceId, ruleId)).toBe(0)
     } finally {
@@ -1094,7 +1094,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         triggerPayload(foreignInstance, `evt_fwb2_foreign_${TS}`),
       )
       expect(foreignRun.steps[0]?.status).toBe('failed')
-      expect(String(foreignRun.steps[0]?.error ?? '')).toBe('fwb_rejected:record_not_writable')
+      expect(String(foreignRun.steps[0]?.error ?? '')).toBe('fwb_rejected:linked_record_unavailable')
       expect(await recordData(foreignRecord)).toMatchObject({ [F_TITLE]: 'scope-before', [F_AMOUNT]: 0 })
       expect(await claimCount(foreignInstance, ruleId)).toBe(0)
     } finally {
