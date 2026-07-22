@@ -10,11 +10,13 @@
  *   POST /api/multitable/sheets/:sheetId/automations/:ruleId/test
  *   GET  /api/multitable/sheets/:sheetId/automations/:ruleId/logs
  *   GET  /api/multitable/sheets/:sheetId/automations/:ruleId/stats
+ *   POST /api/multitable/sheets/:sheetId/automations/fwb/confirm
  *
  * Response shapes (match apps/web/src/multitable/api/client.ts):
  *   test  → AutomationExecution (flat object)
  *   logs  → { executions: AutomationExecution[] }
  *   stats → AutomationStats (flat object)
+ *   fwb/confirm → { confirmationHash, templateId, sourceTemplateVersionId, targetSheetId, targetBaseId }
  */
 
 import express, { Router, type Request, type Response } from 'express'
@@ -36,6 +38,14 @@ import {
   resolveExecutionNameMaps,
   type ExecutionNameMaps,
 } from '../multitable/automation-execution-names'
+import {
+  deriveFwbConfirmationHash,
+  hasUnavailableFwbNumberMapping,
+  isFwbTargetFieldTypeCompatible,
+  isFwbWritebackEnabled,
+  normalizeFwbMappings,
+} from '../multitable/approval-fwb-activation'
+import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -239,6 +249,232 @@ export function createAutomationRoutes(
       return res.status(202).json({ ok: true, executionId: result.execution.id, status: result.execution.status })
     },
   )
+
+  // ── FWB confirmation (server-owned hash; Q6 gate 3) ─────────────────────
+  //
+  // The ordinary-user mapping editor asks the server to derive confirmationHash over the
+  // canonicalized {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings}
+  // subject. The client MUST NOT invent a hash — save re-derives and rejects any mismatch.
+  // Target is always the rule's OWN sheet (path sheetId); no cross-base / arbitrary target.
+
+  router.post('/sheets/:sheetId/automations/fwb/confirm', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'SHEET_ID_REQUIRED', message: 'sheetId is required' } })
+    }
+
+    if (!isFwbWritebackEnabled()) {
+      return res.status(403).json({
+        ok: false,
+        error: { code: 'FWB_WRITEBACK_DISABLED', message: 'Approval form writeback is not enabled' },
+      })
+    }
+
+    let authoringUserId = ''
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation || !capabilities.canManageSheetAccess) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      authoringUserId = access.userId
+      if (!authoringUserId) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : ''
+      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: {
+          code: transient ? 'DB_NOT_READY' : 'PERMISSION_CHECK_FAILED',
+          message: transient ? 'Service temporarily unavailable' : 'Failed to resolve permissions',
+        },
+      })
+    }
+
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const templateId = typeof body.templateId === 'string' ? body.templateId.trim() : ''
+    const sourceTemplateVersionId = typeof body.sourceTemplateVersionId === 'string'
+      ? body.sourceTemplateVersionId.trim()
+      : ''
+    if (!templateId || !sourceTemplateVersionId) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'FWB_CONFIRM_SUBJECT_REQUIRED',
+          message: 'templateId and sourceTemplateVersionId are required',
+        },
+      })
+    }
+
+    const normalized = normalizeFwbMappings(body.mappings)
+    if (normalized.ok === false) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'FWB_MAPPING_INVALID', message: `mapping config invalid: ${normalized.issue}` },
+      })
+    }
+    const confirmedMappings = normalized.mappings
+    if (hasUnavailableFwbNumberMapping(confirmedMappings)) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'FWB_EXACT_NUMBER_UNAVAILABLE',
+          message: 'exact_number_mapping_unavailable',
+        },
+      })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const canReadSource = await canReadApprovalTemplateForAutomation(
+        pool.query.bind(pool),
+        templateId,
+        authoringUserId,
+      )
+      if (!canReadSource) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'FWB_SOURCE_UNAVAILABLE', message: 'Approval template is unavailable' },
+        })
+      }
+      const [sheetResult, versionResult, fieldResult] = await Promise.all([
+        pool.query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId]),
+        pool.query(
+          `SELECT t.active_version_id, v.form_schema
+             FROM approval_templates t
+             JOIN approval_template_versions v ON v.id = t.active_version_id
+            WHERE t.id = $1`,
+          [templateId],
+        ),
+        pool.query(
+          'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+          [sheetId, confirmedMappings.map((mapping) => mapping.targetFieldId)],
+        ),
+      ])
+      const targetBaseId = (sheetResult.rows[0] as { base_id?: unknown } | undefined)?.base_id
+      if (typeof targetBaseId !== 'string' || !targetBaseId) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'SHEET_NOT_FOUND', message: 'Target sheet is unavailable' },
+        })
+      }
+
+      const versionRow = versionResult.rows[0] as {
+        active_version_id?: unknown
+        form_schema?: unknown
+      } | undefined
+      const activeVersionId = typeof versionRow?.active_version_id === 'string'
+        ? versionRow.active_version_id
+        : ''
+      if (!activeVersionId || activeVersionId !== sourceTemplateVersionId) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'FWB_SOURCE_VERSION_STALE', message: 'The active approval template version changed' },
+        })
+      }
+      const rawSchema = typeof versionRow?.form_schema === 'string'
+        ? (() => { try { return JSON.parse(versionRow.form_schema as string) as unknown } catch { return null } })()
+        : versionRow?.form_schema
+      const schema = rawSchema && typeof rawSchema === 'object' && !Array.isArray(rawSchema)
+        ? rawSchema as { fields?: unknown }
+        : null
+      const sourceFieldIds = new Set(
+        (Array.isArray(schema?.fields) ? schema.fields : [])
+          .map((field) => field && typeof field === 'object' && !Array.isArray(field)
+            ? (field as { id?: unknown }).id
+            : null)
+          .filter((id): id is string => typeof id === 'string' && /[!-~]/.test(id)),
+      )
+      if (confirmedMappings.some((mapping) => !sourceFieldIds.has(mapping.formFieldId))) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'FWB_SOURCE_SCHEMA_STALE', message: 'The approval form schema changed' },
+        })
+      }
+
+      const targetFields = new Map<string, { type: string; property: unknown }>()
+      for (const row of fieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
+        if (typeof row.id === 'string' && typeof row.type === 'string') {
+          targetFields.set(row.id, { type: row.type, property: row.property })
+        }
+      }
+      for (const mapping of confirmedMappings) {
+        const field = targetFields.get(mapping.targetFieldId)
+        if (!field || !isFwbTargetFieldTypeCompatible(field.type, mapping.targetType)) {
+          return res.status(409).json({
+            ok: false,
+            error: { code: 'FWB_TARGET_SCHEMA_STALE', message: 'The target sheet schema changed' },
+          })
+        }
+        if (mapping.targetType === 'select') {
+          const property = typeof field.property === 'string'
+            ? (() => { try { return JSON.parse(field.property) as Record<string, unknown> } catch { return {} } })()
+            : (field.property && typeof field.property === 'object'
+                ? field.property as Record<string, unknown>
+                : {})
+          const options = Array.isArray(property.options) ? property.options : []
+          const allowed = new Set(
+            options
+              .map((option) => option && typeof option === 'object'
+                ? (option as { value?: unknown }).value
+                : undefined)
+              .filter((value): value is string => typeof value === 'string'),
+          )
+          if ((mapping.selectOptions ?? []).some((option) => !allowed.has(option))) {
+            return res.status(409).json({
+              ok: false,
+              error: { code: 'FWB_TARGET_SCHEMA_STALE', message: 'The target sheet schema changed' },
+            })
+          }
+        }
+      }
+
+      const confirmationHash = deriveFwbConfirmationHash({
+        templateId,
+        sourceTemplateVersionId,
+        targetBaseId,
+        targetSheetId: sheetId,
+        mappings: confirmedMappings,
+      })
+
+      const auditMetadata = {
+        templateId,
+        sourceTemplateVersionId,
+        targetBaseId,
+        targetSheetId: sheetId,
+        formFieldIds: confirmedMappings.map((mapping) => mapping.formFieldId),
+        targetFieldIds: confirmedMappings.map((mapping) => mapping.targetFieldId),
+        confirmationHash,
+      }
+      await pool.query(
+        `INSERT INTO operation_audit_logs
+           (actor_id, actor_type, action, resource_type, resource_id, metadata, meta)
+         VALUES ($1, 'user', 'automation.fwb_confirm', 'automation_fwb_confirmation', $2, $3::jsonb, $3::jsonb)`,
+        [authoringUserId, sheetId, JSON.stringify(auditMetadata)],
+      )
+
+      // Values-free response: identifiers + server hash only (Q6: 审计只记标识不记值).
+      return res.json({
+        confirmationHash,
+        templateId,
+        sourceTemplateVersionId,
+        targetSheetId: sheetId,
+        targetBaseId,
+      })
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : ''
+      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: {
+          code: transient ? 'DB_NOT_READY' : 'FWB_CONFIRM_FAILED',
+          message: transient ? 'Service temporarily unavailable' : 'Failed to derive confirmation hash',
+        },
+      })
+    }
+  })
 
   // ── Test run ────────────────────────────────────────────────────────────
 

@@ -32,6 +32,13 @@ export interface ProductFeatures {
    * session value or the existing authorized development override.
    */
   approvalCanvasV2: boolean
+  /**
+   * FWB production authoring (`write_approval_form_values` / create-from-approval). Mirrors the
+   * backend APPROVAL_FWB_WRITEBACK_ENABLED master flag (default OFF). The automation rule editor
+   * offers NEW FWB actions only when this is true AND the trigger is approval.completed; a
+   * previously persisted FWB action remains visible as read-only while the flag is off.
+   */
+  approvalFwbWriteback: boolean
   mode: ProductMode
 }
 
@@ -65,6 +72,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalMobile: false,
   approvalAttachments: false,
   approvalCanvasV2: false,
+  approvalFwbWriteback: false,
   mode: 'platform',
 }
 
@@ -200,6 +208,12 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.approval_canvas_v2 === 'boolean'
           ? featuresNode.approval_canvas_v2
           : undefined,
+    approvalFwbWriteback:
+      typeof featuresNode.approvalFwbWriteback === 'boolean'
+        ? featuresNode.approvalFwbWriteback
+        : typeof featuresNode.approval_fwb_writeback === 'boolean'
+          ? featuresNode.approval_fwb_writeback
+          : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -314,6 +328,12 @@ function resolveFeatures(
     backend.approvalCanvasV2,
   )
 
+  // FWB authoring: same default-OFF discipline — only an explicit backend/override boolean enables it.
+  const approvalFwbWriteback = boolOrDefault(
+    override.approvalFwbWriteback,
+    backend.approvalFwbWriteback,
+  )
+
   return {
     attendance,
     workflow,
@@ -323,6 +343,7 @@ function resolveFeatures(
     approvalMobile,
     approvalAttachments,
     approvalCanvasV2,
+    approvalFwbWriteback,
     mode,
   }
 }
