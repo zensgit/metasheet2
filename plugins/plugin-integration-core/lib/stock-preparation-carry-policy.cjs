@@ -130,7 +130,18 @@ class StockPreparationCarryPolicyError extends Error {
   }
 }
 
+// Runtime consumer of the frozen reason vocabulary: every reason this module can throw
+// MUST be declared in CARRY_POLICY_ERROR_REASONS. A fail('SOME_NEW_REASON') that skips the
+// vocabulary trips here instead of silently emitting an undeclared reason — so the closed
+// vocabulary is fail-closed at runtime, not documentation-only.
+const CARRY_POLICY_ERROR_REASON_SET = new Set(CARRY_POLICY_ERROR_REASONS)
 function fail(reason, message, details) {
+  if (!CARRY_POLICY_ERROR_REASON_SET.has(reason)) {
+    throw new Error(
+      `stock-preparation-carry-policy internal: undeclared error reason "${reason}" ` +
+        '(add it to the frozen CARRY_POLICY_ERROR_REASONS vocabulary)',
+    )
+  }
   throw new StockPreparationCarryPolicyError(reason, message, details)
 }
 

@@ -72,8 +72,51 @@ function frozenVocabularies() {
     'carry_reattach_requires_confirm',
     'carry_conflicting_source_content',
   ])
-  // Every conflictType the module can emit is in the frozen conflict vocabulary.
-  assert.ok(CARRY_POLICY_ERROR_REASONS.includes('UNKNOWN_CONFLICT_TYPE'), 'UNKNOWN_CONFLICT_TYPE is a declared error reason')
+  // EXACT-pin the error-reason vocabulary too (mirror CARRY_CONFLICT_TYPES): dropping OR
+  // adding any reason fails closed. Prior `.includes('UNKNOWN_CONFLICT_TYPE')` let a silent
+  // removal (e.g. UNSUPPORTED_DECISION) stay green (round-4 review). fail() also enforces
+  // this set at runtime, so this pin + that guard are the two layers.
+  assert.deepEqual([...CARRY_POLICY_ERROR_REASONS], [
+    'CARRY_POLICY_NOT_OBJECT',
+    'UNKNOWN_CARRY_KEY',
+    'UNKNOWN_MANUAL_ROW_REATTACH',
+    'UNKNOWN_CARRY_POLICY_KEY',
+    'NEW_ADD_ROW_INVALID',
+    'MISSING_IDEMPOTENCY_KEY',
+    'MISSING_COMPONENT_SOURCE_ID',
+    'PREV_ROWS_INVALID',
+    'HUMAN_FIELD_WHITELIST_DRIFT',
+    'CARRY_CONFIRM_SHAPE_VIOLATION',
+    'AMBIGUITY_MUST_HOLD',
+    'UNSUPPORTED_DECISION',
+    'UNKNOWN_CONFLICT_TYPE',
+  ])
+}
+
+// Round-4 review P3: the out-of-vocab conflictType branch must fail with COARSE details —
+// it must NOT echo the offending value back into the thrown error. Without this test the
+// coarse-details fix is regressible (reverting to fail(..., { conflictType }) stayed green).
+function manualConfirmOutOfVocabIsCoarse() {
+  const SMUGGLED = 'carry_smuggled_secret_value'
+  let caught = null
+  try {
+    __internals.makeManualConfirm(
+      { idempotencyKey: 'k-1', componentSourceId: 'c-1' },
+      { carryKey: 'component_source_id', manualRowReattach: 'none' },
+      SMUGGLED,
+      2,
+    )
+  } catch (err) {
+    caught = err
+  }
+  assert.ok(caught, 'out-of-vocab conflictType must throw')
+  assert.equal(caught.reason, 'UNKNOWN_CONFLICT_TYPE')
+  // COARSE: details carries no fields (no echo of the smuggled value anywhere).
+  assert.deepEqual(caught.details, {}, 'thrown details must be coarse (empty)')
+  assert.ok(
+    !JSON.stringify({ m: caught.message, d: caught.details }).includes(SMUGGLED),
+    'the offending conflictType value must never appear in the thrown error',
+  )
 }
 
 function policyNormalization() {
@@ -422,6 +465,7 @@ function sameKeyConflictingContentHolds() {
 
 function main() {
   frozenVocabularies()
+  manualConfirmOutOfVocabIsCoarse()
   sameKeyConflictingContentHolds()
   policyNormalization()
   inputValidation()

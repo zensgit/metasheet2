@@ -381,7 +381,7 @@ export interface MultitableProvisioningAPI {
     projectId: string
     objectId: string
     fieldIds: string[]
-  }): Promise<Record<string, { name: string; type: string; property: Record<string, unknown> }>>
+  }): Promise<Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }>>
   // W2: additive-only field provisioning (ON CONFLICT DO NOTHING) — adds missing
   // template columns to an already-provisioned object without overwriting existing ones.
   ensureMissingObjectFields(input: {

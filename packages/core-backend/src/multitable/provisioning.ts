@@ -602,22 +602,29 @@ export type ReadObjectFieldsContentInput = {
 // unchanged — a runtime positive control on top of the DO-NOTHING primitive.
 export async function readObjectFieldsContent(
   input: ReadObjectFieldsContentInput,
-): Promise<Record<string, { name: string; type: string; property: Record<string, unknown> }>> {
+): Promise<Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }>> {
   const sheetId = getObjectSheetId(input.projectId, input.objectId)
   const pairs = (input.fieldIds ?? []).map((logical) => ({
     logical,
     physical: stableMetaId('fld', input.projectId, input.objectId, logical),
   }))
-  const out: Record<string, { name: string; type: string; property: Record<string, unknown> }> = {}
+  const out: Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }> = {}
   if (pairs.length === 0) return out
+  // Snapshot the full column IDENTITY of an existing field: name/type/property AND
+  // `order` (the only other mutable, schema-affecting column). This is the before/after
+  // positive control behind assertNoExistingFieldMutated — it must cover every column a
+  // renumbering write could touch, so the "never touch a pre-existing column" contract is
+  // literally true even if the wired write primitive later stops being append-only.
+  // `updated_at` is intentionally excluded: it is a housekeeping timestamp, not column
+  // identity, and would false-positive on any legitimate re-touch.
   const res = await input.query(
-    `SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
+    `SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
     [sheetId, pairs.map((pair) => pair.physical)],
   )
   const byPhysical = new Map(
-    (res.rows as { id: unknown; name: unknown; type: unknown; property: unknown }[]).map((row) => [
+    (res.rows as { id: unknown; name: unknown; type: unknown; property: unknown; order: unknown }[]).map((row) => [
       String(row.id),
-      { name: String(row.name), type: String(row.type), property: normalizeJson(row.property) },
+      { name: String(row.name), type: String(row.type), property: normalizeJson(row.property), order: Number(row.order) },
     ]),
   )
   for (const pair of pairs) {

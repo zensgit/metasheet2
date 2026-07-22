@@ -92,6 +92,22 @@ W2 首版推送后经独立审阅(codex,exact head 8e107),抓出 **4 个真缺�
 
 教训升级:**动核心+跨包接线的刀,推送前必过独立对抗审**——本刀跳过首审,连吃两轮 HOLD。
 
+**第三轮审阅(codex,HOLD)——旧 1P1+2P2 闭合,又 4 个新 P2 + 1 MD,全修(head 9192601):**
+- **P2(repair 无既有列前后内容快照)**:上一轮只复核「缺列补回」,未证「既有列 name/type/property 未被动过」——DO NOTHING 只是 SQL 意图,无运行时正控。修:新增 DB-backed `readObjectFieldsContent`(逐既有字段读 name/type/property)+ `assertNoExistingFieldMutated(before,after)`,repair 前后各快照一次,任何漂移 → `REPAIR_MUTATED_EXISTING_FIELD`(MVP+canonical 双路);变异「禁用守卫」→ 红。
+- **P2(MVP 完整性复核无承重测试)**:MVP_REPAIR_INCOMPLETE 无红探针 → 可能空转。修:加 INCOMPLETE + MUTATED 探针;变异「stillMissing 直通」→ 红。
+- **P2(scope 测试未钉「检查先于 delegate」)**:仅证 hook 被调,未证**写 DB 之前**被调。修:拒绝型 hook + 断言三新方法 delegate 调用数 = 0;变异「先写 DB 后 assertObjectScope」→ 红。
+- **P2(P4 闭词表第二层漂移)**:`UNKNOWN_CONFLICT_TYPE` 不在 `CARRY_POLICY_ERROR_REASONS`;`CARRY_CONFLICT_TYPES` 无 exact-vocab 测试(偷加第 4 值仍绿);错误 details 回显传入的未知 conflictType。修:入错误词表 + `deepEqual` exact-vocab 测试(变异偷加第 4 值→红)+ `makeManualConfirm` details 改 coarse(不 echo 值)。
+- **MD**:execution-plan 承诺 evidence 带 `addedFields`(字段清单),实现只发 `addedFieldCount` → 统一为 count(values-free);快照机制描述从 compute-only `resolveFieldIds` 改为 DB-backed `readObjectFieldsContent`。
+
+**第三轮验证边界**:四修全部本地 mutation-verified load-bearing(内容快照/MVP stillMissing/scope reorder/exact-vocab 各红),type-check 0 error、CJS 链 103/103、scope 单测 11/11、4 realdb 15/15;已 commit+push(9192601)。
+
+**第四轮:独立对抗审(本机 3-lens workflow,worktree 隔离,refute-first)——1 P3 + 2 NIT,全修:**
+- **P3(coarse-details 修复无承重测试)**:上一轮把 `makeManualConfirm` details 改 coarse(不 echo 传入 conflictType),但无测试钉住 → 变异「改回 `{ conflictType }`」仍绿,可静默回退。修:加 `manualConfirmOutOfVocabIsCoarse` 测试(越词表 → `details` deepEqual `{}` + 断言 smuggled 值不出现在 message/details);变异回显 → 红。
+- **NIT(CARRY_POLICY_ERROR_REASONS 仅 .includes-pin,无运行时消费者)**:删任一 reason(如 UNSUPPORTED_DECISION)仍绿,「闭词表」只是文档。修:(a)`fail()` 运行时校验 reason ∈ 冻结表(13/13 调用点已核对全在表内,越表 → 内部错;冻结表现有真运行时消费者、fail-closed),(b)加 `deepEqual` exact-pin 测试;变异删 reason → 红。
+- **NIT(既有列快照只覆盖 name/type/property,漏 mutable `order` 列)**:契约称「既有列一列不动」但快照少一列 → 若未来 write-primitive 改为 renumber,order 漂移可静默过关(当前 wired 写是 append-only DO NOTHING,latent 非 live)。修:`readObjectFieldsContent` SELECT + 比较加 `"order"`(`updated_at` 故意排除=housekeeping 时间戳);探针 order-change → THROW、identical → 不抛;realdb scoped-repair 仍 1/1 绿(DO NOTHING 下 order 不变、不误报)。
+
+**第四轮验证边界**:三修全部 mutation-verified load-bearing;合并电池(F1 target+mvp/F2/F3/F4a exact-vocab/F4b reasons-drift/F4c coarse-echo/Fix-C order)全红或 throw;type-check 0 error、CJS 链 103/103、scope 单测 11/11、realdb scoped-repair 1/1。**note**:workflow 的 test-load-bearing lens 因子代理登录基建错(`Not logged in`)未返回,但其覆盖已由 guard-correctness lens(两 CJS 套件 node --test 全过 + 直探 assertNoExistingFieldMutated)+ 我本机对 F1/F2/F3/F4 的逐一变异证实补齐。**至此本刀独立审 clean,可提请 owner 侧第 4 轮短复审并在通过后开 W3。**
+
 ## 6. 验证纪律记录
 
 - **独立对抗审阅**:两份计划先经 Fable5 独立审(refute-first,对 origin/main 逐 file:line),打掉我 2 个基于陈旧注释/记忆的 P1 前提(P0 已接线、drift 单向),6 个 P2 缺口全吸收进 rev-2。**教训**:「对旧基点断言把已落地写成 gap」再次自证,已入台账。
