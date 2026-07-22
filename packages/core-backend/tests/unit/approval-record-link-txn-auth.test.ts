@@ -282,6 +282,21 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
     await expect(userHasApprovalsWriteOnQuery(dbWrite, 'u1')).resolves.toBe(true)
   })
 
+  it('userHasApprovalsWriteOnQuery: users.is_admin is DB authority without a user_roles admin row', async () => {
+    const profileAdmin = vi.fn(async (sql: string) => {
+      const q = sql.replace(/\s+/g, ' ').trim()
+      if (q.startsWith('SELECT role, department, is_admin, is_active FROM users')) {
+        return { rows: [{ role: 'user', is_admin: true, is_active: true }] }
+      }
+      if (q.startsWith('SELECT ur.role_id, r.name FROM user_roles')) return { rows: [] }
+      return routeAuthSql(sql, {
+        codes: { rows: [] },
+        legacy: { rows: [{ permissions: [] }] },
+      })
+    })
+    await expect(userHasApprovalsWriteOnQuery(profileAdmin, 'u1')).resolves.toBe(true)
+  })
+
   it('lockRecordLinkAuthorityRowsOnQuery locks every consumed source in deterministic order', async () => {
     const kinds: string[] = []
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -338,6 +353,8 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       baseId: 'b1',
       sheetId: 's1',
     })
+    // Shared authority locks no longer make an interleaved phase order deadlock, so this exact
+    // structural assertion is the load-bearing guard against silently reordering the phases.
     expect(kinds).toEqual([...RECORD_LINK_AUTHORITY_LOCK_ORDER])
   })
 

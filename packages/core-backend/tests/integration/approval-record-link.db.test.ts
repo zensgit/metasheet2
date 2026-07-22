@@ -408,6 +408,97 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     }
   })
 
+  it('templates without record-link fields accept a DB users.is_admin actor at the final boundary', async () => {
+    const pool = poolManager.get()
+    const key = `rl-no-link-admin-${TS}`
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', name: 's', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          name: 'a',
+          config: {
+            assigneeSources: [{ kind: 'static_user', userIds: [FILLER] }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', name: 'e', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'end' },
+      ],
+    }
+    const created = await req(base, '/api/approval-templates', adminTok, {
+      method: 'POST',
+      body: {
+        key,
+        name: key,
+        formSchema: { fields: [{ id: 'note', type: 'text', label: 'Note' }] },
+        approvalGraph: graph,
+      },
+    })
+    expect(created.status, await created.clone().text()).toBe(201)
+    const templateId = ((await created.json()) as { id: string }).id
+    const published = await req(base, `/api/approval-templates/${templateId}/publish`, adminTok, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(published.status, await published.clone().text()).toBe(200)
+
+    const previousUser = (await pool.query(
+      `SELECT role, is_admin FROM users WHERE id = $1`,
+      [FILLER],
+    )).rows[0] as { role: string; is_admin: boolean } | undefined
+    const hadAdminRole = Number((await pool.query(
+      `SELECT count(*)::int AS count FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [FILLER],
+    )).rows[0]?.count ?? 0) > 0
+    try {
+      await pool.query(
+        `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:write'`,
+        [FILLER],
+      )
+      await pool.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [FILLER])
+      if (previousUser) {
+        await pool.query(`UPDATE users SET is_admin = true, role = 'user' WHERE id = $1`, [FILLER])
+      } else {
+        await pool.query(
+          `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+           VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, true, true)`,
+          [FILLER, `${FILLER}@test.local`],
+        )
+      }
+      const allowed = await req(base, '/api/approvals', fillerTok, {
+        method: 'POST',
+        body: { templateId, formData: { note: 'db admin is authoritative' } },
+      })
+      expect(allowed.status, await allowed.clone().text()).toBe(201)
+    } finally {
+      if (previousUser) {
+        await pool.query(
+          `UPDATE users SET is_admin = $2, role = $3 WHERE id = $1`,
+          [FILLER, previousUser.is_admin, previousUser.role],
+        )
+      } else {
+        await pool.query(`DELETE FROM users WHERE id = $1`, [FILLER])
+      }
+      if (hadAdminRole) {
+        await pool.query(
+          `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+          [FILLER],
+        )
+      }
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:write')
+         ON CONFLICT DO NOTHING`,
+        [FILLER],
+      )
+    }
+  })
+
   it('record-permission PUT observes an in-flight actor revoke before writing', async () => {
     const pool = poolManager.get()
     // Make canManageSheetAccess depend only on the sheet-scoped row. This catches a partial fix

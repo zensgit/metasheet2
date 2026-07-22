@@ -12,9 +12,10 @@
  * permission/admin/owner/scope read goes through the supplied `QueryFn` with **no global cache**.
  * This module does NOT reintroduce weaker global-pool base-read wrappers.
  *
- * Constant-shape (P2): missing base / missing sheet / mismatch / unreadable always execute the
- * same ordered stages (base lookup + admin + permission codes + owner eval + sheet scope), so
- * query depth cannot form an existence oracle. Evaluation may fail closed after stages complete.
+ * Core authority shape (P2): missing base / missing sheet / mismatch / unreadable always execute
+ * the same ordered authority stages (base lookup + admin + permission codes + owner eval + sheet
+ * scope). The system-owned projection fence may add read-plane probes for a non-admin target;
+ * callers must not treat query count as an existence-hiding boundary. Evaluation fails closed.
  */
 import {
   BASE_READ_PERMISSION_CODES,
@@ -119,7 +120,7 @@ export async function listUserPermissionsOnQuery(
 }
 
 /**
- * Deterministic lock order for every DB authority source the record-link create final path
+ * Deterministic lock order for every DB write-authority source the record-link create final path
  * actually consumes (readers: isAdminOnQuery, listUserPermissionsOnQuery,
  * resolveBaseReadableForUserOnQuery, resolveSheetCapabilitiesForUserOnQuery /
  * loadSheetPermissionScopeMap, sheet membership via meta_sheets).
@@ -144,6 +145,10 @@ export async function listUserPermissionsOnQuery(
  *
  * Single-target `lockRecordLinkAuthorityRowsOnQuery` remains the convenience wrapper
  * (publish one pin, revoke writers) and uses the same phase order for one target.
+ *
+ * The projection participant read also consults meta_records, but it can only restore read/export
+ * capability; it never restores create/edit/manage authority. The create path separately locks
+ * and rechecks each selected target row. It is intentionally outside this authority lock list.
  *
  * Fail-closed: lock errors on core tables rethrow. Only undefined-table (42P01) for the
  * optional platform_member_group_members relation is soft. Final create write is DB/admin only.
@@ -498,6 +503,44 @@ function hasApprovalsWriteCode(codes: readonly string[]): boolean {
   )
 }
 
+type ApprovalDbIdentity = {
+  user: {
+    role?: unknown
+    department?: unknown
+    is_admin?: unknown
+    is_active?: unknown
+  } | undefined
+  roles: Set<string>
+}
+
+/** One DB identity source for both final approvals:write and template visibility. */
+async function loadApprovalDbIdentityOnQuery(query: QueryFn, uid: string): Promise<ApprovalDbIdentity> {
+  const userResult = await query(
+    `SELECT role, department, is_admin, is_active
+     FROM users
+     WHERE id = $1`,
+    [uid],
+  )
+  const user = userResult.rows[0] as ApprovalDbIdentity['user']
+  const roles = new Set<string>()
+  if (typeof user?.role === 'string' && user.role.trim()) roles.add(user.role.trim())
+  // A present disabled profile is authoritative; do not let stale normalized roles revive it.
+  if (user?.is_active === false) return { user, roles }
+
+  const roleResult = await query(
+    `SELECT ur.role_id, r.name
+     FROM user_roles ur
+     LEFT JOIN roles r ON r.id = ur.role_id
+     WHERE ur.user_id = $1`,
+    [uid],
+  )
+  for (const row of roleResult.rows as Array<{ role_id?: unknown; name?: unknown }>) {
+    if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
+    if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
+  }
+  return { user, roles }
+}
+
 /**
  * approvals:write at the final write boundary (txn-local DB/admin only).
  *
@@ -518,7 +561,17 @@ export async function userHasApprovalsWriteOnQuery(
 ): Promise<boolean> {
   const uid = userId.trim()
   if (!uid) return false
-  if (await isAdminOnQuery(query, uid)) return true
+  // Match the DB-backed admin identities used by the template-visibility boundary and route
+  // actor: users.is_admin, legacy users.role, user_roles role id, or joined role name. The actor
+  // authority rows are already locked before this final check, so none of these reads can retain
+  // a concurrently revoked admin grant.
+  try {
+    const identity = await loadApprovalDbIdentityOnQuery(query, uid)
+    if (identity.user?.is_active === false) return false
+    if (identity.user?.is_admin === true || identity.roles.has('admin')) return true
+  } catch {
+    // Fall through to explicit DB permission codes. Any read failure remains fail-closed.
+  }
   const codes = await listUserPermissionsOnQuery(query, uid)
   return hasApprovalsWriteCode(codes)
 }
@@ -546,34 +599,10 @@ export async function loadApprovalTemplateVisibilityActorOnQuery(
   if (!uid) return null
 
   try {
-    const userResult = await query(
-      `SELECT role, department, is_admin, is_active
-       FROM users
-       WHERE id = $1`,
-      [uid],
-    )
-    const user = userResult.rows[0] as {
-      role?: unknown
-      department?: unknown
-      is_admin?: unknown
-      is_active?: unknown
-    } | undefined
+    const { user, roles } = await loadApprovalDbIdentityOnQuery(query, uid)
     // A missing profile is valid for dev/external identities, but a present disabled profile is
     // authoritative and must not retain template visibility through role/permission rows.
     if (user?.is_active === false) return null
-    const roleResult = await query(
-      `SELECT ur.role_id, r.name
-       FROM user_roles ur
-       LEFT JOIN roles r ON r.id = ur.role_id
-       WHERE ur.user_id = $1`,
-      [uid],
-    )
-    const roles = new Set<string>()
-    if (typeof user?.role === 'string' && user.role.trim()) roles.add(user.role.trim())
-    for (const row of roleResult.rows as Array<{ role_id?: unknown; name?: unknown }>) {
-      if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
-      if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
-    }
 
     const permissions = await listUserPermissionsOnQuery(query, uid)
     const isTemplateManager = user?.is_admin === true

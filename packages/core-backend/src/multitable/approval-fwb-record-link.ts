@@ -177,7 +177,7 @@ export async function probeRecordLinkSubmitAuthConstantShape(
       await deps.lockRowAuth(input.sheetId, input.recordId)
     }
 
-    // Membership under lock (meta_sheets already FOR UPDATE when lockAuthorityRows ran).
+    // Membership under lock (meta_sheets already FOR SHARE when lockAuthorityRows ran).
     push('sheet_membership')
     const membershipOk = await deps.sheetBelongsToBase(input.sheetId, input.baseId)
 
