@@ -1434,6 +1434,22 @@
               </div>
             </div>
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.setup)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.setup)"
+              data-attendance-setup-readiness-section
+            >
+              <AttendanceSetupReadiness
+                :tr="tr"
+                :steps="setupReadinessSteps"
+                :summary="setupReadinessSummary"
+                :load-state="setupReadinessState"
+                :viewer-is-platform-admin="setupViewerIsPlatformAdmin"
+                @select-section="selectAdminSection"
+                @reload="loadSetupReadiness(normalizedOrgId())"
+              />
+            </div>
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes)"
@@ -9712,6 +9728,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
+import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
 import AttendanceCalendarPolicyQuickAdd from './attendance/AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
@@ -9727,7 +9744,7 @@ import {
   toPayloadSteps as toApprovalPayloadSteps,
   type AttendanceApprovalStep as AttendanceApprovalStepModel,
 } from './attendance/attendanceApprovalSteps'
-import { useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
+import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
@@ -9840,6 +9857,7 @@ import {
   useAttendanceAdminRail,
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
+import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
   applyPayrollSummaryFieldsToConfig,
   buildPayrollSummaryFieldOptionsFromReportFields,
@@ -14396,6 +14414,56 @@ function hasExplicitAdminSectionTarget(): boolean {
 const adminTaskHomeOpen = ref(!hasExplicitAdminSectionTarget())
 const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHomeOpen.value)
 
+// W4-1 (Wave 4 onboarding design-lock §6/§9 W4-1): seven-step setup-readiness wizard shell.
+// The composable owns fetch/state; this parent only wires load triggers + canonical navigation
+// (charter §6.2 "暂留父层: section 权限过滤、active id、数据加载").
+const {
+  state: setupReadinessState,
+  steps: setupReadinessSteps,
+  summary: setupReadinessSummary,
+  needsAttention: setupReadinessNeedsAttention,
+  lastOrgId: setupReadinessLastOrgId,
+  loadReadiness: loadSetupReadiness,
+} = useAttendanceSetupReadiness()
+
+// §3① role contract (W4-1 强制): the step① remediation branches on the viewer being a PLATFORM
+// admin (the /api/admin/users surface is ensurePlatformAdmin-gated). Same client-side signal as
+// UserManagementView.vue's `adminAllowed` (useAuth().hasAdminAccess(), evaluated once at setup —
+// role claims are session-stable). Fail-closed: if the signal is unavailable (e.g. a partial
+// useAuth test double), the viewer is treated as a DELEGATED admin — contact-your-admin copy,
+// never a 403-bound entry.
+const setupViewerIsPlatformAdmin = typeof auth.hasAdminAccess === 'function' ? auth.hasAdminAccess() : false
+
+const setupSectionActive = computed(() =>
+  showAdminSectionWorkspace.value && adminActiveSectionId.value === ATTENDANCE_ADMIN_SECTION_IDS.setup,
+)
+
+// Load triggers (OD-W4-7: readiness is recomputed on every entry — no persisted wizard state):
+// entering the setup section always re-derives; opening the admin task home loads so the §6.1
+// readiness-derived "未完成" hint can render (never visit-history based). Charter §8.3 org 切换:
+// the badge/matrix must track the CURRENT org — a load fires whenever a readiness-consuming
+// surface (wizard section or task home) is on screen and the org changes, and re-opening the
+// task home refreshes when the loaded org no longer matches (org changed while it was closed).
+const setupTaskHomeVisible = computed(() =>
+  showAdmin.value && adminTaskHomeOpen.value && !adminForbidden.value,
+)
+
+watch(setupSectionActive, (active) => {
+  if (active) void loadSetupReadiness(normalizedOrgId())
+}, { immediate: true })
+
+watch(setupTaskHomeVisible, (open) => {
+  if (!open) return
+  const target = resolveAttendanceReadinessOrgId(normalizedOrgId())
+  if (shouldReloadSetupReadinessOnSurfaceOpen(setupReadinessState.value, setupReadinessLastOrgId.value, target)) {
+    void loadSetupReadiness(normalizedOrgId())
+  }
+}, { immediate: true })
+
+watch(orgId, () => {
+  if (setupSectionActive.value || setupTaskHomeVisible.value) void loadSetupReadiness(normalizedOrgId())
+})
+
 const {
   adminSectionBinding,
   scrollToAdminSection,
@@ -14490,10 +14558,20 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
     ),
     actions: [
       {
+        // W4-1 (design-lock §6.1): first action of the people-groups group. The light
+        // "未完成" hint is readiness-derived (§6.1/OD-W4-2(c): steps ①②③⑤ non-ready;
+        // advisory ④⑥ never trigger it) — NEVER visit-history based.
+        key: 'setup-readiness',
+        label: setupReadinessNeedsAttention.value
+          ? tr('Setup readiness · incomplete', '启用准备 · 未完成')
+          : tr('Setup readiness', '启用准备'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.setup,
+        primary: true,
+      },
+      {
         key: 'attendance-groups',
         label: tr('Attendance groups', '考勤组'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
-        primary: true,
       },
       {
         key: 'group-members',
