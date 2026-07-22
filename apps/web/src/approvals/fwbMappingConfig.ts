@@ -78,10 +78,24 @@ export function toExecutorMappings(
   targetFields: readonly TargetFieldInfo[],
 ): Array<{ formFieldId: string; targetFieldId: string; targetType: FwbTargetType; selectOptions?: readonly string[] }> {
   const tgt = new Map(targetFields.map((f) => [f.id, f]))
+  const seenTargets = new Set<string>()
   return draft.map((m) => {
     const t = tgt.get(m.targetFieldId)
     const targetType = t ? toFwbTargetType(t.type) : null
-    if (!t || !targetType || targetType === 'number') throw new RangeError('toExecutorMappings called on an unvalidated draft')
+    const invalidSelect = targetType === 'select' && (!t?.selectOptions || t.selectOptions.length === 0)
+    const duplicateTarget = seenTargets.has(m.targetFieldId)
+    if (
+      !m.formFieldId
+      || !m.targetFieldId
+      || !t
+      || !targetType
+      || targetType === 'number'
+      || invalidSelect
+      || duplicateTarget
+    ) {
+      throw new RangeError('toExecutorMappings called on an unvalidated draft')
+    }
+    seenTargets.add(m.targetFieldId)
     return {
       formFieldId: m.formFieldId,
       targetFieldId: m.targetFieldId,
