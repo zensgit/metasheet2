@@ -1,0 +1,50 @@
+name: Stock Preparation RC-A C-Stage Sidecar
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-preparation-rca-window-sidecar.yml'
+      - 'scripts/ops/build-stock-preparation-rca-window-sidecar.mjs'
+      - 'scripts/ops/build-stock-preparation-rca-window-sidecar.test.mjs'
+      - 'scripts/ops/stock-preparation-rca-window.ps1'
+      - 'scripts/ops/stock-preparation-rca-window-pm2-sample.mjs'
+      - 'scripts/ops/stock-preparation-rca-window-README.txt'
+      - 'scripts/ops/stock-preparation-prep-line-extended-smoke.mjs'
+      - 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Verify and stage the no-Git sidecar
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          node --test scripts/ops/build-stock-preparation-rca-window-sidecar.test.mjs
+          node scripts/ops/build-stock-preparation-rca-window-sidecar.mjs \
+            --source-sha "$SOURCE_SHA" \
+            --output-dir output/stock-preparation-rca-window-sidecar
+          package_dir="$(find output/stock-preparation-rca-window-sidecar -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          package_name="$(basename "$package_dir")"
+          (cd output/stock-preparation-rca-window-sidecar && zip -X -r "$package_name.zip" "$package_name")
+          sha256sum "output/stock-preparation-rca-window-sidecar/$package_name.zip" \
+            > "output/stock-preparation-rca-window-sidecar/$package_name.zip.sha256"
+      - name: Upload exact-SHA executable sidecar
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-preparation-rca-c-window-sidecar
+          path: |
+            output/stock-preparation-rca-window-sidecar/*.zip
+            output/stock-preparation-rca-window-sidecar/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
