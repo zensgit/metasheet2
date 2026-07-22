@@ -50,6 +50,7 @@ import {
   getObjectFieldId as getProvisionedObjectFieldId,
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
+  ensureMissingObjectFields as ensureMissingMultitableObjectFields,
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
@@ -518,6 +519,28 @@ export class MetaSheetServer {
                 projectId,
                 baseId,
                 descriptor,
+              })
+            })
+          },
+          // W2 template-evolution rung: ADDITIVE-ONLY missing-field provisioning
+          // (DO NOTHING) so an already-provisioned table can gain a new template
+          // column without the DO-UPDATE overwrite `ensureObject` would inflict.
+          ensureMissingObjectFields: async ({ projectId, objectId, fields }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMissingMultitableObjectFields({
+                query: txQuery,
+                projectId,
+                objectId,
+                fields,
               })
             })
           },

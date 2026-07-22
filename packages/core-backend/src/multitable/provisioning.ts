@@ -506,6 +506,56 @@ export async function createView(
   return { created: true, view }
 }
 
+export type EnsureMissingObjectFieldsInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fields: MultitableProvisioningFieldDescriptor[]
+}
+
+export type EnsureMissingObjectFieldsResult = {
+  addedFieldIds: string[]
+  skippedExistingFieldIds: string[]
+}
+
+// ADDITIVE-ONLY field primitive (general-prep W2 template-evolution rung). Unlike
+// `ensureFields` (INSERT ... ON CONFLICT DO UPDATE — it overwrites name/type/property/
+// order, which would destroy option-sync-written options and tenant renames on an
+// already-provisioned table), this uses ON CONFLICT (id) DO NOTHING — the createView
+// precedent. Existing field rows are CONSTRUCTIVELY untouchable: there is no UPDATE and
+// no DELETE statement in this function body, so "add-only, never mutate, never drop" is
+// guaranteed by the statement set itself, not by convention. Returns values-free evidence
+// (field ids + counts only). Physical ids are computed exactly as ensureObject does, so a
+// later template field lands on the same stable id an `ensure` would have used.
+export async function ensureMissingObjectFields(
+  input: EnsureMissingObjectFieldsInput,
+): Promise<EnsureMissingObjectFieldsResult> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const addedFieldIds: string[] = []
+  const skippedExistingFieldIds: string[] = []
+  const fields = input.fields ?? []
+  for (const [index, field] of fields.entries()) {
+    const physicalId = stableMetaId('fld', input.projectId, input.objectId, field.id)
+    const order = typeof field.order === 'number' ? field.order : index
+    const res = await input.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        physicalId,
+        sheetId,
+        field.name.trim(),
+        field.type,
+        JSON.stringify(buildFieldProperty(field)),
+        order,
+      ],
+    )
+    if ((res.rowCount ?? 0) > 0) addedFieldIds.push(physicalId)
+    else skippedExistingFieldIds.push(physicalId)
+  }
+  return { addedFieldIds, skippedExistingFieldIds }
+}
+
 export async function ensureObject(
   input: EnsureObjectInput,
 ): Promise<{
