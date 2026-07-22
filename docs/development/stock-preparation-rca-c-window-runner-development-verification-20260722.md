@@ -98,7 +98,7 @@ Local verification after the first adversarial correction:
 | --- | --- |
 | PM2 projection Node tests | 8/8 PASS |
 | PowerShell contract tests | 36/36 PASS |
-| PowerShell behavior tests | 26/26 PASS |
+| PowerShell behavior tests | 27/27 PASS |
 | Sidecar builder tests | 2/2 PASS |
 | Frozen extended + MVP + abort-provenance regressions | 95/95 PASS |
 | PowerShell parser | zero errors under the 5.1 grammar |

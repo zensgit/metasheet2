@@ -253,6 +253,7 @@ function Invoke-SmokeCapture {
 function Invoke-PhysicalReadback {
   param([SecureString]$Token, [string]$Origin, [string]$Tenant, [string]$Workspace, [string]$Salt)
   $script:MockReadbackCount++
+  if ($script:MockMode -eq 'readback-fails') { return $false }
   return $true
 }
 function Invoke-TokenLogout {
@@ -311,6 +312,15 @@ Check 'helper disappearance after ON cannot suppress the literal-false PM2 resta
   (@($script:MockRestarts) -join ',') -eq 'True,False' -and
   $script:MockFlag -eq $false -and
   $missingHelperDuringWindow.overallAcceptance -eq 'FAIL'
+)
+
+Reset-Mocks
+$script:MockMode = 'readback-fails'
+$readbackFailure = Invoke-RcaWindow -Root $opsDir -Origin 'http://127.0.0.1:8900' -Tenant 'tenant' -Workspace '' -ConfigPreflightPassed $true -ProvidedToken (Secure 'token-secret') -ProvidedConfig (Secure 'config-secret')
+Check 'a green smoke cannot pass when physical internal-row proof fails' (
+  $readbackFailure.overallAcceptance -eq 'FAIL' -and
+  $readbackFailure.failedStage -eq 'PHYSICAL_READ' -and
+  $readbackFailure.approvedSourceInternalRowsNonEmpty -eq 'FAIL'
 )
 
 Reset-Mocks
