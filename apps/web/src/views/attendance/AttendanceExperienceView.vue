@@ -40,10 +40,11 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import type { LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
+import { confirmAttendanceSetupPrefillLeave } from './attendanceSetupPrefillLeaveGuard'
 import AttendanceOverview from './AttendanceOverview.vue'
 import AttendanceReportsView from './AttendanceReportsView.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
@@ -66,6 +67,12 @@ const route = useRoute()
 const router = useRouter()
 const { hasFeature, loadProductFeatures } = useFeatureFlags()
 const { isZh } = useLocale()
+
+// W4-2 OD-W4-7② (切区确认 leg): an applied-but-unsaved template prefill lives in the admin
+// host's in-memory forms (AttendanceView). Leaving the /attendance route unmounts everything —
+// beforeunload never fires on SPA navigation, so ask here before vue-router proceeds.
+const setupPrefillLeaveTr = (en: string, zh: string): string => (isZh.value ? zh : en)
+onBeforeRouteLeave(() => confirmAttendanceSetupPrefillLeave(setupPrefillLeaveTr))
 
 const activeTab = ref<AttendanceTab>('overview')
 const featuresReady = ref(false)
@@ -252,6 +259,12 @@ function syncFromRoute(): void {
 
 async function selectTab(tab: AttendanceTab): Promise<void> {
   const nextTab = ensureTabAllowed(tab)
+  // W4-2 OD-W4-7② (切区确认 leg): switching top tabs swaps `component :is` and unmounts the
+  // admin host — an applied-but-unsaved template prefill would be discarded silently (no
+  // beforeunload, no route leave). Same confirm as the route-leave guard above.
+  if (nextTab !== activeTab.value && !confirmAttendanceSetupPrefillLeave(setupPrefillLeaveTr)) {
+    return
+  }
   activeTab.value = nextTab
 
   // Keep this page-level state isolated to `tab`.

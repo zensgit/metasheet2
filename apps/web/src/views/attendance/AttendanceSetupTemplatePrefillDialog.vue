@@ -6,25 +6,39 @@
   never claims anything is saved or active.
 
   Contract carried here (each leg has a spec in attendance-setup-templates.spec.ts):
-  - §5.2① 覆盖确认: the affected-field list (current → template value) renders BEFORE any write;
-    apply is an explicit button — never silent. A dirty-target warning appears when a target form
-    already差异于 pristine (unsaved edits or a selected existing record).
+  - §5.2① 覆盖确认: the affected-field list (current → template value) renders BEFORE any write
+    and lists EVERY field the apply step writes (the spec locks the complete row set); apply is an
+    explicit button — never silent. A dirty-target warning appears when a target form already差异
+    于 pristine (unsaved edits or a selected existing record).
   - §5.2② 快照/取消: stage 'applied' offers 「撤销预填（恢复原值）」 → parent restores the
-    snapshot byte-identically; stage 'confirm' 「取消」 applies nothing.
+    snapshot byte-identically; stage 'confirm' 「取消」 applies nothing. The undo affordance (and
+    its snapshot) lives ONLY while this dialog is open — the copy says so explicitly and never
+    promises recovery beyond it.
   - §5.2③ 只承诺已保存: the applied-stage copy says the values are written to the FORMS and NOT
     saved — saving happens on each form's own save button; the wizard saves nothing.
   - §5.2④ 时区: shows the org's explicit current value when resolvable; otherwise REQUIRES a user
     choice (apply stays disabled) — the browser timezone is never presented as the org timezone.
   - R4: the field-sales settings hint is a deep-link emit only (navigate) — no settings write.
+  - a11y: focus moves into the panel on open, Tab is trapped inside it, Esc performs the stage's
+    no-write close (confirm → cancel; applied → close-keep-prefill), and focus returns to the
+    opener on unmount. The applied stage always offers a side-effect-free 「关闭（保留预填）」
+    button (close without undoing and without navigating).
 -->
 <template>
-  <div class="setup-template-dialog" data-setup-template-dialog :data-setup-template-dialog-stage="stage">
+  <div
+    class="setup-template-dialog"
+    data-setup-template-dialog
+    :data-setup-template-dialog-stage="stage"
+    @keydown="handleKeydown"
+  >
     <div class="setup-template-dialog__backdrop" aria-hidden="true"></div>
     <div
+      ref="panelRef"
       class="setup-template-dialog__panel"
       role="dialog"
       aria-modal="true"
       aria-labelledby="attendance-setup-template-dialog-title"
+      tabindex="-1"
     >
       <h4 id="attendance-setup-template-dialog-title" class="setup-template-dialog__title">
         {{ stage === 'confirm'
@@ -46,8 +60,8 @@
           data-setup-template-dirty-warning
         >
           {{ tr(
-            'Note: a target form already has content (unsaved edits or a selected existing record). Applying overwrites the form content; Cancel changes nothing, and after applying you can still undo to restore the original values. Applying also switches both forms to create-new mode so saving will not overwrite an existing record.',
-            '注意：目标表单当前已有内容（未保存的编辑或已选中的现有记录）。应用会覆盖表单内容；「取消」不做任何修改，应用后也可「撤销预填」恢复原值。应用后两个表单将切换为新建模式，保存不会覆盖已有记录。',
+            'Note: a target form already has content (unsaved edits or a selected existing record). Applying overwrites the form content; Cancel changes nothing. After applying, "Undo prefill (restore original values)" is available ONLY while this dialog stays open — leaving the dialog (including via the go-to-form buttons) discards the snapshot, and the overwritten unsaved edits cannot be recovered. Applying also switches both forms to create-new mode so saving will not overwrite an existing record.',
+            '注意：目标表单当前已有内容（未保存的编辑或已选中的现有记录）。应用会覆盖表单内容；「取消」不做任何修改。应用后「撤销预填（恢复原值）」仅在本弹窗打开期间可用——离开弹窗（含「前往表单」按钮）即丢弃快照，被覆盖的未保存编辑将无法恢复。应用后两个表单将切换为新建模式，保存不会覆盖已有记录。',
           ) }}
         </p>
 
@@ -159,6 +173,12 @@
         <p class="setup-template-dialog__note" data-setup-template-applied-note>
           {{ appliedNote }}
         </p>
+        <p class="setup-template-dialog__hint" data-setup-template-undo-scope-note>
+          {{ tr(
+            '"Undo prefill" is available only while this dialog is open — closing or leaving it keeps the prefilled form values and discards the undo snapshot.',
+            '「撤销预填」仅在本弹窗打开期间可用——关闭或离开弹窗将保留已预填的表单值并丢弃撤销快照。',
+          ) }}
+        </p>
         <p v-if="template.rotationRuleHint" class="setup-template-dialog__hint" data-setup-template-rotation-hint>
           {{ pickLabel(template.rotationRuleHint) }}
         </p>
@@ -200,6 +220,14 @@
           >
             {{ tr('Undo prefill (restore original values)', '撤销预填（恢复原值）') }}
           </button>
+          <button
+            class="setup-template-dialog__btn"
+            type="button"
+            data-setup-template-close
+            @click="emit('close')"
+          >
+            {{ tr('Close (keep prefill)', '关闭（保留预填）') }}
+          </button>
         </div>
       </template>
     </div>
@@ -207,7 +235,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   ATTENDANCE_SETUP_GROUP_FORM_FIELDS,
   ATTENDANCE_SETUP_SHIFT_FORM_FIELDS,
@@ -242,6 +270,9 @@ const emit = defineEmits<{
   apply: []
   cancel: []
   undo: []
+  /** Applied-stage side-effect-free close: keep the prefilled forms (and the parent's
+   *  pending-unsaved tracker), discard only the dialog + its undo snapshot. */
+  close: []
   navigate: [sectionId: string]
   'update:timezone': [value: string]
   'update:shiftPresetKey': [value: string]
@@ -249,6 +280,63 @@ const emit = defineEmits<{
 
 const tr = props.tr
 const pickLabel = (label: AttendanceSetupTemplateLabel): string => tr(label.en, label.zh)
+
+// --- a11y: modal focus contract -------------------------------------------------------------
+// aria-modal only hides the background from assistive tech — it does not constrain the keyboard.
+// So: initial focus into the panel, Tab cycled inside it, Esc = the stage's no-write close, and
+// focus handed back to the opener when the dialog unmounts.
+const panelRef = ref<HTMLElement | null>(null)
+let previouslyFocusedElement: HTMLElement | null = null
+
+onMounted(() => {
+  previouslyFocusedElement =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null
+  panelRef.value?.focus()
+})
+
+onBeforeUnmount(() => {
+  previouslyFocusedElement?.focus()
+})
+
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), select:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+
+function handleKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    // Esc never writes and never navigates: confirm stage cancels (nothing was applied),
+    // applied stage closes keeping the prefill (same as the explicit close button).
+    if (props.stage === 'confirm') {
+      emit('cancel')
+    } else {
+      emit('close')
+    }
+    return
+  }
+  if (event.key !== 'Tab') return
+  const panel = panelRef.value
+  if (!panel) return
+  const focusable = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+  if (focusable.length === 0) {
+    event.preventDefault()
+    panel.focus()
+    return
+  }
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  const active = document.activeElement
+  const activeInPanel = active instanceof HTMLElement && panel.contains(active) && active !== panel
+  if (event.shiftKey) {
+    if (!activeInPanel || active === first) {
+      event.preventDefault()
+      last.focus()
+    }
+  } else if (!activeInPanel || active === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
 
 /** §5.2③ applied-stage copy — states what happened (values written to FORMS) and what did NOT
  *  (nothing saved, nothing activated); only saved resources are promised to persist (OD-W4-7). */
@@ -297,7 +385,10 @@ interface FieldChangeRow {
   next: string
 }
 
-/** §5.2① affected-field list: exactly the fields the apply step writes, current → template. */
+/** §5.2① affected-field list: exactly the fields the apply step writes (applySetupTemplate in
+ *  AttendanceView), current → template. Group: name/attendanceType/timezone. Shift: name/window/
+ *  timezone/grace/rounding/workingDays. Keep the two in lockstep — the spec locks the COMPLETE
+ *  row-key set, so dropping a row here (or adding an apply write without a row) turns it red. */
 const fieldChanges = computed<FieldChangeRow[]>(() => {
   const plan = props.plan
   if (!plan) return []
@@ -353,6 +444,13 @@ const fieldChanges = computed<FieldChangeRow[]>(() => {
         label: tr('Shift · late/early grace (minutes)', '班次 · 迟到/早退宽限（分钟）'),
         current: `${props.currentShift.lateGraceMinutes}/${props.currentShift.earlyGraceMinutes}`,
         next: `${plan.shift.lateGraceMinutes}/${plan.shift.earlyGraceMinutes}`,
+      },
+      {
+        form: 'shift',
+        field: 'rounding',
+        label: tr('Shift · rounding (minutes)', '班次 · 取整（分钟）'),
+        current: String(props.currentShift.roundingMinutes),
+        next: String(plan.shift.roundingMinutes),
       },
       {
         form: 'shift',

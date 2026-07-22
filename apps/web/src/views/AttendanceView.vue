@@ -1473,6 +1473,7 @@
                 @apply="applySetupTemplate"
                 @cancel="cancelSetupTemplateConfirm"
                 @undo="undoSetupTemplate"
+                @close="closeSetupTemplateDialogKeepPrefill"
                 @navigate="navigateSetupTemplate"
               />
             </div>
@@ -9757,6 +9758,7 @@ import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
+import { attendanceSetupPrefillPending } from './attendance/attendanceSetupPrefillLeaveGuard'
 import {
   buildAttendanceSetupTemplatePrefillPlan,
   captureAttendanceSetupPrefillSnapshot,
@@ -14630,6 +14632,13 @@ function cancelSetupTemplateConfirm(): void {
   setupTemplateDialog.value = null
 }
 
+function closeSetupTemplateDialogKeepPrefill(): void {
+  // Applied-stage side-effect-free close (a11y contract): keep the prefilled forms AND the
+  // pending-unsaved tracker (leave warnings stay armed); only the dialog and its undo snapshot
+  // are released — exactly what the dialog's undo-scope copy promises.
+  setupTemplateDialog.value = null
+}
+
 function undoSetupTemplate(): void {
   const dialog = setupTemplateDialog.value
   if (!dialog) return
@@ -14667,10 +14676,16 @@ function clearSetupTemplatePrefillPending(form: 'group' | 'shift'): void {
   setupTemplatePrefillPending.value = next
 }
 
-// OD-W4-7② 未保存离开提示: while an applied template prefill is unsaved, leaving the PAGE loses
-// it (the prefilled forms are in-memory only) — warn via beforeunload. In-app section switches
-// do NOT lose the forms (they live in this host across v-show sections), so no in-app confirm is
-// required. Template selection is never persisted (no localStorage draft), so OD-W4-7③'s
+// OD-W4-7② 未保存离开提示: while an applied template prefill is unsaved, THREE distinct ways of
+// leaving can lose it (the prefilled forms are in-memory only):
+//   1. page unload/refresh — the window beforeunload handler below;
+//   2. leaving the /attendance route (vue-router navigation to another top-level view) — covered
+//      by AttendanceExperienceView's onBeforeRouteLeave, which consults the shared
+//      attendanceSetupPrefillPending signal synced here;
+//   3. attendance-shell top-tab switches (overview/reports/admin/import swap `component :is`,
+//      unmounting this host) — AttendanceExperienceView.selectTab consults the same signal.
+// In-host admin SECTION switches lose nothing (sections are v-show in this host), so they need no
+// confirm. Template selection is never persisted (no localStorage draft), so OD-W4-7③'s
 // userId+orgId storage-key requirement is N/A by construction — the spec asserts zero
 // template-related storage writes instead.
 function handleSetupTemplateBeforeUnload(event: BeforeUnloadEvent): void {
@@ -14679,12 +14694,19 @@ function handleSetupTemplateBeforeUnload(event: BeforeUnloadEvent): void {
   event.returnValue = ''
 }
 
+watch(setupTemplatePendingTemplateId, (pendingId) => {
+  attendanceSetupPrefillPending.value = pendingId !== null
+})
+
 onMounted(() => {
   window.addEventListener('beforeunload', handleSetupTemplateBeforeUnload)
 })
 
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleSetupTemplateBeforeUnload)
+  // Host gone ⇒ the in-memory prefill is gone too: clear the shared in-app leave signal so a
+  // stale `true` can never block navigation after this host unmounts.
+  attendanceSetupPrefillPending.value = false
 })
 
 const {

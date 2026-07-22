@@ -21,14 +21,29 @@
 //        superset covers them; the named list below is the API-reachable subset; mutation
 //        target: a settings PUT from the wizard ⇒ red).
 //      - OD-W4-7: unsaved-prefill beforeunload warning (armed after apply, disarmed by undo and
-//        by the forms' own save paths); template selection is NEVER persisted (zero
-//        template-related storage writes — the storage-key-with-userId+orgId contract is N/A by
-//        construction because no local draft storage exists in this slice).
+//        by the forms' own save paths); the IN-APP leave confirm (route-leave + attendance-shell
+//        top-tab switch, via the shared attendanceSetupPrefillLeaveGuard signal); template
+//        selection is NEVER persisted (zero template-related storage writes — the
+//        storage-key-with-userId+orgId contract is N/A by construction because no local draft
+//        storage exists in this slice).
+//   4. dialog component (AttendanceSetupTemplatePrefillDialog.vue) rendered DIRECTLY in zh AND en
+//      (both stages, all copy branches) — §5.3 completion-claim negatives over the dialog surface
+//      itself, presence-anchored so neither leg can go skip-shaped green (W4-1 lesson, #3487).
+//   5. AttendanceExperienceView navigation seams (memory router + child stubs): the OD-W4-7②
+//      切区确认 legs — refusing the confirm keeps the tab/route, confirming proceeds, and no
+//      prompt fires without a pending prefill.
 // Wired into .github/workflows/attendance-web-guard.yml (run-list + both path filters).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import AttendanceSetupReadiness from '../src/views/attendance/AttendanceSetupReadiness.vue'
+import AttendanceSetupTemplatePrefillDialog from '../src/views/attendance/AttendanceSetupTemplatePrefillDialog.vue'
+import AttendanceExperienceView from '../src/views/attendance/AttendanceExperienceView.vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import {
+  attendanceSetupPrefillPending,
+  confirmAttendanceSetupPrefillLeave,
+} from '../src/views/attendance/attendanceSetupPrefillLeaveGuard'
 import { apiFetch } from '../src/utils/api'
 import {
   ATTENDANCE_SETUP_STEP_IDS,
@@ -64,6 +79,28 @@ vi.mock('../src/composables/usePlugins', () => ({
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: vi.fn(),
+}))
+
+// AttendanceExperienceView seam suite only (AttendanceView imports NONE of these, so the mounted
+// §5.2 suite is unaffected): stub the four heavy tab children and the feature-flag store so the
+// shell mounts fast and tab swaps are observable via data-testid markers.
+vi.mock('../src/stores/featureFlags', () => ({
+  useFeatureFlags: () => ({
+    hasFeature: () => true,
+    loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+  }),
+}))
+vi.mock('../src/views/attendance/AttendanceOverview.vue', () => ({
+  default: { name: 'AttendanceOverviewStub', template: '<div data-testid="attendance-overview">overview</div>' },
+}))
+vi.mock('../src/views/attendance/AttendanceReportsView.vue', () => ({
+  default: { name: 'AttendanceReportsStub', template: '<div data-testid="attendance-reports">reports</div>' },
+}))
+vi.mock('../src/views/attendance/AttendanceAdminCenter.vue', () => ({
+  default: { name: 'AttendanceAdminCenterStub', template: '<div data-testid="attendance-admin-center">admin-center</div>' },
+}))
+vi.mock('../src/views/attendance/AttendanceWorkflowDesigner.vue', () => ({
+  default: { name: 'AttendanceWorkflowDesignerStub', template: '<div data-testid="attendance-workflow-designer">workflow</div>' },
 }))
 
 function jsonResponse(status: number, payload: unknown): Response {
@@ -508,11 +545,15 @@ describe('AttendanceSetupReadiness shell — W4-2 gallery + ⑦ derivation', () 
     expect(item!.querySelector('[data-setup-checklist-remedy="template-shift-form"]')).toBeNull()
   })
 
-  it('§5.3 completion-claim negative on the FULL W4-2 surface — zh leg: no 已启用 / 已生效 anywhere (gallery + derivation + pending checklist item, both fixtures)', async () => {
+  it('§5.3 completion-claim negative on the FULL W4-2 surface — zh leg: no 已启用 / 已生效 anywhere (gallery + derivation + pending checklist item all PRESENT, both fixtures)', async () => {
     for (const data of [allReadyResponse(), mixedMissingResponse()]) {
       mount({ steps: okSteps(data), summary: data, pendingTemplateId: 'factory-multi-shift', tr: zhTr })
       await flushUi()
+      // Presence anchors — every surface the sweep claims to cover must actually be in the DOM,
+      // or the negative degrades to a vacuous pass when wiring drifts.
       expect(container!.querySelector('[data-setup-templates]')).toBeTruthy()
+      expect(container!.querySelector('[data-setup-preview-derivation]')).toBeTruthy()
+      expect(container!.querySelector('[data-setup-checklist-item="template-prefill"]')).toBeTruthy()
       const fullText = container!.textContent || ''
       expect(fullText).not.toContain('已启用')
       expect(fullText).not.toContain('已生效')
@@ -522,11 +563,13 @@ describe('AttendanceSetupReadiness shell — W4-2 gallery + ⑦ derivation', () 
     }
   })
 
-  it('§5.3 completion-claim negative — en leg: no "enabled"/"activated" completion claims anywhere (both fixtures)', async () => {
+  it('§5.3 completion-claim negative — en leg: no "enabled"/"activated" completion claims anywhere (same three surfaces PRESENT, both fixtures)', async () => {
     for (const data of [allReadyResponse(), mixedMissingResponse()]) {
       mount({ steps: okSteps(data), summary: data, pendingTemplateId: 'factory-multi-shift', tr: enTr })
       await flushUi()
       expect(container!.querySelector('[data-setup-templates]')).toBeTruthy()
+      expect(container!.querySelector('[data-setup-preview-derivation]')).toBeTruthy()
+      expect(container!.querySelector('[data-setup-checklist-item="template-prefill"]')).toBeTruthy()
       const fullText = (container!.textContent || '').toLowerCase()
       expect(fullText).not.toMatch(/\benabled\b/)
       expect(fullText).not.toMatch(/\bactivated\b/)
@@ -579,6 +622,7 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
   let container: HTMLDivElement | null = null
   let calls: RecordedCall[] = []
   let groupsFixture: () => unknown[]
+  let shiftsFixture: () => unknown[]
   let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
 
   const ORG_GROUP = {
@@ -592,6 +636,21 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     attendanceType: 'fixed_shift',
   }
 
+  // Every field deliberately differs from BOTH the pristine defaults and every template value, so
+  // a restore assertion over this record can never pass vacuously (finding: grace/rounding/
+  // workingDays previously had no non-default current value anywhere in the suite).
+  const ORG_SHIFT = {
+    id: 's1',
+    name: 'Night audit shift',
+    timezone: 'Asia/Shanghai',
+    workStartTime: '10:30',
+    workEndTime: '19:30',
+    lateGraceMinutes: 25,
+    earlyGraceMinutes: 20,
+    roundingMinutes: 15,
+    workingDays: [2, 3, 4, 5, 6],
+  }
+
   beforeEach(() => {
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -602,6 +661,8 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     window.history.replaceState({}, '', '/attendance')
     calls = []
     groupsFixture = () => [ORG_GROUP]
+    shiftsFixture = () => [ORG_SHIFT]
+    attendanceSetupPrefillPending.value = false
     vi.mocked(apiFetch).mockReset()
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
@@ -620,8 +681,15 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
       if (url.startsWith('/api/attendance/groups/') && method === 'PUT') {
         return jsonResponse(200, { ok: true, data: { ...ORG_GROUP } })
       }
+      if (url.startsWith('/api/attendance/shifts?')) {
+        const items = shiftsFixture()
+        return jsonResponse(200, { ok: true, data: { items, total: items.length } })
+      }
       if (url === '/api/attendance/shifts' && method === 'POST') {
         return jsonResponse(200, { ok: true, data: { id: 's-new' } })
+      }
+      if (url.startsWith('/api/attendance/shifts/') && method === 'PUT') {
+        return jsonResponse(200, { ok: true, data: { ...ORG_SHIFT } })
       }
       return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
     })
@@ -637,6 +705,7 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     }
     app = null
     container = null
+    attendanceSetupPrefillPending.value = false
   })
 
   async function mountWizard(): Promise<void> {
@@ -665,6 +734,8 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     return container!.querySelector<HTMLInputElement>('#attendance-shift-name')!
   }
 
+  /** EVERY field applySetupTemplate writes (plus both save-button labels = the editing posture),
+   *  so a before/after deepEqual can never pass on a partial restore. */
   function readFormState() {
     return {
       groupName: groupNameInput().value,
@@ -674,7 +745,12 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
       shiftStart: container!.querySelector<HTMLInputElement>('#attendance-shift-start')!.value,
       shiftEnd: container!.querySelector<HTMLInputElement>('#attendance-shift-end')!.value,
       shiftTimezone: container!.querySelector<HTMLSelectElement>('#attendance-shift-timezone')!.value,
+      shiftLateGrace: container!.querySelector<HTMLInputElement>('#attendance-shift-late-grace')!.value,
+      shiftEarlyGrace: container!.querySelector<HTMLInputElement>('#attendance-shift-early-grace')!.value,
+      shiftRounding: container!.querySelector<HTMLInputElement>('#attendance-shift-rounding')!.value,
+      shiftWorkingDays: container!.querySelector<HTMLInputElement>('#attendance-shift-working-days')!.value,
       groupSaveLabel: groupSaveButton().textContent?.trim(),
+      shiftSaveLabel: shiftSaveButton().textContent?.trim(),
     }
   }
 
@@ -685,6 +761,31 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     })
     expect(button, 'group save button').toBeTruthy()
     return button!
+  }
+
+  function shiftSaveButton(): HTMLButtonElement {
+    const button = Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find((b) => {
+      const text = b.textContent?.trim() || ''
+      return text === 'Create shift' || text === 'Update shift'
+    })
+    expect(button, 'shift save button').toBeTruthy()
+    return button!
+  }
+
+  /** Load the existing ORG_SHIFT record into the shift form (edit mode) — gives the shift leg a
+   *  non-pristine, non-template current state + a non-null shiftEditingId. */
+  async function selectExistingShift(): Promise<void> {
+    const cell = Array.from(container!.querySelectorAll('td')).find(
+      (td) => td.textContent?.trim() === 'Night audit shift',
+    )
+    expect(cell, 'ORG_SHIFT table row').toBeTruthy()
+    const edit = Array.from(cell!.closest('tr')!.querySelectorAll<HTMLButtonElement>('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    )
+    expect(edit, 'shift Edit button').toBeTruthy()
+    edit!.click()
+    await flushUi()
+    expect(shiftSaveButton().textContent?.trim()).toBe('Update shift')
   }
 
   it('覆盖确认 (§5.2①, mutation target: silent overwrite ⇒ red): the template click opens the confirm dialog and writes NOTHING until apply', async () => {
@@ -701,8 +802,25 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     expect(confirm!.getAttribute('data-setup-template-dialog-stage')).toBe('confirm')
     // Nothing applied yet — the forms are untouched while the dialog is open.
     expect(readFormState()).toEqual(before)
-    // Affected-field list renders (org timezone resolved from the saved group ⇒ plan exists).
+    // Affected-field list renders (org timezone resolved from the saved group ⇒ plan exists) and
+    // lists the COMPLETE apply-write field set — exactly the fields applySetupTemplate writes,
+    // in order, no omission (finding: roundingMinutes was written but unlisted).
     expect(confirm!.querySelector('[data-setup-template-field-changes]')).toBeTruthy()
+    expect(
+      Array.from(confirm!.querySelectorAll('[data-setup-template-field-change]')).map((el) =>
+        el.getAttribute('data-setup-template-field-change'),
+      ),
+    ).toEqual([
+      'group.name',
+      'group.attendanceType',
+      'group.timezone',
+      'shift.name',
+      'shift.window',
+      'shift.timezone',
+      'shift.grace',
+      'shift.rounding',
+      'shift.workingDays',
+    ])
     const nameRow = confirm!.querySelector('[data-setup-template-field-change="group.name"]')
     expect(nameRow?.textContent).toContain('Store A')
     expect(nameRow?.textContent).toContain('Office attendance group')
@@ -713,6 +831,33 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     await flushUi()
     expect(dialog()).toBeNull()
     expect(readFormState()).toEqual(before)
+  })
+
+  it('§5.2① every confirm row shows the REAL current value (selected shift: grace/rounding/workingDays all non-default, all listed current → template)', async () => {
+    await mountWizard()
+    await selectExistingShift()
+    openTemplate('office-fixed')
+    await flushUi()
+    const confirm = dialog()!
+    const rowText = (key: string): string =>
+      confirm.querySelector(`[data-setup-template-field-change="${key}"]`)?.textContent || ''
+    expect(rowText('shift.name')).toContain('Night audit shift')
+    expect(rowText('shift.name')).toContain('Office shift 09:00-18:00')
+    expect(rowText('shift.window')).toContain('10:30-19:30')
+    expect(rowText('shift.window')).toContain('09:00-18:00')
+    expect(rowText('shift.grace')).toContain('25/20')
+    expect(rowText('shift.grace')).toContain('10/10')
+    expect(rowText('shift.rounding')).toContain('15')
+    expect(rowText('shift.rounding')).toContain('5')
+    expect(rowText('shift.workingDays')).toContain('2,3,4,5,6')
+    expect(rowText('shift.workingDays')).toContain('1,2,3,4,5')
+    // Both target forms hold existing records ⇒ the dirty warning names the risk, and its copy
+    // scopes the undo promise to this dialog (no promise survives the dialog).
+    const warning = confirm.querySelector('[data-setup-template-dirty-warning]')
+    expect(warning).toBeTruthy()
+    expect(warning!.textContent).toContain('ONLY while this dialog stays open')
+    confirm.querySelector<HTMLButtonElement>('[data-setup-template-cancel]')!.click()
+    await flushUi()
   })
 
   it('§5.2④ timezone: org current value preselected when resolvable; first-run org REQUIRES a user choice (apply disabled until chosen; browser timezone never leaks in)', async () => {
@@ -754,8 +899,14 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
 
   it('快照/取消 (§5.2②, mutation target: partial restore ⇒ red): apply writes both forms + create-new posture; undo restores EVERYTHING byte-identically', async () => {
     await mountWizard()
+    // BOTH forms hold selected existing records — every shift field (grace/rounding/workingDays
+    // included) differs from both pristine and template values, so a partial restore of any
+    // single field turns the final deepEqual red (nothing vacuous).
+    await selectExistingShift()
     const before = readFormState()
-    expect(before.groupSaveLabel).toBe('Save group') // an existing record is selected
+    expect(before.groupSaveLabel).toBe('Save group') // an existing group record is selected
+    expect(before.shiftSaveLabel).toBe('Update shift') // an existing shift record is selected
+    expect(before.shiftRounding).toBe('15')
 
     openTemplate('office-fixed')
     await flushUi()
@@ -774,13 +925,18 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
       shiftStart: '09:00',
       shiftEnd: '18:00',
       shiftTimezone: 'Asia/Shanghai',
+      shiftLateGrace: '10',
+      shiftEarlyGrace: '10',
+      shiftRounding: '5',
+      shiftWorkingDays: '1,2,3,4,5',
       groupSaveLabel: 'Create group',
+      shiftSaveLabel: 'Create shift',
     })
 
     applied.querySelector<HTMLButtonElement>('[data-setup-template-undo]')!.click()
     await flushUi()
     expect(dialog()).toBeNull()
-    // Byte-identical restore of every touched field INCLUDING the editing posture.
+    // Byte-identical restore of every touched field INCLUDING both editing postures.
     expect(readFormState()).toEqual(before)
   })
 
@@ -808,6 +964,37 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
       ruleSetId: null,
       attendanceType: 'fixed_shift',
       description: null,
+    })
+  })
+
+  it('after undo, saving the shift targets the RESTORED existing shift (PUT /shifts/s1) with the exact original body — the snapshot restored the shift editing id AND every shift field at the wire', async () => {
+    await mountWizard()
+    await selectExistingShift()
+    openTemplate('office-fixed')
+    await flushUi()
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!.click()
+    await flushUi()
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-undo]')!.click()
+    await flushUi()
+    calls = []
+    shiftSaveButton().click()
+    await flushUi(12)
+    const writes = calls.filter((c) => WRITE_METHODS.has(c.method))
+    expect(writes.map((c) => ({ url: c.url, method: c.method }))).toEqual([
+      { url: '/api/attendance/shifts/s1', method: 'PUT' },
+    ])
+    // Full body shape — the ORIGINAL shift record byte for byte (grace/rounding/workingDays are
+    // all non-default, so any missed field in undoSetupTemplate turns this red; no orgId key —
+    // the harness org is blank and JSON.stringify drops the undefined normalizedOrgId()).
+    expect(JSON.parse(writes[0].body || 'null')).toEqual({
+      name: 'Night audit shift',
+      timezone: 'Asia/Shanghai',
+      workStartTime: '10:30',
+      workEndTime: '19:30',
+      lateGraceMinutes: 25,
+      earlyGraceMinutes: 20,
+      roundingMinutes: 15,
+      workingDays: [2, 3, 4, 5, 6],
     })
   })
 
@@ -840,9 +1027,15 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
 
   it('R3 (§0, mutation target: any wizard-phase PUT ⇒ red): the FULL wizard/template/prefill walk issues ZERO write-method requests', async () => {
     await mountWizard()
-    // Walk: open → cancel → open → choose preset → apply → undo → open → apply → navigate →
-    // re-enter wizard → checklist template jumps → reload readiness.
+    // Walk (every wizard affordance actually exercised — the comment matches the clicks):
+    //   open → change timezone → cancel → open → choose preset → apply → undo → open → apply →
+    //   go-SHIFT navigate → re-enter wizard → BOTH checklist template jumps (shift + group) →
+    //   reload readiness.
     openTemplate('factory-multi-shift')
+    await flushUi()
+    const tzSelect = dialog()!.querySelector<HTMLSelectElement>('[data-setup-template-timezone-select]')!
+    tzSelect.value = 'America/New_York'
+    tzSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-cancel]')!.click()
     await flushUi()
@@ -862,8 +1055,10 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     await flushUi()
     dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!.click()
     await flushUi()
-    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-go-group]')!.click()
+    // go-shift leg (previously never clicked anywhere in the suite): navigate to the shift form.
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-go-shift]')!.click()
     await flushUi(8)
+    expect(dialog()).toBeNull()
 
     // Re-enter the wizard (task home → setup) — pending prefill keeps the checklist item alive.
     const returnHome = Array.from(container!.querySelectorAll('button')).find((b) => (b.textContent || '').includes('Management home'))
@@ -874,7 +1069,13 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     await flushUi(16)
     const checklistItem = container!.querySelector('[data-setup-checklist-item="template-prefill"]')
     expect(checklistItem).toBeTruthy()
+    checklistItem!.querySelector<HTMLButtonElement>('[data-setup-checklist-remedy="template-shift-form"]')!.click()
+    await flushUi(8)
     checklistItem!.querySelector<HTMLButtonElement>('[data-setup-checklist-remedy="template-group-form"]')!.click()
+    await flushUi(8)
+
+    // Reload readiness from the wizard (read-only refresh).
+    container!.querySelector<HTMLButtonElement>('[data-setup-reload]')!.click()
     await flushUi(8)
 
     // The ENTIRE walk (mount + every interaction above): zero write-method requests.
@@ -898,10 +1099,110 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
       const hits = calls.filter((c) => c.url.includes(door.pattern) && WRITE_METHODS.has(c.method))
       expect(hits, `${door.pattern} (${door.note})`).toEqual([])
     }
-    // Belt: the settings door also saw no wizard-driven request at all beyond the pre-existing
+    // Belt 1: the settings door also saw no wizard-driven request at all beyond the pre-existing
     // admin GET load (which is part of loadAdminData, not the wizard).
     const settingsCalls = calls.filter((c) => c.url.includes('/api/attendance/settings'))
     expect(settingsCalls.every((c) => c.method === 'GET')).toBe(true)
+    // Belt 2 (whole-walk zero-write, R3-grade): THIS walk (field-sales apply → go-settings) is
+    // not the R3 test's walk — without this belt a non-banned-door write (e.g. POST /groups)
+    // fired during it would slip both tests.
+    expect(calls.filter((c) => WRITE_METHODS.has(c.method))).toEqual([])
+  })
+
+  it('applied stage offers a side-effect-free close: prefill kept, checklist item alive, leave warning still armed, undo snapshot gone', async () => {
+    await mountWizard()
+    openTemplate('office-fixed')
+    await flushUi()
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!.click()
+    await flushUi()
+    // The applied stage documents the undo scope honestly (undo lives only in this dialog).
+    expect(dialog()!.querySelector('[data-setup-template-undo-scope-note]')).toBeTruthy()
+    const appliedState = readFormState()
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-close]')!.click()
+    await flushUi()
+    expect(dialog()).toBeNull()
+    // No side effects: the prefilled values stay, nothing was undone, nothing navigated.
+    expect(readFormState()).toEqual(appliedState)
+    expect(container!.querySelector('[data-setup-checklist-item="template-prefill"]')).toBeTruthy()
+    // The unsaved-prefill leave warning stays armed (close ≠ save, close ≠ undo).
+    const event = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('a11y: focus moves into the panel on open, Tab wraps inside it, Esc = stage-appropriate no-write close, focus returns to the opener', async () => {
+    await mountWizard()
+    // jsdom's .click() never moves focus, so focus the opener explicitly — that is what a real
+    // keyboard/mouse open leaves as document.activeElement for the dialog to restore later.
+    const opener = container!.querySelector<HTMLButtonElement>('[data-setup-template-open="office-fixed"]')!
+    opener.focus()
+    opener.click()
+    await flushUi()
+    const panel = container!.querySelector<HTMLElement>('.setup-template-dialog__panel')!
+    // Initial focus lands on the panel itself (tabindex="-1").
+    expect(document.activeElement).toBe(panel)
+
+    // Tab trap: forward-Tab from the last focusable wraps to the first; shift-Tab from the first
+    // wraps to the last (jsdom performs no native tab moves, so the wrap IS the observable).
+    const focusables = Array.from(
+      panel.querySelectorAll<HTMLElement>('button:not([disabled]), select:not([disabled]), input:not([disabled])'),
+    )
+    expect(focusables.length).toBeGreaterThan(1)
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    last.focus()
+    last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    expect(document.activeElement).toBe(first)
+    first.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }))
+    expect(document.activeElement).toBe(last)
+
+    // Esc in the confirm stage = cancel: dialog closes, nothing applied, focus returns to opener.
+    const before = readFormState()
+    panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(dialog()).toBeNull()
+    expect(readFormState()).toEqual(before)
+    expect(document.activeElement).toBe(opener)
+
+    // Esc in the applied stage = close-keep-prefill (never undo): values stay, warning armed.
+    openTemplate('office-fixed')
+    await flushUi()
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!.click()
+    await flushUi()
+    const appliedState = readFormState()
+    container!.querySelector<HTMLElement>('.setup-template-dialog__panel')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(dialog()).toBeNull()
+    expect(readFormState()).toEqual(appliedState)
+    const event = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('OD-W4-7② the shared in-app leave signal tracks the pending prefill: apply arms, undo disarms, unmount always clears', async () => {
+    await mountWizard()
+    expect(attendanceSetupPrefillPending.value).toBe(false)
+    openTemplate('office-fixed')
+    await flushUi()
+    expect(attendanceSetupPrefillPending.value).toBe(false) // confirm stage: nothing applied yet
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!.click()
+    await flushUi()
+    expect(attendanceSetupPrefillPending.value).toBe(true)
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-undo]')!.click()
+    await flushUi()
+    expect(attendanceSetupPrefillPending.value).toBe(false)
+
+    // Re-arm, then unmount the host with the prefill still pending: the signal MUST clear —
+    // a stale `true` would block navigation after the host (and the prefill) are already gone.
+    openTemplate('office-fixed')
+    await flushUi()
+    dialog()!.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!.click()
+    await flushUi()
+    expect(attendanceSetupPrefillPending.value).toBe(true)
+    app!.unmount()
+    app = null
+    expect(attendanceSetupPrefillPending.value).toBe(false)
   })
 
   it('OD-W4-7 未保存离开提示: beforeunload is armed while a prefill is applied-but-unsaved, and disarmed by undo', async () => {
@@ -969,5 +1270,349 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     )
     expect(templateWrites).toEqual([])
     setItemSpy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4. Dialog component rendered DIRECTLY — §5.3 completion-claim negatives, zh AND en legs
+// ---------------------------------------------------------------------------
+// W4-1 lesson (#3487): a locale leg no test ever renders is a skip-shaped green. The mounted
+// suite above renders the dialog under locale 'en' only, and the shell sweep never mounts the
+// dialog at all — so the dialog's OWN copy (both locales, both stages, every copy branch) gets
+// its own presence-anchored sweep here. Mutation target: add 「已启用」/"enabled" to any dialog
+// copy string ⇒ the matching leg turns red.
+
+const DIALOG_PRISTINE_GROUP = {
+  name: '',
+  code: '',
+  timezone: 'Asia/Shanghai',
+  ruleSetId: '',
+  attendanceType: 'fixed_shift',
+  description: '',
+}
+const DIALOG_PRISTINE_SHIFT = {
+  name: 'Standard Shift',
+  timezone: 'Asia/Shanghai',
+  workStartTime: '09:00',
+  workEndTime: '18:00',
+  lateGraceMinutes: 10,
+  earlyGraceMinutes: 10,
+  roundingMinutes: 5,
+  workingDays: '1,2,3,4,5',
+}
+const DIALOG_TIMEZONE_OPTIONS = [
+  { value: 'Asia/Shanghai', label: 'UTC+08:00 · Asia/Shanghai' },
+  { value: 'America/New_York', label: 'UTC-05:00 · America/New_York' },
+]
+
+interface DialogScenario {
+  key: string
+  templateId: string
+  stage: 'confirm' | 'applied'
+  timezone: string
+  orgTimezone: string | null
+  /** presence anchors: selectors that MUST exist for this scenario (leg really rendered) */
+  anchors: string[]
+  absent?: string[]
+}
+
+/** Every copy branch of the dialog: shift-preset template (confirm dirty + applied), preset
+ *  select (store), settings-hint template (field-sales confirm-no-tz + applied). */
+const DIALOG_SCENARIOS: DialogScenario[] = [
+  {
+    key: 'office-confirm-dirty',
+    templateId: 'office-fixed',
+    stage: 'confirm',
+    timezone: 'Asia/Shanghai',
+    orgTimezone: 'Asia/Shanghai',
+    anchors: [
+      '[data-setup-template-field-changes]',
+      '[data-setup-template-field-change="shift.rounding"]',
+      '[data-setup-template-dirty-warning]',
+      '[data-setup-template-timezone-org]',
+      '[data-setup-template-apply]',
+    ],
+  },
+  {
+    key: 'office-applied',
+    templateId: 'office-fixed',
+    stage: 'applied',
+    timezone: 'Asia/Shanghai',
+    orgTimezone: 'Asia/Shanghai',
+    anchors: [
+      '[data-setup-template-applied-note]',
+      '[data-setup-template-undo-scope-note]',
+      '[data-setup-template-undo]',
+      '[data-setup-template-close]',
+      '[data-setup-template-go-shift]',
+    ],
+  },
+  {
+    key: 'store-confirm-presets',
+    templateId: 'store-scheduled',
+    stage: 'confirm',
+    timezone: 'Asia/Shanghai',
+    orgTimezone: 'Asia/Shanghai',
+    anchors: ['[data-setup-template-preset-block]', '[data-setup-template-rotation-hint]'],
+  },
+  {
+    key: 'sales-confirm-no-tz',
+    templateId: 'field-sales',
+    stage: 'confirm',
+    timezone: '',
+    orgTimezone: null,
+    anchors: [
+      '[data-setup-template-timezone-required]',
+      '[data-setup-template-plan-missing]',
+      '[data-setup-template-settings-hint]',
+    ],
+  },
+  {
+    key: 'sales-applied',
+    templateId: 'field-sales',
+    stage: 'applied',
+    timezone: 'Asia/Shanghai',
+    orgTimezone: 'Asia/Shanghai',
+    anchors: ['[data-setup-template-applied-note]', '[data-setup-template-go-settings]'],
+    absent: ['[data-setup-template-go-shift]'],
+  },
+]
+
+describe('AttendanceSetupTemplatePrefillDialog direct render — §5.3 negatives (zh AND en, all stages/branches)', () => {
+  let app: App<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+  })
+
+  function renderScenario(tr: (en: string, zh: string) => string, scenario: DialogScenario): string {
+    const template = getAttendanceSetupTemplate(scenario.templateId)!
+    const shiftPresetKey = template.shiftPresets[0]?.key ?? null
+    const plan = buildAttendanceSetupTemplatePrefillPlan({
+      templateId: scenario.templateId,
+      shiftPresetKey,
+      timezone: scenario.timezone,
+      pickLabel: (label) => tr(label.en, label.zh),
+    })
+    app = createApp(AttendanceSetupTemplatePrefillDialog, {
+      tr,
+      stage: scenario.stage,
+      template,
+      plan,
+      currentGroup: { ...DIALOG_PRISTINE_GROUP, name: 'Existing group' },
+      currentShift: { ...DIALOG_PRISTINE_SHIFT },
+      pristineGroup: DIALOG_PRISTINE_GROUP,
+      pristineShift: DIALOG_PRISTINE_SHIFT,
+      groupEditingId: 'existing-group-id',
+      shiftEditingId: null,
+      orgTimezone: scenario.orgTimezone,
+      timezone: scenario.timezone,
+      timezoneOptions: DIALOG_TIMEZONE_OPTIONS,
+      shiftPresetKey,
+      onApply: () => {},
+      onCancel: () => {},
+      onUndo: () => {},
+      onClose: () => {},
+      onNavigate: () => {},
+    })
+    app.mount(container!)
+    for (const anchor of scenario.anchors) {
+      expect(container!.querySelector(anchor), `${scenario.key}: ${anchor}`).toBeTruthy()
+    }
+    for (const anchor of scenario.absent ?? []) {
+      expect(container!.querySelector(anchor), `${scenario.key}: ${anchor} must be absent`).toBeNull()
+    }
+    const text = container!.textContent || ''
+    app.unmount()
+    app = null
+    container!.innerHTML = ''
+    return text
+  }
+
+  it('zh leg: every stage/branch renders zh copy and none of it contains 已启用/已生效 completion tenses', () => {
+    let combined = ''
+    for (const scenario of DIALOG_SCENARIOS) {
+      combined += renderScenario(zhTr, scenario)
+    }
+    // The zh leg REALLY rendered zh (anchor, not just absence).
+    expect(combined).toContain('模板值')
+    expect(combined).toContain('不执行任何启用动作')
+    expect(combined).toContain('关闭（保留预填）')
+    expect(combined).not.toContain('已启用')
+    expect(combined).not.toContain('已生效')
+  })
+
+  it('en leg: every stage/branch renders en copy and none of it contains enabled/activated completion tenses', () => {
+    let combined = ''
+    for (const scenario of DIALOG_SCENARIOS) {
+      combined += renderScenario(enTr, scenario)
+    }
+    expect(combined).toContain('Apply template prefill')
+    expect(combined).toContain('no activation action')
+    expect(combined).toContain('Close (keep prefill)')
+    const lower = combined.toLowerCase()
+    expect(lower).not.toMatch(/\benabled\b/)
+    expect(lower).not.toMatch(/\bactivated\b/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5. OD-W4-7② in-app leave guard — pure module + AttendanceExperienceView seams
+// ---------------------------------------------------------------------------
+
+describe('attendanceSetupPrefillLeaveGuard (pure module)', () => {
+  afterEach(() => {
+    attendanceSetupPrefillPending.value = false
+  })
+
+  it('no pending prefill ⇒ proceed WITHOUT asking; pending ⇒ the confirm decides, exactly once per call', () => {
+    const confirmFn = vi.fn(() => false)
+    attendanceSetupPrefillPending.value = false
+    expect(confirmAttendanceSetupPrefillLeave(enTr, confirmFn)).toBe(true)
+    expect(confirmFn).not.toHaveBeenCalled()
+
+    attendanceSetupPrefillPending.value = true
+    expect(confirmAttendanceSetupPrefillLeave(enTr, confirmFn)).toBe(false)
+    expect(confirmFn).toHaveBeenCalledTimes(1)
+    // The message is locale-routed through tr and promises loss, not recovery (§5.2③).
+    expect(confirmFn).toHaveBeenLastCalledWith(
+      'A template prefill has been applied but not saved — leaving attendance discards it. Leave anyway?',
+    )
+    expect(confirmAttendanceSetupPrefillLeave(zhTr, confirmFn)).toBe(false)
+    expect(confirmFn).toHaveBeenLastCalledWith(
+      '模板预填已应用但尚未保存——离开考勤页将丢失该预填。仍要离开吗？',
+    )
+
+    confirmFn.mockReturnValue(true)
+    expect(confirmAttendanceSetupPrefillLeave(enTr, confirmFn)).toBe(true)
+  })
+})
+
+describe('AttendanceExperienceView seams — OD-W4-7② 切区确认 (tab switch + route leave)', () => {
+  let app: App<Element> | null = null
+  let router: Router | null = null
+  let container: HTMLDivElement | null = null
+  let confirmResult = false
+  let confirmCalls = 0
+  const originalConfirm = window.confirm
+  const originalMatchMedia = window.matchMedia
+
+  beforeEach(async () => {
+    window.localStorage.clear()
+    window.localStorage.setItem('metasheet_locale', 'en')
+    attendanceSetupPrefillPending.value = false
+    confirmResult = false
+    confirmCalls = 0
+    window.confirm = (_message?: string): boolean => {
+      confirmCalls += 1
+      return confirmResult
+    }
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/attendance', component: AttendanceExperienceView },
+        { path: '/elsewhere', component: { template: '<div data-testid="elsewhere">elsewhere</div>' } },
+      ],
+    })
+    await router.push('/attendance?tab=admin')
+    await router.isReady()
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({ template: '<router-view />' })
+    app.use(router)
+    app.mount(container)
+    await flushUi(8)
+    // The admin tab (the AttendanceView host seat) is really active before any seam is probed.
+    expect(container.querySelector('[data-testid="attendance-admin-center"]')).toBeTruthy()
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    window.confirm = originalConfirm
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: originalMatchMedia,
+    })
+    attendanceSetupPrefillPending.value = false
+    app = null
+    router = null
+    container = null
+  })
+
+  function clickTab(label: string): void {
+    const tab = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance-shell__tab')).find(
+      (b) => b.textContent?.trim() === label,
+    )
+    expect(tab, `tab ${label}`).toBeTruthy()
+    tab!.click()
+  }
+
+  it('top-tab switch with a pending prefill asks first: refusing keeps the admin host mounted, confirming proceeds', async () => {
+    attendanceSetupPrefillPending.value = true
+    clickTab('Overview')
+    await flushUi(4)
+    expect(confirmCalls).toBe(1)
+    // Refused ⇒ the admin host (and the in-memory prefill) survives.
+    expect(container!.querySelector('[data-testid="attendance-admin-center"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="attendance-overview"]')).toBeNull()
+
+    confirmResult = true
+    clickTab('Overview')
+    await flushUi(4)
+    expect(confirmCalls).toBe(2)
+    expect(container!.querySelector('[data-testid="attendance-overview"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="attendance-admin-center"]')).toBeNull()
+  })
+
+  it('route leave with a pending prefill asks first: refusing keeps /attendance, confirming navigates away', async () => {
+    attendanceSetupPrefillPending.value = true
+    await router!.push('/elsewhere')
+    expect(confirmCalls).toBe(1)
+    expect(router!.currentRoute.value.path).toBe('/attendance')
+    expect(container!.querySelector('[data-testid="attendance-admin-center"]')).toBeTruthy()
+
+    confirmResult = true
+    await router!.push('/elsewhere')
+    expect(router!.currentRoute.value.path).toBe('/elsewhere')
+    expect(container!.querySelector('[data-testid="elsewhere"]')).toBeTruthy()
+  })
+
+  it('without a pending prefill neither seam ever prompts (no nag)', async () => {
+    clickTab('Overview')
+    await flushUi(4)
+    expect(container!.querySelector('[data-testid="attendance-overview"]')).toBeTruthy()
+    clickTab('Admin Center')
+    await flushUi(4)
+    expect(container!.querySelector('[data-testid="attendance-admin-center"]')).toBeTruthy()
+    await router!.push('/elsewhere')
+    expect(router!.currentRoute.value.path).toBe('/elsewhere')
+    expect(confirmCalls).toBe(0)
   })
 })

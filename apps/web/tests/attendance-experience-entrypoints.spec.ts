@@ -15,6 +15,11 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({
     replace: replaceSpy,
   }),
+  // W4-2 OD-W4-7②: AttendanceExperienceView registers a route-leave confirm for
+  // applied-but-unsaved template prefill. This suite mocks the router entirely, so the guard
+  // registration is a no-op here; the guard's real behavior is covered with a memory router in
+  // attendance-setup-templates.spec.ts.
+  onBeforeRouteLeave: () => {},
 }))
 
 const adminFeatureEnabled = ref(true)
