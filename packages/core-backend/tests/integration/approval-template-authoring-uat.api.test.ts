@@ -21,6 +21,7 @@ const realFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis)
 // `test (18.x/20.x)` jobs, which match tests/integration but provide no DB) and RUN in the
 // DB-provisioned plugin-tests `test:integration` step.
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+const REQUESTER_USER_ID = 'uat-requester'
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -106,13 +107,32 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     const address = server.getAddress()
     expect(address?.port).toBeTruthy()
     baseUrl = `http://127.0.0.1:${address.port}`
+    const pool = poolManager.get()
+    // The final create boundary intentionally trusts DB authority, not JWT claims. Keep this UAT
+    // positive control production-shaped so a dev-token wildcard cannot mask a missing grant.
+    await pool.query(
+      `INSERT INTO permissions (code, name, description)
+       VALUES ('approvals:write', 'Approvals Write', 'approval authoring UAT')
+       ON CONFLICT (code) DO NOTHING`,
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       VALUES ($1, 'approvals:write')
+       ON CONFLICT DO NOTHING`,
+      [REQUESTER_USER_ID],
+    )
     adminToken = await authToken(baseUrl, 'uat-admin')
-    requesterToken = await authToken(baseUrl, 'uat-requester')
+    requesterToken = await authToken(baseUrl, REQUESTER_USER_ID)
   })
 
   afterAll(async () => {
     const pool = poolManager.get()
     try {
+      await pool.query(
+        `DELETE FROM user_permissions
+         WHERE user_id = $1 AND permission_code = 'approvals:write'`,
+        [REQUESTER_USER_ID],
+      )
       const approvalIds = [...createdApprovalIds]
       const templateIds = [...createdTemplateIds]
       if (approvalIds.length > 0) {
