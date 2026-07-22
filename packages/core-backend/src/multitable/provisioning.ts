@@ -1,5 +1,6 @@
 import { createHash } from 'crypto'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
+import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
   MultitableProvisioningFieldDescriptor,
   MultitableProvisioningFieldType,
@@ -632,6 +633,26 @@ export async function readObjectFieldsContent(
     if (content) out[pair.logical] = content
   }
   return out
+}
+
+// W2/P2-3: build the atomic-repair tx surface — binds ALL FOUR provisioning methods a repair
+// needs to the SAME `query`. This is the SINGLE place that wiring lives, so index.ts's
+// runObjectFieldsRepairTransaction and the real-DB test both use it: a divergence (one method
+// escaping to a different connection, breaking atomicity) is impossible to introduce per-method,
+// and the shipped binding is exercised by the real-DB rollback test — closing the runner-vs-prod
+// gap (a hand-mirrored test runner would have left the shipped surface unverified).
+export function buildObjectFieldsRepairSurface(
+  query: MultitableProvisioningQueryFn,
+): MultitableRepairTransactionSurface {
+  return {
+    findObjectSheet: ({ projectId, objectId }) => findObjectSheet(query, projectId, objectId),
+    resolveExistingObjectFieldIds: ({ projectId, objectId, fieldIds }) =>
+      resolveExistingObjectFieldIds({ query, projectId, objectId, fieldIds }),
+    readObjectFieldsContent: ({ projectId, objectId, fieldIds }) =>
+      readObjectFieldsContent({ query, projectId, objectId, fieldIds }),
+    ensureMissingObjectFields: ({ projectId, objectId, fields }) =>
+      ensureMissingObjectFields({ query, projectId, objectId, fields }),
+  }
 }
 
 export async function ensureObject(

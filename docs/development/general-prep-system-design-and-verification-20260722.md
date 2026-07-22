@@ -111,11 +111,13 @@ W2 首版推送后经独立审阅(codex,exact head 8e107),抓出 **4 个真缺�
 **第五轮:owner 侧 codex 复审(HOLD,0 P1/3 P2/2 P3)——两个"判别输入原样复现"的 P2 + 两个 P3 全修;P2-3 记为 W3-entry 门:**
 - **P2(MVP repair 与 fresh 不同构)**:fresh 走 `buildMvpTargetDescriptor` 注入 `property.stockPreparationMvp`,repair 却从裸 `buildSheetStructureFromMvpTableTemplate` 取描述符 → `repairedHasFrozenMvpMetadata=false`、`sameProperty=false`。修:repair 改用 `buildMvpTargetDescriptor(template).fields`;加 fresh-vs-repair 全 `property` deep-equal 判别测试;变异「退回裸 builder」→ 红。
 - **P2(并发 skipped-field 未证即 ready)**:缺列在两次读之间被他者抢插,`stillMissing.length===0` 只证 id 存在、不证抢插行符合冻结描述符 → `missingFieldWasContentVerified=false` 却 `ready=true`。修:只交本轮缺集,`skippedExistingFieldIds` 任意非空 ⇒ 抛 `REPAIR_CONCURRENT_FIELD_APPEARED`(MVP+canonical 两路);变异「删 fail-close」两路各红。
-- **P2→W3-entry 门(内容守卫非原子)**:before/write/after 分处独立事务,mutation 变红只证「发现」非「状态未变」;当前 DO NOTHING 本身安全。**修正口径**:守卫注释与 execution-plan §3.3-4 明标为 post-write **检测 canary**、非原子;§3.3a 记为 W3-entry 门(host 侧 `runObjectFieldsRepairTransaction`:scope+读+写+复核+回滚同一事务,realdb 证既有行回滚)。**为何 W2 期不建**:repair unarmed/未接路由;原语形状受 W3 接线牵引,提前反应式建有搭错形状之险(见 [[feedback_adversarial_review_before_pushing_core_cross_package]])。
+- **P2→原子组合事务原语(内容守卫升级为原子 fail-close)**:before/write/after 原分处独立事务,mutation 变红只证「发现」非「状态未变」。**按 owner「完成所有开发」指令已建成**(head `085a8c2c4`):host `runObjectFieldsRepairTransaction`(§3.3a)把 scope+读+写+复核+回滚统一进同一事务;canonical + MVP repair 体全挪进;plugin-scope 对 tx-surface 每方法仍套 scope;realdb 原子回滚证(after-read 注入 mutation ⇒ 守卫在 tx 内抛 ⇒ additive INSERT 回滚 ⇒ plm 字段仍 missing;变异 ROLLBACK→COMMIT ⇒ 红)+ scope 单测 tx-surface 内 scope pin。repair 仍 unarmed/未接路由;接线是 W3 事、现有原子兜底。
 - **P3(coarse-details 未来保护层回显 reason)**:`fail()` 未声明 reason 的内部错误把 `${reason}` 写进 message。修:改固定 coarse token,不回显拒绝值。
 - **P3(order 无落库回归 + 两 CJS fake 只返回 name/type/property)**:手工变异不能替代 CI 钉。修:两 fake 补 `order`;MVP/canonical 各加 order-only 变更 → `REPAIR_MUTATED_EXISTING_FIELD` 的落库判别测试。
 
-**第五轮验证边界**:四修(2 P2 + 2 P3)全 mutation-verified load-bearing——MVP g/h/i(退裸 builder/删 race/剥 order 比较)各红、canonical b4(删 race)红;type-check 0 error、CJS 链 103/103、scope 单测 11/11、realdb 15/15。**P2-3 未在本轮建**(按 reviewer「在 W3 接路由前应提供」框定 + 自认「当前 DO NOTHING 本身安全」),而是记为 W3-entry 门 + 修正过度声称。**至此两个"判别输入"闭合、P3 收尾;是否需在宣布 W2 clean 前先建 §3.3a 原子原语(而非留作 W3 首任务),留 owner 裁。**
+**第五轮验证边界**:四修(2 P2 + 2 P3)全 mutation-verified load-bearing——MVP g/h/i(退裸 builder/删 race/剥 order 比较)各红、canonical b4(删 race)红;fail() 源级不变量(advisor pin,注入 undeclared reason ⇒ 红);type-check 0 error、CJS 链 103/103、scope 单测 11/11、realdb 15/15。
+
+**第五轮延伸:P2-3 原子原语已建成(head `085a8c2c4`)**——owner「完成所有开发」把「build-now vs W3-first」的杆拨向 build。host `runObjectFieldsRepairTransaction` + plugin-scope tx-surface scope + canonical/MVP repair 全挪进单事务(MVP all-or-nothing);承重证:realdb 原子回滚(变异 ROLLBACK→COMMIT ⇒ 红)+ scope tx-surface pin(变异删 assertObjectScope ⇒ 红);tsc 0、CJS 103/103、scope 单测 12/12、realdb 16/16(+原子证明)。**推送前经独立 3-lens 对抗审(worktree 隔离)**——遵 [[feedback_adversarial_review_before_pushing_core_cross_package]]。
 
 ## 6. 验证纪律记录
 

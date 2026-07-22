@@ -33,7 +33,6 @@ import type {
   PluginStorage,
   PluginApiMethod,
   PluginLifecycle,
-  MultitableRepairTransactionSurface,
 } from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
@@ -57,6 +56,7 @@ import {
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
+  buildObjectFieldsRepairSurface,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
 import {
@@ -595,17 +595,10 @@ export class MetaSheetServer {
                   rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
                 }
               }
-              const surface: MultitableRepairTransactionSurface = {
-                findObjectSheet: ({ projectId, objectId }) =>
-                  findProvisionedObjectSheet(txQuery, projectId, objectId),
-                resolveExistingObjectFieldIds: ({ projectId, objectId, fieldIds }) =>
-                  resolveExistingMultitableObjectFieldIds({ query: txQuery, projectId, objectId, fieldIds }),
-                readObjectFieldsContent: ({ projectId, objectId, fieldIds }) =>
-                  readMultitableObjectFieldsContent({ query: txQuery, projectId, objectId, fieldIds }),
-                ensureMissingObjectFields: ({ projectId, objectId, fields }) =>
-                  ensureMissingMultitableObjectFields({ query: txQuery, projectId, objectId, fields }),
-              }
-              return fn(surface)
+              // Single shared surface-builder (provisioning.ts): every method is bound to the
+              // one tx `query`, so no method can escape to a fresh connection and break
+              // atomicity. The real-DB rollback test exercises this same builder.
+              return fn(buildObjectFieldsRepairSurface(txQuery))
             })
           },
           ensureView: async ({ projectId, sheetId, descriptor }) => {

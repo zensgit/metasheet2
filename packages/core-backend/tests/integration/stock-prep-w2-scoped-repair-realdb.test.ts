@@ -25,6 +25,7 @@ import {
   readObjectFieldsContent,
   ensureMissingObjectFields,
   ensureObject,
+  buildObjectFieldsRepairSurface,
 } from '../../src/multitable/provisioning'
 import { createPluginScopedMultitableApi } from '../../src/multitable/plugin-scope'
 
@@ -83,23 +84,16 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
           await q('COMMIT')
           return r
         }),
-      // W2/P2-3: the ATOMIC repair runner — mirrors index.ts. ONE client, ONE transaction;
-      // the surface's read/write all use the same client, and a thrown verify ROLLS BACK.
+      // W2/P2-3: the ATOMIC repair runner — mirrors index.ts by using the SAME shipped
+      // surface-builder (buildObjectFieldsRepairSurface), so this real-DB rollback test
+      // exercises the production surface-binding, not a hand-mirrored copy (review P3:
+      // runner-vs-prod gap). ONE client, ONE transaction; a thrown verify ROLLS BACK.
       runObjectFieldsRepairTransaction: async (fn: (surface: unknown) => Promise<unknown>) => {
         const client = await pool.connect()
         const q = (sql: string, params?: unknown[]) => client.query(sql, params as unknown[])
         try {
           await q('BEGIN')
-          const surface = {
-            findObjectSheet: (i: { projectId: string; objectId: string }) => findObjectSheet(q as never, i.projectId, i.objectId),
-            resolveExistingObjectFieldIds: (i: { projectId: string; objectId: string; fieldIds: string[] }) =>
-              resolveExistingObjectFieldIds({ query: q as never, projectId: i.projectId, objectId: i.objectId, fieldIds: i.fieldIds }),
-            readObjectFieldsContent: (i: { projectId: string; objectId: string; fieldIds: string[] }) =>
-              readObjectFieldsContent({ query: q as never, projectId: i.projectId, objectId: i.objectId, fieldIds: i.fieldIds }),
-            ensureMissingObjectFields: (i: { projectId: string; objectId: string; fields: unknown[] }) =>
-              ensureMissingObjectFields({ query: q as never, projectId: i.projectId, objectId: i.objectId, fields: i.fields as never }),
-          }
-          const r = await fn(surface)
+          const r = await fn(buildObjectFieldsRepairSurface(q as never))
           await q('COMMIT')
           return r
         } catch (e) {
@@ -199,20 +193,18 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
         const q = (sql: string, params?: unknown[]) => client.query(sql, params as unknown[])
         try {
           await q('BEGIN')
+          // Real shipped surface, with ONLY the after-read wrapped to inject the mutation.
+          const base = buildObjectFieldsRepairSurface(q as never)
           const surface = {
-            findObjectSheet: (i: { projectId: string; objectId: string }) => findObjectSheet(q as never, i.projectId, i.objectId),
-            resolveExistingObjectFieldIds: (i: { projectId: string; objectId: string; fieldIds: string[] }) =>
-              resolveExistingObjectFieldIds({ query: q as never, projectId: i.projectId, objectId: i.objectId, fieldIds: i.fieldIds }),
+            ...base,
             readObjectFieldsContent: async (i: { projectId: string; objectId: string; fieldIds: string[] }) => {
               readCount += 1
-              const real = await readObjectFieldsContent({ query: q as never, projectId: i.projectId, objectId: i.objectId, fieldIds: i.fieldIds })
+              const real = await base.readObjectFieldsContent(i)
               if (readCount >= 2) {
                 for (const k of Object.keys(real)) real[k] = { ...real[k], name: `${real[k].name}_MUTATED` }
               }
               return real
             },
-            ensureMissingObjectFields: (i: { projectId: string; objectId: string; fields: unknown[] }) =>
-              ensureMissingObjectFields({ query: q as never, projectId: i.projectId, objectId: i.objectId, fields: i.fields as never }),
           }
           const r = await fn(surface)
           await q('COMMIT')

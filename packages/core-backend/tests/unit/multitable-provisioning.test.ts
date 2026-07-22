@@ -10,6 +10,7 @@ import {
   patchObjectFieldProperty,
   getObjectField,
   resolveObjectFieldIds,
+  buildObjectFieldsRepairSurface,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
 
@@ -503,5 +504,33 @@ describe('multitable provisioning helper', () => {
       groupFieldId: 'status',
       cardFieldIds: ['ticketNo', 'title', 'priority'],
     })
+  })
+})
+
+describe('buildObjectFieldsRepairSurface (W2/P2-3 atomic repair surface)', () => {
+  it('binds every method to the ONE passed query — no method escapes to another connection', async () => {
+    // The atomicity guarantee is that all four repair methods share a single (tx-bound)
+    // query. This exercises the SHIPPED surface-builder (index.ts uses the same function),
+    // so a future divergence — one method wired to a different connection — is caught here
+    // and in the real-DB rollback test, not left to a hand-mirrored copy (review P3).
+    const sqls: string[] = []
+    const spy: MultitableProvisioningQueryFn = async (sql: string) => {
+      sqls.push(sql)
+      return { rows: [], rowCount: 0 }
+    }
+    const surface = buildObjectFieldsRepairSurface(spy)
+
+    await surface.findObjectSheet({ projectId: 'tenant_1:plugin', objectId: 'obj' })
+    await surface.resolveExistingObjectFieldIds({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
+    await surface.readObjectFieldsContent({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
+    await surface.ensureMissingObjectFields({ projectId: 'tenant_1:plugin', objectId: 'obj', fields: [] })
+
+    const joined = sqls.join(' ; ')
+    // findObjectSheet routed through the spy (meta_sheets) …
+    expect(joined).toMatch(/meta_sheets/)
+    // … and resolveExistingObjectFieldIds + readObjectFieldsContent (meta_fields).
+    expect(joined).toMatch(/meta_fields/)
+    // At least the three DB-touching methods used the injected query.
+    expect(sqls.length).toBeGreaterThanOrEqual(3)
   })
 })
