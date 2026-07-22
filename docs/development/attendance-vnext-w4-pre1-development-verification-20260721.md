@@ -13,7 +13,7 @@
 
 | 票面项 | 实现（锚点对 `e20371b1a` 实证） |
 |---|---|
-| 1. 建人写点盘点 + 已知权威 org 同事务维护 | **同事务写者×2**：admin 建人 `packages/core-backend/src/routes/admin-users.ts:3359`（`INSERT INTO user_orgs`，位于 `:3297` `transaction()` 内；org 对提交的 group/shift 校验）；目录 admission（写点经 #4526 单点化入 helper `upsertActiveUserOrgMembership`，`packages/core-backend/src/directory/directory-sync.ts:4912`，DT-HARDEN-02 SAVEPOINT 内；org 自 `directory_integrations` NOT-NULL-FK 行解析，orphan fail-closed）。**行号统一按 `3727cd92e`（#4526 后 main）校准**——#4521 落地时点为 :3295/:3233/:5097，#4526（admin-users +70/directory-sync +283 重构）后位移 |
+| 1. 建人写点盘点 + 已知权威 org 同事务维护 | **同事务写者×2**：admin 建人 `packages/core-backend/src/routes/admin-users.ts:3359`（`INSERT INTO user_orgs`，位于 `:3297` `transaction()` 内；org 对提交的 group/shift 校验）；目录 admission（写点经 #4526 单点化入 helper `upsertActiveUserOrgMembership`，def `packages/core-backend/src/directory/directory-sync.ts:5166`/INSERT `:5171`——PRE-1c/1d 后行号，DT-HARDEN-02 SAVEPOINT 内；org 自 `directory_integrations` NOT-NULL-FK 行解析，orphan fail-closed）。**行号统一按 `3d1b6cfaa`（#4534 后 main）校准**——#4521 落地时点为 :3295/:3233/:5097，#4526（admin-users +70/directory-sync +283 重构）后位移 |
 | 2. org 不可知路径显式策略 | **策略记录×2（行为验证零写）**：部署级注册 `AuthService.ts:299`、OAuth JIT `dingtalk-oauth.ts:615`（测试 seam `:1132`）——注释+文档+测试三件齐，不静默猜 org、不塞 `'default'` |
 | 3. 测试三件套（真库） | `tests/integration/attendance-w4pre1-user-orgs-{admission,directory-sync,policy}.db.test.ts`：fresh-DB（含同事务原子性失败注入）/ upgrade（zzzz 回填行不破坏，两写者各有）/ two-org（计数互不串）。CI 双点接线：`plugin-tests.yml:823-825` + `vitest.config.ts:382-384` |
 | 4. 双 `is_active` 口径 | 计数口径 = `user_orgs.is_active AND users.is_active`（先例 `index.cjs:15532-15541`）；写者硬编码 `is_active=TRUE`（修复轮 P2：避免镜像建人时 `isActive` 造成后激活用户永久不计数的 stuck-false），inactive→reactivate 真库回归腿锁定 |
@@ -63,11 +63,11 @@
 
 ## 6. §11.1 六项（本切片）
 
-1. 基线 SHA：`57d89bc1d`（errata #4513 合入后 main）；**锚点校准基线 = `3727cd92e`（#4526 合入后 main）**。漂移账：`6ea0ccfab..749ba92d0` 考勤面零漂移（预检）；`749ba92d0..57d89bc1d`=errata 本身（docs-only）；`57d89bc1d..e20371b1a`=#4521 本身；`e20371b1a..3727cd92e`=#4526 本身（行号位移已全量校准）。
+1. 基线 SHA：`57d89bc1d`（errata #4513 合入后 main）；**锚点校准基线 = `3d1b6cfaa`（#4534 合入后 main）**。漂移账：`6ea0ccfab..749ba92d0` 考勤面零漂移（预检）；`749ba92d0..57d89bc1d`=errata；`57d89bc1d..e20371b1a`=#4521；`e20371b1a..3727cd92e`=#4526；`3727cd92e..1a209a5cc` 区间含 #4529（stock-prep，考勤面零漂移）+#4530；`1a209a5cc..3d1b6cfaa`=#4534——每轮 rebase 后现势锚点全量重验（rev2 预审 P2-1 纪律）。
 2. 查重：全仓双语法扫 `user_orgs` 写面——#4521 之前唯一生产写者 = 一次性迁移回填 `zzzz20260114110000`；之后 = 回填 + 本票两写者，正门完备性扫描确认无其他。
 3. 修改文件：core-backend 两写点 + 两策略注释 + 三 .db.test.ts + CI 双点 + 受影响单测 mock 同步 3 文件；零迁移、零 apps/web、零 plugin-attendance。
 4. IN/OUT：票面五项全 IN；①闭合宣布/re-ratify/W4-0 明示 OUT（锁 §10 序）。
-5. 唯一写路径：`user_orgs` 生产写者 = admin-users:3359 + directory-sync:4912（helper 单点，#4526 后行号）+ backfill 迁移×2（历史回填 + zzzz20260721150000）；权限真源不变。
+5. 唯一写路径：`user_orgs` 生产写者 = admin-users:3359 + directory-sync helper（def :5166，#4534 后行号）+ 受控离职失活写者（deprovision 三重门内，#4530/#4534）+ backfill 迁移×2（历史回填 + zzzz20260721150000）；权限真源不变。
 6. 完成门：票面五项 + 三件套 + G3 预跑 + Opus 门 0 P1/P2 —— 全过（见 §2-§4）。
 
 ## 7. W4-PRE-1b 补票（owner 复核 CHANGES REQUESTED 吸收，PR #4526 = `3727cd92e`）
@@ -90,6 +90,36 @@ KILLED-CONFIRMED**（亲自动刀恰红 org-A 腿、diff 字节级零生产代�
 
 **实跑（终态）**：F 系 6 文件 26/26；CI attendance 步 40 文件 522/522；单测 6909；双 typecheck 绿。
 
-**owner 待裁三项（#4526 body 详述，不阻本包）**：① 显式建人「org 存在」validate-can-fail vs
-auto-vivify；② DT-OPS-01 离职扫只翻 `directory_accounts.is_active` 不失活 membership（真实钉钉离职
-主路径残口）；③ `dingtalk-group-destination-service.ts:215` 两 EXISTS 可见性过滤是否同型双活。
+**原待裁三项——owner 已全部裁决并落地（2026-07-22）**：① validate-can-fail（404，不自动造组织）
+=已裁并与 #4526 实装一致；② DT-OPS 受控离职语义=裁决②，由 #4530（三重门失活+manual_review 待确认）
++#4534（候选集拆分，双组织正确性）落地；③ destination 双活=裁决③，#4530 落地。
+
+## 8. W4-PRE-1c 补票（owner rev3 复核 P1 + 裁决②③，PR #4530 = `1a209a5cc`）
+
+受控离职语义：失活唯一触发 = **breaker 通过 + `DIRECTORY_DEPROVISION_ENABLED` 启用 + 策略实际执行**
+（与 sweep 同事务）；sweep 单独/单次缺失永不触碰 `user_orgs`；manual_review 保持 active + values-free
+待确认暴露；destination 两 EXISTS 双活。门链：三镜预门 9 findings（4P2）修复轮全吸收 → Opus 正门
+APPROVE 0/0/0、6/6 独立 mutation killed（门记录 = #4530 comment-5043576613）。实跑：新四文件 14/14、
+合并回归 61/61、单测面 55/55、全量 6909。
+**后记（诚实账）**：owner 复审识别其「双组织测试」用裸 B membership 替身避开点名场景——正门 0/0/0
+在该场景为**假阴性**（教训固化：fixture 形状必须与场景名逐字段对齐）；缺陷由 #4534 修复。开关默认
+OFF 故 #4530 未回滚。
+
+## 9. W4-PRE-1d 补票（owner 对 #4530 复审 1P1/1P2，候选集拆分，PR #4534 = `3d1b6cfaa`）
+
+| owner 规格 | 落地 |
+|---|---|
+| org-membership 候选按 (userId, orgId) | 候选 SELECT org 内无其他活跃绑定（org_id 锚）⇒ 辖 membership 失活 |
+| 全局候选守卫只辖 grant/users.is_active | 全局清空查询移位，仅 mark_inactive 停平台用户、两策略关 grant 时查 |
+| breaker 用 org 候选数 | `candidateCount`=org-membership 集大小；真库：3 跨组织受保护用户在 maxBatch=2 仍触发上限 |
+| 真实双 integration fixture | A、B 两真实 integration+account+link+user_orgs 全链，零裸替身 |
+
+三策略九格矩阵（owner 确认冻结）：manual_review=全不动+待确认；disable_grant_only=失活 org
+membership/永不动平台用户/仅全局清空关 grant；mark_inactive=失活 org membership/仅全局清空停平台
+用户+关 grant。
+门链：预门 13 findings（1P1：orchestration strict-toEqual 盲区；2P2 含 sweep 层真实路径腿）修复轮
+8 项吸收 → **Opus 正门 APPROVE 0P1/0P2**、5/5 独立 mutation killed（含 P1 复现刀）、
+**ownerScenarioReplay：门审独立构造双组织场景 4/4 PASS 且在复现刀下翻红**（门记录 = #4534
+comment-5045682547）。实跑：新案 7/7、CI 同构 15 文件 75/75、policy 单测 21/21、全量 5811。
+**deferred P3（记录）**：全局守卫为批量级 check-then-act 无写时重查（org 侧有 FOR UPDATE，全局侧
+无）——TOCTOU 纪律需构造并发验证，随后续周期呈 owner 定级。
