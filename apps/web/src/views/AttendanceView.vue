@@ -1445,8 +1445,36 @@
                 :summary="setupReadinessSummary"
                 :load-state="setupReadinessState"
                 :viewer-is-platform-admin="setupViewerIsPlatformAdmin"
+                :pending-template-id="setupTemplatePendingTemplateId"
                 @select-section="selectAdminSection"
+                @open-template="openSetupTemplate"
                 @reload="loadSetupReadiness(normalizedOrgId())"
+              />
+              <!-- W4-2 (§5.2): template-prefill confirm/undo dialog. The forms live in THIS host
+                   (same-host prefill), so the orchestration state (snapshot/pending) lives here. -->
+              <AttendanceSetupTemplatePrefillDialog
+                v-if="setupTemplateDialog && setupTemplateDialogTemplate"
+                :tr="tr"
+                :stage="setupTemplateDialog.stage"
+                :template="setupTemplateDialogTemplate"
+                :plan="setupTemplatePlan"
+                :current-group="attendanceGroupForm"
+                :current-shift="shiftForm"
+                :pristine-group="setupTemplatePristineGroup"
+                :pristine-shift="setupTemplatePristineShift"
+                :group-editing-id="attendanceGroupEditingId"
+                :shift-editing-id="shiftEditingId"
+                :org-timezone="setupTemplateDialog.orgTimezone"
+                :timezone="setupTemplateDialog.timezoneChoice"
+                :timezone-options="timezoneOptions"
+                :shift-preset-key="setupTemplateDialog.shiftPresetKey"
+                @update:timezone="setupTemplateDialog.timezoneChoice = $event"
+                @update:shift-preset-key="setupTemplateDialog.shiftPresetKey = $event"
+                @apply="applySetupTemplate"
+                @cancel="cancelSetupTemplateConfirm"
+                @undo="undoSetupTemplate"
+                @close="closeSetupTemplateDialogKeepPrefill"
+                @navigate="navigateSetupTemplate"
               />
             </div>
             <div
@@ -9729,6 +9757,16 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
+import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
+import { attendanceSetupPrefillPending } from './attendance/attendanceSetupPrefillLeaveGuard'
+import {
+  buildAttendanceSetupTemplatePrefillPlan,
+  captureAttendanceSetupPrefillSnapshot,
+  getAttendanceSetupTemplate,
+  resolveAttendanceSetupOrgTimezone,
+  type AttendanceSetupPrefillSnapshot,
+  type AttendanceSetupTemplateId,
+} from './attendance/attendanceSetupTemplates'
 import AttendanceCalendarPolicyQuickAdd from './attendance/AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
@@ -14462,6 +14500,213 @@ watch(setupTaskHomeVisible, (open) => {
 
 watch(orgId, () => {
   if (setupSectionActive.value || setupTaskHomeVisible.value) void loadSetupReadiness(normalizedOrgId())
+})
+
+// ---------------------------------------------------------------------------
+// W4-2 (design-lock §5/§9 W4-2): template-prefill orchestration. The four templates are FE
+// constants (attendanceSetupTemplates.ts); this host owns the §5.2 contract end to end:
+//   open (snapshot + timezone resolution) → confirm dialog (affected fields + dirty warning +
+//   required timezone choice) → apply (write BOTH forms, clear editing ids so a save CREATES
+//   instead of PUT-overwriting a selected record) → undo (byte-identical snapshot restore) —
+// and the OD-W4-7 unsaved-prefill leave warning. The wizard performs no request anywhere in
+// this flow (R3/R4): every write stays each canonical form's own save button.
+// ---------------------------------------------------------------------------
+
+const setupTemplateDialog = ref<null | {
+  stage: 'confirm' | 'applied'
+  templateId: AttendanceSetupTemplateId
+  shiftPresetKey: string | null
+  timezoneChoice: string
+  orgTimezone: string | null
+  snapshot: AttendanceSetupPrefillSnapshot
+}>(null)
+
+// Applied-but-unsaved prefill tracker (per target form). Cleared by: undo (both), a successful
+// group save, and each form's reset (reset discards the prefilled content, so the leave warning
+// must not keep firing for content that no longer exists).
+const setupTemplatePrefillPending = ref<{
+  group: boolean
+  shift: boolean
+  templateId: AttendanceSetupTemplateId | null
+}>({ group: false, shift: false, templateId: null })
+
+const setupTemplatePendingTemplateId = computed<AttendanceSetupTemplateId | null>(() =>
+  setupTemplatePrefillPending.value.group || setupTemplatePrefillPending.value.shift
+    ? setupTemplatePrefillPending.value.templateId
+    : null,
+)
+
+const setupTemplateDialogTemplate = computed(() =>
+  setupTemplateDialog.value ? getAttendanceSetupTemplate(setupTemplateDialog.value.templateId) : null,
+)
+
+const setupTemplatePlan = computed(() => {
+  const dialog = setupTemplateDialog.value
+  if (!dialog) return null
+  return buildAttendanceSetupTemplatePrefillPlan({
+    templateId: dialog.templateId,
+    shiftPresetKey: dialog.shiftPresetKey,
+    timezone: dialog.timezoneChoice,
+    pickLabel: (label) => tr(label.en, label.zh),
+  })
+})
+
+// Pristine baselines for the dialog's "target form already has content" warning — the exact
+// values resetAttendanceGroupForm/resetShiftForm write (structural mirror; a drift here only
+// affects the warning, never the always-on confirm gate).
+const setupTemplatePristineGroup = {
+  name: '',
+  code: '',
+  timezone: defaultTimezone,
+  ruleSetId: '',
+  attendanceType: 'fixed_shift',
+  description: '',
+}
+const setupTemplatePristineShift = {
+  name: 'Standard Shift',
+  timezone: defaultTimezone,
+  workStartTime: '09:00',
+  workEndTime: '18:00',
+  lateGraceMinutes: 10,
+  earlyGraceMinutes: 10,
+  roundingMinutes: 5,
+  workingDays: '1,2,3,4,5',
+}
+
+function openSetupTemplate(templateId: AttendanceSetupTemplateId): void {
+  const template = getAttendanceSetupTemplate(templateId)
+  if (!template) return
+  // §5.2④: the org's explicit timezone = the single distinct explicit value across this org's
+  // saved attendance groups (each was explicitly part of a saved group payload). None/ambiguous ⇒
+  // null ⇒ the dialog REQUIRES a user choice; the browser timezone is never used as the org zone.
+  const orgTimezone = resolveAttendanceSetupOrgTimezone(
+    attendanceGroups.value.map((group) => group.timezone),
+  )
+  setupTemplateDialog.value = {
+    stage: 'confirm',
+    templateId,
+    shiftPresetKey: template.shiftPresets[0]?.key ?? null,
+    timezoneChoice: orgTimezone ?? '',
+    orgTimezone,
+    // §5.2② snapshot BEFORE any write — exactly the state apply mutates.
+    snapshot: captureAttendanceSetupPrefillSnapshot({
+      group: attendanceGroupForm,
+      shift: shiftForm,
+      groupEditingId: attendanceGroupEditingId.value,
+      shiftEditingId: shiftEditingId.value,
+    }),
+  }
+}
+
+function applySetupTemplate(): void {
+  const dialog = setupTemplateDialog.value
+  const plan = setupTemplatePlan.value
+  if (!dialog || !plan || dialog.stage !== 'confirm') return
+  // Create-new posture: never leave an existing record selected — a follow-up save must POST a
+  // new resource, not PUT-overwrite whichever record happened to be loaded into the form.
+  attendanceGroupEditingId.value = null
+  attendanceGroupForm.name = plan.group.name
+  attendanceGroupForm.attendanceType = plan.group.attendanceType as AttendanceGroupType
+  attendanceGroupForm.timezone = plan.group.timezone
+  if (plan.shift) {
+    shiftEditingId.value = null
+    shiftForm.name = plan.shift.name
+    shiftForm.timezone = plan.shift.timezone
+    shiftForm.workStartTime = plan.shift.workStartTime
+    shiftForm.workEndTime = plan.shift.workEndTime
+    shiftForm.lateGraceMinutes = plan.shift.lateGraceMinutes
+    shiftForm.earlyGraceMinutes = plan.shift.earlyGraceMinutes
+    shiftForm.roundingMinutes = plan.shift.roundingMinutes
+    shiftForm.workingDays = plan.shift.workingDays
+  }
+  setupTemplatePrefillPending.value = {
+    group: true,
+    shift: Boolean(plan.shift),
+    templateId: dialog.templateId,
+  }
+  dialog.stage = 'applied'
+}
+
+function cancelSetupTemplateConfirm(): void {
+  // Confirm-stage cancel: nothing was applied, nothing to restore.
+  setupTemplateDialog.value = null
+}
+
+function closeSetupTemplateDialogKeepPrefill(): void {
+  // Applied-stage side-effect-free close (a11y contract): keep the prefilled forms AND the
+  // pending-unsaved tracker (leave warnings stay armed); only the dialog and its undo snapshot
+  // are released — exactly what the dialog's undo-scope copy promises.
+  setupTemplateDialog.value = null
+}
+
+function undoSetupTemplate(): void {
+  const dialog = setupTemplateDialog.value
+  if (!dialog) return
+  const snapshot = dialog.snapshot
+  attendanceGroupEditingId.value = snapshot.groupEditingId
+  attendanceGroupForm.name = snapshot.group.name
+  attendanceGroupForm.code = snapshot.group.code
+  attendanceGroupForm.timezone = snapshot.group.timezone
+  attendanceGroupForm.ruleSetId = snapshot.group.ruleSetId
+  attendanceGroupForm.attendanceType = snapshot.group.attendanceType as AttendanceGroupType
+  attendanceGroupForm.description = snapshot.group.description
+  shiftEditingId.value = snapshot.shiftEditingId
+  shiftForm.name = snapshot.shift.name
+  shiftForm.timezone = snapshot.shift.timezone
+  shiftForm.workStartTime = snapshot.shift.workStartTime
+  shiftForm.workEndTime = snapshot.shift.workEndTime
+  shiftForm.lateGraceMinutes = snapshot.shift.lateGraceMinutes
+  shiftForm.earlyGraceMinutes = snapshot.shift.earlyGraceMinutes
+  shiftForm.roundingMinutes = snapshot.shift.roundingMinutes
+  shiftForm.workingDays = snapshot.shift.workingDays
+  setupTemplatePrefillPending.value = { group: false, shift: false, templateId: null }
+  setupTemplateDialog.value = null
+}
+
+function navigateSetupTemplate(sectionId: string): void {
+  setupTemplateDialog.value = null
+  selectAdminSection(sectionId)
+}
+
+function clearSetupTemplatePrefillPending(form: 'group' | 'shift'): void {
+  const pending = setupTemplatePrefillPending.value
+  if (!pending[form]) return
+  const next = { ...pending, [form]: false }
+  if (!next.group && !next.shift) next.templateId = null
+  setupTemplatePrefillPending.value = next
+}
+
+// OD-W4-7② 未保存离开提示: while an applied template prefill is unsaved, THREE distinct ways of
+// leaving can lose it (the prefilled forms are in-memory only):
+//   1. page unload/refresh — the window beforeunload handler below;
+//   2. leaving the /attendance route (vue-router navigation to another top-level view) — covered
+//      by AttendanceExperienceView's onBeforeRouteLeave, which consults the shared
+//      attendanceSetupPrefillPending signal synced here;
+//   3. attendance-shell top-tab switches (overview/reports/admin/import swap `component :is`,
+//      unmounting this host) — AttendanceExperienceView.selectTab consults the same signal.
+// In-host admin SECTION switches lose nothing (sections are v-show in this host), so they need no
+// confirm. Template selection is never persisted (no localStorage draft), so OD-W4-7③'s
+// userId+orgId storage-key requirement is N/A by construction — the spec asserts zero
+// template-related storage writes instead.
+function handleSetupTemplateBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!setupTemplatePendingTemplateId.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+watch(setupTemplatePendingTemplateId, (pendingId) => {
+  attendanceSetupPrefillPending.value = pendingId !== null
+})
+
+onMounted(() => {
+  window.addEventListener('beforeunload', handleSetupTemplateBeforeUnload)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', handleSetupTemplateBeforeUnload)
+  // Host gone ⇒ the in-memory prefill is gone too: clear the shared in-app leave signal so a
+  // stale `true` can never block navigation after this host unmounts.
+  attendanceSetupPrefillPending.value = false
 })
 
 const {
@@ -25649,6 +25894,9 @@ async function deleteRotationAssignment(id: string) {
 }
 
 function resetShiftForm() {
+  // W4-2: a reset discards any template-prefilled shift content (save success also lands here) —
+  // stop the unsaved-prefill leave warning for this form.
+  clearSetupTemplatePrefillPending('shift')
   shiftEditingId.value = null
   shiftForm.name = 'Standard Shift'
   shiftForm.timezone = defaultTimezone
@@ -26412,6 +26660,9 @@ async function deleteRuleSet(id: string) {
 }
 
 function resetAttendanceGroupForm() {
+  // W4-2: a reset discards any template-prefilled group content — stop the unsaved-prefill
+  // leave warning for this form.
+  clearSetupTemplatePrefillPending('group')
   attendanceGroupActiveStage.value = 'basics'
   attendanceGroupEditingId.value = null
   attendanceGroupForm.name = ''
@@ -26639,6 +26890,10 @@ async function saveAttendanceGroup() {
       throw new Error(readErrorMessage(data, tr('Failed to save attendance group', '保存考勤分组失败')))
     }
     adminForbidden.value = false
+    // W4-2: a successful group save persists the (possibly template-prefilled) content — the
+    // unsaved-prefill leave warning for this form must stop (the group save path keeps the form
+    // populated instead of resetting, so the reset-side clear never fires here).
+    clearSetupTemplatePrefillPending('group')
     const savedGroup = data.data as AttendanceGroup | undefined
     await loadAttendanceGroups()
     if (savedGroup?.id) {
