@@ -55,7 +55,8 @@
 3. 提交时验证填写人可读源记录；执行时再次验证目标记录存在、未锁定、rule creator 可写且目标字段可写。
 4. 缺失、越权、锁定和不可写对持久化结果统一为 `fwb_rejected:linked_record_unavailable`，不得形成存在性 oracle。
 5. claim、record mutation、revision 和 chained outbox 必须在同一事务；重复事件不得产生第二次业务写入。
-6. 数字、日期、单选/多选和 record-link 均按目标字段契约无损转换；精度丢失、非法日期和未知选项 fail closed。
+6. 日期、单选和 record-link 按目标字段契约无损转换；非法日期和未知选项 fail closed。精确数字映射在
+   普通编辑、查询、公式、汇总和导出链路全部证明不丢精度前保持不可选，不得用 operator 开关绕过。
 7. 隐藏或未映射字段不得进入目标记录、日志或错误正文。
 
 ### 3.5 启用纪律
@@ -71,13 +72,17 @@
 | FWB-2 精确更新已有记录 | #4531 | record-link 选定记录、双时点权限、统一无 oracle 拒绝、事务写回 |
 | 并行条件路径闭合 | #4532 | 所有路径到 join，兼容存量图，并覆盖 clone 后 draft |
 | Canvas V2 节点检查器 | #4533 | 画布内共享配置编辑、业务标签、键盘与响应式可用性 |
+| 版本 diff/恢复集成 | #4536 | 历史恢复生成新 draft，复用当前拓扑校验；画布内版本变化可视化 |
+| 画布导航层 | #4537 | zoom/pan/minimap、版本 overlay、窄屏导航，不改变 graph authority |
+| 语义重排 | #4538 | 只允许同一区域合法重排，通过 graph command 重连并保持 undo/redo |
+| FWB 生产组合 | #4539 | 新建/更新 UI、server-owned confirmation、actor receipt、runtime mapping 与正式矩阵 |
 
 ## 5. 明确不在本轮宣称完成的范围
 
-- 画布自由拖拽重连、分支拖排、zoom/pan/minimap 和大型流程虚拟化。
-- 版本差异在画布上的彩色 overlay、版本并排比较和逐节点 cherry-pick。
-- #4439 历史恢复生成的新 draft 与 #4532 all-path join guard 的最终组合验证。
-- 手机端完整 bottom-sheet 编辑体验。
+- 任意边自由拖拽重连、跨条件/并行区域拖排和大型流程虚拟化；#4538 只交付受约束的语义重排。
+- 版本逐节点 cherry-pick、跨版本三方合并；#4536/#4537 只交付差异、恢复和 overlay。
+- 手机端完整 bottom-sheet 编辑体验；当前为响应式导航与检查器，不宣称原生移动编排完成。
+- 精确数字写回；当前 UI、确认路由和保存门均显式拒绝 number mapping。
 - 真实钉钉/飞书租户 UAT、生产 flag 开启和运行指标观察。
 
 这些是下一轮 Canvas parity/enablement 工作，不得由本轮 MD 宣称覆盖。
