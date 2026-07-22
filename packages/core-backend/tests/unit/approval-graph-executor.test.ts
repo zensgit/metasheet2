@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { ApprovalGraphExecutor, validateApprovalFormData, pruneHiddenFormData } from '../../src/services/ApprovalGraphExecutor'
+import {
+  ApprovalGraphExecutor,
+  canonicalizeRecordLinkFormData,
+  pruneHiddenFormData,
+  validateApprovalFormData,
+} from '../../src/services/ApprovalGraphExecutor'
 import type { FormSchema, RuntimeGraph } from '../../src/types/approval-product'
 
 describe('ApprovalGraphExecutor', () => {
@@ -1350,6 +1355,84 @@ describe('validateApprovalFormData — detail (明细) rows (C-2)', () => {
   it('applies per-row visibility: a hidden required sub-field is not required, but required when visible', () => {
     expect(validateApprovalFormData(detailSchema, { items: [{ product: 'A', qty: 1 }] })).toEqual([])
     expect(validateApprovalFormData(detailSchema, { items: [{ product: 'special', qty: 1 }] })).toEqual(['items[0].note is required'])
+  })
+})
+
+describe('validateApprovalFormData — record-link value shape (FWB-0 Layer 2)', () => {
+  const schema: FormSchema = {
+    fields: [{
+      id: 'linked',
+      type: 'record-link',
+      label: '关联记录',
+      required: true,
+      props: { baseId: 'base_a', sheetId: 'sheet_a' },
+    }],
+  }
+
+  it('accepts exactly one { recordId: non-blank string }', () => {
+    expect(validateApprovalFormData(schema, { linked: { recordId: 'rec_1' } })).toEqual([])
+    expect(validateApprovalFormData(schema, { linked: { recordId: '  rec_2  ' } })).toEqual([])
+  })
+
+  it('rejects arrays, free-text, empty id, and extra target overrides (fail-closed)', () => {
+    expect(validateApprovalFormData(schema, { linked: 'rec_1' })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: ['rec_1'] })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordId: '' } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordId: 'a', sheetId: 'override' } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordIds: ['a', 'b'] } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+  })
+
+  it('required empty still surfaces required (not a type error)', () => {
+    expect(validateApprovalFormData(schema, {})).toEqual(['linked is required'])
+  })
+})
+
+describe('canonicalizeRecordLinkFormData — FWB-0 Layer 2', () => {
+  it('rewrites padded recordId to the exact trimmed canonical object in-place', () => {
+    const schema: FormSchema = {
+      fields: [
+        {
+          id: 'linked',
+          type: 'record-link',
+          label: '关联',
+          props: { baseId: 'b', sheetId: 's' },
+        },
+        { id: 'reason', type: 'text', label: '事由' },
+      ],
+    }
+    const formData: Record<string, unknown> = {
+      linked: { recordId: '  rec-1  ' },
+      reason: 'keep',
+    }
+    canonicalizeRecordLinkFormData(schema, formData)
+    expect(formData.linked).toEqual({ recordId: 'rec-1' })
+    expect(formData.reason).toBe('keep')
+  })
+
+  it('does not loosen structural validation — invalid shapes stay untouched', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'linked',
+        type: 'record-link',
+        label: '关联',
+        props: { baseId: 'b', sheetId: 's' },
+      }],
+    }
+    const invalid: Record<string, unknown> = {
+      linked: { recordId: 'a', sheetId: 'smuggle' },
+    }
+    canonicalizeRecordLinkFormData(schema, invalid)
+    expect(invalid.linked).toEqual({ recordId: 'a', sheetId: 'smuggle' })
   })
 })
 

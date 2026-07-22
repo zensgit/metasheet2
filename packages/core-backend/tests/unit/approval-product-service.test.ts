@@ -1362,6 +1362,205 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  describe('record-link field contract (FWB-0 Layer 2 author-time)', () => {
+    // assertFormSchema runs BEFORE pool.connect(), so reject cases throw without any query mock.
+    const wrap = (field: Record<string, unknown>, extra: Record<string, unknown>[] = []) => ({
+      key: `rl-${Date.now()}`,
+      name: 'Record Link Tpl',
+      formSchema: { fields: [field, ...extra] },
+      approvalGraph: buildRuntimeGraph(),
+    })
+    const create = async (request: unknown) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate(request as never)
+    }
+
+    it('rejects record-link without non-blank props.baseId/props.sheetId', async () => {
+      await expect(create(wrap({ id: 'linked', type: 'record-link', label: '关联' })))
+        .rejects.toThrow(/record-link requires non-blank props\.baseId and props\.sheetId/)
+      await expect(create(wrap({
+        id: 'linked', type: 'record-link', label: '关联', props: { baseId: '  ', sheetId: 's' },
+      }))).rejects.toThrow(/record-link requires non-blank props\.baseId and props\.sheetId/)
+    })
+
+    it('rejects record-link nested inside a detail group (top-level only)', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{
+          id: 'linked', type: 'record-link', label: '关联',
+          props: { baseId: 'b', sheetId: 's' },
+        }],
+      }))).rejects.toThrow(/record-link cannot nest inside a detail group|not a valid leaf sub-field/)
+    })
+
+    it('rejects record-link props keys outside baseId/sheetId (OpenAPI additionalProperties:false)', async () => {
+      // Fail-closed: do not silently drop author extras (mutation removing this reject reds the contract).
+      await expect(create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { baseId: 'b', sheetId: 's', extra: 1 },
+      }))).rejects.toThrow(/record-link props may only contain baseId and sheetId/)
+      await expect(create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { baseId: 'b', sheetId: 's', foreignSheetId: 'x', displayField: 'name' },
+      }))).rejects.toThrow(/unknown: foreignSheetId, displayField/)
+    })
+
+    it('pins only trimmed baseId/sheetId on create (positive control; no extra keys)', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{
+            id: 'tpl-rl', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+            visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+            active_version_id: null, latest_version_id: null,
+            created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{
+            id: 'ver-rl', template_id: 'tpl-rl', version: 1, status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{
+            id: 'tpl-rl', key: 'rl-tpl', name: 'RL', description: null, category: null,
+            visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+            active_version_id: 'ver-rl', latest_version_id: 'ver-rl',
+            created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { baseId: '  base_x  ', sheetId: '  sheet_y  ' },
+      }))
+      const field = result.formSchema.fields[0]
+      expect(field.type).toBe('record-link')
+      expect(field.props).toEqual({ baseId: 'base_x', sheetId: 'sheet_y' })
+      expect(Object.keys(field.props as object).sort()).toEqual(['baseId', 'sheetId'])
+    })
+
+    it('rejects record-link extra props keys on update (assertFormSchema on request body)', async () => {
+      // updateTemplate validates request.formSchema before any write — no DB needed for reject.
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const graph = buildRuntimeGraph()
+      await expect(service.updateTemplate('tpl-any', {
+        formSchema: {
+          fields: [{
+            id: 'linked', type: 'record-link', label: '关联',
+            props: { baseId: 'b', sheetId: 's', stale: true },
+          }],
+        },
+        approvalGraph: graph,
+      } as never)).rejects.toThrow(/record-link props may only contain baseId and sheetId/)
+    })
+
+    it('rejects record-link extra props keys on publish (asFormSchema re-validates stored schema)', async () => {
+      // publishTemplate loads the draft version and re-runs assertFormSchema (STORED context).
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const graph = buildRuntimeGraph()
+      const badSchema = {
+        fields: [{
+          id: 'linked', type: 'record-link', label: '关联',
+          props: { baseId: 'b', sheetId: 's', leftover: 'x' },
+        }],
+      }
+      const templateRow = {
+        id: 'tpl-rl-pub', key: 'rl-pub', name: 'RL', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-rl-pub',
+        created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+      }
+      const versionRow = {
+        id: 'ver-rl-pub', template_id: 'tpl-rl-pub', version: 1, status: 'draft',
+        form_schema: badSchema,
+        approval_graph: graph,
+        created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.includes('FROM approval_templates') && s.includes('FOR UPDATE')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (s.includes('FROM approval_template_versions')) {
+          return { rows: [versionRow], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+
+      await expect(service.publishTemplate('tpl-rl-pub', {
+        policy: { allowRevoke: true },
+        actorUserId: 'admin-1',
+      } as never)).rejects.toThrow(/record-link props may only contain baseId and sheetId/)
+    })
+
+    it('P1-2: rejects visibilityRule that depends on a record-link field (fail-closed v1)', async () => {
+      await expect(create(wrap(
+        {
+          id: 'linked', type: 'record-link', label: '关联',
+          props: { baseId: 'b', sheetId: 's' },
+        },
+        [{
+          id: 'note', type: 'text', label: '备注',
+          visibilityRule: { fieldId: 'linked', operator: 'notEmpty' },
+        }],
+      ))).rejects.toThrow(/cannot reference a record-link field/)
+    })
+
+    it('P1-2: rejects simple condition rules that compare a record-link field (fail-closed v1)', async () => {
+      const request = {
+        key: `rl-cond-${Date.now()}`,
+        name: 'Record Link Cond',
+        formSchema: {
+          fields: [{
+            id: 'linked', type: 'record-link', label: '关联',
+            props: { baseId: 'b', sheetId: 's' },
+          }],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'route',
+              type: 'condition',
+              config: {
+                branches: [{
+                  edgeKey: 'edge-yes',
+                  rules: [{ fieldId: 'linked', operator: 'eq', value: 'anything' }],
+                }],
+                defaultEdgeKey: 'edge-no',
+              },
+            },
+            { key: 'yes', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['u1'] } },
+            { key: 'no', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['u1'] } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'edge-start-route', source: 'start', target: 'route' },
+            { key: 'edge-yes', source: 'route', target: 'yes' },
+            { key: 'edge-no', source: 'route', target: 'no' },
+            { key: 'edge-yes-end', source: 'yes', target: 'end' },
+            { key: 'edge-no-end', source: 'no', target: 'end' },
+          ],
+          policy: { allowRevoke: true },
+        },
+      }
+      await expect(create(request)).rejects.toThrow(/cannot reference record-link field/)
+    })
+  })
+
   describe('approval condition formula contract (FC-1)', () => {
     const formulaFormSchema = {
       fields: [

@@ -4927,7 +4927,7 @@
           "operator"
         ]
       },
-      "FormField": {
+      "FormFieldDetailLeaf": {
         "type": "object",
         "properties": {
           "id": {
@@ -4978,6 +4978,160 @@
           "type",
           "label"
         ]
+      },
+      "RecordLinkFieldProps": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "description": "Pinned multitable base id (publish-time; filler cannot override).\nMust be non-blank after trim — whitespace-only is invalid.\n"
+          },
+          "sheetId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "description": "Pinned multitable sheet id (publish-time; filler cannot override).\nMust be non-blank after trim — whitespace-only is invalid.\n"
+          }
+        },
+        "required": [
+          "baseId",
+          "sheetId"
+        ]
+      },
+      "FormFieldGeneric": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "textarea",
+              "number",
+              "date",
+              "datetime",
+              "select",
+              "multi-select",
+              "user",
+              "attachment",
+              "detail"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "placeholder": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "nullable": true
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FormOption"
+            }
+          },
+          "props": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "visibilityRule": {
+            "$ref": "#/components/schemas/FormFieldVisibilityRule"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FormFieldDetailLeaf"
+            },
+            "description": "Detail-group leaf columns (only when type=detail). Never contains record-link."
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "label"
+        ]
+      },
+      "FormFieldRecordLink": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "record-link"
+            ],
+            "description": "FWB-0 Layer 2 record-link field. Pins multitable base/sheet via props and stores\nexactly one `{ recordId }` value. Top-level only in v1 (never a detail leaf).\n"
+          },
+          "label": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "placeholder": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "nullable": true
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FormOption"
+            }
+          },
+          "props": {
+            "$ref": "#/components/schemas/RecordLinkFieldProps"
+          },
+          "visibilityRule": {
+            "$ref": "#/components/schemas/FormFieldVisibilityRule"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "label",
+          "props"
+        ]
+      },
+      "FormField": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FormFieldRecordLink"
+          },
+          {
+            "$ref": "#/components/schemas/FormFieldGeneric"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "record-link": "#/components/schemas/FormFieldRecordLink",
+            "text": "#/components/schemas/FormFieldGeneric",
+            "textarea": "#/components/schemas/FormFieldGeneric",
+            "number": "#/components/schemas/FormFieldGeneric",
+            "date": "#/components/schemas/FormFieldGeneric",
+            "datetime": "#/components/schemas/FormFieldGeneric",
+            "select": "#/components/schemas/FormFieldGeneric",
+            "multi-select": "#/components/schemas/FormFieldGeneric",
+            "user": "#/components/schemas/FormFieldGeneric",
+            "attachment": "#/components/schemas/FormFieldGeneric",
+            "detail": "#/components/schemas/FormFieldGeneric"
+          }
+        }
       },
       "FormSchema": {
         "type": "object",
@@ -6617,6 +6771,151 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approvals/record-link-options": {
+      "get": {
+        "operationId": "listApprovalRecordLinkOptions",
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "List candidate records for an approval record-link field",
+        "description": "FWB-0 Layer 2 dedicated candidate picker for ordinary fillers. Scoped to a\nserver-pinned (baseId, sheetId) pair from a form `record-link` field. Requires\nthe same `approvals:write` permission as createApproval (not read/act-only).\n\nReturns only rows the actor can read, with human display labels derived from\nvisible non-computed source fields (never a raw record id). Missing sheet,\nbase mismatch, and unreadable target share one public refuse shape (no existence\noracle). Does NOT reuse multitable `/fields/:fieldId/link-options`.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "baseId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pinned multitable base id from the form field props."
+          },
+          {
+            "in": "query",
+            "name": "sheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pinned multitable sheet id from the form field props."
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional case-insensitive search against the effective display label."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "records",
+                    "page"
+                  ],
+                  "properties": {
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "display"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "Record id (selection value only; never used as the display label)."
+                          },
+                          "display": {
+                            "type": "string",
+                            "description": "Human label from visible source fields, or a generic placeholder."
+                          }
+                        }
+                      }
+                    },
+                    "page": {
+                      "type": "object",
+                      "required": [
+                        "limit",
+                        "offset",
+                        "total",
+                        "hasMore"
+                      ],
+                      "properties": {
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "offset": {
+                          "type": "integer"
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "hasMore": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Target sheet not found / base mismatch / unreadable (shared no-oracle shape).\nBody is the same approval error envelope as other 4xx routes\n(`code` + `message`, never distinguishes missing vs denied).\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"

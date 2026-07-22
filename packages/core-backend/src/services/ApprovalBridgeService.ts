@@ -29,6 +29,10 @@ import {
   redactHiddenFormFields,
   type RedactableRuntimeGraph,
 } from './approval-form-redaction'
+import {
+  projectRecordLinkFormSnapshotForViewer,
+  projectRecordLinkFormSnapshotsForViewerBatch,
+} from './approval-record-link-read-projection'
 
 const logger = new Logger('ApprovalBridgeService')
 const PLM_SYNC_CONCURRENCY = 5
@@ -561,13 +565,30 @@ export class ApprovalBridgeService {
       return dto
     })
 
+    // FWB-0 Layer 2 P1-1: project record-link fields for the list viewer (actorId).
+    // Fail-closed redaction when actorId is absent; authorized viewers keep { recordId }.
+    if (data.length > 0) {
+      const queryFn = (sql: string, params?: unknown[]) => pool!.query(sql, params)
+      const projected = await projectRecordLinkFormSnapshotsForViewerBatch(
+        data.map((dto, index) => ({
+          formSnapshot: dto.formSnapshot ?? null,
+          templateVersionId: instancesResult.rows[index]?.template_version_id ?? null,
+        })),
+        options?.actorId ?? null,
+        queryFn,
+      )
+      for (let i = 0; i < data.length; i += 1) {
+        data[i]!.formSnapshot = projected[i] ?? null
+      }
+    }
+
     return {
       data,
       total,
     }
   }
 
-  async getApproval(id: string): Promise<UnifiedApprovalDTO | null> {
+  async getApproval(id: string, viewerUserId?: string | null): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     if (isPlmId(id)) {
@@ -600,6 +621,16 @@ export class ApprovalBridgeService {
       )
       const frozen = versionResult.rows[0]?.form_schema
       if (frozen) dto.formSchema = frozen as unknown as FormSchema
+    }
+    // FWB-0 Layer 2 P1-1: redact stored linked record ids unless the viewer has fresh target authz.
+    if (dto?.formSnapshot) {
+      const queryFn = (sql: string, params?: unknown[]) => pool!.query(sql, params)
+      dto.formSnapshot = await projectRecordLinkFormSnapshotForViewer(
+        dto.formSnapshot,
+        dto.formSchema ?? null,
+        viewerUserId,
+        queryFn,
+      )
     }
     return dto
   }
@@ -736,7 +767,7 @@ export class ApprovalBridgeService {
       client.release()
     }
 
-    const updated = await this.getApproval(id)
+    const updated = await this.getApproval(id, actor.userId)
     if (!updated) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }

@@ -43,6 +43,8 @@ export type FormFieldType =
   | 'user'
   | 'attachment'
   | 'detail'
+  /** FWB-0 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */
+  | 'record-link'
 
 export interface ApprovalNode {
   key: string

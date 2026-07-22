@@ -416,6 +416,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/record-link-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List candidate records for an approval record-link field
+         * @description FWB-0 Layer 2 dedicated candidate picker for ordinary fillers. Scoped to a
+         *     server-pinned (baseId, sheetId) pair from a form `record-link` field. Requires
+         *     the same `approvals:write` permission as createApproval (not read/act-only).
+         *
+         *     Returns only rows the actor can read, with human display labels derived from
+         *     visible non-computed source fields (never a raw record id). Missing sheet,
+         *     base mismatch, and unreadable target share one public refuse shape (no existence
+         *     oracle). Does NOT reuse multitable `/fields/:fieldId/link-options`.
+         */
+        get: operations["listApprovalRecordLinkOptions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approvals/pending": {
         parameters: {
             query?: never;
@@ -714,6 +741,50 @@ export interface paths {
          *     highest SLA breach rate.
          */
         get: operations["getApprovalMetricsReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/metrics/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval metrics aggregated by requester (person)
+         * @description Requires the `approvals:analytics` permission (a person-level performance ranking is an
+         *     HR/ops-analytics lens, gated separately from approval administration). Aggregates approval
+         *     metrics by the requester (person), Top-100 by volume. A null key is the unattributed bucket.
+         */
+        get: operations["getApprovalMetricsByPerson"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/metrics/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval metrics aggregated by requester department (team)
+         * @description Admin-only. Aggregates approval metrics by the requester's frozen department
+         *     (directoryDepartment with a department fallback), Top-100 by volume. A null key is
+         *     the unattributed bucket.
+         */
+        get: operations["getApprovalMetricsByTeam"];
         put?: never;
         post?: never;
         delete?: never;
@@ -14368,6 +14439,10 @@ export interface components {
             sheetId?: string | null;
             viewId?: string | null;
             recordId?: string | null;
+            baseName?: string | null;
+            sheetName?: string | null;
+            viewName?: string | null;
+            fieldName?: string | null;
         };
         CommentInboxResponse: {
             /** @example true */
@@ -15837,7 +15912,7 @@ export interface components {
             /** @description Candidate values for the in operator. */
             values?: unknown[];
         };
-        FormField: {
+        FormFieldDetailLeaf: {
             id: string;
             /** @enum {string} */
             type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment";
@@ -15851,6 +15926,55 @@ export interface components {
             };
             visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
         };
+        RecordLinkFieldProps: {
+            /**
+             * @description Pinned multitable base id (publish-time; filler cannot override).
+             *     Must be non-blank after trim — whitespace-only is invalid.
+             */
+            baseId: string;
+            /**
+             * @description Pinned multitable sheet id (publish-time; filler cannot override).
+             *     Must be non-blank after trim — whitespace-only is invalid.
+             */
+            sheetId: string;
+        };
+        FormFieldGeneric: {
+            id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment" | "detail";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props?: {
+                [key: string]: unknown;
+            };
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+            /** @description Detail-group leaf columns (only when type=detail). Never contains record-link. */
+            columns?: components["schemas"]["FormFieldDetailLeaf"][];
+        };
+        FormFieldRecordLink: {
+            id: string;
+            /**
+             * @description FWB-0 Layer 2 record-link field. Pins multitable base/sheet via props and stores
+             *     exactly one `{ recordId }` value. Top-level only in v1 (never a detail leaf).
+             *      (enum property replaced by openapi-typescript)
+             * @enum {string}
+             */
+            type: "record-link";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props: components["schemas"]["RecordLinkFieldProps"];
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+        };
+        FormField: components["schemas"]["FormFieldRecordLink"] | components["schemas"]["FormFieldGeneric"];
         FormSchema: {
             fields: components["schemas"]["FormField"][];
         };
@@ -16232,6 +16356,65 @@ export interface operations {
             400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listApprovalRecordLinkOptions: {
+        parameters: {
+            query: {
+                /** @description Pinned multitable base id from the form field props. */
+                baseId: string;
+                /** @description Pinned multitable sheet id from the form field props. */
+                sheetId: string;
+                /** @description Optional case-insensitive search against the effective display label. */
+                search?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        records: {
+                            /** @description Record id (selection value only; never used as the display label). */
+                            id: string;
+                            /** @description Human label from visible source fields, or a generic placeholder. */
+                            display: string;
+                        }[];
+                        page: {
+                            limit: number;
+                            offset: number;
+                            total: number;
+                            hasMore: boolean;
+                        };
+                    };
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /**
+             * @description Target sheet not found / base mismatch / unreadable (shared no-oracle shape).
+             *     Body is the same approval error envelope as other 4xx routes
+             *     (`code` + `message`, never distinguishes missing vs denied).
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };
@@ -16743,6 +16926,96 @@ export interface operations {
                                 p95DurationSeconds?: number | null;
                             }[];
                         };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getApprovalMetricsByPerson: {
+        parameters: {
+            query?: {
+                since?: string;
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok: boolean;
+                        data: {
+                            key?: string | null;
+                            name?: string | null;
+                            total?: number;
+                            approved?: number;
+                            rejected?: number;
+                            revoked?: number;
+                            avgDurationSeconds?: number | null;
+                            slaBreachRate?: number;
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getApprovalMetricsByTeam: {
+        parameters: {
+            query?: {
+                since?: string;
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok: boolean;
+                        data: {
+                            key?: string | null;
+                            name?: string | null;
+                            total?: number;
+                            approved?: number;
+                            rejected?: number;
+                            revoked?: number;
+                            avgDurationSeconds?: number | null;
+                            slaBreachRate?: number;
+                        }[];
                     };
                 };
             };

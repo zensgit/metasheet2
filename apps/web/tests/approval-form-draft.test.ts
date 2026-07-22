@@ -47,6 +47,37 @@ describe('formDraft helpers', () => {
     expect(formSchemaSignature(SCHEMA)).not.toContain('attachment')
   })
 
+  it('record-link signature includes baseId+sheetId pins so a repin invalidates old drafts', () => {
+    const pinnedA: FormSchema = {
+      fields: [{
+        id: 'linked',
+        type: 'record-link',
+        label: '关联',
+        props: { baseId: 'base-a', sheetId: 'sheet-a' },
+      }],
+    } as FormSchema
+    const pinnedB: FormSchema = {
+      fields: [{
+        id: 'linked',
+        type: 'record-link',
+        label: '关联',
+        props: { baseId: 'base-a', sheetId: 'sheet-b' },
+      }],
+    } as FormSchema
+    const sigA = formSchemaSignature(pinnedA)
+    const sigB = formSchemaSignature(pinnedB)
+    expect(sigA).toContain('linked:record-link:base-a:sheet-a')
+    expect(sigB).toContain('linked:record-link:base-a:sheet-b')
+    expect(sigA).not.toBe(sigB)
+
+    const storage = fakeStorage()
+    const key = formDraftKey('u1', 't-rl')
+    saveFormDraft(storage, key, sigA, { linked: { recordId: 'old-rec' } })
+    // Repin (sigB) must fail closed: stale draft with the prior recordId is GC-ed.
+    expect(loadFormDraft(storage, key, sigB)).toBeNull()
+    expect(storage.getItem(key)).toBeNull()
+  })
+
   it('save→load round-trips under the same signature', () => {
     const storage = fakeStorage()
     const key = formDraftKey('u1', 't1')

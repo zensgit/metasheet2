@@ -11182,48 +11182,83 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-
-      const recordCheck = await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
-      if (recordCheck.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
-      }
-
-      const { subjectType, subjectId, accessLevel } = parsed.data
-      if (subjectType === 'user') {
-        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
-        if (userCheck.rows.length === 0) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
-        }
-      } else if (subjectType === 'role') {
-        const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
-        if (roleCheck.rows.length === 0) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
-        }
-      } else {
-        const groupCheck = await pool.query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
-        if (groupCheck.rows.length === 0) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
-        }
-      }
-
-      await pool.query(
-        `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (record_id, subject_type, subject_id)
-         DO UPDATE SET access_level = EXCLUDED.access_level`,
-        [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
+      // Real transaction + canonical sheet+record row-auth advisory BEFORE auth/read/write so a
+      // concurrent approval create final recheck serializes against deny INSERT (phantom-safe).
+      // HTTP response is emitted ONLY after pool.transaction resolves (post-COMMIT): the callback
+      // returns a typed outcome and must not touch res — otherwise a COMMIT failure can leave a
+      // success body already written (headersSent) while persistence rolls back.
+      const { acquireRecordLinkRowAuthLockOnQuery } = await import(
+        '../services/approval-record-link-row-auth-lock'
       )
+      type PutRecordPermissionTxnOutcome =
+        | {
+            kind: 'ok'
+            data: {
+              sheetId: string
+              recordId: string
+              subjectType: 'user' | 'role' | 'member-group'
+              subjectId: string
+              accessLevel: 'read' | 'write' | 'admin' | 'none'
+            }
+          }
+        | { kind: 'error'; status: number; code: string; message: string }
 
-      return res.json({
-        ok: true,
-        data: { sheetId, recordId, subjectType, subjectId, accessLevel },
+      const outcome = await pool.transaction(async ({ query }): Promise<PutRecordPermissionTxnOutcome> => {
+        await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
+
+        const sheet = await loadSheetRow(query, sheetId)
+        if (!sheet) {
+          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
+        }
+        const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+        if (!capabilities.canManageSheetAccess) {
+          return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
+        }
+
+        const recordCheck = await query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+        if (recordCheck.rows.length === 0) {
+          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Record not found: ${recordId}` }
+        }
+
+        const { subjectType, subjectId, accessLevel } = parsed.data
+        if (subjectType === 'user') {
+          const userCheck = await query('SELECT id FROM users WHERE id = $1', [subjectId])
+          if (userCheck.rows.length === 0) {
+            return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `User not found: ${subjectId}` }
+          }
+        } else if (subjectType === 'role') {
+          const roleCheck = await query('SELECT id FROM roles WHERE id = $1', [subjectId])
+          if (roleCheck.rows.length === 0) {
+            return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Role not found: ${subjectId}` }
+          }
+        } else {
+          const groupCheck = await query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
+          if (groupCheck.rows.length === 0) {
+            return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` }
+          }
+        }
+
+        await query(
+          `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (record_id, subject_type, subject_id)
+           DO UPDATE SET access_level = EXCLUDED.access_level`,
+          [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
+        )
+
+        return {
+          kind: 'ok',
+          data: { sheetId, recordId, subjectType, subjectId, accessLevel },
+        }
       })
+
+      if (outcome.kind === 'error') {
+        return res.status(outcome.status).json({
+          ok: false,
+          error: { code: outcome.code, message: outcome.message },
+        })
+      }
+      return res.json({ ok: true, data: outcome.data })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -11242,22 +11277,45 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-
-      const result = await pool.query(
-        'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
-        [permissionId, sheetId, recordId],
+      // Same post-COMMIT response contract as PUT: callback returns a typed outcome / throws;
+      // never touches res. Canonical row-auth advisory + txn-local auth stay inside the txn.
+      const { acquireRecordLinkRowAuthLockOnQuery } = await import(
+        '../services/approval-record-link-row-auth-lock'
       )
-      if ((result.rowCount ?? 0) === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
-      }
+      type DeleteRecordPermissionTxnOutcome =
+        | { kind: 'ok'; data: { deleted: true; permissionId: string } }
+        | { kind: 'error'; status: number; code: string; message: string }
 
-      return res.json({ ok: true, data: { deleted: true, permissionId } })
+      const outcome = await pool.transaction(async ({ query }): Promise<DeleteRecordPermissionTxnOutcome> => {
+        await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
+
+        const sheet = await loadSheetRow(query, sheetId)
+        if (!sheet) {
+          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
+        }
+        const { capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+        if (!capabilities.canManageSheetAccess) {
+          return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
+        }
+
+        const result = await query(
+          'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
+          [permissionId, sheetId, recordId],
+        )
+        if ((result.rowCount ?? 0) === 0) {
+          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` }
+        }
+
+        return { kind: 'ok', data: { deleted: true, permissionId } }
+      })
+
+      if (outcome.kind === 'error') {
+        return res.status(outcome.status).json({
+          ok: false,
+          error: { code: outcome.code, message: outcome.message },
+        })
+      }
+      return res.json({ ok: true, data: outcome.data })
     } catch (err) {
       if (isUndefinedTableError(err, 'record_permissions')) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })

@@ -981,6 +981,52 @@ export async function isRecordReadDeniedForUser(
 }
 
 /**
+ * FWB-0 Layer 2 (record-link submit no-oracle): strict flag lookup that does NOT swallow
+ * unexpected DB errors into `false` (unlike `loadRowLevelReadDenyEnabled`, which is inert on any
+ * error for generic multitable surfaces). Only pre-feature absence (undefined table/column) is
+ * treated as flag-off; every other query failure rethrows so the submit path can fail closed.
+ */
+export async function loadRowLevelReadDenyEnabledStrict(
+  query: QueryFn,
+  sheetId: string,
+): Promise<boolean> {
+  if (!sheetId) return false
+  try {
+    const r = await query(
+      'SELECT row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = $1',
+      [sheetId],
+    )
+    const row = r.rows[0] as { enabled?: boolean; base_id?: string } | undefined
+    if (isApprovalProjectionBaseId(row?.base_id)) return true
+    return row?.enabled === true
+  } catch (err) {
+    if (
+      isUndefinedTableError(err, 'meta_sheets')
+      || isUndefinedColumnError(err, 'row_level_read_permissions_enabled')
+    ) {
+      return false
+    }
+    throw err
+  }
+}
+
+/**
+ * FWB-0 Layer 2 strict record-read deny for approval form submit. Flag lookup uses the strict
+ * resolver (DB errors propagate). Callers that need a boolean readable check should catch and
+ * treat any throw as "not readable" (no existence oracle).
+ */
+export async function isRecordReadDeniedForUserStrict(
+  query: QueryFn,
+  sheetId: string,
+  recordId: string,
+  userId: string,
+): Promise<boolean> {
+  if (!sheetId || !recordId) return true
+  if (!(await loadRowLevelReadDenyEnabledStrict(query, sheetId))) return false
+  return (await loadDeniedRecordIds(query, sheetId, userId)).has(recordId)
+}
+
+/**
  * T36-1 (Plan A): for a projection sheet, the record ids `userId` may NOT read — every row where
  * they are neither the requester nor the terminal decider. NULL/missing participant fields never
  * match the actor, so corrupt rows land in the denied set (fail-closed, lock §3). Returns empty

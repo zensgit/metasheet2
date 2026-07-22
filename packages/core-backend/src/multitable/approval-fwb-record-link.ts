@@ -45,6 +45,170 @@ export async function validateRecordLinkAtSubmit(
   return readable ? { ok: true } : { ok: false, code: 'link_not_readable' }
 }
 
+/**
+ * Ordered helper steps for the full record-link submit authz pipeline.
+ * Missing / base-mismatch / unreadable / row-denied MUST share this order so public
+ * bodies AND query/helper transcripts cannot form an existence oracle.
+ *
+ * Create-txn final recheck (when multi-target create path is used):
+ *   Globally phased locks for ALL candidates first (see
+ *   lockRecordLinkMultiTargetCreatePathOnQuery):
+ *     1) all target meta_bases (sorted)
+ *     2) all target meta_sheets (sorted)
+ *     3) actor-wide authority rows once (user_roles → … → groups)
+ *     4) spreadsheet_permissions for all target sheets (sorted)
+ *     5) row-auth advisory + meta_records FOR UPDATE per target (canonical order)
+ *   Then re-read membership / base / sheet / row auth for every candidate under those locks
+ *   (this probe's per-link steps; lock hooks no-op when pre-locked by the multi-target helper).
+ * Concurrent DELETE/INSERT on locked sources either blocks or is observed as empty.
+ * Final write gate is txn-local DB/admin only. Never authorize from a pre-lock snapshot alone.
+ *
+ * Multi-link: sorting alone does NOT fix unequal overlapping sets ([A,B] vs [B] same actor
+ * deadlocks when authority is interleaved per candidate). Global phases close that cycle.
+ * Candidate sort still keeps re-read / row-auth order deterministic.
+ */
+export const RECORD_LINK_SUBMIT_AUTH_STEPS = [
+  'lock_authority',
+  'lock_row_auth',
+  'sheet_membership',
+  'record_exists',
+  'base_readable',
+  'sheet_capabilities',
+  'row_deny_strict',
+] as const
+
+/**
+ * Canonical multi-link lock order for final create recheck.
+ * Sort key: baseId → sheetId → recordId → fieldId → stable original index.
+ * Shape-invalid candidates use their placeholder ids and still sort deterministically
+ * (they take no real locks when shapeOk is false, but keep pipeline order uniform).
+ */
+export function sortRecordLinkSubmitCandidates<
+  T extends { baseId: string; sheetId: string; recordId: string; fieldId: string },
+>(links: readonly T[]): T[] {
+  return links
+    .map((link, index) => ({ link, index }))
+    .sort((a, b) => {
+      if (a.link.baseId !== b.link.baseId) {
+        return a.link.baseId < b.link.baseId ? -1 : 1
+      }
+      if (a.link.sheetId !== b.link.sheetId) {
+        return a.link.sheetId < b.link.sheetId ? -1 : 1
+      }
+      if (a.link.recordId !== b.link.recordId) {
+        return a.link.recordId < b.link.recordId ? -1 : 1
+      }
+      if (a.link.fieldId !== b.link.fieldId) {
+        return a.link.fieldId < b.link.fieldId ? -1 : 1
+      }
+      return a.index - b.index
+    })
+    .map(({ link }) => link)
+}
+
+export type RecordLinkSubmitAuthStep = (typeof RECORD_LINK_SUBMIT_AUTH_STEPS)[number]
+
+export type RecordLinkSubmitAuthDeps = {
+  sheetBelongsToBase: (sheetId: string, baseId: string) => Promise<boolean>
+  /**
+   * Optional: lock every authority source consumed by the subsequent auth re-read
+   * (create final path). Signature includes baseId so meta_bases can be locked.
+   */
+  lockAuthorityRows?: (userId: string, sheetId: string, baseId: string) => Promise<void>
+  /**
+   * Optional: canonical sheet+record row-auth advisory lock (create final path).
+   * Shared with record_permissions PUT/DELETE writers.
+   */
+  lockRowAuth?: (sheetId: string, recordId: string) => Promise<void>
+  baseReadable: (userId: string, baseId: string) => Promise<boolean>
+  resolveSheetCapabilities: (
+    sheetId: string,
+    userId: string,
+  ) => Promise<{ isAdminRole: boolean; capabilities: { canRead: boolean } }>
+  isRecordReadDeniedStrict: (
+    sheetId: string,
+    recordId: string,
+    userId: string,
+  ) => Promise<boolean>
+  /**
+   * Existence (and optional FOR UPDATE lock) on the pinned sheet.
+   * Final create-path recheck locks the row on the transaction client after authority locks.
+   */
+  recordExistsOnSheet: (sheetId: string, recordId: string) => Promise<boolean>
+}
+
+/**
+ * Constant-shape submit authz for one linked record.
+ *
+ * Always executes every step in `RECORD_LINK_SUBMIT_AUTH_STEPS` order (no early
+ * return that skips later helpers). Result is the AND of all gates; any throw
+ * fails closed. When `transcript` is provided, each step name is appended in
+ * order for parity tests across missing / mismatch / unreadable / denied.
+ */
+export async function probeRecordLinkSubmitAuthConstantShape(
+  deps: RecordLinkSubmitAuthDeps,
+  input: {
+    userId: string
+    baseId: string
+    sheetId: string
+    recordId: string
+  },
+  transcript?: string[],
+): Promise<boolean> {
+  const push = (step: RecordLinkSubmitAuthStep) => {
+    transcript?.push(step)
+  }
+  try {
+    // Locks first so membership / base / sheet / row re-reads observe a consistent locked set.
+    // Membership MUST NOT be trusted from a pre-lock read (meta_sheets.base_id can mutate).
+    push('lock_authority')
+    if (deps.lockAuthorityRows) {
+      await deps.lockAuthorityRows(input.userId, input.sheetId, input.baseId)
+    }
+
+    // Serialize concurrent record_permissions deny INSERT/DELETE (phantom-safe advisory).
+    push('lock_row_auth')
+    if (deps.lockRowAuth) {
+      await deps.lockRowAuth(input.sheetId, input.recordId)
+    }
+
+    // Membership under lock (meta_sheets already FOR UPDATE when lockAuthorityRows ran).
+    push('sheet_membership')
+    const membershipOk = await deps.sheetBelongsToBase(input.sheetId, input.baseId)
+
+    // Lock / existence (create final recheck uses FOR UPDATE here).
+    push('record_exists')
+    const exists = await deps.recordExistsOnSheet(input.sheetId, input.recordId)
+
+    push('base_readable')
+    const baseOk = await deps.baseReadable(input.userId, input.baseId)
+
+    push('sheet_capabilities')
+    const { capabilities, isAdminRole } = await deps.resolveSheetCapabilities(
+      input.sheetId,
+      input.userId,
+    )
+    const sheetOk = isAdminRole || capabilities.canRead === true
+
+    push('row_deny_strict')
+    let denied = false
+    if (!isAdminRole) {
+      denied = await deps.isRecordReadDeniedStrict(
+        input.sheetId,
+        input.recordId,
+        input.userId,
+      )
+    }
+
+    return Boolean(membershipOk && exists && baseOk && sheetOk && !denied)
+  } catch {
+    // Ensure a partial transcript still ends at a fixed length when a later step throws:
+    // callers that compare ordered steps across outcomes should push remaining steps only
+    // on the happy path of the try; on throw we leave the transcript as-is (fail-closed).
+    return false
+  }
+}
+
 /** Execute-time recheck: exists → not locked → configurer-writable, each fail-closed on error. */
 export async function recheckBoundRecordAtExecute(
   trx: Queryable,
