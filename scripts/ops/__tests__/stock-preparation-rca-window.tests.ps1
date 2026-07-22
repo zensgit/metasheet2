@@ -9,6 +9,9 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
   [ref]$errors
 )
 $source = Get-Content -LiteralPath $scriptPath -Raw
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+$workflowPath = Join-Path $repoRoot '.github/workflows/plugin-tests.yml'
+$workflowSource = Get-Content -LiteralPath $workflowPath -Raw
 $pass = 0
 $fail = 0
 
@@ -28,6 +31,17 @@ function Find-Function {
 }
 
 Check 'runner parses under the PowerShell 5.1 grammar' ($errors.Count -eq 0)
+$windowsJob = [regex]::Match(
+  $workflowSource,
+  '(?ms)^  stock-prep-powershell51:\r?\n(?<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\z)'
+)
+Check 'real Windows PowerShell 5.1 job runs the full RC-A behavior suite' (
+  $windowsJob.Success -and
+  $windowsJob.Groups['body'].Value -match 'shell:\s+powershell' -and
+  $windowsJob.Groups['body'].Value -match '\$powershell51' -and
+  $windowsJob.Groups['body'].Value -match 'stock-preparation-rca-window\.ps51\.tests\.ps1' -and
+  $windowsJob.Groups['body'].Value -match 'stock-preparation-rca-window\.behavior\.tests\.ps1'
+)
 foreach ($name in @(
   'Prepare-FrozenHelpers', 'Invoke-Pm2NativeCapture', 'Invoke-Pm2Projection', 'Get-Pm2Sample',
   'Suspend-UnsafePm2Environment', 'Restore-Pm2Environment', 'Invoke-Pm2RestartStable',

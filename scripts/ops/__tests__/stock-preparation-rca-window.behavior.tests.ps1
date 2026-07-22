@@ -157,11 +157,13 @@ try {
   $script:StabilitySampleCount = 0
   function Get-Pm2Sample {
     $script:StabilitySampleCount++
-    $restartTime = if ($script:StabilityMode -eq 'restart' -and $script:StabilitySampleCount -gt 1) { 2 } else { 1 }
+    $afterBaseline = $script:StabilitySampleCount -gt 1
+    $restartTime = if ($script:StabilityMode -eq 'restart-time' -and $afterBaseline) { 2 } else { 1 }
+    $uptime = if ($script:StabilityMode -eq 'uptime' -and $afterBaseline) { 2000 } else { 1000 }
     return [pscustomobject]@{
       state = 'online'
       restartTime = $restartTime
-      uptime = if ($restartTime -eq 1) { 1000 } else { 2000 }
+      uptime = $uptime
       authTokenNonEmpty = $false
       adminTokenNonEmpty = $false
       plmAutoPersistEnabledTrue = $true
@@ -174,11 +176,18 @@ try {
     $stable.ok -and $script:StabilitySampleCount -gt 1
   )
 
-  $script:StabilityMode = 'restart'
+  $script:StabilityMode = 'restart-time'
   $script:StabilitySampleCount = 0
   $restarted = Invoke-Pm2RestartStable -ExpectedFlagTrue $true
-  Check 'real PM2 stable-window loop rejects a newer restart sample' (
+  Check 'real PM2 stable-window loop rejects restart-time drift with stable uptime' (
     -not $restarted.ok -and $restarted.reason -eq 'PM2_UNSTABLE'
+  )
+
+  $script:StabilityMode = 'uptime'
+  $script:StabilitySampleCount = 0
+  $uptimeAdvanced = Invoke-Pm2RestartStable -ExpectedFlagTrue $true
+  Check 'real PM2 stable-window loop rejects uptime drift with stable restart time' (
+    -not $uptimeAdvanced.ok -and $uptimeAdvanced.reason -eq 'PM2_UNSTABLE'
   )
 } finally {
   Set-Item Function:Invoke-Pm2NativeCapture -Value $realPm2Capture
@@ -198,8 +207,10 @@ try {
   Set-Content -LiteralPath $httpServerScript -Encoding ASCII -NoNewline -Value @'
 import fs from 'node:fs'
 import http from 'node:http'
+import { fileURLToPath } from 'node:url'
 
-const [originFile, modeFile] = process.argv.slice(2)
+const originFile = fileURLToPath(new URL('./origin.txt', import.meta.url))
+const modeFile = fileURLToPath(new URL('./mode.txt', import.meta.url))
 const respond = (res, status, body = null) => {
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(body === null ? '' : JSON.stringify(body))
@@ -228,7 +239,7 @@ server.listen(0, '127.0.0.1', () => {
 })
 '@
   $nodePath = (Get-Command node).Source
-  $httpServer = Start-Process -FilePath $nodePath -ArgumentList @($httpServerScript, $originFile, $modeFile) -PassThru
+  $httpServer = Start-Process -FilePath $nodePath -WorkingDirectory $httpFixtureDir -ArgumentList @('server.mjs') -PassThru
   for ($attempt = 0; $attempt -lt 50 -and -not (Test-Path -LiteralPath $originFile); $attempt++) {
     Start-Sleep -Milliseconds 100
   }
@@ -252,8 +263,11 @@ server.listen(0, '127.0.0.1', () => {
     -not (Invoke-TokenLogout -Token $logoutToken -Origin $fixtureOrigin)
   )
 } finally {
-  if ($httpServer -and -not $httpServer.HasExited) { $httpServer.Kill() }
-  if ($httpServer) { $httpServer.Dispose() }
+  if ($httpServer) {
+    if (-not $httpServer.HasExited) { $httpServer.Kill() }
+    [void]$httpServer.WaitForExit(5000)
+    $httpServer.Dispose()
+  }
   Remove-Item -LiteralPath $httpFixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
