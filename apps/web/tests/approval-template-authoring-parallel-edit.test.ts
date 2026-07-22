@@ -510,6 +510,50 @@ describe('parallelDynamicAssigneeConflicts — condition paths inside a parallel
     expect(parallelDynamicAssigneeConflicts(conditionDefaultPathGraph([{ kind: 'manager_at_level', level: 2 }]))).toEqual([])
   })
 
+  it('ignores a stray outgoing edge that is absent from the condition config', () => {
+    const base = conditionDefaultPathGraph([{ kind: 'direct_manager' }])
+    const graph: ApprovalGraph = {
+      ...base,
+      nodes: [
+        ...base.nodes.slice(0, -2),
+        { key: 'approval_stray', type: 'approval', name: '幽灵边', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        ...base.nodes.slice(-2),
+      ],
+      edges: [
+        ...base.edges.slice(0, -1),
+        { key: 'e-cond-stray', source: 'cond_1', target: 'approval_stray' },
+        { key: 'e-stray-join', source: 'approval_stray', target: 'join_1' },
+        ...base.edges.slice(-1),
+      ],
+    }
+    expect(parallelDynamicAssigneeConflicts(graph)).toEqual([])
+  })
+
+  it('without a default, includes the first-outgoing runtime fallback as well as declared rules edges', () => {
+    const base = conditionDefaultPathGraph([{ kind: 'requester' }])
+    const graph: ApprovalGraph = {
+      ...base,
+      nodes: base.nodes.map((node) => (node.key === 'cond_1'
+        ? {
+            ...node,
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+            },
+          } as ApprovalGraph['nodes'][number]
+        : node)),
+      // First outgoing is now the unconfigured low edge; runtime falls back to it
+      // when no rule matches, so its requester source still conflicts with branch B.
+      edges: base.edges.map((edge) => {
+        if (edge.key === 'e-cond-high') return { ...edge, key: 'e-cond-low', target: 'approval_low' }
+        if (edge.key === 'e-cond-low') return { ...edge, key: 'e-cond-high', target: 'approval_high' }
+        return edge
+      }),
+    }
+    const errors = parallelDynamicAssigneeConflicts(graph)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('requester')
+  })
+
   it('flags a conflict hidden behind the RULES edge when the default edge happens to be declared first', () => {
     // Reorder: default edge (→ approval_low, requester) declared FIRST; the dept_head conflict sits
     // behind the RULES edge, which a first-edge-only walk would never enter. Branch B = dept_head.

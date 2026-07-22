@@ -161,9 +161,60 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `manager_at_level:${source.level}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId.trim()}`
-    default:
+    case 'static_user':
+    case 'static_role':
       return null
+    default: {
+      const _exhaustive: never = source
+      return _exhaustive
+    }
   }
+}
+
+function runtimeSuccessorTargets(
+  node: ApprovalNode,
+  edgeByKey: Map<string, ApprovalGraph['edges'][number]>,
+  outgoingBySource: Map<string, ApprovalGraph['edges']>,
+): string[] {
+  if (node.type === 'condition') {
+    const config = node.config as {
+      branches?: Array<{ edgeKey?: string }>
+      defaultEdgeKey?: string
+    }
+    const declaredKeys: string[] = []
+    const seenKeys = new Set<string>()
+    const pushKey = (raw: string | undefined): void => {
+      const key = typeof raw === 'string' ? raw.trim() : ''
+      if (!key || seenKeys.has(key)) return
+      seenKeys.add(key)
+      declaredKeys.push(key)
+    }
+    for (const branch of config.branches ?? []) pushKey(branch.edgeKey)
+    const hasDefault = typeof config.defaultEdgeKey === 'string' && config.defaultEdgeKey.trim().length > 0
+    if (hasDefault) pushKey(config.defaultEdgeKey)
+
+    const targets: string[] = []
+    for (const edgeKey of declaredKeys) {
+      const edge = edgeByKey.get(edgeKey)
+      if (edge?.source === node.key) targets.push(edge.target)
+    }
+    if (!hasDefault) {
+      const firstEdge = outgoingBySource.get(node.key)?.[0]
+      if (firstEdge && !seenKeys.has(firstEdge.key)) targets.push(firstEdge.target)
+    }
+    return targets
+  }
+
+  if (node.type === 'parallel') {
+    const config = node.config as { branches?: string[] }
+    return (config.branches ?? []).flatMap((edgeKey) => {
+      const edge = edgeByKey.get(edgeKey)
+      return edge?.source === node.key ? [edge.target] : []
+    })
+  }
+
+  const firstEdge = outgoingBySource.get(node.key)?.[0]
+  return firstEdge ? [firstEdge.target] : []
 }
 
 /**
@@ -178,26 +229,26 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
  * for some org shapes and stay the runtime guard's job.
  *
  * Traversal (review #4433 owner P2, mirror-ports the backend EXACTLY): within each branch the walk
- * enumerates EVERY runtime-reachable path — a condition node fans out over ALL of its outgoing
- * edges (every rules-branch edge AND the default edge: which path fires is form-data-dependent, so
- * each is possible), every other node type follows its first outgoing edge (linear in a normalized
- * graph). The branch's fingerprint set is the UNION over all condition paths up to the join node,
+ * enumerates EVERY runtime-reachable path — a condition node follows its configured rule edges and
+ * default edge; without a default it additionally follows the runtime's first-outgoing fallback.
+ * Stray outgoing edges are ignored. Every other linear node follows its first outgoing edge. The
+ * branch's fingerprint set is the UNION over all condition paths up to the join node,
  * and a conflict is flagged when SOME path through one branch and SOME path through another carry
  * the identical dynamic source — exactly the pairings for which the runtime 409 is reachable.
  * Cycles are cut with a per-branch visited set; an unexpectedly nested parallel (unauthorable via
  * the canvas F4 guard, but a legacy graph could carry one on a non-first condition path) is
- * defensively a PASS-THROUGH fan-out over all its outgoing edges (its sub-branches are all
- * simultaneously active). Deduped within a branch first — sequential same-source nodes, or the same
+ * defensively a pass-through over its configured branch edges. Deduped within a branch first —
+ * sequential same-source nodes, or the same
  * source on two ALTERNATIVE paths of ONE branch, are not a parallel conflict.
  */
 export function parallelDynamicAssigneeConflicts(graph: ApprovalGraph): string[] {
   const errors: string[] = []
   const edgeByKey = new Map(graph.edges.map((edge) => [edge.key, edge]))
-  const outgoingTargets = new Map<string, string[]>()
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
   for (const edge of graph.edges) {
-    const targets = outgoingTargets.get(edge.source)
-    if (targets) targets.push(edge.target)
-    else outgoingTargets.set(edge.source, [edge.target])
+    const edges = outgoingBySource.get(edge.source)
+    if (edges) edges.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
   }
   const nodeByKey = new Map(graph.nodes.map((node) => [node.key, node]))
   for (const node of graph.nodes) {
@@ -224,14 +275,8 @@ export function parallelDynamicAssigneeConflicts(graph: ApprovalGraph): string[]
             if (fingerprint) branchFingerprints.add(fingerprint)
           }
         }
-        const targets = outgoingTargets.get(currentKey) ?? []
-        if (current.type === 'condition' || current.type === 'parallel') {
-          // Condition: EVERY outgoing edge (each rules branch + the default) is a possible runtime
-          // path. Parallel (defensive — see doc above): pass-through fan-out over all sub-branches.
-          for (const target of targets) queue.push(target)
-        } else if (targets.length > 0) {
-          // Linear node — follow its first outgoing edge, as before.
-          queue.push(targets[0])
+        for (const target of runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)) {
+          queue.push(target)
         }
       }
       for (const fingerprint of branchFingerprints) {
