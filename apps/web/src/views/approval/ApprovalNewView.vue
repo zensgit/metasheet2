@@ -160,9 +160,42 @@
               <span class="approval-new__field-hint">{{ field.placeholder }}</span>
             </template>
 
+            <!-- FWB-0 Layer 2 record-link: single-record picker locked to server-pinned sheetId.
+                 No free-text record-id entry — value shape is exactly { recordId }. -->
+            <div
+              v-if="field.type === 'record-link'"
+              class="approval-new__record-link"
+              data-testid="approval-record-link-field"
+            >
+              <div class="approval-new__record-link-row">
+                <el-input
+                  :model-value="recordLinkDisplay(field.id)"
+                  readonly
+                  placeholder="请选择一条关联记录"
+                  data-testid="approval-record-link-display"
+                />
+                <el-button
+                  type="primary"
+                  plain
+                  data-testid="approval-record-link-pick"
+                  @click="openRecordLinkPicker(field)"
+                >
+                  选择记录
+                </el-button>
+                <el-button
+                  v-if="formData[field.id]"
+                  plain
+                  data-testid="approval-record-link-clear"
+                  @click="clearRecordLink(field.id)"
+                >
+                  清除
+                </el-button>
+              </div>
+            </div>
+
             <!-- text -->
             <el-input
-              v-if="field.type === 'text'"
+              v-else-if="field.type === 'text'"
               v-model="formData[field.id]"
               :placeholder="field.placeholder || `请输入${field.label}`"
             />
@@ -186,16 +219,6 @@
               v-bind="numberFieldProps(field)"
               class="ms-w-100pct"
             />
-            <!-- G-B2-16: 大写回显 — ONLY under the template-declared amount total (no label
-                 guessing); derived from the same value the backend total-check sees. -->
-            <div
-              v-if="field.type === 'number' && isAutoSummedTotal(field.id) && amountWordsFor(field.id)"
-              class="approval-new__amount-words"
-              data-testid="approval-amount-words"
-            >
-              大写：{{ amountWordsFor(field.id) }}
-            </div>
-
             <!-- date -->
             <el-date-picker
               v-else-if="field.type === 'date'"
@@ -430,6 +453,17 @@
               :placeholder="field.placeholder || `请输入${field.label}`"
             />
 
+            <!-- G-B2-16: 大写回显 — ONLY under the template-declared amount total (no label
+                 guessing); derived from the same value the backend total-check sees. Keep this
+                 outside the field-type v-if chain so earlier branches never fall through twice. -->
+            <div
+              v-if="field.type === 'number' && isAutoSummedTotal(field.id) && amountWordsFor(field.id)"
+              class="approval-new__amount-words"
+              data-testid="approval-amount-words"
+            >
+              大写：{{ amountWordsFor(field.id) }}
+            </div>
+
             <span v-if="isAutoSummedTotal(field.id)" class="approval-new__field-hint">
               由明细自动汇总，无需手填
             </span>
@@ -453,6 +487,17 @@
 
       <el-empty v-else-if="!templateStore.loading" description="未找到审批模板" />
     </div>
+
+    <!-- FWB-0 Layer 2: dedicated record-link picker (pinned baseId+sheetId; no MetaField fabric). -->
+    <ApprovalRecordLinkPicker
+      v-if="recordLinkPickerField"
+      :visible="recordLinkPickerVisible"
+      :base-id="recordLinkPickerBaseId"
+      :sheet-id="recordLinkPickerSheetId"
+      :current-record-id="recordLinkPickerCurrentId"
+      @close="recordLinkPickerVisible = false"
+      @confirm="onRecordLinkPicked"
+    />
   </PageShell>
 </template>
 
@@ -490,6 +535,13 @@ import { createRoutePreviewController } from '../../approvals/routePreviewContro
 import { getApproval } from '../../approvals/api'
 import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
 import {
+  formatRecordLinkDisplay,
+  parseRecordLinkValue,
+  recordLinkBaseId,
+  recordLinkSheetId,
+} from '../../approvals/recordLinkField'
+import ApprovalRecordLinkPicker from '../../approvals/components/ApprovalRecordLinkPicker.vue'
+import {
   deleteApprovalAttachment,
   fetchApprovalAttachmentRefs,
   preValidateAttachments,
@@ -506,6 +558,13 @@ const { canWrite } = useApprovalPermissions()
 
 const formRef = ref<FormInstance>()
 const formData = reactive<Record<string, unknown>>({})
+// FWB-0 Layer 2 record-link picker state (single-record; value shape { recordId }).
+const recordLinkPickerVisible = ref(false)
+const recordLinkPickerField = ref<FormField | null>(null)
+// Human labels keyed by field id (NOT recordId): two record-link fields may pin different
+// sheets and still share the same record id with different display names. Keying by recordId
+// alone overwrites the first field's label when the second is selected.
+const recordLinkLabels = reactive<Record<string, string>>({})
 
 // B3-07 (#4195): attachment upload — flag-gated swap of the B2-28 placeholder. formData[field.id]
 // holds the uploaded id ARRAY (the §4.4 bind contract); the display names live here only.
@@ -784,6 +843,70 @@ function stripAttachmentFields(
     result[key] = value
   }
   return result
+}
+
+// ---------------------------------------------------------------------------
+// FWB-0 Layer 2 record-link fill helpers — value is exactly `{ recordId }`.
+// ---------------------------------------------------------------------------
+function recordLinkDisplay(fieldId: string): string {
+  const parsed = parseRecordLinkValue(formData[fieldId])
+  if (!parsed.ok) return ''
+  // Human label for THIS field when the picker supplied one; otherwise a generic selected-record
+  // label. NEVER fall back to the raw recordId (review: id oracle surface).
+  return formatRecordLinkDisplay(recordLinkLabels[fieldId])
+}
+
+function clearRecordLink(fieldId: string): void {
+  formData[fieldId] = undefined
+  // Drop stale display so a later pick (or empty state) does not show a previous label.
+  delete recordLinkLabels[fieldId]
+}
+
+function openRecordLinkPicker(field: FormField): void {
+  // Require both pins before opening — no free-text id fallback when pins are missing.
+  if (!recordLinkBaseId(field) || !recordLinkSheetId(field)) return
+  recordLinkPickerField.value = field
+  recordLinkPickerVisible.value = true
+}
+
+const recordLinkPickerBaseId = computed(() => {
+  const field = recordLinkPickerField.value
+  return field ? recordLinkBaseId(field) : ''
+})
+
+const recordLinkPickerSheetId = computed(() => {
+  const field = recordLinkPickerField.value
+  return field ? recordLinkSheetId(field) : ''
+})
+
+const recordLinkPickerCurrentId = computed<string | null>(() => {
+  const field = recordLinkPickerField.value
+  if (!field) return null
+  const parsed = parseRecordLinkValue(formData[field.id])
+  return parsed.ok ? parsed.recordId : null
+})
+
+function onRecordLinkPicked(payload: { recordId: string; display: string }): void {
+  const field = recordLinkPickerField.value
+  if (!field) return
+  const recordId = payload.recordId?.trim()
+  if (!recordId) {
+    formData[field.id] = undefined
+    delete recordLinkLabels[field.id]
+  } else {
+    // Strict product shape: only { recordId } — server rejects extra keys / free-text / arrays.
+    formData[field.id] = { recordId }
+    // Per-field human label only (never raw id; never key by recordId alone).
+    const display = typeof payload.display === 'string' ? payload.display.trim() : ''
+    if (display && display !== recordId) {
+      recordLinkLabels[field.id] = display
+    } else {
+      // No distinct human label — clear any previous label for this field (generic fallback).
+      delete recordLinkLabels[field.id]
+    }
+  }
+  recordLinkPickerVisible.value = false
+  recordLinkPickerField.value = null
 }
 
 // ---------------------------------------------------------------------------

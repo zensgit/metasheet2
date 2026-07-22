@@ -24,6 +24,7 @@ import {
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
+import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -648,10 +649,13 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
   r.post('/api/approval-templates/:id/publish', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
+      const actorUserId = resolveApprovalActorId(req)
       const version = await productService.publishTemplate(req.params.id, {
         policy: req.body?.policy,
         // B3-09 — optional publish note; the service normalizes (trim, empty->null, length cap).
         note: req.body?.note,
+        // FWB-0 Layer 2: publisher identity for record-link target sheet read authorization.
+        actorUserId: actorUserId ?? null,
       })
       res.json(version)
     } catch (error) {
@@ -762,6 +766,52 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       handleApprovalsError(res, error, 'APPROVAL_PARTICIPANT_DIRECTORY_FAILED', 'Failed to search directory users')
     }
   })
+
+  // FWB-0 Layer 2: dedicated record-link candidate picker for ordinary fillers.
+  // Scoped to pinned baseId+sheetId (NOT multitable /fields/:fieldId/link-options — no fabricated MetaField).
+  // Same permission as create (approvals:write) — not a read/act-only surface.
+  // Registered BEFORE '/api/approvals/:id' so 'record-link-options' is never matched as an :id.
+  r.get(
+    '/api/approvals/record-link-options',
+    authenticate,
+    rbacGuard('approvals', 'write'),
+    async (req: Request, res: Response) => {
+      try {
+        const userId = resolveApprovalActorId(req)
+        if (!userId) {
+          return res.status(401).json(
+            approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+          )
+        }
+        const baseId = typeof req.query.baseId === 'string' ? req.query.baseId : ''
+        const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId : ''
+        const search = typeof req.query.search === 'string' ? req.query.search : undefined
+        const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
+        const offset = Number.parseInt(String(req.query.offset ?? '0'), 10)
+        const result = await listApprovalRecordLinkOptions({
+          userId,
+          baseId,
+          sheetId,
+          search,
+          limit: Number.isFinite(limit) ? limit : 20,
+          offset: Number.isFinite(offset) ? offset : 0,
+        })
+        if (result.ok === false) {
+          return res.status(result.status).json(
+            approvalErrorResponse(result.code, result.message),
+          )
+        }
+        res.json({ records: result.records, page: result.page })
+      } catch (error) {
+        handleApprovalsError(
+          res,
+          error,
+          'APPROVAL_RECORD_LINK_OPTIONS_FAILED',
+          'Failed to list record-link options',
+        )
+      }
+    },
+  )
 
   r.get('/api/approvals', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
@@ -2296,7 +2346,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   r.get('/api/approvals/:id', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
-      const approval = await bridgeService.getApproval(req.params.id)
+      // FWB-0 Layer 2 P1-1: pass viewer identity so record-link fields are projected/redacted
+      // server-side (raw stored record ids never leave the API for unauthorized viewers).
+      const approval = await bridgeService.getApproval(req.params.id, resolveApprovalActorId(req))
       if (!approval) {
         return res.status(404).json(
           approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),

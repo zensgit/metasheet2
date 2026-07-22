@@ -1,6 +1,7 @@
 import type { FormField, FormFieldType, FormOption, FormSchema } from '../types/approval'
 import { getVisibleFormFields, isEmptyValue, pruneHiddenFormData } from './fieldVisibility'
 import { isRowDerivationActive } from './lineDerivation'
+import { formatRecordLinkDisplay } from './recordLinkField'
 
 /**
  * Pure (Element-Plus-free) helpers for the `detail` / sub-form (明细/子表单) field type.
@@ -17,8 +18,9 @@ import { isRowDerivationActive } from './lineDerivation'
 
 /**
  * Leaf sub-field types allowed inside a `detail` group's `columns` — the 8 authorable scalar
- * types (everything except `attachment`, which is not authorable, and `detail`, which would
- * nest). Mirrors backend `DETAIL_LEAF_FIELD_TYPES`.
+ * types (everything except `attachment`, which is not authorable; `detail`, which would nest;
+ * and `record-link`, which is FWB-0 Layer 2 top-level-only). Mirrors backend
+ * `DETAIL_LEAF_FIELD_TYPES` (which derives from FORM_FIELD_TYPES and excludes detail + record-link).
  */
 export const DETAIL_LEAF_FIELD_TYPES: readonly FormFieldType[] = [
   'text',
@@ -487,6 +489,17 @@ function formatDisplayValue(field: FormField, value: unknown): string {
     }
     case 'attachment':
       return formatLegacyAttachmentValue(value)
+    case 'record-link': {
+      // FWB-0 Layer 2: never echo raw recordId (no id oracle). Detail snapshots have no
+      // human summary channel here — generic selected-record label when present.
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const recordId = (value as { recordId?: unknown }).recordId
+        if (typeof recordId === 'string' && recordId.trim()) {
+          return formatRecordLinkDisplay(null)
+        }
+      }
+      return '-'
+    }
     default:
       return String(value)
   }

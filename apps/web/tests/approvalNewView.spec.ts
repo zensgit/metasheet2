@@ -1195,3 +1195,182 @@ describe('ApprovalNewView — B2-13 再次提交 prefill', () => {
     expect(payload.formData).not.toHaveProperty('legacy_field_removed')
   })
 })
+
+// ---------------------------------------------------------------------------
+// FWB-0 Layer 2 — record-link display labels keyed by field id (not recordId alone).
+// Two fields can share a recordId across different pinned sheets with different labels.
+// ---------------------------------------------------------------------------
+const SHARED_RECORD_ID = 'rec_shared_001'
+const RECORD_LINK_LABEL_A = '客户甲（A表）'
+const RECORD_LINK_LABEL_B = '合同乙（B表）'
+
+// Module mock so the SFC import is replaced (global app.component cannot override local import).
+vi.mock('../src/approvals/components/ApprovalRecordLinkPicker.vue', () => ({
+  default: defineComponent({
+    name: 'ApprovalRecordLinkPicker',
+    props: {
+      visible: { type: Boolean, default: false },
+      baseId: { type: String, default: '' },
+      sheetId: { type: String, default: '' },
+      currentRecordId: { type: [String, null], default: null },
+    },
+    emits: ['confirm', 'close'],
+    setup(props, { emit }) {
+      return () => (props.visible
+        ? h('button', {
+            type: 'button',
+            'data-testid': 'stub-record-link-confirm',
+            onClick: () => {
+              const display = props.baseId === 'base_a' ? RECORD_LINK_LABEL_A : RECORD_LINK_LABEL_B
+              emit('confirm', { recordId: SHARED_RECORD_ID, display })
+            },
+          }, 'stub-confirm')
+        : null)
+    },
+  }),
+}))
+
+describe('ApprovalNewView — record-link labels are per-field (same recordId, distinct labels)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [
+          {
+            id: 'link_a',
+            type: 'record-link',
+            label: '关联客户',
+            required: false,
+            props: { baseId: 'base_a', sheetId: 'sheet_a' },
+          } as FormField,
+          {
+            id: 'link_b',
+            type: 'record-link',
+            label: '关联合同',
+            required: false,
+            props: { baseId: 'base_b', sheetId: 'sheet_b' },
+          } as FormField,
+        ],
+      },
+    })
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_rl_1' }))
+    loadTemplateSpy.mockClear()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function flushUi() {
+    await nextTick()
+    await nextTick()
+  }
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', ElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  it('keeps distinct human labels for two fields that share the same recordId', async () => {
+    await mountView()
+
+    const fields = Array.from(container!.querySelectorAll('[data-testid="approval-record-link-field"]'))
+    expect(fields.length).toBe(2)
+    expect(container!.querySelector('input[placeholder="请输入关联客户"]')).toBeNull()
+    expect(container!.querySelector('input[placeholder="请输入关联合同"]')).toBeNull()
+
+    // Pick for field A (first pick button).
+    const pickButtons = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-pick"]'),
+    ) as HTMLButtonElement[]
+    expect(pickButtons.length).toBe(2)
+
+    pickButtons[0]!.click()
+    await flushUi()
+    const confirmA = container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement
+    expect(confirmA).toBeTruthy()
+    confirmA.click()
+    await flushUi()
+
+    // Pick for field B with the SAME recordId but a different human label.
+    pickButtons[1]!.click()
+    await flushUi()
+    const confirmB = container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement
+    expect(confirmB).toBeTruthy()
+    confirmB.click()
+    await flushUi()
+
+    const displays = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-display"]'),
+    ) as HTMLInputElement[]
+    expect(displays.length).toBe(2)
+
+    // Each field keeps its own label — second pick must NOT overwrite the first.
+    expect(displays[0]!.value).toBe(RECORD_LINK_LABEL_A)
+    expect(displays[1]!.value).toBe(RECORD_LINK_LABEL_B)
+
+    // No raw shared record id on either display (oracle surface).
+    expect(displays[0]!.value).not.toContain(SHARED_RECORD_ID)
+    expect(displays[1]!.value).not.toContain(SHARED_RECORD_ID)
+    expect(container!.textContent ?? '').not.toContain(SHARED_RECORD_ID)
+  })
+
+  it('clears the per-field label when the selection is cleared', async () => {
+    await mountView()
+    const pickButtons = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-pick"]'),
+    ) as HTMLButtonElement[]
+    pickButtons[0]!.click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const displaysBefore = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-display"]'),
+    ) as HTMLInputElement[]
+    expect(displaysBefore[0]!.value).toBe(RECORD_LINK_LABEL_A)
+
+    const clearBtn = container!.querySelector('[data-testid="approval-record-link-clear"]') as HTMLButtonElement
+    expect(clearBtn).toBeTruthy()
+    clearBtn.click()
+    await flushUi()
+
+    const displaysAfter = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-display"]'),
+    ) as HTMLInputElement[]
+    expect(displaysAfter[0]!.value).toBe('')
+    expect(displaysAfter[0]!.value).not.toContain(SHARED_RECORD_ID)
+    expect(displaysAfter[0]!.value).not.toContain(RECORD_LINK_LABEL_A)
+  })
+})

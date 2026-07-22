@@ -65,6 +65,8 @@ export type FormFieldType =
   | 'user'
   | 'attachment'
   | 'detail'
+  /** FWB-0 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */
+  | 'record-link'
 
 export interface ApprovalNode {
   key: string
@@ -545,6 +547,11 @@ export interface PublishApprovalTemplateRequest {
    * compatible).
    */
   note?: string | null
+  /**
+   * FWB-0 Layer 2: publisher identity for record-link target sheet read authorization.
+   * Required when the form schema contains any `record-link` field; fail-closed when missing.
+   */
+  actorUserId?: string | null
 }
 
 export interface ApprovalTemplateVersionDetailDTO {

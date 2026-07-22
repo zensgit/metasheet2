@@ -1533,7 +1533,7 @@ export class MetaSheetServer {
   }
 
   private async handleAfterSalesApprovalDecisionCallback(
-    approval: UnifiedApprovalDTO,
+    approval: import('./services/AfterSalesApprovalBridgeService').AfterSalesApprovalSummary,
     decision: {
       action: 'approve' | 'reject'
       actorId: string
@@ -1549,6 +1549,8 @@ export class MetaSheetServer {
     }
 
     try {
+      // Plugin callback receives the narrow AfterSalesApprovalSummary only (no formSnapshot /
+      // formSchema / record-link ids). Normal HTTP action DTOs stay UnifiedApprovalDTO.
       await handler({
         approval,
         projectId: approval.subject?.projectId,

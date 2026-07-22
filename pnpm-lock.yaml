@@ -324,6 +324,15 @@ importers:
         specifier: ^5.3.3
         version: 5.8.3
 
+  packages/openapi:
+    devDependencies:
+      js-yaml:
+        specifier: ^4.1.0
+        version: 4.1.1
+      tsx:
+        specifier: ^4.19.0
+        version: 4.20.6
+
   packages/openapi/dist-sdk:
     devDependencies:
       openapi-typescript:

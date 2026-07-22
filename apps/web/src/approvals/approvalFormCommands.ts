@@ -105,6 +105,7 @@ const FIELD_LABELS: Record<AuthorableFieldType, string> = {
   'multi-select': '多选',
   user: '人员',
   detail: '明细',
+  'record-link': '关联记录',
 }
 
 const AUTHORABLE_FIELD_TYPES = new Set<AuthorableFieldType>(
@@ -239,6 +240,8 @@ export function addFormField(
       fieldType === 'detail' ? [newDetailColumn(identity.detailColumn!)] : [],
     minRowsText: '',
     maxRowsText: '',
+    recordLinkBaseId: '',
+    recordLinkSheetId: '',
   }
 
   if (!afterLocalId) {

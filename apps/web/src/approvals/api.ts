@@ -1267,3 +1267,105 @@ export async function searchApprovalDirectoryUsers(
     return []
   }
 }
+
+// ---------------------------------------------------------------------------
+// FWB-0 Layer 2 — dedicated record-link candidate picker (pinned baseId+sheetId).
+// Does NOT call multitable /fields/:fieldId/link-options.
+// ---------------------------------------------------------------------------
+export interface ApprovalRecordLinkOption {
+  id: string
+  /** Human label — server never falls back to raw record id. */
+  display: string
+}
+
+export interface ApprovalRecordLinkOptionsPage {
+  records: ApprovalRecordLinkOption[]
+  page: { limit: number; offset: number; total: number; hasMore: boolean }
+}
+
+export type ApprovalRecordLinkOptionsResult =
+  | { ok: true; data: ApprovalRecordLinkOptionsPage }
+  | { ok: false; status: number; code?: string; message?: string }
+
+/**
+ * List readable record-link candidates for a server-pinned base/sheet.
+ * Failures (403/404/empty network) return ok:false so the UI can fail closed without
+ * inventing free-text / raw-id fallbacks.
+ */
+export async function listApprovalRecordLinkOptions(params: {
+  baseId: string
+  sheetId: string
+  search?: string
+  limit?: number
+  offset?: number
+}): Promise<ApprovalRecordLinkOptionsResult> {
+  const baseId = params.baseId.trim()
+  const sheetId = params.sheetId.trim()
+  if (!baseId || !sheetId) {
+    return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'baseId and sheetId are required' }
+  }
+  try {
+    const qs = new URLSearchParams()
+    qs.set('baseId', baseId)
+    qs.set('sheetId', sheetId)
+    if (params.search?.trim()) qs.set('search', params.search.trim())
+    if (typeof params.limit === 'number') qs.set('limit', String(params.limit))
+    if (typeof params.offset === 'number') qs.set('offset', String(params.offset))
+    const response = await apiFetch(`/api/approvals/record-link-options?${qs.toString()}`)
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null) as {
+        error?: { code?: string; message?: string }
+        code?: string
+        message?: string
+      } | null
+      return {
+        ok: false,
+        status: response.status,
+        code: payload?.error?.code ?? payload?.code,
+        message: payload?.error?.message ?? payload?.message,
+      }
+    }
+    const payload = await response.json().catch(() => null) as {
+      records?: unknown
+      page?: { limit?: unknown; offset?: unknown; total?: unknown; hasMore?: unknown }
+    } | null
+    if (!payload || !Array.isArray(payload.records)) {
+      return { ok: false, status: 502, code: 'INVALID_RESPONSE', message: 'Invalid response' }
+    }
+    const records: ApprovalRecordLinkOption[] = []
+    let dropped = 0
+    for (const entry of payload.records) {
+      if (!entry || typeof entry !== 'object') continue
+      const row = entry as Record<string, unknown>
+      const id = typeof row.id === 'string' ? row.id.trim() : ''
+      const display = typeof row.display === 'string' ? row.display.trim() : ''
+      // Client belt: drop any option that would surface a raw id as the label.
+      if (!id || !display || display === id) {
+        dropped += 1
+        continue
+      }
+      records.push({ id, display })
+    }
+    const page = payload.page ?? {}
+    const limit = typeof page.limit === 'number' ? page.limit : records.length
+    const offset = typeof page.offset === 'number' ? page.offset : 0
+    const total = typeof page.total === 'number' ? page.total : records.length
+    // If sanitization emptied a non-empty server page, stop paging (no hasMore loop).
+    const serverHasMore = page.hasMore === true
+    const hasMore = serverHasMore && records.length > 0 && dropped < limit
+    return {
+      ok: true,
+      data: {
+        records,
+        page: {
+          limit,
+          offset,
+          total,
+          hasMore,
+        },
+      },
+    }
+  } catch {
+    return { ok: false, status: 0, code: 'NETWORK_ERROR', message: 'Network error' }
+  }
+}

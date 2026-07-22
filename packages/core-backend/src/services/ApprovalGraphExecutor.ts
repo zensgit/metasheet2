@@ -386,8 +386,54 @@ function validateFieldType(
         return `${field.id} must contain only configured options`
       }
       return null
+    case 'record-link': {
+      // FWB-0 Layer 2 structural shape only (sync): exactly one `{ recordId: non-blank string }`.
+      // No arrays, free-text ids, or extra keys (incl. target base/sheet overrides). Filler read
+      // authorization is an async check outside this function (assembleCreationContext).
+      const parsed = parseRecordLinkFormValue(value)
+      return parsed.ok
+        ? null
+        : `${field.id} must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)`
+    }
     default:
       return null
+  }
+}
+
+/**
+ * FWB-0 Layer 2 — structural parse for a record-link form value.
+ * Legal shape is exactly one object `{ recordId: non-blank string }` (trimmed).
+ * Rejects arrays, free-text, empty ids, and extra keys (no target override smuggling).
+ */
+export function parseRecordLinkFormValue(
+  value: unknown,
+): { ok: true; recordId: string } | { ok: false } {
+  if (!isRecord(value)) return { ok: false }
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== 'recordId') return { ok: false }
+  const recordId = typeof value.recordId === 'string' ? value.recordId.trim() : ''
+  if (!recordId) return { ok: false }
+  return { ok: true, recordId }
+}
+
+/**
+ * FWB-0 Layer 2 — rewrite every valid top-level record-link value to the canonical
+ * `{ recordId: trimmed }` shape in-place. Does NOT loosen structural validation: invalid
+ * values are left untouched (validateApprovalFormData already rejects them). Call after
+ * successful validation and before graph execution / form_snapshot persistence so a value
+ * authorized as `rec-1` is never frozen as `{ recordId: '  rec-1  ' }`.
+ */
+export function canonicalizeRecordLinkFormData(
+  formSchema: FormSchema,
+  formData: Record<string, unknown>,
+): void {
+  for (const field of formSchema.fields ?? []) {
+    if (field.type !== 'record-link') continue
+    const raw = formData[field.id]
+    if (raw === undefined || raw === null) continue
+    const parsed = parseRecordLinkFormValue(raw)
+    if (!parsed.ok) continue
+    formData[field.id] = { recordId: parsed.recordId }
   }
 }
 

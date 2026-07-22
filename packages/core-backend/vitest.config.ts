@@ -228,6 +228,10 @@ export default defineConfig({
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',
+      // FWB-0 Layer 2 record-link: DATABASE_URL-gated (describeIfDatabase). Excluded from the no-DB
+      // default job so it doesn't skip-green, and wired as a WHOLE FILE into the
+      // `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/approval-record-link.db.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
       'tests/integration/approval-common-template-presets.api.test.ts',
       // R2 hidden-field redaction guard: DATABASE_URL-gated (describeIfDatabase). Excluded from the

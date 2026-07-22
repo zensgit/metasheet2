@@ -100,6 +100,99 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approvals/record-link-options:
+    get:
+      operationId: listApprovalRecordLinkOptions
+      tags: [Approvals]
+      summary: List candidate records for an approval record-link field
+      description: |
+        FWB-0 Layer 2 dedicated candidate picker for ordinary fillers. Scoped to a
+        server-pinned (baseId, sheetId) pair from a form `record-link` field. Requires
+        the same `approvals:write` permission as createApproval (not read/act-only).
+
+        Returns only rows the actor can read, with human display labels derived from
+        visible non-computed source fields (never a raw record id). Missing sheet,
+        base mismatch, and unreadable target share one public refuse shape (no existence
+        oracle). Does NOT reuse multitable `/fields/:fieldId/link-options`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: baseId
+          required: true
+          schema:
+            type: string
+          description: Pinned multitable base id from the form field props.
+        - in: query
+          name: sheetId
+          required: true
+          schema:
+            type: string
+          description: Pinned multitable sheet id from the form field props.
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Optional case-insensitive search against the effective display label.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [records, page]
+                properties:
+                  records:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, display]
+                      properties:
+                        id:
+                          type: string
+                          description: Record id (selection value only; never used as the display label).
+                        display:
+                          type: string
+                          description: Human label from visible source fields, or a generic placeholder.
+                  page:
+                    type: object
+                    required: [limit, offset, total, hasMore]
+                    properties:
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                      total:
+                        type: integer
+                      hasMore:
+                        type: boolean
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: |
+            Target sheet not found / base mismatch / unreadable (shared no-oracle shape).
+            Body is the same approval error envelope as other 4xx routes
+            (`code` + `message`, never distinguishes missing vs denied).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/pending:
     get:
       operationId: listPendingApprovalsLegacy

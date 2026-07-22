@@ -127,22 +127,87 @@ if [[ "$CASE_ID" == "openapi" ]]; then
   openapi_dir="${case_dir}/openapi"
   mkdir -p "$openapi_dir"
 
-  info "running openapi build"
-  if ! pnpm exec tsx packages/openapi/tools/build.ts >"${openapi_dir}/build.log" 2>&1; then
-    cat "${openapi_dir}/build.log" >&2
-    die "openapi build failed"
+  # Full generate: OpenAPI dist + SDK types. Required check must catch dist-sdk drift too.
+  info "running openapi generate:sdk (@metasheet/openapi — not a no-op filter)"
+  if ! pnpm --filter @metasheet/openapi generate:sdk >"${openapi_dir}/generate-sdk.log" 2>&1; then
+    cat "${openapi_dir}/generate-sdk.log" >&2
+    die "openapi generate:sdk failed"
   fi
 
   if ! git diff --quiet -- \
     packages/openapi/dist/openapi.json \
     packages/openapi/dist/openapi.yaml \
-    packages/openapi/dist/combined.openapi.yml; then
+    packages/openapi/dist/combined.openapi.yml \
+    packages/openapi/dist-sdk/index.d.ts; then
     git diff -- \
       packages/openapi/dist/openapi.json \
       packages/openapi/dist/openapi.yaml \
-      packages/openapi/dist/combined.openapi.yml >"${openapi_dir}/dist-drift.patch"
-    die "openapi dist drift detected; rebuild artifacts and commit generated outputs"
+      packages/openapi/dist/combined.openapi.yml \
+      packages/openapi/dist-sdk/index.d.ts >"${openapi_dir}/dist-drift.patch"
+    die "openapi dist/SDK drift detected; rebuild with pnpm --filter @metasheet/openapi generate:sdk and commit outputs"
   fi
+
+  # Content-based guard (no mtime). Mutate-to-fail proves the guard is load-bearing.
+  info "running openapi content guard"
+  if ! pnpm --filter @metasheet/openapi guard:codegen >"${openapi_dir}/guard.log" 2>&1; then
+    cat "${openapi_dir}/guard.log" >&2
+    die "openapi guard:codegen failed"
+  fi
+
+  # Restore-safe discriminating mutations on dist openapi.json only. Each mutation:
+  #   backup exact JSON → apply jq → run guard:codegen (must fail) → restore exact backup.
+  # Covers FormFieldDetailLeaf (pre-existing) plus record-link strictness that unit/dist-sdk
+  # tests alone do not put on the required openapi CI run-list.
+  function expect_openapi_guard_mutation_fail() {
+    local slug="$1"
+    local label="$2"
+    local jq_filter="$3"
+    local dist="packages/openapi/dist/openapi.json"
+    local bak="${openapi_dir}/openapi.json.bak.${slug}"
+    local invalid="${openapi_dir}/openapi.invalid.${slug}.json"
+    local log="${openapi_dir}/guard-mutation.${slug}.log"
+
+    cp "$dist" "$bak"
+    if ! jq "$jq_filter" "$bak" >"$invalid"; then
+      mv "$bak" "$dist"
+      die "jq mutation failed: ${label}"
+    fi
+    cp "$invalid" "$dist"
+
+    set +e
+    pnpm --filter @metasheet/openapi guard:codegen >"$log" 2>&1
+    local rc=$?
+    set -e
+
+    # Always restore exact pre-mutation bytes before deciding pass/fail.
+    mv "$bak" "$dist"
+
+    if [[ "$rc" -eq 0 ]]; then
+      die "openapi guard mutation did not fail: ${label}"
+    fi
+    info "OK: guard mutation (${label}) failed as expected"
+  }
+
+  # (existing) strip FormFieldDetailLeaf → detail-column contract must fail closed
+  expect_openapi_guard_mutation_fail \
+    "detail-leaf" \
+    "deleted FormFieldDetailLeaf" \
+    'del(.components.schemas.FormFieldDetailLeaf)'
+
+  # (a) FormFieldRecordLink.additionalProperties=true → outer closed-object check must fail
+  expect_openapi_guard_mutation_fail \
+    "record-link-additional-props" \
+    "FormFieldRecordLink.additionalProperties=true" \
+    '.components.schemas.FormFieldRecordLink.additionalProperties = true'
+
+  # (b) RecordLinkFieldProps baseId/sheetId patterns relaxed to .* (accepts whitespace-only)
+  expect_openapi_guard_mutation_fail \
+    "record-link-props-pattern" \
+    "RecordLinkFieldProps baseId/sheetId patterns relaxed to .*" \
+    '
+      .components.schemas.RecordLinkFieldProps.properties.baseId.pattern = ".*"
+      | .components.schemas.RecordLinkFieldProps.properties.sheetId.pattern = ".*"
+    '
 
   node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
     packages/openapi/dist/openapi.json \
