@@ -24,6 +24,16 @@ import {
  * policy dispatch; the write-shape of each policy; the circuit breaker; the env gate; and the
  * fail-safe direction of policy resolution.
  */
+// W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22): `applyDirectoryDeprovisionPolicies`
+// now ALSO resolves the run's org (`SELECT org_id FROM directory_integrations ...`, lazily, at
+// most once) and — for a policy that actually executed a write — attempts a same-transaction
+// `user_orgs` deactivation via `deactivateUserOrgMembershipIfNoOtherActiveBinding` (a row lock
+// SELECT, then a conditional UPDATE). This stub answers all three shapes the same "does not
+// evaluate the predicate" way the pre-existing shapes do — the org-scoped sibling predicate
+// itself is proved against real Postgres in the real-DB suites (this file's own scope note),
+// same discipline extended to the new queries.
+const STUB_ORG_ID = 'org-1'
+
 function stubClient(candidates: Array<{ directory_account_id: string; local_user_id: string; deprovision_policy_override: string | null }>) {
   const queries: string[] = []
   return {
@@ -38,6 +48,15 @@ function stubClient(candidates: Array<{ directory_account_id: string; local_user
       if (/INSERT INTO user_external_auth_grants/i.test(sql) || /UPDATE users SET is_active = FALSE/i.test(sql)) {
         return { rows: [] }
       }
+      if (/SELECT org_id\s+FROM directory_integrations/i.test(sql)) {
+        return { rows: [{ org_id: STUB_ORG_ID }] }
+      }
+      if (/FROM user_orgs WHERE user_id = \$1::text AND org_id = \$2::text\s+FOR UPDATE/i.test(sql)) {
+        return { rows: [] }
+      }
+      if (/UPDATE user_orgs\s+SET is_active = FALSE/i.test(sql)) {
+        return { rows: [] }
+      }
       // Anything else is drift: a new query appeared that no test has reasoned about.
       throw new Error(`Unhandled SQL in deprovision stub:\n${sql}`)
     },
@@ -46,6 +65,7 @@ function stubClient(candidates: Array<{ directory_account_id: string; local_user
 
 const wrote = (queries: string[], pattern: RegExp) => queries.some((sql) => pattern.test(sql))
 const DEACTIVATES_USER = /UPDATE users SET is_active = FALSE/i
+const DEACTIVATES_USER_ORG = /UPDATE user_orgs\s+SET is_active = FALSE/i
 const DISABLES_GRANT = /INSERT INTO user_external_auth_grants/i
 
 const CANDIDATE = { directory_account_id: 'acct-1', local_user_id: 'user-1', deprovision_policy_override: null }
@@ -65,6 +85,10 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     // The load-bearing safety property: merging this cannot deactivate anyone.
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
+    // W4-PRE-1c (owner 裁决②): disabled must ALSO never attempt the user_orgs deactivation —
+    // this is the unit-level half of mutation ①/② (moving the write before the enabled gate,
+    // or dropping the gate); the real-DB half lives in the W4-PRE-1c real-DB suite.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
 
     // …but the operator gets the preview.
     expect(outcome).toMatchObject({
@@ -76,17 +100,22 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     })
   })
 
-  it('enabled + mark_inactive: disables the grant AND deactivates the local user', async () => {
+  it('enabled + mark_inactive: disables the grant, deactivates the local user, AND attempts the user_orgs deactivation', async () => {
     const client = stubClient([CANDIDATE])
     const outcome = await applyDirectoryDeprovisionPolicies(client, { ...baseOptions, enabled: true })
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(true)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(true)
+    // W4-PRE-1c (owner 裁决②): mark_inactive is a policy that "actually executes" — the
+    // user_orgs deactivation attempt must fire in the same run. Whether it actually FLIPS the
+    // row depends on the org-scoped sibling check (real-DB suites); this stub cannot evaluate
+    // that predicate, only that the write was attempted.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
     expect(outcome.applied).toBe(true)
     expect(outcome.affected).toEqual([{ directoryAccountId: 'acct-1', localUserId: 'user-1', policy: 'mark_inactive' }])
   })
 
-  it('enabled + disable_grant_only: revokes DingTalk login but leaves the local user active', async () => {
+  it('enabled + disable_grant_only: revokes DingTalk login, leaves the local user active, but STILL attempts the user_orgs deactivation', async () => {
     const client = stubClient([CANDIDATE])
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       ...baseOptions,
@@ -96,10 +125,17 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(true)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
+    // W4-PRE-1c (owner 裁决②, 逐字 "策略实际执行"): disable_grant_only is NOT manual_review —
+    // it revokes real access (the grant) — so per the owner's own carve-out (only
+    // manual_review is excluded), this branch ALSO attempts the user_orgs deactivation, even
+    // though it leaves `users.is_active` untouched. Flagged for owner confirmation in the PR
+    // body's combination-semantics section: this is a genuinely NEW consequence of
+    // disable_grant_only that did not exist before this PR.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
     expect(outcome).toMatchObject({ grantsDisabledCount: 1, usersDeactivatedCount: 0 })
   })
 
-  it('enabled + manual_review: touches nothing, but the offboarding is counted', async () => {
+  it('enabled + manual_review: touches nothing (including user_orgs), but the offboarding is counted and exposed as pending', async () => {
     const client = stubClient([CANDIDATE])
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       ...baseOptions,
@@ -109,7 +145,13 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
+    // W4-PRE-1c (owner 裁决②, 逐字: "manual_review 则保持 active 并暴露待人工确认状态"): the
+    // unique carve-out — no write attempted at all, including user_orgs.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
     expect(outcome).toMatchObject({ candidateCount: 1, manualReviewCount: 1, affected: [] })
+    expect(outcome.manualReviewPending).toEqual([
+      { directoryAccountId: 'acct-1', localUserId: 'user-1', orgId: STUB_ORG_ID },
+    ])
   })
 
   it('honours a per-account override inside a batch', async () => {

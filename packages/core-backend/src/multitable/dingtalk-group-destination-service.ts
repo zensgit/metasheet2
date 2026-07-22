@@ -209,12 +209,20 @@ export class DingTalkGroupDestinationService {
       builder = builder.where((eb) =>
         eb.or([
           eb('sheet_id', '=', normalizedSheetId),
+          // W4-PRE-1c item C (owner 裁决③, #4522 rev3 review, 2026-07-22, 逐字: "现在就统一为
+          // user_orgs.is_active && users.is_active,不留同型后续债"): same finding shape as
+          // `attendance-admin.ts`'s `canReadAttendanceDirectoryReadiness` and `api-tokens.ts`'s
+          // `requireOrgMemberAccess` (both already fixed in #4526) — a deactivated PLATFORM
+          // account (`users.is_active=false`) must not keep surfacing org-scoped destinations
+          // through a `user_orgs` row that is still `is_active=true`.
           eb.exists(
             eb.selectFrom('user_orgs')
-              .select('user_id')
+              .innerJoin('users', 'users.id', 'user_orgs.user_id')
+              .select('user_orgs.user_id')
               .whereRef('user_orgs.org_id', '=', 'dingtalk_group_destinations.org_id')
               .where('user_orgs.user_id', '=', userId)
-              .where('user_orgs.is_active', '=', true),
+              .where('user_orgs.is_active', '=', true)
+              .where('users.is_active', '=', true),
           ),
           eb.and([
             eb('sheet_id', 'is', null),
@@ -226,12 +234,20 @@ export class DingTalkGroupDestinationService {
     } else {
       builder = builder.where((eb) =>
         eb.or([
+          // W4-PRE-1c item C (owner 裁决③, #4522 rev3 review, 2026-07-22, 逐字: "现在就统一为
+          // user_orgs.is_active && users.is_active,不留同型后续债"): same finding shape as
+          // `attendance-admin.ts`'s `canReadAttendanceDirectoryReadiness` and `api-tokens.ts`'s
+          // `requireOrgMemberAccess` (both already fixed in #4526) — a deactivated PLATFORM
+          // account (`users.is_active=false`) must not keep surfacing org-scoped destinations
+          // through a `user_orgs` row that is still `is_active=true`.
           eb.exists(
             eb.selectFrom('user_orgs')
-              .select('user_id')
+              .innerJoin('users', 'users.id', 'user_orgs.user_id')
+              .select('user_orgs.user_id')
               .whereRef('user_orgs.org_id', '=', 'dingtalk_group_destinations.org_id')
               .where('user_orgs.user_id', '=', userId)
-              .where('user_orgs.is_active', '=', true),
+              .where('user_orgs.is_active', '=', true)
+              .where('users.is_active', '=', true),
           ),
           eb.and([
             eb('sheet_id', 'is', null),

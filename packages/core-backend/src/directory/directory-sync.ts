@@ -1320,6 +1320,21 @@ export type DirectoryDeprovisionOutcome = {
     localUserId: string
     policy: DirectoryDeprovisionPolicy
   }>
+  /**
+   * W4-PRE-1c item B (owner 裁决②, #4522 rev3 review, 2026-07-22): `manual_review` never
+   * writes anything — `manualReviewCount` alone cannot answer WHO is pending. This is the
+   * same (directoryAccountId, localUserId) shape as `affected`, plus `orgId` (every entry
+   * from one call shares the same org, but the run-stats consumer — `GET
+   * /integrations/:integrationId/runs`, see `admin-directory.ts` — should not have to
+   * cross-reference the integration to learn it). Populated regardless of `enabled`
+   * (preview and real runs both resolve policy the same way; only the WRITE is gated).
+   * Values-free: ids only, no name/email/mobile.
+   */
+  manualReviewPending: Array<{
+    directoryAccountId: string
+    localUserId: string
+    orgId: string
+  }>
 }
 
 type DeprovisionCandidateRow = {
@@ -1387,6 +1402,7 @@ export async function applyDirectoryDeprovisionPolicies(
     usersDeactivatedCount: 0,
     abortedReason: null,
     affected: [],
+    manualReviewPending: [],
   }
 
   if (options.deactivatedAccountIds.length === 0) return outcome
@@ -1449,9 +1465,24 @@ export async function applyDirectoryDeprovisionPolicies(
     return outcome
   }
 
+  // W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22): resolved LAZILY and at most
+  // ONCE per call — every candidate here was selected for the SAME `options.integrationId`,
+  // hence the SAME org. Only queried the first time it is actually needed (a manual_review
+  // candidate to report, or a non-manual_review write to perform), so a run with neither
+  // never pays for it.
+  let resolvedOrgId: string | null = null
+  const resolveOrgIdOnce = async (): Promise<string> => {
+    if (resolvedOrgId === null) resolvedOrgId = await resolveDirectoryAccountOrgId(client, options.integrationId)
+    return resolvedOrgId
+  }
+
   for (const [localUserId, { directoryAccountId, policy }] of byUser) {
     if (policy === 'manual_review') {
       outcome.manualReviewCount += 1
+      // Owner 裁决②, 逐字: "manual_review 则保持 active 并暴露待人工确认状态" — never a
+      // write, membership stays exactly as it was; only the pending-confirmation state is
+      // exposed (org/membership-scoped) on the existing run-stats surface.
+      outcome.manualReviewPending.push({ directoryAccountId, localUserId, orgId: await resolveOrgIdOnce() })
       continue
     }
 
@@ -1466,6 +1497,22 @@ export async function applyDirectoryDeprovisionPolicies(
          DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
         [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
       )
+      // W4-PRE-1c (owner 裁决②, 逐字: "推荐在 deprovision circuit-breaker 通过、开关启用且
+      // 策略实际执行时,同事务失活对应 user_orgs"): the circuit breaker already passed (we are
+      // past the abort-and-return above), the switch is on (`options.enabled`), and this
+      // policy just executed a REAL write for this person — a grant revoked here, and for
+      // `mark_inactive` the local account too, below. THIS moment — not the DT-OPS-01 sweep
+      // flipping `directory_accounts.is_active` alone — is "策略实际执行", and is what may
+      // deactivate `user_orgs`, same transaction. Reuses #4526's own org-scoped "no other
+      // active binding" rule verbatim (`deactivateUserOrgMembershipIfNoOtherActiveBinding`);
+      // see the PR body's combination-semantics section for how that org-scoped check
+      // composes with (is currently dominated by) this function's OWN global sibling guard
+      // above. `manual_review` is excluded by the `continue` above: a single missed sync,
+      // or a policy that never executes, must never itself revoke membership.
+      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, {
+        userId: localUserId,
+        orgId: await resolveOrgIdOnce(),
+      })
     }
 
     if (policy === 'mark_inactive') {
@@ -3512,14 +3559,17 @@ export async function syncDirectoryIntegration(
       // deactivated on every sync — audit spam, and it would stomp a reactivation.
       // RETURNING gives the executor exactly the accounts that departed in THIS run.
       //
-      // KNOWN OPEN GAP (#4526 review, not fixed this round — needs an owner ruling): this sweep
-      // flips ONLY `directory_accounts.is_active`; it does not call
-      // `deactivateUserOrgMembershipIfNoOtherActiveBinding`, so a departed employee's `user_orgs`
-      // row stays ACTIVE until an admin manually unbinds them (the deprovision executor below is
-      // OFF by default and, even enabled, only ever touches `users.is_active`, never
-      // `user_orgs`). Whether "the directory silently stopped reporting this account" counts as a
-      // BINDING event under this line's own boundary (only unbind/rebind/archive deactivate) is
-      // an open adjudication point — see the PR body's lifecycle table and open items.
+      // W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22 — resolves the #4526-review open
+      // gap this comment used to describe): this sweep ALONE still flips only
+      // `directory_accounts.is_active` — it never itself deactivates `user_orgs`. A single
+      // missed sync (one account absent from one fetch) must never, by itself, revoke
+      // membership — owner 逐字: "不要因『单次同步缺失』直接撤销 membership". The deprovision
+      // executor below (`applyDirectoryDeprovisionPolicies`, OFF by default) is the ONLY path
+      // that may deactivate `user_orgs` for a swept account, and only once ALL of its own gates
+      // clear: circuit breaker passed, `DIRECTORY_DEPROVISION_ENABLED=true`, AND the resolved
+      // policy actually executes a write (`disable_grant_only` / `mark_inactive`; `manual_review`
+      // never writes — see that function's own `manual_review` branch, which instead exposes a
+      // pending-confirmation state on `manualReviewPending`).
       const deactivatedAccountsResult = await client.query(
         `UPDATE directory_accounts
          SET is_active = false, updated_at = NOW()
@@ -3892,6 +3942,13 @@ export async function syncDirectoryIntegration(
         // the stats JSONB.
         deprovisionAffected: deprovisionOutcome.affected.slice(0, 100),
         deprovisionAffectedTruncated: deprovisionOutcome.affected.length > 100,
+        // W4-PRE-1c item B (owner 裁决②): manual_review candidates never appear in
+        // `deprovisionAffected` above (nothing was written for them) — this is the minimal
+        // read-only exposure of WHO is pending manual confirmation, org/membership-scoped,
+        // on this same existing queryable surface (`GET /integrations/:integrationId/runs`).
+        // No new table, no new endpoint, no new UI. Values-free: ids only.
+        deprovisionManualReviewPending: deprovisionOutcome.manualReviewPending.slice(0, 100),
+        deprovisionManualReviewPendingTruncated: deprovisionOutcome.manualReviewPending.length > 100,
         linkedCount,
         pendingCount,
         unmatchedCount,

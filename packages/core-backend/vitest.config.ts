@@ -397,6 +397,17 @@ export default defineConfig({
       // #4526 review addition: real-DB behavioral proof for item E's api-tokens.ts dual filter
       // (the PR's original coverage was mock-SQL-text-only).
       'tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts',
+      // W4-PRE-1c real-DB (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, rev3 review,
+      // 2026-07-22): controlled-departure user_orgs deactivation (owner 裁决②) — real sync
+      // sweep composed with the deprovision executor (case ①), org-scoped composition with the
+      // global sibling guard (cases ②/③), manual_review pending exposure (case ④), and the
+      // readiness-gate + DingTalk destination permission negatives (case ⑤). DATABASE_URL-gated
+      // describeIfDatabase; excluded here so the no-DB job cannot skip-green them; wired
+      // whole-file into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts',
+      'tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts',
+      'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
+      'tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
