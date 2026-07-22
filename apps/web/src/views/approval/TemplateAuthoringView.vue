@@ -535,18 +535,33 @@
                     data-testid="approval-canvas-edge"
                   />
                 </svg>
+                <button
+                  v-for="line in canvasMoveTargetLines"
+                  :key="`move-target-${line.key}`"
+                  type="button"
+                  class="template-authoring__canvas-move-target"
+                  :style="{ left: `${line.dropX}px`, top: `${line.dropY}px` }"
+                  :aria-label="canvasMoveTargetLabel(line.key)"
+                  :data-testid="`approval-canvas-move-target-${line.key}`"
+                  @click.stop="applyCanvasNodeMove(line.key)"
+                  @dragover.prevent
+                  @drop="onCanvasNodeDrop($event, line.key)"
+                >
+                  <el-icon><Rank /></el-icon>
+                  <span>移到这里</span>
+                </button>
                 <div
                   v-for="pos in canvasLayout.nodes"
                   :key="pos.key"
                   class="template-authoring__canvas-node"
-                  :class="{ 'is-selected': selectedCanvasNode === pos.key }"
+                  :class="{ 'is-selected': selectedCanvasNode === pos.key, 'is-moving': movingCanvasNode === pos.key }"
                   :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: CANVAS_NODE_W + 'px' }"
                   :data-canvas-node="pos.key"
                   data-testid="approval-canvas-node"
-                  :draggable="!readOnly"
+                  :draggable="!readOnly && canMoveCanvasNode(pos.key)"
                   @click="selectCanvasNode(pos.key)"
-                  @dragstart="onCanvasNodeDragStart(pos.key)"
-                  @dragend="onCanvasNodeDragEnd($event)"
+                  @dragstart="onCanvasNodeDragStart($event, pos.key)"
+                  @dragend="cancelCanvasNodeMove"
                 >
                   <div
                     class="template-authoring__canvas-node-selector"
@@ -558,6 +573,7 @@
                     @click.stop="selectCanvasNode(pos.key)"
                     @keydown.enter.stop.prevent="selectCanvasNode(pos.key)"
                     @keydown.space.stop.prevent="selectCanvasNode(pos.key)"
+                    @keydown="onCanvasNodeKeydown($event, pos.key)"
                   >
                     <strong>{{ graphNodeLabel(pos.key) }}</strong>
                     <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
@@ -565,6 +581,35 @@
                     </span>
                   </div>
                   <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
+                    <template v-if="canMoveCanvasNode(pos.key)">
+                      <el-button
+                        :icon="Top"
+                        size="small"
+                        title="上移节点"
+                        :aria-label="`上移${graphNodeLabel(pos.key)}`"
+                        :disabled="!canvasStepMoveTarget(pos.key, 'up')"
+                        :data-testid="`approval-canvas-move-up-${pos.key}`"
+                        @click.stop="moveCanvasNodeStep(pos.key, 'up')"
+                      />
+                      <el-button
+                        :icon="Bottom"
+                        size="small"
+                        title="下移节点"
+                        :aria-label="`下移${graphNodeLabel(pos.key)}`"
+                        :disabled="!canvasStepMoveTarget(pos.key, 'down')"
+                        :data-testid="`approval-canvas-move-down-${pos.key}`"
+                        @click.stop="moveCanvasNodeStep(pos.key, 'down')"
+                      />
+                      <el-button
+                        :icon="Rank"
+                        size="small"
+                        title="移动节点"
+                        :aria-label="`选择${graphNodeLabel(pos.key)}的移动位置`"
+                        :type="movingCanvasNode === pos.key ? 'primary' : undefined"
+                        :data-testid="`approval-canvas-move-${pos.key}`"
+                        @click.stop="beginCanvasNodeMove(pos.key)"
+                      />
+                    </template>
                     <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
                     <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
                     <template v-if="canInsertAfter(canvasNodeByKey(pos.key)!)">
@@ -1244,7 +1289,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { FullScreen, Plus, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+import { Bottom, FullScreen, Plus, Rank, Top, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { summarizeConditionBranch, summarizeConditionNode } from '../../approvals/conditionSummary'
@@ -1310,10 +1355,13 @@ import {
 import {
   addConditionBranch,
   addParallelBranch,
+  adjacentLinearNodeMoveTarget,
   appendApprovalNode,
   collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
+  linearNodeMoveTargets,
+  moveLinearNode,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
 import {
@@ -1324,7 +1372,6 @@ import {
   type GraphLayout,
 } from '../../approvals/graphLayout'
 import {
-  clientToCanvasPoint,
   computeMinimapFrame,
   fitCanvasZoom,
   stepCanvasZoom,
@@ -1854,16 +1901,14 @@ function canRemoveNode(node: ApprovalNode): boolean {
     && topologyEdgeCount(node.key, 'source') === 1
 }
 
-// ── D-1/D-5/D-6 visual canvas (bespoke SVG/HTML — the render is DATA, so it's unit-testable; only the
-// raw mouse-drag GESTURE is manual/E2E QA). Auto-layout via computeLayout, overridable by a position
-// SIDECAR (`nodePositions`) that NEVER reaches the saved graph. Reuses the same topology handlers as
-// the list. Canvas V2 Slice A: selecting a node opens the right-side inspector (same draft handlers). ──
+// ── D-1/D-5/D-6 visual canvas. Layout and semantic move targets are pure data; drag/drop and
+// Alt+Arrow both invoke the same topology edit, so visual position never diverges from the saved graph.
+// Reuses the same topology handlers as the list and the same draft-backed right-side inspector. ──
 const canvasViewMode = ref<'list' | 'canvas'>('list')
 const selectedCanvasNode = ref<string | null>(null)
 const canvasInspectorRef = ref<HTMLElement | null>(null)
 const canvasViewportRef = ref<HTMLElement | null>(null)
-const nodePositions = ref<Record<string, { x: number; y: number }>>({})
-const draggingCanvasNode = ref<string | null>(null)
+const movingCanvasNode = ref<string | null>(null)
 const canvasZoom = ref(1)
 const canvasViewportState = ref({ width: 0, height: 0, scrollLeft: 0, scrollTop: 0 })
 const CANVAS_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
@@ -1871,16 +1916,7 @@ const CANVAS_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
 const CANVAS_MINIMAP_W = 220
 const CANVAS_MINIMAP_H = 120
 const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(draft.value))
-const canvasLayout = computed<GraphLayout>(() => {
-  const layout = computeLayout(canvasEffectiveGraph.value)
-  return {
-    ...layout,
-    nodes: layout.nodes.map((n) => {
-      const override = nodePositions.value[n.key]
-      return override ? { ...n, x: override.x, y: override.y } : n
-    }),
-  }
-})
+const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGraph.value))
 const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
 const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
 const canvasStageStyle = computed(() => ({
@@ -1953,8 +1989,9 @@ const selectedCanvasInspectorNode = computed<ApprovalNode | null>(() => {
 })
 watch(canvasEffectiveGraph, (graph) => {
   const key = selectedCanvasNode.value
-  if (!key) return
-  if (!graph.nodes.some((node) => node.key === key)) clearCanvasSelection()
+  if (key && !graph.nodes.some((node) => node.key === key)) clearCanvasSelection()
+  const movingKey = movingCanvasNode.value
+  if (movingKey && linearNodeMoveTargets(graph, movingKey).length === 0) cancelCanvasNodeMove()
 })
 watch([canvasViewMode, canvasLayout], async ([mode]) => {
   if (mode !== 'canvas') return
@@ -2010,28 +2047,68 @@ const canvasEdgeLines = computed(() => {
     const x2 = (t?.x ?? 0) + CANVAS_NODE_W / 2
     const y2 = t?.y ?? 0
     const midY = y1 + (y2 - y1) / 2
-    return { key: edge.key, path: `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}` }
+    return {
+      key: edge.key,
+      path: `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`,
+      dropX: (x1 + x2) / 2,
+      dropY: midY,
+    }
   })
 })
-function onCanvasNodeDragStart(key: string): void {
-  if (!readOnly.value) draggingCanvasNode.value = key
+const canvasMoveTargets = computed(() => movingCanvasNode.value
+  ? new Set(linearNodeMoveTargets(canvasEffectiveGraph.value, movingCanvasNode.value).map((target) => target.edgeKey))
+  : new Set<string>())
+const canvasMoveTargetLines = computed(() => canvasEdgeLines.value.filter((line) => canvasMoveTargets.value.has(line.key)))
+function canvasStepMoveTarget(nodeKey: string, direction: 'up' | 'down'): string | undefined {
+  return adjacentLinearNodeMoveTarget(canvasEffectiveGraph.value, nodeKey, direction)
 }
-function onCanvasNodeDragEnd(event: DragEvent): void {
-  // The drag GESTURE is manual/E2E QA; this position-update (sidecar only, never saved) is exercised.
-  if (readOnly.value || !draggingCanvasNode.value) return
-  const surface = (event.currentTarget as HTMLElement | null)?.closest('[data-testid="approval-graph-canvas"]')
-  const rect = surface?.getBoundingClientRect()
-  if (rect) {
-    const point = clientToCanvasPoint(event.clientX, event.clientY, rect, canvasZoom.value)
-    nodePositions.value = {
-      ...nodePositions.value,
-      [draggingCanvasNode.value]: {
-        x: Math.max(0, Math.round(point.x - CANVAS_NODE_W / 2)),
-        y: Math.max(0, Math.round(point.y - CANVAS_NODE_H / 2)),
-      },
-    }
+function canMoveCanvasNode(nodeKey: string): boolean {
+  return linearNodeMoveTargets(canvasEffectiveGraph.value, nodeKey).length > 0
+}
+function canvasMoveTargetLabel(edgeKey: string): string {
+  const edge = canvasEffectiveGraph.value.edges.find((candidate) => candidate.key === edgeKey)
+  const movingLabel = movingCanvasNode.value ? graphNodeLabel(movingCanvasNode.value) : '节点'
+  return edge ? `将${movingLabel}移动到${graphNodeLabel(edge.source)}之后` : `移动${movingLabel}`
+}
+function beginCanvasNodeMove(nodeKey: string): void {
+  if (readOnly.value || !canMoveCanvasNode(nodeKey)) return
+  movingCanvasNode.value = movingCanvasNode.value === nodeKey ? null : nodeKey
+}
+function cancelCanvasNodeMove(): void {
+  movingCanvasNode.value = null
+}
+function applyCanvasNodeMove(targetEdgeKey: string): void {
+  const nodeKey = movingCanvasNode.value
+  if (!nodeKey || !canvasMoveTargets.value.has(targetEdgeKey)) return
+  runTopologyOp((graph) => moveLinearNode(graph, nodeKey, targetEdgeKey))
+  selectedCanvasNode.value = nodeKey
+  cancelCanvasNodeMove()
+}
+function moveCanvasNodeStep(nodeKey: string, direction: 'up' | 'down'): void {
+  const target = canvasStepMoveTarget(nodeKey, direction)
+  if (!target) return
+  movingCanvasNode.value = nodeKey
+  applyCanvasNodeMove(target)
+}
+function onCanvasNodeKeydown(event: KeyboardEvent, nodeKey: string): void {
+  if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
+  event.preventDefault()
+  event.stopPropagation()
+  moveCanvasNodeStep(nodeKey, event.key === 'ArrowUp' ? 'up' : 'down')
+}
+function onCanvasNodeDragStart(event: DragEvent, nodeKey: string): void {
+  if (readOnly.value || !canMoveCanvasNode(nodeKey)) {
+    event.preventDefault()
+    return
   }
-  draggingCanvasNode.value = null
+  movingCanvasNode.value = nodeKey
+  event.dataTransfer?.setData('text/plain', nodeKey)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+function onCanvasNodeDrop(event: DragEvent, edgeKey: string): void {
+  event.preventDefault()
+  event.stopPropagation()
+  applyCanvasNodeMove(edgeKey)
 }
 function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const kind = approvalSourceKind(nodeKey)
@@ -2329,8 +2406,8 @@ function moveStep(index: number, delta: -1 | 1) {
 }
 
 async function loadTemplateForEdit() {
-  nodePositions.value = {}
   selectedCanvasNode.value = null
+  movingCanvasNode.value = null
   canvasZoom.value = 1
   if (!isEditMode.value) {
     draft.value = createEmptyTemplateDraft()
@@ -3150,13 +3227,20 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  cursor: grab;
+  cursor: default;
   font-size: 12px;
   min-height: 96px;
+}
+.template-authoring__canvas-node[draggable='true'] {
+  cursor: grab;
 }
 .template-authoring__canvas-node.is-selected {
   border-color: var(--el-color-primary);
   box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
+.template-authoring__canvas-node.is-moving {
+  border-style: dashed;
+  border-color: var(--el-color-primary);
 }
 .template-authoring__canvas-node-selector {
   display: flex;
@@ -3175,6 +3259,29 @@ pre {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
+}
+.template-authoring__canvas-move-target {
+  position: absolute;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px dashed var(--el-color-primary);
+  border-radius: 6px;
+  color: var(--el-color-primary);
+  background: var(--el-bg-color);
+  box-shadow: var(--el-box-shadow-lighter);
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  font-size: 12px;
+}
+.template-authoring__canvas-move-target:hover,
+.template-authoring__canvas-move-target:focus-visible {
+  border-style: solid;
+  background: var(--el-color-primary-light-9);
+  outline: none;
 }
 .template-authoring__canvas-minimap {
   position: absolute;
