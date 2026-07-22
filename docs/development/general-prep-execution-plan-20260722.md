@@ -196,9 +196,22 @@ ensureMissingObjectFields({ query, projectId, objectId, fields })
 1. **入口门**:`assertAdminPermission`(mvp-provisioning 既有);
 2. **只修模板缺列**:待加集合 = `missingLogicalFields(template, resolved)`(target-provisioning.cjs:214)——**修复集是模板与现表的差集,不接受调用方自由列**;调用方无法借 repair 塞任意字段;
 3. **命名空间正控**:每个待加字段必须满足 `ownership === 'plm_system'` **或** `assertExtensionFieldIdValid(id, { templateFieldIds })`(extension-namespace.cjs:117)通过——**`human_preserved` 新列被显式 reject**(闭合 reason `REPAIR_HUMAN_FIELD_FORBIDDEN`):human 白名单(templates.cjs:28)是 apply-writer `assertNoHumanFields`(apply-writer.cjs:187)与 carry-policy 的承重词表,扩它是独立设计门,不许从 repair 后门进;
-4. **既有列不可变更式核查**:repair 前后各跑一次 DB-backed 的 `readObjectFieldsContent`(逐既有字段读 `name/type/property` 内容快照,非 compute-only 的 `resolveFieldIds`),经 `assertNoExistingFieldMutated` 对账,任何漂移 ⇒ 抛 `REPAIR_MUTATED_EXISTING_FIELD`(fail-closed;这是对 DO NOTHING 的**运行时正控**,不只信 SQL);
-5. **fail-closed 原点不动**:`:232-239` 与 `:370-383` 的 throw **一字不改**——ensure 永远不静默修;repair 是**另一个动词**、另一条 admin 路由(`['POST','/api/integration/stock-preparation/mvp/repair','stockPreparationMvpRepair']`,http-routes.cjs :73 `mvp/ensure` 旁),证据模式 `mvp_repaired`;
-6. **模板版本纪律**:模板加列必须同 PR 内含 repair 覆盖测试;模板 `version` 走语义化 minor(v1 → v1.1 记入 evidence),repair evidence 带 `templateVersion` + `addedFieldCount`(values-free 计数,非字段清单)。
+4. **既有列不可变更式核查**:repair 前后各跑一次 DB-backed 的 `readObjectFieldsContent`(逐既有字段读 `name/type/property/order` 内容快照,非 compute-only 的 `resolveFieldIds`),经 `assertNoExistingFieldMutated` 对账,任何漂移 ⇒ 抛 `REPAIR_MUTATED_EXISTING_FIELD`。**口径修正(round-5 审 P2)**:当前 wired 写是 append-only `DO NOTHING`,故此为**安全的 post-write 检测 canary,尚非原子 fail-close**——before/write/after 分处独立 host 事务,若写原语被变异为 mutate-then-commit 会先提交后抛。**原子性(scope+读+写+复核+回滚同一 host 事务)= W3-entry 门(§3.3a)**,repair 未 arm/未接路由期间不需要;
+5. **repair 字段与 fresh 同构(round-5 审 P2)**:repair 的缺列描述符必须来自与 fresh ensure **同一 builder**(MVP=`buildMvpTargetDescriptor`、canonical=`buildStockPreparationTargetDescriptor`),**不得**用裸 `buildSheetStructureFromMvpTableTemplate`——否则修出的列缺冻结 `property.stockPreparationMvp` 元数据、与新装列不同构。判别测试:fresh-vs-repair 全 `property` deep-equal;
+6. **并发抢插 fail-close(round-5 审 P2)**:只把**本轮缺集**交给 `ensureMissingObjectFields`,故返回的 `skippedExistingFieldIds` 任意非空 = 竞争写者在 resolve 与 write 之间插了未验证行 ⇒ 抛 `REPAIR_CONCURRENT_FIELD_APPEARED`(id 存在 ≠ 形状正确;幂等可重试)。MVP+canonical 两路各带判别测试;
+7. **fail-closed 原点不动**:`:232-239` 与 `:370-383` 的 throw **一字不改**——ensure 永远不静默修;repair 是**另一个动词**、另一条 admin 路由(`['POST','/api/integration/stock-preparation/mvp/repair','stockPreparationMvpRepair']`,http-routes.cjs :73 `mvp/ensure` 旁),证据模式 `mvp_repaired`;
+8. **模板版本纪律**:模板加列必须同 PR 内含 repair 覆盖测试;模板 `version` 走语义化 minor(v1 → v1.1 记入 evidence),repair evidence 带 `templateVersion` + `addedFieldCount`(values-free 计数,非字段清单)。
+
+### 3.3a W3-entry 门:原子组合事务原语(round-5 审 P2-3)
+
+**在 W3 把 repair 接进生产路由前**,必须提供 host 侧组合事务原语,把 **scope 校验 → before-read → additive write → after-read → 复核(mutated/incomplete/race)→ commit/rollback** 统一进**同一** DB 事务;任一复核抛错 ⇒ 整事务回滚,既有行状态不变。契约(参照 `ensureObject` 的「host fn 收 `query`、单事务组合多写」先例,index.ts):
+
+- **host**(`packages/core-backend/src/index.ts` + `multitable/provisioning.ts`):新增 `runObjectFieldsRepairTransaction(fn)`,`poolManager.get().transaction` 内构造绑定同一 `query` 的 tx-surface `{findObjectSheet, resolveExistingObjectFieldIds, readObjectFieldsContent, ensureMissingObjectFields}` 传给 `fn`;`fn` 抛错则 poolManager 传播 ⇒ ROLLBACK;
+- **plugin-scope**(`multitable/plugin-scope.ts`):转发时对 tx-surface 每个方法**仍套 `assertProjectIdAllowedForPlugin` + `assertObjectScope`**(scope 必须在事务内也生效,不裸转发);
+- **plugin**(target/mvp-provisioning.cjs):repair 的读/写/复核体挪进 `provisioning.runObjectFieldsRepairTransaction(async (tx) => {…})`,域知识(模板/ownership/human-reject)留在插件侧;
+- **realdb 承重证**:变异写原语为 mutate-then-throw ⇒ 断言既有行**已回滚**(不只是抛错),证明是原子 fail-close 而非 post-commit 报警。
+
+**为何 W2 期不建**:repair 当前 unarmed/未接路由,§3.3-4 的检测 canary 在 append-only DO NOTHING 下安全;原语形状受 W3 实际接线(单表/多表/批)牵引,提前反应式建有搭错形状之险(见 [[feedback_adversarial_review_before_pushing_core_cross_package]])。故记为 W3 首任务门,不塞进 W2。
 
 ### 3.4 验证方式
 
@@ -207,7 +220,7 @@ ensureMissingObjectFields({ query, projectId, objectId, fields })
 
 ### 3.5 W3/G2 消费口径
 
-W3 的 `suggestedDemandDate`、G2 的注解列,一律走「模板加列(plm_system)→ repair 已装表 → 接线」三步;两刀自身不再触碰 provisioning 机制。
+W3 的 `suggestedDemandDate`、G2 的注解列,一律走「模板加列(plm_system)→ repair 已装表 → 接线」三步;两刀自身不再触碰 provisioning 机制。**其中「接线」这步以 §3.3a 的原子组合事务原语为前置门**(repair 一旦接进生产路由,检测 canary 必须升级为原子 fail-close)。
 
 ---
 

@@ -74,8 +74,10 @@ function createContext({
       calls.readObjectFieldsContent = calls.readObjectFieldsContent || []
       calls.readObjectFieldsContent.push(input)
       const out = {}
+      // Fake mirrors the REAL provisioning surface: content snapshot carries `order` too
+      // (round-5 review P3 — `order` is part of the mutation-guard's column identity).
       for (const fieldId of input.fieldIds || []) {
-        if (!currentMissing.has(fieldId)) out[fieldId] = { name: fieldId, type: 'text', property: {} }
+        if (!currentMissing.has(fieldId)) out[fieldId] = { name: fieldId, type: 'text', property: {}, order: 0 }
       }
       return out
     },
@@ -484,6 +486,42 @@ async function main() {
     }
     assert.ok(mutatedErr instanceof StockPreparationTargetProvisioningError, 'mutated existing field fails closed')
     assert.equal(mutatedErr.code, 'REPAIR_MUTATED_EXISTING_FIELD')
+
+    // (b4) round-5 review P2: a field from THIS round's missing set that returns as
+    //      skipped-existing = a concurrent writer inserted an UNVERIFIED row → fail closed
+    //      (id-exists ≠ shape-correct). Canonical path must discriminate this too.
+    const raceCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    raceCtx.context.api.multitable.provisioning.ensureMissingObjectFields = async (input) => ({
+      addedFieldIds: [],
+      skippedExistingFieldIds: (input.fields || []).map((f) => `fld_${f.id}`),
+    })
+    let raceErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: raceCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      raceErr = error
+    }
+    assert.ok(raceErr instanceof StockPreparationTargetProvisioningError, 'concurrent skipped field fails closed')
+    assert.equal(raceErr.code, 'REPAIR_CONCURRENT_FIELD_APPEARED')
+
+    // (b5) round-5 review P3: `order` is part of the snapshotted column identity — an
+    //      order-ONLY change across the additive write must ALSO fail closed (landed pin).
+    const orderCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    let orderRead = 0
+    orderCtx.context.api.multitable.provisioning.readObjectFieldsContent = async (input) => {
+      orderRead += 1
+      const out = {}
+      for (const fieldId of input.fieldIds || []) out[fieldId] = { name: fieldId, type: 'text', property: {}, order: orderRead >= 2 ? 99 : 1 }
+      return out
+    }
+    let orderErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: orderCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      orderErr = error
+    }
+    assert.ok(orderErr instanceof StockPreparationTargetProvisioningError, 'order-only change fails closed')
+    assert.equal(orderErr.code, 'REPAIR_MUTATED_EXISTING_FIELD')
 
     // (c) absent target fails closed.
     const absentCtx = createContext({ sheetExists: false })

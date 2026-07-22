@@ -137,8 +137,10 @@ class StockPreparationCarryPolicyError extends Error {
 const CARRY_POLICY_ERROR_REASON_SET = new Set(CARRY_POLICY_ERROR_REASONS)
 function fail(reason, message, details) {
   if (!CARRY_POLICY_ERROR_REASON_SET.has(reason)) {
+    // COARSE: do NOT echo the rejected reason value back — this future-protection layer
+    // must not become a value-leak channel (round-5 review P3). Fixed token only.
     throw new Error(
-      `stock-preparation-carry-policy internal: undeclared error reason "${reason}" ` +
+      'stock-preparation-carry-policy internal: undeclared error reason ' +
         '(add it to the frozen CARRY_POLICY_ERROR_REASONS vocabulary)',
     )
   }

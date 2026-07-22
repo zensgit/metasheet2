@@ -498,9 +498,15 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
   const fieldIds = templateFieldIds(template)
   const resolved = await provisioning.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
   const missingIds = missingLogicalFields(template, resolved)
-  // BEFORE snapshot of the EXISTING fields' content (name/type/property) — the
-  // REPAIR_MUTATED_EXISTING_FIELD positive control (design lock §3.3-4): the additive
-  // write must not touch any pre-existing column, and we PROVE it, not just trust it.
+  // BEFORE snapshot of the EXISTING fields' content (name/type/property/order) — the
+  // REPAIR_MUTATED_EXISTING_FIELD control (design lock §3.3-4): the additive write must
+  // not touch any pre-existing column. NOTE (round-5 review P2): with the currently-wired
+  // append-only ensureMissingObjectFields (ON CONFLICT DO NOTHING) this is a safe
+  // post-write DETECTION canary, NOT yet an atomic fail-close — the before-read, write and
+  // after-read run in separate host transactions, so a hypothetical mutate-then-commit
+  // write primitive would commit before this throws. Atomic scope+read+write+verify+rollback
+  // in ONE host transaction is the explicit W3-ENTRY gate (see execution-plan §3.3a); it is
+  // NOT required while repair stays unarmed/unwired, which it does here.
   const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
   const beforeContent = await provisioning.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds })
   const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
@@ -528,6 +534,19 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     objectId: template.objectId,
     fields: missingDescriptors,
   })
+  // CONCURRENCY fail-close (round-5 review P2): we submitted ONLY this round's missing set,
+  // so a skipped-existing id means a competing writer inserted that column between our
+  // resolve and our write. We neither added it nor content-verified its row against the
+  // frozen descriptor, so `ready` would be UNPROVEN (id-exists ≠ shape-correct). Fail
+  // closed — repair is idempotent, a retry after the race settles re-verifies.
+  if (result.skippedExistingFieldIds.length) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'REPAIR_CONCURRENT_FIELD_APPEARED',
+      'a missing field was inserted by a concurrent writer during repair; retry after it settles',
+      { objectId: template.objectId, skippedExistingFieldCount: result.skippedExistingFieldIds.length },
+    )
+  }
   // POST-WRITE completeness re-verify: `ready:true` must be PROVEN, never asserted.
   const resolvedAfter = await provisioning.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
   const stillMissing = missingLogicalFields(template, resolvedAfter)

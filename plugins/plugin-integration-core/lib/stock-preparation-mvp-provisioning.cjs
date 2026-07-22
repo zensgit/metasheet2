@@ -366,7 +366,13 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
     const missingIds = missingLogicalFields(template, resolved)
     const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
     const beforeContent = await provisioning.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds })
-    const structure = buildSheetStructureFromMvpTableTemplate(template)
+    // Build repaired-field descriptors from the SAME builder the fresh ensure path uses
+    // (buildMvpTargetDescriptor, not the raw buildSheetStructureFromMvpTableTemplate) so a
+    // repaired column is byte-for-byte isomorphic to a freshly-provisioned one — including
+    // the frozen `property.stockPreparationMvp` metadata (round-5 review P2: repair must not
+    // emit a structurally-different field than fresh provisioning). Proven by the
+    // fresh-vs-repair full-property equivalence test.
+    const descriptor = buildMvpTargetDescriptor(template)
     const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
     const missingDescriptors = []
     for (const id of missingIds) {
@@ -383,14 +389,27 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         // A non-plm_system template field id must be a valid tenant extension id.
         assertExtensionFieldIdValid(id, { templateFieldIds: fieldIds })
       }
-      const descriptor = structure.fields.find((field) => field.id === id)
-      if (descriptor) missingDescriptors.push(descriptor)
+      const found = descriptor.fields.find((field) => field.id === id)
+      if (found) missingDescriptors.push(found)
     }
     const result = await provisioning.ensureMissingObjectFields({
       projectId: scopedProjectId,
       objectId: template.objectId,
       fields: missingDescriptors,
     })
+    // CONCURRENCY fail-close (round-5 review P2): we submitted ONLY this round's missing
+    // set, so a skipped-existing id means a competing writer inserted that column between
+    // our resolve and our write. We neither added it nor content-verified its row against
+    // the frozen descriptor, so `ready` would be UNPROVEN (id-exists ≠ shape-correct).
+    // Fail closed — repair is idempotent, a retry after the race settles re-verifies.
+    if (result.skippedExistingFieldIds.length) {
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'REPAIR_CONCURRENT_FIELD_APPEARED',
+        'a missing field was inserted by a concurrent writer during repair; retry after it settles',
+        { objectId: template.objectId, skippedExistingFieldCount: result.skippedExistingFieldIds.length },
+      )
+    }
     // POST-WRITE completeness re-verify (never report ready unproven).
     const resolvedAfter = await provisioning.resolveExistingObjectFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
     const stillMissing = missingLogicalFields(template, resolvedAfter)

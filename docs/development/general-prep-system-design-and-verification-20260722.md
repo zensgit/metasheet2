@@ -106,7 +106,16 @@ W2 首版推送后经独立审阅(codex,exact head 8e107),抓出 **4 个真缺�
 - **NIT(CARRY_POLICY_ERROR_REASONS 仅 .includes-pin,无运行时消费者)**:删任一 reason(如 UNSUPPORTED_DECISION)仍绿,「闭词表」只是文档。修:(a)`fail()` 运行时校验 reason ∈ 冻结表(13/13 调用点已核对全在表内,越表 → 内部错;冻结表现有真运行时消费者、fail-closed),(b)加 `deepEqual` exact-pin 测试;变异删 reason → 红。
 - **NIT(既有列快照只覆盖 name/type/property,漏 mutable `order` 列)**:契约称「既有列一列不动」但快照少一列 → 若未来 write-primitive 改为 renumber,order 漂移可静默过关(当前 wired 写是 append-only DO NOTHING,latent 非 live)。修:`readObjectFieldsContent` SELECT + 比较加 `"order"`(`updated_at` 故意排除=housekeeping 时间戳);探针 order-change → THROW、identical → 不抛;realdb scoped-repair 仍 1/1 绿(DO NOTHING 下 order 不变、不误报)。
 
-**第四轮验证边界**:三修全部 mutation-verified load-bearing;合并电池(F1 target+mvp/F2/F3/F4a exact-vocab/F4b reasons-drift/F4c coarse-echo/Fix-C order)全红或 throw;type-check 0 error、CJS 链 103/103、scope 单测 11/11、realdb scoped-repair 1/1。**note**:workflow 的 test-load-bearing lens 因子代理登录基建错(`Not logged in`)未返回,但其覆盖已由 guard-correctness lens(两 CJS 套件 node --test 全过 + 直探 assertNoExistingFieldMutated)+ 我本机对 F1/F2/F3/F4 的逐一变异证实补齐。**至此本刀独立审 clean,可提请 owner 侧第 4 轮短复审并在通过后开 W3。**
+**第四轮验证边界**:三修全部 mutation-verified load-bearing;合并电池(F1 target+mvp/F2/F3/F4a exact-vocab/F4b reasons-drift/F4c coarse-echo/Fix-C order)全红或 throw;type-check 0 error、CJS 链 103/103、scope 单测 11/11、realdb scoped-repair 1/1。**note**:workflow 的 test-load-bearing lens 因子代理登录基建错(`Not logged in`)未返回,但其覆盖已由 guard-correctness lens(两 CJS 套件 node --test 全过 + 直探 assertNoExistingFieldMutated)+ 我本机对 F1/F2/F3/F4 的逐一变异证实补齐。
+
+**第五轮:owner 侧 codex 复审(HOLD,0 P1/3 P2/2 P3)——两个"判别输入原样复现"的 P2 + 两个 P3 全修;P2-3 记为 W3-entry 门:**
+- **P2(MVP repair 与 fresh 不同构)**:fresh 走 `buildMvpTargetDescriptor` 注入 `property.stockPreparationMvp`,repair 却从裸 `buildSheetStructureFromMvpTableTemplate` 取描述符 → `repairedHasFrozenMvpMetadata=false`、`sameProperty=false`。修:repair 改用 `buildMvpTargetDescriptor(template).fields`;加 fresh-vs-repair 全 `property` deep-equal 判别测试;变异「退回裸 builder」→ 红。
+- **P2(并发 skipped-field 未证即 ready)**:缺列在两次读之间被他者抢插,`stillMissing.length===0` 只证 id 存在、不证抢插行符合冻结描述符 → `missingFieldWasContentVerified=false` 却 `ready=true`。修:只交本轮缺集,`skippedExistingFieldIds` 任意非空 ⇒ 抛 `REPAIR_CONCURRENT_FIELD_APPEARED`(MVP+canonical 两路);变异「删 fail-close」两路各红。
+- **P2→W3-entry 门(内容守卫非原子)**:before/write/after 分处独立事务,mutation 变红只证「发现」非「状态未变」;当前 DO NOTHING 本身安全。**修正口径**:守卫注释与 execution-plan §3.3-4 明标为 post-write **检测 canary**、非原子;§3.3a 记为 W3-entry 门(host 侧 `runObjectFieldsRepairTransaction`:scope+读+写+复核+回滚同一事务,realdb 证既有行回滚)。**为何 W2 期不建**:repair unarmed/未接路由;原语形状受 W3 接线牵引,提前反应式建有搭错形状之险(见 [[feedback_adversarial_review_before_pushing_core_cross_package]])。
+- **P3(coarse-details 未来保护层回显 reason)**:`fail()` 未声明 reason 的内部错误把 `${reason}` 写进 message。修:改固定 coarse token,不回显拒绝值。
+- **P3(order 无落库回归 + 两 CJS fake 只返回 name/type/property)**:手工变异不能替代 CI 钉。修:两 fake 补 `order`;MVP/canonical 各加 order-only 变更 → `REPAIR_MUTATED_EXISTING_FIELD` 的落库判别测试。
+
+**第五轮验证边界**:四修(2 P2 + 2 P3)全 mutation-verified load-bearing——MVP g/h/i(退裸 builder/删 race/剥 order 比较)各红、canonical b4(删 race)红;type-check 0 error、CJS 链 103/103、scope 单测 11/11、realdb 15/15。**P2-3 未在本轮建**(按 reviewer「在 W3 接路由前应提供」框定 + 自认「当前 DO NOTHING 本身安全」),而是记为 W3-entry 门 + 修正过度声称。**至此两个"判别输入"闭合、P3 收尾;是否需在宣布 W2 clean 前先建 §3.3a 原子原语(而非留作 W3 首任务),留 owner 裁。**
 
 ## 6. 验证纪律记录
 

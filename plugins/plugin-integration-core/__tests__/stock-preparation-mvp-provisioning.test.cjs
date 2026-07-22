@@ -99,8 +99,10 @@ function createContext({ existingObjectIds = [], missingFieldsByObject = {}, fai
       calls.readObjectFieldsContent.push({ ...input })
       const gone = missing[input.objectId] || new Set()
       const out = {}
+      // Fake mirrors the REAL provisioning surface: content snapshot carries `order` too
+      // (round-5 review P3 — `order` is part of the mutation-guard's column identity).
       for (const fieldId of input.fieldIds || []) {
-        if (!gone.has(fieldId)) out[fieldId] = { name: fieldId, type: 'text', property: {} }
+        if (!gone.has(fieldId)) out[fieldId] = { name: fieldId, type: 'text', property: {}, order: 0 }
       }
       return out
     },
@@ -538,6 +540,55 @@ async function main() {
     }
     await rejectsWith(
       () => repairStockPreparationMvpTargets({ context: mutateCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
+      StockPreparationTargetProvisioningError,
+      'REPAIR_MUTATED_EXISTING_FIELD',
+    )
+
+    // (g) round-5 review P2: a REPAIRED field must be byte-for-byte isomorphic to a
+    //     FRESHLY-provisioned one — same property INCLUDING the frozen stockPreparationMvp
+    //     metadata. Fresh uses buildMvpTargetDescriptor; repair must use it too (not the
+    //     raw structure builder, which omits stockPreparationMvp). Full-property equivalence.
+    const isoCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+    await repairStockPreparationMvpTargets({ context: isoCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] })
+    const mapTemplate = STOCK_PREPARATION_MVP_TABLE_TEMPLATES.find((t) => t.objectId === MAP)
+    const freshField = buildMvpTargetDescriptor(mapTemplate).fields.find((f) => f.id === 'plmDrawingNo')
+    const submittedField = isoCtx.calls.ensureMissingObjectFields[0].fields.find((f) => f.id === 'plmDrawingNo')
+    assert.ok(submittedField, 'repair submitted the missing field')
+    assert.ok(freshField.property.stockPreparationMvp, 'CONTROL: fresh field carries frozen mvp metadata')
+    assert.deepEqual(submittedField.property, freshField.property, 'repaired field property === fresh (incl stockPreparationMvp)')
+    assert.deepEqual(
+      { name: submittedField.name, type: submittedField.type, order: submittedField.order },
+      { name: freshField.name, type: freshField.type, order: freshField.order },
+      'repaired field name/type/order === fresh',
+    )
+
+    // (h) round-5 review P2: a field from THIS round's missing set that returns as
+    //     skipped-existing = a concurrent writer inserted an UNVERIFIED row → fail closed
+    //     (id-exists ≠ shape-correct). Without the guard this reports ready unproven.
+    const raceCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+    raceCtx.context.api.multitable.provisioning.ensureMissingObjectFields = async (input) => ({
+      addedFieldIds: [],
+      skippedExistingFieldIds: (input.fields || []).map((f) => `fld_${input.objectId}_${f.id}`),
+    })
+    await rejectsWith(
+      () => repairStockPreparationMvpTargets({ context: raceCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
+      StockPreparationTargetProvisioningError,
+      'REPAIR_CONCURRENT_FIELD_APPEARED',
+    )
+
+    // (i) round-5 review P3: `order` is part of the snapshotted column identity — an
+    //     order-ONLY change across the additive write must ALSO fail closed. Landed CI pin
+    //     (not just a manual mutation): the fake now carries `order`, and here it drifts.
+    const orderCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+    let orderRead = 0
+    orderCtx.context.api.multitable.provisioning.readObjectFieldsContent = async (input) => {
+      orderRead += 1
+      const out = {}
+      for (const fieldId of input.fieldIds || []) out[fieldId] = { name: fieldId, type: 'text', property: {}, order: orderRead >= 2 ? 99 : 1 }
+      return out
+    }
+    await rejectsWith(
+      () => repairStockPreparationMvpTargets({ context: orderCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
       StockPreparationTargetProvisioningError,
       'REPAIR_MUTATED_EXISTING_FIELD',
     )
