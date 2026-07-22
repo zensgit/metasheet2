@@ -65,7 +65,7 @@
     <el-alert
       v-if="!unsupportedReason && graphReadOnlyMessage"
       :title="graphReadOnlyMessage"
-      description="画布用于编排节点与分支；结构列表用于编辑审批人、条件、并行汇聚、抄送和字段权限。"
+      description="画布编排结构；选中节点后可在右侧检查器编辑审批人、条件、并行汇聚、抄送和字段权限（与结构列表共用同一草稿）。"
       type="info"
       show-icon
       :closable="false"
@@ -470,75 +470,118 @@
           <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
         </div>
 
-        <!-- D-1/D-5 visual canvas: auto-laid-out nodes + SVG edges + topology toolbar + live validity.
-             The mouse-drag GESTURE is manual/E2E QA; everything else is unit-covered. Node config is
-             edited in the「结构列表」view (D-6 toggle). -->
-        <div v-if="graphReadOnly && canvasViewMode === 'canvas'">
-          <el-alert
-            v-if="canvasValidity.length"
-            type="warning"
-            :closable="false"
-            show-icon
-            data-testid="approval-canvas-validity"
-            title="画布结构校验（保存时后端为最终判定）"
-          >
-            <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
-          </el-alert>
-          <div class="template-authoring__canvas-viewport">
-            <div
-              class="template-authoring__canvas"
-              data-testid="approval-graph-canvas"
-              :style="{ position: 'relative', height: canvasLayout.height + 'px', width: canvasLayout.width + 'px' }"
+        <!-- D-1/D-5 visual canvas + Canvas V2 Slice A right-side inspector.
+             Topology stays on the canvas; node config reuses the SAME draft handlers as 结构列表. -->
+        <div
+          v-if="graphReadOnly && canvasViewMode === 'canvas'"
+          class="template-authoring__canvas-workspace"
+          data-testid="approval-canvas-workspace"
+        >
+          <div class="template-authoring__canvas-main">
+            <el-alert
+              v-if="canvasValidity.length"
+              type="warning"
+              :closable="false"
+              show-icon
+              data-testid="approval-canvas-validity"
+              title="画布结构校验（保存时后端为最终判定）"
             >
-              <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
-                <defs>
-                  <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
-                    <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
-                  </marker>
-                </defs>
-                <path
-                  v-for="line in canvasEdgeLines"
-                  :key="line.key"
-                  :d="line.path"
-                  stroke="#bbb"
-                  stroke-width="1.5"
-                  fill="none"
-                  marker-end="url(#approval-canvas-arrow)"
-                  data-testid="approval-canvas-edge"
-                />
-              </svg>
+              <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
+            </el-alert>
+            <div class="template-authoring__canvas-viewport">
               <div
-                v-for="pos in canvasLayout.nodes"
-                :key="pos.key"
-                class="template-authoring__canvas-node"
-                :class="{ 'is-selected': selectedCanvasNode === pos.key }"
-                :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: CANVAS_NODE_W + 'px' }"
-                :data-canvas-node="pos.key"
-                data-testid="approval-canvas-node"
-                :draggable="!readOnly"
-                @click="selectedCanvasNode = pos.key"
-                @dragstart="onCanvasNodeDragStart(pos.key)"
-                @dragend="onCanvasNodeDragEnd($event)"
+                class="template-authoring__canvas"
+                data-testid="approval-graph-canvas"
+                :style="{ position: 'relative', height: canvasLayout.height + 'px', width: canvasLayout.width + 'px' }"
               >
-                <strong>{{ canvasNodeByKey(pos.key)?.name || pos.key }}</strong>
-                <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
-                  {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
-                </span>
-                <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
-                  <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
-                  <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
-                  <template v-if="canInsertAfter(canvasNodeByKey(pos.key)!)">
-                    <el-button size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">+审批</el-button>
-                    <el-button size="small" :data-testid="`approval-canvas-insert-condition-${pos.key}`" @click.stop="onInsertConditionAfter(pos.key)">+条件</el-button>
-                    <!-- F4: no +并行 inside a parallel branch — the backend rejects nested parallel. -->
-                    <el-button v-if="canInsertParallelAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-parallel-${pos.key}`" @click.stop="onInsertParallelAfter(pos.key)">+并行</el-button>
-                  </template>
-                  <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
+                <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
+                  <defs>
+                    <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                      <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
+                    </marker>
+                  </defs>
+                  <path
+                    v-for="line in canvasEdgeLines"
+                    :key="line.key"
+                    :d="line.path"
+                    stroke="#bbb"
+                    stroke-width="1.5"
+                    fill="none"
+                    marker-end="url(#approval-canvas-arrow)"
+                    data-testid="approval-canvas-edge"
+                  />
+                </svg>
+                <div
+                  v-for="pos in canvasLayout.nodes"
+                  :key="pos.key"
+                  class="template-authoring__canvas-node"
+                  :class="{ 'is-selected': selectedCanvasNode === pos.key }"
+                  :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: CANVAS_NODE_W + 'px' }"
+                  :data-canvas-node="pos.key"
+                  data-testid="approval-canvas-node"
+                  :draggable="!readOnly"
+                  @click="selectCanvasNode(pos.key)"
+                  @dragstart="onCanvasNodeDragStart(pos.key)"
+                  @dragend="onCanvasNodeDragEnd($event)"
+                >
+                  <div
+                    class="template-authoring__canvas-node-selector"
+                    role="button"
+                    tabindex="0"
+                    :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
+                    :aria-pressed="selectedCanvasNode === pos.key"
+                    data-testid="approval-canvas-node-select"
+                    @click.stop="selectCanvasNode(pos.key)"
+                    @keydown.enter.stop.prevent="selectCanvasNode(pos.key)"
+                    @keydown.space.stop.prevent="selectCanvasNode(pos.key)"
+                  >
+                    <strong>{{ graphNodeLabel(pos.key) }}</strong>
+                    <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
+                      {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+                    </span>
+                  </div>
+                  <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
+                    <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
+                    <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
+                    <template v-if="canInsertAfter(canvasNodeByKey(pos.key)!)">
+                      <el-button size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">+审批</el-button>
+                      <el-button size="small" :data-testid="`approval-canvas-insert-condition-${pos.key}`" @click.stop="onInsertConditionAfter(pos.key)">+条件</el-button>
+                      <!-- F4: no +并行 inside a parallel branch — the backend rejects nested parallel. -->
+                      <el-button v-if="canInsertParallelAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-parallel-${pos.key}`" @click.stop="onInsertParallelAfter(pos.key)">+并行</el-button>
+                    </template>
+                    <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
+                  </div>
                 </div>
               </div>
             </div>
+            <p class="template-authoring__hint">画布用于编排结构（增删节点 / 分支、拖动布局）。点击节点在右侧检查器编辑配置；也可切换「结构列表」。</p>
           </div>
-          <p class="template-authoring__hint">画布用于查看与编排结构（增删节点 / 分支、拖动布局）。各节点的审批人 / 规则配置请切换到「结构列表」编辑。</p>
+          <aside
+            v-if="selectedCanvasInspectorNode"
+            ref="canvasInspectorRef"
+            class="template-authoring__canvas-inspector"
+            data-testid="approval-canvas-inspector"
+            :data-inspector-node="selectedCanvasInspectorNode.key"
+            :data-inspector-type="selectedCanvasInspectorNode.type"
+          >
+            <div class="template-authoring__canvas-inspector-header">
+              <div class="template-authoring__canvas-inspector-title">
+                <strong>{{ graphNodeLabel(selectedCanvasInspectorNode.key) }}</strong>
+                <span class="template-authoring__node-type" :data-node-type="selectedCanvasInspectorNode.type">
+                  {{ nodeTypeLabel(selectedCanvasInspectorNode.type) }}
+                </span>
+              </div>
+              <el-button
+                text
+                size="small"
+                data-testid="approval-canvas-inspector-close"
+                @click="clearCanvasSelection"
+              >关闭</el-button>
+            </div>
+            <div class="template-authoring__canvas-inspector-body">
+              <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
+            </div>
+          </aside>
         </div>
 
         <div v-if="graphReadOnly && canvasViewMode === 'list'" data-testid="approval-graph-readonly-list">
@@ -597,489 +640,7 @@
               </div>
             </div>
 
-            <!-- G-2: editable condition node (rules / conjunction / default fall-through edge).
-                 Topology (which branches exist, their edgeKeys/targets) is NOT editable here — only
-                 the matching LOGIC. Branch add/remove is a later slice. -->
-            <div
-              v-if="node.type === 'condition' && conditionEditFor(node.key)"
-              class="template-authoring__condition"
-              data-testid="approval-condition-editor"
-              :data-condition-node="node.key"
-            >
-              <div
-                v-for="branch in conditionEditFor(node.key)!.branches"
-                :key="branch.edgeKey"
-                class="template-authoring__condition-branch"
-                data-testid="approval-condition-branch"
-              >
-                <div class="template-authoring__condition-branch-head">
-                  <span>分支「{{ liveBranchSummary(branch) }}」→ {{ branch.edgeKey }}</span>
-                  <el-select
-                    :model-value="branch.predicateMode"
-                    size="small"
-                    :disabled="readOnly"
-                    class="ms-w-130"
-                    data-testid="approval-condition-predicate-mode"
-                    @update:model-value="(mode: string) => setConditionBranchPredicateMode(branch, mode)"
-                  >
-                    <el-option label="简单规则" value="rules" />
-                    <el-option label="公式" value="formula" />
-                  </el-select>
-                  <el-select
-                    v-if="branch.predicateMode === 'rules'"
-                    v-model="branch.conjunction"
-                    size="small"
-                    :disabled="readOnly"
-                    class="ms-w-110"
-                    data-testid="approval-condition-conjunction"
-                  >
-                    <el-option label="全部满足 (AND)" value="and" />
-                    <el-option label="任一满足 (OR)" value="or" />
-                  </el-select>
-                </div>
-                <template v-if="branch.predicateMode === 'rules'">
-                  <div
-                    v-for="(rule, ruleIndex) in branch.rules"
-                    :key="ruleIndex"
-                    class="template-authoring__condition-rule"
-                    data-testid="approval-condition-rule"
-                  >
-                    <el-select
-                      v-model="rule.fieldId"
-                      size="small"
-                      filterable
-                      placeholder="字段"
-                      :disabled="readOnly"
-                      class="ms-w-160"
-                      data-testid="approval-condition-rule-field"
-                    >
-                      <el-option
-                        v-for="field in conditionFieldOptions"
-                        :key="field.id"
-                        :label="field.label"
-                        :value="field.id"
-                      />
-                    </el-select>
-                    <el-select
-                      v-model="rule.operator"
-                      size="small"
-                      :disabled="readOnly"
-                      class="ms-w-120"
-                      data-testid="approval-condition-rule-operator"
-                    >
-                      <el-option
-                        v-for="operator in CONDITION_RULE_OPERATORS"
-                        :key="operator"
-                        :label="conditionOperatorLabel(operator)"
-                        :value="operator"
-                      />
-                    </el-select>
-                    <el-input
-                      v-if="rule.operator !== 'isEmpty'"
-                      :model-value="conditionRuleValueText(rule)"
-                      size="small"
-                      placeholder="比较值"
-                      :disabled="readOnly"
-                      class="ms-w-160"
-                      data-testid="approval-condition-rule-value"
-                      @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
-                    />
-                    <el-button
-                      size="small"
-                      type="danger"
-                      :disabled="readOnly || branch.rules.length === 1"
-                      data-testid="approval-condition-rule-remove"
-                      @click="removeConditionRule(branch, ruleIndex)"
-                    >删除</el-button>
-                  </div>
-                </template>
-                <el-button
-                  v-if="branch.predicateMode === 'rules'"
-                  size="small"
-                  :disabled="readOnly"
-                  data-testid="approval-condition-rule-add"
-                  @click="addConditionRule(branch)"
-                >
-                  <el-icon><Plus /></el-icon>
-                  添加规则
-                </el-button>
-                <div
-                  v-else
-                  class="template-authoring__condition-formula"
-                  data-testid="approval-condition-formula"
-                >
-                  <el-input
-                    v-model="branch.formulaExpression"
-                    type="textarea"
-                    :rows="3"
-                    :disabled="readOnly"
-                    placeholder='例如 SUM({purchase_items.amount}) >= 20000'
-                    data-testid="approval-condition-formula-expression"
-                  />
-                  <div class="template-authoring__condition-formula-tools">
-                    <el-button
-                      v-for="option in conditionFormulaInsertOptions"
-                      :key="option.token"
-                      size="small"
-                      :disabled="readOnly"
-                      :title="option.label"
-                      :data-testid="`approval-condition-formula-insert-${option.token}`"
-                      @click="insertConditionFormulaToken(branch, option.token)"
-                    >{{ option.token }}</el-button>
-                    <el-button
-                      size="small"
-                      :disabled="readOnly"
-                      data-testid="approval-condition-formula-insert-sum"
-                      @click="insertConditionFormulaFunction(branch, 'SUM')"
-                    >SUM()</el-button>
-                    <el-button
-                      size="small"
-                      :disabled="readOnly"
-                      data-testid="approval-condition-formula-insert-count"
-                      @click="insertConditionFormulaFunction(branch, 'COUNT')"
-                    >COUNT()</el-button>
-                    <el-button
-                      size="small"
-                      :disabled="readOnly"
-                      data-testid="approval-condition-formula-insert-min"
-                      @click="insertConditionFormulaFunction(branch, 'MIN')"
-                    >MIN()</el-button>
-                    <el-button
-                      size="small"
-                      :disabled="readOnly"
-                      data-testid="approval-condition-formula-insert-max"
-                      @click="insertConditionFormulaFunction(branch, 'MAX')"
-                    >MAX()</el-button>
-                    <template v-if="directory.formulaRoles.value.length > 0">
-                      <span
-                        class="template-authoring__condition-formula-role-hint"
-                        data-testid="approval-condition-formula-role-hint"
-                      >requester.role（审批可用角色）：</span>
-                      <el-button
-                        v-for="role in directory.formulaRoles.value"
-                        :key="role.id"
-                        size="small"
-                        :disabled="readOnly"
-                        :title="`插入 requester.role in [&quot;${role.id}&quot;]`"
-                        :data-testid="`approval-condition-formula-insert-role-${role.id}`"
-                        @click="insertConditionFormulaRoleMembership(branch, role.id)"
-                      >{{ directory.formatRoleLabel(role) }}</el-button>
-                    </template>
-                  </div>
-                  <div class="template-authoring__condition-formula-dryrun">
-                    <el-input
-                      :model-value="conditionFormulaDryRunSample(node.key, branch.edgeKey)"
-                      type="textarea"
-                      :rows="2"
-                      :disabled="readOnly"
-                      placeholder='样例数据 JSON，例如 {"amount": 5000}'
-                      data-testid="approval-condition-formula-dry-run-sample"
-                      @update:model-value="(text: string) => setConditionFormulaDryRunSample(node.key, branch.edgeKey, text)"
-                    />
-                    <div class="template-authoring__condition-formula-dryrun-actions">
-                      <el-button
-                        size="small"
-                        :loading="conditionFormulaDryRunLoading(node.key, branch.edgeKey)"
-                        :disabled="readOnly || conditionFormulaDryRunLoading(node.key, branch.edgeKey)"
-                        data-testid="approval-condition-formula-dry-run-button"
-                        @click="dryRunConditionFormula(node.key, branch)"
-                      >测试公式</el-button>
-                      <span
-                        v-if="conditionFormulaDryRunResult(node.key, branch.edgeKey)"
-                        class="template-authoring__condition-formula-dryrun-result"
-                        data-testid="approval-condition-formula-dry-run-result"
-                      >
-                        {{ conditionFormulaDryRunResult(node.key, branch.edgeKey) }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
-                <el-select
-                  v-model="conditionEditFor(node.key)!.defaultEdgeKey"
-                  size="small"
-                  clearable
-                  :disabled="readOnly"
-                  class="ms-w-220"
-                  placeholder="（无默认分支）"
-                  data-testid="approval-condition-default-edge"
-                >
-                  <el-option
-                    v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
-                    :key="edgeKey"
-                    :label="edgeKey"
-                    :value="edgeKey"
-                  />
-                </el-select>
-              </el-form-item>
-            </div>
-
-            <!-- G-3: editable parallel node — `joinMode` ONLY (会签 all / 或签 any, both
-                 backend-accepted). `branches` (fork edges) + `joinNodeKey` are TOPOLOGY: shown
-                 read-only, preserved byte-for-byte on save. -->
-            <div
-              v-else-if="node.type === 'parallel' && parallelEditFor(node.key)"
-              class="template-authoring__parallel"
-              data-testid="approval-parallel-editor"
-              :data-parallel-node="node.key"
-            >
-              <el-form-item label="汇聚模式" class="template-authoring__parallel-join-mode">
-                <el-select
-                  v-model="parallelEditFor(node.key)!.joinMode"
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-240"
-                  data-testid="approval-parallel-join-mode"
-                >
-                  <el-option
-                    v-for="mode in PARALLEL_JOIN_MODES"
-                    :key="mode"
-                    :label="parallelJoinModeLabel(mode)"
-                    :value="mode"
-                  />
-                </el-select>
-              </el-form-item>
-              <!-- branches + join target are preserved topology (not editable here). -->
-              <ul class="template-authoring__node-summary" data-testid="approval-parallel-topology">
-                <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.join('、') || '（无）' }}</li>
-                <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey || '（无）' }}</li>
-              </ul>
-            </div>
-
-            <!-- G-4: editable cc node — targetType (用户/角色) + targetIds. The cc node's edges /
-                 position are TOPOLOGY: preserved byte-for-byte on save. -->
-            <div
-              v-else-if="node.type === 'cc' && ccEditFor(node.key)"
-              class="template-authoring__cc"
-              data-testid="approval-cc-editor"
-              :data-cc-node="node.key"
-            >
-              <el-form-item label="抄送类型">
-                <el-select
-                  v-model="ccEditFor(node.key)!.targetType"
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-240"
-                  data-testid="approval-cc-target-type"
-                >
-                  <el-option
-                    v-for="targetType in CC_TARGET_TYPES"
-                    :key="targetType"
-                    :label="ccTargetTypeLabel(targetType)"
-                    :value="targetType"
-                  />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="抄送对象">
-                <el-select
-                  v-model="ccEditFor(node.key)!.targetIds"
-                  multiple
-                  filterable
-                  allow-create
-                  default-first-option
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-360"
-                  placeholder="输入用户/角色 ID 后回车"
-                  data-testid="approval-cc-target-ids"
-                />
-              </el-form-item>
-            </div>
-
-            <!-- G-5: editable approval node — approver SOURCE only (assigneeSources[0]). The node's
-                 approvalMode / emptyAssigneePolicy / autoApprovalPolicy + edges are preserved. Legacy
-                 nodes (no assigneeSources) aren't seeded → fall to the read-only summary below. -->
-            <div
-              v-else-if="node.type === 'approval' && approvalNodeEditFor(node.key)"
-              class="template-authoring__approval-node"
-              data-testid="approval-node-editor"
-              :data-approval-node="node.key"
-            >
-              <el-form-item label="审批人来源">
-                <el-select
-                  :model-value="approvalSourceKind(node.key)"
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-240"
-                  data-testid="approval-node-source-kind"
-                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => { setApprovalSourceKind(node.key, kind); syncApprovalNodeOptions(node.key) }"
-                >
-                  <el-option
-                    v-for="opt in APPROVAL_NODE_SOURCE_KINDS"
-                    :key="opt.value"
-                    :label="opt.label"
-                    :value="opt.value"
-                  />
-                </el-select>
-              </el-form-item>
-              <!-- G-B2-18: same directory typeahead as the linear-step picker (line ~973) — the
-                   composable is shared (one users/roles fetch backs both surfaces), only the
-                   template wiring is duplicated per editor. The manual-ID input stays as the
-                   advanced fallback (directory search doesn't guarantee full id coverage). -->
-              <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
-                <el-form-item v-if="approvalSourceKind(node.key) === 'static_user'" label="选择用户">
-                  <el-select
-                    :model-value="approvalSourceIds(node.key)"
-                    multiple
-                    filterable
-                    remote
-                    :remote-method="onUserSearch"
-                    :loading="directory.usersLoading.value"
-                    size="small"
-                    :disabled="readOnly"
-                    class="ms-w-360"
-                    placeholder="搜索用户名 / 邮箱 / ID"
-                    data-testid="approval-node-source-user-picker"
-                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
-                    @visible-change="(visible: boolean) => visible && onUserSearch('')"
-                  >
-                    <el-option
-                      v-for="user in directory.users.value"
-                      :key="user.id"
-                      :label="directory.formatUserLabel(user)"
-                      :value="user.id"
-                    />
-                  </el-select>
-                </el-form-item>
-                <el-form-item v-else label="选择角色">
-                  <el-select
-                    :model-value="approvalSourceIds(node.key)"
-                    multiple
-                    filterable
-                    size="small"
-                    :disabled="readOnly"
-                    class="ms-w-360"
-                    placeholder="选择角色"
-                    data-testid="approval-node-source-role-picker"
-                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
-                  >
-                    <el-option
-                      v-for="role in directory.roles.value"
-                      :key="role.id"
-                      :label="directory.formatRoleLabel(role)"
-                      :value="role.id"
-                    />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="手动输入 ID（高级）">
-                  <el-input
-                    :model-value="approvalSourceIdsText(node.key)"
-                    :disabled="readOnly"
-                    placeholder="逗号或换行分隔"
-                    data-testid="approval-node-source-ids-text"
-                    @update:model-value="(text: string) => setApprovalSourceIdsText(node.key, text)"
-                  />
-                </el-form-item>
-              </template>
-              <el-form-item
-                v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
-                label="表单用户字段 ID"
-              >
-                <el-input
-                  :model-value="approvalSourceFieldId(node.key)"
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-240"
-                  placeholder="顶层 user 字段 ID"
-                  data-testid="approval-node-source-field"
-                  @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, fieldId)"
-                />
-              </el-form-item>
-              <el-form-item
-                v-else-if="approvalSourceKind(node.key) === 'manager_at_level' || approvalSourceKind(node.key) === 'continuous_managers'"
-                :label="approvalSourceKind(node.key) === 'manager_at_level' ? '指定上级层级' : '上级层级数'"
-              >
-                <el-input-number
-                  :model-value="approvalSourceLevel(node.key)"
-                  :min="1"
-                  :max="10"
-                  :step="1"
-                  size="small"
-                  :disabled="readOnly"
-                  data-testid="approval-node-source-level"
-                  @update:model-value="(value: number) => setApprovalSourceLevel(node.key, value ?? 1)"
-                />
-              </el-form-item>
-              <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
-                   so the admin replaces it before publish (rather than hitting the publish-time 400). -->
-              <el-alert
-                v-if="approvalSourceIsPlaceholder(node.key)"
-                type="warning"
-                :closable="false"
-                show-icon
-                class="template-authoring__placeholder-hint"
-                data-testid="approval-node-placeholder-hint"
-                title="此为占位审批角色，发布前请替换为真实角色 ID"
-                description="占位角色无人可认领，未替换将无法发布该模板。"
-              />
-              <div class="template-authoring__grid template-authoring__approval-node-policy">
-                <el-form-item label="审批模式">
-                  <el-select
-                    :model-value="approvalNodeMode(node.key)"
-                    :disabled="readOnly"
-                    class="ms-w-100pct"
-                    data-testid="approval-node-mode"
-                    @update:model-value="(mode: ApprovalMode) => setApprovalNodeMode(node.key, mode)"
-                  >
-                    <el-option label="单人通过" value="single" />
-                    <el-option label="全部通过" value="all" />
-                    <el-option label="任一通过" value="any" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="空审批人策略">
-                  <el-select
-                    :model-value="approvalNodeEmptyPolicy(node.key)"
-                    :disabled="readOnly"
-                    class="ms-w-100pct"
-                    data-testid="approval-node-empty-policy"
-                    @update:model-value="(policy: EmptyAssigneePolicy) => setApprovalNodeEmptyPolicy(node.key, policy)"
-                  >
-                    <el-option label="报错" value="error" />
-                    <el-option label="自动通过" value="auto-approve" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="自审策略">
-                  <el-checkbox
-                    :model-value="approvalNodeMergeWithRequester(node.key)"
-                    :disabled="readOnly"
-                    data-testid="approval-node-merge-with-requester"
-                    @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
-                  >发起人自动通过（自审合并）</el-checkbox>
-                </el-form-item>
-              </div>
-              <div class="template-authoring__field-perms" data-testid="approval-node-field-permissions">
-                <div class="template-authoring__field-perms-head"><strong>字段权限</strong></div>
-                <div
-                  v-for="field in fieldPermissionFields"
-                  :key="field.id"
-                  class="template-authoring__field-perm-row"
-                  data-testid="approval-node-field-permission-row"
-                >
-                  <span class="template-authoring__field-perm-label">{{ field.label || field.id }}（{{ field.id }}）</span>
-                  <el-select
-                    :model-value="approvalNodeFieldAccess(node.key, field.id)"
-                    :disabled="readOnly"
-                    size="small"
-                    class="ms-w-130"
-                    :data-testid="`approval-node-field-access-${field.id}`"
-                    @update:model-value="(access: NodeFieldAccess) => setApprovalNodeFieldAccess(node.key, field.id, access)"
-                  >
-                    <el-option label="可编辑" value="editable" />
-                    <el-option label="只读" value="readonly" />
-                    <el-option label="隐藏" value="hidden" />
-                  </el-select>
-                </div>
-              </div>
-            </div>
-
-            <!-- approval (legacy / no edit) / other — read-only summary. -->
-            <template v-else>
-              <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
-                <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
-              </ul>
-              <div v-else class="template-authoring__hint">（无可编辑配置）</div>
-            </template>
+            <ApprovalGraphNodeConfigEditor :node="node" />
           </div>
         </div>
 
@@ -1617,7 +1178,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
@@ -1640,6 +1201,11 @@ import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
+import {
+  APPROVAL_NODE_CONFIG_EDITOR_KEY,
+  type ApprovalNodeConfigEditorApi,
+} from '../../approvals/nodeConfigEditorContext'
 import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
@@ -2037,6 +1603,24 @@ function conditionOutgoingEdgeKeys(nodeKey: string): string[] {
     .map((edge) => edge.key)
 }
 
+function graphNodeLabel(nodeKey: string): string {
+  const node = canvasEffectiveGraph.value.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node) return '流程节点'
+  return node.name?.trim() || nodeTypeLabel(node.type)
+}
+
+function graphEdgeTargetLabel(nodeKey: string, edgeKey: string): string {
+  const edge = canvasEffectiveGraph.value.edges.find(
+    (candidate) => candidate.source === nodeKey && candidate.key === edgeKey,
+  )
+  return edge ? graphNodeLabel(edge.target) : '流程分支'
+}
+
+function conditionEdgeLabel(nodeKey: string, edgeKey: string): string {
+  const branch = conditionEditFor(nodeKey)?.branches.find((candidate) => candidate.edgeKey === edgeKey)
+  return branch ? liveBranchSummary(branch) : graphEdgeTargetLabel(nodeKey, edgeKey)
+}
+
 // ── G-3 parallel editor (joinMode ONLY; branches / joinNodeKey are preserved topology, read-only) ──
 // The editable model lives on `draft.parallelEdits[nodeKey]`, seeded 1:1 from the preserved parallel
 // nodes. The select below mutates ONLY `joinMode`; `buildApprovalGraph` re-applies it onto a COPY of
@@ -2070,19 +1654,7 @@ function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
 // Edits the FIRST assignee source of an approval node in a preserved complex graph; the edit model
 // (`draft.approvalNodeEdits[nodeKey].assigneeSources`) is seeded 1:1 + carried through
 // `applyApprovalNodeEditsToGraph` (every other node + all edges byte-identical). Any extra sources
-// (index 1+) are preserved verbatim. approvalMode / emptyAssigneePolicy / autoApprovalPolicy are
-// NOT editable here (a later slice) — they ride through untouched. Legacy nodes (no `assigneeSources`)
-// aren't seeded, so they fall to the read-only summary below.
-const APPROVAL_NODE_SOURCE_KINDS: { value: ApprovalAssigneeSourceKind; label: string }[] = [
-  { value: 'static_user', label: '指定用户' },
-  { value: 'static_role', label: '指定角色' },
-  { value: 'requester', label: '发起人' },
-  { value: 'direct_manager', label: '直属上级' },
-  { value: 'dept_head', label: '部门主管' },
-  { value: 'continuous_managers', label: '连续多级上级' },
-  { value: 'manager_at_level', label: '指定层级上级' },
-  { value: 'form_field_user', label: '表单用户字段' },
-]
+// (index 1+) are preserved verbatim. Shared with the canvas inspector via provide/inject.
 function approvalNodeEditFor(nodeKey: string): ApprovalNodeSourceEdit | undefined {
   return draft.value.approvalNodeEdits?.[nodeKey]
 }
@@ -2190,6 +1762,8 @@ function onInsertParallelAfter(nodeKey: string): void {
 }
 function onRemoveNode(nodeKey: string): void {
   runTopologyOp((graph) => removeLinearNode(graph, nodeKey))
+  // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
+  if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
 }
 function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
   return (draft.value.preservedGraph?.edges ?? []).filter((edge) => edge[dir] === nodeKey).length
@@ -2215,9 +1789,10 @@ function canRemoveNode(node: ApprovalNode): boolean {
 // ── D-1/D-5/D-6 visual canvas (bespoke SVG/HTML — the render is DATA, so it's unit-testable; only the
 // raw mouse-drag GESTURE is manual/E2E QA). Auto-layout via computeLayout, overridable by a position
 // SIDECAR (`nodePositions`) that NEVER reaches the saved graph. Reuses the same topology handlers as
-// the list; config editing stays in the list view (toggle = D-6 parity). ──
+// the list. Canvas V2 Slice A: selecting a node opens the right-side inspector (same draft handlers). ──
 const canvasViewMode = ref<'list' | 'canvas'>('list')
 const selectedCanvasNode = ref<string | null>(null)
+const canvasInspectorRef = ref<HTMLElement | null>(null)
 const nodePositions = ref<Record<string, { x: number; y: number }>>({})
 const draggingCanvasNode = ref<string | null>(null)
 const CANVAS_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
@@ -2237,6 +1812,28 @@ const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? gr
 function canvasNodeByKey(key: string): ApprovalNode | undefined {
   return canvasEffectiveGraph.value.nodes.find((n) => n.key === key)
 }
+async function selectCanvasNode(nodeKey: string): Promise<void> {
+  selectedCanvasNode.value = nodeKey
+  await nextTick()
+  if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 960px)').matches) {
+    canvasInspectorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+function clearCanvasSelection(): void {
+  selectedCanvasNode.value = null
+}
+// Inspector node for the right-side panel. Selection is preserved across list/canvas toggles while
+// the key still exists; once the graph no longer carries that key, selection clears.
+const selectedCanvasInspectorNode = computed<ApprovalNode | null>(() => {
+  const key = selectedCanvasNode.value
+  if (!key) return null
+  return canvasNodeByKey(key) ?? null
+})
+watch(canvasEffectiveGraph, (graph) => {
+  const key = selectedCanvasNode.value
+  if (!key) return
+  if (!graph.nodes.some((node) => node.key === key)) clearCanvasSelection()
+})
 
 // B2-03 publish pre-flight checklist — aggregates the SAME already-exported validators used
 // elsewhere in this view (validateTemplateFormFields / validateTemplateApprovalFlow + canvasValidity
@@ -2432,6 +2029,75 @@ function syncApprovalNodeOptions(nodeKey: string): void {
 function syncAllApprovalNodeOptions(): void {
   for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
 }
+
+// Canvas V2 Slice A: list + canvas inspector inject the SAME handlers (one draft source of truth).
+const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
+  readOnly,
+  conditionEditFor,
+  parallelEditFor,
+  ccEditFor,
+  approvalNodeEditFor,
+  conditionFieldOptions,
+  conditionFormulaInsertOptions,
+  fieldPermissionFields,
+  conditionOperatorLabel,
+  liveBranchSummary,
+  conditionRuleValueText,
+  setConditionRuleValue,
+  addConditionRule,
+  removeConditionRule,
+  setConditionBranchPredicateMode,
+  insertConditionFormulaToken,
+  insertConditionFormulaFunction,
+  insertConditionFormulaRoleMembership,
+  conditionFormulaDryRunSample,
+  setConditionFormulaDryRunSample,
+  conditionFormulaDryRunResult,
+  conditionFormulaDryRunLoading,
+  dryRunConditionFormula,
+  conditionOutgoingEdgeKeys,
+  conditionEdgeLabel,
+  graphEdgeTargetLabel,
+  graphNodeLabel,
+  parallelJoinModeLabel,
+  ccTargetTypeLabel,
+  approvalSourceKind,
+  setApprovalSourceKind,
+  syncApprovalNodeOptions,
+  approvalSourceIds,
+  setApprovalSourceIdsFromPicker,
+  approvalSourceIdsText,
+  setApprovalSourceIdsText,
+  approvalSourceFieldId,
+  setApprovalSourceFieldId,
+  approvalSourceLevel,
+  setApprovalSourceLevel,
+  approvalSourceIsPlaceholder,
+  approvalNodeMode,
+  setApprovalNodeMode,
+  approvalNodeEmptyPolicy,
+  setApprovalNodeEmptyPolicy,
+  approvalNodeMergeWithRequester,
+  setApprovalNodeMergeWithRequester,
+  approvalNodeFieldAccess,
+  setApprovalNodeFieldAccess,
+  nodeConfigSummary,
+  onUserSearch,
+  directoryUsers: directory.users,
+  directoryUsersLoading: directory.usersLoading,
+  directoryRoles: directory.roles,
+  formulaRoles: directory.formulaRoles,
+  formatUserLabel: (user) => directory.formatUserLabel({
+    id: user.id,
+    name: user.name ?? user.id,
+    email: user.email ?? '',
+  }),
+  formatRoleLabel: (role) => directory.formatRoleLabel({
+    id: role.id,
+    name: role.name ?? role.id,
+  }),
+}
+provide(APPROVAL_NODE_CONFIG_EDITOR_KEY, nodeConfigEditorApi)
 
 function clearErrors() {
   loadError.value = null
@@ -3149,82 +2815,14 @@ onUnmounted(() => {
   color: var(--el-text-color-secondary);
 }
 
+/* node-summary is also used by the try-run panel (parent markup). Graph node config editors
+   live in ApprovalGraphNodeConfigEditor.vue and carry their own copy of these rules. */
 .template-authoring__node-summary {
   margin: 0;
   padding-left: 20px;
   font-size: 13px;
   line-height: 1.7;
   color: var(--el-text-color-regular);
-}
-
-/* G-2 condition editor */
-.template-authoring__condition {
-  margin-top: 8px;
-}
-
-.template-authoring__condition-branch {
-  border: 1px dashed var(--el-border-color);
-  border-radius: 6px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
-}
-
-.template-authoring__condition-branch-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
-
-.template-authoring__condition-rule {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.template-authoring__condition-formula {
-  display: grid;
-  gap: 8px;
-}
-
-.template-authoring__condition-formula-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.template-authoring__condition-formula-role-hint {
-  margin-left: 4px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.template-authoring__condition-formula-dryrun {
-  display: grid;
-  gap: 6px;
-}
-
-.template-authoring__condition-formula-dryrun-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.template-authoring__condition-formula-dryrun-result {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--el-text-color-regular);
-}
-
-.template-authoring__condition-default {
-  margin: 4px 0 0;
 }
 
 .template-authoring__error-list {
@@ -3356,6 +2954,17 @@ pre {
   gap: 8px;
   margin-bottom: 12px;
 }
+.template-authoring__canvas-workspace {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+}
+.template-authoring__canvas-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .template-authoring__canvas-viewport {
   max-width: 100%;
   overflow: auto;
@@ -3391,11 +3000,70 @@ pre {
   border-color: var(--el-color-primary);
   box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
 }
+.template-authoring__canvas-node-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+}
+.template-authoring__canvas-node-selector:focus-visible {
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
 .template-authoring__canvas-node-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
+}
+.template-authoring__canvas-inspector {
+  /* ~400px so ms-w-360 controls fit with body padding; stacks to 100% under 960px. */
+  flex: 0 0 400px;
+  width: 400px;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+  display: flex;
+  flex-direction: column;
+  max-height: min(70vh, 720px);
+  overflow: hidden;
+  scroll-margin-top: 164px;
+}
+.template-authoring__canvas-inspector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+.template-authoring__canvas-inspector-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 13px;
+}
+.template-authoring__canvas-inspector-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 14px;
+}
+@media (max-width: 960px) {
+  .template-authoring__canvas-workspace {
+    flex-direction: column;
+  }
+  .template-authoring__canvas-inspector {
+    flex: 1 1 auto;
+    width: 100%;
+    max-height: none;
+  }
 }
 
 /* RP-3 (route-preview lock, B3-06) 试运行面板 — chip styling mirrors ApprovalNewView's RP-2 live
