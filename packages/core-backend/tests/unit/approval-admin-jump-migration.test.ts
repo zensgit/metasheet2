@@ -54,6 +54,7 @@ describe('approval admin jump migration and bootstrap sync', () => {
     expect(source).toContain('ADD COLUMN IF NOT EXISTS publish_note TEXT')
     expect(source).toContain('ADD COLUMN IF NOT EXISTS node_activation_seq INTEGER NOT NULL DEFAULT 0')
     expect(source).toContain('ADD COLUMN IF NOT EXISTS entry_epoch INTEGER')
+    expect(source).toContain('CREATE INDEX IF NOT EXISTS idx_approval_template_versions_restored_from')
   })
 
   it('does not mutate immutable historical approval action migrations', async () => {

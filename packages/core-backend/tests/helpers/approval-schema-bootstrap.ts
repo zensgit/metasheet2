@@ -266,6 +266,11 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
         REFERENCES approval_template_versions(id) ON DELETE SET NULL
     `)
     await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_approval_template_versions_restored_from
+      ON approval_template_versions(restored_from_version_id)
+      WHERE restored_from_version_id IS NOT NULL
+    `)
+    await client.query(`
       ALTER TABLE approval_template_versions
       ADD COLUMN IF NOT EXISTS publish_note TEXT
     `)
