@@ -80,9 +80,10 @@ Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独�
 
 ## 4. CI 状态
 
-#4540 首轮远端 checks 中除 `test (20.x)` 外均成功；该 job 的唯一失败为既有
-`multitable-oapi-scope-guard-realdb` 异步审计正控未在 flush 后读到行。本地 exact-head 单独复跑 15/15，通过后仅重跑该
-失败 job。记录本文时重跑仍在结算，因此不写成“CI 全绿”。#4524/#4531/#4539 的新 heads 也必须分别结算自己的 checks。
+#4540 首轮远端 checks 中，`test (20.x)` 的唯一失败为既有 `multitable-oapi-scope-guard-realdb` 异步审计正控未在
+flush 后读到行；本地 exact-head 单独复跑 15/15 后只重跑失败 job。重跑越过原失败的 multitable 真库步骤并最终通过，
+#4540 全部 required checks 为绿。#4524/#4531/#4539 新 heads 的实际 path-trigger checks 也已成功；串行 retarget 到 main
+后仍必须让完整 required set 在新基线上重新结算。
 
 ## 5. 尚未完成
 
