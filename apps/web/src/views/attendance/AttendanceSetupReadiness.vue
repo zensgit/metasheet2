@@ -27,6 +27,14 @@
   - §3⑦/R4: step⑦ is preview-only; the manual activation checklist ALWAYS lists ④
     and ⑥'s three signals, offers no confirm/activate action, and never implies
     anything is already enabled (no 「已启用」/"enabled" completion claims).
+  - W4-2 (§5/§9 W4-2): the quick-start template gallery renders the four FE-constant
+    templates (attendanceSetupTemplates.ts) and only EMITS `open-template` — the parent
+    (the form host) owns confirm/snapshot/apply/undo. Cards promise prefill only, never
+    saving or activation; no timezone value is rendered from the constants (none exists
+    there — §5.2④). Step⑦ additionally renders the full read-only impact derivation
+    (①② count-derived population + per-signal recap) and, while a template prefill is
+    applied-but-unsaved (parent-signaled), a checklist item pointing at the canonical
+    forms where saving happens.
 -->
 <template>
   <div
@@ -199,6 +207,38 @@
             </button>
           </div>
 
+          <!-- W4-2 ⑦ full read-only impact derivation (§3⑦ 影响人数=①②计数派生; §5.3 无副作用):
+               counts only, derived client-side from the same aggregate — no extra request. -->
+          <div
+            v-if="step.stepId === 'preview' && summary"
+            class="setup-readiness__derivation"
+            data-setup-preview-derivation
+          >
+            <strong>{{ tr('Read-only impact derivation (writes nothing)', '只读影响范围推演（不写入）') }}</strong>
+            <ul>
+              <li data-setup-preview-derivation-population>
+                {{ tr('Affected people (derived from step 1/2 counts)', '影响人数（①②计数派生）') }}:
+                {{ tr('active org members', '本组织有效成员') }} {{ summary.orgActiveMemberCount }}
+                · {{ tr('groups with members', '有成员的考勤组') }} {{ summary.groupsWithMembers }}/{{ summary.groupCount }}
+              </li>
+              <li data-setup-preview-derivation-gating>
+                {{ tr('Required steps (1/2/3/5)', '必备步骤（①②③⑤）') }}:
+                {{ gatingRecapLabel }}
+              </li>
+              <li data-setup-preview-derivation-resources>
+                {{ tr('Shifts', '班次') }} {{ summary.shiftCount }}
+                · {{ tr('scheduled-shift groups', '排班制组') }} {{ summary.scheduledShiftGroupCount }}
+                · {{ tr('active rotation rules', '启用轮班规则') }} {{ summary.activeRotationRuleCount }}
+                · {{ tr('active approval flows', '启用审批流') }} {{ summary.approvalFlowCount }}
+              </li>
+              <li data-setup-preview-derivation-advisory>
+                {{ tr('Advisory (never gates preview-ready)', '提示项（不参与 preview-ready 判定）') }}:
+                {{ tr('punch policy', '打卡策略') }} {{ punchPolicyChecklistLabel(summary.punchPolicyPosture) }}
+                · {{ tr('delivery runtime', '投递运行期') }} {{ deliveryRuntimeLabel(summary.notify.deliveryRuntime) }}
+              </li>
+            </ul>
+          </div>
+
           <!-- ⑦ manual canonical activation checklist (§3⑦: ④⑥ always listed; never implies enabled) -->
           <div
             v-if="step.stepId === 'preview' && summary"
@@ -241,6 +281,32 @@
               <li data-setup-checklist-item="recipient-scope">
                 <span>{{ tr('Recipient scope (per-org / per-recipient)', '接收范围（按组织/按收件人）') }}: {{ tr('not supported in this version — no action available', '当前版本不支持，无可用操作') }}</span>
               </li>
+              <!-- W4-2 template-linked item (§9 W4-2 "checklist 模板关联"): only while the parent
+                   reports an applied-but-unsaved template prefill. Saving stays on the canonical
+                   forms — this wizard performs no save (§5.3). -->
+              <li v-if="pendingTemplate" data-setup-checklist-item="template-prefill">
+                <span>
+                  {{ tr('Template prefill', '模板预填') }}（{{ trLabel(pendingTemplate.name) }}）:
+                  {{ tr('written to the forms but not saved yet — save on each form itself; the wizard never saves for you', '已写入表单但尚未保存——请在各表单自行保存；向导不代存') }}
+                </span>
+                <button
+                  class="setup-readiness__action setup-readiness__action--inline"
+                  type="button"
+                  data-setup-checklist-remedy="template-group-form"
+                  @click="emit('select-section', 'attendance-admin-groups')"
+                >
+                  {{ tr('Go to the group form', '前往考勤组表单') }}
+                </button>
+                <button
+                  v-if="pendingTemplate.shiftPresets.length > 0"
+                  class="setup-readiness__action setup-readiness__action--inline"
+                  type="button"
+                  data-setup-checklist-remedy="template-shift-form"
+                  @click="emit('select-section', 'attendance-admin-shifts')"
+                >
+                  {{ tr('Go to the shift form', '前往班次表单') }}
+                </button>
+              </li>
             </ul>
           </div>
 
@@ -261,6 +327,61 @@
         </div>
       </li>
     </ol>
+
+    <!-- W4-2 quick-start template gallery (§5.1 four FE-constant templates; §9 W4-2). Rendered only
+         with a loaded ok aggregate (forbidden/db_not_ready/error states stay clean). Cards emit
+         `open-template` — the parent owns the §5.2 confirm/snapshot/apply/undo orchestration. -->
+    <section
+      v-if="summary"
+      class="setup-readiness__templates"
+      data-setup-templates
+      aria-labelledby="attendance-setup-templates-title"
+    >
+      <div class="setup-readiness__templates-head">
+        <strong id="attendance-setup-templates-title">{{ tr('Quick-start templates', '快速开始模板') }}</strong>
+        <p>
+          {{ tr(
+            'A template only prefills the group and shift forms — it saves nothing and changes no configuration or switches. Saving stays on each form\'s own save button. Templates carry no built-in timezone: the organization\'s current value is used when resolvable, otherwise you choose one in the confirm step.',
+            '模板只预填考勤组与班次表单——不保存、不修改任何配置或开关；保存动作仍在各表单自己的保存按钮完成。模板不内置时区：能取到组织现值时使用组织现值，否则在确认步骤中由你选择。',
+          ) }}
+        </p>
+      </div>
+      <ul class="setup-readiness__template-cards">
+        <li
+          v-for="template in setupTemplates"
+          :key="template.id"
+          class="setup-readiness__template-card"
+          :data-setup-template-card="template.id"
+        >
+          <div class="setup-readiness__template-head">
+            <strong>{{ trLabel(template.name) }}</strong>
+            <span class="setup-readiness__template-type" :data-setup-template-type="template.attendanceType">
+              {{ templateTypeLabel(template.attendanceType) }}
+            </span>
+          </div>
+          <p class="setup-readiness__template-desc">{{ trLabel(template.description) }}</p>
+          <ul v-if="template.shiftPresets.length > 0" class="setup-readiness__template-presets">
+            <li v-for="preset in template.shiftPresets" :key="preset.key" :data-setup-template-preset="preset.key">
+              {{ trLabel(preset.label) }}<template v-if="preset.overnight"> · {{ tr('overnight', '跨夜') }}</template>
+            </li>
+          </ul>
+          <p v-if="template.rotationRuleHint" class="setup-readiness__template-hint" data-setup-template-card-rotation-hint>
+            {{ trLabel(template.rotationRuleHint) }}
+          </p>
+          <p v-if="template.settingsHint" class="setup-readiness__template-hint" data-setup-template-card-settings-hint>
+            {{ trLabel(template.settingsHint) }}
+          </p>
+          <button
+            class="setup-readiness__action"
+            type="button"
+            :data-setup-template-open="template.id"
+            @click="emit('open-template', template.id)"
+          >
+            {{ tr('Prefill with this template', '使用此模板预填') }}
+          </button>
+        </li>
+      </ul>
+    </section>
   </div>
 </template>
 
@@ -283,23 +404,73 @@ import {
   resolveAttendanceSetupAdminUsersHref,
   type AttendanceSetupReadinessLoadState,
 } from './useAttendanceSetupReadiness'
+import {
+  ATTENDANCE_SETUP_TEMPLATES,
+  getAttendanceSetupTemplate,
+  type AttendanceSetupTemplateGroupType,
+  type AttendanceSetupTemplateId,
+  type AttendanceSetupTemplateLabel,
+} from './attendanceSetupTemplates'
 
 type TranslateFn = (en: string, zh: string) => string
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   tr: TranslateFn
   steps: AttendanceSetupReadinessStepResult[]
   summary: AttendanceSetupReadinessResponse | null
   loadState: AttendanceSetupReadinessLoadState
   viewerIsPlatformAdmin: boolean
-}>()
+  /** W4-2: parent-signaled applied-but-unsaved template prefill (null = none) — drives the ⑦
+   *  checklist template item. The shell holds no prefill state itself (OD-W4-7). */
+  pendingTemplateId?: AttendanceSetupTemplateId | null
+}>(), {
+  pendingTemplateId: null,
+})
 
 const emit = defineEmits<{
   'select-section': [id: string]
+  'open-template': [id: AttendanceSetupTemplateId]
   reload: []
 }>()
 
 const tr = props.tr
+const trLabel = (label: AttendanceSetupTemplateLabel): string => tr(label.en, label.zh)
+
+const setupTemplates = ATTENDANCE_SETUP_TEMPLATES
+
+const pendingTemplate = computed(() =>
+  props.pendingTemplateId ? getAttendanceSetupTemplate(props.pendingTemplateId) : null,
+)
+
+function templateTypeLabel(type: AttendanceSetupTemplateGroupType): string {
+  switch (type) {
+    case 'fixed_shift':
+      return tr('Fixed shift', '固定班')
+    case 'scheduled_shift':
+      return tr('Scheduled shift', '排班制')
+    case 'free_time':
+      return tr('Free time', '自由工时')
+  }
+}
+
+/** ⑦ derivation — gating recap (①②③⑤ only, §3.2): done count + the not-yet-ready step numbers. */
+const gatingRecapLabel = computed(() => {
+  const gatingIds: Array<[AttendanceSetupStepId, string]> = [
+    ['attendance-admin-user-access', '①'],
+    ['attendance-admin-groups', '②'],
+    ['attendance-admin-shifts', '③'],
+    ['attendance-admin-approval-flows', '⑤'],
+  ]
+  const rows = gatingIds
+    .map(([stepId, marker]) => ({ marker, step: props.steps.find((step) => step.stepId === stepId) }))
+    .filter((row): row is { marker: string; step: AttendanceSetupReadinessStepResult } => Boolean(row.step))
+  if (rows.length === 0) return tr('unknown', '未知')
+  const notReady = rows.filter((row) => row.step.status !== 'ready').map((row) => row.marker)
+  const done = rows.length - notReady.length
+  return notReady.length === 0
+    ? `${done}/${rows.length} ${tr('complete', '已完成')}`
+    : `${done}/${rows.length} ${tr('complete', '已完成')} · ${tr('incomplete', '未完成')}: ${notReady.join(' ')}`
+})
 
 const rootRef = ref<HTMLElement | null>(null)
 
@@ -933,6 +1104,121 @@ const gatingSummaryLabel = computed(() => {
   overflow-wrap: anywhere;
 }
 
+.setup-readiness__derivation {
+  display: grid;
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-page);
+  font-size: 12px;
+  color: var(--ms-text-1);
+}
+
+.setup-readiness__derivation ul {
+  display: grid;
+  gap: var(--ms-space-1);
+  margin: 0;
+  padding-left: var(--ms-space-4);
+  color: var(--ms-text-2);
+  line-height: 1.5;
+}
+
+.setup-readiness__derivation li {
+  overflow-wrap: anywhere;
+}
+
+.setup-readiness__templates {
+  display: grid;
+  gap: var(--ms-space-3);
+}
+
+.setup-readiness__templates-head strong {
+  color: var(--ms-text-1);
+  font-size: 13px;
+}
+
+.setup-readiness__templates-head p {
+  margin: var(--ms-space-1) 0 0;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+  max-width: 720px;
+  overflow-wrap: anywhere;
+}
+
+.setup-readiness__template-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--ms-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-readiness__template-card {
+  display: grid;
+  gap: var(--ms-space-2);
+  align-content: start;
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+}
+
+.setup-readiness__template-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  flex-wrap: wrap;
+}
+
+.setup-readiness__template-head strong {
+  color: var(--ms-text-1);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.setup-readiness__template-type {
+  padding: 2px 8px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 999px;
+  color: var(--ms-text-2);
+  background: var(--ms-bg-page);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.setup-readiness__template-desc {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.setup-readiness__template-presets {
+  display: grid;
+  gap: var(--ms-space-1);
+  margin: 0;
+  padding-left: var(--ms-space-4);
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.setup-readiness__template-presets li {
+  overflow-wrap: anywhere;
+}
+
+.setup-readiness__template-hint {
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 640px) {
   .setup-readiness__step {
     flex-direction: column;
@@ -941,6 +1227,10 @@ const gatingSummaryLabel = computed(() => {
 
   .setup-readiness__header {
     flex-direction: column;
+  }
+
+  .setup-readiness__template-cards {
+    grid-template-columns: 1fr;
   }
 }
 </style>
