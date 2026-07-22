@@ -38,9 +38,10 @@
  * `attendance_rotation_rules(org_id, name, is_active?)`; `attendance_approval_flows(id, org_id,
  * name, request_type, steps, is_active)`; `directory_integrations(org_id, provider, name, status,
  * corp_id)`; `directory_accounts(integration_id, provider, external_user_id, external_key, name,
- * is_active)`; `directory_account_links(directory_account_id, link_status, match_strategy)`
- * (local_user_id left NULL — the readiness queries never filter on it, see §4.5(ii));
- * `system_configs(key, value)` for the ONE deployment-wide `attendance.settings` row.
+ * is_active)`; `directory_account_links(directory_account_id, link_status, match_strategy,
+ * local_user_id)` (local_user_id set to a real seeded `users.id` — the readiness query REQUIRES
+ * `local_user_id IS NOT NULL`, mirroring `resolveRecipient`'s own `WHERE l.local_user_id = $1`, see
+ * §4.5(ii)); `system_configs(key, value)` for the ONE deployment-wide `attendance.settings` row.
  */
 import express from 'express'
 import request from 'supertest'
@@ -104,6 +105,19 @@ function makeApp(user: Record<string, unknown> | null) {
   return app
 }
 
+// Fail-closed sentinel (trilens review: a sentinel placed INSIDE `describeIfDatabase` is
+// structurally unable to ever fire when DATABASE_URL is unset — that whole block is
+// `describe.skip`-ed, and a skipped test cannot itself go red). Kept at MODULE scope, a sibling of
+// `describeIfDatabase(...)` below, not nested inside it, so it runs unconditionally: if this whole
+// real-DB lane were ever invoked without DATABASE_URL set (e.g. a workflow-file misconfiguration),
+// THIS is the one assertion that still executes and goes red, rather than the entire G1-G5 file
+// silently reporting zero failures. `plugin-tests.yml`'s attendance step also shell-guards
+// `DATABASE_URL` before ever reaching vitest, and `vitest.config.ts` excludes this file from the
+// no-DB unit lane — this sentinel is defense-in-depth on top of those, not a substitute for them.
+it('sentinel: DATABASE_URL is set (real-DB lane must not silently skip)', () => {
+  expect(dbUrl).toBeTruthy()
+})
+
 describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', () => {
   const pool = new Pool({ connectionString: dbUrl })
   const pinned = usePinnedServer()
@@ -118,8 +132,18 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
       [userId, isActive],
     )
   }
-  async function seedMembership(orgId: string, userId: string, isActive = true): Promise<void> {
-    await seedUser(userId, true)
+  // `userIsActive` is a SEPARATE knob from `isActive` (which is `user_orgs.is_active`) — the ①
+  // count is a DOUBLE filter (`user_orgs.is_active=true` AND `users.is_active=true`, RD-3), and
+  // until this fix every caller passed `seedUser(userId, true)` unconditionally, leaving the
+  // `users.is_active=false` leg of that double filter with zero real-DB behavioural coverage
+  // (P2 — only a source-text regex asserted the SQL mentions `u.is_active = true` at all).
+  async function seedMembership(
+    orgId: string,
+    userId: string,
+    isActive = true,
+    userIsActive = true,
+  ): Promise<void> {
+    await seedUser(userId, userIsActive)
     await pool.query(
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, $3)
        ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
@@ -181,11 +205,21 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
     )
     return r.rows[0].id
   }
-  async function linkAccount(accountId: string, linkStatus: 'linked' | 'pending' = 'linked'): Promise<void> {
+  // `localUserId` is REQUIRED (not optional) — a NULL `local_user_id` link can never be resolved by
+  // `AttendanceNotificationDeliveryWorker.resolveRecipient` (`WHERE l.local_user_id = $1`), so
+  // `readAttendanceSetupReadinessOrgRecipientBinding` correctly excludes it too (P2 fix — the prior
+  // fixture left this NULL and the query never filtered on it, silently counting an unresolvable
+  // link as a "bound recipient"). Callers pass an id already seeded via `seedMembership`/`seedUser`
+  // so the `users.id` FK is satisfied.
+  async function linkAccount(
+    accountId: string,
+    linkStatus: 'linked' | 'pending' = 'linked',
+    localUserId: string,
+  ): Promise<void> {
     await pool.query(
-      `INSERT INTO directory_account_links (directory_account_id, link_status, match_strategy)
-       VALUES ($1, $2, 'manual')`,
-      [accountId, linkStatus],
+      `INSERT INTO directory_account_links (directory_account_id, link_status, match_strategy, local_user_id)
+       VALUES ($1, $2, 'manual', $3)`,
+      [accountId, linkStatus, localUserId],
     )
   }
 
@@ -244,10 +278,6 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
   beforeEach(() => {
     getSharedAttendanceSchedulerMock.mockReset()
     getSharedAttendanceSchedulerMock.mockReturnValue(null)
-  })
-
-  it('sentinel: DATABASE_URL is set (real-DB lane must not silently skip)', () => {
-    expect(dbUrl).toBeTruthy()
   })
 
   describe('§9 W4-0-G1: org-membership door (two-org forgery + platform-admin bypass)', () => {
@@ -392,21 +422,35 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
     const ADMIN_DT = `${PFX}_g3_admin_dt`
 
     beforeAll(async () => {
-      // Positive control 1: PURE LOCAL org — active member, ZERO directory_account_links rows.
+      // Positive control 1: PURE LOCAL org — active member, ZERO directory_account_links rows, AND
+      // (P2 fix — a bare orgActiveMemberCount>0 check cannot distinguish "① is judged ready" from
+      // "① is judged ready by an implementation that ALSO requires directoryLinked", since the
+      // fixture below never populated ②③⑤ to make previewReady observable) a full ①②③⑤ fixture so
+      // previewReady is independently, behaviourally provable — a mutant that ANDs step① with
+      // `directoryLinked` (which is false here) would flip previewReady to false and this test
+      // would catch it; a bare orgActiveMemberCount assertion alone would not.
       await seedMembership(ORG_LOCAL, ADMIN_LOCAL, true)
+      const localGroup = await seedGroup(ORG_LOCAL, `${PFX} g3 local group`)
+      await seedGroupMember(ORG_LOCAL, localGroup, ADMIN_LOCAL)
+      await seedShift(ORG_LOCAL, `${PFX} g3 local shift`)
+      await seedApprovalFlow(ORG_LOCAL, `${PFX} g3 local flow`, 'leave', true)
 
       // Positive control 2: DingTalk-LINKED org — active member AND a linked dingtalk account.
       await seedMembership(ORG_DINGTALK, ADMIN_DT, true)
       const integration = await seedDingtalkIntegration(ORG_DINGTALK, `${PFX} g3 dt integration`, `${PFX}-g3-corp`)
       const account = await seedDingtalkAccount(integration, `${PFX}-g3-ext`, `${PFX}-g3-key`, `${PFX} g3 account`)
-      await linkAccount(account, 'linked')
+      await linkAccount(account, 'linked', ADMIN_DT)
     }, 30000)
 
     afterAll(async () => {
+      await pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1`, [ORG_LOCAL])
+      await pool.query(`DELETE FROM attendance_shifts WHERE org_id = $1`, [ORG_LOCAL])
+      await pool.query(`DELETE FROM attendance_group_members WHERE org_id = $1`, [ORG_LOCAL])
+      await pool.query(`DELETE FROM attendance_groups WHERE org_id = $1`, [ORG_LOCAL])
       await pool.query(`DELETE FROM user_orgs WHERE org_id IN ($1, $2)`, [ORG_LOCAL, ORG_DINGTALK])
     })
 
-    it('pure local org: orgActiveMemberCount>0, directoryLinked=false, step① still ready (via previewReady prerequisites)', async () => {
+    it('pure local org: orgActiveMemberCount>0, directoryLinked=false, AND previewReady=true (directoryLinked never gates ① or ⑦)', async () => {
       const app = makeApp({ id: ADMIN_LOCAL })
       pinned.setApp(app)
       const res = await request(pinned.url()).get(
@@ -415,6 +459,11 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
       expect(res.status).toBe(200)
       expect(res.body.data.orgActiveMemberCount).toBe(1)
       expect(res.body.data.directoryLinked).toBe(false)
+      // Mutation target (P2): an implementation that computed ① (or previewReady) as
+      // `orgActiveMemberCount>0 && directoryLinked` would flip this to false — directoryLinked is
+      // false here by construction, so this is the actual, behavioural "OR semantics" proof the
+      // frozen `orgActiveMemberCount` assertion above could not provide on its own.
+      expect(res.body.data.previewReady).toBe(true)
     })
 
     it('DingTalk-linked org: orgActiveMemberCount>0 AND directoryLinked=true, both correctly reported', async () => {
@@ -444,7 +493,7 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
       // A bound DingTalk recipient, so orgRecipientBinding can be exercised non-trivially.
       const integration = await seedDingtalkIntegration(ORG_NOTIFY, `${PFX} g4 dt integration`, `${PFX}-g4-corp`)
       const account = await seedDingtalkAccount(integration, `${PFX}-g4-ext`, `${PFX}-g4-key`, `${PFX} g4 account`)
-      await linkAccount(account, 'linked')
+      await linkAccount(account, 'linked', ADMIN_NOTIFY)
     }, 30000)
 
     afterAll(async () => {
@@ -598,9 +647,17 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
       const memberA = `${PFX}_audit_member_a`
       const memberB = `${PFX}_audit_member_b`
       const memberInactive = `${PFX}_audit_member_inactive`
+      const memberPlatformDeactivated = `${PFX}_audit_member_platform_deactivated`
       await seedMembership(ORG_AUDIT, memberA, true)
       await seedMembership(ORG_AUDIT, memberB, true)
-      await seedMembership(ORG_AUDIT, memberInactive, false) // proves the is_active filter
+      await seedMembership(ORG_AUDIT, memberInactive, false) // proves the user_orgs.is_active filter
+      // P2 fix: user_orgs.is_active=true but users.is_active=false — e.g. a platform-level
+      // deactivation (PATCH /api/admin/users/:id/status) that deliberately never touches user_orgs.
+      // Before this fixture, the RD-3 double-filter's users.is_active leg had zero real-DB
+      // behavioural coverage (only a source-text regex in the unit test asserted the SQL mentions
+      // it). Mutation target: dropping `AND u.is_active = true` from member_scope would count this
+      // member too, inflating orgActiveMemberCount to 3.
+      await seedMembership(ORG_AUDIT, memberPlatformDeactivated, true, false)
 
       const groupWithMembers = await seedGroup(ORG_AUDIT, `${PFX} audit group with members`)
       await seedGroup(ORG_AUDIT, `${PFX} audit group without members`) // groupCount !== groupsWithMembers
@@ -666,7 +723,7 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
       expect(sql).not.toMatch(/\$2/)
       // Exact counts — this org's rows only, the sibling org's rows never leak in.
       expect(counts).toEqual({
-        orgActiveMemberCount: 2, // memberInactive excluded
+        orgActiveMemberCount: 2, // memberInactive (user_orgs.is_active=false) AND memberPlatformDeactivated (users.is_active=false) both excluded
         groupCount: 3, // 2 fixed_shift + 1 scheduled_shift
         groupsWithMembers: 1,
         shiftCount: 3,

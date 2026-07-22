@@ -396,6 +396,19 @@ describe('§9 W4-0-G5: closed-set reconciliation against the LIVE plugin source 
   })
 })
 
+// §4.5 names three contract-test requirements: (1) zero env-value/credential leakage — covered by
+// the route test's `JSON.stringify(data)).not.toMatch(/ATTENDANCE_[A-Z_]/)` assertion below; (2)
+// "缺 port 时聚合端点仍 200 且 notify={deliveryRuntime:'unknown',…}" (missing port ⇒ still 200,
+// fail-closed to unknown); (3) "不得由 deliveries 表推断" — covered by the SQL-shape assertions
+// below (the query never touches `attendance_notification_deliveries`) and the real-DB G4 describe.
+// Requirement (2) is explicitly N/A-BY-CONSTRUCTION for this slice, not silently skipped: this
+// module has exactly one production import path for the scheduler port
+// (`import { getSharedAttendanceScheduler } from './AttendanceScheduler'` at the top of
+// `AttendanceSetupReadinessAggregate.ts`) with no conditional/optional wiring — there is no runtime
+// state in which that import resolves but the function is "missing", so a test simulating a missing
+// port would have nothing to exercise beyond re-asserting the null-check branch already covered by
+// "deliveryRuntime = not_ready when the scheduler is not started (null)" below. If a future slice
+// ever makes the port pluggable/optional, this comment is the marker to add the real test then.
 describe('§4.5 notify readiness (⑥ three independent signals, §9 W4-0-G4)', () => {
   beforeEach(() => {
     queryMock.mockReset()
@@ -426,16 +439,23 @@ describe('§4.5 notify readiness (⑥ three independent signals, §9 W4-0-G4)', 
     }
   })
 
-  it('orgRecipientBinding: org-scoped EXISTS-style join, boundRecipientCount/hasAnyBoundRecipient only', async () => {
+  it('orgRecipientBinding: org-scoped join covering BOTH wired channels (dingtalk+wecom, §4.5(ii) "企微同型"), boundRecipientCount/hasAnyBoundRecipient only', async () => {
     queryMock.mockResolvedValueOnce({ rows: [{ bound_recipient_count: 2 }] })
     const result = await readAttendanceSetupReadinessOrgRecipientBinding('org-a', queryMock as never)
     expect(result).toEqual({ boundRecipientCount: 2, hasAnyBoundRecipient: true })
     const [sql, params] = queryMock.mock.calls[0] as [string, unknown[]]
     expect(sql).toMatch(/i\.org_id\s*=\s*\$1/)
-    expect(sql).toMatch(/provider\s*=\s*'dingtalk'/)
+    // Mutation target: pinning either leg back to a single literal 'dingtalk' (dropping wecom
+    // coverage, or letting a.provider/i.provider mismatch) reds this.
+    expect(sql).toMatch(/provider\s+IN\s*\(\s*'dingtalk'\s*,\s*'wecom'\s*\)/)
+    expect(sql).toMatch(/i\.provider\s*=\s*a\.provider/)
     expect(sql).toMatch(/link_status\s*=\s*'linked'/)
+    // Mutation target: dropping either guard lets a NULL-local_user_id link or a duplicate binding
+    // for the same local user inflate the count.
+    expect(sql).toMatch(/local_user_id\s+IS\s+NOT\s+NULL/)
+    expect(sql).toMatch(/COUNT\(\s*DISTINCT\s+l\.local_user_id\s*\)/)
     expect(params).toEqual(['org-a'])
-    expect(sql).not.toMatch(/external_user_id|local_user_id\s*,|name|email/i)
+    expect(sql).not.toMatch(/external_user_id|name|email/i)
   })
 
   it('orgRecipientBinding: zero rows ⇒ hasAnyBoundRecipient=false', async () => {
@@ -491,7 +511,15 @@ describe('§9 W4-0-G2 negative meta-assertion: no first-word/regex read-only che
   it('the route file contains no prefix/regex "is this SQL a SELECT" guard either (code only)', () => {
     const routePath = path.resolve(__dirname, '../../src/routes/attendance-admin.ts')
     const code = stripCommentsAndStrings(readFileSync(routePath, 'utf8'))
-    expect(code).not.toMatch(/\.startsWith\(\s*``\s*\)/) // any startsWith(<stripped-literal>) call
+    // As strong as the aggregate-module leg above (not just the stripped-template-literal-arg
+    // shape): a re-introduced `sql.trim().toUpperCase().startsWith('SELECT')`-style guard using a
+    // quoted string literal (not a template literal) or any `.startsWith(` call at all — plus the
+    // three named helper functions the frozen predecessor used — must all red this test. The route
+    // file is production "implementation" exactly as much as the aggregate module (§9 W4-0-G2's ban
+    // covers "the implementation", not one file within it) and today's stripped code has zero
+    // legitimate `.startsWith(`/`toUpperCase()` occurrences, so there is no false-positive risk.
+    expect(code).not.toMatch(/\.startsWith\(/)
+    expect(code).not.toMatch(/toUpperCase\(\)/)
     expect(code).not.toMatch(/isSelectOnly|assertSelectOnly|isReadOnlySql/i)
   })
 })
@@ -530,7 +558,7 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
     expect(transactionMock).not.toHaveBeenCalled()
   })
 
-  it('200 for an org member, with the exact §4.2-locked key set and values-free payload', async () => {
+  it('200 for an org member, with the §4.2-locked key set PLUS the disclosed viewerIsPlatformAdmin addition, and a values-free payload', async () => {
     queryMock.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // user_orgs membership: member
     mockTransactionQueries([
       { rows: [{ ready: true }] }, // directoryLinked
@@ -546,6 +574,7 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
     const data = res.body.data
     expect(Object.keys(data).sort()).toEqual(
       [
+        // §4.2-locked 13 keys, verbatim:
         'directoryLinked',
         'orgActiveMemberCount',
         'groupCount',
@@ -559,6 +588,8 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
         'notify',
         'previewReady',
         'perStep',
+        // Disclosed, not-yet-owner-ratified 14th key (§3① role-gated remediation contract — see
+        // the response interface's doc comment; do NOT read this assertion as the sign-off).
         'viewerIsPlatformAdmin',
       ].sort(),
     )
@@ -569,9 +600,19 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
     expect(data.viewerIsPlatformAdmin).toBe(false)
     expect(data.previewReady).toBe(true) // OK_COUNTS_ROW satisfies ①②③⑤
     expect(Object.keys(data.perStep).sort()).toEqual([...ATTENDANCE_SETUP_STEP_IDS].sort())
+    // §4.2 `perStep.effectiveTime: {source, posture, effectiveAt?}` — each perStep ENTRY nests
+    // under an `effectiveTime` key (not a flat {source,posture} record); mutation target: flattening
+    // this back out reds every assertion in this loop.
+    for (const stepId of ATTENDANCE_SETUP_STEP_IDS) {
+      const entry = data.perStep[stepId]
+      expect(Object.keys(entry)).toEqual(['effectiveTime'])
+      expect(entry.effectiveTime).toHaveProperty('source')
+      expect(entry.effectiveTime).toHaveProperty('posture')
+    }
     // Values-free: no raw env-var NAMES (uppercase-with-underscore, e.g. the notify env flags) or
-    // credentials anywhere. (perStep[*].source table-name identifiers like "attendance_groups" are
-    // the sanctioned §4.2 contract, not an env leak — hence the uppercase-only pattern here.)
+    // credentials anywhere. (perStep[*].effectiveTime.source table-name identifiers like
+    // "attendance_groups" are the sanctioned §4.2 contract, not an env leak — hence the
+    // uppercase-only pattern here.)
     expect(JSON.stringify(data)).not.toMatch(/ATTENDANCE_[A-Z_]/)
     expect(JSON.stringify(data)).not.toMatch(/password|secret|token/i)
   })

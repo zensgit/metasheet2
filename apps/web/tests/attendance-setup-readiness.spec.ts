@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ATTENDANCE_SETUP_READINESS_STATUS_VALUES,
   ATTENDANCE_SETUP_STEP_IDS,
+  ATTENDANCE_SETUP_STEP_SCOPE,
   deriveAttendanceSetupReadinessPreviewReady,
   deriveAttendanceSetupReadinessSteps,
   deriveAttendanceSetupReadinessStep3Ready,
@@ -26,10 +27,11 @@ const EFFECTIVE_TIME = {
   posture: 'immediate' as const,
 }
 
-const PER_STEP = Object.fromEntries(ATTENDANCE_SETUP_STEP_IDS.map((id) => [id, EFFECTIVE_TIME])) as Record<
-  (typeof ATTENDANCE_SETUP_STEP_IDS)[number],
-  typeof EFFECTIVE_TIME
->
+// §4.2-locked nested shape: perStep.effectiveTime: {source, posture, effectiveAt?} — each entry
+// wraps under an `effectiveTime` key (not the effective-time record itself).
+const PER_STEP = Object.fromEntries(
+  ATTENDANCE_SETUP_STEP_IDS.map((id) => [id, { effectiveTime: EFFECTIVE_TIME }]),
+) as Record<(typeof ATTENDANCE_SETUP_STEP_IDS)[number], { effectiveTime: typeof EFFECTIVE_TIME }>
 
 function baseResponse(overrides: Partial<AttendanceSetupReadinessResponse> = {}): AttendanceSetupReadinessResponse {
   return {
@@ -368,7 +370,7 @@ describe('effectiveTime pass-through', () => {
     const custom = { source: 'user_orgs.is_active', posture: 'immediate' as const }
     const rows = deriveAttendanceSetupReadinessSteps({
       kind: 'ok',
-      data: baseResponse({ perStep: { ...PER_STEP, 'attendance-admin-user-access': custom } }),
+      data: baseResponse({ perStep: { ...PER_STEP, 'attendance-admin-user-access': { effectiveTime: custom } } }),
     })
     expect(stepById(rows, 'attendance-admin-user-access').effectiveTime).toEqual(custom)
   })
@@ -377,9 +379,38 @@ describe('effectiveTime pass-through', () => {
     const scheduled = { source: 'holiday_sync_window', posture: 'scheduled' as const, effectiveAt: '2026-08-01T00:00:00.000Z' }
     const rows = deriveAttendanceSetupReadinessSteps({
       kind: 'ok',
-      data: baseResponse({ perStep: { ...PER_STEP, 'attendance-admin-groups': scheduled } }),
+      data: baseResponse({ perStep: { ...PER_STEP, 'attendance-admin-groups': { effectiveTime: scheduled } } }),
     })
     expect(stepById(rows, 'attendance-admin-groups').effectiveTime).toEqual(scheduled)
+  })
+})
+
+describe('scope tag (§3.2 "每信号携带 scope: org | deployment") on every matrix row', () => {
+  it('org-scoped for ①②③⑤⑦, deployment-scoped for ④⑥, on an "ok" response', () => {
+    const rows = deriveAttendanceSetupReadinessSteps({ kind: 'ok', data: baseResponse() })
+    expect(stepById(rows, 'attendance-admin-user-access').scope).toBe('org')
+    expect(stepById(rows, 'attendance-admin-groups').scope).toBe('org')
+    expect(stepById(rows, 'attendance-admin-shifts').scope).toBe('org')
+    expect(stepById(rows, 'attendance-admin-settings').scope).toBe('deployment')
+    expect(stepById(rows, 'attendance-admin-approval-flows').scope).toBe('org')
+    expect(stepById(rows, 'attendance-admin-notification-deliveries').scope).toBe('deployment')
+    expect(stepById(rows, 'preview').scope).toBe('org')
+  })
+
+  it('every row scope matches the exported ATTENDANCE_SETUP_STEP_SCOPE registry exactly', () => {
+    const rows = deriveAttendanceSetupReadinessSteps({ kind: 'ok', data: baseResponse() })
+    for (const row of rows) {
+      expect(row.scope).toBe(ATTENDANCE_SETUP_STEP_SCOPE[row.stepId])
+    }
+  })
+
+  it('scope is present even on the whole-endpoint forbidden/db_not_ready folds (a scope tag is a property of the STEP, not of the current judgement)', () => {
+    for (const input of [{ kind: 'forbidden' as const }, { kind: 'db_not_ready' as const }]) {
+      const rows = deriveAttendanceSetupReadinessSteps(input)
+      for (const row of rows) {
+        expect(row.scope).toBe(ATTENDANCE_SETUP_STEP_SCOPE[row.stepId])
+      }
+    }
   })
 })
 

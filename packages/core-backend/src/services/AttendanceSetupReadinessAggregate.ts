@@ -92,6 +92,26 @@ export const ATTENDANCE_SETUP_READINESS_STEP_EFFECTIVE_TIME: Readonly<
   preview: { source: 'none', posture: 'manual_activation' },
 }
 
+/** §4.2-locked wire shape for the response's `perStep` key: the design lock's own JSON block
+ *  writes `perStep.effectiveTime: { source, posture, effectiveAt? }` — i.e. each per-step ENTRY
+ *  is an object carrying an `effectiveTime` key, not the effective-time record itself. (Trilens
+ *  review on the frozen predecessor: a flat `perStep[stepId] = {source,posture,effectiveAt?}`
+ *  shape reads as a claims-vs-lock-text deviation.) This wraps
+ *  `ATTENDANCE_SETUP_READINESS_STEP_EFFECTIVE_TIME` — the single source of truth for VALUES — into
+ *  the locked wire shape once, at module load, so every request reuses the same frozen object. */
+export interface AttendanceSetupReadinessPerStepEntry {
+  effectiveTime: AttendanceSetupReadinessEffectiveTime
+}
+
+export const ATTENDANCE_SETUP_READINESS_PER_STEP: Readonly<
+  Record<AttendanceSetupStepId, AttendanceSetupReadinessPerStepEntry>
+> = Object.fromEntries(
+  ATTENDANCE_SETUP_STEP_IDS.map((stepId) => [
+    stepId,
+    { effectiveTime: ATTENDANCE_SETUP_READINESS_STEP_EFFECTIVE_TIME[stepId] },
+  ]),
+) as Readonly<Record<AttendanceSetupStepId, AttendanceSetupReadinessPerStepEntry>>
+
 // ---------------------------------------------------------------------------------------------
 // §4.1 / R1: the read-only seam. Exported so a real-DB test can drive it DIRECTLY with synthetic
 // SQL (the behavioural proof §9 W4-0-G2 requires) without going through any business query.
@@ -404,31 +424,43 @@ export function computeAttendanceSetupReadinessDeliveryRuntime(): AttendanceSetu
 
 /**
  * §4.5(ii): org-scoped bound-recipient coverage. Mirrors the EXACT join
- * `AttendanceNotificationDeliveryWorker.resolveRecipient` uses to find a usable DingTalk
- * recipient (directory_account_links ⋈ directory_accounts ⋈ directory_integrations), minus the
- * per-recipient `local_user_id = $1` filter (this is an org-wide aggregate, not a single lookup).
- * Returns ONLY a count/boolean — never a userId, external_user_id, or integration id (values-free,
- * §4.2). No `unknown` state exists for this signal (its type is count/boolean only, unlike
- * deliveryRuntime); a query failure here is not swallowed — it propagates to the route's
- * DB_NOT_READY/500 handling so the response is never a fabricated zero.
+ * `AttendanceNotificationDeliveryWorker.resolveRecipient` uses to find a usable recipient
+ * (directory_account_links ⋈ directory_accounts ⋈ directory_integrations), minus the per-recipient
+ * `local_user_id = $1` filter (this is an org-wide aggregate, not a single lookup).
+ * **Provider coverage (§4.5(ii) real-source note "企微同型")**: the WeCom channel's own
+ * `resolveRecipient` (`AttendanceNotificationDeliveryWorker.ts` WeCom section) uses the EXACT same
+ * three-table join shape as DingTalk's, just with `provider='wecom'` on both legs — a
+ * dingtalk-only filter here would under-report coverage (false `hasAnyBoundRecipient=false`) for a
+ * purely-WeCom-deployed org. `a.provider = i.provider` (rather than pinning both sides to one
+ * literal) plus the `IN (...)` list below covers both wired channels without a cross-provider
+ * account/integration mismatch. `l.local_user_id IS NOT NULL` and `COUNT(DISTINCT ...)` mirror the
+ * worker's own resolution precondition (`resolveRecipient` selects `WHERE l.local_user_id = $1`, so
+ * a NULL-local_user_id link can never be resolved for anyone and must not inflate this count; two+
+ * active links for the same local user is one recipient, not two — the worker itself flags that
+ * shape as a data-integrity anomaly, not extra coverage). Returns ONLY a count/boolean — never a
+ * userId, external_user_id, or integration id (values-free, §4.2). No `unknown` state exists for
+ * this signal (its type is count/boolean only, unlike deliveryRuntime); a query failure here is not
+ * swallowed — it propagates to the route's DB_NOT_READY/500 handling so the response is never a
+ * fabricated zero.
  */
 export async function readAttendanceSetupReadinessOrgRecipientBinding(
   orgId: string,
   runQuery: AttendanceSetupReadinessQueryFn,
 ): Promise<AttendanceSetupReadinessOrgRecipientBinding> {
   const result = await runQuery<{ bound_recipient_count: number }>(
-    `SELECT COUNT(*)::int AS bound_recipient_count
+    `SELECT COUNT(DISTINCT l.local_user_id)::int AS bound_recipient_count
        FROM directory_account_links l
        JOIN directory_accounts a
          ON a.id = l.directory_account_id
-        AND a.provider = 'dingtalk'
+        AND a.provider IN ('dingtalk', 'wecom')
         AND a.is_active = true
        JOIN directory_integrations i
          ON i.id = a.integration_id
-        AND i.provider = 'dingtalk'
+        AND i.provider = a.provider
         AND i.status = 'active'
         AND i.org_id = $1
-      WHERE l.link_status = 'linked'`,
+      WHERE l.link_status = 'linked'
+        AND l.local_user_id IS NOT NULL`,
     [orgId],
   )
   const count = Number(result.rows[0]?.bound_recipient_count ?? 0)

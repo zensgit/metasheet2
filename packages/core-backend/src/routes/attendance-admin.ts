@@ -9,7 +9,7 @@ import { redeliverFailedAttendanceNotification } from '../services/AttendanceNot
 import { ensurePlatformAdmin } from './admin-users'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import {
-  ATTENDANCE_SETUP_READINESS_STEP_EFFECTIVE_TIME,
+  ATTENDANCE_SETUP_READINESS_PER_STEP,
   ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
   computeAttendanceSetupReadinessDeliveryRuntime,
   computeAttendanceSetupReadinessPreviewReady,
@@ -19,7 +19,7 @@ import {
   runAttendanceSetupReadinessReadOnly,
   type AttendanceSetupReadinessOrgCounts,
   type AttendanceSetupReadinessNotify,
-  type AttendanceSetupReadinessEffectiveTime,
+  type AttendanceSetupReadinessPerStepEntry,
   type AttendanceSetupStepId,
   type AttendancePunchPolicyPosture,
 } from '../services/AttendanceSetupReadinessAggregate'
@@ -416,10 +416,19 @@ export async function canReadAttendanceDirectoryReadiness(
 // pre-existing `readOrgDirectoryReadiness` (S7-5) into the §4.2-locked response shape.
 // ---------------------------------------------------------------------------------------------
 
-/** Mirrors the §4.2-locked response key set EXACTLY — see the PR body's "§4.2 键集" note for the
- *  one pre-authorized addition (`viewerIsPlatformAdmin`, §3① role-gated remediation data) and why
- *  `scope` is NOT a wire field (kept as code-level documentation only, per the design lock's own
- *  §4.2 illustration, which marks scope via comments rather than a runtime key). */
+/** Mirrors the §4.2-locked response key set PLUS one disclosed, not-yet-owner-ratified addition —
+ *  see the PR body's "§4.2 键集偏离说明" for the full disclosure. `directoryLinked` ... `perStep`
+ *  are the §4.2-locked 13 keys verbatim (`perStep` nested as `perStep[stepId].effectiveTime`, per
+ *  the lock's own `perStep.effectiveTime: {...}` JSON-block notation). `viewerIsPlatformAdmin` is
+ *  NOT in that locked list — it exists to satisfy the §3① role-gated remediation contract
+ *  ("W4-1 强制"), which needs viewer-role data the locked shape has no other field for. This is a
+ *  genuine tension between two ratified provisions (exact-key-set lock vs. role-gated display
+ *  contract), not a settled call this implementation is authorized to make either direction of —
+ *  keeping the field (rather than silently dropping a value a ratified clause depends on) is the
+ *  reversible choice pending explicit owner sign-off at the next gate; do not read the contract
+ *  test's key-set assertion below as itself constituting that sign-off. `scope` is NOT a wire field
+ *  (kept as code-level documentation only, per the design lock's own §4.2 illustration, which marks
+ *  scope via comments rather than a runtime key). */
 export interface AttendanceSetupReadinessResponse {
   directoryLinked: boolean
   orgActiveMemberCount: number
@@ -433,7 +442,7 @@ export interface AttendanceSetupReadinessResponse {
   punchPolicyPosture: AttendancePunchPolicyPosture
   notify: AttendanceSetupReadinessNotify
   previewReady: boolean
-  perStep: Readonly<Record<AttendanceSetupStepId, AttendanceSetupReadinessEffectiveTime>>
+  perStep: Readonly<Record<AttendanceSetupStepId, AttendanceSetupReadinessPerStepEntry>>
   viewerIsPlatformAdmin: boolean
 }
 
@@ -476,7 +485,7 @@ async function buildAttendanceSetupReadiness(
       punchPolicyPosture,
       notify,
       previewReady: computeAttendanceSetupReadinessPreviewReady(counts),
-      perStep: ATTENDANCE_SETUP_READINESS_STEP_EFFECTIVE_TIME,
+      perStep: ATTENDANCE_SETUP_READINESS_PER_STEP,
       viewerIsPlatformAdmin,
     } satisfies AttendanceSetupReadinessResponse
   })
