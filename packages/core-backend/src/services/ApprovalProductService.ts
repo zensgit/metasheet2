@@ -1700,10 +1700,12 @@ function normalizeApprovalGraph(
       )
     }
 
-    // Collect the approval-node assignees reachable from each branch start up to
-    // the join node. Reject duplicate assigneeIds across branches because the
-    // active-assignment unique index cannot hold two active rows for the same
-    // user at once. Nested parallel is explicitly rejected in v1.
+    // Collect static assignees on EVERY runtime-possible path from each branch
+    // start up to the join (see collectBranchAssignees: conditions fan out over
+    // all rules/default edges). Also structurally proves each path reaches the
+    // join — rejects end/dead-end/cycle/nested-parallel before join. Cross-branch
+    // duplicate assigneeIds are then rejected (active-assignment unique index
+    // cannot hold two active rows for the same user at once).
     const assigneesPerBranch: Array<Set<string>> = []
     for (const branchEdgeKey of parallelConfig.branches) {
       const edge = edgeMap.get(branchEdgeKey)!
@@ -1735,6 +1737,40 @@ function normalizeApprovalGraph(
   return { nodes, edges }
 }
 
+/**
+ * Structural walk of ONE parallel branch: prove every runtime-possible path from
+ * `startNodeKey` reaches `joinNodeKey`, and collect static assignees along the way
+ * (UNION over all paths — feeds the cross-branch duplicate-approver check).
+ *
+ * Runtime semantics (mirrored here so create/update/publish catch shapes that would
+ * only fail mid-request) — see `ApprovalGraphExecutor.resolveConditionTarget`:
+ *   - condition nodes: successors are the DEDUPLICATED set of
+ *     `config.branches[].edgeKey` plus `config.defaultEdgeKey` when present.
+ *     Each declared edgeKey must exist AND have `source ===` this condition node
+ *     (`targetForEdge` is a global key lookup, so a key owned by another node is
+ *     malformed and must fail authoring rather than route elsewhere). When
+ *     default is ABSENT, also include the first outgoing edge
+ *     (`firstTargetForNode` fallback). Stray outgoing edges NOT referenced by
+ *     config are NOT runtime-possible and must not be walked (they must not
+ *     false-fail a valid branch).
+ *   - linear nodes (approval/cc/start/…): follow the first outgoing edge only,
+ *     matching `firstTargetForNode`.
+ *   - reject end / unknown / nested parallel / cycle / dead-end before join with
+ *     the same failValidation messages as before (stable codes via ValidationContext).
+ *
+ * Complexity (tri-color / memoized per branch — required: no graph node-count cap):
+ *   - VISITING (gray): node is on the active DFS stack → true back-edge / cycle.
+ *   - DONE (black): node-to-join subgraph already proven; return the memoized static-
+ *     assignee set (self ∪ descendants) without rewalking.
+ *   - Convergent DAG diamonds therefore cost O(V+E) per branch, not O(paths). A pure
+ *     path-local rewalk is exponential on layered diamonds (2^N path recomputations of
+ *     the shared tail) and is rejected by the layered-DAG regression test.
+ *
+ * Mutation: reverting the condition arm to `outgoing[current][0]` only REDs the
+ * exact golden in approval-product-service.test.ts (default edge → end while the
+ * first rules edge joins). Dropping DONE memoization REDs the layered-diamond
+ * acceptance (or hangs) while leaving the golden green.
+ */
 function collectBranchAssignees(
   startNodeKey: string,
   joinNodeKey: string,
@@ -1742,22 +1778,117 @@ function collectBranchAssignees(
   edges: ApprovalGraph['edges'],
   context: ValidationContext,
 ): Set<string> {
-  const assignees = new Set<string>()
   const outgoing = new Map<string, ApprovalGraph['edges']>()
+  const edgeByKey = new Map<string, ApprovalGraph['edges'][number]>()
   for (const edge of edges) {
     const existing = outgoing.get(edge.source) || []
     existing.push(edge)
     outgoing.set(edge.source, existing)
+    edgeByKey.set(edge.key, edge)
   }
 
-  const visited = new Set<string>()
-  let currentKey: string | null = startNodeKey
-  while (currentKey) {
-    if (currentKey === joinNodeKey) return assignees
-    if (visited.has(currentKey)) {
+  // Per-branch tri-color state. DONE memo is the static-assignee UNION of the
+  // node-to-join subgraph (self + every runtime-possible descendant); re-entry from
+  // a convergent arm reuses it instead of rewalking.
+  const visiting = new Set<string>()
+  const doneMemo = new Map<string, Set<string>>()
+
+  const localApprovalAssignees = (node: ApprovalGraph['nodes'][number]): string[] => {
+    if (node.type !== 'approval') return []
+    const approvalConfig = node.config as {
+      assigneeIds?: string[]
+      assigneeSources?: ApprovalAssigneeSource[]
+      approvalMode?: ApprovalMode
+    }
+    // T2-4: threshold mode is linear-only in v1 — reject a 'threshold' approval node nested
+    // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
+    if (approvalConfig.approvalMode === 'threshold') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
+        400,
+        'APPROVAL_THRESHOLD_IN_PARALLEL',
+      )
+    }
+    const local: string[] = []
+    for (const assignee of approvalConfig.assigneeIds ?? []) {
+      local.push(assignee)
+    }
+    for (const source of approvalConfig.assigneeSources ?? []) {
+      if (source.kind === 'static_user') {
+        source.userIds.forEach((assignee) => local.push(assignee))
+      }
+      if (source.kind === 'static_role') {
+        source.roleIds.forEach((assignee) => local.push(assignee))
+      }
+    }
+    return local
+  }
+
+  /**
+   * Runtime-possible condition successors — mirrors resolveConditionTarget's edge
+   * selection (rules arms + default, else firstTarget), with authoring ownership
+   * checks so a mis-owned edgeKey cannot silently route via global key lookup.
+   */
+  const conditionSuccessorTargets = (node: ApprovalGraph['nodes'][number]): string[] => {
+    const config = node.config as {
+      branches?: Array<{ edgeKey?: string }>
+      defaultEdgeKey?: string
+    }
+    const declaredKeys: string[] = []
+    const seenKeys = new Set<string>()
+    const pushKey = (raw: string | undefined): void => {
+      if (typeof raw !== 'string') return
+      const key = raw.trim()
+      if (!key || seenKeys.has(key)) return
+      seenKeys.add(key)
+      declaredKeys.push(key)
+    }
+    for (const branch of config.branches ?? []) {
+      pushKey(branch.edgeKey)
+    }
+    const hasDefault = typeof config.defaultEdgeKey === 'string' && config.defaultEdgeKey.trim().length > 0
+    if (hasDefault) {
+      pushKey(config.defaultEdgeKey)
+    }
+
+    const targets: string[] = []
+    for (const edgeKey of declaredKeys) {
+      const edge = edgeByKey.get(edgeKey)
+      // Global targetForEdge would still return a foreign-source edge's target; reject
+      // that malformed config at authoring instead of treating it as a legal route.
+      if (!edge || edge.source !== node.key) {
+        failValidation(
+          context,
+          `approvalGraph parallel branch condition ${node.key} references invalid edge ${edgeKey}`,
+        )
+      }
+      targets.push(edge.target)
+    }
+
+    // resolveConditionTarget: default ABSENT → firstTargetForNode fallback only.
+    // Stray outgoing edges beyond the first are never selected when default is set,
+    // and when default is absent only the first outgoing is the fallback — never a
+    // non-declared non-first edge.
+    if (!hasDefault) {
+      const firstEdge = outgoing.get(node.key)?.[0]
+      if (firstEdge && !seenKeys.has(firstEdge.key)) {
+        targets.push(firstEdge.target)
+      }
+    }
+    return targets
+  }
+
+  /** Returns the memoized static-assignee set for `currentKey` → join (inclusive of self). */
+  const walk = (currentKey: string): Set<string> => {
+    if (currentKey === joinNodeKey) return new Set()
+
+    const memoized = doneMemo.get(currentKey)
+    if (memoized) return memoized
+
+    if (visiting.has(currentKey)) {
       failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
     }
-    visited.add(currentKey)
+
     const node = nodeByKey.get(currentKey)
     if (!node) {
       failValidation(context, `approvalGraph parallel branch references unknown node ${currentKey}`)
@@ -1771,45 +1902,43 @@ function collectBranchAssignees(
         `approvalGraph parallel branch must reach join before end (at ${node.key})`,
       )
     }
-    if (node.type === 'approval') {
-      const approvalConfig = node.config as {
-        assigneeIds?: string[]
-        assigneeSources?: ApprovalAssigneeSource[]
-        approvalMode?: ApprovalMode
-      }
-      // T2-4: threshold mode is linear-only in v1 — reject a 'threshold' approval node nested
-      // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
-      if (approvalConfig.approvalMode === 'threshold') {
-        throw new ServiceError(
-          `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
-          400,
-          'APPROVAL_THRESHOLD_IN_PARALLEL',
-        )
-      }
-      for (const assignee of approvalConfig.assigneeIds ?? []) {
-        assignees.add(assignee)
-      }
-      for (const source of approvalConfig.assigneeSources ?? []) {
-        if (source.kind === 'static_user') {
-          source.userIds.forEach((assignee) => assignees.add(assignee))
+
+    visiting.add(currentKey)
+    try {
+      const result = new Set(localApprovalAssignees(node))
+      const nextEdges = outgoing.get(currentKey) ?? []
+
+      if (node.type === 'condition') {
+        const targets = conditionSuccessorTargets(node)
+        if (targets.length === 0) {
+          failValidation(
+            context,
+            `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
+          )
         }
-        if (source.kind === 'static_role') {
-          source.roleIds.forEach((assignee) => assignees.add(assignee))
+        for (const target of targets) {
+          for (const assignee of walk(target)) result.add(assignee)
         }
+      } else {
+        // Linear node — sole runtime successor is the first outgoing edge.
+        const nextKey = nextEdges[0]?.target
+        if (!nextKey) {
+          failValidation(
+            context,
+            `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
+          )
+        }
+        for (const assignee of walk(nextKey)) result.add(assignee)
       }
+
+      doneMemo.set(currentKey, result)
+      return result
+    } finally {
+      visiting.delete(currentKey)
     }
-    // Walk the first outgoing edge — condition nodes aren't explored for every
-    // branch here (the form-data isn't available at template validation
-    // time), so duplicate detection is conservative across the statically
-    // reachable first-edge path. Condition branches inside parallel remain
-    // legal at runtime; this check only flags obvious overlaps.
-    const nextEdge = outgoing.get(currentKey)?.[0]
-    currentKey = nextEdge?.target ?? null
   }
-  failValidation(
-    context,
-    `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
-  )
+
+  return walk(startNodeKey)
 }
 
 function asApprovalGraph(value: Record<string, unknown>): ApprovalGraph {
