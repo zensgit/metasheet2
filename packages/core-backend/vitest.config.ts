@@ -562,6 +562,11 @@ export default defineConfig({
       // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-fwb-activation-realdb.test.ts',
+      // FWB-2 production write_approval_form_values mode:update (same-base/cross-base/lock/delete/
+      // net-once/atomicity): real Postgres only — excluded HERE so it cannot skip-green in the no-DB
+      // lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      // Two-point wiring.
+      'tests/integration/multitable-fwb-update-activation-realdb.test.ts',
       // approval attachment GC worker (TTL sweep + purge-intent drain) — real-DB. Two-point wiring.
       'tests/integration/approval-attachment-gc-realdb.test.ts',
       // attachment bind (form-freeze) + bucket reconciler — real-DB. Two-point wiring.

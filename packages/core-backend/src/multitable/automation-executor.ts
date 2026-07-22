@@ -26,9 +26,31 @@ import { withAutomationEventId } from './automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { produceAutomationEvent } from './automation-durable-activation'
-import { isFwbWritebackEnabled, normalizeFwbMappings } from './approval-fwb-activation'
+import {
+  extractExactLinkedRecordId,
+  isFwbWritebackEnabled,
+  normalizeFwbMappings,
+  normalizeFwbUpdateRecordLinkFieldId,
+  parseFwbWriteMode,
+  resolveRecordLinkTargetFromSchema,
+} from './approval-fwb-activation'
 import { executeWriteApprovalFormValues, type FwbRecordWriteSeam } from './approval-fwb-write-action'
+import {
+  executeUpdateBoundRecord,
+  type FwbUpdateSeam,
+  type RecordLinkChecks,
+} from './approval-fwb-record-link'
 import type { FwbGateChecks } from './approval-fwb-permission-gates'
+import {
+  ensureRecordWriteAllowed,
+  loadRecordPermissionScopeMap,
+  loadSheetPermissionScopeMap,
+} from './permission-service'
+import {
+  lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
+  resolveSheetCapabilitiesForUserOnQuery,
+} from '../services/approval-record-link-txn-auth'
+import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
@@ -901,6 +923,11 @@ export interface AutomationDeps {
   /** FWB activation (§11 Q6): the four-gate set re-checked at execute time. OMITTED ⇒ DEFAULT-DENY —
    *  a wiring that forgets to bind gates can never silently allow (fail-closed, kills default-allow). */
   fwbGateChecks?: FwbGateChecks
+  /**
+   * Production FWB gate factory. The executor passes the CURRENT transaction query so every
+   * authorization read shares the write transaction; a fixed `fwbGateChecks` remains a test seam.
+   */
+  fwbGateChecksFactory?: (queryFn: AutomationDeps['queryFn']) => FwbGateChecks
 }
 
 /** FWB fail-closed default: every gate denies. Production binds real checks at AutomationService
@@ -2832,14 +2859,75 @@ export class AutomationExecutor {
     }
   }
 
+  /** Bind the production gate set to the current write transaction; fixed checks are tests only. */
+  private fwbGateChecksFor(queryFn: AutomationDeps['queryFn']): FwbGateChecks {
+    return this.deps.fwbGateChecksFactory?.(queryFn)
+      ?? this.deps.fwbGateChecks
+      ?? DEFAULT_DENY_FWB_GATES
+  }
+
   /**
-   * FWB activation — `write_approval_form_values` (FWB0 lock, RATIFIED). Writes the approved instance's
-   * immutable `form_snapshot` (D4 — values NEVER ride the event payload or action config) into the rule's
-   * OWN sheet as a NEW record (D2), atomically with the FWB idempotency claim, the create revision and the
-   * chained durable outbox row (D9: ONE transaction). Preconditions fail closed with zero writes:
-   * flag OFF → skipped; durable chain OFF → failed (no half-durable path, D10); no rule-execution identity
-   * (ad-hoc dispatch) → failed (D11); no transaction seam → failed (the withTransaction autocommit
-   * fallback would silently break the four-way atomicity). Gates default to DENY when unbound.
+   * Freeze every authority source consumed by the FWB execute-time gate before any record lock/write.
+   * Existing grant rows are protected by FOR SHARE through the shared record-link lock order. The
+   * field-permission table lock also closes the absent-row -> concurrent read-only INSERT phantom.
+   * Membership is re-read after locking so a sheet rehome cannot preserve a stale base claim.
+   */
+  private async lockFwbExecutionAuthority(
+    queryFn: AutomationDeps['queryFn'],
+    input: {
+      userId: string
+      ruleId: string
+      templateId: string
+      templateVersionId: string
+      targets: ReadonlyArray<{ baseId: string; sheetId: string }>
+    },
+  ): Promise<void> {
+    await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(queryFn, {
+      userId: input.userId,
+      targets: input.targets,
+    })
+    await queryFn('LOCK TABLE field_permissions IN SHARE MODE')
+    const rule = await queryFn(
+      'SELECT id FROM automation_rules WHERE id = $1 AND enabled = TRUE FOR SHARE',
+      [input.ruleId],
+    )
+    const template = await queryFn(
+      'SELECT id FROM approval_templates WHERE id = $1 FOR SHARE',
+      [input.templateId],
+    )
+    const version = await queryFn(
+      'SELECT id FROM approval_template_versions WHERE id = $1 AND template_id = $2 FOR SHARE',
+      [input.templateVersionId, input.templateId],
+    )
+    if (rule.rows.length !== 1 || template.rows.length !== 1 || version.rows.length !== 1) {
+      throw new Error('fwb_rejected:authority_changed')
+    }
+    for (const target of input.targets) {
+      const membership = await queryFn(
+        'SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+        [target.sheetId],
+      )
+      const liveBaseId = (membership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+      if (typeof liveBaseId !== 'string' || liveBaseId !== target.baseId) {
+        throw new Error('fwb_rejected:target_schema')
+      }
+    }
+  }
+
+  /**
+   * FWB activation — `write_approval_form_values` (FWB0 lock, RATIFIED).
+   *
+   * - mode absent/`create` (FWB-1): writes the approved instance's immutable `form_snapshot` (D4)
+   *   into the rule's OWN sheet as a NEW record (D2).
+   * - mode `'update'` (FWB-2): updates the existing record addressed by the form's record-link
+   *   field (D3); target base/sheet are derived from the pinned template-version schema, never from
+   *   client-supplied ids. Cross-base writes go through `evaluateCrossBaseWriteGate` with the rule
+   *   creator (not the event actor).
+   *
+   * Both modes commit claim + record write + revision + durable outbox in ONE transaction (D9).
+   * Preconditions fail closed with zero writes: flag OFF → skipped; durable chain OFF → failed
+   * (no half-durable path, D10); no rule-execution identity → failed (D11); no transaction seam →
+   * failed. Gates default to DENY when unbound.
    */
   private async executeWriteApprovalFormValuesAction(
     config: Record<string, unknown>,
@@ -2872,149 +2960,14 @@ export class AutomationExecutor {
           error: 'write_approval_form_values requires the transaction seam — the autocommit fallback cannot honour claim+record+revision+outbox atomicity (FWB0 D9)',
         }
       }
-      const trig = (context.triggerEvent && typeof context.triggerEvent === 'object' ? context.triggerEvent : {}) as Record<string, unknown>
-      const approval = (trig.approval && typeof trig.approval === 'object' ? trig.approval : {}) as Record<string, unknown>
-      const instanceId = typeof approval.instanceId === 'string' ? approval.instanceId.trim() : ''
-      const templateId = typeof approval.templateId === 'string' ? approval.templateId.trim() : ''
-      const templateVersionId = typeof approval.templateVersionId === 'string'
-        ? approval.templateVersionId.trim()
-        : ''
-      const baseEventId = typeof trig.eventId === 'string' && trig.eventId.trim()
-        ? trig.eventId.trim()
-        : (typeof trig._eventId === 'string' ? trig._eventId.trim() : '')
-      if (!instanceId || !templateId || !templateVersionId || !baseEventId) {
-        return { actionType, status: 'failed', error: 'write_approval_form_values requires an approval completion event carrying instanceId + templateId + templateVersionId + a stable eventId' }
+      const modeParsed = parseFwbWriteMode(config.mode)
+      if (!modeParsed.ok) {
+        return { actionType, status: 'failed', error: 'fwb_rejected:mapping_config:unknown_mode' }
       }
-      // D1 hard gate: writeback fires on APPROVED completions only — regardless of the rule's outcome filter.
-      const transition = (trig.transition && typeof trig.transition === 'object' ? trig.transition : {}) as Record<string, unknown>
-      const outcome = typeof transition.toStatus === 'string' && transition.toStatus
-        ? transition.toStatus
-        : (typeof trig.eventType === 'string' && trig.eventType.startsWith('approval.') ? trig.eventType.slice('approval.'.length) : '')
-      if (outcome !== 'approved') {
-        return { actionType, status: 'skipped', output: { reason: 'fwb_outcome_not_approved' } }
+      if (modeParsed.mode === 'update') {
+        return await this.executeWriteApprovalFormValuesUpdateAction(config, context, identity)
       }
-      const normalized = normalizeFwbMappings((config as { mappings?: unknown }).mappings)
-      if (!normalized.ok) {
-        return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
-      }
-      const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
-        ? config.sourceTemplateVersionId.trim()
-        : ''
-      if (!confirmedVersionId || confirmedVersionId !== templateVersionId) {
-        return { actionType, status: 'failed', error: 'fwb_rejected:source_template_version' }
-      }
-      const gates = this.deps.fwbGateChecks ?? DEFAULT_DENY_FWB_GATES
-      // Per-action identity: the SAME §2.1 derivation Class-A uses — structuralPath keeps two
-      // byte-identical FWB actions in one rule distinct (config-hash identity would collapse them).
-      const actionKey = deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config })
-      const fwbEventId = `${baseEventId}::fwb::${context.ruleId}::${actionKey}`
-      const automationDepth = (typeof trig._automationDepth === 'number' ? trig._automationDepth : 0) + 1
-
-      const result = await this.withTransaction(context.sheetId, async (query) => {
-        const targetFieldResult = await query(
-          `SELECT id, type, property
-             FROM meta_fields
-            WHERE sheet_id = $1 AND id = ANY($2::text[])
-            FOR SHARE`,
-          [context.sheetId, normalized.mappings.map((mapping) => mapping.targetFieldId)],
-        )
-        const targetFields = new Map(
-          (targetFieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
-            .filter((row): row is { id: string; type: string; property?: unknown } => (
-              typeof row.id === 'string' && typeof row.type === 'string'
-            ))
-            .map((row) => [row.id, { type: row.type, property: normalizeJson(row.property) }] as const),
-        )
-        if (targetFields.size !== normalized.mappings.length) throw new Error('fwb_rejected:mapping_target_changed')
-        const runtimeMappings = normalized.mappings.map((mapping) => {
-          const field = targetFields.get(mapping.targetFieldId)
-          if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
-          if (mapping.targetType !== 'number') return mapping
-          // Number fields persist their decimal-place cap as `property.decimals` (the canonical
-          // field codec contract). Do not infer a second `precision` spelling here: doing so silently
-          // removes the execute-time cap from every normally authored number field.
-          const precision = field.property.decimals
-          return {
-            ...mapping,
-            ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
-              ? { numberPrecision: precision }
-              : {}),
-          }
-        })
-        // D4: the immutable form snapshot is the ONLY value source, read server-side inside the txn.
-        const snapRes = await query(
-          `SELECT form_snapshot FROM approval_instances
-            WHERE id = $1 AND template_id = $2 AND template_version_id = $3 AND status = 'approved'`,
-          [instanceId, templateId, templateVersionId],
-        )
-        const snapRow = snapRes.rows[0] as { form_snapshot?: unknown } | undefined
-        if (!snapRow) throw new Error('fwb_rejected:instance_not_found')
-        const rawSnap = snapRow.form_snapshot
-        const formValues = (rawSnap && typeof rawSnap === 'object' && !Array.isArray(rawSnap)
-          ? rawSnap
-          : (() => { try { return JSON.parse(String(rawSnap ?? '{}')) as Record<string, unknown> } catch { return {} } })()) as Record<string, unknown>
-        const trx = { query, isTransaction: true } as unknown as TransactionalQueryable
-        const seam: FwbRecordWriteSeam = {
-          createRecordWithRevision: async (t, targetSheetId, values) => {
-            const recordId = `rec_${randomUUID()}`
-            // xbase-write-exempt: FWB-1 writes ONLY the rule's OWN sheet (FWB0 D2 — the config schema has
-            // no targetBase/targetSheet fields, §11 Q3 rejected them), so this create can never retarget
-            // to a config-declared base; the §11 Q6 gate set (incl. canWriteSheet on THIS sheet) ran above.
-            // revision-emitted: recordRecordRevision(action:'create') immediately below, SAME transaction.
-            await t.query(
-              'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)',
-              [recordId, targetSheetId, JSON.stringify(values)],
-            )
-            // Same revision contract as executeCreateRecord (OD-2 source names the write entry point;
-            // the write identity is the rule CREATOR — §2.2: system completions carry no human actor).
-            await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
-              sheetId: targetSheetId,
-              recordId,
-              version: 1,
-              action: 'create',
-              source: 'automation',
-              actorId: context.ruleCreatedBy ?? null,
-              changedFieldIds: Object.keys(values),
-              patch: values,
-              snapshot: values,
-            })
-            return recordId
-          },
-          enqueueOutbox: async (t, event) => {
-            await produceAutomationEvent(
-              { query: t.query, isTransaction: true } as unknown as TransactionalQueryable,
-              { eventType: event.eventType, eventId: event.eventId, payload: event.payload, automationDepth: event.automationDepth },
-            )
-          },
-        }
-        return executeWriteApprovalFormValues(trx, {
-          claimId: `fwb_${randomUUID()}`,
-          instanceId,
-          ruleId: context.ruleId,
-          actionKey,
-          gateSubject: {
-            configurerUserId: context.ruleCreatedBy,
-            ruleId: context.ruleId,
-            sourceTemplateId: templateId,
-            targetSheetId: context.sheetId,
-          },
-          mappings: runtimeMappings,
-          formValues,
-          eventId: fwbEventId,
-          automationDepth,
-        }, gates, seam)
-      })
-
-      if (result.status === 'applied') {
-        return { actionType, status: 'success', output: { recordId: result.recordId, sheetId: context.sheetId } }
-      }
-      if (result.status === 'already_applied') {
-        return { actionType, status: 'success', alreadyApplied: true, output: { alreadyApplied: true } }
-      }
-      if (result.reason === 'permission_gates') {
-        return { actionType, status: 'failed', error: `fwb_rejected:permission_gates:${(result.failedGates ?? []).join(',')}` }
-      }
-      return { actionType, status: 'failed', error: 'fwb_rejected:mapping' }
+      return await this.executeWriteApprovalFormValuesCreateAction(config, context, identity)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (message.startsWith('fwb_rejected:') || message.startsWith('write_approval_form_values requires')) {
@@ -3023,6 +2976,452 @@ export class AutomationExecutor {
       logger.warn('write_approval_form_values execution failed')
       return { actionType, status: 'failed', error: 'fwb_execution_failed' }
     }
+  }
+
+  /** Shared completion-event identity extraction for FWB create/update. */
+  private parseFwbCompletionContext(context: ExecutionContext): {
+    ok: true
+    instanceId: string
+    templateId: string
+    templateVersionId: string
+    baseEventId: string
+    automationDepth: number
+  } | { ok: false; error: string; skipped?: true; skipReason?: string } {
+    const trig = (context.triggerEvent && typeof context.triggerEvent === 'object' ? context.triggerEvent : {}) as Record<string, unknown>
+    const approval = (trig.approval && typeof trig.approval === 'object' ? trig.approval : {}) as Record<string, unknown>
+    const instanceId = typeof approval.instanceId === 'string' ? approval.instanceId.trim() : ''
+    const templateId = typeof approval.templateId === 'string' ? approval.templateId.trim() : ''
+    const templateVersionId = typeof approval.templateVersionId === 'string'
+      ? approval.templateVersionId.trim()
+      : ''
+    const baseEventId = typeof trig.eventId === 'string' && trig.eventId.trim()
+      ? trig.eventId.trim()
+      : (typeof trig._eventId === 'string' ? trig._eventId.trim() : '')
+    if (!instanceId || !templateId || !templateVersionId || !baseEventId) {
+      return {
+        ok: false,
+        error: 'write_approval_form_values requires an approval completion event carrying instanceId + templateId + templateVersionId + a stable eventId',
+      }
+    }
+    // D1 hard gate: writeback fires on APPROVED completions only — regardless of the rule's outcome filter.
+    const transition = (trig.transition && typeof trig.transition === 'object' ? trig.transition : {}) as Record<string, unknown>
+    const outcome = typeof transition.toStatus === 'string' && transition.toStatus
+      ? transition.toStatus
+      : (typeof trig.eventType === 'string' && trig.eventType.startsWith('approval.') ? trig.eventType.slice('approval.'.length) : '')
+    if (outcome !== 'approved') {
+      return { ok: false, error: '', skipped: true, skipReason: 'fwb_outcome_not_approved' }
+    }
+    const automationDepth = (typeof trig._automationDepth === 'number' ? trig._automationDepth : 0) + 1
+    return { ok: true, instanceId, templateId, templateVersionId, baseEventId, automationDepth }
+  }
+
+  /** FWB-1 create path — rule's own sheet (D2). Byte-compatible with pre-FWB-2 wiring. */
+  private async executeWriteApprovalFormValuesCreateAction(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity,
+  ): Promise<AutomationStepResult> {
+    const actionType = 'write_approval_form_values'
+    const parsed = this.parseFwbCompletionContext(context)
+    if (parsed.ok === false) {
+      if (parsed.skipped) return { actionType, status: 'skipped', output: { reason: parsed.skipReason } }
+      return { actionType, status: 'failed', error: parsed.error }
+    }
+    const { instanceId, templateId, templateVersionId, baseEventId, automationDepth } = parsed
+    const normalized = normalizeFwbMappings((config as { mappings?: unknown }).mappings)
+    if (!normalized.ok) {
+      return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
+    }
+    const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+      ? config.sourceTemplateVersionId.trim()
+      : ''
+    if (!confirmedVersionId || confirmedVersionId !== templateVersionId) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:source_template_version' }
+    }
+    const actionKey = deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config })
+    const fwbEventId = `${baseEventId}::fwb::${context.ruleId}::${actionKey}`
+
+    const result = await this.withTransaction(context.sheetId, async (query) => {
+      if (this.deps.fwbGateChecksFactory) {
+        const ruleMembership = await query(
+          'SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+          [context.sheetId],
+        )
+        const ruleBaseId = (ruleMembership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+        if (typeof ruleBaseId !== 'string' || !ruleBaseId) throw new Error('fwb_rejected:target_schema')
+        await this.lockFwbExecutionAuthority(query, {
+          userId: context.ruleCreatedBy,
+          ruleId: context.ruleId,
+          templateId,
+          templateVersionId,
+          targets: [{ baseId: ruleBaseId, sheetId: context.sheetId }],
+        })
+      }
+      const gates = this.fwbGateChecksFor(query)
+      const targetFieldResult = await query(
+        `SELECT id, type, property
+           FROM meta_fields
+          WHERE sheet_id = $1 AND id = ANY($2::text[])
+          FOR SHARE`,
+        [context.sheetId, normalized.mappings.map((mapping) => mapping.targetFieldId)],
+      )
+      const targetFields = new Map(
+        (targetFieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
+          .filter((row): row is { id: string; type: string; property?: unknown } => (
+            typeof row.id === 'string' && typeof row.type === 'string'
+          ))
+          .map((row) => [row.id, { type: row.type, property: normalizeJson(row.property) }] as const),
+      )
+      if (targetFields.size !== normalized.mappings.length) throw new Error('fwb_rejected:mapping_target_changed')
+      const runtimeMappings = normalized.mappings.map((mapping) => {
+        const field = targetFields.get(mapping.targetFieldId)
+        if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
+        if (mapping.targetType !== 'number') return mapping
+        const precision = field.property.decimals
+        return {
+          ...mapping,
+          ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
+            ? { numberPrecision: precision }
+            : {}),
+        }
+      })
+      // D4: the immutable form snapshot is the ONLY value source, read server-side inside the txn.
+      const snapRes = await query(
+        `SELECT form_snapshot FROM approval_instances
+          WHERE id = $1 AND template_id = $2 AND template_version_id = $3 AND status = 'approved'
+          FOR SHARE`,
+        [instanceId, templateId, templateVersionId],
+      )
+      const snapRow = snapRes.rows[0] as { form_snapshot?: unknown } | undefined
+      if (!snapRow) throw new Error('fwb_rejected:instance_not_found')
+      const rawSnap = snapRow.form_snapshot
+      const formValues = (rawSnap && typeof rawSnap === 'object' && !Array.isArray(rawSnap)
+        ? rawSnap
+        : (() => { try { return JSON.parse(String(rawSnap ?? '{}')) as Record<string, unknown> } catch { return {} } })()) as Record<string, unknown>
+      const trx = { query, isTransaction: true } as unknown as TransactionalQueryable
+      const seam: FwbRecordWriteSeam = {
+        createRecordWithRevision: async (t, targetSheetId, values) => {
+          const recordId = `rec_${randomUUID()}`
+          // xbase-write-exempt: FWB-1 writes ONLY the rule's OWN sheet (FWB0 D2).
+          // revision-emitted: recordRecordRevision(action:'create') immediately below, SAME transaction.
+          await t.query(
+            'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)',
+            [recordId, targetSheetId, JSON.stringify(values)],
+          )
+          await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
+            sheetId: targetSheetId,
+            recordId,
+            version: 1,
+            action: 'create',
+            source: 'automation',
+            actorId: context.ruleCreatedBy ?? null,
+            changedFieldIds: Object.keys(values),
+            patch: values,
+            snapshot: values,
+          })
+          return recordId
+        },
+        enqueueOutbox: async (t, event) => {
+          await produceAutomationEvent(
+            { query: t.query, isTransaction: true } as unknown as TransactionalQueryable,
+            { eventType: event.eventType, eventId: event.eventId, payload: event.payload, automationDepth: event.automationDepth },
+          )
+        },
+      }
+      return executeWriteApprovalFormValues(trx, {
+        claimId: `fwb_${randomUUID()}`,
+        instanceId,
+        ruleId: context.ruleId,
+        actionKey,
+        gateSubject: {
+          configurerUserId: context.ruleCreatedBy,
+          ruleId: context.ruleId,
+          actionKey,
+          sourceTemplateId: templateId,
+          targetSheetId: context.sheetId,
+          mode: 'create',
+        },
+        mappings: runtimeMappings,
+        formValues,
+        eventId: fwbEventId,
+        automationDepth,
+      }, gates, seam)
+    })
+
+    if (result.status === 'applied') {
+      return { actionType, status: 'success', output: { recordId: result.recordId, sheetId: context.sheetId } }
+    }
+    if (result.status === 'already_applied') {
+      return { actionType, status: 'success', alreadyApplied: true, output: { alreadyApplied: true } }
+    }
+    if (result.reason === 'permission_gates') {
+      return { actionType, status: 'failed', error: `fwb_rejected:permission_gates:${(result.failedGates ?? []).join(',')}` }
+    }
+    return { actionType, status: 'failed', error: 'fwb_rejected:mapping' }
+  }
+
+  /**
+   * FWB-2 update path — form-anchored existing record (D3). Target base/sheet from the pinned
+   * template-version record-link field props; exact one `{recordId}` from form_snapshot; cross-base
+   * via evaluateCrossBaseWriteGate(ruleCreatedBy); reuses executeUpdateBoundRecord for the D9 four-way
+   * atomic claim + UPDATE + revision + outbox.
+   */
+  private async executeWriteApprovalFormValuesUpdateAction(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity,
+  ): Promise<AutomationStepResult> {
+    const actionType = 'write_approval_form_values'
+    const parsed = this.parseFwbCompletionContext(context)
+    if (parsed.ok === false) {
+      if (parsed.skipped) return { actionType, status: 'skipped', output: { reason: parsed.skipReason } }
+      return { actionType, status: 'failed', error: parsed.error }
+    }
+    const { instanceId, templateId, templateVersionId, baseEventId, automationDepth } = parsed
+    const linkField = normalizeFwbUpdateRecordLinkFieldId(config.recordLinkFieldId)
+    if (linkField.ok === false) {
+      return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${linkField.issue}` }
+    }
+    const normalized = normalizeFwbMappings((config as { mappings?: unknown }).mappings)
+    if (!normalized.ok) {
+      return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
+    }
+    const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+      ? config.sourceTemplateVersionId.trim()
+      : ''
+    if (!confirmedVersionId || confirmedVersionId !== templateVersionId) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:source_template_version' }
+    }
+    const actionKey = deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config })
+    const fwbEventId = `${baseEventId}::fwb::${context.ruleId}::${actionKey}`
+    const ruleCreatorId = typeof context.ruleCreatedBy === 'string' ? context.ruleCreatedBy : ''
+
+    // Transaction keyed on the RULE sheet (same as create) — the write may retarget, but the
+    // transaction seam is stable; FOR UPDATE on the bound row serializes the target mutation.
+    const result = await this.withTransaction(context.sheetId, async (query) => {
+      // D4: immutable form_snapshot + pinned template-version schema are the ONLY sources of truth.
+      const snapRes = await query(
+        `SELECT i.form_snapshot, v.form_schema
+           FROM approval_instances i
+           JOIN approval_template_versions v ON v.id = i.template_version_id
+          WHERE i.id = $1 AND i.template_id = $2 AND i.template_version_id = $3 AND i.status = 'approved'
+          FOR SHARE OF i, v`,
+        [instanceId, templateId, templateVersionId],
+      )
+      const snapRow = snapRes.rows[0] as { form_snapshot?: unknown; form_schema?: unknown } | undefined
+      if (!snapRow) throw new Error('fwb_rejected:instance_not_found')
+
+      const rawSchema = snapRow.form_schema && typeof snapRow.form_schema === 'object' && !Array.isArray(snapRow.form_schema)
+        ? snapRow.form_schema
+        : (() => {
+          try { return JSON.parse(String(snapRow.form_schema ?? 'null')) as unknown } catch { return null }
+        })()
+      const derived = resolveRecordLinkTargetFromSchema(rawSchema, linkField.recordLinkFieldId)
+      if (!derived) throw new Error('fwb_rejected:record_link_field')
+
+      if (this.deps.fwbGateChecksFactory) {
+        const ruleMembership = await query(
+          'SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+          [context.sheetId],
+        )
+        const ruleBaseId = (ruleMembership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+        if (typeof ruleBaseId !== 'string' || !ruleBaseId) throw new Error('fwb_rejected:target_schema')
+        await this.lockFwbExecutionAuthority(query, {
+          userId: ruleCreatorId,
+          ruleId: context.ruleId,
+          templateId,
+          templateVersionId,
+          targets: [
+            { baseId: ruleBaseId, sheetId: context.sheetId },
+            { baseId: derived.baseId, sheetId: derived.sheetId },
+          ],
+        })
+      }
+      const gates = this.fwbGateChecksFor(query)
+
+      const rawSnap = snapRow.form_snapshot
+      const formValues = (rawSnap && typeof rawSnap === 'object' && !Array.isArray(rawSnap)
+        ? rawSnap
+        : (() => { try { return JSON.parse(String(rawSnap ?? '{}')) as Record<string, unknown> } catch { return {} } })()) as Record<string, unknown>
+
+      // D3: exactly one { recordId: string }; 0 / multi / free-text / extra keys → reject (no oracle).
+      const boundRecordId = extractExactLinkedRecordId(formValues[linkField.recordLinkFieldId])
+      if (!boundRecordId) throw new Error('fwb_rejected:linked_record')
+
+      // Cross-base gate with rule CREATOR (not event actor — §2.2). claim == derived target base.
+      // Same-base remains the fast path inside evaluateCrossBaseWriteGate.
+      const crossGate = await this.evaluateCrossBaseWriteGate(
+        query as AutomationDeps['queryFn'],
+        ruleCreatorId || null,
+        context.sheetId,
+        derived.sheetId,
+        derived.baseId,
+      )
+      if (crossGate.crossBase && crossGate.ok === false) {
+        // Values-free stable reason (do not leak the full gate error string's internal identifiers beyond code).
+        throw new Error('fwb_rejected:cross_base')
+      }
+
+      // Fire-time type recheck on the DERIVED target sheet (field retype/delete since save → reject).
+      const targetFieldResult = await query(
+        `SELECT id, type, property
+           FROM meta_fields
+          WHERE sheet_id = $1 AND id = ANY($2::text[])
+          FOR SHARE`,
+        [derived.sheetId, normalized.mappings.map((mapping) => mapping.targetFieldId)],
+      )
+      const targetFields = new Map(
+        (targetFieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
+          .filter((row): row is { id: string; type: string; property?: unknown } => (
+            typeof row.id === 'string' && typeof row.type === 'string'
+          ))
+          .map((row) => [row.id, { type: row.type, property: normalizeJson(row.property) }] as const),
+      )
+      if (targetFields.size !== normalized.mappings.length) throw new Error('fwb_rejected:mapping_target_changed')
+      const runtimeMappings = normalized.mappings.map((mapping) => {
+        const field = targetFields.get(mapping.targetFieldId)
+        if (!field || field.type !== mapping.targetType) throw new Error('fwb_rejected:mapping_target_changed')
+        if (mapping.targetType !== 'number') return mapping
+        const precision = field.property.decimals
+        return {
+          ...mapping,
+          ...(typeof precision === 'number' && Number.isSafeInteger(precision) && precision >= 0
+            ? { numberPrecision: precision }
+            : {}),
+        }
+      })
+
+      const trx = { query, isTransaction: true } as unknown as TransactionalQueryable
+      const queryFn = query as AutomationDeps['queryFn']
+
+      // Production bound-record checks: FOR UPDATE + lock + sheet/own-write/record-scope authority.
+      // Missing / unreadable / not-writable share fail-closed codes (no existence oracle on responses).
+      const linkChecks: RecordLinkChecks = {
+        fillerCanReadRecord: async () => false, // not used at execute time
+        recordExists: async (t, sheetId, recordId) => {
+          await acquireRecordLinkRowAuthLockOnQuery(t.query, sheetId, recordId)
+          const r = await t.query(
+            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+            [sheetId, recordId],
+          )
+          return r.rows.length > 0
+        },
+        recordIsLocked: async (t, sheetId, recordId) => {
+          const r = await t.query(
+            'SELECT locked, locked_by, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2',
+            [sheetId, recordId],
+          )
+          const row = r.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
+          if (!row) return false // missing → handled by recordExists first
+          try {
+            ensureRecordNotLocked(ruleCreatorId || null, row, () => new Error('locked'))
+            return false
+          } catch {
+            return true
+          }
+        },
+        configurerCanWriteRecord: async (t, configurerUserId, sheetId, recordId) => {
+          if (!configurerUserId) return false
+          const resolved = await resolveSheetCapabilitiesForUserOnQuery(queryFn, sheetId, configurerUserId)
+          const sheetScope = (await loadSheetPermissionScopeMap(queryFn, [sheetId], configurerUserId)).get(sheetId)
+          const rowRes = await t.query(
+            'SELECT created_by FROM meta_records WHERE sheet_id = $1 AND id = $2',
+            [sheetId, recordId],
+          )
+          const createdBy = (rowRes.rows[0] as { created_by?: unknown } | undefined)?.created_by
+          const access = {
+            userId: configurerUserId,
+            permissions: resolved.permissions,
+            isAdminRole: resolved.isAdminRole,
+          }
+          const scopeMap = await loadRecordPermissionScopeMap(queryFn, sheetId, [recordId], configurerUserId)
+          return ensureRecordWriteAllowed(
+            resolved.capabilities,
+            sheetScope,
+            access,
+            typeof createdBy === 'string' ? createdBy : null,
+            'edit',
+            scopeMap,
+            recordId,
+          )
+        },
+      }
+
+      const seam: FwbUpdateSeam = {
+        updateRecordWithRevision: async (t, sheetId, recordId, values) => {
+          // xbase-write-gated: evaluateCrossBaseWriteGate accepted the server-pinned target above.
+          // lock-guarded: recordExists holds FOR UPDATE and calls ensureRecordNotLocked in this transaction.
+          // revision-emitted: recordRecordRevision runs below in this transaction before commit.
+          const updateRes = await t.query(
+            `UPDATE meta_records
+             SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
+                 version = version + 1,
+                 updated_at = NOW()
+             WHERE id = $2 AND sheet_id = $3
+             RETURNING version, data`,
+            [JSON.stringify(values), recordId, sheetId],
+          )
+          const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+          // Fail closed if the locked row vanished between FOR UPDATE and UPDATE (should be impossible
+          // under FOR UPDATE, but never report success with a missing mutation).
+          if (!updatedRow) throw new Error('fwb_rejected:record_missing')
+          const nextVersion = Number(updatedRow.version)
+          await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
+            sheetId,
+            recordId,
+            version: Number.isFinite(nextVersion) ? nextVersion : 0,
+            action: 'update',
+            source: 'automation',
+            // §2.2: write identity = rule creator, never the event actor (may be null on auto-approve).
+            actorId: ruleCreatorId || null,
+            changedFieldIds: Object.keys(values),
+            patch: values,
+            snapshot: normalizeJson(updatedRow.data),
+          })
+        },
+        enqueueOutbox: async (t, event) => {
+          await produceAutomationEvent(
+            { query: t.query, isTransaction: true } as unknown as TransactionalQueryable,
+            { eventType: event.eventType, eventId: event.eventId, payload: event.payload, automationDepth: event.automationDepth },
+          )
+        },
+      }
+
+      return executeUpdateBoundRecord(trx, {
+        claimId: `fwb_${randomUUID()}`,
+        instanceId,
+        ruleId: context.ruleId,
+        actionKey,
+        gateSubject: {
+          configurerUserId: ruleCreatorId,
+          ruleId: context.ruleId,
+          actionKey,
+          sourceTemplateId: templateId,
+          targetSheetId: derived.sheetId,
+          mode: 'update',
+        },
+        boundRecordId,
+        mappings: runtimeMappings,
+        formValues,
+        eventId: fwbEventId,
+        automationDepth,
+      }, gates, linkChecks, seam)
+    })
+
+    if (result.status === 'applied') {
+      return { actionType, status: 'success', output: { mode: 'update', alreadyApplied: false } }
+    }
+    if (result.status === 'already_applied') {
+      return { actionType, status: 'success', alreadyApplied: true, output: { mode: 'update', alreadyApplied: true } }
+    }
+    if (result.reason === 'permission_gates') {
+      return { actionType, status: 'failed', error: `fwb_rejected:permission_gates:${(result.failedGates ?? []).join(',')}` }
+    }
+    if (result.reason === 'mapping') {
+      return { actionType, status: 'failed', error: 'fwb_rejected:mapping' }
+    }
+    // record_missing | record_locked | record_not_writable — values-free stable codes.
+    return { actionType, status: 'failed', error: `fwb_rejected:${result.reason}` }
   }
 
   private async executeSendWebhook(

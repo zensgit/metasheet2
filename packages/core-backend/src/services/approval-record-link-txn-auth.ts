@@ -688,10 +688,7 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   precomputed?: { isAdminRole: boolean; permissions: string[] },
 ): Promise<{
   isAdminRole: boolean
-  capabilities: Pick<
-    MultitableCapabilities,
-    'canRead' | 'canEditRecord' | 'canCreateRecord' | 'canManageSheetAccess'
-  >
+  capabilities: MultitableCapabilities
   permissions: string[]
 }> {
   const normalizedUserId = userId.trim()
@@ -736,12 +733,7 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
 
   return {
     isAdminRole,
-    capabilities: {
-      canRead: capabilities.canRead === true,
-      canEditRecord: capabilities.canEditRecord === true,
-      canCreateRecord: capabilities.canCreateRecord === true,
-      canManageSheetAccess: capabilities.canManageSheetAccess === true,
-    },
+    capabilities,
     permissions,
   }
 }

@@ -15,22 +15,39 @@
  * module is testable and the real ACL wiring is one seam. All-or-nothing; check failures (thrown errors)
  * are NOT treated as passes (fail-closed on error).
  */
+/** FWB write mode for sheet/field authority. Omitted/`create` = FWB-1; `update` = FWB-2. */
+export type FwbWriteMode = 'create' | 'update'
+
 export interface FwbGateChecks {
   isAdmin(userId: string): Promise<boolean>
   canManageSheetAccess(userId: string, sheetId: string): Promise<boolean>
   canReadTemplate(userId: string, templateId: string): Promise<boolean>
-  canWriteSheet(userId: string, sheetId: string): Promise<boolean>
-  canWriteTargetFields(userId: string, ruleId: string, sheetId: string): Promise<boolean>
+  /**
+   * G3 target writable. Create mode requires canCreateRecord; update mode requires canEditRecord
+   * (must NOT require create permission for update — FWB-2).
+   */
+  canWriteSheet(userId: string, sheetId: string, mode?: FwbWriteMode): Promise<boolean>
+  canWriteTargetFields(
+    userId: string,
+    ruleId: string,
+    actionKey: string,
+    sheetId: string,
+    mode?: FwbWriteMode,
+  ): Promise<boolean>
   /** G4: the saved rule carries a recorded explicit confirmation (identifiers only). */
-  hasRecordedConfirmation(ruleId: string): Promise<boolean>
+  hasRecordedConfirmation(ruleId: string, actionKey: string): Promise<boolean>
 }
 
 export interface FwbGateSubject {
   /** the rule's configurer (creator/last enabler) — the authority the gates bind to. */
   configurerUserId: string
   ruleId: string
+  /** Exact persisted action identity; prevents sibling FWB actions from contaminating this gate. */
+  actionKey: string
   sourceTemplateId: string
   targetSheetId: string
+  /** FWB-1 create (default when omitted) vs FWB-2 update. */
+  mode?: FwbWriteMode
 }
 
 export type FwbGateId =
@@ -52,13 +69,14 @@ export async function recheckFwbPermissionGates(checks: FwbGateChecks, s: FwbGat
       return false // fail-closed: an errored check is a failed check
     }
   }
+  const mode = s.mode === 'update' ? 'update' : 'create'
   const [admin, manage, readSrc, writeTgt, writeFields, confirmed] = await Promise.all([
     safe(checks.isAdmin(s.configurerUserId)),
     safe(checks.canManageSheetAccess(s.configurerUserId, s.targetSheetId)),
     safe(checks.canReadTemplate(s.configurerUserId, s.sourceTemplateId)),
-    safe(checks.canWriteSheet(s.configurerUserId, s.targetSheetId)),
-    safe(checks.canWriteTargetFields(s.configurerUserId, s.ruleId, s.targetSheetId)),
-    safe(checks.hasRecordedConfirmation(s.ruleId)),
+    safe(checks.canWriteSheet(s.configurerUserId, s.targetSheetId, mode)),
+    safe(checks.canWriteTargetFields(s.configurerUserId, s.ruleId, s.actionKey, s.targetSheetId, mode)),
+    safe(checks.hasRecordedConfirmation(s.ruleId, s.actionKey)),
   ])
   if (!admin && !manage) failed.push('configurer_authority')
   if (!readSrc) failed.push('source_readable')

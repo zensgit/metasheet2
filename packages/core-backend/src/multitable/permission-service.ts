@@ -1654,7 +1654,10 @@ export function ensureRecordWriteAllowed(
   const rowActions = deriveRecordRowActions(capabilities, scope, access, createdBy)
   const baseAllowed = action === 'edit' ? rowActions.canEdit : rowActions.canDelete
   if (baseAllowed) return true
-  if (recordScopeMap && recordId) {
+  // Record grants are additive only when THIS record has an explicit grant. Passing an empty map (or
+  // a map for other records) must not turn a write-own denial back into sheet-wide edit authority via
+  // deriveRecordPermissions' no-scope fallback.
+  if (recordScopeMap && recordId && recordScopeMap.has(recordId)) {
     const recordPerms = deriveRecordPermissions(recordId, capabilities, recordScopeMap)
     return action === 'edit' ? recordPerms.canEdit : recordPerms.canDelete
   }
