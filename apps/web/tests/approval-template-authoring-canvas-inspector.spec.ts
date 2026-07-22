@@ -205,6 +205,7 @@ const ElDialog = defineComponent({
 function installStubs(app: VueApp<Element>) {
   app.directive('loading', {})
   app.component('ElButton', ElButton)
+  app.component('ElButtonGroup', passthrough('ElButtonGroup'))
   app.component('ElInput', ElInput)
   app.component('ElInputNumber', ElInputNumber)
   app.component('ElSelect', ElSelect)
@@ -466,6 +467,57 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
     expect(inspector?.getAttribute('data-inspector-node')).toBe('cond_1')
     expect(node.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('renders stable navigation controls and keeps free-drag coordinates correct under zoom', async () => {
+    routeParams = { id: 'tpl_canvas_navigation' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-canvas-toolbar"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-canvas-minimap"]')).not.toBeNull()
+    const zoomLabel = container!.querySelector('[data-testid="approval-canvas-zoom-label"]') as HTMLButtonElement
+    expect(zoomLabel.textContent).toContain('100%')
+    expect(zoomLabel.getAttribute('aria-label')).toBe('重置画布缩放为 100%')
+
+    ;(container!.querySelector('[data-testid="approval-canvas-zoom-in"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-zoom-label"]')?.textContent).toContain('125%')
+
+    const surface = container!.querySelector('[data-testid="approval-graph-canvas"]') as HTMLElement
+    expect(surface.style.transform).toBe('scale(1.25)')
+    surface.getBoundingClientRect = () => ({
+      left: 100,
+      top: 50,
+      width: 1000,
+      height: 750,
+      right: 1100,
+      bottom: 800,
+      x: 100,
+      y: 50,
+      toJSON: () => ({}),
+    })
+
+    const node = container!.querySelector('[data-canvas-node="approval_high"]') as HTMLElement
+    node.dispatchEvent(new Event('dragstart', { bubbles: true }))
+    const dragEnd = new Event('dragend', { bubbles: true })
+    Object.defineProperties(dragEnd, {
+      clientX: { value: 344 },
+      clientY: { value: 210 },
+    })
+    node.dispatchEvent(dragEnd)
+    await flushUi()
+
+    expect(node.style.left).toBe('100px')
+    expect(node.style.top).toBe('80px')
+
+    zoomLabel.click()
+    await flushUi()
+    expect(surface.style.transform).toBe('scale(1)')
   })
 
   it('shows business labels instead of internal topology keys in the inspector', async () => {
