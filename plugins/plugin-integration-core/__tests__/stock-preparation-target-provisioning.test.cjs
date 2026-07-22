@@ -59,6 +59,16 @@ function createContext({
       }
       return out
     },
+    // W2: DB-backed existence — only EXISTING (non-missing) fields resolve.
+    async resolveExistingObjectFieldIds(input) {
+      calls.resolveExistingObjectFieldIds = calls.resolveExistingObjectFieldIds || []
+      calls.resolveExistingObjectFieldIds.push(input)
+      const out = {}
+      for (const fieldId of input.fieldIds || []) {
+        if (!currentMissing.has(fieldId)) out[fieldId] = `fld_${fieldId}`
+      }
+      return out
+    },
     async ensureObject(input) {
       calls.ensureObject.push({
         projectId: input.projectId,

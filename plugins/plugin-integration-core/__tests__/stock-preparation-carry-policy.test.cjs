@@ -231,7 +231,7 @@ function sourceSelectionEdges() {
     manualRowReattach: 'propose_confirm',
   })
   assert.equal(decision.decision, CARRY_DECISIONS.CARRY_VIA_CONFIRM, 'de-dup by key: one source key = one match')
-  assert.deepEqual(__internals.findComponentSourceMatches(dupKey, newAdd('k-new', 'c1')).map((r) => r.idempotencyKey), ['old-1'])
+  assert.deepEqual(__internals.findComponentSourceMatches(dupKey, newAdd('k-new', 'c1')).matches.map((r) => r.idempotencyKey), ['old-1'])
 }
 
 // classifyCarry is the pure branch selector — pin every cell of the decision table.
@@ -261,7 +261,7 @@ function mutationAutoPickAmbiguity() {
     removedRow('old-c', 'c1', { leadTimeDays: 3 }),
   ]
   const newRow = newAdd('k-new', 'c1')
-  const matches = __internals.findComponentSourceMatches(three, newRow)
+  const { matches } = __internals.findComponentSourceMatches(three, newRow)
   assert.equal(matches.length, 3, 'fixture yields a genuine 1→N')
 
   // The mutant output: an auto-picked carry instead of a hold.
@@ -383,8 +383,32 @@ function exportSurfaceClean() {
   walk(mod, 'module')
 }
 
+// review P2: two prior rows sharing an idempotencyKey but carrying DIFFERENT human
+// content must HOLD — and the outcome must not depend on input order.
+function sameKeyConflictingContentHolds() {
+  const rowA = removedRow('dup', 'c1', { notes: 'a' })
+  const rowB = removedRow('dup', 'c1', { materialType: 'b' }) // same key, different human content
+  const policy = { carryKey: 'component_source_id', manualRowReattach: 'propose_confirm' }
+
+  const forward = planCarry([rowA, rowB], newAdd('k-new', 'c1'), policy)
+  assert.equal(forward.decision, CARRY_DECISIONS.MANUAL_CONFIRM, 'same-key conflicting content → hold (forward order)')
+  assert.equal(forward.carry, false, 'a conflicting hold never carries any human field')
+
+  const reversed = planCarry([rowB, rowA], newAdd('k-new', 'c1'), policy)
+  assert.equal(reversed.decision, CARRY_DECISIONS.MANUAL_CONFIRM, 'same-key conflicting content → hold (reversed order)')
+  // Order-independence: the two orderings must not disagree, and neither silently carries.
+  assert.equal(forward.decision, reversed.decision, 'decision is order-independent')
+
+  // Identical duplicates under one key are still a clean single match (dedup is fine).
+  const idA = removedRow('dup2', 'c2', { notes: 'same' })
+  const idB = removedRow('dup2', 'c2', { notes: 'same' })
+  const clean = planCarry([idA, idB], newAdd('k-new2', 'c2'), { carryKey: 'component_source_id', manualRowReattach: 'propose_confirm' })
+  assert.equal(clean.decision, CARRY_DECISIONS.CARRY_VIA_CONFIRM, 'identical duplicates collapse to one clean match')
+}
+
 function main() {
   frozenVocabularies()
+  sameKeyConflictingContentHolds()
   policyNormalization()
   inputValidation()
   idempotencyKeyIsAlwaysNoCarry()

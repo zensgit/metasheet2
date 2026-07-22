@@ -56,7 +56,7 @@
 
 | 刀 | 门 | 状态 |
 |---|---|---|
-| **模板演进 rung** | stock-prep 设计门 | **P3/P5 共享前置**(审阅 P2-2):`mvp-provisioning.cjs:215` 对 existing+incomplete 表 fail-closed「never repairs in place」,无迁移 rung。加任何 plm_system 列前须先建。**本轮识别为下一刀,未建**(改承重 provisioning) |
+| **模板演进 rung(W2)** | stock-prep 设计门 | **✅ 已建(unarmed)**:additive-only `ensureMissingObjectFields`(DO NOTHING)+ MVP/canonical governed repair(admin/只修缺集/plm_system·ext_ 限定/human reject 承重)+ DB-backed 字段发现;真库 scoped repair 端到端证 + 变异(DO NOTHING→UPDATE / human-reject 各红)。plugin.ts/plugin-scope.ts 已接线(assertObjectScope),type-check 绿。ensure 的 fail-closed throw 不动;repair 未接路由。见 §6 审阅吸收 |
 | **P0** production-policy 生产激活 | 🔶 owner 配置决策 | 接线**已完成**(#3199,审阅 P1-1 纠正我原「未接线」误判)。剩 = owner 设 `context.config.stockPrepApplyProduction` + 验收。**非代码刀,owner 决策,不替你开** |
 | **P-T3** K3-Save ERP 写回解锁 | 🔶 需求门 | 参考系统「写回 K3」的**真 go-live 前置**(审阅 P1-1 揭示,原计划遗漏)。T3 external-write 线,大工程。**未建,待具名用例过需求门** |
 | **P5** identity-convention profile | 设计门 + D2 依赖 | 载体是 D 线 binding(#4520 未合 PROPOSED)。**出设计,不建载体** |
@@ -68,11 +68,22 @@
 |---|---|---|
 | **M1 可行性实证** | P1a | ✅ **完成**(4/4 真库绿+CI 白名单) |
 | **M2 可演示试点** | P1b+P2 | 模块+配置包**已构建**;接线 hook 待 ratify;P2 通知限人工/日程 |
-| **M3 治理内核补齐** | P3+P4+P5 | P3/P4 模块+变异**已构建**;P3 待模板演进 rung;P5 待 D2 |
+| **M3 治理内核补齐** | P3+P4+P5 | P3/P4/W2 模块+变异**已构建**;P3 接线待 W2 路由(rung 已就绪);P5 待 D2 |
 | **M4 配置样例** | P6 | gallery 包**已构建** |
 | **M5a canonical apply go-live** | P0 | owner 配置决策 |
 | **M5b ERP 写回 go-live** | P-T3 | 需求门(真前置) |
 | **M6 通用性证明** | P7 | D 线拉动 |
+
+## 5b. 独立审阅吸收(codex,W2 首版 2P1+3P2 全修)
+
+W2 首版推送后经独立审阅(codex,exact head 8e107),抓出 **4 个真缺陷 + MD 陈旧**——**全部确认属实并修复**:
+- **P1(接线未通+type-check 红)**:index.ts 加了 `ensureMissingObjectFields` 但 plugin.ts 类型未声明(TS2353)、plugin-scope 未转发 → 真实插件调用只得 `*_REPAIR_API_UNAVAILABLE`。修:plugin.ts 加两方法类型、plugin-scope 转发**过 `assertObjectScope`**(写能力不裸转发)。type-check 现 0 error。
+- **P1(repair 真库发现断链)**:`resolveFieldIds` 只算稳定 id、不查 meta_fields → repair 永远「无缺列」永不写;首版真库测试**直调原语**绕过了这条链(「mock 不是契约」「触发≠验证」)。修:新增 DB-backed `resolveExistingObjectFieldIds`(真查 meta_fields),repair 改用它;新增 scoped-repair 真库测试**走真实 surface** 端到端证(ensure→删列→repair 发现+补回)。
+- **P2(canonical 可注入任意字段)**:canonical repair 收 `input.template` → 修:冻结为 registry 主模板,忽略 input.template。
+- **P2(P4 依输入序静默选第一)**:同 idempotencyKey 不同 human 内容静默折第一 → 修:同 key 冲突内容 = 真歧义,**hold**(order-independent),新增 reorder 测试。
+- **P2(MD 陈旧)**:本节即修。
+
+教训:「真库测试直调原语 = wire-vs-fixture 自欺」再次自证——已入 [[feedback_triggered_is_not_verified]] / [[feedback_mock_is_not_the_contract]]。
 
 ## 6. 验证纪律记录
 
@@ -84,7 +95,7 @@
 ## 7. 下一步(owner 决策点)
 
 1. **🔶 ratify 通用备料方向**(可行性 rev-2)→ 解锁 §3 全部接线;
-2. **🔶 模板演进 rung** 设计门 → 解锁 P3 字段 + P5;
+2. **模板演进 rung(W2)已建** → 解锁 P3 字段接线 + P5;
 3. **🔶 P0** 生产激活决策(canonical apply)/ **🔶 P-T3** 需求门(ERP 写回,真 go-live);
 4. **🔶 P5** 待 D2(#4520);**🔶 P7** 待 D 线第二场景。
 

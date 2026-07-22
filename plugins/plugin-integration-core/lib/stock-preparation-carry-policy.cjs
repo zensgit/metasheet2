@@ -219,7 +219,7 @@ function normalizeNewAddRow(row) {
 // the new row's componentSourceId, and live under a DIFFERENT idempotencyKey
 // (same-key is the free UPDATE-preserve path, never a cross-key carry).
 // De-duplicated by idempotencyKey so a repeated source row is ONE match.
-function findComponentSourceMatches(prevBatchRows, newAddRow) {
+function findComponentSourceMatches(prevBatchRows, newAddRow, humanFields) {
   const targetId = String(newAddRow.componentSourceId)
   const targetKey = keyOf(newAddRow)
   const byKey = new Map()
@@ -229,9 +229,27 @@ function findComponentSourceMatches(prevBatchRows, newAddRow) {
     if (String(row.componentSourceId) !== targetId) continue
     const sourceKey = keyOf(row)
     if (!sourceKey || sourceKey === targetKey) continue
-    if (!byKey.has(sourceKey)) byKey.set(sourceKey, row)
+    if (!byKey.has(sourceKey)) byKey.set(sourceKey, [])
+    byKey.get(sourceKey).push(row)
   }
-  return Array.from(byKey.values())
+  const humanValue = (row, field) => (isBlank(row[field]) ? null : String(row[field]))
+  let conflicted = false
+  const matches = []
+  for (const rows of byKey.values()) {
+    // A repeated source row under the SAME key is one match — BUT only if the rows
+    // agree on the carried human fields. If two rows share a key yet carry DIFFERENT
+    // human content, that is a genuine, order-dependent ambiguity that must HOLD —
+    // never a silent pick of whichever came first (review P2).
+    if (rows.length > 1) {
+      const first = rows[0]
+      const differs = rows.slice(1).some((row) =>
+        (humanFields || []).some((field) => humanValue(row, field) !== humanValue(first, field)),
+      )
+      if (differs) conflicted = true
+    }
+    matches.push(rows[0])
+  }
+  return { matches, conflicted }
 }
 
 function presentHumanFields(row, humanFields) {
@@ -376,18 +394,22 @@ function planCarry(prevBatchRows, newAddRow, carryPolicy, options = {}) {
   }
 
   const prev = normalizePrevBatchRows(prevBatchRows)
-  const matches = findComponentSourceMatches(prev, row)
+  const { matches, conflicted } = findComponentSourceMatches(prev, row, humanFields)
   const matchCount = matches.length
-  const single = matchCount === 1 ? matches[0] : null
+  // Same-key-conflicting-content ALWAYS holds, whatever the match count — a genuine
+  // ambiguity is never resolved by input order (review P2).
+  const single = matchCount === 1 && !conflicted ? matches[0] : null
   const carryFields = single ? presentHumanFields(single, humanFields) : []
   const hasHumanContext = carryFields.length > 0
 
-  const classified = classifyCarry({
-    carryKey: policy.carryKey,
-    manualRowReattach: policy.manualRowReattach,
-    matchCount,
-    hasHumanContext,
-  })
+  const classified = conflicted
+    ? { decision: CARRY_DECISIONS.MANUAL_CONFIRM, conflictType: 'carry_conflicting_source_content' }
+    : classifyCarry({
+        carryKey: policy.carryKey,
+        manualRowReattach: policy.manualRowReattach,
+        matchCount,
+        hasHumanContext,
+      })
 
   let decision
   if (classified.decision === CARRY_DECISIONS.NO_CARRY) {

@@ -369,6 +369,20 @@ export interface MultitableProvisioningAPI {
     objectId: string
     fieldIds: string[]
   }): Promise<Record<string, string>>
+  // W2: DB-backed existence read — {logicalId: physicalId} only for fields that
+  // physically exist (drives the additive repair's missing-field discovery).
+  resolveExistingObjectFieldIds(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, string>>
+  // W2: additive-only field provisioning (ON CONFLICT DO NOTHING) — adds missing
+  // template columns to an already-provisioned object without overwriting existing ones.
+  ensureMissingObjectFields(input: {
+    projectId: string
+    objectId: string
+    fields: MultitableProvisioningFieldDescriptor[]
+  }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
   ensureObject(input: {
     projectId: string
     baseId?: string | null

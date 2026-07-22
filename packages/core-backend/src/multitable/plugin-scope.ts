@@ -216,6 +216,27 @@ export function createPluginScopedMultitableApi(
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.resolveFieldIds(input)
       },
+      // W2: DB-backed existence read, scoped to the plugin's own object.
+      resolveExistingObjectFieldIds: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.resolveExistingObjectFieldIds(input)
+      },
+      // W2: additive-only field write — a WRITE capability, so it must pass the same
+      // object-scope check as ensureObject/patchObjectFieldProperty (never bare-forward).
+      ensureMissingObjectFields: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.ensureMissingObjectFields(input)
+      },
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         if (hooks.ensureObjectInScope) {

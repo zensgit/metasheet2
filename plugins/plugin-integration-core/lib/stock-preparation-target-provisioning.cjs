@@ -434,14 +434,14 @@ function getCanonicalRepairApi(context) {
   if (
     !provisioning ||
     typeof provisioning.findObjectSheet !== 'function' ||
-    typeof provisioning.resolveFieldIds !== 'function' ||
+    typeof provisioning.resolveExistingObjectFieldIds !== 'function' ||
     typeof provisioning.ensureMissingObjectFields !== 'function'
   ) {
     throw new StockPreparationTargetProvisioningError(
       503,
       'CANONICAL_REPAIR_API_UNAVAILABLE',
       'stock-preparation canonical repair requires multitable.provisioning ensureMissingObjectFields API',
-      { requiredMethods: ['findObjectSheet', 'resolveFieldIds', 'ensureMissingObjectFields'] },
+      { requiredMethods: ['findObjectSheet', 'resolveExistingObjectFieldIds', 'ensureMissingObjectFields'] },
     )
   }
   return provisioning
@@ -459,7 +459,11 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
   const provisioning = getCanonicalRepairApi(context)
   assertAdminPermission(input.permission)
   const projectId = requiredString(input.projectId, 'projectId')
-  const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+  // Repair ONLY heals against the FROZEN canonical template — input.template is
+  // deliberately ignored so a caller can never inject an arbitrary field into the
+  // additive primitive (review P2: repair must not be a field-injection vector;
+  // unlike ensure, which legitimately takes a caller template for a fresh table).
+  const template = normalizeStockPreparationTemplate(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const modePrefix = optionalString(input.modePrefix) || 'canonical'
   const sheet = await provisioning.findObjectSheet({ projectId, objectId: template.objectId })
   if (!sheet) {
@@ -471,7 +475,7 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     )
   }
   const fieldIds = templateFieldIds(template)
-  const resolved = await provisioning.resolveFieldIds({ projectId, objectId: template.objectId, fieldIds })
+  const resolved = await provisioning.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
   const missingIds = missingLogicalFields(template, resolved)
   const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
   const descriptor = buildStockPreparationTargetDescriptor({ template, description: input.description })

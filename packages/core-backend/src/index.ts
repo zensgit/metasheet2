@@ -51,6 +51,7 @@ import {
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
   ensureMissingObjectFields as ensureMissingMultitableObjectFields,
+  resolveExistingObjectFieldIds as resolveExistingMultitableObjectFieldIds,
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
@@ -520,6 +521,22 @@ export class MetaSheetServer {
                 baseId,
                 descriptor,
               })
+            })
+          },
+          // W2: DB-backed field existence — repair discovers genuinely-missing
+          // template fields from meta_fields (resolveFieldIds is compute-only and
+          // never omits a field, so it cannot drive a repair).
+          resolveExistingObjectFieldIds: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return resolveExistingMultitableObjectFieldIds({ query: txQuery, projectId, objectId, fieldIds })
             })
           },
           // W2 template-evolution rung: ADDITIVE-ONLY missing-field provisioning

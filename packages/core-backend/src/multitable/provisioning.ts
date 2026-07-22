@@ -556,6 +556,39 @@ export async function ensureMissingObjectFields(
   return { addedFieldIds, skippedExistingFieldIds }
 }
 
+export type ResolveExistingObjectFieldIdsInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldIds: string[]
+}
+
+// DB-BACKED field existence (general-prep W2). `resolveObjectFieldIds` only COMPUTES
+// stable ids (it maps every requested logical id, whether or not the row exists), so
+// it can never tell a repair which fields are genuinely missing. This one queries
+// meta_fields and returns {logicalId: physicalId} ONLY for fields that physically
+// exist — so `missingLogicalFields(template, resolved)` returns the truly-missing set.
+export async function resolveExistingObjectFieldIds(
+  input: ResolveExistingObjectFieldIdsInput,
+): Promise<Record<string, string>> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const pairs = (input.fieldIds ?? []).map((logical) => ({
+    logical,
+    physical: stableMetaId('fld', input.projectId, input.objectId, logical),
+  }))
+  const out: Record<string, string> = {}
+  if (pairs.length === 0) return out
+  const res = await input.query(
+    `SELECT id FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
+    [sheetId, pairs.map((pair) => pair.physical)],
+  )
+  const present = new Set((res.rows as { id: unknown }[]).map((row) => String(row.id)))
+  for (const pair of pairs) {
+    if (present.has(pair.physical)) out[pair.logical] = pair.physical
+  }
+  return out
+}
+
 export async function ensureObject(
   input: EnsureObjectInput,
 ): Promise<{
