@@ -21,7 +21,12 @@ const {
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   buildSheetStructureFromMvpTableTemplate,
+  HUMAN_PRESERVED_FIELD_IDS,
 } = require('./stock-preparation-templates.cjs')
+
+// W2 template-evolution rung: the repair action's namespace positive control —
+// a repaired-in field must be plm_system OR a valid ext_ tenant extension id.
+const { assertExtensionFieldIdValid } = require('./stock-preparation-extension-namespace.cjs')
 
 const {
   StockPreparationTargetProvisioningError,
@@ -303,6 +308,111 @@ async function ensureStockPreparationMvpTargets({ context, projectId, permission
   }
 }
 
+// W2 repair needs the ADDITIVE-ONLY ensureMissingObjectFields (never ensureObject,
+// whose DO-UPDATE would overwrite existing fields). Same accessor-fail-closed shape.
+function getMvpRepairApi(context) {
+  const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+  if (
+    !provisioning ||
+    typeof provisioning.findObjectSheet !== 'function' ||
+    typeof provisioning.resolveFieldIds !== 'function' ||
+    typeof provisioning.ensureMissingObjectFields !== 'function'
+  ) {
+    throw new StockPreparationTargetProvisioningError(
+      503,
+      'MVP_REPAIR_API_UNAVAILABLE',
+      'stock-preparation MVP repair requires multitable.provisioning ensureMissingObjectFields API',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds', 'ensureMissingObjectFields'] },
+    )
+  }
+  return provisioning
+}
+
+// W2 template-evolution rung — the EXPLICIT repair verb (never folded into ensure;
+// the `:232` MVP_TARGET_SCHEMA_INCOMPLETE throw stays a hard fail-closed). Governance:
+//   1. admin-gated;
+//   2. repair set = missingLogicalFields(template, resolved) ONLY — the caller passes
+//      objectIds, never a free field list, so no arbitrary field can be injected;
+//   3. every repaired-in field must be `plm_system` OR pass the ext_ namespace
+//      validator — a `human_preserved` new column is rejected (REPAIR_HUMAN_FIELD_FORBIDDEN):
+//      the human whitelist (templates.cjs) is the load-bearing vocab of the apply-writer
+//      ownership wall + carry-policy; growing it is a separate design gate, never a repair
+//      back door;
+//   4. existing columns are constructively untouched by ensureMissingObjectFields
+//      (ON CONFLICT DO NOTHING; proven at the primitive layer by the W2 realdb test).
+async function repairStockPreparationMvpTargets({ context, projectId, permission, objectIds } = {}) {
+  assertAdminPermission(permission)
+  const provisioning = getMvpRepairApi(context || {})
+  const scopedProjectId = requiredString(projectId, 'projectId')
+  const templates = resolveTargetTemplates(objectIds)
+  const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
+  const tables = []
+  for (const template of templates) {
+    const sheet = await provisioning.findObjectSheet({ projectId: scopedProjectId, objectId: template.objectId })
+    if (!sheet) {
+      // Repair only heals an EXISTING table's missing template fields; a wholly
+      // absent table is an ensure/provision concern, not a repair one.
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'MVP_REPAIR_TARGET_ABSENT',
+        'stock-preparation MVP repair requires an already-provisioned table',
+        { objectId: template.objectId },
+      )
+    }
+    const fieldIds = templateFieldIds(template)
+    const resolved = await provisioning.resolveFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
+    const missingIds = missingLogicalFields(template, resolved)
+    const structure = buildSheetStructureFromMvpTableTemplate(template)
+    const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
+    const missingDescriptors = []
+    for (const id of missingIds) {
+      const ownership = ownershipById.get(id)
+      if (humanSet.has(id) || ownership === 'human_preserved') {
+        throw new StockPreparationTargetProvisioningError(
+          422,
+          'REPAIR_HUMAN_FIELD_FORBIDDEN',
+          'repair may not add a human_preserved column; grow the human whitelist through its own design gate',
+          { objectId: template.objectId, fieldId: id },
+        )
+      }
+      if (ownership !== 'plm_system') {
+        // A non-plm_system template field id must be a valid tenant extension id.
+        assertExtensionFieldIdValid(id, { templateFieldIds: fieldIds })
+      }
+      const descriptor = structure.fields.find((field) => field.id === id)
+      if (descriptor) missingDescriptors.push(descriptor)
+    }
+    const result = await provisioning.ensureMissingObjectFields({
+      projectId: scopedProjectId,
+      objectId: template.objectId,
+      fields: missingDescriptors,
+    })
+    tables.push({
+      objectId: template.objectId,
+      role: template.role,
+      repaired: result.addedFieldIds.length > 0,
+      mode: result.addedFieldIds.length > 0 ? 'mvp_repaired' : 'mvp_already_ready',
+      addedFieldCount: result.addedFieldIds.length,
+      skippedExistingFieldCount: result.skippedExistingFieldIds.length,
+      templateVersion: template.version,
+    })
+  }
+  return {
+    ready: true,
+    tables,
+    evidence: {
+      action: 'stock_preparation_mvp_repair',
+      repairedTableCount: tables.filter((table) => table.repaired).length,
+      tables: tables.map((table) => ({
+        objectId: table.objectId,
+        mode: table.mode,
+        addedFieldCount: table.addedFieldCount,
+        templateVersion: table.templateVersion,
+      })),
+    },
+  }
+}
+
 // Option sync needs patchObjectFieldProperty (not ensureObject); this mirrors
 // the canonical option-sync API accessor's method requirement while keeping the
 // single StockPreparationTargetProvisioningError gate shape.
@@ -516,6 +626,7 @@ async function syncStockPreparationMvpOptions({ context, projectId, permission, 
 }
 
 module.exports = {
+  repairStockPreparationMvpTargets,
   inspectStockPreparationMvpTargets,
   ensureStockPreparationMvpTargets,
   syncStockPreparationMvpOptions,

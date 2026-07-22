@@ -10,8 +10,12 @@ const crypto = require('node:crypto')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
+  HUMAN_PRESERVED_FIELD_IDS,
   buildSheetStructureFromTemplate,
 } = require('./stock-preparation-templates.cjs')
+
+// W2 canonical repair: namespace positive control for a repaired-in field.
+const { assertExtensionFieldIdValid } = require('./stock-preparation-extension-namespace.cjs')
 
 const CANONICAL_FIELD_MAP_MODE = 'canonical'
 const SANDBOX_FIELD_MAP_MODE = 'sandbox'
@@ -423,8 +427,93 @@ async function ensureStockPreparationTarget(input = {}) {
   }
 }
 
+// W2 canonical repair needs the additive-only ensureMissingObjectFields (never
+// ensureObject's DO UPDATE). Same accessor-fail-closed shape as getProvisioningApi.
+function getCanonicalRepairApi(context) {
+  const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+  if (
+    !provisioning ||
+    typeof provisioning.findObjectSheet !== 'function' ||
+    typeof provisioning.resolveFieldIds !== 'function' ||
+    typeof provisioning.ensureMissingObjectFields !== 'function'
+  ) {
+    throw new StockPreparationTargetProvisioningError(
+      503,
+      'CANONICAL_REPAIR_API_UNAVAILABLE',
+      'stock-preparation canonical repair requires multitable.provisioning ensureMissingObjectFields API',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds', 'ensureMissingObjectFields'] },
+    )
+  }
+  return provisioning
+}
+
+// W2 template-evolution rung — canonical main-table repair. This is where the
+// human-field-reject guard is LOAD-BEARING: the canonical main carries the 8
+// HUMAN_PRESERVED_FIELD_IDS, so a repair that could add a human column would be a
+// back door around the apply-writer ownership wall's vocab. Same discipline as the
+// MVP repair: admin-gated, missing-set-only, plm_system/ext_ only, ensure's
+// TARGET_SCHEMA_INCOMPLETE throw left untouched; existing columns untouched by the
+// DO-NOTHING primitive (proven at the primitive layer, W2 realdb test).
+async function repairStockPreparationCanonicalTarget(input = {}) {
+  const context = input.context || {}
+  const provisioning = getCanonicalRepairApi(context)
+  assertAdminPermission(input.permission)
+  const projectId = requiredString(input.projectId, 'projectId')
+  const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+  const modePrefix = optionalString(input.modePrefix) || 'canonical'
+  const sheet = await provisioning.findObjectSheet({ projectId, objectId: template.objectId })
+  if (!sheet) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'CANONICAL_REPAIR_TARGET_ABSENT',
+      'stock-preparation canonical repair requires an already-provisioned target',
+      { objectId: template.objectId },
+    )
+  }
+  const fieldIds = templateFieldIds(template)
+  const resolved = await provisioning.resolveFieldIds({ projectId, objectId: template.objectId, fieldIds })
+  const missingIds = missingLogicalFields(template, resolved)
+  const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
+  const descriptor = buildStockPreparationTargetDescriptor({ template, description: input.description })
+  const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
+  const missingDescriptors = []
+  for (const id of missingIds) {
+    const ownership = ownershipById.get(id)
+    if (humanSet.has(id) || ownership === 'human_preserved') {
+      throw new StockPreparationTargetProvisioningError(
+        422,
+        'REPAIR_HUMAN_FIELD_FORBIDDEN',
+        'repair may not add a human_preserved column; grow the human whitelist through its own design gate',
+        { objectId: template.objectId, fieldId: id },
+      )
+    }
+    if (ownership !== 'plm_system') {
+      assertExtensionFieldIdValid(id, { templateFieldIds: fieldIds })
+    }
+    const found = descriptor.fields.find((field) => field.id === id)
+    if (found) missingDescriptors.push(found)
+  }
+  const result = await provisioning.ensureMissingObjectFields({
+    projectId,
+    objectId: template.objectId,
+    fields: missingDescriptors,
+  })
+  return {
+    ready: true,
+    mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
+    evidence: {
+      action: 'stock_preparation_canonical_repair',
+      mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
+      addedFieldCount: result.addedFieldIds.length,
+      skippedExistingFieldCount: result.skippedExistingFieldIds.length,
+      templateVersion: template.version,
+    },
+  }
+}
+
 module.exports = {
   CANONICAL_FIELD_MAP_MODE,
+  repairStockPreparationCanonicalTarget,
   SANDBOX_FIELD_MAP_MODE,
   CANONICAL_KEY_FIELD,
   REQUIRED_PERMISSION,

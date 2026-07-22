@@ -19,6 +19,7 @@ const {
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
+  repairStockPreparationCanonicalTarget,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 
 const LOGICAL_FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
@@ -84,6 +85,21 @@ function createContext({
           order: index,
         })),
       }
+    },
+    async ensureMissingObjectFields(input) {
+      calls.ensureMissingObjectFields = calls.ensureMissingObjectFields || []
+      calls.ensureMissingObjectFields.push(input)
+      const addedFieldIds = []
+      const skippedExistingFieldIds = []
+      for (const field of input.fields || []) {
+        if (currentMissing.has(field.id)) {
+          currentMissing.delete(field.id)
+          addedFieldIds.push(`fld_${field.id}`)
+        } else {
+          skippedExistingFieldIds.push(`fld_${field.id}`)
+        }
+      }
+      return { addedFieldIds, skippedExistingFieldIds }
     },
   }
   const records = {
@@ -388,6 +404,50 @@ async function main() {
   assert.equal(JSON.stringify(sandboxIncompleteError.details).includes(sandboxObjectId), false, 'sandbox incomplete error hides object id')
   assert.equal(sandboxIncompleteCalls.ensureObject.length, 0, 'incomplete sandbox target is not repaired in place')
   assert.equal(sandboxIncompleteCalls.records.length, 0, 'incomplete sandbox path never uses records API')
+
+  // ---- W2 canonical repair (main table has the 8 human fields — the reject guard is load-bearing here) ----
+  {
+    // (a) repair adds a missing plm_system field on the existing canonical target.
+    const { context, calls } = createContext({ sheetExists: true, missingFields: ['path'] })
+    const repaired = await repairStockPreparationCanonicalTarget({ context, projectId: 'proj_x', permission: 'admin' })
+    assert.equal(repaired.mode, 'canonical_repaired')
+    assert.equal(repaired.evidence.addedFieldCount, 1)
+    assert.equal((calls.ensureMissingObjectFields || []).length, 1, 'canonical repair uses the additive-only primitive')
+
+    // (b) LOAD-BEARING: repair REJECTS a missing human_preserved field. The main table's
+    //     8 human fields must never grow via a repair back door.
+    const humanCtx = createContext({ sheetExists: true, missingFields: ['materialType'] })
+    let humanErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: humanCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      humanErr = error
+    }
+    assert.ok(humanErr instanceof StockPreparationTargetProvisioningError, 'human-field repair rejected')
+    assert.equal(humanErr.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
+    assert.equal((humanCtx.calls.ensureMissingObjectFields || []).length, 0, 'no additive write when a human field is in the repair set')
+
+    // (c) absent target fails closed.
+    const absentCtx = createContext({ sheetExists: false })
+    let absentErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: absentCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      absentErr = error
+    }
+    assert.ok(absentErr instanceof StockPreparationTargetProvisioningError && absentErr.code === 'CANONICAL_REPAIR_TARGET_ABSENT')
+
+    // (d) non-admin rejected before provisioning access.
+    const rbacCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    let deniedErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: rbacCtx.context, projectId: 'proj_x', permission: 'write' })
+    } catch (error) {
+      deniedErr = error
+    }
+    assert.ok(deniedErr, 'non-admin canonical repair rejected')
+    assert.equal(rbacCtx.calls.findObjectSheet.length, 0, 'admin gate precedes provisioning reads')
+  }
 
   console.log('stock-preparation-target-provisioning.test.cjs OK')
 }

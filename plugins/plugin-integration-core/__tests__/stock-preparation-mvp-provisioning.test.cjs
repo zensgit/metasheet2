@@ -23,6 +23,7 @@ const {
 const {
   inspectStockPreparationMvpTargets,
   ensureStockPreparationMvpTargets,
+  repairStockPreparationMvpTargets,
   syncStockPreparationMvpOptions,
   buildMvpTargetDescriptor,
   __internals: { syncMvpTemplateOptions },
@@ -57,7 +58,7 @@ function run(name, fn) {
 // In-memory provisioning fake. NO real I/O. Tracks every provisioning call and
 // records created object metadata so create -> resolve round-trips work.
 function createContext({ existingObjectIds = [], missingFieldsByObject = {}, failPatch = false } = {}) {
-  const calls = { findObjectSheet: [], resolveFieldIds: [], ensureObject: [], patchObjectFieldProperty: [] }
+  const calls = { findObjectSheet: [], resolveFieldIds: [], ensureObject: [], patchObjectFieldProperty: [], ensureMissingObjectFields: [] }
   const sheets = new Map()
   const missing = {}
   for (const objectId of existingObjectIds) {
@@ -99,6 +100,24 @@ function createContext({ existingObjectIds = [], missingFieldsByObject = {}, fai
           type: field.type,
         })),
       }
+    },
+    async ensureMissingObjectFields(input) {
+      // Additive-only fake: adds each field that is currently in the `missing` set,
+      // skips the rest; never mutates an existing field (mirrors DO NOTHING).
+      calls.ensureMissingObjectFields.push(JSON.parse(JSON.stringify(input)))
+      const gone = missing[input.objectId] || new Set()
+      const addedFieldIds = []
+      const skippedExistingFieldIds = []
+      for (const field of input.fields || []) {
+        const physicalId = `fld_${input.objectId}_${field.id}`
+        if (gone.has(field.id)) {
+          gone.delete(field.id)
+          addedFieldIds.push(physicalId)
+        } else {
+          skippedExistingFieldIds.push(physicalId)
+        }
+      }
+      return { addedFieldIds, skippedExistingFieldIds }
     },
     async patchObjectFieldProperty(input) {
       calls.patchObjectFieldProperty.push(JSON.parse(JSON.stringify(input)))
@@ -431,6 +450,51 @@ async function main() {
     for (const { name } of failures) console.error(`  - ${name}`)
     process.exit(1)
   }
+  // ---- W2 template-evolution rung: MVP repair action ----
+  // (canonical-main repair + its human-field-reject guard is tested in
+  // stock-preparation-target-provisioning.test.cjs, where the 8 human fields live.)
+  {
+    const MAP = 'plm_stock_preparation_material_mapping'
+
+    // (a) repair adds a missing plm_system field on an existing MVP table (admin), values-free.
+    const { context, calls } = createContext({
+      existingObjectIds: ALL_OBJECT_IDS.slice(),
+      missingFieldsByObject: { [MAP]: ['plmDrawingNo'] },
+    })
+    const repaired = await repairStockPreparationMvpTargets({ context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] })
+    const mapTable = repaired.tables.find((t) => t.objectId === MAP)
+    assert.equal(mapTable.mode, 'mvp_repaired')
+    assert.equal(mapTable.addedFieldCount, 1)
+    assert.equal(calls.ensureMissingObjectFields.length, 1, 'repair goes through the additive-only primitive')
+    assert.equal(repaired.evidence.repairedTableCount, 1)
+    assertValuesFree(repaired.evidence, 'repair evidence')
+
+    // (b) repair on an ABSENT table fails closed (that's an ensure concern).
+    const absentCtx = createContext({ existingObjectIds: [] })
+    await rejectsWith(
+      () => repairStockPreparationMvpTargets({ context: absentCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
+      StockPreparationTargetProvisioningError,
+      'MVP_REPAIR_TARGET_ABSENT',
+    )
+
+    // (c) non-admin is rejected before any provisioning access.
+    const rbacCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice() })
+    let denied = null
+    try {
+      await repairStockPreparationMvpTargets({ context: rbacCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'write', objectIds: [MAP] })
+    } catch (error) {
+      denied = error
+    }
+    assert.ok(denied, 'non-admin repair rejected')
+    assert.equal(rbacCtx.calls.findObjectSheet.length, 0, 'admin gate precedes all provisioning access')
+
+    // (d) nothing missing → already-ready, zero adds.
+    const readyCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice() })
+    const already = await repairStockPreparationMvpTargets({ context: readyCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] })
+    assert.equal(already.tables[0].mode, 'mvp_already_ready')
+    assert.equal(already.tables[0].addedFieldCount, 0)
+  }
+
   console.log('stock-preparation-mvp-provisioning.test.cjs OK')
 }
 
