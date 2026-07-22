@@ -13,11 +13,11 @@
 
 | 票面项 | 实现（锚点对 `e20371b1a` 实证） |
 |---|---|
-| 1. 建人写点盘点 + 已知权威 org 同事务维护 | **同事务写者×2**：admin 建人 `packages/core-backend/src/routes/admin-users.ts:3295`（`INSERT INTO user_orgs`，位于 `:3233` `transaction()` 内；org 对提交的 group/shift 校验）；目录 admission `packages/core-backend/src/directory/directory-sync.ts:5097`（DT-HARDEN-02 SAVEPOINT 内；org 自 `directory_integrations` NOT-NULL-FK 行解析，orphan fail-closed） |
+| 1. 建人写点盘点 + 已知权威 org 同事务维护 | **同事务写者×2**：admin 建人 `packages/core-backend/src/routes/admin-users.ts:3359`（`INSERT INTO user_orgs`，位于 `:3297` `transaction()` 内；org 对提交的 group/shift 校验）；目录 admission（写点经 #4526 单点化入 helper `upsertActiveUserOrgMembership`，`packages/core-backend/src/directory/directory-sync.ts:4912`，DT-HARDEN-02 SAVEPOINT 内；org 自 `directory_integrations` NOT-NULL-FK 行解析，orphan fail-closed）。**行号统一按 `3727cd92e`（#4526 后 main）校准**——#4521 落地时点为 :3295/:3233/:5097，#4526（admin-users +70/directory-sync +283 重构）后位移 |
 | 2. org 不可知路径显式策略 | **策略记录×2（行为验证零写）**：部署级注册 `AuthService.ts:299`、OAuth JIT `dingtalk-oauth.ts:615`（测试 seam `:1132`）——注释+文档+测试三件齐，不静默猜 org、不塞 `'default'` |
 | 3. 测试三件套（真库） | `tests/integration/attendance-w4pre1-user-orgs-{admission,directory-sync,policy}.db.test.ts`：fresh-DB（含同事务原子性失败注入）/ upgrade（zzzz 回填行不破坏，两写者各有）/ two-org（计数互不串）。CI 双点接线：`plugin-tests.yml:823-825` + `vitest.config.ts:382-384` |
 | 4. 双 `is_active` 口径 | 计数口径 = `user_orgs.is_active AND users.is_active`（先例 `index.cjs:15532-15541`）；写者硬编码 `is_active=TRUE`（修复轮 P2：避免镜像建人时 `isActive` 造成后激活用户永久不计数的 stuck-false），inactive→reactivate 真库回归腿锁定 |
-| 5. canonical surface 具名+行为验证 | **`POST /api/admin/users`（`admin-users.ts:3072`）**——经该面建人 ⇒ 同事务 `user_orgs` 行在（集成测试走真实路由，非直接 INSERT 模拟）。= 重 ratify 回填锁 §3① 修复动作的唯一合法来源 |
+| 5. canonical surface 具名+行为验证 | **`POST /api/admin/users`（路由 `admin-users.ts:3094`，`3727cd92e` 行号）**——经该面建人 ⇒ 同事务 `user_orgs` 行在（集成测试走真实路由，非直接 INSERT 模拟）。= 重 ratify 回填锁 §3① 修复动作的唯一合法来源 |
 | （附）W4-0-G3 两正控预跑 | 纯本地 org（零 `directory_account_links`，count>0 可算且 `directoryLinked=false`）+ 目录已联通 org——在 SQL 层验证计数语义（`setup-readiness` 端点属 W4-0，测试如实限定；锁 §9 原句「两正控在 W4-PRE-1 完成门先跑一遍，W4-0 完成门复跑」，W4-0 收口时复跑） |
 
 ## 2. 实跑记录（全部真库/真命令，修复轮后最终数）
@@ -63,11 +63,11 @@
 
 ## 6. §11.1 六项（本切片）
 
-1. 基线 SHA：`57d89bc1d`（errata #4513 合入后 main）。漂移账：`6ea0ccfab..749ba92d0` 考勤面零漂移（预检）；`749ba92d0..57d89bc1d` 即 errata 本身（docs-only）；`57d89bc1d..e20371b1a` 即 #4521 本身。
+1. 基线 SHA：`57d89bc1d`（errata #4513 合入后 main）；**锚点校准基线 = `3727cd92e`（#4526 合入后 main）**。漂移账：`6ea0ccfab..749ba92d0` 考勤面零漂移（预检）；`749ba92d0..57d89bc1d`=errata 本身（docs-only）；`57d89bc1d..e20371b1a`=#4521 本身；`e20371b1a..3727cd92e`=#4526 本身（行号位移已全量校准）。
 2. 查重：全仓双语法扫 `user_orgs` 写面——#4521 之前唯一生产写者 = 一次性迁移回填 `zzzz20260114110000`；之后 = 回填 + 本票两写者，正门完备性扫描确认无其他。
 3. 修改文件：core-backend 两写点 + 两策略注释 + 三 .db.test.ts + CI 双点 + 受影响单测 mock 同步 3 文件；零迁移、零 apps/web、零 plugin-attendance。
 4. IN/OUT：票面五项全 IN；①闭合宣布/re-ratify/W4-0 明示 OUT（锁 §10 序）。
-5. 唯一写路径：`user_orgs` 生产写者 = admin-users:3295 + directory-sync:5097（+历史回填）；权限真源不变。
+5. 唯一写路径：`user_orgs` 生产写者 = admin-users:3359 + directory-sync:4912（helper 单点，#4526 后行号）+ backfill 迁移×2（历史回填 + zzzz20260721150000）；权限真源不变。
 6. 完成门：票面五项 + 三件套 + G3 预跑 + Opus 门 0 P1/P2 —— 全过（见 §2-§4）。
 
 ## 7. W4-PRE-1b 补票（owner 复核 CHANGES REQUESTED 吸收，PR #4526 = `3727cd92e`）
@@ -76,7 +76,7 @@ owner 复核（2026-07-21，对 re-ratify 首轮呈审）裁定 1P1+3P2；处置
 
 | owner finding | 处置 | 证据 |
 |---|---|---|
-| [P1] 只做新建准入，无生命周期/存量升级（bind 不写、解绑不失活 ⇒ ①假 missing + stale access） | ✅ #4526：8 生命周期写点（bind/admit/sync-loop auto-match/解绑/rebind 位移/本地建号/归档/显式 org 建人）同事务 upsert 或按「同 org 无其他有效绑定」条件失活；真实存量 backfill 迁移 `zzzz20260721150000`（幂等、不复活失活行）；S7-5 门补 `users.is_active` 双活（api-tokens/automation-executor 同型点一并） | 七案 F1-F7 + 跨 org 回归真库全绿；rebind 位移对钉钉实证不可达（`user_external_identities` 冲突守卫先抛），防御代码保留 |
+| [P1] 只做新建准入，无生命周期/存量升级（bind 不写、解绑不失活 ⇒ ①假 missing + stale access） | ✅ #4526：8 生命周期写点（bind/admit/sync-loop auto-match/解绑/rebind 位移/本地建号/归档/显式 org 建人）同事务 upsert 或按「同 org 无其他有效绑定」（#4526 机制语义）条件失活；真实存量 backfill 迁移 `zzzz20260721150000`（幂等、不复活失活行）；S7-5 门补 `users.is_active` 双活（api-tokens/automation-executor 同型点一并） | 七案 F1-F7 + 跨 org 回归真库全绿；rebind 位移对钉钉实证不可达（`user_external_identities` 冲突守卫先抛），防御代码保留 |
 | [P2] 修复动作步骤循环（仅 group/shift 才解析 org） | ✅ #4526：显式 `attendanceOrgId` 参数（`admin-users.ts:3109`），零考勤组/班次前置；F6 用例以 fresh-org 证伪旧循环；「org 存在」采 validate-can-fail（404），双读法呈 owner 待裁 | 锁 §3① 修复动作格已同步改真 |
 | [P2] 修复动作对受托管理员必 403 | ✅ 锁 §3① 行新增**角色化合同**（W4-1 强制）：平台 admin 见可操作深链；受托 `attendance:admin` 见「联系平台管理员」文案，绝不渲染必然 403 入口 | docs（本 PR）；UI 落地属 W4-1 完成门 |
 | [P2] effectiveTime 合同静默回退 | ✅ 锁 §3.2 恢复 #4509 四态 `immediate|scheduled|manual_activation|undeterminable` + `scheduled` 必带 `effectiveAt`，并记录回退勘误 | docs（本 PR） |
