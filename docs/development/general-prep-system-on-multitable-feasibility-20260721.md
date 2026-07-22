@@ -15,11 +15,11 @@ file:line 可核。
 1. ⟲ **真正的 ERP 写回欠账在 T3 线,不在 production-policy。** 审阅纠错:`production-policy.cjs` **早已接线**
    (#3199,2026-06-25 落 main;`table-actions.cjs:863` `assertStockPrepApplyAllowed` 是双写入口单一门,
    `http-routes.cjs:3494/3650` 均已传 policy)——但它门的是 **MetaSheet canonical 备料表的 apply 写**,
-   **不是 K3/ERP 写回**。要替代亚光的 K3 写回,真 go-live 欠账是 **T3 external-write 线(K3 Save 生产解锁,
+   **不是 K3/ERP 写回**。要替代该参考系统的 K3 写回,真 go-live 欠账是 **T3 external-write 线(K3 Save 生产解锁,
    现锁在 dry-run/Save-only)**——需单独一刀,过需求门。
 2. **「通用」在第二场景处证明**——循 owner 已拍板的抽取序(generalization proposal §4:第二场景=D 线
    物料主数据对账拉动 K1 抽取,非 big-bang)。v1 通用性 = 配置载体存在 + stock-prep preset #1 逐字节钉死今天行为。
-3. **三处亚光语义需新治理代码**(carry-policy、suggestion 算子、identity profile);其余全是现成 substrate。
+3. **三处参考系统语义需新治理代码**(carry-policy、suggestion 算子、identity profile);其余全是现成 substrate。
 
 ## 关键事实(改变可行性判断;审阅确认为真)
 
@@ -31,7 +31,7 @@ file:line 可核。
 ⟲ **但有一条精确边界(审阅 P2-1)**:**自动化事件只在网格路由层发射**(`univer-meta.ts:10530+`);
 **插件面 records API 与 persist unit-of-work 不发自动化事件**(`stock-preparation-persist-unit-of-work.ts`
 零 event/automation import,已核)。而这 9 表生产里的主写入方正是插件(refresh/apply/sync/confirm)。
-后果:「人在网格编辑 → 触发自动化」成立;「**批次刷新改了行 → 自动通知采购/仓库**」(亚光钉钉待办总线
+后果:「人在网格编辑 → 触发自动化」成立;「**批次刷新改了行 → 自动通知采购/仓库**」(参考系统钉钉待办总线
 最重的一类)**现有自动化表达不了**,需新 seam(插件写入口发事件/outbox)。这是 substrate 断言的真实边界。
 
 ## 三层架构(对抗收敛 + 审阅修订后)
@@ -50,7 +50,7 @@ parentSourceId+path,`bom-expansion.cjs:401-408`)→ 快照批次/行 + 阻断式
 - ⟲ **歧义落点二选一(审阅 P2-4,必须在设计锁定死)**:1→N 歧义与手工行重挂,要么走 **planner 行级 hold**
   (`MANUAL_CONFIRM`→`held`,现成,UX 弱,`apply-writer.cjs:487`),要么**扩 `exception_confirmation` 闭词表**
   (现 8 项 `stock_preparation_exception_type_v1`,无 carry 类,扩版 = 新治理代码 + confirm-reads/writes 改)。
-  **绝不学亚光 latest-createTime 静默覆盖。**
+  **绝不学参考系统 latest-createTime 静默覆盖。**
 - **suggestion 算子对**:需求日期级联(`engine.ts` DATEADD/WORKDAY,**无节假日日历**——审阅确认,`engine.ts:576`
   NETWORKDAYS 仅 2-arg)写 `plm_system` 建议列;跨项目预填候选(用已跨项目的 `plmDrawingNo` 映射表)。
   二者**只经 K2 确认进 human_preserved**。
@@ -61,7 +61,7 @@ parentSourceId+path,`bom-expansion.cjs:401-408`)→ 快照批次/行 + 阻断式
 
 ### 层 2 — approved config(版本化,owner/admin 门,非实时网格数据)
 
-- **identity-convention profile**:亚光图号语法 = **版本化+审批**的有界 ReDoS-checked 分类规则,**只发
+- **identity-convention profile**:参考系统图号语法 = **版本化+审批**的有界 ReDoS-checked 分类规则,**只发
   `plm_system` 注解列**(isSelfMadeCandidate/rootCandidate/hierarchyHint,**永不发身份**)。
   ⟲ **载体依赖 D 线(审阅 P2-5)**:main 上只有 D1 binding-member **契约模板**(`material-reconciliation-templates.cjs:812`,
   含 approved_config_version_id + system_content_key,但 schema-only 且被 MR 场景词表锁死)。**物理载体

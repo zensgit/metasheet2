@@ -20,7 +20,7 @@ P1a(substrate 证明+负例·零风险·无门) ──┬─→ P2(部门协作+
 🔶 approach ratify ─→ P1b(扩展命名空间·小门·新增非修订)─┤─→ P4(carry-policy·stock-prep 门·硬)
                                         └─→ P5(identity profile·设计门)──依赖──→ D2 binding 落地(#4520,现 PROPOSED)
 P0(production-policy 生产激活·配置/运维刀·owner 门) ──→ [canonical 表 apply go-live]
-⟲ P-T3(K3-Save ERP 写回生产解锁·真代码·需求门) ──→ [真实 ERP 写回 go-live·亚光替代的真前置]
+⟲ P-T3(K3-Save ERP 写回生产解锁·真代码·需求门) ──→ [真实 ERP 写回 go-live·参考系统替代的真前置]
 P7(K1 kernel 抽取) ── 由 D 线第二场景上线拉动(owner §4 已拍板) ·owner 门
 ```
 
@@ -58,8 +58,8 @@ P3/P4/P5 三刀 P1 之后可**并行**;P0 与 P-T3 是**两个不同的 go-live 
 
 ### ⟲ ▢ P-T3 — K3-Save ERP 写回生产解锁(新增·真欠账·需求门)
 - **入口门**:需求门(具名用例)+ T3 external-write 线设计门。
-- **审阅 P1-1 揭示**:亚光的 K3 写回(物料/BOM/ECN/生产任务 Save)对应我们的 **T3 external-write 线**,现锁在
-  dry-run/Save-only。**这才是替代亚光「写回 K3」的真 go-live 前置**,原 P0-P7 无一覆盖。
+- **审阅 P1-1 揭示**:参考系统的 K3 写回(物料/BOM/ECN/生产任务 Save)对应我们的 **T3 external-write 线**,现锁在
+  dry-run/Save-only。**这才是替代该参考系统「写回 K3」的真 go-live 前置**,原 P0-P7 无一覆盖。
 - **做**:K3 Save 生产写路径治理解锁(egress/审计/幂等/values-free 全线),循 send-trigger 审计与 external-write 纪律。
 - **出口**:受治理的 K3 写回可用。**量级**:大。**风险最高刀**(真外部写)。
 
@@ -108,7 +108,7 @@ P3/P4/P5 三刀 P1 之后可**并行**;P0 与 P-T3 是**两个不同的 go-live 
 - ⟲ **审阅 P2-6 对齐**:owner §4 已拍板触发 = **V2 第二场景 = D 线物料主数据对账(charter #4484 已 ratify、
   D1 已落)拉动 K1 抽取**,**与是否有第二个备料客户无关**。原计划「第二真实客户」触发是静默改写,已改回对齐 §4;
   若确要改判触发,须显式请 owner 裁。
-- **量级**:大。**之前 stock-prep preset #1 = 亚光行为逐字节钉死,不预抽象。**
+- **量级**:大。**之前 stock-prep preset #1 = 参考系统行为逐字节钉死,不预抽象。**
 
 ## 3. 明确非目标(仅逃生舱)
 
@@ -126,7 +126,7 @@ MRP/ATP、SMB 图纸、宜搭推送(需求门)、像素复刻、human 字段跨 
 - **第 1 步(现在,零风险)**:P1a(正例+负例)。绿了「可行」变 demo,且钉死「refresh 通知需新 seam」边界。
 - **第 2 步(ratify 方向后)**:P1b + P2 并行——补扩展纪律 + 纯配置搭部门协作(通知限人工/日程触发)。
 - **第 3 步**:P3/P4/P5 按设计门并行(P4 最硬;P5 等 D2);P3/P5 先补模板演进 rung。
-- **go-live 双欠账**:P0(canonical apply 配置激活)+ P-T3(ERP 写回代码解锁)——**替代亚光 K3 写回靠 P-T3**。
+- **go-live 双欠账**:P0(canonical apply 配置激活)+ P-T3(ERP 写回代码解锁)——**替代该参考系统 K3 写回靠 P-T3**。
 - **P6 收尾;P7 由 D 线拉动。**
 
 ## 6. 里程碑(⟲ M5 拆分)
@@ -138,5 +138,5 @@ MRP/ATP、SMB 图纸、宜搭推送(需求门)、像素复刻、human 字段跨 
 | **M3 治理内核补齐** | P3+P4+P5(+模板演进 rung, +D2) | 日期级联/跨批继承/图号 profile |
 | **M4 配置样例完整** | P6 | 工艺建模 gallery 包 |
 | **⟲ M5a canonical apply go-live** | P0 | MetaSheet 备料表 apply 生产可用 |
-| **⟲ M5b ERP 写回 go-live** | P-T3 | K3 Save 受治理写回——**替代亚光的真前置** |
+| **⟲ M5b ERP 写回 go-live** | P-T3 | K3 Save 受治理写回——**替代该参考系统的真前置** |
 | **M6 通用性证明** | P7(D 线拉动) | 第二场景抽取 K1 |

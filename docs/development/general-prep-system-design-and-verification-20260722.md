@@ -58,7 +58,7 @@
 |---|---|---|
 | **模板演进 rung** | stock-prep 设计门 | **P3/P5 共享前置**(审阅 P2-2):`mvp-provisioning.cjs:215` 对 existing+incomplete 表 fail-closed「never repairs in place」,无迁移 rung。加任何 plm_system 列前须先建。**本轮识别为下一刀,未建**(改承重 provisioning) |
 | **P0** production-policy 生产激活 | 🔶 owner 配置决策 | 接线**已完成**(#3199,审阅 P1-1 纠正我原「未接线」误判)。剩 = owner 设 `context.config.stockPrepApplyProduction` + 验收。**非代码刀,owner 决策,不替你开** |
-| **P-T3** K3-Save ERP 写回解锁 | 🔶 需求门 | 亚光「写回 K3」的**真 go-live 前置**(审阅 P1-1 揭示,原计划遗漏)。T3 external-write 线,大工程。**未建,待具名用例过需求门** |
+| **P-T3** K3-Save ERP 写回解锁 | 🔶 需求门 | 参考系统「写回 K3」的**真 go-live 前置**(审阅 P1-1 揭示,原计划遗漏)。T3 external-write 线,大工程。**未建,待具名用例过需求门** |
 | **P5** identity-convention profile | 设计门 + D2 依赖 | 载体是 D 线 binding(#4520 未合 PROPOSED)。**出设计,不建载体** |
 | **P7** K1 kernel 抽取 | 🔶 owner §4 | **由 D 线第二场景拉动**(非"第二备料客户"),owner 已拍板序 |
 
