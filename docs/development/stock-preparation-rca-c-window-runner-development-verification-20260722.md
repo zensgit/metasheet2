@@ -120,6 +120,13 @@ Behavior tests additionally prove:
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
 
+Twelve committed-head mutations were applied one at a time in a detached worktree and all were
+killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
+removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
+archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
+redirect refusal removal. Each mutation was restored before the next; the source worktree remained
+clean.
+
 ## 7. Independent Adversarial Review
 
 A read-only Kimi K3 pass verified the frozen digests and locally ran the first 8/25/18 test set. It
