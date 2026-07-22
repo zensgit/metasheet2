@@ -38,9 +38,8 @@ $windowsJob = [regex]::Match(
 Check 'real Windows PowerShell 5.1 job runs the full RC-A behavior suite' (
   $windowsJob.Success -and
   $windowsJob.Groups['body'].Value -match 'shell:\s+powershell' -and
-  $windowsJob.Groups['body'].Value -match '\$powershell51' -and
-  $windowsJob.Groups['body'].Value -match 'stock-preparation-rca-window\.ps51\.tests\.ps1' -and
-  $windowsJob.Groups['body'].Value -match 'stock-preparation-rca-window\.behavior\.tests\.ps1'
+  $windowsJob.Groups['body'].Value -match '(?m)^\s*&\s+\$powershell51\b[^\r\n]*-File\s+scripts/ops/__tests__/stock-preparation-rca-window\.ps51\.tests\.ps1\s*$' -and
+  $windowsJob.Groups['body'].Value -match '(?m)^\s*&\s+\$powershell51\b[^\r\n]*-File\s+scripts/ops/__tests__/stock-preparation-rca-window\.behavior\.tests\.ps1\s*$'
 )
 foreach ($name in @(
   'Prepare-FrozenHelpers', 'Invoke-Pm2NativeCapture', 'Invoke-Pm2Projection', 'Get-Pm2Sample',

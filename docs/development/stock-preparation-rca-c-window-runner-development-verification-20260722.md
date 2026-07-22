@@ -131,7 +131,7 @@ Behavior tests additionally prove:
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
 
-Twenty-six committed-head mutations were applied one at a time in detached worktrees and all were
+Twenty-seven committed-head mutations were applied one at a time in detached worktrees and all were
 killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
 removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
 archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
@@ -139,9 +139,10 @@ redirect refusal removal, plus removal of the artifact checkout ref pin and chec
 guard. The final nine mutations disabled the PM2 stability loop, weakened its baseline comparison,
 broadened the health status, bypassed logout boolean/status checks, removed the SHA-qualified artifact
 name, accepted duplicate smoke headers, accepted zero created lines, and accepted URL query/fragment
-inputs. The final three mutations independently removed the restart-time comparison, removed the
-uptime comparison, and removed the full behavior suite from the real Windows PowerShell 5.1 job;
-each failed its dedicated guard. Every mutation ran in its own disposable worktree; the source
+inputs. The final four mutations independently removed the restart-time comparison, removed the
+uptime comparison, removed the full behavior suite from the real Windows PowerShell 5.1 job, and
+replaced that suite's `$powershell51` invocation with `pwsh`; each failed its dedicated guard. Every
+mutation ran in its own disposable worktree; the source
 worktree remained clean.
 
 ## 7. Independent Adversarial Review
