@@ -1983,17 +1983,20 @@ function fwbTargetHint(action: DraftAction): string {
 async function loadFwbLinkedTargetFields(sheetId: string): Promise<void> {
   const id = sheetId.trim()
   if (!id || fwbLinkedTargetFields.value[id] || fwbLinkedTargetLoading.value[id] || !props.client) return
+  const templateGeneration = fwbTemplateLoadGeneration
   fwbLinkedTargetLoading.value = { ...fwbLinkedTargetLoading.value, [id]: true }
   const nextErrors = { ...fwbLinkedTargetErrors.value }
   delete nextErrors[id]
   fwbLinkedTargetErrors.value = nextErrors
   try {
     const result = await props.client.listFields(id)
+    if (templateGeneration !== fwbTemplateLoadGeneration) return
     fwbLinkedTargetFields.value = {
       ...fwbLinkedTargetFields.value,
       [id]: sheetFieldsToFwbTargets(Array.isArray(result.fields) ? result.fields : []),
     }
   } catch {
+    if (templateGeneration !== fwbTemplateLoadGeneration) return
     // Do not cache a transient failure as an empty schema. Confirmation and save stay fail-closed,
     // while the explicit retry lets the author recover without closing the drawer.
     fwbLinkedTargetErrors.value = {
@@ -2003,9 +2006,11 @@ async function loadFwbLinkedTargetFields(sheetId: string): Promise<void> {
         : 'Target-sheet fields could not be loaded, so the mapping cannot be confirmed.',
     }
   } finally {
-    const nextLoading = { ...fwbLinkedTargetLoading.value }
-    delete nextLoading[id]
-    fwbLinkedTargetLoading.value = nextLoading
+    if (templateGeneration === fwbTemplateLoadGeneration) {
+      const nextLoading = { ...fwbLinkedTargetLoading.value }
+      delete nextLoading[id]
+      fwbLinkedTargetLoading.value = nextLoading
+    }
   }
 }
 
@@ -3127,6 +3132,9 @@ watch(
   () => (typeof draft.value.triggerConfig.templateId === 'string' ? draft.value.triggerConfig.templateId : ''),
   (templateId, previous) => {
     if (templateId === previous) return
+    fwbLinkedTargetFields.value = {}
+    fwbLinkedTargetErrors.value = {}
+    fwbLinkedTargetLoading.value = {}
     void loadFwbTemplateSource(templateId)
     for (const action of draft.value.actions) {
       if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue

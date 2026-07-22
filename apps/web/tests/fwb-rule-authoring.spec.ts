@@ -347,6 +347,74 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
       .toContainEqual(expect.objectContaining({ value: 'target_name', textContent: 'Name' }))
   })
 
+  it('ignores a linked-sheet response from a previous drawer generation', async () => {
+    fwbFlag = true
+    getTemplateMock.mockResolvedValue({
+      id: 'tpl_1',
+      name: 'Leave',
+      activeVersionId: 'ver_1',
+      formSchema: {
+        fields: [
+          { id: 'form_reason', type: 'text', label: 'Reason', required: true },
+          {
+            id: 'linked_order',
+            type: 'record-link',
+            label: 'Order',
+            required: true,
+            props: { baseId: 'base_target', sheetId: 'sheet_target' },
+          },
+        ],
+      },
+    })
+    const first = deferred<{ fields: Array<{ id: string; name: string; type: string }> }>()
+    const listFields = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ fields: [{ id: 'target_new', name: 'New field', type: 'string' }] })
+    const mounted = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client: mockClient({ listFields }),
+      rule: fakeRule({
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mode: 'update',
+          recordLinkFieldId: 'linked_order',
+          mappings: [{ formFieldId: 'form_reason', targetFieldId: 'target_new', targetType: 'text' }],
+          sourceTemplateVersionId: 'ver_1',
+          confirmationHash: '',
+        },
+        actions: [{
+          type: 'write_approval_form_values',
+          config: {
+            mode: 'update',
+            recordLinkFieldId: 'linked_order',
+            mappings: [{ formFieldId: 'form_reason', targetFieldId: 'target_new', targetType: 'text' }],
+            sourceTemplateVersionId: 'ver_1',
+            confirmationHash: '',
+          },
+        }],
+      }),
+    })
+    await flushPromises()
+    expect(listFields).toHaveBeenCalledTimes(1)
+
+    mounted.props.visible = false
+    await flushPromises()
+    mounted.props.visible = true
+    await flushPromises()
+    await flushPromises()
+    expect(listFields).toHaveBeenCalledTimes(2)
+
+    first.resolve({ fields: [{ id: 'target_old', name: 'Old field', type: 'string' }] })
+    await flushPromises()
+    ;(mounted.container.querySelector('[data-field="actionSummary"]') as HTMLElement | null)?.click()
+    await flushPromises()
+    const options = epOptions(mounted.container.querySelector('[data-testid="fwb-target-field-select"]') as HTMLElement)
+    expect(options).toContainEqual(expect.objectContaining({ value: 'target_new', textContent: 'New field' }))
+    expect(options.some((option) => option.value === 'target_old')).toBe(false)
+  })
+
   it('does not clear authored mappings when a destructive write-mode switch is cancelled', async () => {
     fwbFlag = true
     vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce(new Error('cancelled'))
