@@ -71,6 +71,10 @@ test('workflow checks out and verifies the exact SHA recorded in provenance', ()
   )
   assert.match(workflow, /SOURCE_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/)
   assert.match(workflow, /ref: \$\{\{ env\.SOURCE_SHA \}\}/)
+  assert.match(
+    workflow,
+    /- name: Require manual delivery builds from main\n\s+if: github\.event_name == 'workflow_dispatch'\n\s+run: test "\$GITHUB_REF" = 'refs\/heads\/main'/,
+  )
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$SOURCE_SHA"/)
   assert.match(workflow, /sha256sum "\$package_name\.zip" > "\$package_name\.zip\.sha256"/)
   assert.match(workflow, /name: stock-preparation-rca-c-window-sidecar-\$\{\{ env\.SOURCE_SHA \}\}/)

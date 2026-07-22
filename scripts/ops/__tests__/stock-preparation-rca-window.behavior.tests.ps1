@@ -27,6 +27,67 @@ Check 'input contract accepts a bare loopback origin only' (
   -not (Test-InputContract -Origin 'http://127.0.0.1:8900/#fragment' -Tenant 'tenant')
 )
 
+$firstLock = $false
+$secondLock = $false
+$reacquiredLock = $false
+try {
+  $firstLock = Enter-RcaWindowLock
+  $secondLock = Enter-RcaWindowLock
+} finally {
+  Exit-RcaWindowLock
+}
+try {
+  $reacquiredLock = Enter-RcaWindowLock
+} finally {
+  Exit-RcaWindowLock
+}
+Check 'real named mutex refuses a second window and is releasable' (
+  $firstLock -and -not $secondLock -and $reacquiredLock
+)
+
+$lockProbeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rca-window-lock-" + [guid]::NewGuid().ToString('N'))
+$lockProbeProcess = $null
+$lockProbeAcquired = $false
+try {
+  New-Item -ItemType Directory -Path $lockProbeDir | Out-Null
+  $lockProbeScript = Join-Path $lockProbeDir 'probe.ps1'
+  $lockProbeResult = Join-Path $lockProbeDir 'result.txt'
+  Set-Content -LiteralPath $lockProbeScript -Encoding ASCII -Value @'
+$ErrorActionPreference = 'Stop'
+. $env:RCA_WINDOW_LOCK_RUNNER
+$acquired = Enter-RcaWindowLock
+try {
+  [System.IO.File]::WriteAllText(
+    $env:RCA_WINDOW_LOCK_RESULT,
+    $(if ($acquired) { 'ACQUIRED' } else { 'BLOCKED' })
+  )
+} finally {
+  if ($acquired) { Exit-RcaWindowLock }
+}
+'@
+  $env:RCA_WINDOW_LOCK_RUNNER = $scriptPath
+  $env:RCA_WINDOW_LOCK_RESULT = $lockProbeResult
+  $lockProbeAcquired = Enter-RcaWindowLock
+  $hostPath = (Get-Process -Id $PID).Path
+  $lockProbeProcess = Start-Process -FilePath $hostPath -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $lockProbeScript
+  ) -PassThru -Wait
+  $lockProbeText = if (Test-Path -LiteralPath $lockProbeResult -PathType Leaf) {
+    (Get-Content -LiteralPath $lockProbeResult -Raw).Trim()
+  } else {
+    ''
+  }
+  Check 'real named mutex blocks a second PowerShell process' (
+    $lockProbeAcquired -and $lockProbeProcess.ExitCode -eq 0 -and $lockProbeText -eq 'BLOCKED'
+  )
+} finally {
+  Exit-RcaWindowLock
+  Remove-Item Env:RCA_WINDOW_LOCK_RUNNER -ErrorAction SilentlyContinue
+  Remove-Item Env:RCA_WINDOW_LOCK_RESULT -ErrorAction SilentlyContinue
+  if ($lockProbeProcess) { $lockProbeProcess.Dispose() }
+  Remove-Item -LiteralPath $lockProbeDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 function Complete-SmokeSummary {
   param([string]$Salt = 't1720000000', [string]$PassValue = 'true')
   return @"
@@ -220,8 +281,13 @@ const server = http.createServer((req, res) => {
   if (req.url === '/api/health') {
     if (mode === 'health-ok') return respond(res, 200, { ok: true })
     if (mode === 'health-no-content') return respond(res, 204)
+    if (mode === 'health-redirect') {
+      res.writeHead(302, { location: '/api/health?redirected=1' })
+      return res.end()
+    }
     return respond(res, 503, { ok: false })
   }
+  if (req.url === '/api/health?redirected=1') return respond(res, 200, { ok: true })
   if (req.url === '/api/auth/logout' && req.method === 'POST') {
     if (!String(req.headers.authorization || '').startsWith('Bearer ')) {
       return respond(res, 401, { success: false })
@@ -250,6 +316,10 @@ server.listen(0, '127.0.0.1', () => {
   Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'health-no-content'
   $healthNoContent = Invoke-HealthCheck -Origin $fixtureOrigin
   Check 'real health probe accepts exactly HTTP 200' ($healthOk -and -not $healthNoContent)
+  Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'health-redirect'
+  Check 'real health probe refuses redirects even when the target would return 200' (
+    -not (Invoke-HealthCheck -Origin $fixtureOrigin)
+  )
 
   $logoutToken = Secure 'logout-token-sentinel'
   Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'logout-ok'
@@ -348,13 +418,17 @@ function Get-Pm2Sample {
   if ($script:MockMode -eq 'final-sample-throws' -and $script:MockPm2SampleCount -eq 2) {
     throw 'simulated final sample failure'
   }
+  $finalSample = $script:MockPm2SampleCount -eq 2
+  $state = if ($finalSample -and $script:MockMode -eq 'final-state-stopped') { 'stopped' } else { 'online' }
+  $restartTime = if ($finalSample -and $script:MockMode -eq 'final-restarted') { 2 } else { 1 }
+  $flagEnabled = if ($finalSample -and $script:MockMode -eq 'final-flag-on') { $true } else { $script:MockFlag }
   return [pscustomobject]@{
-    state = 'online'
-    restartTime = 1
+    state = $state
+    restartTime = $restartTime
     uptime = 1000
     authTokenNonEmpty = $false
     adminTokenNonEmpty = $false
-    plmAutoPersistEnabledTrue = $script:MockFlag
+    plmAutoPersistEnabledTrue = $flagEnabled
   }
 }
 function Invoke-Pm2RestartStable {
@@ -370,7 +444,11 @@ function Invoke-Pm2RestartStable {
     return @{ ok = $false; reason = 'PM2_RESTART_FAILED' }
   }
   $script:MockFlag = $ExpectedFlagTrue
-  return @{ ok = $true; reason = 'NONE' }
+  return @{
+    ok = $true
+    reason = 'NONE'
+    baseline = [pscustomobject]@{ restartTime = 1; uptime = 1000 }
+  }
 }
 function Invoke-HealthCheck { param([string]$Origin) return $true }
 function Invoke-SmokeCapture {
@@ -475,6 +553,25 @@ Check 'final PM2 sampling failure cannot skip logout, helper cleanup, or lock re
   $script:MockCleanupCount -eq 1 -and
   $script:MockUnlockCount -eq 1
 )
+
+$finalEvidenceByMode = @{
+  'final-flag-on' = 'flagRestoredOff'
+  'final-state-stopped' = 'postRestorePm2StableOnline'
+  'final-restarted' = 'postRestorePm2StableOnline'
+}
+foreach ($mode in @($finalEvidenceByMode.Keys)) {
+  Reset-Mocks
+  $script:MockMode = $mode
+  $finalStateDrift = Invoke-RcaWindow -Root $opsDir -Origin 'http://127.0.0.1:8900' -Tenant 'tenant' -Workspace '' -ConfigPreflightPassed $true -ProvidedToken (Secure 'token-secret') -ProvidedConfig (Secure 'config-secret')
+  Check "final PM2 proof fails closed: $mode" (
+    $finalStateDrift.overallAcceptance -eq 'FAIL' -and
+    $finalStateDrift.failedStage -eq 'PM2_RESTORE' -and
+    $finalStateDrift[$finalEvidenceByMode[$mode]] -eq 'FAIL' -and
+    $script:MockLogoutCount -eq 1 -and
+    $script:MockCleanupCount -eq 1 -and
+    $script:MockUnlockCount -eq 1
+  )
+}
 
 Reset-Mocks
 $missingAttestation = Invoke-RcaWindow -Root $opsDir -Origin 'http://127.0.0.1:8900' -Tenant 'tenant' -Workspace '' -ConfigPreflightPassed $false -ProvidedToken (Secure 'token-secret') -ProvidedConfig (Secure 'config-secret')

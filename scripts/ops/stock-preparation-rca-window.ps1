@@ -30,7 +30,8 @@ $script:PreparedHelperDir = $null
 $script:PreparedExtendedHelper = $null
 $script:PreparedPm2Helper = $null
 $script:WindowLock = $null
-$script:WindowLockPath = $null
+$script:WindowLockOwned = $false
+$script:WindowLockName = 'Global\MetaSheetStockPreparationRcaWindow'
 $script:SmokeInvocationCount = 0
 $script:Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds }
 $script:Pm2EnvironmentAllowlist = @(
@@ -151,26 +152,39 @@ function Test-IsReparsePoint {
 }
 
 function Enter-RcaWindowLock {
-  $path = Join-Path ([System.IO.Path]::GetTempPath()) 'metasheet-stock-preparation-rca-window.lock'
+  if ($script:WindowLock) { return $false }
+  $mutex = $null
   try {
-    $script:WindowLock = [System.IO.File]::Open(
-      $path,
-      [System.IO.FileMode]::OpenOrCreate,
-      [System.IO.FileAccess]::ReadWrite,
-      [System.IO.FileShare]::None
-    )
-    $script:WindowLockPath = $path
+    $createdNew = $false
+    $mutex = New-Object System.Threading.Mutex($false, $script:WindowLockName, [ref]$createdNew)
+    $acquired = $false
+    try {
+      $acquired = $mutex.WaitOne(0, $false)
+    } catch [System.Threading.AbandonedMutexException] {
+      $acquired = $true
+    }
+    if (-not $acquired) {
+      $mutex.Dispose()
+      return $false
+    }
+    $script:WindowLock = $mutex
+    $script:WindowLockOwned = $true
     return $true
   } catch {
+    if ($mutex) { $mutex.Dispose() }
     return $false
   }
 }
 
 function Exit-RcaWindowLock {
-  if ($script:WindowLock) { $script:WindowLock.Dispose(); $script:WindowLock = $null }
-  # Keep the empty lock inode stable. Deleting it after dispose permits two processes to lock
-  # different inodes on platforms where an open file can be unlinked.
-  $script:WindowLockPath = $null
+  if (-not $script:WindowLock) { return }
+  try {
+    if ($script:WindowLockOwned) { $script:WindowLock.ReleaseMutex() }
+  } finally {
+    $script:WindowLock.Dispose()
+    $script:WindowLock = $null
+    $script:WindowLockOwned = $false
+  }
 }
 
 function Prepare-FrozenHelpers {
@@ -367,7 +381,7 @@ function Invoke-Pm2RestartStable {
     if (-not $verdict.ok) { return $verdict }
     & $script:Sleep 2
   }
-  return @{ ok = $true; reason = 'NONE' }
+  return @{ ok = $true; reason = 'NONE'; baseline = $baseline }
 }
 
 function Invoke-HealthCheck {
@@ -375,7 +389,7 @@ function Invoke-HealthCheck {
   $oldProtocol = [System.Net.ServicePointManager]::SecurityProtocol
   try {
     [System.Net.ServicePointManager]::SecurityProtocol = $oldProtocol -bor [System.Net.SecurityProtocolType]::Tls12
-    $response = Invoke-WebRequest -Uri "$Origin/api/health" -UseBasicParsing -TimeoutSec 15
+    $response = Invoke-WebRequest -Uri "$Origin/api/health" -UseBasicParsing -TimeoutSec 15 -MaximumRedirection 0
     return ($response.StatusCode -eq 200)
   } catch {
     return $false
@@ -602,6 +616,7 @@ function Invoke-RcaWindow {
   $restoreRequired = $false
   $tokenUsed = $false
   $preflightSample = $null
+  $restoreBaseline = $null
   $script:SmokeInvocationCount = 0
   Remove-Item "Env:$($script:FlagName)" -ErrorAction SilentlyContinue
   Remove-TokenCarriers
@@ -669,6 +684,7 @@ function Invoke-RcaWindow {
         $env:MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED = 'false'
         $restored = Invoke-Pm2RestartStable -ExpectedFlagTrue $false
         if ($restored.ok) {
+          $restoreBaseline = $restored.baseline
           $result.flagRestoredOff = 'PASS'
           $result.postRestorePm2StableOnline = 'PASS'
         } else {
@@ -692,11 +708,27 @@ function Invoke-RcaWindow {
 
     try {
       $finalSample = if ($script:PreparedPm2Helper) { Get-Pm2Sample } else { $null }
-      if ($finalSample -and -not $finalSample.plmAutoPersistEnabledTrue) { $result.flagRestoredOff = 'PASS' }
-      if ($finalSample -and -not $finalSample.authTokenNonEmpty -and -not $finalSample.adminTokenNonEmpty) {
-        $result.postRestoreCredentialHygiene = 'PASS'
+      if ($finalSample) {
+        $finalStable = (
+          $finalSample.state -eq 'online' -and
+          (-not $restoreBaseline -or (
+            [long]$finalSample.restartTime -le [long]$restoreBaseline.restartTime -and
+            [long]$finalSample.uptime -le [long]$restoreBaseline.uptime
+          ))
+        )
+        $result.flagRestoredOff = if (-not $finalSample.plmAutoPersistEnabledTrue) { 'PASS' } else { 'FAIL' }
+        $result.postRestorePm2StableOnline = if ($finalStable) { 'PASS' } else { 'FAIL' }
+        $result.postRestoreCredentialHygiene = if (
+          -not $finalSample.authTokenNonEmpty -and -not $finalSample.adminTokenNonEmpty
+        ) { 'PASS' } else { 'FAIL' }
       }
-      if ($restoreRequired -and -not $finalSample) {
+      $finalSafe = (
+        $finalSample -and
+        $result.flagRestoredOff -eq 'PASS' -and
+        $result.postRestorePm2StableOnline -eq 'PASS' -and
+        $result.postRestoreCredentialHygiene -eq 'PASS'
+      )
+      if ($restoreRequired -and -not $finalSafe) {
         Set-RcaFailure -Result $result -Stage 'PM2_RESTORE' -Reason 'FLAG_RESTORE_FAILED' -SafetyCritical
       }
     } catch {

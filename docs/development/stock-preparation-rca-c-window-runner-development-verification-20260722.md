@@ -35,7 +35,8 @@ The runner performs exactly this sequence:
 1. Require private approved-config preflight attestation, tenant input, token, and config reference.
    The API origin must be a bare loopback HTTP(S) origin; authenticated PowerShell calls do not
    follow redirects.
-2. Acquire an exclusive machine-local lock.
+2. Acquire an exclusive machine-wide `Global\` named mutex. A second PowerShell process cannot
+   enter the window, including from another Windows logon session.
 3. Verify and privately copy all frozen helpers.
 4. Prove the current PM2 process is online, token-clean, and effectively flag-OFF; prove health.
 5. Set `MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED=true`, restart PM2, prove stable online,
@@ -46,8 +47,8 @@ The runner performs exactly this sequence:
 8. Read the internal project and snapshot-batch endpoints and prove exactly one expected project,
    exactly one expected batch, `lineCount>=1`, the exact run handle, and `incomplete=false`.
 9. In independent cleanup blocks: scrub token carriers, set the flag literal false, restart/stabilize
-   PM2, prove effective OFF and token hygiene, prove health, revoke the token, remove helpers, and
-   release the lock.
+   PM2, then re-sample and recompute effective OFF, online stability, and token hygiene from the
+   final PM2 state. Prove health, revoke the token, remove helpers, and release the lock.
 10. Emit one 17-field values-free block. Exit 0 is possible only when every result is PASS; all
     blocked or failed outcomes exit 2.
 
@@ -104,7 +105,7 @@ Local verification after the first adversarial correction:
 | --- | --- |
 | PM2 projection Node tests | 8/8 PASS |
 | PowerShell contract tests | 38/38 PASS |
-| PowerShell behavior tests | 35/35 PASS |
+| PowerShell behavior tests | 41/41 PASS |
 | Sidecar builder and provenance-wiring tests | 3/3 PASS |
 | Frozen extended + MVP + abort-provenance regressions | 95/95 PASS |
 | PowerShell parser | zero errors under the 5.1 grammar |
@@ -129,11 +130,15 @@ Behavior tests additionally prove:
 - the real PM2 stability loop takes repeated samples and independently rejects restart-time drift
   with stable uptime and uptime drift with stable restart time;
 - real loopback HTTP probes require exactly `200` health and `200 + {success:true}` logout;
+- every PowerShell HTTP leg rejects redirects; a real `302 -> 200` health fixture must remain FAIL;
 - restore failure overrides an otherwise green run;
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
+- final flag re-enable, non-online state, or restart-counter drift revokes prior restoration PASS
+  evidence and fails at `PM2_RESTORE`;
+- the machine-wide mutex blocks a second real PowerShell process and can be reacquired after release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
 
-Twenty-eight committed-head mutations were applied one at a time in detached worktrees and all were
+Thirty-three committed-head mutations were applied one at a time in detached worktrees and all were
 killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
 removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
 archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
@@ -145,6 +150,9 @@ inputs. The final four mutations independently removed the restart-time comparis
 uptime comparison, removed the full behavior suite from the real Windows PowerShell 5.1 job, and
 replaced that suite's `$powershell51` invocation with `pwsh`; each failed its dedicated guard. The
 last mutation removed one frozen-helper `eol=lf` attribute and failed the checkout-byte contract.
+The final five mutations restored permissive final-PM2 evidence, removed health redirect refusal,
+bypassed mutex contention, removed the `Global\` namespace, and removed the manual-main workflow
+gate; each failed its dedicated behavior or contract test.
 Every mutation ran in its own disposable worktree; the source
 worktree remained clean.
 
@@ -176,6 +184,12 @@ tests isolate both counters, run the full behavior suite on the target shell, de
 from `import.meta.url`, and wait for the child process before cleanup. The frozen smoke contract still
 requires the approved config reference as a local child argument; the README distinguishes that
 internal boundary from the prohibited operator command line and evidence surfaces.
+
+The final exact-head owner review found four additional delivery/safety gaps and closed them before
+approval: final PM2 evidence had been latched instead of recomputed, the health request followed
+redirects, the file lock lived in a per-user temp directory, and manual workflow dispatch was not
+restricted to `main`. The corrected runner recomputes all final evidence, uses a machine-wide named
+mutex, refuses every HTTP redirect, and fails manual delivery builds outside `refs/heads/main`.
 
 ## 8. Honest Boundary
 

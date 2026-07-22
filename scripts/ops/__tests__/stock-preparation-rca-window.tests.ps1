@@ -138,15 +138,19 @@ Check 'only the frozen internal read endpoints are used for physical readback' (
   $source -match '/stock-preparation/snapshot-batches' -and
   $source -notmatch '/records'
 )
-Check 'authenticated PowerShell requests refuse redirects' (
+Check 'every PowerShell HTTP request refuses redirects' (
+  (Find-Function 'Invoke-HealthCheck')[0].Extent.Text -match 'MaximumRedirection\s+0' -and
   (Find-Function 'Invoke-AuthenticatedJsonGet')[0].Extent.Text -match 'MaximumRedirection\s+0' -and
   (Find-Function 'Invoke-TokenLogout')[0].Extent.Text -match 'MaximumRedirection\s+0'
 )
 Check 'all three companion helper digests are full lowercase SHA-256 pins' (
   ([regex]::Matches($source, "'[0-9a-f]{64}'").Count -eq 3)
 )
-Check 'lock release keeps the stable lock inode instead of deleting it' (
-  (Find-Function 'Exit-RcaWindowLock')[0].Extent.Text -notmatch 'Remove-Item'
+Check 'window lock is a machine-wide named mutex instead of a per-user temp file' (
+  $source -match "WindowLockName\s*=\s*'Global\\MetaSheetStockPreparationRcaWindow'" -and
+  (Find-Function 'Enter-RcaWindowLock')[0].Extent.Text -match 'System\.Threading\.Mutex' -and
+  (Find-Function 'Enter-RcaWindowLock')[0].Extent.Text -match 'WaitOne\s*\(\s*0' -and
+  (Find-Function 'Enter-RcaWindowLock')[0].Extent.Text -notmatch 'GetTempPath|System\.IO\.File'
 )
 
 . $scriptPath
