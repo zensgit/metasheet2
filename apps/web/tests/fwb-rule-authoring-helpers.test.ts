@@ -8,6 +8,7 @@ import {
   isFwbActionSelectable,
   sheetFieldsToFwbTargets,
   templateSchemaToFwbFields,
+  templateSchemaToFwbRecordLinks,
 } from '../src/multitable/fwbRuleAuthoring'
 
 describe('fwbRuleAuthoring helpers', () => {
@@ -111,6 +112,36 @@ describe('fwbRuleAuthoring helpers', () => {
     })
   })
 
+  it('hydrates and saves update mode without letting stale raw config override the selected mode', () => {
+    const update = draftConfigFromFwbAction({
+      mode: 'update',
+      recordLinkFieldId: 'linked',
+      mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+      sourceTemplateVersionId: 'ver_1',
+      confirmationHash: 'server-hash',
+    })
+    expect(update).toMatchObject({ fwbWriteMode: 'update', recordLinkFieldId: 'linked' })
+    expect(buildFwbActionConfigForSave(update, sheetFieldsToFwbTargets([
+      { id: 't1', name: 'Name', type: 'string' },
+    ]), { flagEnabled: true, readOnly: false })).toMatchObject({
+      ok: true,
+      config: { mode: 'update', recordLinkFieldId: 'linked' },
+    })
+
+    update.fwbWriteMode = 'create'
+    update.recordLinkFieldId = ''
+    expect(buildFwbActionConfigForSave(update, sheetFieldsToFwbTargets([
+      { id: 't1', name: 'Name', type: 'string' },
+    ]), { flagEnabled: true, readOnly: false })).toEqual({
+      ok: true,
+      config: {
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+        sourceTemplateVersionId: 'ver_1',
+        confirmationHash: 'server-hash',
+      },
+    })
+  })
+
   it('maps sheet + template fields for the editor', () => {
     expect(sheetFieldsToFwbTargets([
       { id: 's1', name: 'Title', type: 'string' },
@@ -125,5 +156,12 @@ describe('fwbRuleAuthoring helpers', () => {
         { id: 2, label: 'bad' },
       ],
     })).toEqual([{ id: 'f1', label: 'Reason' }])
+    expect(templateSchemaToFwbRecordLinks({
+      fields: [
+        { id: 'linked', label: 'Order', type: 'record-link', props: { baseId: 'base_1', sheetId: 'sheet_1' } },
+        { id: 'broken', type: 'record-link', props: { baseId: 'base_1' } },
+        { id: 'plain', type: 'text', props: { baseId: 'base_1', sheetId: 'sheet_1' } },
+      ],
+    })).toEqual([{ id: 'linked', label: 'Order', baseId: 'base_1', sheetId: 'sheet_1' }])
   })
 })

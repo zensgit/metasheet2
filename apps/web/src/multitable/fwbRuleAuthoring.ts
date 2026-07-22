@@ -25,9 +25,15 @@ export interface FwbPersistedActionConfig {
   mappings: FwbExecutorMapping[]
   sourceTemplateVersionId: string
   confirmationHash: string
+  mode?: 'create' | 'update'
+  recordLinkFieldId?: string
 }
 
 export interface FwbDraftActionConfig {
+  /** Create a new row in the rule sheet, or update the record selected by an approval record-link field. */
+  fwbWriteMode: 'create' | 'update'
+  /** Approval form record-link field used by update mode. */
+  recordLinkFieldId: string
   /** UI mapping rows (form field → target field ids only). */
   fwbMappings: FwbMappingDraft[]
   /** Active template version the author confirmed against (bound into the server hash). */
@@ -114,6 +120,8 @@ export function fwbReadOnlyStatusMessage(
 
 export function emptyFwbDraftConfig(): FwbDraftActionConfig {
   return {
+    fwbWriteMode: 'create',
+    recordLinkFieldId: '',
     fwbMappings: [],
     sourceTemplateVersionId: '',
     confirmationHash: '',
@@ -171,7 +179,13 @@ export function draftConfigFromFwbAction(
   const sourceTemplateVersionId = typeof config.sourceTemplateVersionId === 'string'
     ? config.sourceTemplateVersionId
     : ''
+  const fwbWriteMode = config.mode === 'update' ? 'update' : 'create'
+  const recordLinkFieldId = typeof config.recordLinkFieldId === 'string'
+    ? config.recordLinkFieldId
+    : ''
   return {
+    fwbWriteMode,
+    recordLinkFieldId,
     fwbMappings: mappings.map((m) => ({ formFieldId: m.formFieldId, targetFieldId: m.targetFieldId })),
     sourceTemplateVersionId,
     confirmationHash,
@@ -181,6 +195,30 @@ export function draftConfigFromFwbAction(
     fwbPersistedRawConfig: cloneJsonValue(config),
     fwbWasPersisted: options.persisted,
   }
+}
+
+export interface FwbRecordLinkOption {
+  id: string
+  label: string
+  baseId: string
+  sheetId: string
+}
+
+/** Extract top-level, fully pinned record-link fields from the selected approval template. */
+export function templateSchemaToFwbRecordLinks(
+  formSchema: { fields?: ReadonlyArray<{ id?: unknown; label?: unknown; type?: unknown; props?: unknown }> } | null | undefined,
+): FwbRecordLinkOption[] {
+  const fields = Array.isArray(formSchema?.fields) ? formSchema.fields : []
+  return fields.flatMap((field) => {
+    if (field?.type !== 'record-link') return []
+    const id = typeof field.id === 'string' ? field.id.trim() : ''
+    const props = isPlainRecord(field.props) ? field.props : null
+    const baseId = typeof props?.baseId === 'string' ? props.baseId.trim() : ''
+    const sheetId = typeof props?.sheetId === 'string' ? props.sheetId.trim() : ''
+    if (!id || !baseId || !sheetId) return []
+    const label = typeof field.label === 'string' && field.label.trim() ? field.label.trim() : id
+    return [{ id, label, baseId, sheetId }]
+  })
 }
 
 export function sheetFieldsToFwbTargets(
@@ -247,17 +285,30 @@ export function buildFwbActionConfigForSave(
   if (!sourceTemplateVersionId) {
     return { ok: false, error: 'fwb_template_version_required' }
   }
+  if (draft.fwbWriteMode === 'update' && !draft.recordLinkFieldId.trim()) {
+    return { ok: false, error: 'fwb_record_link_required' }
+  }
 
   try {
     const mappings = toExecutorMappings(draft.fwbMappings, targetFields)
+    const config: Record<string, unknown> = {
+      ...cloneJsonValue(draft.fwbPersistedRawConfig ?? {}),
+      mappings,
+      sourceTemplateVersionId,
+      confirmationHash,
+    }
+    if (draft.fwbWriteMode === 'update') {
+      config.mode = 'update'
+      config.recordLinkFieldId = draft.recordLinkFieldId.trim()
+    } else {
+      // A persisted update action can be deliberately changed back to create mode. Do not let the
+      // lossless raw-config overlay resurrect the old update target.
+      delete config.mode
+      delete config.recordLinkFieldId
+    }
     return {
       ok: true,
-      config: {
-        ...cloneJsonValue(draft.fwbPersistedRawConfig ?? {}),
-        mappings,
-        sourceTemplateVersionId,
-        confirmationHash,
-      },
+      config,
     }
   } catch {
     // Draft no longer validates — refuse rather than invent mappings.

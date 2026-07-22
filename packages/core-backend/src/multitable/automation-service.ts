@@ -84,6 +84,7 @@ import { AutomationSuspensionService, computeActionFingerprint } from './automat
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import {
   AutomationApprovalBridgeService,
+  hasPermissionCode,
   type AutomationApprovalBridgeRow,
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'

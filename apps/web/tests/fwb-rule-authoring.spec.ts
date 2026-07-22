@@ -62,6 +62,7 @@ function mockClient(overrides: Record<string, unknown> = {}) {
       total: 1,
     })),
     listSheets: vi.fn(async () => ({ sheets: [] })),
+    listFields: vi.fn(async () => ({ fields })),
     listFormShareCandidates: vi.fn(async () => ({ items: [], total: 0, limit: 8, query: '' })),
     confirmFwbWriteback: vi.fn(async () => ({
       confirmationHash: 'server-hash-abc',
@@ -144,6 +145,98 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
     })
     await flushPromises()
     expect(actionTypeOptions(container)).toContain('write_approval_form_values')
+  })
+
+  it('authors update mode against the template-pinned record-link target', async () => {
+    fwbFlag = true
+    getTemplateMock.mockResolvedValue({
+      id: 'tpl_1',
+      name: 'Leave',
+      activeVersionId: 'ver_1',
+      formSchema: {
+        fields: [
+          { id: 'form_reason', type: 'text', label: 'Reason', required: true },
+          {
+            id: 'linked_order',
+            type: 'record-link',
+            label: 'Order',
+            required: true,
+            props: { baseId: 'base_target', sheetId: 'sheet_target' },
+          },
+        ],
+      },
+    })
+    const client = mockClient({
+      listFields: vi.fn(async (sheetId: string) => ({
+        fields: sheetId === 'sheet_target'
+          ? [{ id: 'target_name', name: 'Name', type: 'string' }]
+          : fields,
+      })),
+      confirmFwbWriteback: vi.fn(async () => ({
+        confirmationHash: 'server-update-hash',
+        templateId: 'tpl_1',
+        sourceTemplateVersionId: 'ver_1',
+        targetSheetId: 'sheet_target',
+        targetBaseId: 'base_target',
+      })),
+    })
+    const onSave = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client,
+      onSave,
+      rule: fakeRule({
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mode: 'update',
+          recordLinkFieldId: 'linked_order',
+          mappings: [{ formFieldId: 'form_reason', targetFieldId: 'target_name', targetType: 'text' }],
+          sourceTemplateVersionId: 'ver_1',
+          confirmationHash: '',
+        },
+        actions: [{
+          type: 'write_approval_form_values',
+          config: {
+            mode: 'update',
+            recordLinkFieldId: 'linked_order',
+            mappings: [{ formFieldId: 'form_reason', targetFieldId: 'target_name', targetType: 'text' }],
+            sourceTemplateVersionId: 'ver_1',
+            confirmationHash: '',
+          },
+        }],
+      }),
+    })
+    await flushPromises()
+    await flushPromises()
+    ;(container.querySelector('[data-field="actionSummary"]') as HTMLElement | null)?.click()
+    await flushPromises()
+
+    expect(epSelectValue(container.querySelector('[data-testid="fwb-write-mode"]') as HTMLElement)).toBe('update')
+    expect(epSelectValue(container.querySelector('[data-testid="fwb-record-link-field"]') as HTMLElement)).toBe('linked_order')
+    expect(client.listFields).toHaveBeenCalledWith('sheet_target')
+
+    ;(container.querySelector('[data-testid="fwb-request-confirmation"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(client.confirmFwbWriteback).toHaveBeenCalledWith('sheet_1', {
+      templateId: 'tpl_1',
+      sourceTemplateVersionId: 'ver_1',
+      mode: 'update',
+      recordLinkFieldId: 'linked_order',
+      mappings: [{ formFieldId: 'form_reason', targetFieldId: 'target_name', targetType: 'text' }],
+    })
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(onSave).toHaveBeenCalledTimes(1)
+    const payload = onSave.mock.calls[0]?.[0] as {
+      actions: Array<{ type: string; config: Record<string, unknown> }>
+    }
+    expect(payload.actions[0]?.config).toMatchObject({
+      mode: 'update',
+      recordLinkFieldId: 'linked_order',
+      confirmationHash: 'server-update-hash',
+    })
   })
 
   it('does not offer a new FWB action when completion outcomes include rejected', async () => {

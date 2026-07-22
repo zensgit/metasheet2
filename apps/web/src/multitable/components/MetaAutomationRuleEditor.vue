@@ -463,15 +463,45 @@
               <el-input v-model="action.config.message" type="textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" :rows="3" />
             </div>
 
-            <!-- write_approval_form_values (FWB-1 create-from-approval) config -->
+            <!-- write_approval_form_values (FWB create/update from approval) config -->
             <div
               v-if="action.type === 'write_approval_form_values'"
               class="meta-rule-editor__action-config"
               data-field="fwbActionConfig"
               data-testid="fwb-action-config"
             >
+              <label class="meta-rule-editor__label">{{ isZh ? '写入方式' : 'Write mode' }}</label>
+              <el-select
+                :model-value="fwbWriteModeFor(action)"
+                class="meta-rule-editor__select"
+                data-testid="fwb-write-mode"
+                :disabled="fwbActionReadOnly(action)"
+                @update:model-value="onFwbWriteModeChange(action, $event)"
+              >
+                <el-option value="create" data-value="create" :label="isZh ? '在当前表新建记录' : 'Create a record in this sheet'" />
+                <el-option value="update" data-value="update" :label="isZh ? '更新审批表单关联的记录' : 'Update the record linked in the approval form'" />
+              </el-select>
+              <template v-if="fwbWriteModeFor(action) === 'update'">
+                <label class="meta-rule-editor__label">{{ isZh ? '关联记录字段' : 'Record-link field' }}</label>
+                <el-select
+                  :model-value="typeof action.config.recordLinkFieldId === 'string' ? action.config.recordLinkFieldId : ''"
+                  class="meta-rule-editor__select"
+                  data-testid="fwb-record-link-field"
+                  :disabled="fwbActionReadOnly(action)"
+                  :placeholder="isZh ? '选择审批表单中的关联记录字段' : 'Select an approval-form record-link field'"
+                  @update:model-value="onFwbRecordLinkFieldChange(action, $event)"
+                >
+                  <el-option
+                    v-for="field in fwbRecordLinkFields"
+                    :key="field.id"
+                    :value="field.id"
+                    :data-value="field.id"
+                    :label="field.label"
+                  />
+                </el-select>
+              </template>
               <div class="meta-rule-editor__hint" data-testid="fwb-target-sheet-hint">
-                {{ isZh ? '目标表：当前规则所属表（本表新建记录）' : 'Target sheet: this rule’s sheet (creates a new record here)' }}
+                {{ fwbTargetHint(action) }}
               </div>
               <p
                 v-if="fwbActionReadOnly(action)"
@@ -490,7 +520,7 @@
               >{{ fwbConfirmError }}</p>
               <ApprovalFwbMappingEditor
                 :template-fields="fwbTemplateFields"
-                :target-fields="fwbTargetFields"
+                :target-fields="fwbTargetFieldsFor(action)"
                 :model-value="(action.config.fwbMappings as FwbMappingDraft[] | undefined) ?? []"
                 :disabled="fwbActionReadOnly(action)"
                 :loading="fwbConfirmingDraftId === action.draftId"
@@ -1429,8 +1459,10 @@ import {
   isFwbActionType,
   sheetFieldsToFwbTargets,
   templateSchemaToFwbFields,
+  templateSchemaToFwbRecordLinks,
   type FwbExecutorMapping,
   type FwbMappingConfirmationState,
+  type FwbRecordLinkOption,
 } from '../fwbRuleAuthoring'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
 import {
@@ -1546,6 +1578,8 @@ type DraftActionConfig = Record<string, unknown> & {
   parallelBranchOriginal?: Record<string, unknown> | null
   // FWB write_approval_form_values authoring (server-owned confirmationHash; mapping editor is UX only)
   fwbMappings?: FwbMappingDraft[]
+  fwbWriteMode?: 'create' | 'update'
+  recordLinkFieldId?: string
   sourceTemplateVersionId?: string
   confirmationHash?: string
   fwbConfirmationState?: FwbMappingConfirmationState
@@ -1607,17 +1641,16 @@ const featureFlags = useFeatureFlags()
 // FWB production authoring — surfaces APPROVAL_FWB_WRITEBACK_ENABLED (default OFF).
 const fwbWritebackEnabled = computed(() => featureFlags.hasFeature('approvalFwbWriteback'))
 const fwbTemplateFields = ref<Array<{ id: string; label: string }>>([])
+const fwbRecordLinkFields = ref<FwbRecordLinkOption[]>([])
+type FwbTargetField = ReturnType<typeof sheetFieldsToFwbTargets>[number]
+const fwbLinkedTargetFields = ref<Record<string, FwbTargetField[]>>({})
 const fwbActiveVersionId = ref('')
 const fwbConfirmingDraftId = ref<string | null>(null)
 const fwbConfirmError = ref('')
 const fwbConfirmationGeneration = new Map<string, number>()
 const fwbConfirmingRequestGeneration = new Map<string, number>()
 let fwbTemplateLoadGeneration = 0
-const fwbTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
-const fwbTargetSchemaSignature = computed(() => JSON.stringify({
-  sheetId: props.sheetId,
-  fields: fwbTargetFields.value,
-}))
+const fwbCreateTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
 const cronPreset = ref('0 * * * *')
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
@@ -1744,8 +1777,8 @@ const fwbWrongTriggerBlockReason = computed<string>(() => {
   if (draft.value.triggerType === 'approval.completed') return ''
   if (!draft.value.actions.some((action) => isFwbActionType(action.type))) return ''
   return isZh.value
-    ? '从审批创建记录仅可用于「审批完成」触发器，请切换触发器或移除该动作。'
-    : 'Create-record-from-approval is only allowed on the approval.completed trigger — switch the trigger or remove the action.'
+    ? '审批数据回写仅可用于「审批完成」触发器，请切换触发器或移除该动作。'
+    : 'Approval-data writeback is only allowed on the approval.completed trigger — switch the trigger or remove the action.'
 })
 
 const approvalCompletedBlockReason = computed<string>(() => {
@@ -1768,8 +1801,8 @@ const approvalCompletedBlockReason = computed<string>(() => {
     const outcomes = approvalCompletedOutcomes.value
     if (!(outcomes.length === 1 && outcomes[0] === 'approved')) {
       return zh
-        ? '从审批创建记录仅支持「通过」结果，请将完成结果设为仅通过。'
-        : 'Create-record-from-approval only supports the approved outcome — set completion outcomes to approved only.'
+        ? '审批数据回写仅支持「通过」结果，请将完成结果设为仅通过。'
+        : 'Approval-data writeback only supports the approved outcome — set completion outcomes to approved only.'
     }
   }
   return ''
@@ -1859,6 +1892,90 @@ function fwbConfirmationStateFor(action: DraftAction): FwbMappingConfirmationSta
   return action.config.confirmationHash ? 'confirmed' : 'unconfirmed'
 }
 
+function fwbWriteModeFor(action: DraftAction): 'create' | 'update' {
+  return action.config.fwbWriteMode === 'update' ? 'update' : 'create'
+}
+
+function fwbRecordLinkFor(action: DraftAction): FwbRecordLinkOption | null {
+  const fieldId = typeof action.config.recordLinkFieldId === 'string'
+    ? action.config.recordLinkFieldId
+    : ''
+  return fwbRecordLinkFields.value.find((field) => field.id === fieldId) ?? null
+}
+
+function fwbTargetFieldsFor(action: DraftAction): FwbTargetField[] {
+  if (fwbWriteModeFor(action) === 'create') return fwbCreateTargetFields.value
+  const link = fwbRecordLinkFor(action)
+  return link ? (fwbLinkedTargetFields.value[link.sheetId] ?? []) : []
+}
+
+function fwbTargetSchemaSignatureFor(action: DraftAction): string {
+  const link = fwbRecordLinkFor(action)
+  return JSON.stringify({
+    mode: fwbWriteModeFor(action),
+    recordLinkFieldId: link?.id ?? '',
+    baseId: link?.baseId ?? '',
+    sheetId: link?.sheetId ?? props.sheetId,
+    fields: fwbTargetFieldsFor(action),
+  })
+}
+
+function fwbTargetHint(action: DraftAction): string {
+  if (fwbWriteModeFor(action) === 'create') {
+    return isZh.value
+      ? '目标表：当前规则所属表（新建记录）'
+      : 'Target sheet: this rule’s sheet (creates a new record)'
+  }
+  const link = fwbRecordLinkFor(action)
+  if (!link) {
+    return isZh.value
+      ? '请选择审批表单中的关联记录字段。'
+      : 'Select a record-link field from the approval form.'
+  }
+  return isZh.value
+    ? `目标表：由「${link.label}」固定关联的表（更新所选记录）`
+    : `Target sheet: the sheet pinned by “${link.label}” (updates the selected record)`
+}
+
+async function loadFwbLinkedTargetFields(sheetId: string): Promise<void> {
+  const id = sheetId.trim()
+  if (!id || fwbLinkedTargetFields.value[id] || !props.client) return
+  try {
+    const result = await props.client.listFields(id)
+    fwbLinkedTargetFields.value = {
+      ...fwbLinkedTargetFields.value,
+      [id]: sheetFieldsToFwbTargets(Array.isArray(result.fields) ? result.fields : []),
+    }
+  } catch {
+    // Keep the target empty. Confirmation and save remain fail-closed rather than accepting a
+    // mapping against an unverified target schema.
+    fwbLinkedTargetFields.value = { ...fwbLinkedTargetFields.value, [id]: [] }
+  }
+}
+
+function resetFwbConfirmation(action: DraftAction): void {
+  advanceFwbConfirmationGeneration(action.draftId)
+  action.config.confirmationHash = ''
+  action.config.fwbConfirmationState = 'unconfirmed'
+}
+
+function onFwbWriteModeChange(action: DraftAction, value: unknown): void {
+  if (fwbActionReadOnly(action)) return
+  action.config.fwbWriteMode = value === 'update' ? 'update' : 'create'
+  if (action.config.fwbWriteMode === 'create') action.config.recordLinkFieldId = ''
+  action.config.fwbMappings = []
+  resetFwbConfirmation(action)
+}
+
+function onFwbRecordLinkFieldChange(action: DraftAction, value: unknown): void {
+  if (fwbActionReadOnly(action)) return
+  action.config.recordLinkFieldId = typeof value === 'string' ? value : ''
+  action.config.fwbMappings = []
+  resetFwbConfirmation(action)
+  const link = fwbRecordLinkFor(action)
+  if (link) void loadFwbLinkedTargetFields(link.sheetId)
+}
+
 function advanceFwbConfirmationGeneration(draftId: string): number {
   const next = (fwbConfirmationGeneration.get(draftId) ?? 0) + 1
   fwbConfirmationGeneration.set(draftId, next)
@@ -1901,11 +2018,23 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
       : 'Select an approval template with an active published version first.'
     return
   }
+  const writeMode = fwbWriteModeFor(action)
+  const recordLink = writeMode === 'update' ? fwbRecordLinkFor(action) : null
+  if (writeMode === 'update' && !recordLink) {
+    fwbConfirmError.value = isZh.value
+      ? '请先选择审批表单中的关联记录字段。'
+      : 'Select an approval-form record-link field first.'
+    return
+  }
   try {
     await ElMessageBox.confirm(
       isZh.value
-        ? '审批表单中的已映射值将写入当前多维表，并按该表的现有权限向读者可见。确认继续吗？'
-        : 'Mapped approval-form values will be written to this table and become visible under its current access rules. Continue?',
+        ? (writeMode === 'update'
+            ? '审批表单中的已映射值将更新关联记录，并按目标表的现有权限向读者可见。确认继续吗？'
+            : '审批表单中的已映射值将写入当前多维表，并按该表的现有权限向读者可见。确认继续吗？')
+        : (writeMode === 'update'
+            ? 'Mapped approval-form values will update the linked record and become visible under the target sheet’s access rules. Continue?'
+            : 'Mapped approval-form values will be written to this table and become visible under its current access rules. Continue?'),
       isZh.value ? '确认审批数据回写' : 'Confirm approval data writeback',
       {
         type: 'warning',
@@ -1921,7 +2050,9 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
   const requestSubject = {
     templateId,
     sourceTemplateVersionId,
-    targetSchemaSignature: fwbTargetSchemaSignature.value,
+    targetSchemaSignature: fwbTargetSchemaSignatureFor(action),
+    writeMode,
+    recordLinkFieldId: recordLink?.id ?? '',
     draftMappings: JSON.stringify(action.config.fwbMappings ?? []),
     executorMappings: JSON.stringify(mappings),
   }
@@ -1935,6 +2066,9 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
       templateId,
       sourceTemplateVersionId,
       mappings,
+      ...(writeMode === 'update'
+        ? { mode: 'update' as const, recordLinkFieldId: recordLink!.id }
+        : {}),
     })
     const currentAction = draft.value.actions.find((candidate) => candidate.draftId === action.draftId)
     const currentTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
@@ -1948,10 +2082,14 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
       && currentAction.config.sourceTemplateVersionId === requestSubject.sourceTemplateVersionId
       && JSON.stringify(currentAction.config.fwbMappings ?? []) === requestSubject.draftMappings
       && JSON.stringify(mappings) === requestSubject.executorMappings
-      && fwbTargetSchemaSignature.value === requestSubject.targetSchemaSignature
+      && fwbWriteModeFor(currentAction) === requestSubject.writeMode
+      && (typeof currentAction.config.recordLinkFieldId === 'string'
+        ? currentAction.config.recordLinkFieldId
+        : '') === requestSubject.recordLinkFieldId
+      && fwbTargetSchemaSignatureFor(currentAction) === requestSubject.targetSchemaSignature
       && result.templateId === requestSubject.templateId
       && result.sourceTemplateVersionId === requestSubject.sourceTemplateVersionId
-      && result.targetSheetId === props.sheetId
+      && result.targetSheetId === (recordLink?.sheetId ?? props.sheetId)
     if (!subjectStillCurrent) return
     action.config.confirmationHash = result.confirmationHash
     action.config.sourceTemplateVersionId = result.sourceTemplateVersionId
@@ -1980,6 +2118,7 @@ async function loadFwbTemplateSource(templateId: string): Promise<void> {
   const id = templateId.trim()
   if (!id) {
     fwbTemplateFields.value = []
+    fwbRecordLinkFields.value = []
     fwbActiveVersionId.value = ''
     return
   }
@@ -1990,6 +2129,7 @@ async function loadFwbTemplateSource(templateId: string): Promise<void> {
       : ''
     if (loadGeneration !== fwbTemplateLoadGeneration || currentTemplateId !== id) return
     fwbTemplateFields.value = templateSchemaToFwbFields(detail.formSchema)
+    fwbRecordLinkFields.value = templateSchemaToFwbRecordLinks(detail.formSchema)
     fwbActiveVersionId.value = typeof detail.activeVersionId === 'string' ? detail.activeVersionId : ''
     // Bind every FWB draft that lacks a version to the currently active one; a version drift
     // invalidates confirmation (hash subject includes sourceTemplateVersionId).
@@ -2006,10 +2146,15 @@ async function loadFwbTemplateSource(templateId: string): Promise<void> {
         action.config.confirmationHash = ''
         action.config.fwbConfirmationState = 'unconfirmed'
       }
+      const link = fwbRecordLinkFor(action)
+      if (fwbWriteModeFor(action) === 'update' && link) {
+        void loadFwbLinkedTargetFields(link.sheetId)
+      }
     }
   } catch {
     if (loadGeneration !== fwbTemplateLoadGeneration) return
     fwbTemplateFields.value = []
+    fwbRecordLinkFields.value = []
     fwbActiveVersionId.value = ''
   }
 }
@@ -2820,6 +2965,7 @@ watch(
       fwbConfirmingDraftId.value = null
       fwbConfirmationGeneration.clear()
       fwbConfirmingRequestGeneration.clear()
+      fwbLinkedTargetFields.value = {}
       dingTalkDestinationsError.value = ''
       personRecipientSuggestions.value = {}
       personRecipientLoading.value = {}
@@ -2881,10 +3027,14 @@ watch(
 // Target sheet/schema is part of the server confirmation subject. Clear any editable confirmation
 // as soon as the host replaces the sheet field model; the save gate remains the final race-safe
 // authority if the schema changes after this client-side observation.
-watch(fwbTargetSchemaSignature, (next, previous) => {
+watch(() => JSON.stringify(fwbCreateTargetFields.value), (next, previous) => {
   if (next === previous) return
   for (const action of draft.value.actions) {
-    if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue
+    if (
+      !isFwbActionType(action.type)
+      || fwbActionReadOnly(action)
+      || fwbWriteModeFor(action) !== 'create'
+    ) continue
     action.config.confirmationHash = ''
     action.config.fwbConfirmationState = 'unconfirmed'
     advanceFwbConfirmationGeneration(action.draftId)
@@ -4097,6 +4247,10 @@ function buildPayload(): Partial<AutomationRule> {
     }
     if (action.type === 'write_approval_form_values') {
       const draftConfig = {
+        fwbWriteMode: fwbWriteModeFor(action),
+        recordLinkFieldId: typeof action.config.recordLinkFieldId === 'string'
+          ? action.config.recordLinkFieldId
+          : '',
         fwbMappings: (action.config.fwbMappings as FwbMappingDraft[] | undefined) ?? [],
         sourceTemplateVersionId: typeof action.config.sourceTemplateVersionId === 'string'
           ? action.config.sourceTemplateVersionId
@@ -4109,15 +4263,15 @@ function buildPayload(): Partial<AutomationRule> {
         fwbPersistedRawConfig: action.config.fwbPersistedRawConfig ?? null,
         fwbWasPersisted: action.config.fwbWasPersisted === true,
       }
-      const built = buildFwbActionConfigForSave(draftConfig, fwbTargetFields.value, {
+      const built = buildFwbActionConfigForSave(draftConfig, fwbTargetFieldsFor(action), {
         flagEnabled: fwbWritebackEnabled.value,
         readOnly: fwbActionReadOnly(action),
       })
       if (!built.ok) {
         throw new Error(
           isZh.value
-            ? '从审批创建记录需先完成服务端确认，且映射配置必须有效。'
-            : 'Create-record-from-approval requires a server confirmation and a valid mapping config.',
+            ? '审批数据回写需先完成服务端确认，且映射配置必须有效。'
+            : 'Approval-data writeback requires a server confirmation and a valid mapping config.',
         )
       }
       return {

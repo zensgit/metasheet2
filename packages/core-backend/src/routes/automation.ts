@@ -44,6 +44,9 @@ import {
   isFwbTargetFieldTypeCompatible,
   isFwbWritebackEnabled,
   normalizeFwbMappings,
+  normalizeFwbUpdateRecordLinkFieldId,
+  parseFwbWriteMode,
+  resolveRecordLinkTargetFromSchema,
 } from '../multitable/approval-fwb-activation'
 import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
 
@@ -255,7 +258,8 @@ export function createAutomationRoutes(
   // The ordinary-user mapping editor asks the server to derive confirmationHash over the
   // canonicalized {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings}
   // subject. The client MUST NOT invent a hash — save re-derives and rejects any mismatch.
-  // Target is always the rule's OWN sheet (path sheetId); no cross-base / arbitrary target.
+  // Create mode targets the rule's own sheet. Update mode derives its target only from a top-level
+  // record-link field in the selected approval template; client-supplied base/sheet ids are ignored.
 
   router.post('/sheets/:sheetId/automations/fwb/confirm', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -325,6 +329,23 @@ export function createAutomationRoutes(
         },
       })
     }
+    const modeResult = parseFwbWriteMode(body.mode)
+    if (!modeResult.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'FWB_MODE_INVALID', message: 'mapping config invalid: unknown_mode' },
+      })
+    }
+    const mode = modeResult.mode
+    const linkFieldResult = mode === 'update'
+      ? normalizeFwbUpdateRecordLinkFieldId(body.recordLinkFieldId)
+      : null
+    if (linkFieldResult?.ok === false) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'FWB_RECORD_LINK_REQUIRED', message: `mapping config invalid: ${linkFieldResult.issue}` },
+      })
+    }
 
     try {
       const pool = poolManager.get()
@@ -339,28 +360,13 @@ export function createAutomationRoutes(
           error: { code: 'FWB_SOURCE_UNAVAILABLE', message: 'Approval template is unavailable' },
         })
       }
-      const [sheetResult, versionResult, fieldResult] = await Promise.all([
-        pool.query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId]),
-        pool.query(
-          `SELECT t.active_version_id, v.form_schema
-             FROM approval_templates t
-             JOIN approval_template_versions v ON v.id = t.active_version_id
-            WHERE t.id = $1`,
-          [templateId],
-        ),
-        pool.query(
-          'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
-          [sheetId, confirmedMappings.map((mapping) => mapping.targetFieldId)],
-        ),
-      ])
-      const targetBaseId = (sheetResult.rows[0] as { base_id?: unknown } | undefined)?.base_id
-      if (typeof targetBaseId !== 'string' || !targetBaseId) {
-        return res.status(404).json({
-          ok: false,
-          error: { code: 'SHEET_NOT_FOUND', message: 'Target sheet is unavailable' },
-        })
-      }
-
+      const versionResult = await pool.query(
+        `SELECT t.active_version_id, v.form_schema
+           FROM approval_templates t
+           JOIN approval_template_versions v ON v.id = t.active_version_id
+          WHERE t.id = $1`,
+        [templateId],
+      )
       const versionRow = versionResult.rows[0] as {
         active_version_id?: unknown
         form_schema?: unknown
@@ -393,6 +399,51 @@ export function createAutomationRoutes(
           error: { code: 'FWB_SOURCE_SCHEMA_STALE', message: 'The approval form schema changed' },
         })
       }
+
+      let targetSheetId = sheetId
+      let recordLinkFieldId: string | undefined
+      let derivedTarget: { baseId: string; sheetId: string } | null = null
+      if (mode === 'update') {
+        recordLinkFieldId = linkFieldResult?.ok ? linkFieldResult.recordLinkFieldId : undefined
+        derivedTarget = recordLinkFieldId
+          ? resolveRecordLinkTargetFromSchema(rawSchema, recordLinkFieldId)
+          : null
+        if (!derivedTarget) {
+          return res.status(404).json({
+            ok: false,
+            error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+          })
+        }
+        targetSheetId = derivedTarget.sheetId
+      }
+
+      const targetSheetResult = await pool.query('SELECT base_id FROM meta_sheets WHERE id = $1', [targetSheetId])
+      const targetBaseId = (targetSheetResult.rows[0] as { base_id?: unknown } | undefined)?.base_id
+      if (
+        typeof targetBaseId !== 'string'
+        || !targetBaseId
+        || (derivedTarget && targetBaseId !== derivedTarget.baseId)
+      ) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+        })
+      }
+
+      if (targetSheetId !== sheetId) {
+        const targetAccess = await resolveSheetCapabilities(req, pool.query.bind(pool), targetSheetId)
+        if (!targetAccess.capabilities.canManageSheetAccess) {
+          return res.status(403).json({
+            ok: false,
+            error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+          })
+        }
+      }
+
+      const fieldResult = await pool.query(
+        'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [targetSheetId, confirmedMappings.map((mapping) => mapping.targetFieldId)],
+      )
 
       const targetFields = new Map<string, { type: string; property: unknown }>()
       for (const row of fieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
@@ -435,15 +486,17 @@ export function createAutomationRoutes(
         templateId,
         sourceTemplateVersionId,
         targetBaseId,
-        targetSheetId: sheetId,
+        targetSheetId,
         mappings: confirmedMappings,
+        ...(mode === 'update' ? { mode: 'update' as const, recordLinkFieldId } : {}),
       })
 
       const auditMetadata = {
         templateId,
         sourceTemplateVersionId,
         targetBaseId,
-        targetSheetId: sheetId,
+        targetSheetId,
+        ...(mode === 'update' ? { mode: 'update', recordLinkFieldId } : {}),
         formFieldIds: confirmedMappings.map((mapping) => mapping.formFieldId),
         targetFieldIds: confirmedMappings.map((mapping) => mapping.targetFieldId),
         confirmationHash,
@@ -460,7 +513,7 @@ export function createAutomationRoutes(
         confirmationHash,
         templateId,
         sourceTemplateVersionId,
-        targetSheetId: sheetId,
+        targetSheetId,
         targetBaseId,
       })
     } catch (err) {

@@ -1457,8 +1457,9 @@ export class MultitableApiClient {
   /**
    * FWB production authoring — server-owned confirmation hash (FWB0 §11 Q6 gate 3).
    * The client sends the validated mapping subject; the server derives confirmationHash over
-   * {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings}. Target sheet is
-   * always the path sheetId (rule's own sheet). Never invent a client-side hash.
+   * {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings, mode/link when
+   * updating}. Create targets the path sheet; update targets the approval template's record-link
+   * pin. Never invent a client-side hash or target identifiers.
    */
   async confirmFwbWriteback(
     sheetId: string,
@@ -1471,6 +1472,8 @@ export class MultitableApiClient {
         targetType: 'text' | 'number' | 'date' | 'select'
         selectOptions?: readonly string[]
       }>
+      mode?: 'update'
+      recordLinkFieldId?: string
     },
   ): Promise<{
     confirmationHash: string

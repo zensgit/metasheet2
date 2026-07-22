@@ -988,7 +988,7 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
       return isZh ? '并行分支' : 'Parallel branch'
     case 'write_approval_form_values':
       // Product copy: create-from-approval (FWB-1). Technical action id remains write_approval_form_values.
-      return isZh ? '从审批创建记录' : 'Create record from approval'
+      return isZh ? '审批数据回写' : 'Write back approval data'
     case 'update_field':
       return isZh ? '更新字段值' : 'Update field value'
     default:

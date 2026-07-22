@@ -51,13 +51,25 @@ describe('POST /sheets/:sheetId/automations/fwb/confirm', () => {
       access: { userId: 'author_1' },
       capabilities: { canManageAutomation: true, canManageSheetAccess: true },
     })
-    query.mockImplementation(async (sql: string) => {
-      if (sql.includes('FROM meta_sheets')) return { rows: [{ base_id: 'base_1' }] }
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM meta_sheets')) {
+        return { rows: [{ base_id: params?.[0] === 'sheet_target' ? 'base_target' : 'base_1' }] }
+      }
       if (sql.includes('FROM approval_templates')) {
         return {
           rows: [{
             active_version_id: 'ver_1',
-            form_schema: { fields: [{ id: 'f1' }, { id: 'f2' }] },
+            form_schema: {
+              fields: [
+                { id: 'f1' },
+                { id: 'f2' },
+                {
+                  id: 'linked',
+                  type: 'record-link',
+                  props: { baseId: 'base_target', sheetId: 'sheet_target' },
+                },
+              ],
+            },
           }],
         }
       }
@@ -133,6 +145,89 @@ describe('POST /sheets/:sheetId/automations/fwb/confirm', () => {
       targetFieldIds: ['t1'],
       confirmationHash: expected,
     })
+  })
+
+  it('derives update confirmation from the template-pinned record-link target', async () => {
+    process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
+    pinned.setApp(buildApp())
+    const mappings = [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' as const }]
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet_1/automations/fwb/confirm')
+      .send({
+        templateId: 'tpl_1',
+        sourceTemplateVersionId: 'ver_1',
+        mode: 'update',
+        recordLinkFieldId: 'linked',
+        mappings,
+      })
+      .expect(200)
+
+    const expected = deriveFwbConfirmationHash({
+      templateId: 'tpl_1',
+      sourceTemplateVersionId: 'ver_1',
+      targetBaseId: 'base_target',
+      targetSheetId: 'sheet_target',
+      mappings,
+      mode: 'update',
+      recordLinkFieldId: 'linked',
+    })
+    expect(res.body).toMatchObject({
+      confirmationHash: expected,
+      targetBaseId: 'base_target',
+      targetSheetId: 'sheet_target',
+    })
+    expect(resolveSheetCapabilities).toHaveBeenCalledTimes(2)
+    expect(resolveSheetCapabilities.mock.calls[1]?.[2]).toBe('sheet_target')
+    const auditCall = query.mock.calls.find(([sql]) => String(sql).includes('operation_audit_logs'))
+    expect(JSON.parse(String(auditCall?.[1]?.[2]))).toMatchObject({
+      targetBaseId: 'base_target',
+      targetSheetId: 'sheet_target',
+      mode: 'update',
+      recordLinkFieldId: 'linked',
+      confirmationHash: expected,
+    })
+  })
+
+  it('refuses an update target that is not a pinned record-link field', async () => {
+    process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
+    pinned.setApp(buildApp())
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet_1/automations/fwb/confirm')
+      .send({
+        templateId: 'tpl_1',
+        sourceTemplateVersionId: 'ver_1',
+        mode: 'update',
+        recordLinkFieldId: 'f1',
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+      })
+      .expect(404)
+    expect(res.body.error?.code).toBe('FWB_TARGET_UNAVAILABLE')
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('operation_audit_logs'))).toBe(false)
+  })
+
+  it('refuses update confirmation when the author cannot manage the pinned target sheet', async () => {
+    process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
+    resolveSheetCapabilities
+      .mockResolvedValueOnce({
+        access: { userId: 'author_1' },
+        capabilities: { canManageAutomation: true, canManageSheetAccess: true },
+      })
+      .mockResolvedValueOnce({
+        access: { userId: 'author_1' },
+        capabilities: { canManageAutomation: false, canManageSheetAccess: false },
+      })
+    pinned.setApp(buildApp())
+    await request(pinned.url())
+      .post('/api/multitable/sheets/sheet_1/automations/fwb/confirm')
+      .send({
+        templateId: 'tpl_1',
+        sourceTemplateVersionId: 'ver_1',
+        mode: 'update',
+        recordLinkFieldId: 'linked',
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+      })
+      .expect(403)
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('operation_audit_logs'))).toBe(false)
   })
 
   it('rejects exact-number mappings (decimal lock)', async () => {
