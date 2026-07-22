@@ -9744,7 +9744,7 @@ import {
   toPayloadSteps as toApprovalPayloadSteps,
   type AttendanceApprovalStep as AttendanceApprovalStepModel,
 } from './attendance/attendanceApprovalSteps'
-import { useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
+import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
@@ -9857,7 +9857,7 @@ import {
   useAttendanceAdminRail,
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
-import { useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
+import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
   applyPayrollSummaryFieldsToConfig,
   buildPayrollSummaryFieldOptionsFromReportFields,
@@ -14422,6 +14422,7 @@ const {
   steps: setupReadinessSteps,
   summary: setupReadinessSummary,
   needsAttention: setupReadinessNeedsAttention,
+  lastOrgId: setupReadinessLastOrgId,
   loadReadiness: loadSetupReadiness,
 } = useAttendanceSetupReadiness()
 
@@ -14438,18 +14439,29 @@ const setupSectionActive = computed(() =>
 )
 
 // Load triggers (OD-W4-7: readiness is recomputed on every entry — no persisted wizard state):
-// entering the setup section always re-derives; opening the admin task home loads once so the
-// §6.1 readiness-derived "未完成" hint can render (never visit-history based).
+// entering the setup section always re-derives; opening the admin task home loads so the §6.1
+// readiness-derived "未完成" hint can render (never visit-history based). Charter §8.3 org 切换:
+// the badge/matrix must track the CURRENT org — a load fires whenever a readiness-consuming
+// surface (wizard section or task home) is on screen and the org changes, and re-opening the
+// task home refreshes when the loaded org no longer matches (org changed while it was closed).
+const setupTaskHomeVisible = computed(() =>
+  showAdmin.value && adminTaskHomeOpen.value && !adminForbidden.value,
+)
+
 watch(setupSectionActive, (active) => {
   if (active) void loadSetupReadiness(normalizedOrgId())
 }, { immediate: true })
 
-watch(() => showAdmin.value && adminTaskHomeOpen.value && !adminForbidden.value, (open) => {
-  if (open && setupReadinessState.value === 'idle') void loadSetupReadiness(normalizedOrgId())
+watch(setupTaskHomeVisible, (open) => {
+  if (!open) return
+  const target = resolveAttendanceReadinessOrgId(normalizedOrgId())
+  if (shouldReloadSetupReadinessOnSurfaceOpen(setupReadinessState.value, setupReadinessLastOrgId.value, target)) {
+    void loadSetupReadiness(normalizedOrgId())
+  }
 }, { immediate: true })
 
 watch(orgId, () => {
-  if (setupSectionActive.value) void loadSetupReadiness(normalizedOrgId())
+  if (setupSectionActive.value || setupTaskHomeVisible.value) void loadSetupReadiness(normalizedOrgId())
 })
 
 const {

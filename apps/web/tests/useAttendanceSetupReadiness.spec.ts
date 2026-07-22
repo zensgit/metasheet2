@@ -6,9 +6,12 @@
 // Wired into .github/workflows/attendance-web-guard.yml (run-list + both path filters).
 import { describe, expect, it, vi } from 'vitest'
 import {
+  ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH,
   ATTENDANCE_SETUP_READINESS_ENDPOINT,
   deriveAttendanceSetupEntryNeedsAttention,
   parseAttendanceSetupReadinessResponse,
+  resolveAttendanceSetupAdminUsersHref,
+  shouldReloadSetupReadinessOnSurfaceOpen,
   useAttendanceSetupReadiness,
 } from '../src/views/attendance/useAttendanceSetupReadiness'
 import {
@@ -211,5 +214,43 @@ describe('deriveAttendanceSetupEntryNeedsAttention — §6.1 badge (readiness-de
   it('true on whole-endpoint folds (forbidden / db_not_ready are non-ready gating statuses)', () => {
     expect(deriveAttendanceSetupEntryNeedsAttention(deriveAttendanceSetupReadinessSteps({ kind: 'forbidden' }))).toBe(true)
     expect(deriveAttendanceSetupEntryNeedsAttention(deriveAttendanceSetupReadinessSteps({ kind: 'db_not_ready' }))).toBe(true)
+  })
+})
+
+describe('resolveAttendanceSetupAdminUsersHref — §3① deep link stays operable under sub-path deploys', () => {
+  it('root base (and blank/undefined) → the bare canonical path', () => {
+    expect(resolveAttendanceSetupAdminUsersHref('/')).toBe('/admin/users')
+    expect(resolveAttendanceSetupAdminUsersHref('')).toBe('/admin/users')
+    expect(resolveAttendanceSetupAdminUsersHref(undefined)).toBe('/admin/users')
+    expect(resolveAttendanceSetupAdminUsersHref(null)).toBe('/admin/users')
+  })
+
+  it('sub-path base (VITE_BASE_PATH) → base-prefixed href, single slash, never hash-form', () => {
+    expect(resolveAttendanceSetupAdminUsersHref('/metasheet/')).toBe('/metasheet/admin/users')
+    expect(resolveAttendanceSetupAdminUsersHref('/metasheet')).toBe('/metasheet/admin/users')
+    expect(resolveAttendanceSetupAdminUsersHref('/a/b/')).toBe('/a/b/admin/users')
+    expect(resolveAttendanceSetupAdminUsersHref('/metasheet/')).not.toContain('#')
+  })
+
+  it('the router-push form stays base-free (the router prepends its own history base)', () => {
+    expect(ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH).toBe('/admin/users')
+  })
+})
+
+describe('shouldReloadSetupReadinessOnSurfaceOpen — §8.3 org 切换 / §6.1 badge freshness', () => {
+  it('first open (idle) always loads', () => {
+    expect(shouldReloadSetupReadinessOnSurfaceOpen('idle', null, 'default')).toBe(true)
+  })
+
+  it('re-open with the SAME loaded org does not force a reload (loaded and error states)', () => {
+    expect(shouldReloadSetupReadinessOnSurfaceOpen('loaded', 'default', 'default')).toBe(false)
+    expect(shouldReloadSetupReadinessOnSurfaceOpen('error', 'org-a', 'org-a')).toBe(false)
+  })
+
+  it('re-open after the org changed (loaded org ≠ current target) MUST reload — the previous org\'s badge verdict never lingers', () => {
+    expect(shouldReloadSetupReadinessOnSurfaceOpen('loaded', 'org-a', 'org-b')).toBe(true)
+    expect(shouldReloadSetupReadinessOnSurfaceOpen('loaded', 'default', 'org-b')).toBe(true)
+    // Never-loaded (null) with any target also reloads regardless of state.
+    expect(shouldReloadSetupReadinessOnSurfaceOpen('loaded', null, 'default')).toBe(true)
   })
 })

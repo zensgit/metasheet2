@@ -30,6 +30,21 @@ type ApiFetchFn = (path: string, options?: RequestInit) => Promise<Response>
 
 export const ATTENDANCE_SETUP_READINESS_ENDPOINT = '/api/attendance-admin/setup-readiness'
 
+/** Router-path (base-free) form of the §3① platform-admin remediation deep link. This is the form
+ *  handed to `router.push` — the router prepends its own history base. */
+export const ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH = '/admin/users'
+
+/** Resolve the §3① deep-link HREF against the app base (Vite `BASE_URL`, which is also the Vue
+ *  Router history base — `createWebHistory(import.meta.env.BASE_URL)` in main.ts, base validated
+ *  path-only in vite.config.ts). Under a `VITE_BASE_PATH` sub-path deploy (e.g. `/metasheet/`) a
+ *  bare `/admin/users` href escapes the base and lands on the server root (404) — the anchor HREF
+ *  must carry the base, while the router-push path must NOT. */
+export function resolveAttendanceSetupAdminUsersHref(base: string | null | undefined): string {
+  const trimmed = (base ?? '').trim()
+  if (!trimmed || trimmed === '/') return ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH
+  return `${trimmed.replace(/\/+$/, '')}${ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH}`
+}
+
 /** `error` = network failure / unexpected status / malformed body — the shell must render this
  *  fail-closed ("unknown, go verify"), never as ready (§3.2, charter L232). `loaded` covers the
  *  three derivable outcomes (ok / forbidden / db_not_ready): those fold into step rows. */
@@ -105,6 +120,20 @@ export function deriveAttendanceSetupEntryNeedsAttention(
   return steps.some(
     (step) => SETUP_BADGE_GATING_STEP_IDS.includes(step.stepId) && step.status !== 'ready',
   )
+}
+
+/** Charter §8.3 org 切换 / §6.1: when a readiness-consuming surface (task home badge or wizard)
+ *  becomes visible, a load is needed not only on first open (`idle`) but whenever the loaded org
+ *  no longer matches the current target — otherwise the badge/matrix keeps showing the PREVIOUS
+ *  org's verdict (stale claim about the wrong org). `loadedOrgId` is the composable's `lastOrgId`
+ *  (normalized); `targetOrgId` must be normalized by the caller with
+ *  `resolveAttendanceReadinessOrgId` before comparing. */
+export function shouldReloadSetupReadinessOnSurfaceOpen(
+  state: AttendanceSetupReadinessLoadState,
+  loadedOrgId: string | null,
+  targetOrgId: string,
+): boolean {
+  return state === 'idle' || loadedOrgId !== targetOrgId
 }
 
 interface UseAttendanceSetupReadinessOptions {

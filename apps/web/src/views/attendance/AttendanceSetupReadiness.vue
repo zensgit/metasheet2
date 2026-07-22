@@ -9,8 +9,13 @@
   Red lines carried by this template (each has a negative spec):
   - R2: every remediation is either a `select-section` emit (parent routes through
     `selectAdminSection`, the canonical query-form section switch) or a canonical
-    path/query href (step① platform-admin link → /admin/users). ZERO hash-form
-    navigation (`href="#..."`) anywhere.
+    path/query href (step① platform-admin link → base-aware /admin/users: the href
+    carries the Vite/router BASE_URL so sub-path deploys stay operable, and clicks
+    SPA-navigate through an optionally injected router). ZERO hash-form navigation
+    (`href="#..."`) anywhere.
+  - L210 预览入口: every step row shows a preview entry — ①-⑥ jump to the in-wizard ⑦
+    card (the single page renders ⑦ inline; the full preview derivation is the W4-2
+    slice per §9), ⑦ is the preview surface itself. No navigation involved (no href).
   - §3① role contract: the step① remediation branches on `viewerIsPlatformAdmin`
     (same client signal family as UserManagementView.vue's `adminAllowed` =
     useAuth().hasAdminAccess()); a delegated attendance:admin NEVER sees the
@@ -25,6 +30,7 @@
 -->
 <template>
   <div
+    ref="rootRef"
     class="setup-readiness"
     data-attendance-setup-readiness
     role="region"
@@ -116,14 +122,26 @@
 
           <div class="setup-readiness__meta">
             <span data-setup-step-impact>
-              {{ tr('Affected people', '影响人数') }}:
-              {{ summary ? `${summary.orgActiveMemberCount}` : tr('unknown', '未知') }}
+              {{ impactLabel(step) }}
             </span>
             <span data-setup-step-effective-time>
               {{ tr('Planned effect', '计划生效') }}: {{ effectiveTimeLabel(step.effectiveTime) }}
             </span>
             <span v-if="detailLabel(step.stepId)" data-setup-step-detail>
               {{ detailLabel(step.stepId) }}
+            </span>
+            <!-- L210 预览入口 — in-wizard jump to the ⑦ card (no href, R2); ⑦ is the preview itself. -->
+            <button
+              v-if="step.stepId !== 'preview'"
+              class="setup-readiness__preview-entry"
+              type="button"
+              data-setup-step-preview-entry="jump"
+              @click="jumpToPreviewStep"
+            >
+              {{ tr('Preview entry: step 7 (this page)', '预览入口：⑦ 影响范围（本页）') }}
+            </button>
+            <span v-else data-setup-step-preview-entry="self">
+              {{ tr('Preview entry: this step (read-only preview)', '预览入口：本步（只读预览）') }}
             </span>
           </div>
 
@@ -143,7 +161,7 @@
             </li>
             <li data-setup-notify-scope>
               {{ tr('Recipient scope (per-org / per-recipient)', '接收范围（按组织/按收件人）') }}:
-              {{ tr('not supported in this version — no action available', '当前版本不支持，无需操作') }}
+              {{ tr('not supported in this version — no action available', '当前版本不支持，无可用操作') }}
             </li>
           </ul>
 
@@ -154,7 +172,8 @@
                 v-if="viewerIsPlatformAdmin"
                 class="setup-readiness__action setup-readiness__action--link"
                 data-setup-remedy="user-access-admin-link"
-                href="/admin/users"
+                :href="adminUsersHref"
+                @click="openAdminUsers"
               >
                 {{ tr('Open user management to create members', '前往用户管理创建人员') }}
               </a>
@@ -220,7 +239,7 @@
                 </button>
               </li>
               <li data-setup-checklist-item="recipient-scope">
-                <span>{{ tr('Recipient scope (per-org / per-recipient)', '接收范围（按组织/按收件人）') }}: {{ tr('not supported in this version — no action available', '当前版本不支持，无需操作') }}</span>
+                <span>{{ tr('Recipient scope (per-org / per-recipient)', '接收范围（按组织/按收件人）') }}: {{ tr('not supported in this version — no action available', '当前版本不支持，无可用操作') }}</span>
               </li>
             </ul>
           </div>
@@ -246,7 +265,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, inject, ref } from 'vue'
+import { routerKey } from 'vue-router'
 import type {
   AttendanceSetupReadinessDeliveryRuntime,
   AttendanceSetupReadinessEffectiveTime,
@@ -258,7 +278,11 @@ import type {
   AttendanceSetupStepId,
   AttendancePunchPolicyPosture,
 } from './attendanceSetupReadiness'
-import type { AttendanceSetupReadinessLoadState } from './useAttendanceSetupReadiness'
+import {
+  ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH,
+  resolveAttendanceSetupAdminUsersHref,
+  type AttendanceSetupReadinessLoadState,
+} from './useAttendanceSetupReadiness'
 
 type TranslateFn = (en: string, zh: string) => string
 
@@ -276,6 +300,30 @@ const emit = defineEmits<{
 }>()
 
 const tr = props.tr
+
+const rootRef = ref<HTMLElement | null>(null)
+
+/** §3①/R2: the platform-admin deep link must stay operable under a `VITE_BASE_PATH` sub-path
+ *  deploy (the router history base IS `BASE_URL` — main.ts `createWebHistory(import.meta.env.BASE_URL)`),
+ *  so the anchor href carries the base. The router is injected OPTIONALLY (null default): the shell
+ *  stays a pure display component mountable without vue-router (specs/harness), falling back to
+ *  plain-anchor navigation; when the host app has a router, clicks SPA-navigate (no full reload). */
+const router = inject(routerKey, null)
+const adminUsersHref = computed(() => resolveAttendanceSetupAdminUsersHref(import.meta.env.BASE_URL))
+
+function openAdminUsers(event: MouseEvent): void {
+  if (!router) return // no router in host → default anchor navigation (href is still base-aware)
+  event.preventDefault()
+  void router.push(ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH)
+}
+
+/** L210 预览入口 for steps ①-⑥: an in-wizard jump to the ⑦ preview card (rendered inline on this
+ *  single page; the full preview derivation is the W4-2 slice, §9). Not a navigation — no href,
+ *  no hash (R2). `scrollIntoView` is optional-called for non-browser mounts (jsdom). */
+function jumpToPreviewStep(): void {
+  const target = rootRef.value?.querySelector<HTMLElement>('[data-setup-step="preview"]')
+  target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+}
 
 /** Charter §4.5 L202-208 step names, verbatim (⑦ per lock §3: preview-only wording). */
 function stepTitle(stepId: AttendanceSetupStepId): string {
@@ -385,6 +433,25 @@ function effectiveTimeLabel(effectiveTime: AttendanceSetupReadinessEffectiveTime
     case 'undeterminable':
       return tr('cannot be determined', '无法确定')
   }
+}
+
+/** L210「影响人数」, scope-honest per step (values-free, counts only):
+ *  - deployment-scoped ④/⑥: the affected population is the WHOLE deployment — no per-org count is
+ *    shown (an org-scoped number under a 「部署级」 chip would understate the blast radius);
+ *  - ⑦: derived from the ①/② counts (lock §3⑦ 影响人数=①②计数派生);
+ *  - other org-scoped steps: the org-active-member count, labeled for what it IS
+ *    (「本组织有效成员」), not presented as a per-step affected-set claim. */
+function impactLabel(step: AttendanceSetupReadinessStepResult): string {
+  if (step.scope === 'deployment') {
+    return `${tr('Affected people', '影响人数')}: ${tr('the whole deployment (deployment-level setting)', '整个部署（部署级设置）')}`
+  }
+  const s = props.summary
+  const members = s ? `${s.orgActiveMemberCount}` : tr('unknown', '未知')
+  if (step.stepId === 'preview') {
+    const groups = s ? `${s.groupsWithMembers}` : tr('unknown', '未知')
+    return `${tr('Affected people (derived from step 1/2 counts)', '影响人数（①②计数派生）')}: ${tr('active org members', '本组织有效成员')} ${members} · ${tr('groups with members', '有成员的组')} ${groups}`
+  }
+  return `${tr('Affected people (active org members)', '影响人数（本组织有效成员）')}: ${members}`
 }
 
 /** Values-free per-step count details (missing-item context, counts only). */
@@ -520,7 +587,7 @@ function helpFor(stepId: AttendanceSetupStepId): SetupStepHelp {
       }
     case 'attendance-admin-notification-deliveries':
       return {
-        scenario: tr('Notification channels are enabled per deployment; per-org recipient scope is not supported in this version.', '通知渠道按部署逐项启用；按组织接收范围在当前版本不支持。'),
+        scenario: tr('Notification channel enablement is decided per deployment (each channel stays off unless operations turns it on); per-org recipient scope is not supported in this version.', '通知渠道按部署逐项启用（默认关闭，由运维逐个开启）；按组织接收范围在当前版本不支持。'),
         impact: tr('Delivery depends on the deployment runtime and on recipients being bound via the directory.', '投递依赖部署运行期与收件人目录绑定。'),
         recovery: tr('If the runtime is not ready or no recipient is bound, notifications will not deliver; this page only offers the read-only delivery history.', '运行期未就绪或无收件人绑定时通知不会送达；此处仅提供只读投递历史。'),
         audit: tr('The delivery-history section shows the real delivery state.', '「通知投递」区块展示真实投递状态。'),
@@ -748,6 +815,17 @@ const gatingSummaryLabel = computed(() => {
 }
 
 .setup-readiness__meta span {
+  overflow-wrap: anywhere;
+}
+
+.setup-readiness__preview-entry {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ms-color-primary);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
   overflow-wrap: anywhere;
 }
 

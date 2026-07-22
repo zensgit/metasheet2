@@ -14,6 +14,7 @@
 // Wired into .github/workflows/attendance-web-guard.yml (run-list + both path filters).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import AttendanceSetupReadiness from '../src/views/attendance/AttendanceSetupReadiness.vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
@@ -129,6 +130,7 @@ describe('AttendanceSetupReadiness.vue (component)', () => {
     if (container) container.remove()
     app = null
     container = null
+    vi.unstubAllEnvs()
   })
 
   type MountProps = {
@@ -137,6 +139,8 @@ describe('AttendanceSetupReadiness.vue (component)', () => {
     loadState?: 'idle' | 'loading' | 'loaded' | 'error'
     viewerIsPlatformAdmin?: boolean
     tr?: (en: string, zh: string) => string
+    /** Optional host router — the shell must stay mountable WITHOUT one (pure display component). */
+    router?: Router
   }
 
   function mount(props: MountProps = {}) {
@@ -152,6 +156,7 @@ describe('AttendanceSetupReadiness.vue (component)', () => {
       onSelectSection,
       onReload,
     })
+    if (props.router) app.use(props.router)
     app.mount(container!)
     return { onSelectSection, onReload }
   }
@@ -206,11 +211,17 @@ describe('AttendanceSetupReadiness.vue (component)', () => {
       const badge = card.querySelector('[data-setup-step-status]')
       expect(badge?.getAttribute('data-setup-step-status')).toBe('manual_review_required')
       expect(badge?.textContent).toContain('需人工确认')
-      // The ONLY interactive element is canonical navigation to the settings section — the wizard
-      // itself offers no confirm/accept action (R4: 向导本身不提供确认动作).
+      // Interactive surface = canonical navigation ONLY: the settings remedy + the in-wizard ⑦
+      // preview jump (L210 预览入口, navigates nowhere outside the wizard). The wizard itself
+      // offers no confirm/accept action (R4: 向导本身不提供确认动作).
       const buttons = Array.from(card.querySelectorAll('button'))
-      expect(buttons).toHaveLength(1)
-      buttons[0]!.click()
+      expect(buttons).toHaveLength(2)
+      const remedy = card.querySelector<HTMLButtonElement>('[data-setup-remedy="attendance-admin-settings"]')
+      expect(remedy).toBeTruthy()
+      expect(
+        buttons.filter((b) => b !== remedy).map((b) => b.getAttribute('data-setup-step-preview-entry')),
+      ).toEqual(['jump'])
+      remedy!.click()
       await flushUi(2)
       expect(onSelectSection).toHaveBeenCalledWith('attendance-admin-settings')
     })
@@ -345,8 +356,38 @@ describe('AttendanceSetupReadiness.vue (component)', () => {
       const link = stepCard('attendance-admin-user-access').querySelector<HTMLAnchorElement>('[data-setup-remedy="user-access-admin-link"]')
       expect(link).toBeTruthy()
       expect(link!.tagName).toBe('A')
+      // Root-base deploy (vitest BASE_URL='/'): href is the bare canonical path.
       expect(link!.getAttribute('href')).toBe('/admin/users')
       expect(container!.querySelector('[data-setup-remedy="user-access-contact-admin"]')).toBeNull()
+    })
+
+    it('under a VITE_BASE_PATH sub-path deploy the href carries the base (router history base = BASE_URL) — a bare /admin/users would 404 off the sub-path', async () => {
+      vi.stubEnv('BASE_URL', '/metasheet/')
+      mount({ viewerIsPlatformAdmin: true })
+      await flushUi()
+      const link = stepCard('attendance-admin-user-access').querySelector<HTMLAnchorElement>('[data-setup-remedy="user-access-admin-link"]')
+      expect(link!.getAttribute('href')).toBe('/metasheet/admin/users')
+      // Still path/query form — never hash (R2).
+      expect(link!.getAttribute('href')).not.toContain('#')
+    })
+
+    it('with a host router present, clicking the ① link SPA-navigates (router.push of the base-free path, default prevented — no full-page reload)', async () => {
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          { path: '/', component: { render: () => null } },
+          { path: '/admin/users', component: { render: () => null } },
+        ],
+      })
+      mount({ viewerIsPlatformAdmin: true, router })
+      await flushUi()
+      const link = stepCard('attendance-admin-user-access').querySelector<HTMLAnchorElement>('[data-setup-remedy="user-access-admin-link"]')
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      link!.dispatchEvent(click)
+      expect(click.defaultPrevented).toBe(true)
+      await vi.waitFor(() => {
+        expect(router.currentRoute.value.path).toBe('/admin/users')
+      })
     })
 
     it('a delegated attendance:admin NEVER sees the 403-bound admin entry — contact copy instead', async () => {
@@ -376,6 +417,10 @@ describe('AttendanceSetupReadiness.vue (component)', () => {
       expect(cardText).not.toContain('配置接收范围')
       expect(cardText).not.toContain('未配置')
       expect(cardText).not.toContain('去配置')
+      // Unsupported scope = NO action exists (EN "no action available") — zh must match that
+      // meaning (「无可用操作」), never the all-clear reading 「无需操作」 (no action needed).
+      expect(cardText).toContain('当前版本不支持，无可用操作')
+      expect(cardText).not.toContain('无需操作')
     })
 
     it('English remediation copy is "View delivery history" (never a configure-recipient-scope action)', async () => {
@@ -415,10 +460,81 @@ describe('AttendanceSetupReadiness.vue (component)', () => {
       await flushUi()
       const checklist = stepCard('preview').querySelector('[data-setup-checklist]')
       expect(checklist!.querySelector('[data-setup-checklist-item="punch-policy"]')?.textContent).toContain('待确认')
-      // §5.3/§3⑦ completion-claim negative, component-wide: no 已启用 / "enabled" anywhere.
+      // §5.3/§3⑦ completion-claim negative, component-wide (ZH translator leg; the EN leg runs in
+      // the dedicated test below — a zh-only mount never renders the EN strings).
       const fullText = container!.textContent || ''
       expect(fullText).not.toContain('已启用')
       expect(fullText.toLowerCase()).not.toContain('enabled')
+    })
+
+    it('completion-claim negative holds under the EN translator too — the zh mount is blind to EN strings, so both locales are asserted (both fixtures)', async () => {
+      for (const data of [mixedMissingResponse(), allReadyResponse()]) {
+        mount({ steps: okSteps(data), summary: data, tr: enTr })
+        await flushUi()
+        const fullText = container!.textContent || ''
+        expect(fullText.toLowerCase()).not.toContain('enabled')
+        expect(fullText).not.toContain('已启用')
+        app!.unmount()
+        app = null
+        container!.innerHTML = ''
+      }
+    })
+  })
+
+  describe('L210 per-step meta — 预览入口 + scope-honest 影响人数', () => {
+    it('every step row shows a 预览入口: ①-⑥ are in-wizard jump BUTTONS to the ⑦ card (no href/hash — R2), ⑦ labels itself as the preview', async () => {
+      const scrolledTo: HTMLElement[] = []
+      const hadNative = 'scrollIntoView' in HTMLElement.prototype
+      const original = HTMLElement.prototype.scrollIntoView
+      HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+        scrolledTo.push(this)
+      }
+      try {
+        mount()
+        await flushUi()
+        const entries = Array.from(container!.querySelectorAll('[data-setup-step-preview-entry]'))
+        expect(entries).toHaveLength(7)
+        for (const stepId of ATTENDANCE_SETUP_STEP_IDS.filter((id) => id !== 'preview')) {
+          const entry = stepCard(stepId).querySelector<HTMLElement>('[data-setup-step-preview-entry]')
+          expect(entry, stepId).toBeTruthy()
+          expect(entry!.getAttribute('data-setup-step-preview-entry')).toBe('jump')
+          expect(entry!.tagName).toBe('BUTTON')
+          expect(entry!.getAttribute('href')).toBeNull()
+        }
+        const previewEntry = stepCard('preview').querySelector<HTMLElement>('[data-setup-step-preview-entry]')
+        expect(previewEntry!.getAttribute('data-setup-step-preview-entry')).toBe('self')
+        expect(previewEntry!.tagName).not.toBe('BUTTON')
+        // Clicking a jump entry scrolls to the in-wizard ⑦ card — no navigation of any kind.
+        ;(stepCard('attendance-admin-user-access').querySelector('[data-setup-step-preview-entry]') as HTMLButtonElement).click()
+        await flushUi(2)
+        expect(scrolledTo).toHaveLength(1)
+        expect(scrolledTo[0]!.getAttribute('data-setup-step')).toBe('preview')
+      } finally {
+        if (hadNative) {
+          HTMLElement.prototype.scrollIntoView = original
+        } else {
+          delete (HTMLElement.prototype as Partial<typeof HTMLElement.prototype>).scrollIntoView
+        }
+      }
+    })
+
+    it('影响人数 is scope-honest: ④⑥ say whole-deployment (no org count under a 部署级 chip), org steps label the org-member count, ⑦ derives from ①② (lock §3⑦)', async () => {
+      mount()
+      await flushUi()
+      for (const stepId of ['attendance-admin-settings', 'attendance-admin-notification-deliveries']) {
+        const impact = stepCard(stepId).querySelector('[data-setup-step-impact]')?.textContent || ''
+        expect(impact, stepId).toContain('整个部署')
+        expect(impact, stepId).not.toContain('12')
+        expect(impact, stepId).not.toContain('本组织有效成员')
+      }
+      for (const stepId of ['attendance-admin-user-access', 'attendance-admin-groups', 'attendance-admin-shifts', 'attendance-admin-approval-flows']) {
+        const impact = stepCard(stepId).querySelector('[data-setup-step-impact]')?.textContent || ''
+        expect(impact, stepId).toContain('影响人数（本组织有效成员）: 12')
+      }
+      const previewImpact = stepCard('preview').querySelector('[data-setup-step-impact]')?.textContent || ''
+      expect(previewImpact).toContain('影响人数（①②计数派生）')
+      expect(previewImpact).toContain('本组织有效成员 12')
+      expect(previewImpact).toContain('有成员的组 3')
     })
   })
 

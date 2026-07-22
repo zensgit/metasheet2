@@ -1,0 +1,19 @@
+<!doctype html>
+<!-- W4-1 evidence harness page (copied to apps/web/w41-setup-readiness-harness.html at capture
+     time by capture-setup-readiness.mjs — not part of the app build; vite only builds index.html).
+     Mounts the REAL AttendanceSetupReadiness.vue with the REAL tokens.css. -->
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>W4-1 setup-readiness evidence harness</title>
+    <style>
+      body { margin: 0; background: var(--ms-bg-page, #f5f6f7); padding: 24px 16px; }
+      #app { max-width: 1176px; margin: 0 auto; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/dev-harness/w41SetupReadinessHarness.ts"></script>
+  </body>
+</html>
