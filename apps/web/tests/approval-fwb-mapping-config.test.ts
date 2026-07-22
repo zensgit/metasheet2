@@ -48,5 +48,10 @@ describe('FWB mapping config model', () => {
     expect(() => toExecutorMappings([{ formFieldId: 'f1', targetFieldId: 'ghost' }], TGT)).toThrow(/unvalidated/)
     expect(() => toExecutorMappings([{ formFieldId: 'f1', targetFieldId: 't_formula' }], TGT)).toThrow(/unvalidated/)
     expect(() => toExecutorMappings([{ formFieldId: 'f1', targetFieldId: 't_num' }], TGT)).toThrow(/unvalidated/)
+    expect(() => toExecutorMappings([{ formFieldId: 'f1', targetFieldId: 't_sel_empty' }], TGT)).toThrow(/unvalidated/)
+    expect(() => toExecutorMappings([
+      { formFieldId: 'f1', targetFieldId: 't_text' },
+      { formFieldId: 'f2', targetFieldId: 't_text' },
+    ], TGT)).toThrow(/unvalidated/)
   })
 })
