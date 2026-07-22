@@ -2613,6 +2613,37 @@ describe('ApprovalProductService', () => {
       })
     })
 
+    it('GOLDEN: clone rejects a readable historical graph before creating a new draft version', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const template = {
+        id: 'tpl-join-reach', key: 'join-reach', name: 'Join Reach', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-join-reach', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-join-reach', template_id: 'tpl-join-reach', version: 1, status: 'draft',
+        form_schema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return { rows: [template], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return { rows: [version], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().cloneTemplate('tpl-join-reach')).rejects.toMatchObject(goldenReject)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
     it('compatibility GOLDEN: ordinary reads still return a historical first-edge-valid graph', async () => {
       const graph = goldenDefaultEndsBeforeJoinGraph()
       const template = {

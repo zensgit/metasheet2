@@ -3913,6 +3913,16 @@ export class ApprovalProductService {
       throw new ServiceError('Approval template has no version to clone', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
     }
 
+    // Stored versions remain readable under the historical compatibility rules, but
+    // cloning creates a new draft version and must satisfy the current authoring gate.
+    const formSchema = assertFormSchema(source.version.form_schema)
+    const approvalGraph = assertApprovalGraph(source.version.approval_graph)
+    validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeTimeoutConfigs(approvalGraph)
+    validateConditionBranchRules(approvalGraph)
+
     const newName = `${source.template.name} (副本)`
 
     for (let attempt = 0; attempt < TEMPLATE_CLONE_KEY_ATTEMPTS; attempt += 1) {
@@ -3944,8 +3954,8 @@ export class ApprovalProductService {
            RETURNING *`,
           [
             template.id,
-            JSON.stringify(source.version.form_schema),
-            JSON.stringify(source.version.approval_graph),
+            JSON.stringify(formSchema),
+            JSON.stringify(approvalGraph),
           ],
         )
         const version = versionResult.rows[0]
