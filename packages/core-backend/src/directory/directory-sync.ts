@@ -1313,12 +1313,41 @@ export type DirectoryDeprovisionOutcome = {
   manualReviewCount: number
   grantsDisabledCount: number
   usersDeactivatedCount: number
+  /**
+   * W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22, review-finding observability gap):
+   * how many PEOPLE this run attempted a `user_orgs` deactivation for — every non-`manual_review`
+   * candidate, i.e. the same set (and same count, by construction) as `grantsDisabledCount`,
+   * since both writes are gated by the exact same `if (options.enabled)` block for the exact
+   * same candidates. Named separately so the `user_orgs` consequence is visible on its own in
+   * run stats/logs rather than requiring the reader to know it is implied by
+   * `grantsDisabledCount`. Like that field, this counts an ATTEMPT (preview mode included) —
+   * it does NOT mean the row actually flipped: `deactivateUserOrgMembershipIfNoOtherActiveBinding`
+   * no-ops (without erroring) when the org-scoped sibling check finds another active binding, or
+   * when no `user_orgs` row exists yet. Whether it actually flipped is not tracked (the shared
+   * helper's `UPDATE` has no `RETURNING`); this is attempt-visibility, not flip-visibility.
+   */
+  membershipDeactivationAttemptedCount: number
   /** Set when the circuit breaker refused to act; `applied` is forced false. */
   abortedReason: DirectoryDeprovisionAbortReason | null
   affected: Array<{
     directoryAccountId: string
     localUserId: string
     policy: DirectoryDeprovisionPolicy
+  }>
+  /**
+   * W4-PRE-1c item B (owner 裁决②, #4522 rev3 review, 2026-07-22): `manual_review` never
+   * writes anything — `manualReviewCount` alone cannot answer WHO is pending. This is the
+   * same (directoryAccountId, localUserId) shape as `affected`, plus `orgId` (every entry
+   * from one call shares the same org, but the run-stats consumer — `GET
+   * /integrations/:integrationId/runs`, see `admin-directory.ts` — should not have to
+   * cross-reference the integration to learn it). Populated regardless of `enabled`
+   * (preview and real runs both resolve policy the same way; only the WRITE is gated).
+   * Values-free: ids only, no name/email/mobile.
+   */
+  manualReviewPending: Array<{
+    directoryAccountId: string
+    localUserId: string
+    orgId: string
   }>
 }
 
@@ -1385,8 +1414,10 @@ export async function applyDirectoryDeprovisionPolicies(
     manualReviewCount: 0,
     grantsDisabledCount: 0,
     usersDeactivatedCount: 0,
+    membershipDeactivationAttemptedCount: 0,
     abortedReason: null,
     affected: [],
+    manualReviewPending: [],
   }
 
   if (options.deactivatedAccountIds.length === 0) return outcome
@@ -1449,15 +1480,36 @@ export async function applyDirectoryDeprovisionPolicies(
     return outcome
   }
 
+  // W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22): resolved LAZILY and at most
+  // ONCE per call — every candidate here was selected for the SAME `options.integrationId`,
+  // hence the SAME org. Only queried the first time it is actually needed (a manual_review
+  // candidate to report, or a non-manual_review write to perform), so a run with neither
+  // never pays for it.
+  let resolvedOrgId: string | null = null
+  const resolveOrgIdOnce = async (): Promise<string> => {
+    if (resolvedOrgId === null) resolvedOrgId = await resolveDirectoryAccountOrgId(client, options.integrationId)
+    return resolvedOrgId
+  }
+
   for (const [localUserId, { directoryAccountId, policy }] of byUser) {
     if (policy === 'manual_review') {
       outcome.manualReviewCount += 1
+      // Owner 裁决② (#4522 rev3 review — issuecomment-5042388830: "manual_review 保持 active
+      // 并暴露待人工确认状态") — never a write, membership stays exactly as it was; only the
+      // pending-confirmation state is exposed (org/membership-scoped) on the existing
+      // run-stats surface.
+      outcome.manualReviewPending.push({ directoryAccountId, localUserId, orgId: await resolveOrgIdOnce() })
       continue
     }
 
     outcome.affected.push({ directoryAccountId, localUserId, policy })
 
     outcome.grantsDisabledCount += 1
+    // Same gate, same candidate set as `grantsDisabledCount` above — see this field's own
+    // doc-comment on `DirectoryDeprovisionOutcome`. Counted here (before the `enabled` check,
+    // like `grantsDisabledCount`) so preview runs also report how many `user_orgs`
+    // deactivation attempts WOULD happen if the switch were flipped on.
+    outcome.membershipDeactivationAttemptedCount += 1
     if (options.enabled) {
       await client.query(
         `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
@@ -1466,6 +1518,35 @@ export async function applyDirectoryDeprovisionPolicies(
          DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
         [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
       )
+      // W4-PRE-1c (owner 裁决②, #4522 rev3 review — the only GitHub-persisted record is the
+      // owner's own acknowledgment comment, issuecomment-5042388830: "不因单次同步缺失撤销
+      // membership；deprovision circuit-breaker 通过 + 开关启用 + 策略实际执行时同事务失活对应
+      // user_orgs；manual_review 保持 active 并暴露待人工确认状态。" No #4522 review or review-
+      // thread comment carries a longer/earlier original — this IS the citable text, not a
+      // paraphrase of something else on record): the circuit breaker already passed (we are
+      // past the abort-and-return above), the switch is on (`options.enabled`), and this
+      // policy just executed a REAL write for this person — a grant revoked here, and for
+      // `mark_inactive` the local account too, below. THIS moment — not the DT-OPS-01 sweep
+      // flipping `directory_accounts.is_active` alone — is "策略实际执行", and is what may
+      // deactivate `user_orgs`, same transaction. Reuses #4526's own org-scoped "no other
+      // active binding" rule verbatim (`deactivateUserOrgMembershipIfNoOtherActiveBinding`) —
+      // and that helper's OWN re-read (`SELECT ... FOR UPDATE` then a fresh READ COMMITTED
+      // `NOT EXISTS`) is NOT redundant with this function's global candidate-selection sibling
+      // guard above, despite both checking "no other active binding": guard (1) above is read
+      // ONCE, early, before this loop and before any write in this run; this helper re-checks
+      // AT WRITE TIME under a row lock. A concurrent transaction that commits a brand-new
+      // linked+active directory account for this SAME person in this SAME org, in the window
+      // between guard (1)'s read and this call, is invisible to guard (1)'s stale snapshot but
+      // IS caught by this helper's fresh re-read — the same write-skew shape #4526 itself fixed
+      // with `FOR UPDATE` for concurrent unbinds. So this check is independently load-bearing on
+      // this call path, not merely inherited defense-in-depth; see the PR body's combination-
+      // semantics section (owner review flagged) for the full reasoning. `manual_review` is
+      // excluded by the `continue` above: a single missed sync, or a policy that never executes,
+      // must never itself revoke membership.
+      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, {
+        userId: localUserId,
+        orgId: await resolveOrgIdOnce(),
+      })
     }
 
     if (policy === 'mark_inactive') {
@@ -1482,7 +1563,8 @@ export async function applyDirectoryDeprovisionPolicies(
   if (!options.enabled && outcome.candidateCount > 0) {
     logger.info(
       `Directory deprovision preview for ${options.integrationId}: ${outcome.candidateCount} person(s) — `
-      + `${outcome.grantsDisabledCount} grant(s) and ${outcome.usersDeactivatedCount} local user(s) would be disabled. `
+      + `${outcome.grantsDisabledCount} grant(s) and ${outcome.usersDeactivatedCount} local user(s) would be disabled, `
+      + `and ${outcome.membershipDeactivationAttemptedCount} org membership(s) (user_orgs) would be deactivation-attempted. `
       + `Affected: ${outcome.affected.map((a) => a.localUserId).join(', ') || '(none)'}. `
       + 'Set DIRECTORY_DEPROVISION_ENABLED=true to apply.',
     )
@@ -3512,14 +3594,18 @@ export async function syncDirectoryIntegration(
       // deactivated on every sync — audit spam, and it would stomp a reactivation.
       // RETURNING gives the executor exactly the accounts that departed in THIS run.
       //
-      // KNOWN OPEN GAP (#4526 review, not fixed this round — needs an owner ruling): this sweep
-      // flips ONLY `directory_accounts.is_active`; it does not call
-      // `deactivateUserOrgMembershipIfNoOtherActiveBinding`, so a departed employee's `user_orgs`
-      // row stays ACTIVE until an admin manually unbinds them (the deprovision executor below is
-      // OFF by default and, even enabled, only ever touches `users.is_active`, never
-      // `user_orgs`). Whether "the directory silently stopped reporting this account" counts as a
-      // BINDING event under this line's own boundary (only unbind/rebind/archive deactivate) is
-      // an open adjudication point — see the PR body's lifecycle table and open items.
+      // W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22 — resolves the #4526-review open
+      // gap this comment used to describe): this sweep ALONE still flips only
+      // `directory_accounts.is_active` — it never itself deactivates `user_orgs`. A single
+      // missed sync (one account absent from one fetch) must never, by itself, revoke
+      // membership — owner 裁决② per issuecomment-5042388830: "不因单次同步缺失撤销
+      // membership". The deprovision
+      // executor below (`applyDirectoryDeprovisionPolicies`, OFF by default) is the ONLY path
+      // that may deactivate `user_orgs` for a swept account, and only once ALL of its own gates
+      // clear: circuit breaker passed, `DIRECTORY_DEPROVISION_ENABLED=true`, AND the resolved
+      // policy actually executes a write (`disable_grant_only` / `mark_inactive`; `manual_review`
+      // never writes — see that function's own `manual_review` branch, which instead exposes a
+      // pending-confirmation state on `manualReviewPending`).
       const deactivatedAccountsResult = await client.query(
         `UPDATE directory_accounts
          SET is_active = false, updated_at = NOW()
@@ -3885,6 +3971,11 @@ export async function syncDirectoryIntegration(
         deprovisionManualReviewCount: deprovisionOutcome.manualReviewCount,
         deprovisionGrantsDisabledCount: deprovisionOutcome.grantsDisabledCount,
         deprovisionUsersDeactivatedCount: deprovisionOutcome.usersDeactivatedCount,
+        // W4-PRE-1c (owner 裁决②, review-finding observability gap): the new user_orgs
+        // consequence, surfaced on its own so an operator does not have to infer it from
+        // `deprovisionGrantsDisabledCount`. See `membershipDeactivationAttemptedCount`'s own
+        // doc-comment for what "attempted" does and does not mean.
+        deprovisionMembershipDeactivationAttemptedCount: deprovisionOutcome.membershipDeactivationAttemptedCount,
         deprovisionAbortedReason: deprovisionOutcome.abortedReason,
         // Identities, not just a number: an operator deciding whether to flip
         // DIRECTORY_DEPROVISION_ENABLED needs to see WHO would lose access, and there is no
@@ -3892,6 +3983,27 @@ export async function syncDirectoryIntegration(
         // the stats JSONB.
         deprovisionAffected: deprovisionOutcome.affected.slice(0, 100),
         deprovisionAffectedTruncated: deprovisionOutcome.affected.length > 100,
+        // W4-PRE-1c item B (owner 裁决②): manual_review candidates never appear in
+        // `deprovisionAffected` above (nothing was written for them) — this is the minimal
+        // read-only exposure of WHO is pending manual confirmation, org/membership-scoped,
+        // on this same existing queryable surface (`GET /integrations/:integrationId/runs`).
+        // No new table, no new endpoint, no new UI. Values-free: ids only.
+        //
+        // Scope, read carefully (review finding — this is a per-run snapshot, not a queue):
+        // this array is written ONCE, into THIS run's `directory_sync_runs.stats` row, and
+        // reflects only the accounts THIS run's own sweep transitioned to inactive AND
+        // resolved to `manual_review` (see `deactivatedAccountIds`'s own "this run's
+        // transitions, not the lifetime backlog" contract above). A person who is still
+        // pending confirmation after this run does NOT reappear here on the NEXT run (their
+        // `directory_accounts.is_active` is already `false`, so they no longer satisfy the
+        // sweep's `AND is_active = true` transition filter). There is no aggregate "who is
+        // currently still pending" view and no confirm/resolve marker anywhere in this repo
+        // — an operator must enumerate PAST runs' `stats` blobs to find unresolved
+        // manual_review candidates. Acceptable as a minimal read-only exposure per the
+        // owner's "暴露待人工确认状态" bar, but flagged: this is a one-shot audit trail entry,
+        // not a live pending-queue.
+        deprovisionManualReviewPending: deprovisionOutcome.manualReviewPending.slice(0, 100),
+        deprovisionManualReviewPendingTruncated: deprovisionOutcome.manualReviewPending.length > 100,
         linkedCount,
         pendingCount,
         unmatchedCount,
@@ -3983,6 +4095,12 @@ export async function syncDirectoryIntegration(
             policy: affected.policy,
             grantDisabled: true,
             userDeactivated: affected.policy === 'mark_inactive',
+            // W4-PRE-1c (owner 裁决②, review-finding observability gap): every entry in
+            // `deprovisionOutcome.affected` (this loop's source) attempted the user_orgs
+            // deactivation unconditionally when `applied` is true — same gate as
+            // `grantDisabled` above, see `membershipDeactivationAttemptedCount`'s doc-comment.
+            // Attempted, not necessarily flipped (org-scoped sibling check may have no-op'd it).
+            membershipDeactivationAttempted: true,
             triggeredBy,
           },
         })
