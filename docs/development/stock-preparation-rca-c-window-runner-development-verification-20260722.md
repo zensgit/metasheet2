@@ -103,7 +103,7 @@ Local verification after the first adversarial correction:
 | Gate | Result |
 | --- | --- |
 | PM2 projection Node tests | 8/8 PASS |
-| PowerShell contract tests | 37/37 PASS |
+| PowerShell contract tests | 38/38 PASS |
 | PowerShell behavior tests | 35/35 PASS |
 | Sidecar builder and provenance-wiring tests | 3/3 PASS |
 | Frozen extended + MVP + abort-provenance regressions | 95/95 PASS |
@@ -114,7 +114,9 @@ The Windows job runs both the target-shell suite and the full behavior suite und
 PowerShell 5.1. Its PM2 `.cmd` shim writes a sentinel to stderr for both `jlist` and `restart`; the
 projection/restart must still succeed, preserve exit 0, exclude the sentinel, and restore
 `$ErrorActionPreference='Stop'`. A contract guard fails if the behavior suite is removed from that
-job.
+job. Scoped `.gitattributes` rules keep the three digest-pinned JavaScript helpers at LF in Windows
+checkouts, so target-shell tests exercise the same bytes shipped in the sidecar instead of failing
+on Git working-tree line-ending conversion.
 
 Behavior tests additionally prove:
 
@@ -131,7 +133,7 @@ Behavior tests additionally prove:
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
 
-Twenty-seven committed-head mutations were applied one at a time in detached worktrees and all were
+Twenty-eight committed-head mutations were applied one at a time in detached worktrees and all were
 killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
 removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
 archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
@@ -141,8 +143,9 @@ broadened the health status, bypassed logout boolean/status checks, removed the 
 name, accepted duplicate smoke headers, accepted zero created lines, and accepted URL query/fragment
 inputs. The final four mutations independently removed the restart-time comparison, removed the
 uptime comparison, removed the full behavior suite from the real Windows PowerShell 5.1 job, and
-replaced that suite's `$powershell51` invocation with `pwsh`; each failed its dedicated guard. Every
-mutation ran in its own disposable worktree; the source
+replaced that suite's `$powershell51` invocation with `pwsh`; each failed its dedicated guard. The
+last mutation removed one frozen-helper `eol=lf` attribute and failed the checkout-byte contract.
+Every mutation ran in its own disposable worktree; the source
 worktree remained clean.
 
 ## 7. Independent Adversarial Review

@@ -12,6 +12,12 @@ $source = Get-Content -LiteralPath $scriptPath -Raw
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
 $workflowPath = Join-Path $repoRoot '.github/workflows/plugin-tests.yml'
 $workflowSource = Get-Content -LiteralPath $workflowPath -Raw
+$attributesPath = Join-Path $repoRoot '.gitattributes'
+$attributeLines = if (Test-Path -LiteralPath $attributesPath -PathType Leaf) {
+  @(Get-Content -LiteralPath $attributesPath)
+} else {
+  @()
+}
 $pass = 0
 $fail = 0
 
@@ -41,6 +47,18 @@ Check 'real Windows PowerShell 5.1 job runs the full RC-A behavior suite' (
   $windowsJob.Groups['body'].Value -match '(?m)^\s*&\s+\$powershell51\b[^\r\n]*-File\s+scripts/ops/__tests__/stock-preparation-rca-window\.ps51\.tests\.ps1\s*$' -and
   $windowsJob.Groups['body'].Value -match '(?m)^\s*&\s+\$powershell51\b[^\r\n]*-File\s+scripts/ops/__tests__/stock-preparation-rca-window\.behavior\.tests\.ps1\s*$'
 )
+$frozenHelperAttributes = @(
+  'scripts/ops/stock-preparation-prep-line-extended-smoke.mjs text eol=lf',
+  'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs text eol=lf',
+  'scripts/ops/stock-preparation-rca-window-pm2-sample.mjs text eol=lf'
+)
+$frozenHelperAttributesStable = $true
+foreach ($expected in $frozenHelperAttributes) {
+  if (@($attributeLines | Where-Object { $_ -ceq $expected }).Count -ne 1) {
+    $frozenHelperAttributesStable = $false
+  }
+}
+Check 'frozen helper checkout bytes stay LF-stable on Windows' $frozenHelperAttributesStable
 foreach ($name in @(
   'Prepare-FrozenHelpers', 'Invoke-Pm2NativeCapture', 'Invoke-Pm2Projection', 'Get-Pm2Sample',
   'Suspend-UnsafePm2Environment', 'Restore-Pm2Environment', 'Invoke-Pm2RestartStable',
