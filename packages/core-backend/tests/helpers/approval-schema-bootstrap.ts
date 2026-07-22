@@ -1,11 +1,10 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-// Bumped for T2-1+2 admin handover: the action CHECK constraint now also
-// permits 'reassign' (mirrors migration
-// zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts). The version
-// marker re-runs the DDL on an already-bootstrapped test DB.
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260702-admin-reassign'
+// Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
+// idempotent DDL. The current bump keeps the version-restore UAT fixture aligned with
+// publish-note and node-entry-epoch migrations already present in production.
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260722-template-version-restore-current-round'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -111,6 +110,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS request_no TEXT`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS form_snapshot JSONB`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS current_node_key TEXT`)
+    await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS node_activation_seq INTEGER NOT NULL DEFAULT 0`)
     await client.query(`
       UPDATE approval_instances
       SET source_system = COALESCE(source_system, 'platform'),
@@ -200,6 +200,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       )
     `)
     await client.query(`ALTER TABLE approval_assignments ADD COLUMN IF NOT EXISTS node_key TEXT`)
+    await client.query(`ALTER TABLE approval_assignments ADD COLUMN IF NOT EXISTS entry_epoch INTEGER`)
     await client.query(`
       DO $$
       DECLARE
@@ -258,6 +259,20 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         UNIQUE (template_id, version)
       )
+    `)
+    await client.query(`
+      ALTER TABLE approval_template_versions
+      ADD COLUMN IF NOT EXISTS restored_from_version_id UUID
+        REFERENCES approval_template_versions(id) ON DELETE SET NULL
+    `)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_approval_template_versions_restored_from
+      ON approval_template_versions(restored_from_version_id)
+      WHERE restored_from_version_id IS NOT NULL
+    `)
+    await client.query(`
+      ALTER TABLE approval_template_versions
+      ADD COLUMN IF NOT EXISTS publish_note TEXT
     `)
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_published_definitions (
