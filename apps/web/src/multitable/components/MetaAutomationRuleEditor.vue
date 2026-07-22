@@ -463,6 +463,45 @@
               <el-input v-model="action.config.message" type="textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" :rows="3" />
             </div>
 
+            <!-- write_approval_form_values (FWB-1 create-from-approval) config -->
+            <div
+              v-if="action.type === 'write_approval_form_values'"
+              class="meta-rule-editor__action-config"
+              data-field="fwbActionConfig"
+              data-testid="fwb-action-config"
+            >
+              <div class="meta-rule-editor__hint" data-testid="fwb-target-sheet-hint">
+                {{ isZh ? '目标表：当前规则所属表（本表新建记录）' : 'Target sheet: this rule’s sheet (creates a new record here)' }}
+              </div>
+              <p
+                v-if="fwbActionReadOnly(action)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+                data-testid="fwb-readonly-status"
+              >{{ fwbReadOnlyMessage(action) }}</p>
+              <p
+                v-else-if="!fwbTemplateFields.length"
+                class="meta-rule-editor__hint"
+                data-testid="fwb-template-fields-missing"
+              >{{ isZh ? '请先选择审批完成触发器的模板，以加载可映射的表单字段。' : 'Select an approval-completed template first so form fields can load for mapping.' }}</p>
+              <p
+                v-if="fwbConfirmError"
+                class="meta-rule-editor__hint meta-rule-editor__hint--danger"
+                data-testid="fwb-confirm-error"
+              >{{ fwbConfirmError }}</p>
+              <ApprovalFwbMappingEditor
+                :template-fields="fwbTemplateFields"
+                :target-fields="fwbTargetFields"
+                :model-value="(action.config.fwbMappings as FwbMappingDraft[] | undefined) ?? []"
+                :disabled="fwbActionReadOnly(action)"
+                :loading="fwbConfirmingDraftId === action.draftId"
+                :is-zh="isZh"
+                :confirmation-state="fwbConfirmationStateFor(action)"
+                @update:model-value="onFwbMappingsUpdate(action, $event)"
+                @request-confirmation="onFwbRequestConfirmation(action, $event)"
+                @invalidate-confirmation="onFwbInvalidateConfirmation(action)"
+              />
+            </div>
+
             <!-- start_approval config -->
             <div v-if="action.type === 'start_approval'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
@@ -1360,6 +1399,10 @@
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import { getTemplate } from '../../approvals/api'
+import ApprovalFwbMappingEditor from '../../approvals/components/ApprovalFwbMappingEditor.vue'
+import type { FwbMappingDraft } from '../../approvals/fwbMappingConfig'
 import type { MultitableApiClient } from '../api/client'
 import type {
   AutomationRule,
@@ -1374,6 +1417,21 @@ import type {
   MetaSheet,
   MetaView,
 } from '../types'
+import {
+  FWB_ACTION_TYPE,
+  buildFwbActionConfigForSave,
+  canSelectNewFwbAction,
+  draftConfigFromFwbAction,
+  emptyFwbDraftConfig,
+  fwbReadOnlyStatusMessage,
+  isFwbActionReadOnly,
+  isFwbActionSelectable,
+  isFwbActionType,
+  sheetFieldsToFwbTargets,
+  templateSchemaToFwbFields,
+  type FwbExecutorMapping,
+  type FwbMappingConfirmationState,
+} from '../fwbRuleAuthoring'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
 import {
   appendTemplateToken,
@@ -1486,6 +1544,13 @@ type DraftActionConfig = Record<string, unknown> & {
   parallelBranches?: ParallelBranchDraft[]
   parallelBranchUnsupportedReason?: string | null
   parallelBranchOriginal?: Record<string, unknown> | null
+  // FWB write_approval_form_values authoring (server-owned confirmationHash; mapping editor is UX only)
+  fwbMappings?: FwbMappingDraft[]
+  sourceTemplateVersionId?: string
+  confirmationHash?: string
+  fwbConfirmationState?: FwbMappingConfirmationState
+  fwbPersistedMappings?: FwbExecutorMapping[] | null
+  fwbWasPersisted?: boolean
 }
 
 interface DraftAction {
@@ -1537,6 +1602,18 @@ const saving = ref(false)
 // G-B2-22: root of the drawer's scrollable body, scoped so scroll-to-reason navigation never
 // reaches outside this editor instance.
 const editorBodyRef = ref<HTMLElement | null>(null)
+const featureFlags = useFeatureFlags()
+// FWB production authoring — surfaces APPROVAL_FWB_WRITEBACK_ENABLED (default OFF).
+const fwbWritebackEnabled = computed(() => featureFlags.hasFeature('approvalFwbWriteback'))
+const fwbTemplateFields = ref<Array<{ id: string; label: string }>>([])
+const fwbActiveVersionId = ref('')
+const fwbConfirmingDraftId = ref<string | null>(null)
+const fwbConfirmError = ref('')
+const fwbTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
+const fwbTargetSchemaSignature = computed(() => JSON.stringify({
+  sheetId: props.sheetId,
+  fields: fwbTargetFields.value,
+}))
 const cronPreset = ref('0 * * * *')
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
@@ -1589,18 +1666,28 @@ const APPROVAL_COMPLETED_OUTCOME_OPTIONS = ['approved', 'rejected', 'revoked', '
 type ApprovalCompletedOutcome = (typeof APPROVAL_COMPLETED_OUTCOME_OPTIONS)[number]
 // FE mirror of the backend save allowlist (record-less v1): non-notification actions are save-rejected
 // server-side; mirroring here blocks a doomed save with a visible reason instead of a round-trip error.
-const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES = new Set<string>([
+// FWB (write_approval_form_values) is admitted on approval.completed when the flag is ON, and also
+// when a persisted FWB action is present so a flag-OFF re-open never claims the action is "disallowed"
+// and silently blocks a lossless re-save of the rest of the rule.
+const APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES = new Set<string>([
   'send_notification',
   'send_webhook',
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
 ])
+const approvalCompletedAllowedActionTypes = computed(() => {
+  const allowed = new Set<string>(APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES)
+  if (fwbWritebackEnabled.value || draft.value.actions.some((action) => isFwbActionType(action.type))) {
+    allowed.add(FWB_ACTION_TYPE)
+  }
+  return allowed
+})
 // A-2b: the approval card additionally mounts on the pending-task trigger (and ONLY there).
-const APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES = new Set<string>([
-  ...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES,
+const APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES = computed(() => new Set<string>([
+  ...APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES,
   'send_dingtalk_approval_card',
-])
+]))
 
 function approvalCompletedOutcomeLabel(outcome: ApprovalCompletedOutcome): string {
   const zh = isZh.value
@@ -1637,7 +1724,7 @@ const approvalTaskCreatedBlockReason = computed<string>(() => {
   if (draft.value.conditions.conditions.length > 0) {
     return zh ? '审批待办触发器不支持触发条件，请先移除所有条件。' : 'The approval-task trigger does not support conditions — remove them first.'
   }
-  const disallowed = draft.value.actions.find((action) => !APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES.has(action.type))
+  const disallowed = draft.value.actions.find((action) => !APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES.value.has(action.type))
   if (disallowed) {
     const label = automationActionTypeLabel(disallowed.type, zh)
     return zh
@@ -1645,6 +1732,16 @@ const approvalTaskCreatedBlockReason = computed<string>(() => {
       : `Action "${label}" is not allowed on the approval-task trigger (notification-family actions and the approval card only).`
   }
   return ''
+})
+
+// FWB placement: write_approval_form_values is only legal on approval.completed. Surface a block
+// when the draft still carries FWB under any other trigger (e.g. the author switched triggers).
+const fwbWrongTriggerBlockReason = computed<string>(() => {
+  if (draft.value.triggerType === 'approval.completed') return ''
+  if (!draft.value.actions.some((action) => isFwbActionType(action.type))) return ''
+  return isZh.value
+    ? '从审批创建记录仅可用于「审批完成」触发器，请切换触发器或移除该动作。'
+    : 'Create-record-from-approval is only allowed on the approval.completed trigger — switch the trigger or remove the action.'
 })
 
 const approvalCompletedBlockReason = computed<string>(() => {
@@ -1655,12 +1752,21 @@ const approvalCompletedBlockReason = computed<string>(() => {
   if (draft.value.conditions.conditions.length > 0) {
     return zh ? '审批完成触发器不支持触发条件，请先移除所有条件。' : 'The approval-completed trigger does not support conditions — remove them first.'
   }
-  const disallowed = draft.value.actions.find((action) => !APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES.has(action.type))
+  const disallowed = draft.value.actions.find((action) => !approvalCompletedAllowedActionTypes.value.has(action.type))
   if (disallowed) {
     const label = automationActionTypeLabel(disallowed.type, zh)
     return zh
-      ? `动作「${label}」不可用于审批完成触发器（仅支持通知类动作）。`
-      : `Action "${label}" is not allowed on the approval-completed trigger (notification-family actions only).`
+      ? `动作「${label}」不可用于审批完成触发器（仅支持通知类动作${fwbWritebackEnabled.value ? '与审批回写' : ''}）。`
+      : `Action "${label}" is not allowed on the approval-completed trigger (notification-family actions${fwbWritebackEnabled.value ? ' and approval writeback' : ''} only).`
+  }
+  // FWB D1: when a writeback action is present, outcomes must be approved-only (or default).
+  if (draft.value.actions.some((action) => isFwbActionType(action.type))) {
+    const outcomes = approvalCompletedOutcomes.value
+    if (!(outcomes.length === 1 && outcomes[0] === 'approved')) {
+      return zh
+        ? '从审批创建记录仅支持「通过」结果，请将完成结果设为仅通过。'
+        : 'Create-record-from-approval only supports the approved outcome — set completion outcomes to approved only.'
+    }
   }
   return ''
 })
@@ -1708,10 +1814,138 @@ function isUnsupportedSelectableActionType(type: AutomationActionType): boolean 
 }
 
 function selectableActionTypes(currentType: AutomationActionType): AutomationActionType[] {
-  if (isUnsupportedSelectableActionType(currentType)) {
-    return [...SUPPORTED_SELECTABLE_ACTION_TYPES, currentType]
+  const types: AutomationActionType[] = [...SUPPORTED_SELECTABLE_ACTION_TYPES]
+  // FWB: newly selectable only when flag ON + approval.completed; a loaded FWB action always remains
+  // in the option list so it is never silently dropped from the UI.
+  if (isFwbActionSelectable(fwbWritebackEnabled.value, draft.value.triggerType, currentType)) {
+    if (!types.includes(FWB_ACTION_TYPE)) types.push(FWB_ACTION_TYPE)
   }
-  return SUPPORTED_SELECTABLE_ACTION_TYPES
+  if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
+    types.push(currentType)
+  }
+  return types
+}
+
+function fwbActionReadOnly(action: DraftAction): boolean {
+  return isFwbActionReadOnly(
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    action.config.fwbWasPersisted === true,
+  )
+}
+
+function fwbReadOnlyMessage(_action: DraftAction): string {
+  return fwbReadOnlyStatusMessage(isZh.value, fwbWritebackEnabled.value, draft.value.triggerType)
+}
+
+function fwbConfirmationStateFor(action: DraftAction): FwbMappingConfirmationState {
+  const state = action.config.fwbConfirmationState
+  if (state === 'confirming' || state === 'confirmed' || state === 'unconfirmed') return state
+  return action.config.confirmationHash ? 'confirmed' : 'unconfirmed'
+}
+
+function onFwbMappingsUpdate(action: DraftAction, next: FwbMappingDraft[]): void {
+  if (fwbActionReadOnly(action)) return
+  action.config.fwbMappings = next
+  action.config.confirmationHash = ''
+  action.config.fwbConfirmationState = 'unconfirmed'
+}
+
+function onFwbInvalidateConfirmation(action: DraftAction): void {
+  if (fwbActionReadOnly(action)) return
+  action.config.confirmationHash = ''
+  action.config.fwbConfirmationState = 'unconfirmed'
+}
+
+async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecutorMapping[]): Promise<void> {
+  if (fwbActionReadOnly(action) || !props.client) return
+  if (!canSelectNewFwbAction(fwbWritebackEnabled.value, draft.value.triggerType) && !action.config.fwbWasPersisted) {
+    return
+  }
+  const templateId = typeof draft.value.triggerConfig.templateId === 'string'
+    ? draft.value.triggerConfig.templateId.trim()
+    : ''
+  const sourceTemplateVersionId = (typeof action.config.sourceTemplateVersionId === 'string'
+    && action.config.sourceTemplateVersionId.trim())
+    || fwbActiveVersionId.value
+  if (!templateId || !sourceTemplateVersionId) {
+    fwbConfirmError.value = isZh.value
+      ? '请先选择审批模板（需有已发布版本）。'
+      : 'Select an approval template with an active published version first.'
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      isZh.value
+        ? '审批表单中的已映射值将写入当前多维表，并按该表的现有权限向读者可见。确认继续吗？'
+        : 'Mapped approval-form values will be written to this table and become visible under its current access rules. Continue?',
+      isZh.value ? '确认审批数据回写' : 'Confirm approval data writeback',
+      {
+        type: 'warning',
+        confirmButtonText: isZh.value ? '确认并生成凭据' : 'Confirm and generate confirmation',
+        cancelButtonText: isZh.value ? '取消' : 'Cancel',
+      },
+    )
+  } catch {
+    return
+  }
+  fwbConfirmError.value = ''
+  fwbConfirmingDraftId.value = action.draftId
+  action.config.fwbConfirmationState = 'confirming'
+  action.config.sourceTemplateVersionId = sourceTemplateVersionId
+  try {
+    // Server owns the hash — never compute confirmationHash on the client.
+    const result = await props.client.confirmFwbWriteback(props.sheetId, {
+      templateId,
+      sourceTemplateVersionId,
+      mappings,
+    })
+    action.config.confirmationHash = result.confirmationHash
+    action.config.sourceTemplateVersionId = result.sourceTemplateVersionId
+    action.config.fwbConfirmationState = 'confirmed'
+    // Keep a snapshot of the confirmed executor mappings for lossless re-save if the flag later flips off.
+    action.config.fwbPersistedMappings = mappings
+  } catch (e: unknown) {
+    action.config.confirmationHash = ''
+    action.config.fwbConfirmationState = 'unconfirmed'
+    fwbConfirmError.value = e instanceof Error
+      ? e.message
+      : (isZh.value ? '确认失败，请重试。' : 'Confirmation failed — try again.')
+  } finally {
+    fwbConfirmingDraftId.value = null
+  }
+}
+
+async function loadFwbTemplateSource(templateId: string): Promise<void> {
+  const id = templateId.trim()
+  if (!id) {
+    fwbTemplateFields.value = []
+    fwbActiveVersionId.value = ''
+    return
+  }
+  try {
+    const detail = await getTemplate(id)
+    fwbTemplateFields.value = templateSchemaToFwbFields(detail.formSchema)
+    fwbActiveVersionId.value = typeof detail.activeVersionId === 'string' ? detail.activeVersionId : ''
+    // Bind every FWB draft that lacks a version to the currently active one; a version drift
+    // invalidates confirmation (hash subject includes sourceTemplateVersionId).
+    for (const action of draft.value.actions) {
+      if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue
+      const current = typeof action.config.sourceTemplateVersionId === 'string'
+        ? action.config.sourceTemplateVersionId
+        : ''
+      if (!current && fwbActiveVersionId.value) {
+        action.config.sourceTemplateVersionId = fwbActiveVersionId.value
+      } else if (current && fwbActiveVersionId.value && current !== fwbActiveVersionId.value) {
+        action.config.sourceTemplateVersionId = fwbActiveVersionId.value
+        action.config.confirmationHash = ''
+        action.config.fwbConfirmationState = 'unconfirmed'
+      }
+    }
+  } catch {
+    fwbTemplateFields.value = []
+    fwbActiveVersionId.value = ''
+  }
 }
 
 const formViews = computed(() => (props.views ?? []).filter((view) =>
@@ -2249,6 +2483,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : '',
     }
   }
+  if (type === 'write_approval_form_values') {
+    // Spread into a plain record so the draft config stays assignable to DraftActionConfig
+    // (FwbDraftActionConfig is a closed interface without a string index signature).
+    return { ...draftConfigFromFwbAction(config, { persisted: true }) }
+  }
   return { ...config }
 }
 
@@ -2511,10 +2750,17 @@ watch(
       resetDeleteRecordAcknowledgements()
       error.value = ''
       saving.value = false
+      fwbConfirmError.value = ''
+      fwbConfirmingDraftId.value = null
       dingTalkDestinationsError.value = ''
       personRecipientSuggestions.value = {}
       personRecipientLoading.value = {}
       personRecipientErrors.value = {}
+      // FWB template source: load active version + form fields for the mapping editor.
+      const triggerTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
+        ? draft.value.triggerConfig.templateId
+        : ''
+      void loadFwbTemplateSource(triggerTemplateId)
       if (props.client) {
         try {
           dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
@@ -2546,6 +2792,34 @@ watch(
   },
   { immediate: true },
 )
+
+// FWB: template/version is part of the confirmation subject — reload fields and drop stale hashes
+// whenever the approval.completed template id changes.
+watch(
+  () => (typeof draft.value.triggerConfig.templateId === 'string' ? draft.value.triggerConfig.templateId : ''),
+  (templateId, previous) => {
+    if (templateId === previous) return
+    void loadFwbTemplateSource(templateId)
+    for (const action of draft.value.actions) {
+      if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue
+      action.config.confirmationHash = ''
+      action.config.fwbConfirmationState = 'unconfirmed'
+      action.config.sourceTemplateVersionId = ''
+    }
+  },
+)
+
+// Target sheet/schema is part of the server confirmation subject. Clear any editable confirmation
+// as soon as the host replaces the sheet field model; the save gate remains the final race-safe
+// authority if the schema changes after this client-side observation.
+watch(fwbTargetSchemaSignature, (next, previous) => {
+  if (next === previous) return
+  for (const action of draft.value.actions) {
+    if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue
+    action.config.confirmationHash = ''
+    action.config.fwbConfirmationState = 'unconfirmed'
+  }
+})
 
 // UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6 "确认一律 ElMessageBox").
 // CFG-3 precedent (DirectoryManagementView.vue confirmApprovalCardSecretRegenerate): service-style
@@ -2638,6 +2912,13 @@ const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
     if (action.type === 'delete_record') {
       snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
     }
+    if (action.type === 'write_approval_form_values') {
+      snapshot.fwbWriteback = {
+        mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
+        confirmed: fwbConfirmationStateFor(action) === 'confirmed',
+        readOnly: fwbActionReadOnly(action),
+      }
+    }
     return snapshot
   })
 })
@@ -2692,6 +2973,11 @@ function buildActionSummarySnapshot(action: DraftAction): ActionSummarySnapshot 
     snapshot.startApproval = {
       templateLabel: templateName || templateId,
       mappingCount: countAuthoredFieldPairs(action.config.formDataMappingPairs),
+    }
+  } else if (action.type === 'write_approval_form_values') {
+    snapshot.fwbWriteback = {
+      mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
+      confirmed: fwbConfirmationStateFor(action) === 'confirmed',
     }
   } else if (action.type === 'send_email') {
     snapshot.email = {
@@ -2792,6 +3078,7 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     // T1-3: mirror the backend save gate (templateId / no-conditions / notification-only actions).
     approvalCompletedBlockReason: approvalCompletedBlockReason.value,
     approvalTaskCreatedBlockReason: approvalTaskCreatedBlockReason.value,
+    fwbWrongTriggerBlockReason: fwbWrongTriggerBlockReason.value,
     // T1-2: a signing secret is required; an existing rule with a stored (redacted-on-read) secret
     // may leave the field blank to keep it.
     webhookSecretPresent: !!secret,
@@ -3442,6 +3729,12 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       return { locked: true }
     case 'wait_for_callback':
       return {} // A6-2: zero-param suspend point (no webhook-URL/timer/manual-task fields)
+    case 'write_approval_form_values':
+      return {
+        ...emptyFwbDraftConfig(),
+        // Bind the currently known active version if the trigger template already loaded.
+        sourceTemplateVersionId: fwbActiveVersionId.value,
+      }
     default:
       return {}
   }
@@ -3727,6 +4020,39 @@ function buildPayload(): Partial<AutomationRule> {
           recipients: parseEmailRecipientsText(action.config.recipientsText),
           subjectTemplate: typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
+        },
+      }
+    }
+    if (action.type === 'write_approval_form_values') {
+      const draftConfig = {
+        fwbMappings: (action.config.fwbMappings as FwbMappingDraft[] | undefined) ?? [],
+        sourceTemplateVersionId: typeof action.config.sourceTemplateVersionId === 'string'
+          ? action.config.sourceTemplateVersionId
+          : '',
+        confirmationHash: typeof action.config.confirmationHash === 'string'
+          ? action.config.confirmationHash
+          : '',
+        fwbConfirmationState: fwbConfirmationStateFor(action),
+        fwbPersistedMappings: action.config.fwbPersistedMappings ?? null,
+        fwbWasPersisted: action.config.fwbWasPersisted === true,
+      }
+      const built = buildFwbActionConfigForSave(draftConfig, fwbTargetFields.value, {
+        flagEnabled: fwbWritebackEnabled.value,
+        readOnly: fwbActionReadOnly(action),
+      })
+      if ('error' in built) {
+        throw new Error(
+          isZh.value
+            ? '从审批创建记录需先完成服务端确认，且映射配置必须有效。'
+            : 'Create-record-from-approval requires a server confirmation and a valid mapping config.',
+        )
+      }
+      return {
+        type: action.type,
+        config: {
+          mappings: built.mappings,
+          sourceTemplateVersionId: built.sourceTemplateVersionId,
+          confirmationHash: built.confirmationHash,
         },
       }
     }

@@ -247,6 +247,7 @@ function requestConfirmation(): void {
           :key="option.value"
           :label="option.label"
           :value="option.value"
+          :data-value="option.value"
           :disabled="option.disabled"
         />
       </el-select>
@@ -265,6 +266,7 @@ function requestConfirmation(): void {
           :key="option.value"
           :label="option.label"
           :value="option.value"
+          :data-value="option.value"
           :disabled="option.disabled"
         />
       </el-select>

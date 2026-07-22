@@ -31,6 +31,7 @@ import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
 import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
+import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { query } from '../db/pg'
 import { listUserPermissions } from '../rbac/service'
@@ -289,6 +290,10 @@ function buildFeaturePayload(authUser: User) {
     // Canvas V2 is an independent, default-OFF authoring rollout. It is never inferred from admin
     // role, product mode, or plugin state; the legacy structured editor remains the fallback.
     approvalCanvasV2: isApprovalCanvasV2Enabled(),
+    // FWB production authoring (write_approval_form_values). Surfaces APPROVAL_FWB_WRITEBACK_ENABLED
+    // (default OFF) so the automation rule editor can offer the mapping UI only when execution is
+    // actually enabled. Never inferred from admin/role/mode.
+    approvalFwbWriteback: isFwbWritebackEnabled(),
     mode,
   }
 }

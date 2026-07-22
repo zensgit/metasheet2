@@ -1454,6 +1454,42 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  /**
+   * FWB production authoring — server-owned confirmation hash (FWB0 §11 Q6 gate 3).
+   * The client sends the validated mapping subject; the server derives confirmationHash over
+   * {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings}. Target sheet is
+   * always the path sheetId (rule's own sheet). Never invent a client-side hash.
+   */
+  async confirmFwbWriteback(
+    sheetId: string,
+    body: {
+      templateId: string
+      sourceTemplateVersionId: string
+      mappings: Array<{
+        formFieldId: string
+        targetFieldId: string
+        targetType: 'text' | 'number' | 'date' | 'select'
+        selectOptions?: readonly string[]
+      }>
+    },
+  ): Promise<{
+    confirmationHash: string
+    templateId: string
+    sourceTemplateVersionId: string
+    targetSheetId: string
+    targetBaseId: string
+  }> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/fwb/confirm`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
+    return this.parseJson(res)
+  }
+
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
     const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
       method: 'POST',
