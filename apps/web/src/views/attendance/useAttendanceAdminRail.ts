@@ -10,6 +10,10 @@ export const ADMIN_NAV_DEFAULT_STORAGE_SCOPE = 'default'
 const ADMIN_NAV_RECENT_LIMIT = 5
 
 export const ATTENDANCE_ADMIN_SECTION_IDS = {
+  // W4-1 (Wave 4 onboarding design-lock §6.1, OD-W4-2=(a)): canonical registration of the
+  // seven-step setup-readiness wizard shell — registering here grants the
+  // `?section=attendance-admin-setup` query deep link, rail entry, and quick-jump for free.
+  setup: 'attendance-admin-setup',
   settings: 'attendance-admin-settings',
   userAccess: 'attendance-admin-user-access',
   batchProvisioning: 'attendance-admin-batch-provisioning',
@@ -166,8 +170,15 @@ export function useAttendanceAdminRail({
   notify,
 }: UseAttendanceAdminRailOptions) {
   const adminSectionNavItems = computed<AdminSectionNavItem[]>(() => [
+    // W4-1 setup wizard sits AFTER Settings/User Access on purpose: `adminSectionNavItems[0]`
+    // doubles as the observer-sync default active section (useAttendanceAdminRailNavigation
+    // `resolveAdminSectionElements()[0]`) — putting the wizard first would silently make it the
+    // default active section on every admin mount and pollute the recents rail with a
+    // visit-style signal (§6.1 rejects visit-history signals). Its designed primary entry is
+    // the task-home 「启用准备」 action, not rail position.
     { id: ATTENDANCE_ADMIN_SECTION_IDS.settings, label: tr('Settings', '设置') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.userAccess, label: tr('User Access', '用户权限') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.setup, label: tr('Setup readiness', '启用准备') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning, label: tr('Batch Provisioning', '批量授权') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs, label: tr('Audit Logs', '审计日志') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries, label: tr('Notification deliveries', '通知投递') },
@@ -208,6 +219,7 @@ export function useAttendanceAdminRail({
       itemIds: [
         ATTENDANCE_ADMIN_SECTION_IDS.settings,
         ATTENDANCE_ADMIN_SECTION_IDS.userAccess,
+        ATTENDANCE_ADMIN_SECTION_IDS.setup,
         ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning,
         ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
         ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries,
