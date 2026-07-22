@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 /**
- * W4-PRE-1b item A — the THIRD bind-shaped writer named by the owner ("手工 bind 路由、
- * auto-match、rebind"): the directory-sync SYNC LOOP's `external_identity` re-match write
+ * W4-PRE-1b item A — the THIRD bind-shaped writer in this line's own inventory (manual bind
+ * route, sync-loop auto-match, same-account rebind — this PR's grouping, not owner verbatim
+ * text): the directory-sync SYNC LOOP's `external_identity` re-match write
  * (`syncDirectoryIntegration`, directory-sync.ts ~L3759-3767). Unlike `bindDirectoryAccount`
  * (manual bind) and `admitDirectoryAccountUser`/auto-admit (new user), this write confirms an
  * ALREADY-linked identity on every resync without going through
@@ -155,5 +156,156 @@ describeIfDatabase('W4-PRE-1b item A — sync-loop external_identity auto-match 
 
     const afterPass2 = await query<{ is_active: boolean }>(`SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`, [userId, orgId])
     expect(afterPass2.rows).toEqual([{ is_active: true }])
+  }, 30_000)
+})
+
+/**
+ * #4526 review finding (P1) — regression for the SAME write site tested above
+ * (`linkStatus === 'linked' && localUserId`, directory-sync.ts ~L3773). This loop iterates ALL
+ * accounts ever seen for the integration, not just this run's directory batch — including an
+ * account the DT-OPS-01 sweep (same transaction, runs first) just marked departed
+ * (`directory_accounts.is_active = false`). `resolveDirectoryIdentityMatch` short-circuits to
+ * `'already_linked'` for ANY existing `link_status='linked'` row regardless of the account's own
+ * `is_active`, so — before this fix — a departed-but-still-`linked` account's steady-state
+ * re-confirm would silently flip a deliberately-inactive `user_orgs` row back to ACTIVE on every
+ * subsequent resync, reopening the exact stale-access half of the owner's original P1 finding via
+ * this line's own new writer. The fix additionally gates the write on `account.is_active`.
+ */
+describeIfDatabase('W4-PRE-1b item A regression (#4526 P1) — a swept (inactive) linked account must not resurrect user_orgs', () => {
+  const DEPT2 = `w4pre1bam2-dept-${TS}`
+  const USER_EXT_ID2 = `w4pre1bam2-u1-${TS}`
+  let integrationId2 = ''
+  let orgId2 = ''
+  let userId2 = ''
+  let userPresentInDirectory = true
+
+  beforeAll(() => {
+    // Reconfigures the SAME shared client mocks the block above installed, scoped to THIS test's
+    // department/user id so the two blocks never collide (tests in one file run sequentially).
+    // `userPresentInDirectory` lets a later pass simulate the user disappearing from the
+    // directory (the real-world trigger for the DT-OPS-01 sweep) without a second live call.
+    clientMocks.listDingTalkDepartments.mockImplementation(async (_token: string, parentId: string) =>
+      parentId === '1' ? [{ id: DEPT2, parentId: '1', name: 'W4PRE1B Automatch Regression', order: 0, source: {} }] : [],
+    )
+    clientMocks.getDingTalkDepartmentDetail.mockResolvedValue({ deptManagerUserIdList: [] })
+    clientMocks.listDingTalkDepartmentUsers.mockImplementation(async (_token: string, deptId: string) =>
+      deptId === DEPT2 && userPresentInDirectory
+        ? { users: [{ userId: USER_EXT_ID2, name: 'Regression One', departmentIds: [DEPT2], source: {} }], nextCursor: null, hasMore: false }
+        : { users: [], nextCursor: null, hasMore: false },
+    )
+    clientMocks.getDingTalkUserDetail.mockImplementation(async (_token: string, userId: string) => ({
+      userId,
+      name: 'Regression One',
+      unionId: `w4pre1bam2-union-${TS}`,
+      openId: `w4pre1bam2-open-${TS}`,
+      email: `w4pre1bam2-${TS}@example.test`,
+      mobile: undefined,
+      departmentIds: [DEPT2],
+      source: {},
+    }))
+  })
+
+  afterAll(async () => {
+    if (userId2) {
+      await query(`DELETE FROM user_invites WHERE user_id = $1`, [userId2])
+      await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [userId2])
+      await query(`DELETE FROM user_external_identities WHERE local_user_id = $1`, [userId2])
+      await query(`DELETE FROM user_orgs WHERE user_id = $1`, [userId2])
+    }
+    if (integrationId2) {
+      await query(
+        `DELETE FROM directory_account_departments WHERE directory_account_id IN (SELECT id FROM directory_accounts WHERE integration_id = $1)`,
+        [integrationId2],
+      )
+      await query(
+        `DELETE FROM directory_account_links WHERE directory_account_id IN (SELECT id FROM directory_accounts WHERE integration_id = $1)`,
+        [integrationId2],
+      )
+      await query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [integrationId2])
+      await query(`DELETE FROM directory_departments WHERE integration_id = $1`, [integrationId2])
+      await query(`DELETE FROM directory_sync_runs WHERE integration_id = $1`, [integrationId2])
+      await query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId2])
+    }
+    if (userId2) await query(`DELETE FROM users WHERE id = $1`, [userId2])
+  })
+
+  it('account swept inactive (missing from the directory) does not reactivate an already-deactivated user_orgs row on the SAME sync run', async () => {
+    const integration = await createDirectoryIntegration({
+      name: `w4pre1bam2-${TS}`,
+      corpId: `w4pre1bam2-corp-${TS}`,
+      appKey: `w4pre1bam2-appkey-${TS}`,
+      appSecret: 'w4pre1bam2-secret',
+      admissionMode: 'auto_for_scoped_departments',
+      admissionDepartmentIds: [DEPT2],
+    })
+    integrationId2 = integration.id
+    orgId2 = integration.orgId
+
+    // Pass 1: user present → auto-admitted with an ACTIVE membership (same as the block above).
+    await syncDirectoryIntegration(integrationId2, 'system:w4pre1b-am2', 'manual')
+    const linked = await query<{ local_user_id: string; link_status: string }>(
+      `SELECT l.local_user_id, l.link_status
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE a.integration_id = $1 AND a.external_user_id = $2`,
+      [integrationId2, USER_EXT_ID2],
+    )
+    userId2 = linked.rows[0].local_user_id
+    expect(userId2).toBeTruthy()
+    expect(linked.rows[0].link_status).toBe('linked')
+    expect((await query<{ is_active: boolean }>(`SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`, [userId2, orgId2])).rows).toEqual([{ is_active: true }])
+
+    // Deactivate the membership directly (stands in for whatever admin/system action already
+    // closed it — the LINK ROW STAYS 'linked', matching exactly the state the DT-OPS-01 sweep
+    // itself leaves behind; see this file's item-B open-gap note in directory-sync.ts).
+    await query(`UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`, [userId2, orgId2])
+
+    // Pass 2: the user no longer appears in the mocked directory response — the account's
+    // `last_seen_at` from pass 1 is now stale, so THIS sync's DT-OPS-01 sweep marks
+    // `directory_accounts.is_active = false` in the SAME transaction as the identity-match loop
+    // below it. The link row is untouched by the sweep and remains 'linked'.
+    userPresentInDirectory = false
+    await syncDirectoryIntegration(integrationId2, 'system:w4pre1b-am2', 'manual')
+
+    const acctAfterSweep = await query<{ is_active: boolean }>(
+      `SELECT is_active FROM directory_accounts WHERE integration_id = $1 AND external_user_id = $2`,
+      [integrationId2, USER_EXT_ID2],
+    )
+    expect(acctAfterSweep.rows).toEqual([{ is_active: false }])
+    const linkAfterSweep = await query<{ link_status: string }>(
+      `SELECT l.link_status
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE a.integration_id = $1 AND a.external_user_id = $2`,
+      [integrationId2, USER_EXT_ID2],
+    )
+    expect(linkAfterSweep.rows[0].link_status).toBe('linked')
+
+    // THE FIX under test: the `already_linked` steady-state re-confirm must NOT resurrect
+    // `user_orgs` for an account that is `linked` but no longer `is_active`.
+    const membershipAfterSweep = await query<{ is_active: boolean }>(
+      `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
+      [userId2, orgId2],
+    )
+    expect(membershipAfterSweep.rows).toEqual([{ is_active: false }])
+  }, 30_000)
+
+  it('positive control: the user returning to the directory (account re-activated) DOES get the steady-state re-confirm', async () => {
+    // Continues from the prior test's end state (same integration/user, still `is_active=false`
+    // on both the account and the membership) — the user reappears in the mocked directory.
+    userPresentInDirectory = true
+    await syncDirectoryIntegration(integrationId2, 'system:w4pre1b-am2', 'manual')
+
+    const acctAfterReturn = await query<{ is_active: boolean }>(
+      `SELECT is_active FROM directory_accounts WHERE integration_id = $1 AND external_user_id = $2`,
+      [integrationId2, USER_EXT_ID2],
+    )
+    expect(acctAfterReturn.rows).toEqual([{ is_active: true }])
+
+    const membershipAfterReturn = await query<{ is_active: boolean }>(
+      `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
+      [userId2, orgId2],
+    )
+    expect(membershipAfterReturn.rows).toEqual([{ is_active: true }])
   }, 30_000)
 })

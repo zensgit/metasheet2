@@ -597,7 +597,9 @@ export async function updateLocalAccount(
  * intact — the row still says `link_status='linked'`, only `directory_accounts.is_active` flips.
  *
  * W4-PRE-1b item B: unlike `applyDirectoryDeprovisionPolicies` (which flips `users.is_active` —
- * a genuine user-level deactivation the owner ruling says must NOT touch `user_orgs`), archiving
+ * a genuine user-level deactivation this line's own boundary reading treats as one that must NOT
+ * touch `user_orgs`; see directory-sync.ts's `deactivateUserOrgMembershipIfNoOtherActiveBinding`
+ * doc comment — presented to the owner as evidence, not an adjudicated ruling), archiving
  * a local account is a "directory-side binding removal": the underlying link is kept for history
  * but no longer counts as ACTIVE for org-membership purposes (the same-org sibling check below,
  * and every other reader that filters `directory_accounts.is_active=true`, already treats it that

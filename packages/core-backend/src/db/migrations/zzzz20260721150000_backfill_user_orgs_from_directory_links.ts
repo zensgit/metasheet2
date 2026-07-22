@@ -16,7 +16,8 @@
  * (`readOrgDirectoryReadiness`, attendance-admin.ts) and every bind-shaped writer in this line use
  * to mean "this account currently counts as bound". Never a client-supplied or guessed org.
  *
- * Idempotency + non-resurrection (owner: "绝不复活已 is_active=false 的行"): `ON CONFLICT (user_id,
+ * Idempotency + non-resurrection (this migration must never resurrect an already-deactivated row
+ * — the owner's item-C text is "backfill 迁移（幂等、不复活已失活行）"): `ON CONFLICT (user_id,
  * org_id) DO NOTHING` — this migration ONLY inserts rows that do not exist yet. A row that already
  * exists, active OR already deactivated by the item-B unbind/rebind/archive logic, is left
  * completely untouched (no UPDATE branch at all, unlike the live bind writers' `DO UPDATE SET

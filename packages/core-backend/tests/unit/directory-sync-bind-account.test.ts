@@ -909,9 +909,16 @@ describe('bindDirectoryAccount', () => {
     // deactivates the previously-linked user's user_orgs row (org-scoped sibling check) in the
     // SAME transaction — SQL-text-inspecting closure, matching this file's own established
     // precedent for the analogous bind-side change above.
+    //
+    // #4526 review fix: the previously-linked-user read moved INSIDE the transaction (`FOR
+    // UPDATE OF l` locks the `directory_account_links` row — closes a stale-read race; see the
+    // function's doc comment) — it is now served by `clientQuery`, not the outer `pgMocks.query`.
     const clientQuery = vi.fn(async (sql: string) => {
       if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
         return { rows: [{ org_id: 'default' }] }
+      }
+      if (String(sql).includes('FOR UPDATE OF l')) {
+        return { rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] }
       }
       return { rows: [] }
     })
@@ -930,13 +937,6 @@ describe('bindDirectoryAccount', () => {
           name: '林岚',
           email: null,
           mobile: '13900001234',
-        }],
-      })
-      .mockResolvedValueOnce({
-        rows: [{
-          local_user_id: 'user-1',
-          local_user_email: 'alpha@example.com',
-          local_user_name: 'Alpha',
         }],
       })
       .mockResolvedValueOnce({
@@ -1003,10 +1003,14 @@ describe('bindDirectoryAccount', () => {
   })
 
   it('can disable the DingTalk grant while unbinding', async () => {
-    // W4-PRE-1b item B: see the analogous comment on the previous test.
+    // W4-PRE-1b item B: see the analogous comment on the previous test. #4526 review fix: see
+    // the analogous `FOR UPDATE OF l` note on the previous test too.
     const clientQuery = vi.fn(async (sql: string) => {
       if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
         return { rows: [{ org_id: 'default' }] }
+      }
+      if (String(sql).includes('FOR UPDATE OF l')) {
+        return { rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] }
       }
       return { rows: [] }
     })
@@ -1025,13 +1029,6 @@ describe('bindDirectoryAccount', () => {
           name: '林岚',
           email: null,
           mobile: '13900001234',
-        }],
-      })
-      .mockResolvedValueOnce({
-        rows: [{
-          local_user_id: 'user-1',
-          local_user_email: 'alpha@example.com',
-          local_user_name: 'Alpha',
         }],
       })
       .mockResolvedValueOnce({
@@ -1084,6 +1081,11 @@ describe('bindDirectoryAccount', () => {
       if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
         return { rows: [{ org_id: 'default' }] }
       }
+      // #4526 review fix: the previously-linked-user read moved INSIDE the transaction
+      // (`FOR UPDATE OF l`) — served here now, not via the outer `pgMocks.query`.
+      if (String(sql).includes('FOR UPDATE OF l')) {
+        return { rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] }
+      }
       return { rows: [] }
     })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
@@ -1104,7 +1106,6 @@ describe('bindDirectoryAccount', () => {
           mobile: null,
         }],
       })
-      .mockResolvedValueOnce({ rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] })
       .mockResolvedValueOnce({
         rows: [{
           integration_id: 'dir-1',

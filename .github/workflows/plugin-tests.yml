@@ -828,6 +828,7 @@ jobs:
             tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts \
             tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts \
             tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts \
+            tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

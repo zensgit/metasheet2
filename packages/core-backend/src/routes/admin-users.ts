@@ -3207,12 +3207,15 @@ export function adminUsersRouter(): Router {
 
       let attendanceOrgId = derivedAttendanceOrgId
       if (cleanExplicitAttendanceOrgId) {
-        // "校验 org 存在" (owner text): validated against `directory_integrations` — the org
-        // anchor every org acquires today (a `provider='local'` row via
+        // The owner's item-D text is "支持显式 attendanceOrgId（不依赖考勤组/班次）⇒ canonical
+        // surface 变为真无条件" — it does not itself say how an unrecognized org id should be
+        // handled, which is this PR's own open adjudication point (see the PR body's
+        // explicit-org-path deviation note). Validated here against `directory_integrations` —
+        // the org anchor every org acquires today (a `provider='local'` row via
         // `getOrCreateLocalIntegration`, or a `provider='dingtalk'` integration). Deliberately
-        // does NOT auto-create an anchor for an unrecognized org id — see the PR body's
-        // explicit-org-path deviation note for the alternate (auto-vivify) reading and why this
-        // one shipped (fail-closed default; "静默 fallback = 契约 bug").
+        // does NOT auto-create an anchor for an unrecognized org id — that is the alternate
+        // (auto-vivify) reading the PR body flags as NOT shipped; this one ships fail-closed
+        // ("静默 fallback = 契约 bug").
         const orgAnchor = await query<{ found: number }>(
           'SELECT 1 AS found FROM directory_integrations WHERE org_id = $1 LIMIT 1',
           [cleanExplicitAttendanceOrgId],

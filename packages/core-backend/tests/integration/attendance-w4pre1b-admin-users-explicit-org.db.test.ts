@@ -96,17 +96,27 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
     return rows.rows[0]
   }
 
+  async function attendanceScaffoldCounts(orgId: string): Promise<{ groups: number; shifts: number }> {
+    const [groups, shifts] = await Promise.all([
+      query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM attendance_groups WHERE org_id = $1`, [orgId]),
+      query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM attendance_shifts WHERE org_id = $1`, [orgId]),
+    ])
+    return { groups: Number(groups.rows[0]?.count ?? 0), shifts: Number(shifts.rows[0]?.count ?? 0) }
+  }
+
   beforeAll(async () => {
     if (!(await canListenOnEphemeralPort())) throw new Error('F6 test requires an available loopback port')
     if (!dbUrl) throw new Error('DATABASE_URL / ATTENDANCE_TEST_DATABASE_URL is required')
     process.env.DATABASE_URL = dbUrl
 
-    // `freshOrg` is genuinely new-to-ATTENDANCE (zero attendance_groups/attendance_shifts rows)
-    // but already carries a `directory_integrations` anchor (local provider) — the SHIPPED
-    // reading of "校验 org 存在" (see PR body deviation #1: validate-can-fail against
-    // directory_integrations, not auto-vivify from client input). This is what "fresh-org" means
-    // in F6: fresh to the OLD group/shift-derivation circular dependency, not unanchored at the
-    // directory layer.
+    // `freshOrg` is genuinely new-to-ATTENDANCE (zero attendance_groups/attendance_shifts rows —
+    // asserted explicitly in the F6 test below, not just implied by NS-scoped uniqueness) but
+    // already carries a `directory_integrations` anchor (local provider) — the SHIPPED reading of
+    // the owner's item-D ask ("支持显式 attendanceOrgId（不依赖考勤组/班次）⇒ canonical surface
+    // 变为真无条件"): validate-can-fail against `directory_integrations`, not auto-vivify from
+    // client input (see PR body deviation #1 for the alternate reading, requested for owner
+    // ruling). This is what "fresh-org" means in F6: fresh to the OLD group/shift-derivation
+    // circular dependency, not unanchored at the directory layer.
     await query(
       `INSERT INTO directory_integrations (org_id, name, corp_id, provider, status)
        VALUES ($1, $2, $3, 'local', 'active')`,
@@ -137,6 +147,10 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
   })
 
   it('fresh-org explicit attendanceOrgId with ZERO attendanceGroupId/defaultShiftId creates active membership (falsifies the old circular dependency)', async () => {
+    // Self-verify the "fresh" claim (#4526 review) rather than relying solely on NS-scoped
+    // uniqueness: freshOrg has zero attendance_groups/attendance_shifts BEFORE the call.
+    expect(await attendanceScaffoldCounts(freshOrg)).toEqual({ groups: 0, shifts: 0 })
+
     const res = await createUser({
       name: 'F6 Fresh',
       email: `${NS}-fresh@example.test`,
@@ -146,6 +160,10 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
     const userId = (res.body?.data as { user?: { id?: string } } | undefined)?.user?.id
     expect(userId).toBeTruthy()
     expect(await membershipRow(userId!, freshOrg)).toEqual({ is_active: true })
+
+    // ...and stays zero AFTER: the explicit-org path must not silently scaffold an attendance
+    // group/shift as a side effect of onboarding.
+    expect(await attendanceScaffoldCounts(freshOrg)).toEqual({ groups: 0, shifts: 0 })
   })
 
   it('unknown attendanceOrgId (no directory_integrations anchor) → 404 ATTENDANCE_ORG_NOT_FOUND', async () => {

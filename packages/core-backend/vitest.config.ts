@@ -394,6 +394,9 @@ export default defineConfig({
       'tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts',
       'tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts',
       'tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts',
+      // #4526 review addition: real-DB behavioral proof for item E's api-tokens.ts dual filter
+      // (the PR's original coverage was mock-SQL-text-only).
+      'tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

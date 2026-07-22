@@ -6,9 +6,10 @@ import { query } from '../../src/db/pg'
 /**
  * W4-PRE-1b item E (F5) — the S7-5 door (`GET /api/attendance-admin/directory-readiness`,
  * `canReadAttendanceDirectoryReadiness`) now requires `users.is_active=true` IN ADDITION TO
- * `user_orgs.is_active=true`, exercised via the REAL endpoint (owner: "经真实端点") against a
- * REAL Postgres — everything is real EXCEPT the router-level `rbacGuard('attendance','admin')`
- * mount guard, which is bypassed the SAME way the existing mocked unit coverage for this exact
+ * `user_orgs.is_active=true`, exercised via the REAL endpoint (this PR's own case label for the
+ * approach — not owner verbatim text) against a REAL Postgres — everything is real EXCEPT the
+ * router-level `rbacGuard('attendance','admin')` mount guard, which is bypassed the SAME way the
+ * existing mocked unit coverage for this exact
  * route does (`attendance-admin-admin-directory-readiness-s7-5.test.ts`'s `makeApp` +
  * `vi.mock('../../src/rbac/rbac', ...)`): that outer gate is an UNRELATED RBAC namespace-
  * admission subsystem this ticket does not touch, and a real-DB test that tried to satisfy it

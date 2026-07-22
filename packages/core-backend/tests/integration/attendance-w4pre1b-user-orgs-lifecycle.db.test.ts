@@ -231,6 +231,50 @@ describeIfDatabase('W4-PRE-1b — user_orgs lifecycle: bind/unbind/rebind/local 
     })
   })
 
+  describe('F3-race — concurrent unbind of BOTH bindings (constructed race, #4526 P2)', () => {
+    it('two concurrent deactivation calls on a double-bound user converge to is_active=false (no write-skew stuck-active)', async () => {
+      // Cross-transaction write-skew regression: `deactivateUserOrgMembershipIfNoOtherActiveBinding`'s
+      // NOT EXISTS sibling check reads OTHER accounts' link rows through this transaction's own
+      // READ COMMITTED snapshot. Without a shared-row lock, two concurrent unbinds of a double-
+      // bound user's two DIFFERENT accounts can each see the OTHER as still linked+active
+      // (neither has committed yet) and BOTH skip deactivation — the membership row is left
+      // ACTIVE with ZERO live bindings, permanently (nothing later self-heals it for the local
+      // provider; DingTalk only self-heals via the next resync's own already_linked write, which
+      // this PR's Finding-A fix now correctly gates on the account still being present/active).
+      const org = `${NS}_org_f3race`
+      const userId = await seedUser('f3race')
+      const integrationId = await seedIntegration(org, 'f3race')
+      const dingtalkAccount = await seedAccount(integrationId, 'f3race')
+
+      await bindDirectoryAccount(dingtalkAccount, { localUserRef: userId, adminUserId, enableDingTalkGrant: false })
+      const localAccount = await createLocalAccount({ orgId: org, localUserId: userId, name: 'F3-race Local', email: null, mobile: null, title: null })
+      expect(await membershipRow(userId, org)).toEqual({ is_active: true })
+
+      // Fire both deactivation-triggering calls CONCURRENTLY — each opens its OWN transaction/
+      // connection (`transaction()` acquires a fresh pool connection per call), so this is a
+      // genuine two-transaction race, not a sequential simulation.
+      await Promise.all([
+        unbindDirectoryAccount(dingtalkAccount, { adminUserId }),
+        archiveLocalAccount(org, localAccount.id),
+      ])
+
+      // Both bindings are now gone; the membership MUST be deactivated — not stuck active with
+      // zero bindings (the write-skew failure mode this test targets).
+      expect(await membershipRow(userId, org)).toEqual({ is_active: false })
+
+      const linkRow = await query<{ link_status: string }>(
+        `SELECT link_status FROM directory_account_links WHERE directory_account_id = $1`,
+        [dingtalkAccount],
+      )
+      expect(linkRow.rows[0]?.link_status).toBe('unmatched')
+      const localAccountRow = await query<{ is_active: boolean }>(
+        `SELECT is_active FROM directory_accounts WHERE id = $1`,
+        [localAccount.id],
+      )
+      expect(localAccountRow.rows[0]?.is_active).toBe(false)
+    })
+  })
+
   describe('local-provider bind/deactivate (createLocalAccount / archiveLocalAccount)', () => {
     it('createLocalAccount binds an existing user; archiveLocalAccount deactivates their last local binding', async () => {
       const org = `${NS}_org_local`
