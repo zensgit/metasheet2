@@ -330,6 +330,51 @@ function prefillRanking() {
   assert.equal(single.applyMode, 'k2_confirm_required')
 }
 
+function prefillFieldPresenceRanking() {
+  // The gallery pack's "最全方案复用" (most-complete plan reuse) use-case: rankBy
+  // 'field_presence' must rank the FULLER prior row first even when it is OLDER,
+  // while 'recency' (default) still ranks by date. Both are deterministic.
+  const target = { recordId: 't-1', componentCode: 'part-a' }
+  const history = [
+    // fuller (2 human fields) but OLDER
+    { recordId: 'h-full-old', componentCode: 'part-a', lastPlmRefreshAt: '2026-05-01', materialType: 'mt', notes: 'n' },
+    // sparser (1 human field) but NEWER
+    { recordId: 'h-thin-new', componentCode: 'part-a', lastPlmRefreshAt: '2026-06-01', notes: 'n2' },
+  ]
+  const humanFields = ['materialType', 'notes']
+
+  const byRecency = crossProjectPrefillCandidates(target, history, { humanFields })
+  assert.equal(byRecency.rankBy, 'recency', 'default rank mode reported')
+  assert.deepEqual(
+    byRecency.candidates.map((c) => c.sourceRecordId),
+    ['h-thin-new', 'h-full-old'],
+    'recency: newest first even if sparser',
+  )
+
+  const byPresence = crossProjectPrefillCandidates(target, history, { humanFields, rankBy: 'field_presence' })
+  assert.equal(byPresence.rankBy, 'field_presence')
+  assert.deepEqual(
+    byPresence.candidates.map((c) => c.sourceRecordId),
+    ['h-full-old', 'h-thin-new'],
+    'field_presence: fullest first even if older (most-complete plan reuse)',
+  )
+  assert.equal(byPresence.candidates[0].presentFieldIds.length, 2)
+
+  // Equal presence falls through to recency (still a strict total order).
+  const equalPresence = crossProjectPrefillCandidates(target, [
+    { recordId: 'h-a', componentCode: 'part-a', lastPlmRefreshAt: '2026-05-01', notes: 'a' },
+    { recordId: 'h-b', componentCode: 'part-a', lastPlmRefreshAt: '2026-06-01', notes: 'b' },
+  ], { humanFields: ['notes'], rankBy: 'field_presence' })
+  assert.deepEqual(equalPresence.candidates.map((c) => c.sourceRecordId), ['h-b', 'h-a'], 'presence tie → recency')
+
+  // Closed vocabulary: an unknown rankBy fails closed.
+  assert.throws(
+    () => crossProjectPrefillCandidates(target, history, { humanFields, rankBy: 'nonsense' }),
+    /RANK_MODE_NOT_ALLOWED|rankBy/,
+    'unknown rankBy rejected',
+  )
+}
+
 function prefillEmptyAndExclusions() {
   const target = { recordId: 't-1', componentCode: 'part-a' }
   const opts = { humanFields: ['notes'] }
@@ -465,6 +510,7 @@ function main() {
   cascadeCalendarBoundaries()
   cascadeFailClosed()
   prefillRanking()
+  prefillFieldPresenceRanking()
   prefillEmptyAndExclusions()
   internalsDateCodec()
 }

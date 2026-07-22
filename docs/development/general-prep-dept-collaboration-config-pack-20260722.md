@@ -109,7 +109,7 @@ overlay 时按引用原样返回共享配置(降级契约 §1-C)。**本包不�
 ## 6. 配方 D — done-state 复选字段 【手工配置·现成,带 P1b 注记】
 
 给三部门各加一个「本部门已完成」布尔字段(多维表字段类型含 `boolean`,univer-meta.ts:348-376),
-如 `x_procurementDone` / `x_warehouseDone` / `x_planReleased`(`x_` 前缀见下)。
+如 `ext_procurementDone` / `ext_warehouseDone` / `ext_planReleased`(`ext_` 前缀见下)。
 
 **为什么安全(feasibility rev-2 已证)**:
 - planner 只 patch 模板内 `plm_system` 字段,模板外租户字段**永不进 refresh patch**
@@ -118,7 +118,7 @@ overlay 时按引用原样返回共享配置(降级契约 §1-C)。**本包不�
   只查模板字段缺失),多余租户字段不触发 drift。
 
 **P1b 注记(诚实)**:命名空间纪律(前缀防未来模板字段撞名)是**未落的 P1b 刀**。本包先行约定
-`x_` 前缀作实施方纪律;P1b 落地前它只是约定,没有守卫强制。
+`ext_` 前缀作实施方纪律;P1b hook arm 后由 extension-namespace 守卫强制(前缀+防撞名);arm 前为实施方约定。
 
 ## 7. 通知配方 【手工配置·现成 + 硬边界 + 投递 flag 列账】
 
@@ -132,7 +132,7 @@ GET :17404 / PATCH :17467 / DELETE :17515)。触发词表
 |---|---|---|---|
 | R1 | `field.value_changed` on `procurementReply` | `send_notification` → `<planner-user-ids>` | 采购回复了 → 通知计划 |
 | R2 | `field.value_changed` on `warehouseConfirmation` | `send_notification` → `<planner-user-ids>` | 仓库确认了 → 通知计划 |
-| R3 | `field.value_changed` on `x_planReleased`(changed_to true) | `send_notification` → `<procurement-user-ids>` | 计划放行 → 通知采购 |
+| R3 | `field.value_changed` on `ext_planReleased`(changed_to true) | `send_notification` → `<procurement-user-ids>` | 计划放行 → 通知采购 |
 | R4 | `schedule.date_field` on `demandDate`(N 天前,`automation-date-reminder.ts`) | `send_notification` | 需求日期临近提醒 |
 | R5 | `schedule.cron` / `schedule.interval` | `send_notification` | 固定节奏例会提醒(无 record 上下文) |
 
@@ -171,7 +171,7 @@ GET :17404 / PATCH :17467 / DELETE :17515)。触发词表
 2. ☐ 建三角色 subject(`user`/`role`/`member-group` 任一,与租户组织对齐);
 3. ☐ 配方 A:逐字段 PUT field-permissions(§3 矩阵);
 4. ☐ 配方 B:四个存档视图 + 视图权限;
-5. ☐ 配方 D:三个 `x_*Done` 布尔字段;
+5. ☐ 配方 D:三个 `ext_*Done` 布尔字段;
 6. ☐ 配方通知 R1-R5(flag 全 OFF 即 in-app);
 7. ☐ 【owner】personal-view flag、投递 flag 决策各自单独过门;
 8. ☐ 验收:以三角色各登一次,验证「只能编辑本部门字段 + 本部门视图 + 通知可达」。

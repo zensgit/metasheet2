@@ -1,7 +1,7 @@
 # 通用备料系统 — 设计及验证 MD（Design & Verification）
 
 **状态:PROPOSED（设计+验证记录;实现物 pre-ratify 已落分支未 arm;每门刀待 owner ratify 后接线）**
-**分支:`claude/prep-line-substrate-proof-20260722`。基线 origin/main。**
+**分支:`claude/prep-p1a-substrate-proof-20260722`。基线 origin/main。**
 
 本 MD 是通用备料线的统摄交付,汇总:①可行性(经独立对抗审阅)②rev-2 门控计划 ③本轮已构建+已验证的
 实证 ④每刀 ratify 后的精确接线 hook ⑤门控记账。配套文档:

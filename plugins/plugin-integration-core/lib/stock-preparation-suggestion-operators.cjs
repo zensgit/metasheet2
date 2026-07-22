@@ -46,6 +46,12 @@ const CASCADE_LEAD_DAYS_FIELDS = Object.freeze(['leadTimeDays'])
 const PREFILL_MATCH_FIELDS = Object.freeze(['componentCode', 'plmDrawingNo'])
 const PREFILL_RECENCY_FIELDS = Object.freeze(['lastPlmRefreshAt', 'confirmedAt', 'lastSyncedAt'])
 const PREFILL_EXCLUSION_REASONS = Object.freeze(['self_row', 'record_id_missing', 'no_prefillable_values'])
+// Closed ranking vocabulary. 'recency' (default) = the Java prep-field prefill
+// behaviour (latest same-part row wins). 'field_presence' = the Java craft-plan
+// reuse behaviour (most-COMPLETE plan wins, by non-empty human-field count) — the
+// "最全方案复用" use-case the gallery pack documents. Both are deterministic total
+// orders; ties fall through to the other signal then recordId.
+const PREFILL_RANK_MODES = Object.freeze(['recency', 'field_presence'])
 const MAX_LEAD_TIME_DAYS = 3650
 const SUGGESTION_ERROR_REASONS = Object.freeze([
   'INPUT_SHAPE_INVALID',
@@ -256,6 +262,12 @@ function crossProjectPrefillCandidates(targetRow, historyRows, options) {
       field: 'options.recencyField',
     })
   }
+  const rankBy = options.rankBy === undefined ? 'recency' : options.rankBy
+  if (!PREFILL_RANK_MODES.includes(rankBy)) {
+    fail('options.rankBy is outside the closed vocabulary', 'RANK_MODE_NOT_ALLOWED', {
+      field: 'options.rankBy',
+    })
+  }
   const humanFields = options.humanFields
   if (!Array.isArray(humanFields) || humanFields.length === 0) {
     fail('options.humanFields must be a non-empty array', 'INPUT_SHAPE_INVALID', { field: 'options.humanFields' })
@@ -339,9 +351,12 @@ function crossProjectPrefillCandidates(targetRow, historyRows, options) {
     })
   }
 
-  // Deterministic total order: recency descending (most recent first), rows
-  // with missing/unparseable recency last, ties broken by recordId ascending.
-  matched.sort((left, right) => {
+  // Deterministic total orders. compareRecency: most-recent first, missing/
+  // unparseable recency last, ties by recordId ascending. field_presence layers
+  // a most-complete-first primary key on top (non-empty human-field count desc),
+  // then falls through to recency then recordId — so it is still a strict total
+  // order and 'most-complete plan reuse' gets the fullest prior row.
+  const compareRecency = (left, right) => {
     if (left.recencyMs !== null && right.recencyMs !== null && left.recencyMs !== right.recencyMs) {
       return right.recencyMs - left.recencyMs
     }
@@ -350,6 +365,12 @@ function crossProjectPrefillCandidates(targetRow, historyRows, options) {
     if (left.recordId < right.recordId) return -1
     if (left.recordId > right.recordId) return 1
     return 0
+  }
+  matched.sort((left, right) => {
+    if (rankBy === 'field_presence' && left.presentFieldIds.length !== right.presentFieldIds.length) {
+      return right.presentFieldIds.length - left.presentFieldIds.length
+    }
+    return compareRecency(left, right)
   })
 
   const candidates = matched.map((entry, index) =>
@@ -367,6 +388,7 @@ function crossProjectPrefillCandidates(targetRow, historyRows, options) {
     applyMode: SUGGESTION_APPLY_MODE,
     matchField,
     recencyField,
+    rankBy,
     humanFields: Object.freeze(humanFields.slice()),
     candidateCount: candidates.length,
     candidates: Object.freeze(candidates),
@@ -383,6 +405,7 @@ module.exports = {
   CASCADE_LEAD_DAYS_FIELDS,
   PREFILL_MATCH_FIELDS,
   PREFILL_RECENCY_FIELDS,
+  PREFILL_RANK_MODES,
   PREFILL_EXCLUSION_REASONS,
   MAX_LEAD_TIME_DAYS,
   StockPreparationSuggestionError,

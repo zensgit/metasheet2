@@ -76,7 +76,7 @@ parentSourceId+path,`bom-expansion.cjs:401-408`)→ 快照批次/行 + 阻断式
 - ⟲ **通知配方(审阅 P2-1 圈定)** = 自动化规则,但**只覆盖「人工网格编辑触发 + 日程触发」**;
   refresh-驱动通知列为**需新 seam 的后续刀**。投递 flag owner 门(env-gated register-only,四 durable-delivery flag OFF)。
 - **工段/工序/工艺** = 模板 gallery 里**普通非冻结租户表**(C 胜 B:级联自动填=link+lookup+automation update_record;
-  最全方案复用=层 1 预填算子按字段填充度排序;30 字段工艺词表属实施方——冻结纪律只留给承载治理的表)。
+  最全方案复用=层 1 预填算子 `rankBy:'field_presence'`(按非空 human 字段计数降序;默认 `recency` 服务跨项目预填,二者皆为确定性全序);30 字段工艺词表属实施方——冻结纪律只留给承载治理的表)。
 - ⟲ **「可导入包」措辞诚实化(审阅 P3-3)**:`template-library` 只装 sheets/fields/views,**无字段权限/自动化/
   personal-view 导入原语**。所以 P2/P6 的「包」要么是**手工配置 + 文档**(守住「无代码」),要么是**新 installer 代码**
   (与「无门」矛盾)——设计锁二选一,不含糊。

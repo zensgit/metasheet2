@@ -94,7 +94,7 @@ provisioning)**刻意不同类**:
 field.value_changed` 自动化在这里**全量可用**——P1a 的「插件写不发事件」边界打不到 gallery 表
 (它们没有插件写入方)。这也是把工艺建模放普通租户表的架构红利。
 
-## 3. 最全方案复用:P3 预填算子按字段填充度排序 【需代码·P3 刀·有门】
+## 3. 最全方案复用:P3 预填算子 `rankBy:'field_presence'` 【模块已建·接线待门】
 
 需求:新工艺路线想「从历史最全的同类方案起步」。
 
@@ -104,8 +104,7 @@ field.value_changed` 自动化在这里**全量可用**——P1a 的「插件写
 **P3 刀提供的(计划中,`general-prep-system-development-plan-20260721.md` §2 P3,stock-prep
 门后)**:跨项目预填候选算子——沿用已跨项目的 `plmDrawingNo` 映射语义
 (`plm_stock_preparation_material_mapping` 表,templates.cjs:691-699;匹配逻辑先例
-`stock-preparation-material-match.cjs:93/:129`)。**按字段填充度排序** = 候选记录在一组闭字段
-集上的非空计数降序(feasibility rev-2 层 1「预填算子按字段填充度排序」),只产**建议**:
+`stock-preparation-material-match.cjs:93/:129`)。**`rankBy:'field_presence'`**(模块 `stock-preparation-suggestion-operators.cjs` 已实现,与默认 `recency` 并列的闭词表选项)= 候选记录在 human 字段集上的非空计数降序,平局落 recency;只产**建议**,K2 确认才落库:
 
 - 建议写 `plm_system` 建议列,**只经 K2 确认进 human/可编辑字段**(confirm-writes 先例);
 - 前置欠账(审阅 P2-2):新增 `plm_system` 列撞上 `stock-preparation-mvp-provisioning.cjs:212-215`

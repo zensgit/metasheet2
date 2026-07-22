@@ -54,6 +54,9 @@ describeDb('P1a stock-prep substrate proof (real DB)', () => {
   afterAll(async () => {
     // Clean up only our own rows (shared DB).
     await pool.query(`DELETE FROM meta_automation_outbox WHERE event_id LIKE $1`, [`evt_p1a_${RUN}%`]).catch(() => {})
+    // createRecord emits a meta_record_revisions row per create (source='plugin') — clean those too
+    // so the shared DB has no orphan revisions (review P3).
+    await pool.query(`DELETE FROM meta_record_revisions WHERE sheet_id = $1`, [sheetId]).catch(() => {})
     await pool.query(`DELETE FROM meta_records WHERE sheet_id = $1`, [sheetId]).catch(() => {})
     await pool.query(`DELETE FROM field_permissions WHERE sheet_id = $1`, [sheetId]).catch(() => {})
     await pool.query(`DELETE FROM meta_fields WHERE sheet_id = $1`, [sheetId]).catch(() => {})
