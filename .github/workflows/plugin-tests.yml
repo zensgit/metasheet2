@@ -129,6 +129,10 @@ jobs:
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
             scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   test:
     runs-on: ubuntu-latest
@@ -273,6 +277,8 @@ jobs:
         run: |
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -718,6 +724,7 @@ jobs:
             tests/integration/approval-routing-policy-equivalence.db.test.ts \
             tests/integration/directory-binding-sync-hook.db.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
+            tests/integration/approval-template-authoring-uat.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
@@ -848,6 +855,20 @@ jobs:
             tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts \
             tests/integration/attendance-approval-dept-head-s7-3.db.test.ts \
             tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-lifecycle.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-sync-automatch.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts \
+            tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts \
+            tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts \
+            tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts \
+            tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts \
+            tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

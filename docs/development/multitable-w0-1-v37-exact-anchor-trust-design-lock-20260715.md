@@ -434,3 +434,128 @@ implementation slices only (as the §9 tail).
 **Take-over discipline (recorded so all integration sessions share it):** a ≥65-min branch silence triggers only a
 READ-ONLY independent review + an alert — it does **NOT** transfer PR ownership. Driving another session's PR branch
 requires an explicit handoff; absent that, open a **superseding branch that does not touch the original PR**.
+
+## 12. Owner-directed roadmap addition — durable recovery archive + sheet version restore (2026-07-17)
+
+**Status:** PLANNED / design-lock-required. The owner directed that post-retention recovery and bulk version restore
+be part of the Time Machine line. This section records the product boundary and dependency order; it does **not**
+ratify runtime implementation, change a retention policy, enable a flag, or expand the Phase-B merge authority in
+section 11.
+
+### 12.1 Product contract: two retention horizons
+
+The product must distinguish two independently configured horizons:
+
+1. **History retention** — hot `meta_record_revisions`, config revisions, operation endpoints, and tombstones used by
+   History Center and low-latency inspection.
+2. **Recovery retention** — immutable, verified recovery archives kept after hot history is pruned, used to restore a
+   sheet to an exact recovery point.
+
+A customer-facing **sheet version** is an exact, server-resolved recovery point rooted at an `anchorOperationId`; it
+is not a per-record version number and is not an authoritative free wall-clock timestamp. One selected recovery point
+therefore restores a coherent sheet state without requiring the customer to restore records one by one.
+
+Phase D is required before the product may promise recovery after history retention. It is also required before the
+current PIT-Reset/retention conflict may be reconsidered. Until Phase D is implemented and accepted, existing
+retention behavior and all fail-closed conflicts remain unchanged.
+
+### 12.2 Archive-before-prune invariant
+
+For every operation/checkpoint range covered by recovery retention:
+
+> hot history may be pruned only after the corresponding archive is durable, tenant/sheet-bound, complete, and
+> independently verified.
+
+The archive writer must use a state machine such as `building → verified → expired`; `building`, missing, corrupt,
+or unverifiable archives never authorize pruning. Archive expiration is a separate owner-configured recovery policy,
+not an implication of hot-history expiration. A failed archive write or verification leaves hot source rows intact.
+
+The archive is immutable after verification. Corrections create a new archive generation and supersede the old one;
+they never edit an already verified payload in place. Archive deletion after the recovery horizon must be explicit,
+auditable, and values-free in logs.
+
+### 12.3 Recovery archive content
+
+The v1 single-sheet archive manifest must bind at least:
+
+- format/schema version, tenant/base/sheet identity, `anchorOperationId`, exact bigint `anchorSeq`, checkpoint id,
+  creation time, and recovery-expiry time;
+- field definitions and order, sheet/view configuration, record existence/version/data, and `meta_links` edges;
+- field-value/link tombstones needed by field/record undelete, plus auto-number sequence state;
+- attachment object references and an explicit availability/pinning result (a database reference is not proof that
+  the underlying object still exists);
+- per-section row counts, content hashes, a root manifest hash, encryption/key metadata, and archive-generation id.
+
+Permission restoration remains a separate high-risk tier in v1: the archive may retain permission evidence for audit,
+but a data restore must not silently overwrite current authorization policy. Formula/lookup/rollup values are derived;
+the restore contract recovers their definitions/source inputs and recomputes them rather than treating stale derived
+bytes as authority.
+
+Storage may use object storage, an archive database, or another durable backend, but the interface and goldens must be
+backend-neutral. No archive URI, credential, tenant identifier, or recovered value may enter ordinary logs.
+
+### 12.4 Restore modes and forward-only semantics
+
+The same verified archive supports three product modes:
+
+1. restore the whole sheet;
+2. restore selected records;
+3. restore selected fields across the selected records.
+
+Every mode is preview-first and binds a signed plan to the archive generation, exact anchor, checkpoint, actor,
+permission-filtered scope, current live-set fingerprint, and conflict policy. Execute creates new `source='restore'`
+revisions and a sealed operation endpoint; it never rewrites or moves historical rows. The restore operation therefore
+becomes a future exact recovery anchor itself.
+
+Small single-sheet restores may use the L8 fenced all-or-nothing path. Work above the synchronous ceiling (initially
+the existing 5,000-record boundary unless post-W0 measurement changes it) uses an asynchronous operation with a frozen
+plan/hash, idempotent operation id, progress, retry/resume, conflict detection, and explicit partial-completion
+semantics. V1 makes no cross-sheet long-transaction atomicity promise.
+
+### 12.5 Phase-D slices and estimate
+
+Phase D starts only after Phase B (`L5-wire → L6-b → L7 → L8`) is frozen on `main`. Draft design work may start
+earlier, but no archive reader or restore executor may bypass those exact-anchor and atomic-apply authorities.
+
+| Slice | Deliverable | Estimate |
+|---|---|---:|
+| D1 | archive contract/design lock, manifest versioning, threat model, storage adapter boundary | 1–1.5 pw |
+| D2 | archive writer + archive-before-prune state machine and retention handoff | 1.5–2 pw |
+| D3 | scheduled/manual recovery-point creation, catalog, lifecycle, integrity verifier | 1–1.5 pw |
+| D4 | checkpoint + archived-delta reader/reconstructor at exact operation anchor | 1.5–2 pw |
+| D5 | whole-sheet/record/field restore planner + asynchronous bulk execution | 1.5–2.5 pw |
+| D6 | Time Machine recovery-point picker, diff, scope selection, progress/retry UI | 1–1.5 pw |
+| D7 | staging fault injection, scale/restore rehearsal, runbook, development+verification MD | 1–1.5 pw |
+
+Expected development volume: **8–12 person-weeks**, excluding a future cross-sheet/base-wide atomicity design and
+production rollout. Implementation may use two isolated development lanes plus an independent adversarial gate, but
+merges remain dependency-ordered and exact-head reviewed.
+
+### 12.6 Required evidence before enablement
+
+At minimum, mutation-proven real-DB/integration evidence must show:
+
+- archive write, upload, hash, or verification failure prevents the matching hot-history prune;
+- a corrupt, truncated, wrong-generation, cross-sheet, cross-tenant, expired, or wrong-key archive is refused before
+  any live write;
+- checkpoint + archived deltas reconstruct the exact token-bound anchor, including delete/recreate generations and
+  seq values above JavaScript's safe-integer range;
+- field-value and inbound-link recovery still works after the matching hot tombstones/revisions are pruned;
+- attachment absence is reported in preview and never represented as a successful full restore;
+- preview/live drift, permission drift, schema drift, locked records, and retention-floor drift produce zero-write
+  refusals or the explicitly selected conflict policy;
+- asynchronous jobs are idempotent across worker crash/retry and cannot double-apply a completed chunk;
+- a mid-apply failure follows the documented single-sheet atomic/partial contract, and the restore's own operation is
+  sealed as a future anchor;
+- flag-off behavior and existing history/retention behavior remain unchanged.
+
+### 12.7 Explicit boundary
+
+This feature is forward-looking. It cannot recover bytes already removed by retention before a verified archive was
+created, nor values destroyed before tombstone/revision capture when no other trustworthy backup contains them. Such
+cases remain `unavailable`, not guessed from an older candidate snapshot. External database/WAL/object backups may be
+offered as a separate operator recovery source, but they are not silently reclassified as Time Machine evidence.
+
+Completing W0 Phase B establishes the trusted recovery substrate. Completing Phase D establishes the additional
+product promise **“recoverable after hot-history retention”**. These are separate completion claims and must remain
+separate in status reports and enablement decisions.

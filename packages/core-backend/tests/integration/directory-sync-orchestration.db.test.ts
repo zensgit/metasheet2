@@ -549,11 +549,13 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       }
     }
 
-    const cleanupTargets: Array<{ integrationId: string; localUserId: string }> = []
+    const cleanupTargets: Array<{ integrationId: string; localUserId: string; siblingIntegrationId?: string }> = []
 
     afterAll(async () => {
       for (const target of cleanupTargets) {
         await cleanupIntegration(target.integrationId)
+        if (target.siblingIntegrationId) await cleanupIntegration(target.siblingIntegrationId)
+        await query(`DELETE FROM user_orgs WHERE user_id = $1`, [target.localUserId])
         await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [target.localUserId])
         await query(`DELETE FROM users WHERE id = $1`, [target.localUserId])
       }
@@ -590,12 +592,39 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
 
       expect(stats.deprovisionApplied).toBe(true)
       expect(stats.deprovisionCandidateCount).toBe(1)
+      // W4-PRE-1d (owner P2 item 2, review-findings P1/P2): this fixture is a single-org
+      // departure with no sibling binding anywhere, so the org-membership candidate is ALSO
+      // globally clear — both counts read 1 for this scenario. The dual-org test below
+      // ("with a real, still-active binding in ANOTHER org...") is the one that actually
+      // exercises `globalCandidateCount` diverging from `candidateCount`.
+      expect(stats.deprovisionGlobalCandidateCount).toBe(1)
       expect(stats.deprovisionGrantsDisabledCount).toBe(1)
       expect(stats.deprovisionUsersDeactivatedCount).toBe(1)
       expect(stats.deprovisionAbortedReason).toBeNull()
       expect(stats.deprovisionAffected).toEqual([
-        { directoryAccountId: fixture.accountId, localUserId: fixture.localUserId, policy: 'mark_inactive' },
+        { directoryAccountId: fixture.accountId, localUserId: fixture.localUserId, policy: 'mark_inactive', globallyClear: true },
       ])
+
+      // Sweep-layer audit trail (owner P2 item 2, review finding: `meta.grantDisabled` /
+      // `meta.userDeactivated` were previously hardcoded `true` / `policy === 'mark_inactive'`
+      // and NO test — at the real `syncDirectoryIntegration` sweep layer, as opposed to a
+      // direct `applyDirectoryDeprovisionPolicies` call — asserted on them; a revert to the
+      // hardcoded form would have stayed green here). This is the globally-clear=true branch;
+      // the dual-org test below covers the false branch.
+      const audit = await query<{ action_details: Record<string, unknown> }>(
+        `SELECT action_details FROM audit_logs
+          WHERE resource_type = 'directory-account-link' AND resource_id = $1
+          ORDER BY id DESC LIMIT 1`,
+        [fixture.accountId],
+      )
+      expect(audit.rows).toHaveLength(1)
+      expect(audit.rows[0].action_details).toMatchObject({
+        policy: 'mark_inactive',
+        grantDisabled: true,
+        userDeactivated: true,
+        globallyClear: true,
+        membershipDeactivationAttempted: true,
+      })
     })
 
     it('with the flag unset (shipped default), the same departure writes NOTHING — counts are preview-only', async () => {
@@ -620,7 +649,181 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       // But the run REPORTS what it would have done (the operator preview).
       expect(stats.deprovisionApplied).toBe(false)
       expect(stats.deprovisionCandidateCount).toBe(1)
+      expect(stats.deprovisionGlobalCandidateCount).toBe(1)
       expect(stats.deprovisionUsersDeactivatedCount).toBe(1)
+    })
+
+    // -----------------------------------------------------------------------
+    // Dual-org fixture (owner P1/P2, #4530 review — issuecomment-5043752399):
+    // the named scenario is a real, still-active binding in a DIFFERENT org, not a
+    // bare `user_orgs` stand-in. This is the one test in this file where
+    // `globalCandidateCount` actually diverges from `candidateCount` (0 vs 1),
+    // exercising the sweep-layer observability (run-stats + audit meta) that the
+    // two single-org fixtures above cannot: their globally-clear=true scenario
+    // cannot distinguish a correct `globallyClear`-gated write from an
+    // unconditional one.
+    // -----------------------------------------------------------------------
+    async function seedDualOrgDepartureFixture(tag: string): Promise<{
+      integrationId: string
+      siblingIntegrationId: string
+      siblingOrgId: string
+      localUserId: string
+      accountId: string
+      deptId: string
+      survivorExt: string
+    }> {
+      const integration = await createDirectoryIntegration({
+        name: `dso-dep-${tag}-${TS}`,
+        corpId: `dso-dep-corp-${tag}-${TS}`,
+        appKey: `dso-dep-appkey-${tag}-${TS}`,
+        appSecret: 'dso-secret',
+        admissionMode: 'manual_only',
+        defaultDeprovisionPolicy: 'mark_inactive',
+      })
+
+      // A second, real integration with its OWN distinct, explicit org_id (never the shared
+      // 'default' sentinel the fixture above uses — two integrations without an explicit
+      // org_id would collapse onto the same org and silently defeat this fixture).
+      const siblingOrgId = `dso-dep-orgB-${tag}-${TS}`
+      const siblingIntegration = await query<{ id: string }>(
+        `INSERT INTO directory_integrations (name, corp_id, org_id) VALUES ($1, $2, $3) RETURNING id::text AS id`,
+        [`dso-dep-sib-${tag}-${TS}`, `dso-dep-sib-corp-${tag}-${TS}`, siblingOrgId],
+      )
+
+      const localUserId = `dso-dep-dual-user-${tag}-${TS}`
+      await query(`INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'x', TRUE)`, [
+        localUserId,
+        `${localUserId}@example.test`,
+      ])
+      await query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+        [localUserId],
+      )
+
+      // THIS org's account: pre-linked, absent from the pull below — the sweep transitions it
+      // to inactive and hands its id to the executor within the same run (same shape as the
+      // single-org fixture above).
+      const account = await query<{ id: string }>(
+        `INSERT INTO directory_accounts (
+           integration_id, corp_id, external_user_id, union_id, external_key, name, is_active, last_seen_at, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $4, 'Departed', true, NOW(), NOW(), NOW())
+         RETURNING id`,
+        [integration.id, `dso-dep-corp-${tag}-${TS}`, `dso-dep-dual-ext-${tag}-${TS}`, `dso-dep-dual-un-${tag}-${TS}`],
+      )
+      await query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at)
+         VALUES ($1, $2, 'linked', 'manual', NOW(), NOW())`,
+        [account.rows[0].id, localUserId],
+      )
+
+      // The REAL sibling binding in the OTHER org — active and linked throughout. Owner P1,
+      // verbatim: "全局 sibling guard...把「A 离职但仍在 B 任职」的用户整体排除出候选集"; owner
+      // P2 item 4 requires this be a real integration + real binding, never a bare `user_orgs`
+      // row standing in for one.
+      const siblingAccount = await query<{ id: string }>(
+        `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, is_active)
+         VALUES ($1, $2, $3, 'Sibling', TRUE) RETURNING id`,
+        [siblingIntegration.rows[0].id, `dso-dep-dual-sib-ext-${tag}-${TS}`, `dingtalk:dso-dep-dual-sib-${tag}-${TS}`],
+      )
+      await query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status)
+         VALUES ($1, $2, 'linked')`,
+        [siblingAccount.rows[0].id, localUserId],
+      )
+      await query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+        [localUserId, siblingOrgId],
+      )
+
+      // Pre-existing enabled grant — must survive UNTOUCHED (globallyClear is false here).
+      await query(
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ('dingtalk', $1, TRUE, 'system:test-fixture', NOW(), NOW())`,
+        [localUserId],
+      )
+
+      return {
+        integrationId: integration.id,
+        siblingIntegrationId: siblingIntegration.rows[0].id,
+        siblingOrgId,
+        localUserId,
+        accountId: account.rows[0].id,
+        deptId: `dso-dep-dual-dept-${tag}-${TS}`,
+        survivorExt: `dso-dep-dual-surv-${tag}-${TS}`,
+      }
+    }
+
+    it('with a real, still-active binding in ANOTHER org, mark_inactive deactivates only THIS org membership: grant + platform user survive, and the sweep-layer observability tells the truth (owner P2 items 1/2/4)', async () => {
+      const fixture = await seedDualOrgDepartureFixture('dual')
+      cleanupTargets.push(fixture)
+      activeDirectory = departureDirectory(fixture)
+
+      process.env.DIRECTORY_DEPROVISION_ENABLED = 'true'
+      let stats: Record<string, unknown>
+      try {
+        const result = await syncDirectoryIntegration(fixture.integrationId, 'system:dso-dep-dual')
+        stats = result.run.stats as Record<string, unknown>
+      } finally {
+        delete process.env.DIRECTORY_DEPROVISION_ENABLED
+      }
+
+      // THIS org's membership WAS deactivated — item 1 is org-scoped and unconditional on
+      // global clearance.
+      const membershipA = await query<{ is_active: boolean }>(
+        `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = 'default'`,
+        [fixture.localUserId],
+      )
+      expect(membershipA.rows[0].is_active).toBe(false)
+
+      // The SIBLING org's membership is untouched — a different run, a different org.
+      const membershipB = await query<{ is_active: boolean }>(
+        `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
+        [fixture.localUserId, fixture.siblingOrgId],
+      )
+      expect(membershipB.rows[0].is_active).toBe(true)
+
+      // NOT globally clear: the platform user and the DingTalk grant both survive.
+      const user = await query<{ is_active: boolean }>(`SELECT is_active FROM users WHERE id = $1`, [fixture.localUserId])
+      expect(user.rows[0].is_active).toBe(true)
+
+      const grant = await query<{ enabled: boolean }>(
+        `SELECT enabled FROM user_external_auth_grants WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [fixture.localUserId],
+      )
+      expect(grant.rows).toHaveLength(1)
+      expect(grant.rows[0].enabled).toBe(true)
+
+      expect(stats.deprovisionApplied).toBe(true)
+      expect(stats.deprovisionCandidateCount).toBe(1)
+      expect(stats.deprovisionGlobalCandidateCount).toBe(0)
+      expect(stats.deprovisionGrantsDisabledCount).toBe(0)
+      expect(stats.deprovisionUsersDeactivatedCount).toBe(0)
+      expect(stats.deprovisionMembershipDeactivationAttemptedCount).toBe(1)
+      expect(stats.deprovisionAbortedReason).toBeNull()
+      expect(stats.deprovisionAffected).toEqual([
+        { directoryAccountId: fixture.accountId, localUserId: fixture.localUserId, policy: 'mark_inactive', globallyClear: false },
+      ])
+
+      // Sweep-layer audit trail must tell the truth per-person (owner P2 item 2, review
+      // finding: this is the globally-clear=FALSE branch of the same hardcoded-value regression
+      // the test above closes for the TRUE branch — a revert to `grantDisabled: true` /
+      // `userDeactivated: policy === 'mark_inactive'` unconditionally would go red here).
+      const audit = await query<{ action_details: Record<string, unknown> }>(
+        `SELECT action_details FROM audit_logs
+          WHERE resource_type = 'directory-account-link' AND resource_id = $1
+          ORDER BY id DESC LIMIT 1`,
+        [fixture.accountId],
+      )
+      expect(audit.rows).toHaveLength(1)
+      expect(audit.rows[0].action_details).toMatchObject({
+        policy: 'mark_inactive',
+        grantDisabled: false,
+        userDeactivated: false,
+        globallyClear: false,
+        membershipDeactivationAttempted: true,
+      })
     })
   })
 

@@ -86,6 +86,9 @@ export const RESULT_VOCABULARY = Object.freeze({
   networkRequestCount: Object.freeze(['0', '1', 'OTHER']),
   networkTarget: Object.freeze(['INTERNAL_API_ONLY', 'OTHER', 'UNAVAILABLE']),
   authReadResult: Object.freeze(['HTTP_2XX', 'HTTP_4XX', 'HTTP_5XX', 'TYPE_ERROR', 'ABORT_ERROR', 'OTHER', 'UNAVAILABLE']),
+  authReadStatusClass: Object.freeze(['HTTP_2XX', 'HTTP_401', 'HTTP_403', 'HTTP_404', 'HTTP_409', 'HTTP_4XX_OTHER', 'HTTP_5XX', 'OTHER', 'UNAVAILABLE']),
+  authReadReasonClass: Object.freeze(['NONE', 'UNAUTHORIZED', 'PASSWORD_CHANGE_REQUIRED', 'FORBIDDEN', 'INCONSISTENT', 'OTHER', 'UNAVAILABLE']),
+  authReadContractClass: Object.freeze(['VALID', 'RESPONSE_CONTRACT_INVALID', 'UNAVAILABLE']),
   elapsedClass: Object.freeze(['LT_1S', '1_TO_14S', '15_TO_20S', 'GT_20S', 'UNAVAILABLE']),
   typeErrorBoundary: Object.freeze(['INVALID_URL', 'REQUEST_HEADERS', 'CONNECT', 'DNS', 'TLS', 'FETCH_API', 'RESPONSE_READ', 'OTHER', 'NONE', 'UNAVAILABLE']),
   abortErrorNameClass: Object.freeze(['ABORT_ERROR', 'TIMEOUT_ERROR', 'OTHER', 'NONE']),
@@ -291,6 +294,66 @@ export function classifyHttpStatusClass(status) {
   return 'OTHER'
 }
 
+// v2 acceleration: a finer HTTP status class so ONE run with a known-good token
+// is dispositive. 401 vs 403 splits token-invalid from account/permission
+// failures without a second sidecar. Values-free: HTTP status is a closed
+// protocol enum, not business data.
+export function classifyAuthReadStatusClass(status) {
+  if (!Number.isInteger(status)) return 'UNAVAILABLE'
+  if (status >= 200 && status <= 299) return 'HTTP_2XX'
+  if (status === 401) return 'HTTP_401'
+  if (status === 403) return 'HTTP_403'
+  if (status === 404) return 'HTTP_404'
+  if (status === 409) return 'HTTP_409'
+  if (status >= 400 && status <= 499) return 'HTTP_4XX_OTHER'
+  if (status >= 500 && status <= 599) return 'HTTP_5XX'
+  return 'OTHER'
+}
+
+// The reason class is bound to the EXACT (status, code) pair, not the code alone
+// (review P2): a 404+FORBIDDEN or 401+PASSWORD_CHANGE_REQUIRED is a contradiction,
+// not a FORBIDDEN / PASSWORD_CHANGE_REQUIRED. Only these three pairs occur for
+// GET /api/integration/status auth failures on a real deployment (behind the
+// global JWT gate, the plugin's 401 UNAUTHENTICATED is unreachable — deliberately
+// NOT a recognized branch). A recognized code with the wrong status is
+// INCONSISTENT; any other/absent code is OTHER — no free-text ever surfaces.
+const AUTH_READ_REASON_PAIRS = Object.freeze({
+  '401|UNAUTHORIZED': 'UNAUTHORIZED',
+  '403|PASSWORD_CHANGE_REQUIRED': 'PASSWORD_CHANGE_REQUIRED',
+  '403|FORBIDDEN': 'FORBIDDEN',
+})
+export const AUTH_READ_REASON_CODES = Object.freeze(['UNAUTHORIZED', 'PASSWORD_CHANGE_REQUIRED', 'FORBIDDEN'])
+const AUTH_READ_REASON_CODE_SET = new Set(AUTH_READ_REASON_CODES)
+
+export function classifyAuthReadReasonClass(status, body) {
+  if (!Number.isInteger(status)) return 'UNAVAILABLE'
+  if (status >= 200 && status <= 299) return 'NONE'
+  const code = body && body.error && typeof body.error.code === 'string' ? body.error.code : ''
+  const exact = AUTH_READ_REASON_PAIRS[`${status}|${code}`]
+  if (exact) return exact
+  // A recognized auth code paired with the wrong status is a contradiction.
+  if (AUTH_READ_REASON_CODE_SET.has(code)) return 'INCONSISTENT'
+  return 'OTHER'
+}
+
+// Success-response contract (review P1): a bare 200 is NOT proof of a healthy API.
+// A login/HTML page returns 200 and parses to body=null yet would otherwise read
+// as HTTP_2XX/NONE and unlock the RC-A fast-track. A genuine status success is
+// { ok:true, data:{ adapters:[...], routes:[...] } } — validate it or fail closed
+// to RESPONSE_CONTRACT_INVALID (never fast-track). Non-2xx has no success contract.
+export function classifyAuthReadContractClass(status, body) {
+  if (!Number.isInteger(status) || status < 200 || status > 299) return 'UNAVAILABLE'
+  const valid =
+    body &&
+    typeof body === 'object' &&
+    body.ok === true &&
+    body.data &&
+    typeof body.data === 'object' &&
+    Array.isArray(body.data.adapters) &&
+    Array.isArray(body.data.routes)
+  return valid ? 'VALID' : 'RESPONSE_CONTRACT_INVALID'
+}
+
 // Error codes are collected from a small closed set of locations: the error itself, its cause,
 // the cause's AggregateError members (Node >=20 wraps connection failures this way), and one
 // nested cause level. Values are never printed — they only feed the closed classification below.
@@ -467,6 +530,9 @@ export function baselineFields() {
     networkRequestCount: '0',
     networkTarget: 'UNAVAILABLE',
     authReadResult: 'UNAVAILABLE',
+    authReadStatusClass: 'UNAVAILABLE',
+    authReadReasonClass: 'UNAVAILABLE',
+    authReadContractClass: 'UNAVAILABLE',
     elapsedClass: 'UNAVAILABLE',
     typeErrorBoundary: 'UNAVAILABLE',
     abortErrorNameClass: 'NONE',
@@ -536,7 +602,12 @@ export async function runDiagnostic({
     fields.networkRequestCount = state.requestCount === 0 ? '0' : state.requestCount === 1 ? '1' : 'OTHER'
     fields.networkTarget = state.requestCount === 0 ? 'UNAVAILABLE' : state.networkTarget
     if (outcome.resolved) {
-      fields.authReadResult = classifyHttpStatusClass(outcome.response ? outcome.response.status : undefined)
+      const status = outcome.response ? outcome.response.status : undefined
+      const body = outcome.response ? outcome.response.body : undefined
+      fields.authReadResult = classifyHttpStatusClass(status)
+      fields.authReadStatusClass = classifyAuthReadStatusClass(status)
+      fields.authReadReasonClass = classifyAuthReadReasonClass(status, body)
+      fields.authReadContractClass = classifyAuthReadContractClass(status, body)
       fields.typeErrorBoundary = 'NONE'
       fields.abortErrorNameClass = 'NONE'
     } else {
@@ -544,6 +615,10 @@ export async function runDiagnostic({
       fields.authReadResult = rejection.authReadResult
       fields.typeErrorBoundary = rejection.typeErrorBoundary
       fields.abortErrorNameClass = rejection.abortErrorNameClass
+      // A transport/abort rejection produced no HTTP response to classify.
+      fields.authReadStatusClass = 'UNAVAILABLE'
+      fields.authReadReasonClass = 'UNAVAILABLE'
+      fields.authReadContractClass = 'UNAVAILABLE'
     }
     fields.abortProvenance = deriveAbortProvenance({
       authReadResult: fields.authReadResult,

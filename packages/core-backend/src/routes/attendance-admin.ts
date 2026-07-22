@@ -371,8 +371,19 @@ export async function canReadAttendanceDirectoryReadiness(
   runQuery: typeof query = query,
 ): Promise<boolean> {
   if (hasLegacyAdminClaim(req) || await isRbacAdmin(userId)) return true
+  // W4-PRE-1b item E (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, 2026-07-21): dual
+  // is_active filter — a user whose PLATFORM ACCOUNT is deactivated (`users.is_active=false`,
+  // e.g. via PATCH /api/admin/users/:userId/status, which deliberately never touches
+  // `user_orgs` — see the item-B boundary note) must not keep reading this org's readiness just
+  // because their `user_orgs` row is still `is_active=true`. Mirrors the RD-3 population
+  // predicate every readiness COUNT in this line already uses
+  // (`plugins/plugin-attendance/index.cjs:15532`, "target population: active org members only").
   const member = await runQuery(
-    'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+    `SELECT 1
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+     LIMIT 1`,
     [userId, orgId],
   )
   return member.rows.length > 0

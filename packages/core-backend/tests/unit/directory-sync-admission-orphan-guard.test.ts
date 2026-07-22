@@ -22,6 +22,14 @@ function fakeClient() {
     queries,
     query: async (sql: string) => {
       queries.push(sql)
+      // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+      // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing
+      // user_orgs. This fixture's account.integration_id must resolve to SOME org for the
+      // grant-feasibility scenarios below to reach the INSERT INTO users assertions they exist
+      // to prove — everything else keeps the previous always-empty-rows behavior.
+      if (/SELECT org_id\s+FROM directory_integrations/.test(sql)) {
+        return { rows: [{ org_id: 'orgA' }] as Array<Record<string, unknown>> }
+      }
       return { rows: [] as Array<Record<string, unknown>> }
     },
   }

@@ -41,6 +41,10 @@ export default defineConfig({
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
+      // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
+      // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
+      // approval real-DB workflow step.
+      'tests/integration/approval-template-authoring-uat.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
@@ -376,6 +380,41 @@ export default defineConfig({
       // authz + flag-off. DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot
       // skip-green it; wired whole-file into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
+      // W4-PRE-1 real-DB (§3.3 of attendance-vnext-wave4-onboarding-design-lock-20260721.md):
+      // user_orgs admission write-site suites (fresh-DB/atomicity/two-org/upgrade across
+      // POST /api/admin/users + directory-sync admission, plus the org-unknowable policy
+      // negative controls). DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB
+      // job cannot skip-green them; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts',
+      'tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts',
+      'tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts',
+      // W4-PRE-1b real-DB (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, 2026-07-21):
+      // user_orgs full LIFECYCLE — bind/auto-match writers (item A), org-scoped safe-
+      // deactivation writers (item B), the real-stock backfill migration (item C), the S7-5
+      // dual is_active gate (item E), and the explicit attendanceOrgId admin-users path
+      // (item D). DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job
+      // cannot skip-green them; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/attendance-w4pre1b-user-orgs-lifecycle.db.test.ts',
+      'tests/integration/attendance-w4pre1b-user-orgs-sync-automatch.db.test.ts',
+      'tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts',
+      'tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts',
+      'tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts',
+      // #4526 review addition: real-DB behavioral proof for item E's api-tokens.ts dual filter
+      // (the PR's original coverage was mock-SQL-text-only).
+      'tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts',
+      // W4-PRE-1c real-DB (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, rev3 review,
+      // 2026-07-22): controlled-departure user_orgs deactivation (owner 裁决②) — real sync
+      // sweep composed with the deprovision executor (case ①), org-scoped composition with the
+      // global sibling guard (cases ②/③), manual_review pending exposure (case ④), and the
+      // readiness-gate + DingTalk destination permission negatives (case ⑤). DATABASE_URL-gated
+      // describeIfDatabase; excluded here so the no-DB job cannot skip-green them; wired
+      // whole-file into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts',
+      'tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts',
+      'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
+      'tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

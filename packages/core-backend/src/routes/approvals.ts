@@ -749,6 +749,27 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Restoring never mutates a historical row or switches the active published definition. It
+  // copies the selected snapshot into a new draft and uses expectedLatestVersionId to reject a
+  // stale history view instead of silently overwriting a newer authoring change.
+  r.post('/api/approval-templates/:id/versions/:versionId/restore', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const version = await productService.restoreTemplateVersion(
+        req.params.id,
+        req.params.versionId,
+        { expectedLatestVersionId: req.body?.expectedLatestVersionId },
+      )
+      res.status(201).json(version)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_VERSION_RESTORE_FAILED',
+        'Failed to restore approval template version',
+      )
+    }
+  })
+
   // B3-04: participant candidate-user directory. Registered BEFORE '/api/approvals/:id' so
   // 'directory' is never matched as an :id. Reuses searchDirectoryUsers (active-only, {id,name,email},
   // limit clamped to [1,50]) — same minimal-exposure shape as the author picker, wider guard.

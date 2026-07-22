@@ -55,6 +55,122 @@ function inEdges(graph: ApprovalGraph, nodeKey: string): ApprovalEdge[] {
   return graph.edges.filter((e) => e.target === nodeKey)
 }
 
+function gatewayOwnedEdgeKeys(graph: ApprovalGraph): Set<string> {
+  const keys = new Set<string>()
+  for (const node of graph.nodes) {
+    if (node.type === 'condition') {
+      const config = node.config as ConditionNodeConfig
+      for (const branch of config.branches ?? []) keys.add(branch.edgeKey)
+      if (typeof config.defaultEdgeKey === 'string') keys.add(config.defaultEdgeKey)
+    }
+    if (node.type === 'parallel') {
+      const config = node.config as ParallelNodeConfig
+      for (const edgeKey of config.branches ?? []) keys.add(edgeKey)
+    }
+  }
+  return keys
+}
+
+/**
+ * Stable anchor for one maximal linear region. Walking upstream stops at either a gateway-owned
+ * branch edge or the first node that is not single-in/single-out. Edges sharing this anchor belong
+ * to the same path segment without crossing a condition/parallel fork or rejoin boundary.
+ */
+function linearRegionAnchorEdgeKey(graph: ApprovalGraph, edgeKey: string): string | undefined {
+  const edgesByKey = new Map(graph.edges.map((edge) => [edge.key, edge]))
+  const nodesByKey = new Map(graph.nodes.map((node) => [node.key, node]))
+  const gatewayEdges = gatewayOwnedEdgeKeys(graph)
+  let current = edgesByKey.get(edgeKey)
+  const visited = new Set<string>()
+  while (current && !visited.has(current.key)) {
+    visited.add(current.key)
+    const source = nodesByKey.get(current.source)
+    if (!source) return undefined
+    const ins = inEdges(graph, source.key)
+    const outs = outEdges(graph, source.key)
+    if (ins.length !== 1 || outs.length !== 1) return current.key
+    const predecessor = ins[0]
+    if (gatewayEdges.has(predecessor.key)) return predecessor.key
+    current = predecessor
+  }
+  return undefined
+}
+
+export interface LinearNodeMoveTarget {
+  edgeKey: string
+  source: string
+  target: string
+}
+
+/** Legal semantic drop slots for an approval/cc node, restricted to its current linear region. */
+export function linearNodeMoveTargets(graph: ApprovalGraph, nodeKey: string): LinearNodeMoveTarget[] {
+  const node = graph.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node || (node.type !== 'approval' && node.type !== 'cc')) return []
+  const ins = inEdges(graph, nodeKey)
+  const outs = outEdges(graph, nodeKey)
+  if (ins.length !== 1 || outs.length !== 1) return []
+  const anchor = linearRegionAnchorEdgeKey(graph, ins[0].key)
+  if (!anchor) return []
+  const gatewayEdges = gatewayOwnedEdgeKeys(graph)
+  return graph.edges
+    .filter((edge) => edge.key !== ins[0].key && edge.key !== outs[0].key)
+    .filter((edge) => !gatewayEdges.has(edge.key))
+    .filter((edge) => linearRegionAnchorEdgeKey(graph, edge.key) === anchor)
+    .map((edge) => ({ edgeKey: edge.key, source: edge.source, target: edge.target }))
+}
+
+/**
+ * Move one single-in/single-out approval/cc node onto a legal edge in the same linear region.
+ * Rewires exactly three existing edges and preserves every node/edge key:
+ * `pred→node→succ` + `before→after` becomes `pred→succ` + `before→node→after`.
+ */
+export function moveLinearNode(graph: ApprovalGraph, nodeKey: string, targetEdgeKey: string): ApprovalGraph {
+  const node = graph.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node) throw new Error(`moveLinearNode: node ${nodeKey} not found`)
+  if (node.type !== 'approval' && node.type !== 'cc') {
+    throw new Error(`moveLinearNode: ${nodeKey} is ${node.type}, only approval/cc movable`)
+  }
+  const ins = inEdges(graph, nodeKey)
+  const outs = outEdges(graph, nodeKey)
+  if (ins.length !== 1 || outs.length !== 1) {
+    throw new Error(`moveLinearNode: ${nodeKey} must be single-in/single-out (in=${ins.length} out=${outs.length})`)
+  }
+  const target = graph.edges.find((edge) => edge.key === targetEdgeKey)
+  if (!target) throw new Error(`moveLinearNode: target edge ${targetEdgeKey} not found`)
+  if (!linearNodeMoveTargets(graph, nodeKey).some((candidate) => candidate.edgeKey === targetEdgeKey)) {
+    throw new Error(`moveLinearNode: target edge ${targetEdgeKey} is outside ${nodeKey}'s linear region`)
+  }
+
+  return {
+    nodes: graph.nodes.map(clone),
+    edges: graph.edges.map((edge) => {
+      if (edge.key === ins[0].key) return { ...clone(edge), target: outs[0].target }
+      if (edge.key === outs[0].key) return { ...clone(edge), target: target.target }
+      if (edge.key === target.key) return { ...clone(edge), target: nodeKey }
+      return clone(edge)
+    }),
+  }
+}
+
+/** Target edge for a one-step keyboard move, or undefined at a region boundary. */
+export function adjacentLinearNodeMoveTarget(
+  graph: ApprovalGraph,
+  nodeKey: string,
+  direction: 'up' | 'down',
+): string | undefined {
+  const ins = inEdges(graph, nodeKey)
+  const outs = outEdges(graph, nodeKey)
+  if (ins.length !== 1 || outs.length !== 1) return undefined
+  const adjacentKey = direction === 'up' ? ins[0].source : outs[0].target
+  const adjacent = graph.nodes.find((node) => node.key === adjacentKey)
+  if (!adjacent || (adjacent.type !== 'approval' && adjacent.type !== 'cc')) return undefined
+  const target = direction === 'up' ? inEdges(graph, adjacentKey)[0] : outEdges(graph, adjacentKey)[0]
+  if (!target) return undefined
+  return linearNodeMoveTargets(graph, nodeKey).some((candidate) => candidate.edgeKey === target.key)
+    ? target.key
+    : undefined
+}
+
 /**
  * Node keys strictly INSIDE any parallel region — every node on a branch path between a parallel
  * gateway and its `joinNodeKey` (join and gateway excluded). Mirrors the backend

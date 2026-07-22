@@ -1320,6 +1320,10 @@ describe('AutomationExecutor', () => {
         expect(sql).toContain('org_id IS NULL AND created_by = $3')
         expect(sql).toContain('FROM user_orgs uo')
         expect(sql).toContain('uo.org_id = dg.org_id')
+        // #4526 review fix: a deactivated platform account must not keep org-scoped DingTalk
+        // destination access via a still-active user_orgs row — dual is_active filter.
+        expect(sql).toContain('JOIN users u ON u.id = uo.user_id')
+        expect(sql).toContain('u.is_active = true')
         expect(params).toEqual([['dt_other_sheet'], 'sheet_1', 'user_1'])
       }
       return { rows: [], rowCount: 0 }

@@ -1,0 +1,3 @@
+scripts/ops/stock-preparation-prep-line-extended-smoke.mjs text eol=lf
+scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs text eol=lf
+scripts/ops/stock-preparation-rca-window-pm2-sample.mjs text eol=lf

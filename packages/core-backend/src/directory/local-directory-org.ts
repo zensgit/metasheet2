@@ -27,7 +27,14 @@
 
 import * as crypto from 'crypto'
 import { query, transaction } from '../db/pg'
-import { getOrCreateLocalIntegration } from './directory-sync'
+import {
+  getOrCreateLocalIntegration,
+  // W4-PRE-1b: shared membership-write internals, imported (not reimplemented — see this
+  // file's own header comment) from directory-sync.ts — same convention
+  // `getOrCreateLocalIntegration` above already follows.
+  upsertActiveUserOrgMembership,
+  deactivateUserOrgMembershipIfNoOtherActiveBinding,
+} from './directory-sync'
 
 function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
@@ -507,6 +514,13 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
            updated_at = NOW()`,
         [accountId, localUserId],
       )
+
+      // W4-PRE-1b item A: this connects an EXISTING platform user (`localUserId`, validated
+      // above) to `input.orgId` via a local directory account — maintain their ACTIVE
+      // membership in the SAME transaction. Imported from directory-sync.ts rather than
+      // reimplemented (this file's own header: "directory-sync.ts is edited nowhere by this
+      // file" — same convention `getOrCreateLocalIntegration` already follows).
+      await upsertActiveUserOrgMembership(client, { userId: localUserId, orgId: input.orgId })
     })
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -578,13 +592,34 @@ export async function updateLocalAccount(
   })
 }
 
-/** Archive-not-delete, same semantics as `archiveLocalDepartment`. Keeps `directory_account_links` intact. */
+/**
+ * Archive-not-delete, same semantics as `archiveLocalDepartment`. Keeps `directory_account_links`
+ * intact — the row still says `link_status='linked'`, only `directory_accounts.is_active` flips.
+ *
+ * W4-PRE-1b item B: unlike `applyDirectoryDeprovisionPolicies` (which flips `users.is_active` —
+ * a genuine user-level deactivation this line's own boundary reading treats as one that must NOT
+ * touch `user_orgs`; see directory-sync.ts's `deactivateUserOrgMembershipIfNoOtherActiveBinding`
+ * doc comment — presented to the owner as evidence, not an adjudicated ruling), archiving
+ * a local account is a "directory-side binding removal": the underlying link is kept for history
+ * but no longer counts as ACTIVE for org-membership purposes (the same-org sibling check below,
+ * and every other reader that filters `directory_accounts.is_active=true`, already treats it that
+ * way). Left unhandled, an archived account leaves its linked user's `user_orgs` row `is_active=
+ * true` forever — the "left the org but retains membership" half of the owner P1 finding. Runs in
+ * the SAME transaction as the archive UPDATE, and only when the account was actually linked to a
+ * user (`current.local_user_id`) — an account nobody was ever linked to has no membership to
+ * reconsider.
+ */
 export async function archiveLocalAccount(orgId: string, accountId: string): Promise<LocalAccountSummary | null> {
   const current = await loadLocalAccountForOrg(orgId, accountId)
   if (!current) return null
 
   if (current.is_active) {
-    await query(`UPDATE directory_accounts SET is_active = false, updated_at = NOW() WHERE id = $1`, [accountId])
+    await transaction(async (client) => {
+      await client.query(`UPDATE directory_accounts SET is_active = false, updated_at = NOW() WHERE id = $1`, [accountId])
+      if (current.local_user_id) {
+        await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: current.local_user_id, orgId })
+      }
+    })
   }
 
   const updated = await loadLocalAccountForOrg(orgId, accountId)

@@ -4287,6 +4287,14 @@ export class AutomationExecutor {
       return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk body template is required' }
     }
 
+    // W4-PRE-1b item E follow-up (#4526 review): same-shape `user_orgs` trust point as
+    // `api-tokens.ts`'s `requireOrgMemberAccess` and `attendance-admin.ts`'s
+    // `canReadAttendanceDirectoryReadiness` — this EXISTS clause authorizes org-scoped DingTalk
+    // destination USE (an actual outbound-send authorization, not a read-visibility filter) by
+    // the automation rule's creator. A deactivated platform account (`users.is_active=false`)
+    // must not keep this access via a `user_orgs` row that is still `is_active=true`, exactly per
+    // the item-E fix already applied to the other two sites — this one was missed by the
+    // original PR's grep inventory.
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
          FROM dingtalk_group_destinations dg
@@ -4300,9 +4308,11 @@ export class AutomationExecutor {
               AND EXISTS (
                 SELECT 1
                 FROM user_orgs uo
+                JOIN users u ON u.id = uo.user_id
                 WHERE uo.user_id = $3
                   AND uo.org_id = dg.org_id
                   AND uo.is_active = true
+                  AND u.is_active = true
               )
             )
           )`,

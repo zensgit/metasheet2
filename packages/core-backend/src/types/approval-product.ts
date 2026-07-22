@@ -547,6 +547,14 @@ export interface PublishApprovalTemplateRequest {
   note?: string | null
 }
 
+export interface RestoreApprovalTemplateVersionRequest {
+  /**
+   * Optimistic-concurrency anchor captured when the history was loaded. A restore always creates a
+   * new draft from the selected snapshot; it never rewrites a historical row in place.
+   */
+  expectedLatestVersionId: string
+}
+
 export interface ApprovalTemplateVersionDetailDTO {
   id: string
   templateId: string
@@ -558,6 +566,8 @@ export interface ApprovalTemplateVersionDetailDTO {
   publishedDefinitionId: string | null
   /** B3-09 — see PublishApprovalTemplateRequest.note. */
   publishNote: string | null
+  /** Source snapshot when this draft was created by restore; null for ordinary edits/publishes. */
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -575,6 +585,7 @@ export interface ApprovalTemplateVersionSummaryDTO {
   status: ApprovalTemplateStatus
   publishNote: string | null
   publishedDefinitionId: string | null
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }

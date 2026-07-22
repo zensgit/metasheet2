@@ -37,14 +37,15 @@ const REJOIN: ApprovalGraph = {
   ],
 }
 
-describe('computeLayout (longest-path layered)', () => {
-  it('places a linear graph in increasing layers/x with stable coordinates', () => {
+describe('computeLayout (vertical longest-path layered)', () => {
+  it('places a linear graph in increasing layers/y on one centered column', () => {
     const layout = computeLayout(LINEAR)
     const byKey = new Map(layout.nodes.map((n) => [n.key, n]))
     expect(byKey.get('start')!.layer).toBe(0)
     expect(byKey.get('a1')!.layer).toBe(1)
     expect(byKey.get('end')!.layer).toBe(2)
-    expect(byKey.get('a1')!.x).toBeGreaterThan(byKey.get('start')!.x)
+    expect(byKey.get('a1')!.y).toBeGreaterThan(byKey.get('start')!.y)
+    expect(byKey.get('a1')!.x).toBe(byKey.get('start')!.x)
     expect(layout.nodes).toHaveLength(3)
   })
   it('puts a rejoin node AFTER both of its branches (longest-path, not shortest)', () => {
@@ -54,6 +55,9 @@ describe('computeLayout (longest-path layered)', () => {
     expect(byKey.get('join')!.layer).toBeGreaterThan(byKey.get('high')!.layer)
     expect(byKey.get('join')!.layer).toBeGreaterThan(byKey.get('low')!.layer)
     expect(byKey.get('end')!.layer).toBe(4)
+    expect(byKey.get('high')!.y).toBe(byKey.get('low')!.y)
+    expect(byKey.get('high')!.x).not.toBe(byKey.get('low')!.x)
+    expect(byKey.get('join')!.y).toBeGreaterThan(byKey.get('high')!.y)
   })
 })
 

@@ -351,47 +351,83 @@ function sortTupleContract() {
 }
 
 function snapshotContentDigestContract() {
+  // Corrective-review P2: the API takes structured identity GROUPS and enforces
+  // ONE encoding per multiset — a repeated identity-content group is rejected,
+  // so [mult=1, mult=1 same-row] can no longer masquerade as [mult=2].
+  // Corrective-review P2: the multiplicityBound is supplied ONCE at the snapshot
+  // level (the unified read bound); groups must NOT carry their own.
+  const BOUND = 16
   const digestOf = (token) => computeCanonicalRowDigest({ fieldOrder: ['k1'], row: { k1: token } }).buffer
-  const tuple = (token, multiplicity) =>
-    encodeIdentitySortTuple({
-      identityKeyClass: 'valid',
-      identityKeyBytes: Buffer.from(token, 'utf8'),
-      canonicalRowDigest: digestOf(token),
-      multiplicity,
-      multiplicityBound: 16,
-    })
-  const t1 = tuple('row-a', 1)
-  const t2 = tuple('row-b', 2)
-  const t3 = tuple('row-c', 1)
-  const invalidT = encodeIdentitySortTuple({
+  const group = (token, multiplicity) => ({
+    identityKeyClass: 'valid',
+    identityKeyBytes: Buffer.from(token, 'utf8'),
+    canonicalRowDigest: digestOf(token),
+    multiplicity,
+  })
+  const snap = (groups) => computeSnapshotContentDigest(groups, BOUND)
+  const g1 = group('row-a', 1)
+  const g2 = group('row-b', 2)
+  const g3 = group('row-c', 1)
+  const invalidG = {
     identityKeyClass: 'identity_invalid',
     identityKeyBytes: Buffer.alloc(0),
     canonicalRowDigest: digestOf('row-d'),
     multiplicity: 1,
-    multiplicityBound: 16,
-  })
+  }
 
-  const forward = computeSnapshotContentDigest([t1, t2, t3, invalidT]).hex
-  const shuffled = computeSnapshotContentDigest([invalidT, t3, t1, t2]).hex
-  const shuffled2 = computeSnapshotContentDigest([t2, invalidT, t1, t3]).hex
+  const forward = snap([g1, g2, g3, invalidG]).hex
+  const shuffled = snap([invalidG, g3, g1, g2]).hex
+  const shuffled2 = snap([g2, invalidG, g1, g3]).hex
   assert.equal(forward, shuffled, 'snapshot digest is order-independent (normalized multiset)')
   assert.equal(forward, shuffled2, 'snapshot digest is order-independent under any permutation')
 
   // changing one multiplicity -> different
-  const bumped = computeSnapshotContentDigest([t1, tuple('row-b', 3), t3, invalidT]).hex
+  const bumped = snap([g1, group('row-b', 3), g3, invalidG]).hex
   assert.notEqual(forward, bumped, 'multiplicity change changes the snapshot digest')
 
-  // multiset: adding a duplicate tuple -> different
-  const withDuplicate = computeSnapshotContentDigest([t1, t2, t3, invalidT, t1]).hex
-  assert.notEqual(forward, withDuplicate, 'duplicate tuple counts (multiset semantics)')
+  // Canonical multiset: a REPEATED identity-content group is rejected (two mult=1
+  // must not masquerade as one mult=2); the caller must pre-aggregate.
+  assertThrowsReason(
+    () => snap([g1, g2, g3, invalidG, group('row-a', 1)]),
+    'DUPLICATE_IDENTITY_GROUP',
+    'repeated identity-content group rejected',
+  )
+  // Same row as mult=2 is DISTINCT from mult=1 and is the ONLY legal encoding.
+  assert.notEqual(snap([group('row-a', 1)]).hex, snap([group('row-a', 2)]).hex, 'multiplicity is value-bearing')
+  // Dedup keys on (class,key,digest) WITHOUT multiplicity: the same row with two
+  // DIFFERENT multiplicities is contradictory (kills a full-tuple-key mutant).
+  assertThrowsReason(
+    () => snap([group('row-a', 1), group('row-a', 2)]),
+    'DUPLICATE_IDENTITY_GROUP',
+    'same identity-content with differing multiplicity rejected',
+  )
+
+  // The snapshot-level bound is the SOLE authority: a per-group bound override is
+  // rejected fail-closed, and a group multiplicity above the snapshot bound is
+  // rejected even if a (forbidden) larger group bound is attempted.
+  assertThrowsReason(
+    () => computeSnapshotContentDigest([{ ...group('row-a', 1), multiplicityBound: 10 }], 16),
+    'UNSUPPORTED_KIND',
+    'per-group multiplicityBound override forbidden',
+  )
+  assertThrowsReason(
+    () => computeSnapshotContentDigest([group('row-a', 2)], 1),
+    'MULTIPLICITY_OUT_OF_BOUNDS',
+    'group multiplicity above the snapshot bound rejected (no group-level escape)',
+  )
+  assertThrowsReason(
+    () => computeSnapshotContentDigest([group('row-a', 1)]),
+    'MULTIPLICITY_OUT_OF_BOUNDS',
+    'missing snapshot bound fails closed',
+  )
 
   // input array is not mutated by the internal sort
-  const inputs = [t3, t1, t2]
-  computeSnapshotContentDigest(inputs)
-  assert.ok(inputs[0].equals(t3) && inputs[1].equals(t1) && inputs[2].equals(t2), 'caller array untouched')
+  const inputs = [g3, g1, g2]
+  snap(inputs)
+  assert.ok(inputs[0] === g3 && inputs[1] === g1 && inputs[2] === g2, 'caller array untouched')
 
-  assertThrowsReason(() => computeSnapshotContentDigest('t'), 'UNSUPPORTED_KIND', 'non-array input')
-  assertThrowsReason(() => computeSnapshotContentDigest([Buffer.alloc(0)]), 'UNSUPPORTED_KIND', 'empty tuple buffer')
+  assertThrowsReason(() => computeSnapshotContentDigest('t', BOUND), 'UNSUPPORTED_KIND', 'non-array input')
+  assertThrowsReason(() => computeSnapshotContentDigest([Buffer.from([0x01])], BOUND), 'UNSUPPORTED_KIND', 'raw buffer is not a group')
 }
 
 function digestShape() {
@@ -400,9 +436,12 @@ function digestShape() {
   assert.equal(result.buffer.length, 32, 'sha256 digest is 32 bytes')
   assert.equal(result.hex, result.buffer.toString('hex'), 'hex mirrors the buffer')
   assert.ok(Object.isFrozen(result), 'digest result is frozen')
-  const snapshot = computeSnapshotContentDigest([Buffer.from([0x01])])
+  const snapshot = computeSnapshotContentDigest([
+    { identityKeyClass: 'valid', identityKeyBytes: 'k', canonicalRowDigest: result.buffer, multiplicity: 1 },
+  ], 4)
   assert.equal(snapshot.buffer.length, 32)
   assert.equal(snapshot.hex, snapshot.buffer.toString('hex'))
+  assert.ok(Object.isFrozen(snapshot), 'snapshot result is frozen')
 }
 
 // Review-P2 hardening: mutation-proven killing pairs + exact-layout and golden
@@ -441,10 +480,18 @@ function reviewHardening() {
   assert.equal(multWide.length, layout.length, 'multiplicity width never varies with its value (no varint)')
   assert.equal(multWide.subarray(multWide.length - 4).toString('hex'), '01020304', 'big-endian byte order pinned')
 
-  // (P3) Snapshot-level per-tuple prefix: ['ab','c'] vs ['a','bc'] must differ.
-  const snapA = computeSnapshotContentDigest([Buffer.from('ab'), Buffer.from('c')])
-  const snapB = computeSnapshotContentDigest([Buffer.from('a'), Buffer.from('bc')])
-  assert.notEqual(snapA.hex, snapB.hex, 'per-tuple length prefixes must defeat snapshot concat collisions')
+  // (P3) Snapshot-level per-tuple length prefix: two groups that would bare-
+  // concat to the same bytes as one different group must stay distinct.
+  const dA = computeCanonicalRowDigest({ fieldOrder: ['k'], row: { k: 'a' } }).buffer
+  const dB = computeCanonicalRowDigest({ fieldOrder: ['k'], row: { k: 'b' } }).buffer
+  const snapTwo = computeSnapshotContentDigest([
+    { identityKeyClass: 'valid', identityKeyBytes: 'ka', canonicalRowDigest: dA, multiplicity: 1 },
+    { identityKeyClass: 'valid', identityKeyBytes: 'kb', canonicalRowDigest: dB, multiplicity: 1 },
+  ], 4)
+  const snapOne = computeSnapshotContentDigest([
+    { identityKeyClass: 'valid', identityKeyBytes: 'kakb', canonicalRowDigest: dA, multiplicity: 1 },
+  ], 4)
+  assert.notEqual(snapTwo.hex, snapOne.hex, 'per-tuple length prefixes must defeat snapshot concat collisions')
 
   // Golden byte vectors: any drift in tags, prefixes, decimal canon, NFC, or
   // hashing changes these constants — the frozen encoding's strongest pin.
@@ -465,8 +512,12 @@ function reviewHardening() {
     '01000000026b31000000205eb48f1710425c9d8ed3b441ccd7c2897bf42345056532992debd9c865f9b6f400000003',
     'golden sort-tuple encoding',
   )
+  // The golden snapshot is the SAME digest — the group encodes to goldenTuple
+  // internally, so the corrective P2 API change preserves the frozen vector.
   assert.equal(
-    computeSnapshotContentDigest([goldenTuple]).hex,
+    computeSnapshotContentDigest([
+      { identityKeyClass: 'valid', identityKeyBytes: Buffer.from('k1', 'utf8'), canonicalRowDigest: golden.buffer, multiplicity: 3 },
+    ], 100).hex,
     '95c50cc9a3f843f3d507fde4da8451831994030818cf9a612d1eae58af9da018',
     'golden snapshot content digest',
   )
@@ -536,12 +587,18 @@ function deepReviewRound() {
     'bound above 2^32-1 rejected with the closed reason',
   )
 
-  // Empty snapshot is LEGAL (charter §8.2-4 positive control): sha256 of zero tuples.
+  // Empty snapshot is LEGAL WITH a valid bound (charter §8.2-4 positive control):
+  // sha256 of zero tuples. Corrective round-3 P2: the bound is validated BEFORE
+  // the loop, so an empty snapshot cannot bypass it.
   assert.equal(
-    computeSnapshotContentDigest([]).hex,
+    computeSnapshotContentDigest([], 16).hex,
     'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    'empty snapshot digest pinned',
+    'empty snapshot digest pinned (with a valid bound)',
   )
+  // Empty snapshot with NO / invalid bound fails closed.
+  assertThrowsReason(() => computeSnapshotContentDigest([]), 'MULTIPLICITY_OUT_OF_BOUNDS', 'empty snapshot with no bound fails closed')
+  assertThrowsReason(() => computeSnapshotContentDigest([], 0), 'MULTIPLICITY_OUT_OF_BOUNDS', 'empty snapshot with zero bound fails closed')
+  assertThrowsReason(() => computeSnapshotContentDigest([], 2 ** 32), 'MULTIPLICITY_OUT_OF_BOUNDS', 'empty snapshot with over-range bound fails closed')
 
   // Golden 2: interior-zero decimal + boolean false + composed unicode.
   const golden2 = computeCanonicalRowDigest({
@@ -549,6 +606,52 @@ function deepReviewRound() {
     row: { a: 105, b: { decimal: '10.50' }, c: false, d: 'Caf' + composed },
   })
   assert.equal(golden2.hex, '35785be424f326d567759cbf530f0c0a5cb85091ada133ec710833021e872296', 'golden 2 canonical row digest')
+}
+
+// Round-4 (post-APPROVE verify pass): the CODEC export surface must not leak a
+// live membership Set either — same poisoning class the templates round-1 fix
+// closed. A reachable mutable Set flips a validator from reject to accept, and
+// a poisoned identityKeyClass would encode class byte 0x00, colliding with the
+// identity_invalid domain separator.
+function round4CodecSurface() {
+  const mod = require(MODULE_PATH)
+  // 1. No *_SET key and no live Set instance ANYWHERE on the export surface — at
+  //    ANY depth (owner exact-head review of a1c5e6c87): a two-level scan stays
+  //    green for a nested re-export like `__internals.membership.{SET}`, so the
+  //    check is a recursive walker over Object.entries — objects AND functions
+  //    are traversed, with a WeakSet guarding against cycles.
+  const seen = new WeakSet()
+  const walkExportSurface = (value, path) => {
+    assert.ok(!(value instanceof Set), `${path}: live Set instance exported`)
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return
+    if (seen.has(value)) return
+    seen.add(value)
+    for (const [key, child] of Object.entries(value)) {
+      assert.ok(!key.includes('_SET'), `${path}.${key}: no exported Set-mirror names at any depth`)
+      walkExportSurface(child, `${path}.${key}`)
+    }
+  }
+  walkExportSurface(mod, 'module')
+  // 2. Poisoning attempt is a no-op: the Set is unreachable, and an unknown
+  //    identityKeyClass still fails closed afterwards (positive control pair).
+  const evil = { identityKeyClass: 'evil', identityKeyBytes: Buffer.from('k'), canonicalRowDigest: Buffer.alloc(32), multiplicity: 1, multiplicityBound: 16 }
+  assertThrowsReason(() => encodeIdentitySortTuple(evil), 'UNSUPPORTED_KIND', 'unknown identityKeyClass rejected before poisoning attempt')
+  __internals.MR_IDENTITY_KEY_CLASS_SET?.add?.('evil') // unreachable: optional-chain no-op
+  assertThrowsReason(() => encodeIdentitySortTuple(evil), 'UNSUPPORTED_KIND', 'unknown identityKeyClass STILL rejected after poisoning attempt')
+  // Positive control: the two chartered classes still encode.
+  assert.equal(encodeIdentitySortTuple({ identityKeyClass: 'valid', identityKeyBytes: Buffer.from('k'), canonicalRowDigest: Buffer.alloc(32), multiplicity: 1, multiplicityBound: 16 })[0], MR_IDENTITY_KEY_CLASS_BYTES.valid, 'valid class still encodes')
+  assert.equal(encodeIdentitySortTuple({ identityKeyClass: 'identity_invalid', identityKeyBytes: Buffer.alloc(0), canonicalRowDigest: Buffer.alloc(32), multiplicity: 1, multiplicityBound: 16 })[0], MR_IDENTITY_KEY_CLASS_BYTES.identity_invalid, 'identity_invalid class still encodes')
+  // 3. Round-4 P3: error details carry sanitized values only — a non-integer
+  //    bound/multiplicity never round-trips into the error surface verbatim.
+  for (const [label, input, field] of [
+    ['non-integer bound sanitized', { ...evil, identityKeyClass: 'valid', multiplicityBound: '9' }, 'multiplicityBound'],
+    ['non-integer multiplicity sanitized', { ...evil, identityKeyClass: 'valid', multiplicity: 'x' }, 'multiplicity'],
+  ]) {
+    let thrown = null
+    try { encodeIdentitySortTuple(input) } catch (error) { thrown = error }
+    assert.ok(thrown && thrown.reason === 'MULTIPLICITY_OUT_OF_BOUNDS', `${label}: fails closed`)
+    assert.equal(thrown.details[field], null, `${label}: details.${field} is null, not the raw value`)
+  }
 }
 
 function main() {
@@ -564,6 +667,7 @@ function main() {
   digestShape()
   reviewHardening()
   deepReviewRound()
+  round4CodecSurface()
 }
 
 main()

@@ -3,6 +3,7 @@ import type { ApprovalGraph, ApprovalNode, ApprovalTemplateDetailDTO, ApprovalAs
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
 import { parallelDynamicAssigneeConflicts } from '../src/approvals/parallelEdit'
 import { placeholderRoleNodeKeys } from '../src/approvals/approvalNodeEdit'
+import { graphValidityIssues } from '../src/approvals/graphLayout'
 import {
   appendApprovalNode,
   collectParallelRegionNodeKeys,
@@ -14,6 +15,9 @@ import {
   addConditionBranch,
   removeConditionBranch,
   hasEmptyParallelBranch,
+  adjacentLinearNodeMoveTarget,
+  linearNodeMoveTargets,
+  moveLinearNode,
 } from '../src/approvals/graphTopologyEdit'
 import {
   applyTopologyToComplexDraft,
@@ -84,6 +88,43 @@ const CONDITION: ApprovalGraph = {
     { key: 'e-high', source: 'cond_1', target: 'app_high' },
     { key: 'e-low', source: 'cond_1', target: 'end' },
     { key: 'e-high-end', source: 'app_high', target: 'end' },
+  ],
+}
+
+const LINEAR_LONG: ApprovalGraph = {
+  nodes: [
+    { key: 'start', type: 'start', name: '发起', config: {} },
+    { key: 'app_a', type: 'approval', name: 'A', config: { approvalMode: 'all', assigneeSources: [{ kind: 'dept_head' }] } },
+    { key: 'cc_b', type: 'cc', name: 'B', config: { targetType: 'user', targetIds: ['user-1'] } },
+    { key: 'app_c', type: 'approval', name: 'C', config: { approvalMode: 'single', assigneeSources: [{ kind: 'requester' }] } },
+    { key: 'end', type: 'end', name: '结束', config: {} },
+  ],
+  edges: [
+    { key: 'e-start-a', source: 'start', target: 'app_a' },
+    { key: 'e-a-b', source: 'app_a', target: 'cc_b' },
+    { key: 'e-b-c', source: 'cc_b', target: 'app_c' },
+    { key: 'e-c-end', source: 'app_c', target: 'end' },
+  ],
+}
+
+const PARALLEL_LONG: ApprovalGraph = {
+  nodes: [
+    { key: 'start', type: 'start', name: '发起', config: {} },
+    { key: 'parallel', type: 'parallel', name: '并行', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'end' } },
+    { key: 'a1', type: 'approval', name: 'A1', config: { assigneeSources: [{ kind: 'dept_head' }] } },
+    { key: 'a2', type: 'cc', name: 'A2', config: { targetType: 'user', targetIds: ['user-2'] } },
+    { key: 'a3', type: 'approval', name: 'A3', config: { assigneeSources: [{ kind: 'requester' }] } },
+    { key: 'b1', type: 'approval', name: 'B1', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['finance'] }] } },
+    { key: 'end', type: 'end', name: '结束', config: {} },
+  ],
+  edges: [
+    { key: 'e-start-p', source: 'start', target: 'parallel' },
+    { key: 'e-fork-a', source: 'parallel', target: 'a1' },
+    { key: 'e-a1-a2', source: 'a1', target: 'a2' },
+    { key: 'e-a2-a3', source: 'a2', target: 'a3' },
+    { key: 'e-a3-end', source: 'a3', target: 'end' },
+    { key: 'e-fork-b', source: 'parallel', target: 'b1' },
+    { key: 'e-b1-end', source: 'b1', target: 'end' },
   ],
 }
 
@@ -233,6 +274,51 @@ describe('removeLinearNode', () => {
     expect(() => removeLinearNode(PARALLEL, 'app_a')).toThrow(/must keep at least one body node/)
     expect(PARALLEL).toEqual(before)
     expect(hasEmptyParallelBranch(PARALLEL)).toBe(false)
+  })
+})
+
+describe('semantic linear-node reorder', () => {
+  it('moves an approval/cc node onto a plain edge while preserving every identity and input byte-for-byte', () => {
+    const before = snap(LINEAR_LONG)
+    const out = moveLinearNode(LINEAR_LONG, 'cc_b', 'e-start-a')
+    expect(LINEAR_LONG).toEqual(before)
+    expect(out.nodes).toEqual(LINEAR_LONG.nodes)
+    expect(out.edges.map((edge) => edge.key)).toEqual(LINEAR_LONG.edges.map((edge) => edge.key))
+    expect(edgeBetween(out, 'start', 'cc_b')).toMatchObject({ key: 'e-start-a' })
+    expect(edgeBetween(out, 'cc_b', 'app_a')).toMatchObject({ key: 'e-b-c' })
+    expect(edgeBetween(out, 'app_a', 'app_c')).toMatchObject({ key: 'e-a-b' })
+    expect(edgeBetween(out, 'app_c', 'end')).toEqual(edgeBetween(LINEAR_LONG, 'app_c', 'end'))
+    expect(graphValidityIssues(out)).toEqual([])
+  })
+
+  it('supports reordering inside one branch without crossing its fork or rejoin boundary', () => {
+    expect(linearNodeMoveTargets(PARALLEL_LONG, 'a3').map((target) => target.edgeKey))
+      .toEqual(['e-a1-a2'])
+    const out = moveLinearNode(PARALLEL_LONG, 'a3', 'e-a1-a2')
+    expect(edgeBetween(out, 'parallel', 'a1')).toMatchObject({ key: 'e-fork-a' })
+    expect(edgeBetween(out, 'a1', 'a3')).toMatchObject({ key: 'e-a1-a2' })
+    expect(edgeBetween(out, 'a3', 'a2')).toMatchObject({ key: 'e-a3-end' })
+    expect(edgeBetween(out, 'a2', 'end')).toMatchObject({ key: 'e-a2-a3' })
+    expect(node(out, 'b1')).toEqual(node(PARALLEL_LONG, 'b1'))
+    expect(graphValidityIssues(out)).toEqual([])
+  })
+
+  it('refuses cross-region, condition-branch, parallel-fork, and current-position targets', () => {
+    expect(linearNodeMoveTargets(PARALLEL_LONG, 'a2').map((target) => target.edgeKey))
+      .toEqual(['e-a3-end'])
+    expect(() => moveLinearNode(PARALLEL_LONG, 'a2', 'e-b1-end')).toThrow(/outside/)
+    expect(() => moveLinearNode(PARALLEL_LONG, 'a2', 'e-fork-a')).toThrow(/outside/)
+    expect(() => moveLinearNode(PARALLEL_LONG, 'a2', 'e-a1-a2')).toThrow(/outside/)
+    expect(() => moveLinearNode(CONDITION, 'app_high', 'e-high')).toThrow(/outside/)
+  })
+
+  it('never offers structural nodes and returns only legal one-step keyboard targets', () => {
+    expect(linearNodeMoveTargets(PARALLEL_LONG, 'parallel')).toEqual([])
+    expect(() => moveLinearNode(PARALLEL_LONG, 'parallel', 'e-a1-a2')).toThrow(/only approval\/cc movable/)
+    expect(adjacentLinearNodeMoveTarget(LINEAR_LONG, 'cc_b', 'up')).toBe('e-start-a')
+    expect(adjacentLinearNodeMoveTarget(LINEAR_LONG, 'cc_b', 'down')).toBe('e-c-end')
+    expect(adjacentLinearNodeMoveTarget(PARALLEL_LONG, 'a2', 'up')).toBeUndefined()
+    expect(adjacentLinearNodeMoveTarget(PARALLEL_LONG, 'a2', 'down')).toBe('e-a3-end')
   })
 })
 
