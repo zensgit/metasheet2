@@ -24,8 +24,8 @@ try {
   $script:PreparedPm2Helper = Join-Path $opsDir 'stock-preparation-rca-window-pm2-sample.mjs'
   $fixture = Join-Path $root 'pm2-fixture.mjs'
   Set-Content -LiteralPath $fixture -Encoding ASCII -NoNewline -Value @'
+import fs from "node:fs"
 const flag = process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED || ""
-const fs = require("node:fs")
 const leaked = fs.existsSync(process.argv[2] || "") ? "present" : ""
 process.stdout.write(JSON.stringify([{
   name: "metasheet-backend",
@@ -65,12 +65,18 @@ exit /b 2
   Check 'stderr-writing PM2 native shim does not abort projection on PowerShell 5.1' (
     $null -ne $sampleOn -and $ErrorActionPreference -eq 'Stop'
   )
-  Check 'case-variant true flag is observed on the target shell' ($sampleOn.plmAutoPersistEnabledTrue -eq $true)
-  Check 'Path/PATH duplication does not break the projection' ($sampleOn.state -eq 'online')
+  Check 'case-variant true flag is observed on the target shell' (
+    $null -ne $sampleOn -and $sampleOn.plmAutoPersistEnabledTrue -eq $true
+  )
+  Check 'Path/PATH duplication does not break the projection' (
+    $null -ne $sampleOn -and $sampleOn.state -eq 'online'
+  )
 
   Set-Content -LiteralPath $leakMarker -Encoding ASCII -Value 'present'
   $leaked = Get-Pm2Sample
-  Check 'case-variant token presence is detected on the target shell' ($leaked.authTokenNonEmpty -eq $true)
+  Check 'case-variant token presence is detected on the target shell' (
+    $null -ne $leaked -and $leaked.authTokenNonEmpty -eq $true
+  )
   Remove-Item -LiteralPath $leakMarker -Force
 
   $script:StableOnlineSeconds = 0
