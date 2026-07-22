@@ -350,6 +350,24 @@ function buildMixedGraph() {
   }
 }
 
+function buildLinearReorderGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'app_a', type: 'approval', name: '审批 A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'cc_b', type: 'cc', name: '抄送 B', config: { targetType: 'user', targetIds: ['u_finance'] } },
+      { key: 'app_c', type: 'approval', name: '审批 C', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-a', source: 'start', target: 'app_a' },
+      { key: 'e-a-b', source: 'app_a', target: 'cc_b' },
+      { key: 'e-b-c', source: 'cc_b', target: 'app_c' },
+      { key: 'e-c-end', source: 'app_c', target: 'end' },
+    ],
+  }
+}
+
 let container: HTMLDivElement | null = null
 let app: VueApp<Element> | null = null
 
@@ -469,9 +487,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(node.getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('renders stable navigation controls and keeps free-drag coordinates correct under zoom', async () => {
+  it('renders navigation controls and persists semantic drag/drop plus Alt+Arrow reorder', async () => {
     routeParams = { id: 'tpl_canvas_navigation' }
-    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildLinearReorderGraph() as any }))
     await mountView()
     await flushUi()
 
@@ -490,34 +508,36 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
     const surface = container!.querySelector('[data-testid="approval-graph-canvas"]') as HTMLElement
     expect(surface.style.transform).toBe('scale(1.25)')
-    surface.getBoundingClientRect = () => ({
-      left: 100,
-      top: 50,
-      width: 1000,
-      height: 750,
-      right: 1100,
-      bottom: 800,
-      x: 100,
-      y: 50,
-      toJSON: () => ({}),
-    })
 
-    const node = container!.querySelector('[data-canvas-node="approval_high"]') as HTMLElement
-    node.dispatchEvent(new Event('dragstart', { bubbles: true }))
-    const dragEnd = new Event('dragend', { bubbles: true })
-    Object.defineProperties(dragEnd, {
-      clientX: { value: 344 },
-      clientY: { value: 210 },
+    const node = container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement
+    const dragStart = new Event('dragstart', { bubbles: true, cancelable: true })
+    Object.defineProperty(dragStart, 'dataTransfer', {
+      value: { setData: vi.fn(), effectAllowed: '' },
     })
-    node.dispatchEvent(dragEnd)
+    node.dispatchEvent(dragStart)
+    await flushUi()
+    const dropTarget = container!.querySelector('[data-testid="approval-canvas-move-target-e-start-a"]') as HTMLButtonElement
+    expect(dropTarget).not.toBeNull()
+    dropTarget.dispatchEvent(new Event('drop', { bubbles: true, cancelable: true }))
     await flushUi()
 
-    expect(node.style.left).toBe('100px')
-    expect(node.style.top).toBe('80px')
+    const movedNode = container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement
+    const appA = container!.querySelector('[data-canvas-node="app_a"]') as HTMLElement
+    expect(Number.parseFloat(movedNode.style.top)).toBeLessThan(Number.parseFloat(appA.style.top))
+
+    const selector = movedNode.querySelector('[data-testid="approval-canvas-node-select"]') as HTMLElement
+    selector.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+    await flushUi()
+    expect(Number.parseFloat(movedNode.style.top)).toBeGreaterThan(Number.parseFloat(appA.style.top))
 
     zoomLabel.click()
     await flushUi()
     expect(surface.style.transform).toBe('scale(1)')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.approvalGraph.edges).toEqual(buildLinearReorderGraph().edges)
   })
 
   it('shows business labels instead of internal topology keys in the inspector', async () => {
