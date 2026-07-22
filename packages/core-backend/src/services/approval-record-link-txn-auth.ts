@@ -18,9 +18,12 @@
  */
 import {
   BASE_READ_PERMISSION_CODES,
+  loadApprovalProjectionParticipantSheetIds,
+  loadApprovalProjectionSheetIds,
   loadSheetPermissionScopeMap,
   type QueryFn,
 } from '../multitable/permission-service'
+import { restrictApprovalProjectionCapabilitiesPerRow } from '../multitable/approval-projection-constants'
 import {
   deriveCapabilities,
   applyContextSheetSchemaWriteGrant,
@@ -134,10 +137,10 @@ export async function listUserPermissionsOnQuery(
  *   Phase 6 — re-read every authorization (no further lock acquisition)
  *
  * Why phases (not “sort candidates then lock per candidate”):
- *   Interleaved per-candidate order is target base/sheet → actor rows → next target.
- *   Concurrent same-actor sets T1=[A,B] and T2=[B] cycle: T1 holds base A + user U,
- *   T2 holds base B and waits user U, T1 waits base B → 40P01. Sorting candidates alone
- *   does not fix unequal overlapping sets.
+ *   Keep one canonical order across every caller and acquire every authority source before
+ *   target-record write locks. Authority reads use FOR SHARE so peer creates remain compatible;
+ *   the global phase order also avoids reintroducing a lock-order cycle if a source later needs
+ *   an incompatible mode.
  *
  * Single-target `lockRecordLinkAuthorityRowsOnQuery` remains the convenience wrapper
  * (publish one pin, revoke writers) and uses the same phase order for one target.
@@ -222,7 +225,7 @@ export async function lockRecordLinkTargetBasesOnQuery(
   baseIds: readonly string[],
 ): Promise<void> {
   for (const bid of uniqueSortedIds(baseIds)) {
-    await query(`SELECT id FROM meta_bases WHERE id = $1 FOR UPDATE`, [bid])
+    await query(`SELECT id FROM meta_bases WHERE id = $1 FOR SHARE`, [bid])
   }
 }
 
@@ -232,7 +235,7 @@ export async function lockRecordLinkTargetSheetsOnQuery(
   sheetIds: readonly string[],
 ): Promise<void> {
   for (const sid of uniqueSortedIds(sheetIds)) {
-    await query(`SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE`, [sid])
+    await query(`SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE`, [sid])
   }
 }
 
@@ -248,7 +251,7 @@ export async function lockRecordLinkActorAuthorityRowsOnQuery(
   if (!uid) return { roleIds: [], groupIds: [] }
 
   const rolesRes = await query(
-    `SELECT role_id FROM user_roles WHERE user_id = $1 FOR UPDATE`,
+    `SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE`,
     [uid],
   )
   const roleIds = (rolesRes.rows as Array<{ role_id?: unknown }>)
@@ -257,23 +260,23 @@ export async function lockRecordLinkActorAuthorityRowsOnQuery(
 
   if (roleIds.length > 0) {
     await query(
-      `SELECT id, name FROM roles WHERE id = ANY($1::text[]) FOR UPDATE`,
+      `SELECT id, name FROM roles WHERE id = ANY($1::text[]) FOR SHARE`,
       [roleIds],
     )
     await query(
       `SELECT role_id, permission_code FROM role_permissions
-       WHERE role_id = ANY($1::text[]) FOR UPDATE`,
+       WHERE role_id = ANY($1::text[]) FOR SHARE`,
       [roleIds],
     )
   }
 
   await query(
-    `SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR UPDATE`,
+    `SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR SHARE`,
     [uid],
   )
 
   await query(
-    `SELECT id FROM users WHERE id = $1 FOR UPDATE`,
+    `SELECT id FROM users WHERE id = $1 FOR SHARE`,
     [uid],
   )
 
@@ -284,7 +287,7 @@ export async function lockRecordLinkActorAuthorityRowsOnQuery(
     await query('SAVEPOINT record_link_actor_groups')
     try {
       const groupsRes = await query(
-        `SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR UPDATE`,
+        `SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR SHARE`,
         [uid],
       )
       groupIds = (groupsRes.rows as Array<{ group_id?: unknown }>)
@@ -337,7 +340,7 @@ export async function lockRecordLinkSheetGrantsOnQuery(
            OR (subject_type = 'role' AND subject_id = ANY($3::text[]))
            OR (subject_type = 'member-group' AND subject_id = ANY($4::text[]))
          )
-       FOR UPDATE`,
+       FOR SHARE`,
       [sid, uid, input.roleIds, input.groupIds],
     )
   }
@@ -348,8 +351,8 @@ export async function lockRecordLinkSheetGrantsOnQuery(
  * meta_records — use `lockRecordLinkMultiTargetCreatePathOnQuery` for the full create path.
  *
  * @param options.interleavedPerCandidate — MUTATION ONLY. Restores the legacy per-candidate
- *   interleaving (target base/sheet → actor → next target) that deadlocks on unequal
- *   overlapping sets like [A,B] vs [B]. Never true in production.
+ *   interleaving so phase-order tests can distinguish the production path. Never true in
+ *   production; current shared authority locks make peer readers compatible either way.
  */
 export async function lockRecordLinkMultiTargetAuthorityPhasedOnQuery(
   query: QueryFn,
@@ -372,7 +375,7 @@ export async function lockRecordLinkMultiTargetAuthorityPhasedOnQuery(
   if (pairs.length === 0) return
 
   if (options.interleavedPerCandidate === true) {
-    // Legacy interleaved order — proves [A,B] vs [B] 40P01 in the discriminator golden.
+    // Legacy interleaved order — retained only as a structural phase-order mutation.
     for (const t of pairs) {
       await lockRecordLinkAuthorityRowsOnQuery(query, {
         userId: uid,
@@ -469,10 +472,10 @@ export async function lockRecordLinkAuthorityRowsOnQuery(
   if (!uid) return
 
   if (bid) {
-    await query(`SELECT id FROM meta_bases WHERE id = $1 FOR UPDATE`, [bid])
+    await query(`SELECT id FROM meta_bases WHERE id = $1 FOR SHARE`, [bid])
   }
   if (sid) {
-    await query(`SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE`, [sid])
+    await query(`SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE`, [sid])
   }
 
   const { roleIds, groupIds } = await lockRecordLinkActorAuthorityRowsOnQuery(query, uid)
@@ -685,7 +688,22 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
 
   pushStage(transcript, 'sheet_cap_eval')
   const baseCapabilities = deriveCapabilities(permissions, isAdminRole)
-  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, isAdminRole)
+  let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, isAdminRole)
+
+  // Preserve the system-owned approval projection fence from the request-bound resolver. This
+  // query-bound path is used at write boundaries, so dropping canManageSheetAccess here would let
+  // a non-admin mutate projection record permissions merely by reaching the transactional path.
+  if (!isAdminRole && (await loadApprovalProjectionSheetIds(query, [normalizedSheetId])).has(normalizedSheetId)) {
+    const isParticipant = (
+      await loadApprovalProjectionParticipantSheetIds(query, [normalizedSheetId], normalizedUserId)
+    ).has(normalizedSheetId)
+    capabilities = restrictApprovalProjectionCapabilitiesPerRow(
+      capabilities,
+      true,
+      false,
+      isParticipant,
+    )
+  }
 
   return {
     isAdminRole,

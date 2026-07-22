@@ -112,6 +112,7 @@ import {
   lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
   lockRecordLinkMultiTargetCreatePathOnQuery,
   resolveRecordLinkTargetAuthOnQuery,
+  userHasApprovalsWriteOnQuery,
 } from './approval-record-link-txn-auth'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
@@ -4326,8 +4327,8 @@ export class ApprovalProductService {
     }
     const unavailable = 'record-link target is not readable'
     // Collect pins first; lock ALL targets in global phases (bases → sheets → actor once →
-    // sheet grants) BEFORE any auth re-read. Per-candidate interleaving deadlocks on unequal
-    // overlapping sets (e.g. [A,B] vs [B] same actor).
+    // sheet grants) BEFORE any auth re-read. Shared authority locks let peer publishes proceed;
+    // global phases retain one canonical order across every caller.
     const targets = recordLinkFields
       .map((field, index) => ({
         fieldId: field.id,
@@ -4383,8 +4384,8 @@ export class ApprovalProductService {
    *   2) Globally phased multi-target locks via lockRecordLinkMultiTargetCreatePathOnQuery
    *      (all bases → all sheets → actor once → sheet grants → row-auth/records)
    *   3) Re-read every authorization WITHOUT further lock acquisition
-   * Sorting candidates alone is insufficient for unequal overlapping sets ([A,B] vs [B]);
-   * global phases close that 40P01 cycle. Pre-txn / preview skip locks.
+   * Global phases keep one canonical lock order; shared authority locks avoid serializing peer
+   * creates. Pre-txn / preview skip locks.
    *
    * Shared by createApproval (pre-txn + final in-txn recheck) and route-preview.
    *
@@ -4398,11 +4399,11 @@ export class ApprovalProductService {
    * @param options.sortCandidates — when false, skip canonical sort of re-read order
    *   (MUTATION/test only). Production always sorts (default true).
    * @param options.interleavedAuthorityLocks — MUTATION ONLY. Restores per-candidate
-   *   interleaved locks (deadlocks on [A,B] vs [B]). Never true in production.
+   *   interleaving so phase-order tests can distinguish the production path.
    *
-   * Note: authority-row FOR UPDATE serializes concurrent DELETE on every DB source the
-   * final re-read consumes (see RECORD_LINK_AUTHORITY_LOCK_ORDER). Final write is DB/admin only
-   * (actor.permissions / JWT are not final authority).
+   * Note: authority-row FOR SHARE blocks concurrent UPDATE/DELETE on every DB source the final
+   * re-read consumes while allowing peer approval creates to read the same authority concurrently
+   * (see RECORD_LINK_AUTHORITY_LOCK_ORDER). Final write is DB/admin only.
    */
   private async assertRecordLinksReadableAtSubmit(
     formSchema: FormSchema,
@@ -4419,7 +4420,7 @@ export class ApprovalProductService {
        */
       sortCandidates?: boolean
       /**
-       * MUTATION ONLY: restore interleaved per-candidate locking (40P01 on unequal overlaps).
+       * MUTATION ONLY: restore interleaved per-candidate locking for phase-order tests.
        * Never true on production create/preview paths.
        */
       interleavedAuthorityLocks?: boolean
@@ -5125,6 +5126,18 @@ export class ApprovalProductService {
           404,
           'APPROVAL_TEMPLATE_NOT_FOUND',
         )
+      }
+
+      // The record-link probe checks this for each linked record, but templates without a
+      // record-link field must receive the same DB-only final write check. Actor authority rows
+      // are already locked by templateVisibleAtCreateBoundary, so a concurrent revoke cannot land
+      // between this read and the instance insert.
+      const canWriteApprovalAtBoundary = await userHasApprovalsWriteOnQuery(
+        (sqlText, params) => client!.query(sqlText, params),
+        actor.userId,
+      )
+      if (!canWriteApprovalAtBoundary) {
+        throw new ServiceError('Forbidden', 403, 'FORBIDDEN')
       }
 
       await client.query(
@@ -7268,14 +7281,15 @@ export class ApprovalProductService {
       frozenFormSchema,
     )
 
-    // FWB-0 Layer 2 P1-1: project record-link fields when a viewer is provided (HTTP/actor paths).
-    // Internal reloads that omit viewerUserId keep the stored snapshot (graph execution reads DB).
-    if (viewerUserId !== undefined && dto.formSnapshot) {
+    // FWB-0 Layer 2 P1-1: no viewer is a deny-all viewer. Every current HTTP path passes the
+    // authenticated actor explicitly; making omission fail closed prevents a future call site from
+    // exposing stored linked ids by accidentally using the one-argument form.
+    if (dto.formSnapshot) {
       const queryFn = (sqlText: string, params?: unknown[]) => pool!.query(sqlText, params)
       dto.formSnapshot = await projectRecordLinkFormSnapshotForViewer(
         dto.formSnapshot,
         frozenFormSchema,
-        viewerUserId,
+        viewerUserId ?? null,
         queryFn,
       )
     }
@@ -7392,7 +7406,7 @@ export class ApprovalProductService {
       `SELECT id
        FROM approval_templates
        WHERE ${conditions.join(' AND ')}
-       FOR UPDATE`,
+       FOR SHARE`,
       params,
     )
     return Boolean(result.rows[0])

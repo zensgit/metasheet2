@@ -33,6 +33,9 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
     },
   ): { rows: unknown[] } {
     const q = sql.replace(/\s+/g, ' ')
+    if (q.includes('FROM meta_sheets') && q.includes('base_id = $2') && q.includes('ANY($1::text[])')) {
+      return { rows: [] }
+    }
     // Permission-code UNION includes user_roles join — match it BEFORE bare admin probe.
     if (q.includes('permission_code') || q.includes('user_permissions')) {
       return handlers.codes ?? { rows: [] }
@@ -152,6 +155,42 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
     ).resolves.toMatchObject({ capabilities: { canManageSheetAccess: true } })
   })
 
+  it('preserves the approval-projection write fence on the query-bound resolver', async () => {
+    const query = vi.fn(async (sql: string) => {
+      const q = sql.replace(/\s+/g, ' ')
+      if (q.includes('SELECT DISTINCT permission_code AS code')) {
+        return {
+          rows: [
+            { code: 'multitable:read' },
+            { code: 'multitable:write' },
+            { code: 'multitable:share' },
+          ],
+        }
+      }
+      if (q.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
+      if (q.includes('FROM user_roles')) return { rows: [] }
+      if (q.includes('FROM spreadsheet_permissions')) return { rows: [] }
+      if (q.includes('FROM meta_sheets') && q.includes('base_id = $2')) {
+        return { rows: [{ id: 'projection-sheet' }] }
+      }
+      if (q.includes('JOIN meta_records')) return { rows: [{ id: 'projection-sheet' }] }
+      return { rows: [] }
+    })
+
+    const result = await resolveSheetCapabilitiesForUserOnQuery(
+      query,
+      'projection-sheet',
+      'projection-participant',
+    )
+    expect(result.isAdminRole).toBe(false)
+    expect(result.capabilities).toMatchObject({
+      canRead: true,
+      canManageSheetAccess: false,
+      canEditRecord: false,
+      canCreateRecord: false,
+    })
+  })
+
   it('rebuilds template visibility actor from query-bound active user, roles and permissions', async () => {
     const query = vi.fn(async (sql: string) => {
       const q = sql.replace(/\s+/g, ' ')
@@ -250,40 +289,40 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       if (q.startsWith('SAVEPOINT') || q.startsWith('ROLLBACK TO SAVEPOINT') || q.startsWith('RELEASE SAVEPOINT')) {
         return { rows: [] }
       }
-      if (q.includes('FROM meta_bases') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_bases') && q.includes('FOR SHARE')) {
         kinds.push('meta_bases')
         return { rows: [{ id: 'b1' }] }
       }
-      if (q.includes('FROM meta_sheets') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_sheets') && q.includes('FOR SHARE')) {
         kinds.push('meta_sheets')
         return { rows: [{ id: 's1' }] }
       }
-      if (q.includes('FROM user_roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_roles') && q.includes('FOR SHARE')) {
         kinds.push('user_roles')
         return { rows: [{ role_id: 'role-a' }, { role_id: 'role-b' }] }
       }
-      if (q.includes('FROM roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM roles') && q.includes('FOR SHARE')) {
         kinds.push('roles')
         return { rows: [{ id: 'role-a', name: 'Role A' }, { id: 'role-b', name: 'Role B' }] }
       }
-      if (q.includes('FROM role_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM role_permissions') && q.includes('FOR SHARE')) {
         kinds.push('role_permissions')
         expect(params?.[0]).toEqual(['role-a', 'role-b'])
         return { rows: [{ role_id: 'role-a', permission_code: 'approvals:write' }] }
       }
-      if (q.includes('FROM user_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_permissions') && q.includes('FOR SHARE')) {
         kinds.push('user_permissions')
         return { rows: [{ permission_code: 'multitable:read' }] }
       }
-      if (q.includes('FROM users') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM users') && q.includes('FOR SHARE')) {
         kinds.push('users')
         return { rows: [{ id: 'u1' }] }
       }
-      if (q.includes('FROM platform_member_group_members') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM platform_member_group_members') && q.includes('FOR SHARE')) {
         kinds.push('platform_member_group_members')
         return { rows: [{ group_id: 'g1' }] }
       }
-      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR SHARE')) {
         kinds.push('spreadsheet_permissions')
         // user + roles + groups subjects
         expect(params?.[0]).toBe('s1')
@@ -330,39 +369,39 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       if (q.startsWith('SAVEPOINT') || q.startsWith('ROLLBACK TO SAVEPOINT') || q.startsWith('RELEASE SAVEPOINT')) {
         return { rows: [] }
       }
-      if (q.includes('FROM meta_bases') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_bases') && q.includes('FOR SHARE')) {
         kinds.push(`meta_bases:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM meta_sheets') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_sheets') && q.includes('FOR SHARE')) {
         kinds.push(`meta_sheets:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM user_roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_roles') && q.includes('FOR SHARE')) {
         kinds.push('user_roles')
         return { rows: [{ role_id: 'r1' }] }
       }
-      if (q.includes('FROM roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM roles') && q.includes('FOR SHARE')) {
         kinds.push('roles')
         return { rows: [{ id: 'r1', name: 'Role 1' }] }
       }
-      if (q.includes('FROM role_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM role_permissions') && q.includes('FOR SHARE')) {
         kinds.push('role_permissions')
         return { rows: [] }
       }
-      if (q.includes('FROM user_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_permissions') && q.includes('FOR SHARE')) {
         kinds.push('user_permissions')
         return { rows: [] }
       }
-      if (q.includes('FROM users') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM users') && q.includes('FOR SHARE')) {
         kinds.push('users')
         return { rows: [{ id: 'u1' }] }
       }
-      if (q.includes('FROM platform_member_group_members') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM platform_member_group_members') && q.includes('FOR SHARE')) {
         kinds.push('platform_member_group_members')
         return { rows: [] }
       }
-      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR SHARE')) {
         kinds.push(`spreadsheet_permissions:${String(params?.[0] ?? '')}`)
         return { rows: [] }
       }
@@ -434,31 +473,31 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
         kinds.push(`meta_records:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM meta_bases') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_bases') && q.includes('FOR SHARE')) {
         kinds.push(`meta_bases:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM meta_sheets') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_sheets') && q.includes('FOR SHARE')) {
         kinds.push(`meta_sheets:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM user_roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_roles') && q.includes('FOR SHARE')) {
         kinds.push('user_roles')
         return { rows: [{ role_id: 'r1' }] }
       }
-      if (q.includes('FROM roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM roles') && q.includes('FOR SHARE')) {
         kinds.push('roles')
         return { rows: [{ id: 'r1', name: 'Role 1' }] }
       }
-      if (q.includes('FROM role_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM role_permissions') && q.includes('FOR SHARE')) {
         kinds.push('role_permissions')
         return { rows: [] }
       }
-      if (q.includes('FROM user_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_permissions') && q.includes('FOR SHARE')) {
         kinds.push('user_permissions')
         return { rows: [] }
       }
-      if (q.includes('FROM users') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM users') && q.includes('FOR SHARE')) {
         kinds.push('users')
         return { rows: [{ id: 'u1' }] }
       }
@@ -466,7 +505,7 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
         kinds.push('platform_member_group_members')
         return { rows: [] }
       }
-      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR SHARE')) {
         kinds.push(`spreadsheet_permissions:${String(params?.[0] ?? '')}`)
         return { rows: [] }
       }
@@ -575,23 +614,23 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
         kinds.push(`meta_records:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM meta_bases') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_bases') && q.includes('FOR SHARE')) {
         kinds.push(`meta_bases:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM meta_sheets') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_sheets') && q.includes('FOR SHARE')) {
         kinds.push(`meta_sheets:${String(params?.[0] ?? '')}`)
         return { rows: [{ id: params?.[0] }] }
       }
-      if (q.includes('FROM user_roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_roles') && q.includes('FOR SHARE')) {
         kinds.push('user_roles')
         return { rows: [] }
       }
-      if (q.includes('FROM user_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_permissions') && q.includes('FOR SHARE')) {
         kinds.push('user_permissions')
         return { rows: [] }
       }
-      if (q.includes('FROM users') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM users') && q.includes('FOR SHARE')) {
         kinds.push('users')
         return { rows: [{ id: 'u1' }] }
       }
@@ -599,7 +638,7 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
         kinds.push('platform_member_group_members')
         return { rows: [] }
       }
-      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR SHARE')) {
         kinds.push('spreadsheet_permissions')
         return { rows: [] }
       }
@@ -617,7 +656,7 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       },
       { interleavedPerCandidate: true },
     )
-    // Interleaved: actor rows once per candidate (the deadlock footgun).
+    // Interleaved mutation: actor rows once per candidate instead of the production global phase.
     expect(kinds.filter((k) => k === 'user_roles')).toHaveLength(2)
     expect(kinds.filter((k) => k === 'users')).toHaveLength(2)
   })
@@ -629,23 +668,23 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       if (q.startsWith('SAVEPOINT') || q.startsWith('ROLLBACK TO SAVEPOINT') || q.startsWith('RELEASE SAVEPOINT')) {
         return { rows: [] }
       }
-      if (q.includes('FROM meta_bases') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_bases') && q.includes('FOR SHARE')) {
         kinds.push('meta_bases')
         return { rows: [] }
       }
-      if (q.includes('FROM meta_sheets') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM meta_sheets') && q.includes('FOR SHARE')) {
         kinds.push('meta_sheets')
         return { rows: [] }
       }
-      if (q.includes('FROM user_roles') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_roles') && q.includes('FOR SHARE')) {
         kinds.push('user_roles')
         return { rows: [] }
       }
-      if (q.includes('FROM user_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM user_permissions') && q.includes('FOR SHARE')) {
         kinds.push('user_permissions')
         return { rows: [] }
       }
-      if (q.includes('FROM users') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM users') && q.includes('FOR SHARE')) {
         kinds.push('users')
         return { rows: [] }
       }
@@ -656,7 +695,7 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
         err.code = '42P01'
         throw err
       }
-      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR UPDATE')) {
+      if (q.includes('FROM spreadsheet_permissions') && q.includes('FOR SHARE')) {
         kinds.push('spreadsheet_permissions')
         return { rows: [] }
       }

@@ -3,6 +3,7 @@ import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { loadDeniedRecordIds } from '../../src/multitable/permission-service'
+import { lockRecordLinkActorAuthorityRowsOnQuery } from '../../src/services/approval-record-link-txn-auth'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
 /**
@@ -310,12 +311,175 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
+  it('authority readers use compatible shared locks instead of serializing peer creates', async () => {
+    const pool = poolManager.get()
+    let second: Promise<void> | undefined
+    let secondFinishedWhileFirstHeld = false
+
+    await pool.transaction(async ({ query }) => {
+      await lockRecordLinkActorAuthorityRowsOnQuery(query, FILLER)
+      second = pool.transaction(async ({ query: secondQuery }) => {
+        await lockRecordLinkActorAuthorityRowsOnQuery(secondQuery, FILLER)
+      })
+
+      secondFinishedWhileFirstHeld = await Promise.race([
+        second.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
+      ])
+    })
+    await second
+
+    expect(secondFinishedWhileFirstHeld).toBe(true)
+  })
+
   it('publish succeeds when publisher can read the pinned sheet (admin actor)', async () => {
     const published = await req(base, `/api/approval-templates/${tid}/publish`, adminTok, {
       method: 'POST',
       body: { policy: { allowRevoke: true } },
     })
     expect(published.status, await published.clone().text()).toBe(200)
+  })
+
+  it('templates without record-link fields still require DB approvals:write at the final boundary', async () => {
+    const pool = poolManager.get()
+    const key = `rl-no-link-${TS}`
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', name: 's', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          name: 'a',
+          config: {
+            assigneeSources: [{ kind: 'static_user', userIds: [FILLER] }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', name: 'e', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'end' },
+      ],
+    }
+    const created = await req(base, '/api/approval-templates', adminTok, {
+      method: 'POST',
+      body: {
+        key,
+        name: key,
+        formSchema: { fields: [{ id: 'note', type: 'text', label: 'Note' }] },
+        approvalGraph: graph,
+      },
+    })
+    expect(created.status, await created.clone().text()).toBe(201)
+    const templateId = ((await created.json()) as { id: string }).id
+    const published = await req(base, `/api/approval-templates/${templateId}/publish`, adminTok, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(published.status, await published.clone().text()).toBe(200)
+
+    await pool.query(
+      `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:write'`,
+      [FILLER],
+    )
+    try {
+      const before = Number((await pool.query(
+        'SELECT count(*)::int AS count FROM approval_instances WHERE template_id = $1',
+        [templateId],
+      )).rows[0]?.count ?? 0)
+      const denied = await req(base, '/api/approvals', fillerTok, {
+        method: 'POST',
+        body: { templateId, formData: { note: 'must not persist' } },
+      })
+      expect(denied.status).toBe(403)
+      const after = Number((await pool.query(
+        'SELECT count(*)::int AS count FROM approval_instances WHERE template_id = $1',
+        [templateId],
+      )).rows[0]?.count ?? 0)
+      expect(after).toBe(before)
+    } finally {
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:write')
+         ON CONFLICT DO NOTHING`,
+        [FILLER],
+      )
+    }
+  })
+
+  it('record-permission PUT observes an in-flight actor revoke before writing', async () => {
+    const pool = poolManager.get()
+    // Make canManageSheetAccess depend only on the sheet-scoped row. This catches a partial fix
+    // that locks actor-wide role/user rows but forgets spreadsheet_permissions.
+    await pool.query(
+      `DELETE FROM user_permissions
+       WHERE user_id = $1 AND permission_code = 'multitable:share'`,
+      [FILLER],
+    )
+    const promoted = await pool.query(
+      `UPDATE spreadsheet_permissions
+       SET perm_code = 'spreadsheet:admin'
+       WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+      [sheetId, FILLER],
+    )
+    expect(promoted.rowCount).toBeGreaterThan(0)
+    await pool.query(
+      `DELETE FROM record_permissions
+       WHERE sheet_id = $1 AND record_id = $2 AND subject_type = 'user' AND subject_id = $3`,
+      [sheetId, readableRecordId, ACTOR],
+    )
+
+    let putPromise: Promise<Response> | undefined
+    await pool.transaction(async ({ query }) => {
+      const pidResult = await query('SELECT pg_backend_pid() AS pid')
+      const holderPid = Number((pidResult.rows[0] as { pid: number }).pid)
+      await query(
+        `SELECT sheet_id FROM spreadsheet_permissions
+         WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2 FOR UPDATE`,
+        [sheetId, FILLER],
+      )
+      putPromise = req(
+        base,
+        `/api/multitable/sheets/${sheetId}/records/${readableRecordId}/permissions`,
+        fillerTok,
+        {
+          method: 'PUT',
+          body: { subjectType: 'user', subjectId: ACTOR, accessLevel: 'read' },
+        },
+      )
+      await waitUntilBackendBlockedByHolder(holderPid, { queryFragment: 'spreadsheet_permissions' })
+      await query(
+        `DELETE FROM spreadsheet_permissions
+         WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+        [sheetId, FILLER],
+      )
+    })
+
+    try {
+      const denied = await putPromise!
+      expect(denied.status).toBe(403)
+      const persisted = await pool.query(
+        `SELECT id FROM record_permissions
+         WHERE sheet_id = $1 AND record_id = $2 AND subject_type = 'user' AND subject_id = $3`,
+        [sheetId, readableRecordId, ACTOR],
+      )
+      expect(persisted.rows).toHaveLength(0)
+    } finally {
+      try {
+        await pool.query(
+          `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code)
+           VALUES ($1, 'user', $2, 'spreadsheet:read')`,
+          [sheetId, FILLER],
+        )
+      } catch {
+        await pool.query(
+          `INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code)
+           VALUES ($1, $2, 'user', $2, 'spreadsheet:read')`,
+          [sheetId, FILLER],
+        )
+      }
+    }
   })
 
   it('final create ignores a stale request template-manager grant and rechecks visibility from DB', async () => {
@@ -1468,8 +1632,8 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
 
   it('P1-4 two-connection: concurrent authz revoke is observed by final txn-local check (never freeze stale precheck)', async () => {
     // Production revoke writer: DELETE FROM user_permissions / spreadsheet_permissions.
-    // Create final path locks those grant rows FOR UPDATE before re-reading auth. We hold the
-    // grant rows FOR UPDATE, dispatch create, wait until create is parked on wait_event_type=
+    // Create final path locks those grant rows FOR SHARE before re-reading auth. We hold the
+    // grant rows FOR UPDATE, dispatch create, wait until its shared read is parked on wait_event_type=
     // 'Lock' (blocked by this holder), THEN DELETE and commit — never a fixed sleep.
     const pool = poolManager.get()
     const target = `rl-revoke-rec-${TS}`
@@ -1522,7 +1686,7 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
           formData: { linked: { recordId: raceTarget } },
         },
       })
-      // Prove create engaged production authority FOR UPDATE (not a vacuous sleep).
+      // Prove create engaged the production shared authority lock (not a vacuous sleep).
       await waitUntilBackendBlockedByHolder(holderPid, { queryFragment: 'user_permissions' })
       // Real production revoke writers (same rows/SQL the admin revoke path uses).
       await query(
@@ -1731,7 +1895,7 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
   it('P1-4 two-connection: role_permissions approvals:write revoke is serialized (request grants do not mask)', async () => {
     // DB-only write via role_permissions (NOT user_permissions, NOT JWT). Concurrent DELETE of
     // that role_permissions row while create is parked on the production role_permissions
-    // FOR UPDATE lock must be observed. JWT omits approvals:write so requestGrantedPermissions
+    // shared lock must be observed. JWT omits approvals:write so requestGrantedPermissions
     // cannot mask the DB-role revoke fixture. Mutation of lockAuthorityRows:false must time out
     // waitUntilBackendBlockedByHolder (create never engages the lock).
     const pool = poolManager.get()
@@ -1865,7 +2029,7 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
   it('P1-4 two-connection: member-group sheet-read revoke is serialized by authority locks', async () => {
     // Sheet canRead comes ONLY from member-group spreadsheet_permissions (no multitable:read,
     // no direct user sheet grant). Wait until create is parked on the production membership /
-    // sheet-grant FOR UPDATE (wait_event_type='Lock'), THEN DELETE. Mutation of
+    // sheet-grant shared lock (wait_event_type='Lock'), THEN DELETE. Mutation of
     // lockAuthorityRows:false must fail the barrier (create never parks).
     const pool = poolManager.get()
     const GROUP_READER = `rl-group-reader-${TS}`
@@ -2286,20 +2450,14 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     await pool.query(`DELETE FROM user_permissions WHERE user_id = $1`, [READ_ONLY]).catch(() => {})
   })
 
-  it('P2 multi-link: production multi-target phased locks — [A,B] vs [B] no 40P01; interleaved mutation deadlocks', async () => {
-    // Independent PG review: same-actor T1=[A,B] and T2=[B] deadlock under interleaved
-    // per-candidate locking (target base/sheet → actor U → next target) even when candidates
-    // are sorted. Production lockRecordLinkMultiTargetCreatePathOnQuery acquires in global
-    // phases (all bases → all sheets → actor once → grants → row/records). Prove that golden
-    // with the production helper; prove interleavedPerCandidate / split interleaved steps
-    // restore 40P01. Does not rely on a bare meta_bases-only AB-BA sketch.
+  it('P2 multi-link: production multi-target phased locks let overlapping peer creates complete', async () => {
+    // Same-actor T1=[A,B] and T2=[B]. Production acquires authority in global phases and uses
+    // compatible shared locks for read-only authority rows; both creates must complete without
+    // serializing on those rows or producing 40P01. Structural phase order is pinned separately
+    // by the unit suite; the shared-lock compatibility test above is the real-DB discriminator.
     const { Client } = await import('pg')
-    const {
-      lockRecordLinkMultiTargetCreatePathOnQuery,
-      lockRecordLinkAuthorityRowsOnQuery,
-    } = await import('../../src/services/approval-record-link-txn-auth')
-    const { acquireRecordLinkRowAuthLockOnQuery } = await import(
-      '../../src/services/approval-record-link-row-auth-lock'
+    const { lockRecordLinkMultiTargetCreatePathOnQuery } = await import(
+      '../../src/services/approval-record-link-txn-auth'
     )
 
     const pool = poolManager.get()
@@ -2391,73 +2549,6 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     await new Promise((r) => setTimeout(r, 150))
     t1Release = true
     await expect(golden).resolves.toBeDefined()
-
-    // ── MUTATION / discriminator: interleaved per-candidate order on the production helper
-    // surface reproduces 40P01 for unequal overlapping sets.
-    //
-    // Cycle:
-    //   T1: interleaved lock target A (holds baseA + actor U), wait until T2 holds baseB,
-    //       then interleaved lock target B (wants baseB).
-    //   T2: wait until T1 holds A+U, lock baseB+sheetB, mark, then continue interleaved
-    //       create path for [B] which needs actor U (held by T1) → 40P01.
-    let d1HasAU = false
-    let d2HasB = false
-    const discriminating = Promise.allSettled([
-      withClient(async (c1) => {
-        const q = (sql: string, params?: unknown[]) => c1.query(sql, params)
-        await c1.query('BEGIN')
-        await lockRecordLinkMultiTargetCreatePathOnQuery(
-          q,
-          { userId: USER, targets: [setAB[0]!] },
-          { interleavedPerCandidate: true },
-        )
-        d1HasAU = true
-        await waitFlag(() => d2HasB, 8_000)
-        await lockRecordLinkMultiTargetCreatePathOnQuery(
-          q,
-          { userId: USER, targets: [setAB[1]!] },
-          { interleavedPerCandidate: true },
-        )
-        await c1.query('COMMIT')
-      }),
-      withClient(async (c2) => {
-        const q = (sql: string, params?: unknown[]) => c2.query(sql, params)
-        await waitFlag(() => d1HasAU, 8_000)
-        await c2.query('BEGIN')
-        // Partial interleaved prefix for [B]: take target base/sheet before actor (same
-        // order as lockRecordLinkAuthorityRowsOnQuery / interleaved create path).
-        await q(`SELECT id FROM meta_bases WHERE id = $1 FOR UPDATE`, [baseB])
-        await q(`SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE`, [sheetB])
-        d2HasB = true
-        // Remainder of interleaved single-target path: actor authority + row/record.
-        // Actor U is held by T1; T1 is about to wait on baseB → 40P01.
-        await lockRecordLinkAuthorityRowsOnQuery(q, {
-          userId: USER,
-          baseId: baseB,
-          sheetId: sheetB,
-        })
-        await acquireRecordLinkRowAuthLockOnQuery(q, sheetB, recB)
-        await q(
-          `SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE`,
-          [recB, sheetB],
-        )
-        await c2.query('COMMIT')
-      }),
-    ])
-
-    const discOutcomes = await discriminating
-    const discCodes = discOutcomes.map((o) => {
-      if (o.status === 'fulfilled') return 'ok'
-      const err = o.reason as { code?: string; message?: string }
-      return err?.code ?? String(err?.message ?? o.reason)
-    })
-    const sawDeadlock = discCodes.some(
-      (c) => c === '40P01' || String(c).toLowerCase().includes('deadlock'),
-    )
-    expect(
-      sawDeadlock,
-      `expected 40P01 under interleaved [A,B] vs [B] (production helper surface), got ${JSON.stringify(discCodes)}`,
-    ).toBe(true)
 
     // Cleanup
     await pool.query(`DELETE FROM meta_records WHERE id = ANY($1::text[])`, [[recA, recB]]).catch(() => {})

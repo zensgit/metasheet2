@@ -254,13 +254,13 @@ function commonApprovalClientMockResult(statement: string): { rows: unknown[]; r
 
   // Final create-boundary template visibility recheck (2026-07-22). Dedicated visibility/auth
   // tests exercise deny and mutation cases; unrelated create tests use this ordinary active actor.
-  if (statement.startsWith('SELECT role_id FROM user_roles WHERE user_id = $1 FOR UPDATE')) {
+  if (statement.startsWith('SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE')) {
     return { rows: [], rowCount: 0 }
   }
-  if (statement.startsWith('SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR UPDATE')) {
+  if (statement.startsWith('SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR SHARE')) {
     return { rows: [], rowCount: 0 }
   }
-  if (statement.startsWith('SELECT id FROM users WHERE id = $1 FOR UPDATE')) {
+  if (statement.startsWith('SELECT id FROM users WHERE id = $1 FOR SHARE')) {
     return { rows: [{ id: 'requester-1' }], rowCount: 1 }
   }
   if (
@@ -269,7 +269,7 @@ function commonApprovalClientMockResult(statement: string): { rows: unknown[]; r
   ) {
     return { rows: [], rowCount: 0 }
   }
-  if (statement.startsWith('SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR UPDATE')) {
+  if (statement.startsWith('SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR SHARE')) {
     return { rows: [], rowCount: 0 }
   }
   if (statement.startsWith('SELECT role, department, is_admin, is_active FROM users WHERE id = $1')) {
@@ -279,7 +279,7 @@ function commonApprovalClientMockResult(statement: string): { rows: unknown[]; r
     return { rows: [], rowCount: 0 }
   }
   if (statement.startsWith('SELECT DISTINCT permission_code AS code FROM (')) {
-    return { rows: [], rowCount: 0 }
+    return { rows: [{ code: 'approvals:write' }], rowCount: 1 }
   }
   if (statement.startsWith('SELECT permissions FROM users WHERE id = $1')) {
     return { rows: [{ permissions: [] }], rowCount: 1 }
@@ -3841,6 +3841,72 @@ describe('ApprovalProductService', () => {
       normalize(sql as string).startsWith('INSERT INTO approval_instances'))
     expect(insertInstance?.[1]?.[11]).toBe('ver-2')
     expect(insertInstance?.[1]?.[12]).toBe('pub-2')
+  })
+
+  it('rechecks DB approvals:write for templates with no record-link fields', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+    mockPublishedTemplatePool(runtimeGraph)
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+      // Both the visibility actor and the unconditional final write gate see no DB write grant.
+      if (statement.startsWith('SELECT DISTINCT permission_code AS code FROM (')) {
+        return { rows: [], rowCount: 0 }
+      }
+      const common = commonApprovalClientMockResult(statement)
+      if (common) return common
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    await expect(new ApprovalProductService().createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'requester-1' },
+    )).rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(String(sql)))
+    expect(statements.some((sql) => (
+      sql.startsWith('SELECT id FROM approval_templates WHERE') && sql.endsWith('FOR SHARE')
+    ))).toBe(true)
+    expect(statements.some((sql) => sql.startsWith('INSERT INTO approval_instances'))).toBe(false)
+  })
+
+  it('redacts stored record-link ids when getApproval omits a viewer', async () => {
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            form_snapshot: { linked: { recordId: 'secret-record-id' } },
+            template_version_id: 'ver-record-link',
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT form_schema FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            form_schema: {
+              fields: [{
+                id: 'linked',
+                type: 'record-link',
+                label: 'Linked',
+                props: { baseId: 'base-1', sheetId: 'sheet-1' },
+              }],
+            },
+          }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const approval = await new ApprovalProductService().getApproval('apr-1')
+    expect(approval?.formSnapshot).toEqual({ linked: { inaccessible: true } })
   })
 
   // B3-08 (模板治理 — 停用/启用 + 用量): archiveTemplate/unarchiveTemplate is the only way to REACH

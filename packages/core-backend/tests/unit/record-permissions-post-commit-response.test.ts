@@ -37,7 +37,14 @@ function createSqlHandler(opts: { dbAdmin: boolean }): (sql: string, params?: un
       return { rows: [] }
     }
 
-    // Canonical row-auth advisory + FOR UPDATE existing grants
+    // Shared sheet + actor + sheet-grant authority locks precede the row-auth advisory.
+    if (q.includes('SELECT id FROM meta_sheets') && q.includes('FOR SHARE')) {
+      return { rows: [{ id: params[0] }] }
+    }
+    if (q.includes('SELECT role_id FROM user_roles') && q.includes('FOR SHARE')) return { rows: [] }
+    if (q.includes('SELECT permission_code FROM user_permissions') && q.includes('FOR SHARE')) return { rows: [] }
+    if (q.includes('SELECT id FROM users') && q.includes('FOR SHARE')) return { rows: [{ id: params[0] }] }
+    if (q.includes('SELECT group_id FROM platform_member_group_members') && q.includes('FOR SHARE')) return { rows: [] }
     if (q.includes('pg_advisory_xact_lock')) return { rows: [{ pg_advisory_xact_lock: '' }] }
     if (q.includes('FROM record_permissions') && q.includes('FOR UPDATE')) return { rows: [] }
 
@@ -47,6 +54,7 @@ function createSqlHandler(opts: { dbAdmin: boolean }): (sql: string, params?: un
     if (q.includes('SELECT DISTINCT permission_code AS code')) return { rows: [] }
     if (q.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
 
+    if (q.includes('FROM meta_sheets') && q.includes('base_id = $2')) return { rows: [] }
     if (q.includes('FROM meta_sheets') && q.includes('WHERE id = $1')) {
       return {
         rows: [{
@@ -211,6 +219,12 @@ describe('record_permissions routes — post-COMMIT HTTP response', () => {
     const sqlCalls = mockPool.query.mock.calls.map((c) => String(c[0]).replace(/\s+/g, ' '))
     expect(sqlCalls.some((s) => s.includes('pg_advisory_xact_lock'))).toBe(true)
     expect(sqlCalls.some((s) => s.includes('FROM record_permissions') && s.includes('FOR UPDATE'))).toBe(true)
+    const actorLockIndex = sqlCalls.findIndex((s) => s.includes('FROM user_roles') && s.includes('FOR SHARE'))
+    const sheetGrantLockIndex = sqlCalls.findIndex((s) => s.includes('FROM spreadsheet_permissions') && s.includes('FOR SHARE'))
+    const rowAuthIndex = sqlCalls.findIndex((s) => s.includes('pg_advisory_xact_lock'))
+    expect(actorLockIndex).toBeGreaterThanOrEqual(0)
+    expect(sheetGrantLockIndex).toBeGreaterThan(actorLockIndex)
+    expect(rowAuthIndex).toBeGreaterThan(sheetGrantLockIndex)
     expect(sqlCalls.some((s) => s.includes('INSERT INTO record_permissions'))).toBe(true)
   })
 
@@ -283,6 +297,12 @@ describe('record_permissions routes — post-COMMIT HTTP response', () => {
 
     const sqlCalls = mockPool.query.mock.calls.map((c) => String(c[0]).replace(/\s+/g, ' '))
     expect(sqlCalls.some((s) => s.includes('pg_advisory_xact_lock'))).toBe(true)
+    const actorLockIndex = sqlCalls.findIndex((s) => s.includes('FROM user_roles') && s.includes('FOR SHARE'))
+    const sheetGrantLockIndex = sqlCalls.findIndex((s) => s.includes('FROM spreadsheet_permissions') && s.includes('FOR SHARE'))
+    const rowAuthIndex = sqlCalls.findIndex((s) => s.includes('pg_advisory_xact_lock'))
+    expect(actorLockIndex).toBeGreaterThanOrEqual(0)
+    expect(sheetGrantLockIndex).toBeGreaterThan(actorLockIndex)
+    expect(rowAuthIndex).toBeGreaterThan(sheetGrantLockIndex)
     expect(sqlCalls.some((s) => s.startsWith('DELETE FROM record_permissions'))).toBe(true)
   })
 

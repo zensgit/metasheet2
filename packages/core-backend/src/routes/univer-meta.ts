@@ -72,7 +72,10 @@ import {
 } from '../multitable/permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
-import { resolveSheetCapabilitiesForUserOnQuery } from '../services/approval-record-link-txn-auth'
+import {
+  lockRecordLinkAuthorityRowsOnQuery,
+  resolveSheetCapabilitiesForUserOnQuery,
+} from '../services/approval-record-link-txn-auth'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { precheckSheetHistoryIntegrity, HistoryIncompleteInTxnError } from '../multitable/history-integrity-precheck'
@@ -11209,6 +11212,14 @@ export function univerMetaRouter(): Router {
         | { kind: 'error'; status: number; code: string; message: string }
 
       const outcome = await pool.transaction(async ({ query }): Promise<PutRecordPermissionTxnOutcome> => {
+        // Lock every source consumed by the final capability read before the row-auth advisory.
+        // baseId is intentionally empty: this route consumes sheet, actor, and sheet-grant
+        // authority only. Shared locks let peer readers proceed while serializing revokes.
+        await lockRecordLinkAuthorityRowsOnQuery(query, {
+          userId: requestAccess.userId,
+          baseId: '',
+          sheetId,
+        })
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
         const sheet = await loadSheetRow(query, sheetId)
@@ -11300,6 +11311,11 @@ export function univerMetaRouter(): Router {
         | { kind: 'error'; status: number; code: string; message: string }
 
       const outcome = await pool.transaction(async ({ query }): Promise<DeleteRecordPermissionTxnOutcome> => {
+        await lockRecordLinkAuthorityRowsOnQuery(query, {
+          userId: requestAccess.userId,
+          baseId: '',
+          sheetId,
+        })
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
         const sheet = await loadSheetRow(query, sheetId)
