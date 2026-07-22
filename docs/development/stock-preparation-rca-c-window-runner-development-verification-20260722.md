@@ -90,6 +90,10 @@ After merge, an owner dispatch on `main` produces a ZIP artifact containing exac
 The workflow does not publish a GitHub Release. Public/private release publication remains an
 explicit owner action after the exact-main artifact is verified.
 
+For pull requests, the workflow explicitly checks out the PR head SHA rather than GitHub's synthetic
+merge commit, records that same SHA in provenance, and rejects the build unless `git rev-parse HEAD`
+equals it. For manual dispatch, both values resolve to the selected ref's `github.sha`.
+
 ## 6. Verification
 
 Local verification after the first adversarial correction:
@@ -99,7 +103,7 @@ Local verification after the first adversarial correction:
 | PM2 projection Node tests | 8/8 PASS |
 | PowerShell contract tests | 36/36 PASS |
 | PowerShell behavior tests | 27/27 PASS |
-| Sidecar builder tests | 2/2 PASS |
+| Sidecar builder and provenance-wiring tests | 3/3 PASS |
 | Frozen extended + MVP + abort-provenance regressions | 95/95 PASS |
 | PowerShell parser | zero errors under the 5.1 grammar |
 | Diff hygiene | `git diff --check` PASS |

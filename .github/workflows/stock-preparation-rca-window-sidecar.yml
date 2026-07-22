@@ -20,14 +20,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Bind checkout content to provenance SHA
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
       - name: Verify and stage the no-Git sidecar
-        env:
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           node --test scripts/ops/build-stock-preparation-rca-window-sidecar.test.mjs

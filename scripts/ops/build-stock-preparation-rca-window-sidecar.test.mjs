@@ -4,10 +4,12 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { buildSidecar } from './build-stock-preparation-rca-window-sidecar.mjs'
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678'
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
 function digest(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
@@ -56,4 +58,14 @@ test('builder fails closed when the source SHA is not a full lowercase commit id
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true })
   }
+})
+
+test('workflow checks out and verifies the exact SHA recorded in provenance', () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/stock-preparation-rca-window-sidecar.yml'),
+    'utf8',
+  )
+  assert.match(workflow, /SOURCE_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/)
+  assert.match(workflow, /ref: \$\{\{ env\.SOURCE_SHA \}\}/)
+  assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$SOURCE_SHA"/)
 })
