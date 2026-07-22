@@ -1170,6 +1170,85 @@ describe('validateApprovalFormData', () => {
     ])
   })
 
+  it('date fields accept ONLY a strict real-calendar YYYY-MM-DD string (floating civil date)', () => {
+    const schema: FormSchema = { fields: [{ id: 'due', type: 'date', label: 'Due' }] }
+    // Accepts real calendar dates, leap-year validated — never via Date.parse.
+    expect(validateApprovalFormData(schema, { due: '2026-07-15' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2024-02-29' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2000-02-29' })).toEqual([])
+    // Rejects impossible dates, datetime strings, locale strings, epoch numbers, Date
+    // objects, and surrounding-whitespace variants (the form transport does not trim).
+    const rejected: Array<[string, unknown]> = [
+      ['non-leap Feb 29', '2026-02-29'],
+      ['century non-leap Feb 29', '1900-02-29'],
+      ['April 31', '2026-04-31'],
+      ['month 13', '2026-13-01'],
+      ['ISO datetime', '2026-07-15T10:00:00Z'],
+      ['datetime with offset', '2026-07-15T23:30:00+08:00'],
+      ['space-separated datetime', '2026-07-15 10:00:00'],
+      ['locale string', '7/15/2026'],
+      ['epoch-ms number', Date.UTC(2026, 6, 15)],
+      ['Date object', new Date(Date.UTC(2026, 6, 15))],
+      ['left whitespace', ' 2026-07-15'],
+      ['right whitespace', '2026-07-15 '],
+      ['single-digit month', '2026-7-15'],
+      ['year zero', '0000-01-01'],
+    ]
+    for (const [label, value] of rejected) {
+      expect(validateApprovalFormData(schema, { due: value }), label)
+        .toEqual(['due must be a date value'])
+    }
+  })
+
+  it('datetime fields keep instant semantics (positive control — unchanged behavior)', () => {
+    const schema: FormSchema = { fields: [{ id: 'meet', type: 'datetime', label: 'Meet' }] }
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15T10:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15 10:00:00' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: new Date(Date.UTC(2026, 6, 15)) })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: 'not-a-date' }))
+      .toEqual(['meet must be a date value'])
+    expect(validateApprovalFormData(schema, { meet: 1752573600000 }))
+      .toEqual(['meet must be a date value'])
+  })
+
+  it('date min/max compares validated YYYY-MM-DD calendar strings directly (timezone-stable)', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'due',
+        type: 'date',
+        label: 'Due',
+        props: { min: '2026-04-10', max: '2026-04-12' },
+      }],
+    }
+    // Boundaries are inclusive and identical in every timezone (pure string comparison —
+    // an epoch-converting mutation reds this under TZ=America/Los_Angeles / Asia/Taipei).
+    expect(validateApprovalFormData(schema, { due: '2026-04-10' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-12' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-11' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-09' }))
+      .toEqual(['due must be on or after 2026-04-10'])
+    expect(validateApprovalFormData(schema, { due: '2026-04-13' }))
+      .toEqual(['due must be on or before 2026-04-12'])
+  })
+
+  it('datetime min/max keeps instant semantics (positive control — unchanged behavior)', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'meet',
+        type: 'datetime',
+        label: 'Meet',
+        props: { min: '2026-04-10T00:00:00Z', max: '2026-04-12T00:00:00Z' },
+      }],
+    }
+    expect(validateApprovalFormData(schema, { meet: '2026-04-10T00:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-11T12:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-09T23:59:59Z' }))
+      .toEqual(['meet must be on or after 2026-04-10T00:00:00Z'])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-12T00:00:01Z' }))
+      .toEqual(['meet must be on or before 2026-04-12T00:00:00Z'])
+  })
+
   // P1-B 加签 — buildAddSignAssignments returns one active user row per target
   // id at the current node, stamped {addedBy, addSign:true} and deliberately
   // carrying NO resolvedFrom (so it reads as a static, non-resolver assignment).

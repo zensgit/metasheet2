@@ -1,11 +1,31 @@
 import type { FormFieldType, FormSchema } from '../types/approval'
 
 /**
+ * Floating civil (date-only) calendar validation — strict `YYYY-MM-DD` with real leap-year
+ * rules, checked lexically (never via `Date`/`Date.parse`, which define INSTANT semantics and
+ * can shift the calendar day across timezones). Mirrors the backend contract
+ * (`packages/core-backend/src/utils/calendar-date.ts`); duplicated locally because the web app
+ * does not import backend sources.
+ */
+const ISO_CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+function isValidIsoCalendarDate(value: string): boolean {
+  if (!ISO_CALENDAR_DATE.test(value)) return false
+  const [year, month, day] = value.split('-').map(Number)
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= daysInMonth[month - 1]
+}
+
+/**
  * Runtime shape check for "does this stored snapshot value still fit the CURRENT field's declared
  * type" — the sole "compatible type" gate `prefillFromSnapshot` (below) relies on. `attachment` is
  * always incompatible (B2-28 stopgap — no working uploader yet, nothing legitimate to prefill);
- * `detail`/`multi-select` require an array (the row-array / multi-value shape); `date`/`datetime`
- * require a value `Date` can actually parse; everything else requires the exact JS primitive type
+ * `detail`/`multi-select` require an array (the row-array / multi-value shape); `date` requires a
+ * strict real-calendar `YYYY-MM-DD` string (a floating civil date — a datetime or otherwise
+ * invalid stored value must NOT repopulate a date input); `datetime` keeps instant semantics and
+ * requires a value `Date` can actually parse; everything else requires the exact JS primitive type
  * the corresponding fill-view widget binds via `v-model`. `null`/`undefined` are never compatible —
  * there is nothing to prefill for an unset value; the field just keeps whatever `ApprovalNewView`'s
  * own default-seeding already gave it.
@@ -22,7 +42,11 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
     case 'number':
       return typeof value === 'number' && Number.isFinite(value)
     case 'date':
+      // Floating civil date only: a strict real-calendar `YYYY-MM-DD` string. A datetime or
+      // epoch value stored by an older schema must NOT repopulate a date input.
+      return typeof value === 'string' && isValidIsoCalendarDate(value)
     case 'datetime':
+      // Instant semantics (unchanged): any Date-parseable string/number.
       if (typeof value !== 'string' && typeof value !== 'number') return false
       return !Number.isNaN(new Date(value).getTime())
     case 'select':
