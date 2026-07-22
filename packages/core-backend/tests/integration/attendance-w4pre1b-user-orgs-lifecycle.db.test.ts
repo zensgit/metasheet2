@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import { query } from '../../src/db/pg'
-import { bindDirectoryAccount, unbindDirectoryAccount } from '../../src/directory/directory-sync'
+import { bindDirectoryAccount, unbindDirectoryAccount, __userOrgsMembershipInternalsForTests } from '../../src/directory/directory-sync'
 import { createLocalAccount, archiveLocalAccount } from '../../src/directory/local-directory-org'
+import { poolManager } from '../../src/integration/db/connection-pool'
 
 /**
  * W4-PRE-1b (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, 2026-07-21): full
@@ -231,47 +232,100 @@ describeIfDatabase('W4-PRE-1b — user_orgs lifecycle: bind/unbind/rebind/local 
     })
   })
 
-  describe('F3-race — concurrent unbind of BOTH bindings (constructed race, #4526 P2)', () => {
-    it('two concurrent deactivation calls on a double-bound user converge to is_active=false (no write-skew stuck-active)', async () => {
-      // Cross-transaction write-skew regression: `deactivateUserOrgMembershipIfNoOtherActiveBinding`'s
-      // NOT EXISTS sibling check reads OTHER accounts' link rows through this transaction's own
-      // READ COMMITTED snapshot. Without a shared-row lock, two concurrent unbinds of a double-
-      // bound user's two DIFFERENT accounts can each see the OTHER as still linked+active
-      // (neither has committed yet) and BOTH skip deactivation — the membership row is left
-      // ACTIVE with ZERO live bindings, permanently (nothing later self-heals it for the local
-      // provider; DingTalk only self-heals via the next resync's own already_linked write, which
-      // this PR's Finding-A fix now correctly gates on the account still being present/active).
+  describe('F3-race — concurrent deactivation calls on a double-bound user (constructed race, #4526 P2)', () => {
+    // CONSTRUCTED TOCTOU RACE (two raw pg clients + pg_blocking_pids), same technique as
+    // `multitable-l4-canonical-fence-realdb.test.ts`'s R1/RXR: `waitUntilBlockedBy` THROWS if B
+    // never parks on A's lock, so this can never silently degrade into a non-racing sequential
+    // pass. A naive `Promise.all` of two independent deactivate+commit chains was tried first and
+    // is NOT reliable proof either way: on localhost, with a tiny dataset, one statement routinely
+    // finishes before the other's sibling check even starts (confirmed empirically while building
+    // this test — the "race" silently collapsed into safe sequential execution, converging to the
+    // correct outcome regardless of whether the fix was present). A fully-sequential construction
+    // (A's call awaited to completion WITHOUT committing, then B's call run) DOES reproduce the
+    // skew when the fix is absent, but deadlocks against the fixed code (B's `FOR UPDATE` would
+    // park on A's still-held lock forever, since nothing ever commits A). This test instead
+    // verifies the SERIALIZATION MECHANISM ITSELF: A holds the row lock (uncommitted, 0-row
+    // result), B's own call is fired and PROVEN to park on A's lock (not just assumed), THEN A
+    // commits, B unblocks and re-evaluates against A's now-committed severance, and the final
+    // state is asserted. Mutating away the `FOR UPDATE` makes B never block —
+    // `waitUntilBlockedBy` throws, killing the test.
+    async function waitUntilBlockedBy(blockerPid: number, timeoutMs = 5000): Promise<void> {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const r = await query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event_type = 'Lock'
+              AND $1 = ANY(pg_blocking_pids(pid))`,
+          [blockerPid],
+        )
+        if ((r.rows[0]?.c ?? 0) >= 1) return
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      throw new Error('the second deactivation call never parked on the first caller\'s row lock — the constructed race did not occur')
+    }
+
+    it('B genuinely blocks on A\'s row lock, then unblocks and correctly deactivates after A commits (no write-skew)', async () => {
       const org = `${NS}_org_f3race`
       const userId = await seedUser('f3race')
       const integrationId = await seedIntegration(org, 'f3race')
-      const dingtalkAccount = await seedAccount(integrationId, 'f3race')
+      const accountX = await seedAccount(integrationId, 'f3racex')
+      const accountY = await seedAccount(integrationId, 'f3racey')
 
-      await bindDirectoryAccount(dingtalkAccount, { localUserRef: userId, adminUserId, enableDingTalkGrant: false })
-      const localAccount = await createLocalAccount({ orgId: org, localUserId: userId, name: 'F3-race Local', email: null, mobile: null, title: null })
+      // Seed the pre-race state directly (this test targets the low-level helper, not the
+      // higher-level bind orchestration already covered by F1-F4): user linked to TWO accounts
+      // in the SAME org, membership ACTIVE.
+      await query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at)
+         VALUES ($1, $2, 'linked', 'manual', NOW(), NOW()), ($3, $2, 'linked', 'manual', NOW(), NOW())`,
+        [accountX, userId, accountY],
+      )
+      await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [userId, org])
       expect(await membershipRow(userId, org)).toEqual({ is_active: true })
 
-      // Fire both deactivation-triggering calls CONCURRENTLY — each opens its OWN transaction/
-      // connection (`transaction()` acquires a fresh pool connection per call), so this is a
-      // genuine two-transaction race, not a sequential simulation.
-      await Promise.all([
-        unbindDirectoryAccount(dingtalkAccount, { adminUserId }),
-        archiveLocalAccount(org, localAccount.id),
-      ])
+      const clientA = await poolManager.get().getInternalPool().connect()
+      const clientB = await poolManager.get().getInternalPool().connect()
+      let bOutcome: 'blocked' | 'never-blocked' = 'never-blocked'
+      let bRun: Promise<void> | undefined
+      try {
+        await clientA.query('BEGIN')
+        await clientB.query('BEGIN')
+        const pidA = Number((await clientA.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
 
-      // Both bindings are now gone; the membership MUST be deactivated — not stuck active with
-      // zero bindings (the write-skew failure mode this test targets).
+        // A severs its own sibling (X) and runs the deactivate helper — 0 rows (Y still looks
+        // active from A's snapshot), but A's `SELECT ... FOR UPDATE` now HOLDS the row lock,
+        // uncommitted.
+        await clientA.query(`UPDATE directory_account_links SET local_user_id = NULL, link_status = 'unmatched' WHERE directory_account_id = $1`, [accountX])
+        const qA = (sql: string, params?: unknown[]) => clientA.query(sql, params) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>
+        await __userOrgsMembershipInternalsForTests.deactivateUserOrgMembershipIfNoOtherActiveBinding({ query: qA }, { userId, orgId: org })
+
+        // B severs its own sibling (Y), then fires the SAME deactivate helper WITHOUT awaiting —
+        // its `FOR UPDATE` must park behind A's held lock.
+        await clientB.query(`UPDATE directory_account_links SET local_user_id = NULL, link_status = 'unmatched' WHERE directory_account_id = $1`, [accountY])
+        const qB = (sql: string, params?: unknown[]) => clientB.query(sql, params) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>
+        bRun = __userOrgsMembershipInternalsForTests.deactivateUserOrgMembershipIfNoOtherActiveBinding({ query: qB }, { userId, orgId: org })
+
+        await waitUntilBlockedBy(pidA) // throws if B never genuinely parks — non-vacuity proof
+        bOutcome = 'blocked'
+
+        await clientA.query('COMMIT') // releases A's lock; A's own 0-row deactivate is final
+        await bRun // B unblocks, re-evaluates with a FRESH snapshot that now sees X committed-severed
+        await clientB.query('COMMIT')
+      } finally {
+        // Mutation-testing / failure safety: if `waitUntilBlockedBy` threw (mutation red path),
+        // neither transaction was committed and `bRun` may still be settling (or, without the
+        // fix, may already have resolved unblocked) — settle it and roll back BOTH before
+        // releasing the connections back to the pool, so a failed run never leaves a dangling
+        // open transaction (and its locks) on a pooled connection for a LATER test to hang on.
+        await Promise.allSettled([bRun, clientA.query('ROLLBACK'), clientB.query('ROLLBACK')])
+        clientA.release()
+        clientB.release()
+      }
+
+      expect(bOutcome).toBe('blocked')
+      // Both bindings are now severed; the membership MUST be deactivated — not stuck active
+      // with zero bindings (the write-skew failure mode this test targets).
       expect(await membershipRow(userId, org)).toEqual({ is_active: false })
-
-      const linkRow = await query<{ link_status: string }>(
-        `SELECT link_status FROM directory_account_links WHERE directory_account_id = $1`,
-        [dingtalkAccount],
-      )
-      expect(linkRow.rows[0]?.link_status).toBe('unmatched')
-      const localAccountRow = await query<{ is_active: boolean }>(
-        `SELECT is_active FROM directory_accounts WHERE id = $1`,
-        [localAccount.id],
-      )
-      expect(localAccountRow.rows[0]?.is_active).toBe(false)
     })
   })
 
