@@ -24,7 +24,12 @@ export interface RecordLinkChecks {
   /** execute-time trio: */
   recordExists(trx: Queryable, sheetId: string, recordId: string): Promise<boolean>
   recordIsLocked(trx: Queryable, sheetId: string, recordId: string): Promise<boolean>
-  configurerCanWriteRecord(configurerUserId: string, sheetId: string, recordId: string): Promise<boolean>
+  configurerCanWriteRecord(
+    trx: Queryable,
+    configurerUserId: string,
+    sheetId: string,
+    recordId: string,
+  ): Promise<boolean>
 }
 
 export type RecordLinkRejectCode = 'link_not_readable' | 'record_missing' | 'record_locked' | 'record_not_writable'
@@ -226,7 +231,7 @@ export async function recheckBoundRecordAtExecute(
   }
   if (!(await safe(checks.recordExists(trx, sheetId, recordId), false))) return { ok: false, code: 'record_missing' }
   if (await safe(checks.recordIsLocked(trx, sheetId, recordId), true)) return { ok: false, code: 'record_locked' } // error ⇒ treat as locked
-  if (!(await safe(checks.configurerCanWriteRecord(configurerUserId, sheetId, recordId), false))) {
+  if (!(await safe(checks.configurerCanWriteRecord(trx, configurerUserId, sheetId, recordId), false))) {
     return { ok: false, code: 'record_not_writable' }
   }
   return { ok: true }

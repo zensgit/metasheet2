@@ -107,6 +107,8 @@ import {
   projectRecordLinkFormSnapshotForViewer,
 } from './approval-record-link-read-projection'
 import {
+  loadApprovalTemplateVisibilityActorOnQuery,
+  lockRecordLinkActorAuthorityRowsOnQuery,
   lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
   lockRecordLinkMultiTargetCreatePathOnQuery,
   resolveRecordLinkTargetAuthOnQuery,
@@ -5111,6 +5113,20 @@ export class ApprovalProductService {
         )
       }
 
+      const templateVisibleAtWrite = await this.templateVisibleAtCreateBoundary(
+        client,
+        bundle.template.id,
+        bundle.version.id,
+        actor.userId,
+      )
+      if (!templateVisibleAtWrite) {
+        throw new ServiceError(
+          'Approval template not found',
+          404,
+          'APPROVAL_TEMPLATE_NOT_FOUND',
+        )
+      }
+
       await client.query(
         `INSERT INTO approval_instances
          (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
@@ -7351,6 +7367,35 @@ export class ApprovalProductService {
       version,
       publishedDefinition: publishedResult.rows[0] || null,
     }
+  }
+
+  /**
+   * Final create-boundary template visibility check. The actor and template row are both read on
+   * the approval transaction after actor authority locks, so a stale request manager grant or a
+   * concurrent visibility edit cannot authorize the instance insert.
+   */
+  private async templateVisibleAtCreateBoundary(
+    client: ApprovalDbClient,
+    templateId: string,
+    expectedActiveVersionId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const queryFn = (sqlText: string, params?: unknown[]) => client.query(sqlText, params)
+    await lockRecordLinkActorAuthorityRowsOnQuery(queryFn, userId)
+    const visibilityActor = await loadApprovalTemplateVisibilityActorOnQuery(queryFn, userId)
+    if (!visibilityActor) return false
+
+    const conditions = ["id = $1", "status = 'published'", 'active_version_id = $2']
+    const params: unknown[] = [templateId, expectedActiveVersionId]
+    applyTemplateVisibilityFilter(conditions, params, 3, visibilityActor)
+    const result = await client.query<{ id: string }>(
+      `SELECT id
+       FROM approval_templates
+       WHERE ${conditions.join(' AND ')}
+       FOR UPDATE`,
+      params,
+    )
+    return Boolean(result.rows[0])
   }
 
   private async deactivateAllActiveAssignments(

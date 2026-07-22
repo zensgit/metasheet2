@@ -72,6 +72,7 @@ import {
 } from '../multitable/permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
+import { resolveSheetCapabilitiesForUserOnQuery } from '../services/approval-record-link-txn-auth'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { precheckSheetHistoryIntegrity, HistoryIncompleteInTxnError } from '../multitable/history-integrity-precheck'
@@ -11182,6 +11183,10 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const requestAccess = await resolveRequestAccess(req)
+      if (!requestAccess.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+      }
       // Real transaction + canonical sheet+record row-auth advisory BEFORE auth/read/write so a
       // concurrent approval create final recheck serializes against deny INSERT (phantom-safe).
       // HTTP response is emitted ONLY after pool.transaction resolves (post-COMMIT): the callback
@@ -11210,7 +11215,11 @@ export function univerMetaRouter(): Router {
         if (!sheet) {
           return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
         }
-        const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+        const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
+          query,
+          sheetId,
+          requestAccess.userId,
+        )
         if (!capabilities.canManageSheetAccess) {
           return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
         }
@@ -11243,7 +11252,7 @@ export function univerMetaRouter(): Router {
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (record_id, subject_type, subject_id)
            DO UPDATE SET access_level = EXCLUDED.access_level`,
-          [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
+          [sheetId, recordId, subjectType, subjectId, accessLevel, requestAccess.userId],
         )
 
         return {
@@ -11277,6 +11286,10 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const requestAccess = await resolveRequestAccess(req)
+      if (!requestAccess.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+      }
       // Same post-COMMIT response contract as PUT: callback returns a typed outcome / throws;
       // never touches res. Canonical row-auth advisory + txn-local auth stay inside the txn.
       const { acquireRecordLinkRowAuthLockOnQuery } = await import(
@@ -11293,7 +11306,11 @@ export function univerMetaRouter(): Router {
         if (!sheet) {
           return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
         }
-        const { capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+        const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
+          query,
+          sheetId,
+          requestAccess.userId,
+        )
         if (!capabilities.canManageSheetAccess) {
           return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
         }

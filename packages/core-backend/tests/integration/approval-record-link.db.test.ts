@@ -318,6 +318,51 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     expect(published.status, await published.clone().text()).toBe(200)
   })
 
+  it('final create ignores a stale request template-manager grant and rechecks visibility from DB', async () => {
+    const pool = poolManager.get()
+    await pool.query(
+      `UPDATE approval_templates
+       SET visibility_scope = $2::jsonb
+       WHERE id = $1`,
+      [tid, JSON.stringify({ type: 'user', ids: ['someone-else'] })],
+    )
+    const staleManagerToken = await tok(
+      base,
+      FILLER,
+      'user',
+      'multitable:read,approvals:write,approvals:read,approval-templates:manage',
+    )
+    const before = Number((await pool.query(
+      'SELECT count(*)::int AS count FROM approval_instances WHERE template_id = $1',
+      [tid],
+    )).rows[0]?.count ?? 0)
+    try {
+      const response = await req(base, '/api/approvals', staleManagerToken, {
+        method: 'POST',
+        body: {
+          templateId: tid,
+          formData: { linked: { recordId: readableRecordId } },
+        },
+      })
+      expect(response.status).toBe(404)
+      expect((await response.json()) as unknown).toMatchObject({
+        error: { code: 'APPROVAL_TEMPLATE_NOT_FOUND' },
+      })
+      const after = Number((await pool.query(
+        'SELECT count(*)::int AS count FROM approval_instances WHERE template_id = $1',
+        [tid],
+      )).rows[0]?.count ?? 0)
+      expect(after).toBe(before)
+    } finally {
+      await pool.query(
+        `UPDATE approval_templates
+         SET visibility_scope = '{"type":"all","ids":[]}'::jsonb
+         WHERE id = $1`,
+        [tid],
+      )
+    }
+  })
+
   it('create freezes a readable { recordId } into form_snapshot (non-admin filler, non-denied row)', async () => {
     const started = await req(base, '/api/approvals', fillerTok, {
       method: 'POST',

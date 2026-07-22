@@ -35,7 +35,10 @@ describe('record-link + FWB-2 rechecks', () => {
   })
 
   test('execute: exists→locked→writable in order, each fail-closed (an ERRORED lock check counts as LOCKED)', async () => {
-    expect(await recheckBoundRecordAtExecute(trx, checks(), 'u', 's', 'r')).toEqual({ ok: true })
+    const sameTxnChecks = checks()
+    sameTxnChecks.configurerCanWriteRecord = vi.fn(async () => true)
+    expect(await recheckBoundRecordAtExecute(trx, sameTxnChecks, 'u', 's', 'r')).toEqual({ ok: true })
+    expect(sameTxnChecks.configurerCanWriteRecord).toHaveBeenCalledWith(trx, 'u', 's', 'r')
     expect(await recheckBoundRecordAtExecute(trx, checks({ recordExists: false }), 'u', 's', 'r')).toEqual({ ok: false, code: 'record_missing' })
     expect(await recheckBoundRecordAtExecute(trx, checks({ recordIsLocked: true }), 'u', 's', 'r')).toEqual({ ok: false, code: 'record_locked' })
     expect(await recheckBoundRecordAtExecute(trx, checks({ recordIsLocked: 'throw' }), 'u', 's', 'r')).toEqual({ ok: false, code: 'record_locked' })

@@ -110,7 +110,11 @@ function isWellFormedFormSchema(schema: FormSchema | null | undefined): schema i
 
 function buildSubmitAuthDeps(
   queryFn: QueryFn,
-  options: { lockTargetRow: boolean; lockAuthorityRows: boolean; lockRowAuth: boolean },
+  options: {
+    lockTargetRow: boolean
+    lockAuthorityRows: boolean
+    lockRowAuth: boolean
+  },
 ): RecordLinkSubmitAuthDeps {
   return {
     async sheetBelongsToBase(sheetId, baseId) {
@@ -176,7 +180,11 @@ export async function probeRecordLinkReadableForUser(
   const lockAuthorityRows = input.lockAuthorityRows === true
   // Row-auth advisory accompanies the final create path (target lock) so deny INSERT serializes.
   const lockRowAuth = lockTargetRow
-  const deps = buildSubmitAuthDeps(queryFn, { lockTargetRow, lockAuthorityRows, lockRowAuth })
+  const deps = buildSubmitAuthDeps(queryFn, {
+    lockTargetRow,
+    lockAuthorityRows,
+    lockRowAuth,
+  })
   const ok = await probeRecordLinkSubmitAuthConstantShape(
     deps,
     {
@@ -346,7 +354,7 @@ export async function projectRecordLinkFormSnapshotsForViewerBatch(
 
   // Approval lists may contain many links into the same sheet. Resolve target authority and the
   // conditional/grant-deny set once per pinned target, then fetch all referenced rows in one query.
-  // This avoids N repeated rule evaluations/full-sheet scans while preserving fail-closed output.
+  // Deny evaluation is BOUNDED to the requested linked record ids (never a full-sheet scan).
   const readableKeys = new Set<string>()
   for (const group of groups.values()) {
     try {
@@ -357,12 +365,14 @@ export async function projectRecordLinkFormSnapshotsForViewerBatch(
       })
       if (!auth.ok) continue
 
+      const recordIds = [...group.recordIds]
       let denied = new Set<string>()
       if (!auth.isAdminRole && await loadRowLevelReadDenyEnabledStrict(queryFn, group.sheetId)) {
-        denied = await loadDeniedRecordIds(queryFn, group.sheetId, viewer)
+        // Bound: only evaluate deny for the linked records on this page — unrelated sheet rows
+        // must not increase scanned work (scale regression below).
+        denied = await loadDeniedRecordIds(queryFn, group.sheetId, viewer, recordIds)
       }
 
-      const recordIds = [...group.recordIds]
       const existing = await queryFn(
         `SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])`,
         [group.sheetId, recordIds],

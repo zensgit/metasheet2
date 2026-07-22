@@ -6770,7 +6770,23 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "Forbidden - approvals:write permission is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Insufficient permissions"
+                    }
+                  }
+                }
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
@@ -6905,10 +6921,26 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "Forbidden - approvals:write permission is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Insufficient permissions"
+                    }
+                  }
+                }
+              }
+            }
           },
           "404": {
-            "description": "Target sheet not found / base mismatch / unreadable (shared no-oracle shape).\nBody is the same approval error envelope as other 4xx routes\n(`code` + `message`, never distinguishes missing vs denied).\n",
+            "description": "Target sheet not found / base mismatch / unreadable (shared no-oracle shape).\nBody is the same approval error envelope as other 4xx routes\n(`ok: false` with nested `error.code` + `error.message`; it never\ndistinguishes missing from denied).\n",
             "content": {
               "application/json": {
                 "schema": {

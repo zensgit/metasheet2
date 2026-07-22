@@ -257,6 +257,48 @@ describe('projectRecordLinkFormSnapshotsForViewerBatch — null schema list', ()
     expect(JSON.stringify(out[1])).not.toContain('rec-denied')
   })
 
+  it('bounds conditional deny evaluation to the linked ids in this page', async () => {
+    const baseQuery = queryFnAuthorized({ ownerId: 'viewer-ok' })
+    const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
+      const q = sql.replace(/\s+/g, ' ')
+      if (q.includes('row_level_read_permissions_enabled AS enabled')) {
+        return { rows: [{ enabled: true, base_id: 'base-1' }] }
+      }
+      if (q.includes('SELECT DISTINCT rp.record_id')) return { rows: [] }
+      if (q.includes('SELECT conditional_read_rules AS rules')) {
+        return {
+          rows: [{
+            rules: [{ id: 'deny-secret', fieldId: 'status', operator: 'eq', value: 'secret', effect: 'deny_read' }],
+          }],
+        }
+      }
+      if (q.includes('SELECT id, type FROM meta_fields')) {
+        return { rows: [{ id: 'status', type: 'text' }] }
+      }
+      if (q.includes('SELECT id, data FROM meta_records')) {
+        expect(q).toContain('id = ANY($2::text[])')
+        expect(params?.[1]).toEqual(['rec-a', 'rec-b'])
+        return { rows: [{ id: 'rec-b', data: { status: 'secret' } }] }
+      }
+      return baseQuery(sql, params)
+    })
+
+    const out = await projectRecordLinkFormSnapshotsForViewerBatch(
+      [
+        { formSnapshot: { linked: { recordId: 'rec-a' } }, templateVersionId: 'ver-ok' },
+        { formSnapshot: { linked: { recordId: 'rec-b' } }, templateVersionId: 'ver-ok' },
+      ],
+      'viewer-ok',
+      queryFn,
+      new Map([['ver-ok', schema]]),
+    )
+
+    expect(out[0]).toEqual({ linked: { recordId: 'rec-a' } })
+    expect(out[1]?.linked).toEqual(RECORD_LINK_INACCESSIBLE_VALUE)
+    const conditionalReads = queryFn.mock.calls.filter(([sql]) => String(sql).includes('SELECT id, data FROM meta_records'))
+    expect(conditionalReads).toHaveLength(1)
+  })
+
   it('fails the whole pinned target closed when strict row-auth loading errors', async () => {
     const baseQuery = queryFnAuthorized({ ownerId: 'viewer-ok' })
     const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {

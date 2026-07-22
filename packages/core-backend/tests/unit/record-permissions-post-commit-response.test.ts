@@ -24,7 +24,7 @@ type TxTimeline = {
   successJsonWhileOpen: boolean
 }
 
-function createSqlHandler(): (sql: string, params?: unknown[]) => QueryResult {
+function createSqlHandler(opts: { dbAdmin: boolean }): (sql: string, params?: unknown[]) => QueryResult {
   return (sql: string, params: unknown[] = []): QueryResult => {
     const q = sql.replace(/\s+/g, ' ').trim()
 
@@ -40,6 +40,12 @@ function createSqlHandler(): (sql: string, params?: unknown[]) => QueryResult {
     // Canonical row-auth advisory + FOR UPDATE existing grants
     if (q.includes('pg_advisory_xact_lock')) return { rows: [{ pg_advisory_xact_lock: '' }] }
     if (q.includes('FROM record_permissions') && q.includes('FOR UPDATE')) return { rows: [] }
+
+    if (q.includes('SELECT 1 FROM user_roles') && q.includes("role_id = $2")) {
+      return { rows: opts.dbAdmin ? [{ '?column?': 1 }] : [] }
+    }
+    if (q.includes('SELECT DISTINCT permission_code AS code')) return { rows: [] }
+    if (q.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
 
     if (q.includes('FROM meta_sheets') && q.includes('WHERE id = $1')) {
       return {
@@ -85,10 +91,11 @@ function createSqlHandler(): (sql: string, params?: unknown[]) => QueryResult {
  */
 function createPool(opts: {
   failCommit?: boolean
+  dbAdmin?: boolean
   timeline: TxTimeline
   onSuccessJson?: () => void
 }) {
-  const sqlHandler = createSqlHandler()
+  const sqlHandler = createSqlHandler({ dbAdmin: opts.dbAdmin !== false })
   const query = vi.fn(async (sql: string, params?: unknown[]) => sqlHandler(sql, params))
 
   const transaction = vi.fn(async <T>(
@@ -116,6 +123,7 @@ function createPool(opts: {
 
 async function createApp(opts: {
   failCommit?: boolean
+  dbAdmin?: boolean
   timeline: TxTimeline
 }) {
   vi.resetModules()
@@ -229,6 +237,26 @@ describe('record_permissions routes — post-COMMIT HTTP response', () => {
     expect(timeline.commitAttempted).toBe(true)
     expect(timeline.transactionSettled).toBe(true)
     expect(timeline.successJsonWhileOpen).toBe(false)
+  })
+
+  it('PUT ignores stale request admin claims when the transaction DB authority was revoked', async () => {
+    const timeline: TxTimeline = {
+      handlerReturned: false,
+      commitAttempted: false,
+      transactionSettled: false,
+      successJsonWhileOpen: false,
+    }
+    const { app, mockPool } = await createApp({ timeline, dbAdmin: false })
+    pinned.setApp(app)
+
+    const res = await request(pinned.url())
+      .put('/api/multitable/sheets/sheet-rp-1/records/rec-rp-1/permissions')
+      .send({ subjectType: 'user', subjectId: 'user-target', accessLevel: 'none' })
+
+    expect(res.status).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    const sqlCalls = mockPool.query.mock.calls.map((c) => String(c[0]).replace(/\s+/g, ' '))
+    expect(sqlCalls.some((s) => s.startsWith('INSERT INTO record_permissions'))).toBe(false)
   })
 
   it('DELETE success response is emitted only after transaction resolution (post-COMMIT)', async () => {

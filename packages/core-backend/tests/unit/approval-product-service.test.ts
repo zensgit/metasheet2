@@ -235,22 +235,57 @@ function mockInsertOnlyClient() {
     if (statement.startsWith('INSERT INTO approval_records')) {
       return { rows: [], rowCount: 1 }
     }
-    { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+    { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
   })
 }
 
-// nodeEntryEpoch (2026-07-03): the per-test mock routers predate the epoch columns, but the two
-// epoch queries flow through EVERY create/approve/return/mutation path. Answer them uniformly here
-// (checked right before each router's "Unhandled" throw) so no router needs to enumerate them:
-//   - the activation-seq bump returns a stable value callers only thread onward as the epoch;
-//   - currentNodeEntryEpoch returns a single NULL row, which keeps mock instances on the legacy
-//     cutoff fallback (§6) so every pre-existing round-scoping / metadata assertion is unaffected.
-function epochMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+// Shared queries added to every approval write path are answered here, immediately before each
+// per-test mock router's "Unhandled" throw. This keeps the strict routers useful without copying
+// infrastructure-only fixtures into every behavioral test.
+function commonApprovalClientMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+  // nodeEntryEpoch (2026-07-03): use a stable activation sequence and keep legacy mock instances
+  // on the NULL cutoff fallback so pre-existing round-scoping assertions stay unchanged.
   if (statement.startsWith('UPDATE approval_instances SET node_activation_seq = node_activation_seq + 1')) {
     return { rows: [{ node_activation_seq: 1 }], rowCount: 1 }
   }
   if (statement.startsWith('SELECT DISTINCT entry_epoch FROM approval_assignments')) {
     return { rows: [{ entry_epoch: null }], rowCount: 1 }
+  }
+
+  // Final create-boundary template visibility recheck (2026-07-22). Dedicated visibility/auth
+  // tests exercise deny and mutation cases; unrelated create tests use this ordinary active actor.
+  if (statement.startsWith('SELECT role_id FROM user_roles WHERE user_id = $1 FOR UPDATE')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR UPDATE')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT id FROM users WHERE id = $1 FOR UPDATE')) {
+    return { rows: [{ id: 'requester-1' }], rowCount: 1 }
+  }
+  if (
+    statement === 'SAVEPOINT record_link_actor_groups'
+    || statement === 'RELEASE SAVEPOINT record_link_actor_groups'
+  ) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR UPDATE')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT role, department, is_admin, is_active FROM users WHERE id = $1')) {
+    return { rows: [{ role: 'user', department: null, is_admin: false, is_active: true }], rowCount: 1 }
+  }
+  if (statement.startsWith('SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT DISTINCT permission_code AS code FROM (')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT permissions FROM users WHERE id = $1')) {
+    return { rows: [{ permissions: [] }], rowCount: 1 }
+  }
+  if (statement.startsWith('SELECT id FROM approval_templates WHERE')) {
+    return { rows: [{ id: 'tpl-1' }], rowCount: 1 }
   }
   return null
 }
@@ -326,7 +361,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -400,7 +435,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -466,7 +501,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -524,7 +559,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -608,7 +643,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -704,7 +739,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -800,7 +835,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -945,7 +980,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1086,7 +1121,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1201,7 +1236,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1605,7 +1640,7 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('UPDATE approval_templates')) {
           return { rows: [{ id: 'tpl-formula', key: 'formula-template', name: 'Formula Template', description: null, category: null, visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft', active_version_id: null, latest_version_id: 'ver-formula', created_at: new Date('2026-06-25T00:00:00.000Z'), updated_at: new Date('2026-06-25T00:00:00.000Z') }], rowCount: 1 }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
 
       const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1869,7 +1904,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -2118,7 +2153,7 @@ describe('ApprovalProductService', () => {
             rowCount: 1,
           }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
@@ -2319,7 +2354,7 @@ describe('ApprovalProductService', () => {
             rowCount: 1,
           }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
@@ -2457,7 +2492,7 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
         if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
       const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
       await expect(
@@ -2516,7 +2551,7 @@ describe('ApprovalProductService', () => {
         }
         if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
         if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
@@ -3665,7 +3700,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3783,7 +3818,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3953,7 +3988,7 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
         if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
         if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
       })
       // createApproval's final step re-reads the freshly-inserted instance via getApproval — stub
       // it out (as the existing "creates new approvals..." test above does) since exercising THAT
@@ -4109,7 +4144,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
   }
 
@@ -4402,7 +4437,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4508,7 +4543,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4640,7 +4675,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4757,7 +4792,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4942,7 +4977,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5122,7 +5157,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5214,7 +5249,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_instances')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5391,7 +5426,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5545,7 +5580,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5671,7 +5706,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5798,7 +5833,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5909,7 +5944,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -6036,7 +6071,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -6160,7 +6195,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -6312,7 +6347,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -6462,7 +6497,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -6554,7 +6589,7 @@ describe('ApprovalProductService', () => {
         return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
       }
       if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -6621,7 +6656,7 @@ describe('ApprovalProductService', () => {
         }
         if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
         if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
@@ -6712,7 +6747,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -6839,7 +6874,7 @@ describe('ApprovalProductService', () => {
           template.active_version_id = 'ver-2'
           return { rows: [], rowCount: 1 }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
       return client
     }
@@ -6911,7 +6946,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_published_definitions')) {
         throw new Error('insert failed')
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')

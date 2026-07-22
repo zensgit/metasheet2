@@ -242,10 +242,10 @@ export async function listApprovalRecordLinkOptions(input: {
 
   const queryFn = (sql: string, params?: unknown[]) => pool!.query(sql, params)
 
-  // Constant-shape dual base+sheet auth via txn-local path (no global RBAC cache).
+  // Constant-shape dual base+sheet auth via query-bound DB reads (no global RBAC cache).
   // Missing sheet / base mismatch / missing base / unreadable always run the same ordered
-  // stages (RECORD_LINK_TARGET_AUTH_STAGES) — including admin + permission probes even when
-  // the base row is absent — so query depth cannot form an existence oracle.
+  // stages (RECORD_LINK_TARGET_AUTH_STAGES) -- including admin + permission probes even when
+  // the base row is absent -- so query depth cannot form an existence oracle.
   const targetAuth = await resolveRecordLinkTargetAuthOnQuery(queryFn, {
     userId,
     baseId,
@@ -261,7 +261,7 @@ export async function listApprovalRecordLinkOptions(input: {
   const isAdminRole = targetAuth.isAdminRole
   const capabilities = targetAuth.capabilities
 
-  // Visible non-computed source fields for THIS actor (admin included — no field_permissions bypass).
+  // Visible non-computed source fields for THIS actor (admin included -- no field_permissions bypass).
   let preferredFieldIds: string[] = []
   try {
     preferredFieldIds = await resolveVisibleDisplayFieldIds(

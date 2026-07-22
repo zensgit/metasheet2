@@ -4845,7 +4845,17 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: Forbidden - approvals:write permission is required.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    example: Insufficient permissions
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/record-link-options:
@@ -4960,7 +4970,17 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: Forbidden - approvals:write permission is required.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    example: Insufficient permissions
         '404':
           description: >
             Target sheet not found / base mismatch / unreadable (shared
@@ -4968,7 +4988,9 @@ paths:
 
             Body is the same approval error envelope as other 4xx routes
 
-            (`code` + `message`, never distinguishes missing vs denied).
+            (`ok: false` with nested `error.code` + `error.message`; it never
+
+            distinguishes missing from denied).
           content:
             application/json:
               schema:

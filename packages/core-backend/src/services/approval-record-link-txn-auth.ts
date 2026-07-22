@@ -126,7 +126,7 @@ export async function listUserPermissionsOnQuery(
  * `lockRecordLinkMultiTargetCreatePathOnQuery`):
  *   Phase 1 — ALL target meta_bases (sorted baseId)
  *   Phase 2 — ALL target meta_sheets (sorted sheetId)
- *   Phase 3 — actor-wide authority rows ONCE (user_roles → role_permissions →
+ *   Phase 3 — actor-wide authority rows ONCE (user_roles → roles → role_permissions →
  *             user_permissions → users → platform_member_group_members)
  *   Phase 4 — spreadsheet_permissions for ALL target sheets (sorted sheetId)
  *   Phase 5 — (create only) row-auth advisory + meta_records FOR UPDATE per target
@@ -149,6 +149,7 @@ export const RECORD_LINK_AUTHORITY_LOCK_ORDER = [
   'meta_bases',
   'meta_sheets',
   'user_roles',
+  'roles',
   'role_permissions',
   'user_permissions',
   'users',
@@ -255,6 +256,10 @@ export async function lockRecordLinkActorAuthorityRowsOnQuery(
     .filter(Boolean)
 
   if (roleIds.length > 0) {
+    await query(
+      `SELECT id, name FROM roles WHERE id = ANY($1::text[]) FOR UPDATE`,
+      [roleIds],
+    )
     await query(
       `SELECT role_id, permission_code FROM role_permissions
        WHERE role_id = ANY($1::text[]) FOR UPDATE`,
@@ -516,6 +521,80 @@ export async function userHasApprovalsWriteOnQuery(
 }
 
 /**
+ * Rebuild the template-visibility actor from the supplied query only. The create path calls this
+ * after locking the same actor authority rows, so request/JWT role, department and permission
+ * snapshots cannot preserve a revoked template-manager bypass at the final write boundary.
+ *
+ * A missing `users` profile is not an authentication failure: dev/external identities can have
+ * normalized user_roles/user_permissions without a local profile row. Such actors keep their
+ * stable userId and DB grants, but have no profile-derived department/role/admin authority.
+ */
+export async function loadApprovalTemplateVisibilityActorOnQuery(
+  query: QueryFn,
+  userId: string,
+): Promise<{
+  userId: string
+  departmentIds: string[]
+  roles: string[]
+  permissions: string[]
+  isTemplateManager: boolean
+} | null> {
+  const uid = userId.trim()
+  if (!uid) return null
+
+  try {
+    const userResult = await query(
+      `SELECT role, department, is_admin, is_active
+       FROM users
+       WHERE id = $1`,
+      [uid],
+    )
+    const user = userResult.rows[0] as {
+      role?: unknown
+      department?: unknown
+      is_admin?: unknown
+      is_active?: unknown
+    } | undefined
+    // A missing profile is valid for dev/external identities, but a present disabled profile is
+    // authoritative and must not retain template visibility through role/permission rows.
+    if (user?.is_active === false) return null
+    const roleResult = await query(
+      `SELECT ur.role_id, r.name
+       FROM user_roles ur
+       LEFT JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id = $1`,
+      [uid],
+    )
+    const roles = new Set<string>()
+    if (typeof user?.role === 'string' && user.role.trim()) roles.add(user.role.trim())
+    for (const row of roleResult.rows as Array<{ role_id?: unknown; name?: unknown }>) {
+      if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
+      if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
+    }
+
+    const permissions = await listUserPermissionsOnQuery(query, uid)
+    const isTemplateManager = user?.is_admin === true
+      || roles.has('admin')
+      || permissions.includes('approval-templates:manage')
+      || permissions.includes('approvals:admin-templates')
+      || permissions.includes('approvals:*')
+      || permissions.includes('*:*')
+
+    return {
+      userId: uid,
+      departmentIds: typeof user?.department === 'string' && user.department.trim()
+        ? [user.department.trim()]
+        : [],
+      roles: [...roles],
+      permissions,
+      isTemplateManager,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Base READ via queryFn only — constant-shape stages even when the base row is missing.
  * Missing base still runs admin_role + permission_codes before returning false.
  */
@@ -577,7 +656,10 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   precomputed?: { isAdminRole: boolean; permissions: string[] },
 ): Promise<{
   isAdminRole: boolean
-  capabilities: Pick<MultitableCapabilities, 'canRead' | 'canEditRecord' | 'canCreateRecord'>
+  capabilities: Pick<
+    MultitableCapabilities,
+    'canRead' | 'canEditRecord' | 'canCreateRecord' | 'canManageSheetAccess'
+  >
   permissions: string[]
 }> {
   const normalizedUserId = userId.trim()
@@ -611,6 +693,7 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
       canRead: capabilities.canRead === true,
       canEditRecord: capabilities.canEditRecord === true,
       canCreateRecord: capabilities.canCreateRecord === true,
+      canManageSheetAccess: capabilities.canManageSheetAccess === true,
     },
     permissions,
   }

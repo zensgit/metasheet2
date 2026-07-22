@@ -9,6 +9,7 @@ import {
   RECORD_LINK_TARGET_AUTH_STAGES,
   isAdminOnQuery,
   listUserPermissionsOnQuery,
+  loadApprovalTemplateVisibilityActorOnQuery,
   lockRecordLinkAuthorityRowsOnQuery,
   lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
   lockRecordLinkMultiTargetCreatePathOnQuery,
@@ -36,8 +37,15 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
     if (q.includes('permission_code') || q.includes('user_permissions')) {
       return handlers.codes ?? { rows: [] }
     }
+    // Sheet-scope SQL contains a user_roles subquery; route it before the bare admin probe.
+    if (q.includes('spreadsheet_permissions')) {
+      return handlers.sheetScope ?? { rows: [] }
+    }
     if (q.includes('FROM user_roles')) {
       return handlers.admin ?? { rows: [] }
+    }
+    if (q.includes('FROM roles')) {
+      return { rows: [] }
     }
     if (q.includes('FROM users') && q.includes('permissions')) {
       return handlers.legacy ?? { rows: [{ permissions: [] }] }
@@ -47,9 +55,6 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
     }
     if (q.includes('FROM meta_sheets')) {
       return handlers.sheets ?? { rows: [] }
-    }
-    if (q.includes('spreadsheet_permissions')) {
-      return handlers.sheetScope ?? { rows: [] }
     }
     return { rows: [] }
   }
@@ -126,6 +131,92 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
     expect(caps.capabilities.canRead).toBe(true)
   })
 
+  it('resolveSheetCapabilitiesForUserOnQuery derives share authority from DB/sheet scope, not request claims', async () => {
+    const denied = vi.fn(async (sql: string) => routeAuthSql(sql, {
+      codes: { rows: [] },
+      legacy: { rows: [{ permissions: [] }] },
+    }))
+    await expect(
+      resolveSheetCapabilitiesForUserOnQuery(denied, 'sheet-1', 'u1'),
+    ).resolves.toMatchObject({ capabilities: { canManageSheetAccess: false } })
+
+    const scopedAdmin = vi.fn(async (sql: string) => routeAuthSql(sql, {
+      codes: { rows: [] },
+      legacy: { rows: [{ permissions: [] }] },
+      sheetScope: {
+        rows: [{ sheet_id: 'sheet-1', perm_code: 'spreadsheet:admin', subject_type: 'user' }],
+      },
+    }))
+    await expect(
+      resolveSheetCapabilitiesForUserOnQuery(scopedAdmin, 'sheet-1', 'u1'),
+    ).resolves.toMatchObject({ capabilities: { canManageSheetAccess: true } })
+  })
+
+  it('rebuilds template visibility actor from query-bound active user, roles and permissions', async () => {
+    const query = vi.fn(async (sql: string) => {
+      const q = sql.replace(/\s+/g, ' ')
+      if (q.includes('SELECT role, department, is_admin')) {
+        return { rows: [{ role: 'user', department: 'finance', is_admin: false, is_active: true }] }
+      }
+      if (q.includes('SELECT ur.role_id, r.name')) {
+        return { rows: [{ role_id: 'finance-approver', name: 'Finance Approver' }] }
+      }
+      if (q.includes('SELECT DISTINCT permission_code AS code')) {
+        return { rows: [{ code: 'approval-templates:manage' }] }
+      }
+      if (q.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
+      return { rows: [] }
+    })
+    await expect(loadApprovalTemplateVisibilityActorOnQuery(query, 'u1')).resolves.toEqual({
+      userId: 'u1',
+      departmentIds: ['finance'],
+      roles: ['user', 'finance-approver', 'Finance Approver'],
+      permissions: ['approval-templates:manage'],
+      isTemplateManager: true,
+    })
+  })
+
+  it('keeps a DB-authorized external actor when no local users profile exists', async () => {
+    const query = vi.fn(async (sql: string) => {
+      const q = sql.replace(/\s+/g, ' ')
+      if (q.includes('SELECT role, department, is_admin')) return { rows: [] }
+      if (q.includes('SELECT ur.role_id, r.name')) {
+        return { rows: [{ role_id: 'external-approver', name: 'External Approver' }] }
+      }
+      if (q.includes('SELECT DISTINCT permission_code AS code')) {
+        return { rows: [{ code: 'approvals:write' }] }
+      }
+      if (q.includes('SELECT permissions FROM users')) return { rows: [] }
+      return { rows: [] }
+    })
+    await expect(loadApprovalTemplateVisibilityActorOnQuery(query, 'external-u1')).resolves.toEqual({
+      userId: 'external-u1',
+      departmentIds: [],
+      roles: ['external-approver', 'External Approver'],
+      permissions: ['approvals:write'],
+      isTemplateManager: false,
+    })
+  })
+
+  it('rejects a present but inactive local profile even when stale grants remain', async () => {
+    const query = vi.fn(async (sql: string) => {
+      const q = sql.replace(/\s+/g, ' ')
+      if (q.includes('SELECT role, department, is_admin')) {
+        return { rows: [{ role: 'admin', department: 'finance', is_admin: true, is_active: false }] }
+      }
+      if (q.includes('SELECT ur.role_id, r.name')) {
+        return { rows: [{ role_id: 'admin', name: 'admin' }] }
+      }
+      if (q.includes('SELECT DISTINCT permission_code AS code')) {
+        return { rows: [{ code: '*:*' }] }
+      }
+      if (q.includes('SELECT permissions FROM users')) return { rows: [{ permissions: ['*:*'] }] }
+      return { rows: [] }
+    })
+    await expect(loadApprovalTemplateVisibilityActorOnQuery(query, 'disabled-u1')).resolves.toBeNull()
+    expect(query).toHaveBeenCalledTimes(1)
+  })
+
   it('userHasApprovalsWriteOnQuery: empty DB codes default DENY (no fail-open; no request grants)', async () => {
     const empty = vi.fn(async (sql: string) => routeAuthSql(sql, {
       codes: { rows: [] },
@@ -170,6 +261,10 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       if (q.includes('FROM user_roles') && q.includes('FOR UPDATE')) {
         kinds.push('user_roles')
         return { rows: [{ role_id: 'role-a' }, { role_id: 'role-b' }] }
+      }
+      if (q.includes('FROM roles') && q.includes('FOR UPDATE')) {
+        kinds.push('roles')
+        return { rows: [{ id: 'role-a', name: 'Role A' }, { id: 'role-b', name: 'Role B' }] }
       }
       if (q.includes('FROM role_permissions') && q.includes('FOR UPDATE')) {
         kinds.push('role_permissions')
@@ -246,6 +341,10 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       if (q.includes('FROM user_roles') && q.includes('FOR UPDATE')) {
         kinds.push('user_roles')
         return { rows: [{ role_id: 'r1' }] }
+      }
+      if (q.includes('FROM roles') && q.includes('FOR UPDATE')) {
+        kinds.push('roles')
+        return { rows: [{ id: 'r1', name: 'Role 1' }] }
       }
       if (q.includes('FROM role_permissions') && q.includes('FOR UPDATE')) {
         kinds.push('role_permissions')
@@ -347,6 +446,10 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
         kinds.push('user_roles')
         return { rows: [{ role_id: 'r1' }] }
       }
+      if (q.includes('FROM roles') && q.includes('FOR UPDATE')) {
+        kinds.push('roles')
+        return { rows: [{ id: 'r1', name: 'Role 1' }] }
+      }
       if (q.includes('FROM role_permissions') && q.includes('FOR UPDATE')) {
         kinds.push('role_permissions')
         return { rows: [] }
@@ -431,6 +534,7 @@ describe('approval-record-link-txn-auth — queryFn-only, no global cache', () =
       if (k.startsWith('meta_sheets:')) return 'sheet'
       if (
         k === 'user_roles'
+        || k === 'roles'
         || k === 'role_permissions'
         || k === 'user_permissions'
         || k === 'users'
