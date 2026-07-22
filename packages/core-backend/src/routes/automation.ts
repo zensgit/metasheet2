@@ -45,6 +45,7 @@ import {
   isFwbWritebackEnabled,
   normalizeFwbMappings,
 } from '../multitable/approval-fwb-activation'
+import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -327,6 +328,17 @@ export function createAutomationRoutes(
 
     try {
       const pool = poolManager.get()
+      const canReadSource = await canReadApprovalTemplateForAutomation(
+        pool.query.bind(pool),
+        templateId,
+        authoringUserId,
+      )
+      if (!canReadSource) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'FWB_SOURCE_UNAVAILABLE', message: 'Approval template is unavailable' },
+        })
+      }
       const [sheetResult, versionResult, fieldResult] = await Promise.all([
         pool.query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId]),
         pool.query(

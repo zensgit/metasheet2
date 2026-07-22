@@ -84,8 +84,6 @@ import { AutomationSuspensionService, computeActionFingerprint } from './automat
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import {
   AutomationApprovalBridgeService,
-  hasPermissionCode,
-  listRbacPermissionCodes,
   type AutomationApprovalBridgeRow,
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
@@ -95,6 +93,10 @@ import {
   isAdminOnQuery,
   loadApprovalTemplateVisibilityActorOnQuery,
 } from '../services/approval-record-link-txn-auth'
+import {
+  automationTemplateVisibleToUser,
+  automationUserHasApprovalRead,
+} from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
 import {
   normalizeDingTalkAutomationActionInputs,
@@ -1404,6 +1406,18 @@ export class AutomationService {
         : existingForApproval.execution_mode ?? null
       const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
       const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
+      const previousActionConfig = (existingForApproval.action_config ?? {}) as Record<string, unknown>
+      const previousActions = collectNestedAutomationActions(
+        existingForApproval.action_type,
+        previousActionConfig,
+        existingForApproval.actions ?? null,
+        existingForApproval.execution_mode ?? null,
+      )
+      const previousFwbConfirmationHashes = new Set(
+        collectFwbActionConfigs(existingForApproval.action_type, previousActionConfig, previousActions)
+          .map((config) => typeof config.confirmationHash === 'string' ? config.confirmationHash.trim() : '')
+          .filter(Boolean),
+      )
       // A-2b: placement gate runs for EVERY resulting shape (a card action smuggled onto a
       // non-task_created rule via a partial update must not survive either).
       const cardPlacementError = validateApprovalCardActionPlacement(nextTriggerType, nextActionType, approvalActions)
@@ -1438,6 +1452,8 @@ export class AutomationService {
         approvalActions,
         existingForApproval.created_by,
         authoringActorId,
+        previousFwbConfirmationHashes,
+        existingForApproval.enabled === false && input.enabled === true,
       )
       if (fwbUpdateError) throw new AutomationRuleValidationError(fwbUpdateError)
     }
@@ -1970,6 +1986,8 @@ export class AutomationService {
     nestedActions: AutomationAction[],
     createdBy: string | null,
     authoringActorId: string | null | undefined,
+    previousConfirmationHashes: ReadonlySet<string> = new Set(),
+    requireFreshReceipt = false,
   ): Promise<string | null> {
     const configs = collectFwbActionConfigs(actionType, actionConfig, nestedActions)
     if (configs.length === 0) return null
@@ -2020,7 +2038,6 @@ export class AutomationService {
     if (typeof ruleBaseId !== 'string' || !ruleBaseId) {
       return `${FWB_ACTION_TYPE} target sheet is unavailable`
     }
-
     // Per-config resolved targets (create → rule sheet; update → derived record-link sheet).
     // Authority checks below run against every distinct target.
     type ResolvedTarget = {
@@ -2030,7 +2047,7 @@ export class AutomationService {
       targetFieldIds: string[]
     }
     const resolvedTargets: ResolvedTarget[] = []
-
+    const confirmationHashes = new Set<string>()
     for (const config of configs) {
       const modeParsed = parseFwbWriteMode(config.mode)
       if (!modeParsed.ok) {
@@ -2132,8 +2149,8 @@ export class AutomationService {
       if (stored !== expected) {
         return `${FWB_ACTION_TYPE} actionConfig.confirmationHash must match the server-derived confirmation hash (FWB0 §11 Q6 gate 3)`
       }
-
       resolvedTargets.push({ targetSheetId, targetBaseId, mode, targetFieldIds: targetIds })
+      confirmationHashes.add(stored)
     }
 
     // Q6 gate 1 at save binds the authorization to the actor performing this create/modify/enable,
@@ -2149,7 +2166,36 @@ export class AutomationService {
       }
     }
 
-    // Q6 gate 2 + field-write spine: creator authority is mode-aware (create vs edit) and per target.
+    // A digest is reproducible and therefore is not itself proof that the author saw and accepted
+    // the disclosure. Require a server-persisted receipt for this actor and exact canonical subject.
+    // Receipts may be reused for the same subject; any template/version/target/mapping change yields
+    // a different hash and requires a fresh confirmation. A persisted unchanged hash remains editable
+    // after audit retention removes its original receipt, except that disabled -> enabled is a fresh
+    // activation decision and must be confirmed again. The hash is the durable rule contract while
+    // operation_audit_logs remains a bounded audit surface rather than a permanent business ledger.
+    for (const confirmationHash of confirmationHashes) {
+      if (!requireFreshReceipt && previousConfirmationHashes.has(confirmationHash)) continue
+      const receipt = await this.queryFn(
+        `SELECT 1
+           FROM operation_audit_logs
+          WHERE actor_id = $1
+            AND actor_type = 'user'
+            AND action = 'automation.fwb_confirm'
+            AND resource_type = 'automation_fwb_confirmation'
+            AND resource_id = $2
+            AND COALESCE(meta->>'confirmationHash', metadata->>'confirmationHash') = $3
+          LIMIT 1`,
+        [authoringActorId, sheetId, confirmationHash],
+      ).catch(() => ({ rows: [] }))
+      if (receipt.rows.length === 0) {
+        return `${FWB_ACTION_TYPE} requires an actor-bound server confirmation receipt for the current mapping subject`
+      }
+    }
+
+    // Q6 gate 2 and the canonical field-write spine: the persisted creator must still be able to
+    // create a record and write every mapped target field. Hidden, computed, schema-readonly, and
+    // per-subject read-only fields all fail closed through the same helpers used by REST/Yjs writes.
+    // The resolved target loop keeps creator authority mode-aware (create vs edit) and per target.
     if (!createdBy) return `${FWB_ACTION_TYPE} rules require an authenticated creator`
     for (const target of resolvedTargets) {
       const creatorResolved = await resolveSheetCapabilitiesForUser(this.queryFn, target.targetSheetId, createdBy).catch(() => null)
@@ -2284,14 +2330,7 @@ export class AutomationService {
 
   /** T1-3 Q2 leg 1: the creator must hold `approvals:read` — checked at save AND re-checked at fire (fail-closed). */
   private async approvalCompletedCreatorAuthorized(createdBy: string | null): Promise<boolean> {
-    if (!createdBy) return false
-    try {
-      const codes = await listRbacPermissionCodes(createdBy)
-      return hasPermissionCode(codes, 'approvals:read')
-    } catch (err) {
-      logger.warn('approval.completed creator permission check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
-      return false
-    }
+    return automationUserHasApprovalRead(this.queryFn, createdBy)
   }
 
   /**
@@ -2304,47 +2343,7 @@ export class AutomationService {
    * lookup error and on a missing/inactive creator.
    */
   private async approvalTemplateVisibleToCreator(templateId: string, createdBy: string | null): Promise<boolean> {
-    if (!createdBy) return false
-    try {
-      const userResult = await this.queryFn(
-        `SELECT role, department, is_admin FROM users WHERE id = $1 AND is_active = TRUE`,
-        [createdBy],
-      )
-      const user = userResult.rows[0] as { role?: string | null; department?: string | null; is_admin?: boolean | null } | undefined
-      if (!user) return false
-      const roleRows = await this.queryFn(
-        `SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`,
-        [createdBy],
-      )
-      const roles = new Set<string>()
-      if (typeof user.role === 'string' && user.role.trim()) roles.add(user.role.trim())
-      for (const row of roleRows.rows as Array<{ role_id?: string | null; name?: string | null }>) {
-        if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
-        if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
-      }
-      const codes = await listRbacPermissionCodes(createdBy)
-      const actor: ApprovalTemplateVisibilityActor = {
-        userId: createdBy,
-        departmentIds: typeof user.department === 'string' && user.department.trim() ? [user.department.trim()] : [],
-        roles: [...roles],
-        permissions: codes,
-        isTemplateManager:
-          hasPermissionCode(codes, 'approval-templates:manage')
-          || user.is_admin === true
-          || roles.has('admin'),
-      }
-      const conditions: string[] = ['id = $1']
-      const params: unknown[] = [templateId]
-      applyTemplateVisibilityFilter(conditions, params, 2, actor)
-      const visible = await this.queryFn(
-        `SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`,
-        params,
-      )
-      return visible.rows.length > 0
-    } catch (err) {
-      logger.warn('approval.completed template visibility check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
-      return false
-    }
+    return automationTemplateVisibleToUser(this.queryFn, templateId, createdBy)
   }
 
   private rejectInboundWebhook(ruleId: string, reason: InboundWebhookRejectReason): InboundWebhookDispatchResult {
