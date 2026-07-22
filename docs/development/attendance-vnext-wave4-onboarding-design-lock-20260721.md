@@ -6,8 +6,15 @@
 > **W4-PRE-1 完成证据（§10 步③要求记录）**：PR **#4521** 合入 = **`e20371b1a`**（2026-07-21，基
 > errata 后 main `57d89bc1d`）；Opus 对抗门 **APPROVE 0 P1/P2**（6/6 独立 mutation killed，含
 > 「写挪到事务提交后⇒原子性腿精确红」承重刀；门记录 = #4521 comment-5038977540）；done-gate 第 5 项
-> 产出 canonical surface = **`POST /api/admin/users`**（已回填 §3① 行修复动作格）；开发+验证 MD =
-> `attendance-vnext-w4-pre1-development-verification-20260721.md`（与本 PR 同批入仓）。
+> 产出 canonical surface = **`POST /api/admin/users`**（已回填 §3① 行修复动作格）。
+> **W4-PRE-1b 补票（owner 对本 PR 首轮 CHANGES REQUESTED 复核 2026-07-21 的吸收）**：PR **#4526**
+> 合入 = **`3727cd92e`**——完整生命周期（bind/unbind/迁移/归档/backfill/显式 org 建人/门双活）；
+> 门链 = Opus 正门 REQUEST_CHANGES（单 P2 租户谓词零覆盖）→ 测试补刀 → **独立复核
+> KILLED-CONFIRMED**（8/8 mutation killed 终态；门记录 = #4526 comment-5041872425）。owner 四
+> findings 处置：P1 生命周期 ✅ #4526；P2 步骤循环 ✅ #4526 显式 `attendanceOrgId`；P2 角色化 ✅ 本次
+> 锁 §3① 行合同（W4-1 强制）；P2 effectiveTime 回退 ✅ 本次恢复四态+`effectiveAt` 并记录勘误。
+> 开发+验证 MD = `attendance-vnext-w4-pre1-development-verification-20260721.md`（含 PRE-1b 章，
+> 与本 PR 同批入仓）。
 >
 > （以下为被取代的 errata 时点 Status，保留作历史：）
 > ~~Status: RATIFICATION SUSPENDED / W4-0 FROZEN（owner errata 裁决 2026-07-21，errata PR #4513 为其入仓记录）。~~
@@ -212,7 +219,7 @@ owner 2026-07-21 裁决原文，逐条落为 v1 硬边界；每个 runtime 切�
 
 | 步 | 完成信号（values-free 计数/布尔） | 现有原料（file:line） | 修复动作深链（§6，query 形） |
 |---|---|---|---|
-| ① | **完成真值 = `orgActiveMemberCount>0`**（真源 = `user_orgs` 该 org 的 active 成员数，P2-1：绝不用考勤组成员数——那与步骤②循环依赖；正确计数必须同时要求 `user_orgs.is_active=true` **且** `users.is_active=true`，先例 `index.cjs:15532-15541`「RD-3 target population: active org members only」）；`directoryLinked` **仅为来源/能力 posture，不参与完成判定**（P2-3，OR 语义见上）。**W4-PRE-1 已落地，冻结解除（re-ratify 2026-07-21）**：PR #4521 = `e20371b1a` 建立两条生产写路径——admin 建人（`admin-users.ts:3295`，`transaction()` 内、org 对提交的 group/shift 校验）与目录 admission（`directory-sync.ts:5097`，DT-HARDEN-02 SAVEPOINT 内、org 自 `directory_integrations` NOT-NULL-FK 解析 fail-closed），均同事务写且被真库三件套+6 刀独立 mutation 锁定（含「挪到事务提交后⇒原子性腿红」承重刀）——冻结解除的具名前置（W4-PRE-1 落地）由此满足，① 恢复按真数据计算；owner 原话约束「不能只补它便宣布 ① 闭合」继续有效：**是否据此判 ① 闭合，属 owner re-ratify 终裁**（本 PR 只呈证据：写路径存在且被行为验证，非仅补计数口径）。**已知残差（不改判定语义）**：部署级注册与 OAuth JIT 为显式记录的不写路径（`AuthService.ts:299`/`dingtalk-oauth.ts:615`），仅经这两路建人的 org 在 admin/目录面补录前计数为 0，① 如实 `missing`（fail-closed 方向正确） | `user_orgs`（S7-5 门查同表：`attendance-admin.ts:375`）；`directoryLinked` 复用 `readOrgDirectoryReadiness`（`attendance-admin.ts:336-360`，EXISTS-only） | **修复动作 = `POST /api/admin/users`（admin 建人面，`admin-users.ts:3072`）**——W4-PRE-1 done-gate 第 5 项具名并行为验证的 create/sync canonical surface（经该面建人 ⇒ 同事务 `user_orgs` 行在，`attendance-w4pre1-user-orgs-admission.db.test.ts` 走真实路由锁定）；向导内的深链目标（admin 建人 UI 的 canonical query 形入口）由 W4-1 依 R2 落地；目录已联通 org 亦经目录 admission 自动补录（`directory-sync.ts:5097`）。历史注记：errata 冻结期此格曾为 `unavailable`（`attendance-admin-user-access` 只管权限不管成员资格，不得顶替——该排除继续有效） |
+| ① | **完成真值 = `orgActiveMemberCount>0`**（真源 = `user_orgs` 该 org 的 active 成员数，P2-1：绝不用考勤组成员数——那与步骤②循环依赖；正确计数必须同时要求 `user_orgs.is_active=true` **且** `users.is_active=true`，先例 `index.cjs:15532-15541`「RD-3 target population: active org members only」）；`directoryLinked` **仅为来源/能力 posture，不参与完成判定**（P2-3，OR 语义见上）。**W4-PRE-1 已落地，冻结解除（re-ratify 2026-07-21）**：PR #4521 = `e20371b1a` 建立两条生产写路径——admin 建人（`admin-users.ts:3295`，`transaction()` 内、org 对提交的 group/shift 校验）与目录 admission（`directory-sync.ts:5097`，DT-HARDEN-02 SAVEPOINT 内、org 自 `directory_integrations` NOT-NULL-FK 解析 fail-closed），均同事务写且被真库三件套+6 刀独立 mutation 锁定（含「挪到事务提交后⇒原子性腿红」承重刀）；**W4-PRE-1b（PR #4526 = `3727cd92e`）补齐完整生命周期**：bind/auto-match/本地建号 upsert、解绑/归档按「同 org 无其他有效绑定」条件失活（跨 org 租户谓词独立复核 KILLED-CONFIRMED）、真实存量 backfill 迁移（幂等不复活）、S7-5 门双 `is_active` 过滤——owner P1「只做新建准入」由此闭合——冻结解除的具名前置（W4-PRE-1 落地）由此满足，① 恢复按真数据计算；owner 原话约束「不能只补它便宣布 ① 闭合」继续有效：**是否据此判 ① 闭合，属 owner re-ratify 终裁**（本 PR 只呈证据：写路径存在且被行为验证，非仅补计数口径）。**已知残差（不改判定语义）**：部署级注册与 OAuth JIT 为显式记录的不写路径（`AuthService.ts:299`/`dingtalk-oauth.ts:615`），仅经这两路建人的 org 在 admin/目录面补录前计数为 0，① 如实 `missing`（fail-closed 方向正确） | `user_orgs`（S7-5 门查同表：`attendance-admin.ts:375`）；`directoryLinked` 复用 `readOrgDirectoryReadiness`（`attendance-admin.ts:336-360`，EXISTS-only） | **修复动作 = `POST /api/admin/users`（admin 建人面，`admin-users.ts:3072`）**——W4-PRE-1 done-gate 第 5 项具名并行为验证的 create/sync canonical surface；**自 W4-PRE-1b（#4526）起对全新组织真无条件**：带显式 `attendanceOrgId`（`admin-users.ts:3109`）即写 membership，不再依赖考勤组/班次前置（owner P2「步骤循环」修复；「org 存在」采 validate-can-fail 读法即 404 拒不可知 org——双读法已呈 owner，#4526 body）。**角色化合同（owner P2，W4-1 强制）**：该面权限门为平台 admin（`ensurePlatformAdmin`，`admin-users.ts:3072`）——向导展示修复动作**必须按查看者角色分支**：平台 admin 见可操作深链（canonical query 形，依 R2）；受托 `attendance:admin` 见「联系平台管理员」说明性文案，**绝不渲染必然 403 的操作入口**（`UserManagementView.vue:27` 页面提示同源）。目录已联通 org 亦经目录 admission/bind 自动补录（`directory-sync.ts:5097`+PRE-1b bind 写者）。历史注记：errata 冻结期此格曾为 `unavailable`（`attendance-admin-user-access` 只管权限不管成员资格，不得顶替——该排除继续有效） |
 | ② | `groupCount>0 && groupsWithMembers>0` | `index.cjs:37720`（`COUNT(*)::int … FROM attendance_groups WHERE org_id=$1`；同端点列表带 member_count 子查询） | `attendance-admin-groups` |
 | ③ | **owner errata 逐字**：`scheduledShiftGroupCount = attendance_groups WHERE org_id=$1 AND attendance_type='scheduled_shift'`；`step3Ready = shiftCount > 0 AND (scheduledShiftGroupCount = 0 OR activeRotationRuleCount > 0)`。**显式声明：这是 org 级存在性判定，不是逐组 rotation 覆盖度**——今日 schema 没有权威的组↔轮班规则关联（`attendance_rotation_rules` 无 group 列，`zzzz20260120114000_create_attendance_rotation_tables.ts:12-23`；`attendance_rotation_assignments` 把规则绑到**用户**而非组，`:30-44`）。原稿「排班制组存在时另需 hasRotationRules」不可计算：合同内没有「排班制组存在」的信号来源 | `index.cjs:39710`（attendance_shifts COUNT）；`index.cjs:31185-31190`（attendance_rotation_rules 的 org-scoped COUNT，`is_active` 过滤即 `activeRotationRuleCount`）；`attendance_type` 值域 CHECK ∈ {fixed_shift, scheduled_shift, free_time}（`zzzz20260529213000_add_attendance_group_type.ts:12-27`；type 过滤先例 `index.cjs:15187`） | `attendance-admin-shifts` |
 | ④ | `punchPolicyPosture ∈ {default, customized, unknown}`（**values-free posture，`scope=deployment`**，比对范围 = §3.1 **打卡策略闭集**且仅此闭集；posture 由**后端内部语义检查**得出（OD-W4-4=(c)：闭集逐键与 normalized defaults 比对，前端只收枚举））。**判别值映射（owner errata，推翻合入版 ④=(b)）**：`customized→ready`（「已自定义」）、**`default→manual_review_required`（「待确认：当前使用平台默认策略」），绝不 `ready`**、`unknown→unknown` fail-closed。`manual_review_required` 不阻断 ⑦ preview-ready（§3.2），但**必须**出现在 ⑦ 人工 activation checklist 上 | `system_configs key='attendance.settings'`：SETTINGS_KEY `index.cjs:291`、`DEFAULT_SETTINGS` `:295-512`、`loadSettings` `:13715-13725`、`saveSettings` `:13749-13759`（单键、无 org 维度、写入完整 normalized 结果） | `attendance-admin-settings` |
@@ -279,10 +286,15 @@ unsupported / db_not_ready`，
 （向导本身不提供确认动作——R4）；`unsupported` 显示为「当前版本不支持」，**不得**渲染成「未配置/去配置」
 （否则给出一个不存在的修复动作）；`db_not_ready` 对应各端点统一 503 `DB_NOT_READY` 档
 （`index.cjs:37751` 等）。三者与 `missing` 语义严格分离（章程 L358），且按上文均**不阻断** `previewReady`。
-**「计划生效时间」逐步来源规则（追加门禁 4 + round-2 结构闭合）**：生效时间入响应结构为逐步 posture
-`effectiveTime: {source: <权威来源标识>, posture: 'known'|'undeterminable'}`——有权威来源（如排班生效日、
-节假日同步窗口）才 `known`；否则 `undeterminable` 显示「无法确定」，**不得省略、不得猜测**；各步来源在
-W4-0 判别矩阵逐行登记。
+**「计划生效时间」逐步来源规则（追加门禁 4 + round-2 结构闭合；re-ratify 勘误 2026-07-22 恢复
+#4509 已锁四态合同）**：生效时间入响应结构为逐步 posture
+`effectiveTime: {source: <权威来源标识>, posture: 'immediate'|'scheduled'|'manual_activation'|'undeterminable', effectiveAt?}`
+——立即生效 `immediate`；有权威定时来源（如排班生效日、节假日同步窗口）为 `scheduled` 且**必须携带
+`effectiveAt`**；需人工启用为 `manual_activation`；无权威来源为 `undeterminable` 显示「无法确定」，
+**不得省略、不得猜测**；各步来源在 W4-0 判别矩阵逐行登记。
+**回退勘误记录（owner P2 复核 2026-07-21）**：errata #4513 曾将此处静默回退为
+`'known'|'undeterminable'` 且丢失 `effectiveAt`，而 #4509 已锁四态、errata 未记录撤销该裁决——本次
+恢复 #4509 合同并将该回退在此记录为勘误。
 
 ### 3.3 W4-PRE-1（新前置票，owner errata 2026-07-21）——`user_orgs` 生产维护写路径
 
@@ -648,6 +660,9 @@ W4-PRE-1 完成证据）
 re-ratify PR（锁分支基最新 main `e20371b1a`；drift 复核：`6ea0ccfab..749ba92d0` 考勤面零漂移、
 `749ba92d0..57d89bc1d` 即 errata 本身、`57d89bc1d..e20371b1a` 即 #4521 本身——锁引用锚点全部重验
 成立）；④ 章程 §15 行同步（同 PR）；⑤ W4-0 于本 PR 合入后开工。
+**首轮呈审后进度**：owner CHANGES REQUESTED（2026-07-21，1P1+3P2）→ W4-PRE-1b #4526=`3727cd92e`
+（P1 生命周期+P2 步骤循环，门链见 header）→ 本次修订吸收 P2 角色化+P2 effectiveTime（docs）——
+四 findings 全闭合，重呈 owner 复审+RATIFY。
 
 ## §11.1 六项记录（章程 L459-468）
 

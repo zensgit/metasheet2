@@ -6,6 +6,8 @@
 > 合入 main = **`e20371b1a`**，基 `57d89bc1d` 即 errata 合入后 main）。
 > 门禁：Sonnet 实现 → 三镜预门 → 修复轮 → **Opus 对抗正门 APPROVE — 0 P1 / 0 P2 / 2 P3 / 1 NIT**
 > （门记录 = #4521 comment-5038977540；正门报告 `/tmp/pr4521-review-w4-pre1-gate.md`）。
+> **补票 W4-PRE-1b = PR #4526（合入 `3727cd92e`）**——owner 对 re-ratify 首轮呈审的 CHANGES
+> REQUESTED 复核（1P1+3P2）之代码侧吸收，见 §7。
 
 ## 1. 交付物（票面五项 → 实现映射）
 
@@ -67,3 +69,27 @@
 4. IN/OUT：票面五项全 IN；①闭合宣布/re-ratify/W4-0 明示 OUT（锁 §10 序）。
 5. 唯一写路径：`user_orgs` 生产写者 = admin-users:3295 + directory-sync:5097（+历史回填）；权限真源不变。
 6. 完成门：票面五项 + 三件套 + G3 预跑 + Opus 门 0 P1/P2 —— 全过（见 §2-§4）。
+
+## 7. W4-PRE-1b 补票（owner 复核 CHANGES REQUESTED 吸收，PR #4526 = `3727cd92e`）
+
+owner 复核（2026-07-21，对 re-ratify 首轮呈审）裁定 1P1+3P2；处置全表：
+
+| owner finding | 处置 | 证据 |
+|---|---|---|
+| [P1] 只做新建准入，无生命周期/存量升级（bind 不写、解绑不失活 ⇒ ①假 missing + stale access） | ✅ #4526：8 生命周期写点（bind/admit/sync-loop auto-match/解绑/rebind 位移/本地建号/归档/显式 org 建人）同事务 upsert 或按「同 org 无其他有效绑定」条件失活；真实存量 backfill 迁移 `zzzz20260721150000`（幂等、不复活失活行）；S7-5 门补 `users.is_active` 双活（api-tokens/automation-executor 同型点一并） | 七案 F1-F7 + 跨 org 回归真库全绿；rebind 位移对钉钉实证不可达（`user_external_identities` 冲突守卫先抛），防御代码保留 |
+| [P2] 修复动作步骤循环（仅 group/shift 才解析 org） | ✅ #4526：显式 `attendanceOrgId` 参数（`admin-users.ts:3109`），零考勤组/班次前置；F6 用例以 fresh-org 证伪旧循环；「org 存在」采 validate-can-fail（404），双读法呈 owner 待裁 | 锁 §3① 修复动作格已同步改真 |
+| [P2] 修复动作对受托管理员必 403 | ✅ 锁 §3① 行新增**角色化合同**（W4-1 强制）：平台 admin 见可操作深链；受托 `attendance:admin` 见「联系平台管理员」文案，绝不渲染必然 403 入口 | docs（本 PR）；UI 落地属 W4-1 完成门 |
+| [P2] effectiveTime 合同静默回退 | ✅ 锁 §3.2 恢复 #4509 四态 `immediate|scheduled|manual_activation|undeterminable` + `scheduled` 必带 `effectiveAt`，并记录回退勘误 | docs（本 PR） |
+
+**门链**：Sonnet 实现（`d437b313`）→ 三镜预门（抓 P1：sync-loop 稳态 upsert 经已失活账号复活
+membership；P2：并发解绑 write-skew → `SELECT … FOR UPDATE` 真修）→ 修复轮 10 项 → Opus 正门
+（`afcfcfbe4`）8 刀杀 7、REQUEST_CHANGES 单 P2（失活助手租户谓词 `AND i.org_id=$2` 零覆盖，构造出
+跨 org stale-access 可达故障）→ 测试补刀 `2da81d98b`（纯 +42，双腿断言）→ **独立 Opus 复核
+KILLED-CONFIRMED**（亲自动刀恰红 org-A 腿、diff 字节级零生产代码）⇒ 终态 8/8 killed。
+门记录 = #4526 comment-5041872425；正门报告 `/private/tmp/pr4526-review-w4-pre1b-gate.md`。
+
+**实跑（终态）**：F 系 6 文件 26/26；CI attendance 步 40 文件 522/522；单测 6909；双 typecheck 绿。
+
+**owner 待裁三项（#4526 body 详述，不阻本包）**：① 显式建人「org 存在」validate-can-fail vs
+auto-vivify；② DT-OPS-01 离职扫只翻 `directory_accounts.is_active` 不失活 membership（真实钉钉离职
+主路径残口）；③ `dingtalk-group-destination-service.ts:215` 两 EXISTS 可见性过滤是否同型双活。
