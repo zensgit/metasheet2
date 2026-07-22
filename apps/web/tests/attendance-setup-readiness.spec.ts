@@ -52,7 +52,6 @@ function baseResponse(overrides: Partial<AttendanceSetupReadinessResponse> = {})
     },
     previewReady: true,
     perStep: PER_STEP,
-    viewerIsPlatformAdmin: false,
     ...overrides,
   }
 }

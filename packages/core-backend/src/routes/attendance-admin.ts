@@ -416,19 +416,17 @@ export async function canReadAttendanceDirectoryReadiness(
 // pre-existing `readOrgDirectoryReadiness` (S7-5) into the §4.2-locked response shape.
 // ---------------------------------------------------------------------------------------------
 
-/** Mirrors the §4.2-locked response key set PLUS one disclosed, not-yet-owner-ratified addition —
- *  see the PR body's "§4.2 键集偏离说明" for the full disclosure. `directoryLinked` ... `perStep`
- *  are the §4.2-locked 13 keys verbatim (`perStep` nested as `perStep[stepId].effectiveTime`, per
- *  the lock's own `perStep.effectiveTime: {...}` JSON-block notation). `viewerIsPlatformAdmin` is
- *  NOT in that locked list — it exists to satisfy the §3① role-gated remediation contract
- *  ("W4-1 强制"), which needs viewer-role data the locked shape has no other field for. This is a
- *  genuine tension between two ratified provisions (exact-key-set lock vs. role-gated display
- *  contract), not a settled call this implementation is authorized to make either direction of —
- *  keeping the field (rather than silently dropping a value a ratified clause depends on) is the
- *  reversible choice pending explicit owner sign-off at the next gate; do not read the contract
- *  test's key-set assertion below as itself constituting that sign-off. `scope` is NOT a wire field
- *  (kept as code-level documentation only, per the design lock's own §4.2 illustration, which marks
- *  scope via comments rather than a runtime key). */
+/** Mirrors the §4.2-locked response key set EXACTLY — `directoryLinked` ... `perStep` are the
+ *  §4.2-locked 13 keys verbatim (`perStep` nested as `perStep[stepId].effectiveTime`, per the
+ *  lock's own `perStep.effectiveTime: {...}` JSON-block notation). A prior revision of this file
+ *  also carried `viewerIsPlatformAdmin` as a disclosed, not-yet-owner-ratified 14th key (P2, #4541
+ *  review) — removed: the pure discriminator module
+ *  (`apps/web/src/views/attendance/attendanceSetupReadiness.ts`) has zero consumption of it, so it
+ *  was speculative surface for the §3① role-gated remediation contract, not something this slice
+ *  was authorized to add unilaterally. W4-1, if it needs viewer-role data for that contract, gets
+ *  it via its own owner request to extend this shape — not by resurrecting this field. `scope` is
+ *  NOT a wire field (kept as code-level documentation only, per the design lock's own §4.2
+ *  illustration, which marks scope via comments rather than a runtime key). */
 export interface AttendanceSetupReadinessResponse {
   directoryLinked: boolean
   orgActiveMemberCount: number
@@ -443,7 +441,6 @@ export interface AttendanceSetupReadinessResponse {
   notify: AttendanceSetupReadinessNotify
   previewReady: boolean
   perStep: Readonly<Record<AttendanceSetupStepId, AttendanceSetupReadinessPerStepEntry>>
-  viewerIsPlatformAdmin: boolean
 }
 
 /** §4.2/§4.5 deployment-scoped signal registry (code-level documentation of the design lock's own
@@ -456,10 +453,7 @@ export const ATTENDANCE_SETUP_READINESS_DEPLOYMENT_SCOPED_FIELDS = [
   'notify.recipientScopeConfig',
 ] as const
 
-async function buildAttendanceSetupReadiness(
-  orgId: string,
-  viewerIsPlatformAdmin: boolean,
-): Promise<AttendanceSetupReadinessResponse> {
+async function buildAttendanceSetupReadiness(orgId: string): Promise<AttendanceSetupReadinessResponse> {
   return runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
     const [directory, counts, punchPolicyPosture, orgRecipientBinding] = await Promise.all([
       readOrgDirectoryReadiness(orgId, readOnlyQuery),
@@ -486,7 +480,6 @@ async function buildAttendanceSetupReadiness(
       notify,
       previewReady: computeAttendanceSetupReadinessPreviewReady(counts),
       perStep: ATTENDANCE_SETUP_READINESS_PER_STEP,
-      viewerIsPlatformAdmin,
     } satisfies AttendanceSetupReadinessResponse
   })
 }
@@ -545,13 +538,7 @@ export function attendanceAdminRouter(): Router {
       if (!allowed) {
         return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for setup readiness')
       }
-      // §3① role-gated remediation contract (owner P2, W4-1-enforced display branch — see the
-      // response interface doc comment): the SAME predicate `canReadAttendanceDirectoryReadiness`
-      // already evaluated internally as its platform-admin bypass (`hasLegacyAdminClaim` /
-      // `isRbacAdmin`), recomputed here (cheap — no new query) so the response can carry a single
-      // values-free boolean instead of the route re-deriving admin-ness a second, different way.
-      const viewerIsPlatformAdmin = hasLegacyAdminClaim(req) || (await isRbacAdmin(userId))
-      const readiness = await buildAttendanceSetupReadiness(orgId, viewerIsPlatformAdmin)
+      const readiness = await buildAttendanceSetupReadiness(orgId)
       return jsonOk(res, readiness)
     } catch (error) {
       if (isDatabaseSchemaError(error)) {

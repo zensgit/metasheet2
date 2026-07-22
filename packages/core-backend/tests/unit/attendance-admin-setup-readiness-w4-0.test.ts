@@ -78,6 +78,7 @@ const {
   ATTENDANCE_SETUP_STEP_IDS,
   ATTENDANCE_PUNCH_POLICY_CLOSED_SET_KEYS_IN,
   ATTENDANCE_PUNCH_POLICY_CLOSED_SET_KEYS_OUT,
+  ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT,
   computeAttendanceSetupReadinessDeliveryRuntime,
   computeAttendanceSetupReadinessPreviewReady,
   computeAttendanceSetupReadinessStep3Ready,
@@ -100,13 +101,33 @@ function makeApp(user: Record<string, unknown> | null) {
   return app
 }
 
-/** Wires `transactionMock` so the code under test's `SET TRANSACTION READ ONLY` + N subsequent
- *  `client.query(...)` calls resolve, in order, to `resolvedValues`. */
-function mockTransactionQueries(resolvedValues: Array<{ rows: unknown[] }>) {
+/** Wires `transactionMock` so `SET TRANSACTION READ ONLY`, the SAVEPOINT/RELEASE SAVEPOINT pair
+ *  bracketing the ④ probe (P3-1, #4541 review), and the four business reads all resolve correctly
+ *  — content-DISPATCHED on SQL text rather than positional FIFO. This is deliberate, not
+ *  incidental: P3-1's SAVEPOINT wrapping means `readAttendancePunchPolicyPosture` now issues THREE
+ *  round-trips (SAVEPOINT / SELECT / RELEASE SAVEPOINT) that interleave with the sibling ⑥
+ *  `orgRecipientBinding` read inside the SAME `Promise.all` (all four aggregation reads share one
+ *  client) — a fixed positional sequence would silently feed the wrong canned row to the wrong
+ *  query the moment that interleaving shifts (fragile even today, and a future change to any of the
+ *  four functions' internal await count would shift it further). Dispatching on each query's own
+ *  distinguishing SQL fragment is immune to call-order entirely. */
+function mockTransactionQueries(resolvedValues: {
+  directoryLinked?: { rows: unknown[] }
+  orgCounts?: { rows: unknown[] }
+  punchPolicy?: { rows: unknown[] }
+  orgRecipientBinding?: { rows: unknown[] }
+}) {
   transactionMock.mockImplementationOnce(async (handler: (client: { query: (...a: unknown[]) => Promise<unknown> }) => Promise<unknown>) => {
-    const clientQuery = vi.fn()
-    clientQuery.mockResolvedValueOnce({ rows: [] }) // SET TRANSACTION READ ONLY
-    for (const v of resolvedValues) clientQuery.mockResolvedValueOnce(v)
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/^SET TRANSACTION READ ONLY/i.test(sql)) return { rows: [] }
+      // SAVEPOINT / RELEASE SAVEPOINT / ROLLBACK TO SAVEPOINT (P3-1) — no business row, always a
+      // no-op ack.
+      if (/SAVEPOINT/i.test(sql)) return { rows: [] }
+      if (/FROM system_configs/.test(sql)) return resolvedValues.punchPolicy ?? { rows: [] }
+      if (/bound_recipient_count/.test(sql)) return resolvedValues.orgRecipientBinding ?? { rows: [{ bound_recipient_count: 0 }] }
+      if (/AS ready/.test(sql)) return resolvedValues.directoryLinked ?? { rows: [{ ready: false }] }
+      return resolvedValues.orgCounts ?? { rows: [OK_COUNTS_ROW] } // org-counts CTE (member_scope ...)
+    })
     return handler({ query: clientQuery })
   })
 }
@@ -247,13 +268,22 @@ describe('computeAttendanceSetupReadinessPreviewReady (§3.2 / §9 W4-0-G4)', ()
 describe('readAttendancePunchPolicyPosture (§3④ / §3.1 closed set)', () => {
   beforeEach(() => queryMock.mockReset())
 
+  // P3-1 (#4541 review): the probe now brackets its SELECT with SAVEPOINT/RELEASE SAVEPOINT — queue
+  // the bracketing acks around the given SELECT resolution so every test below still only has to
+  // state the SELECT's own result.
+  function mockPostureProbe(selectResolvedValue: { rows: unknown[] }) {
+    queryMock.mockResolvedValueOnce({ rows: [] }) // SAVEPOINT
+    queryMock.mockResolvedValueOnce(selectResolvedValue) // SELECT value FROM system_configs
+    queryMock.mockResolvedValueOnce({ rows: [] }) // RELEASE SAVEPOINT
+  }
+
   it('no system_configs row ⇒ default', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [] })
+    mockPostureProbe({ rows: [] })
     expect(await readAttendancePunchPolicyPosture(queryMock as never)).toBe('default')
   })
 
   it('row equals normalized defaults exactly ⇒ default', async () => {
-    queryMock.mockResolvedValueOnce({
+    mockPostureProbe({
       rows: [
         {
           value: JSON.stringify({
@@ -275,7 +305,7 @@ describe('readAttendancePunchPolicyPosture (§3④ / §3.1 closed set)', () => {
   })
 
   it('G5 negative control: only annualLeavePolicy differs ⇒ still default', async () => {
-    queryMock.mockResolvedValueOnce({
+    mockPostureProbe({
       rows: [
         {
           value: JSON.stringify({
@@ -296,7 +326,7 @@ describe('readAttendancePunchPolicyPosture (§3④ / §3.1 closed set)', () => {
   })
 
   it('G5 positive control: unscheduled.mode differs ⇒ customized', async () => {
-    queryMock.mockResolvedValueOnce({
+    mockPostureProbe({
       rows: [
         {
           value: JSON.stringify({
@@ -316,17 +346,22 @@ describe('readAttendancePunchPolicyPosture (§3④ / §3.1 closed set)', () => {
   })
 
   it('row exists but has no punchPolicy key ⇒ unknown (pre-S0 / corrupted shape)', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [{ value: JSON.stringify({ foo: 'bar' }) }] })
+    mockPostureProbe({ rows: [{ value: JSON.stringify({ foo: 'bar' }) }] })
     expect(await readAttendancePunchPolicyPosture(queryMock as never)).toBe('unknown')
   })
 
-  it('malformed JSON ⇒ unknown (fail-closed, not a throw)', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [{ value: '{not json' }] })
+  it('malformed JSON ⇒ unknown (fail-closed, not a throw), and the savepoint is rolled back (P3-1)', async () => {
+    mockPostureProbe({ rows: [{ value: '{not json' }] })
     expect(await readAttendancePunchPolicyPosture(queryMock as never)).toBe('unknown')
+    // The SELECT itself succeeded (it's the synchronous JSON.parse afterward that throws) — the
+    // catch block still issues ROLLBACK TO SAVEPOINT unconditionally, never RELEASE, for any error
+    // caught in this scope.
+    expect(queryMock).toHaveBeenCalledTimes(3)
+    expect((queryMock.mock.calls[2] as [string])[0]).toMatch(/^ROLLBACK TO SAVEPOINT/)
   })
 
   it('legacy 038-JSONB shape (driver returns an already-parsed object) ⇒ handled, not thrown', async () => {
-    queryMock.mockResolvedValueOnce({
+    mockPostureProbe({
       rows: [
         {
           value: {
@@ -345,34 +380,68 @@ describe('readAttendancePunchPolicyPosture (§3④ / §3.1 closed set)', () => {
     expect(await readAttendancePunchPolicyPosture(queryMock as never)).toBe('default')
   })
 
-  it('query throws ⇒ unknown', async () => {
-    queryMock.mockRejectedValueOnce(new Error('SECRET_DETAIL boom'))
+  it('a successful probe SAVEPOINTs then RELEASEs — never leaves an open savepoint (P3-1)', async () => {
+    mockPostureProbe({ rows: [] })
+    await readAttendancePunchPolicyPosture(queryMock as never)
+    expect(queryMock).toHaveBeenCalledTimes(3)
+    expect((queryMock.mock.calls[0] as [string])[0]).toMatch(/^SAVEPOINT /)
+    expect((queryMock.mock.calls[2] as [string])[0]).toMatch(/^RELEASE SAVEPOINT /)
+    // Same savepoint name on both ends of the bracket.
+    const savepointName = (queryMock.mock.calls[0] as [string])[0].replace(/^SAVEPOINT /, '')
+    expect((queryMock.mock.calls[2] as [string])[0]).toBe(`RELEASE SAVEPOINT ${savepointName}`)
+  })
+
+  it('query throws ⇒ unknown, and the shared transaction is recovered via ROLLBACK TO SAVEPOINT, not left aborted (P3-1)', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] }) // SAVEPOINT
+    queryMock.mockRejectedValueOnce(new Error('SECRET_DETAIL boom')) // SELECT throws
+    queryMock.mockResolvedValueOnce({ rows: [] }) // ROLLBACK TO SAVEPOINT
     expect(await readAttendancePunchPolicyPosture(queryMock as never)).toBe('unknown')
+    // Mutation target (P3-1): removing the ROLLBACK TO SAVEPOINT call would leave the shared
+    // transaction aborted for every subsequent read sharing this connection (the sibling ⑥
+    // orgRecipientBinding read, in production) — assert it was actually issued, using the SAME
+    // savepoint name SAVEPOINT itself opened.
+    expect(queryMock).toHaveBeenCalledTimes(3)
+    const savepointName = (queryMock.mock.calls[0] as [string])[0].replace(/^SAVEPOINT /, '')
+    expect((queryMock.mock.calls[2] as [string])[0]).toBe(`ROLLBACK TO SAVEPOINT ${savepointName}`)
+  })
+
+  it('cannot even open a SAVEPOINT (shared transaction already aborted upstream) ⇒ unknown, no further query attempted', async () => {
+    queryMock.mockRejectedValueOnce(new Error('current transaction is aborted'))
+    expect(await readAttendancePunchPolicyPosture(queryMock as never)).toBe('unknown')
+    // Fail-closed immediately — no SELECT, no ROLLBACK TO SAVEPOINT attempt against a connection
+    // that cannot even take a savepoint.
+    expect(queryMock).toHaveBeenCalledTimes(1)
   })
 })
 
-describe('§9 W4-0-G5: closed-set reconciliation against the LIVE plugin source text', () => {
-  it('IN ∪ OUT equals every DEFAULT_SETTINGS top-level key in plugins/plugin-attendance/index.cjs', () => {
-    const pluginPath = path.resolve(__dirname, '../../../../plugins/plugin-attendance/index.cjs')
-    const source = readFileSync(pluginPath, 'utf8')
-    const startIdx = source.indexOf('const DEFAULT_SETTINGS = {')
-    expect(startIdx).toBeGreaterThan(-1)
-    const blockStart = source.indexOf('{', startIdx)
-    // Find the matching top-level closing brace by scanning brace depth.
-    let depth = 0
-    let endIdx = -1
-    for (let i = blockStart; i < source.length; i++) {
-      if (source[i] === '{') depth++
-      else if (source[i] === '}') {
-        depth--
-        if (depth === 0) {
-          endIdx = i
-          break
-        }
+/** Locates the literal body text of `const DEFAULT_SETTINGS = { ... }` in the live plugin source —
+ *  shared by both the key-NAME (existing) and key-VALUE (P3-2, #4541 review) reconciliation tests
+ *  below, via brace-depth counting (handles arbitrarily nested objects/arrays inside the block). */
+function readDefaultSettingsBlock(): string {
+  const pluginPath = path.resolve(__dirname, '../../../../plugins/plugin-attendance/index.cjs')
+  const source = readFileSync(pluginPath, 'utf8')
+  const startIdx = source.indexOf('const DEFAULT_SETTINGS = {')
+  if (startIdx < 0) throw new Error('DEFAULT_SETTINGS not found in plugin source')
+  const blockStart = source.indexOf('{', startIdx)
+  let depth = 0
+  let endIdx = -1
+  for (let i = blockStart; i < source.length; i++) {
+    if (source[i] === '{') depth++
+    else if (source[i] === '}') {
+      depth--
+      if (depth === 0) {
+        endIdx = i
+        break
       }
     }
-    expect(endIdx).toBeGreaterThan(blockStart)
-    const block = source.slice(blockStart + 1, endIdx)
+  }
+  if (endIdx <= blockStart) throw new Error('could not find the matching closing brace for DEFAULT_SETTINGS')
+  return source.slice(blockStart + 1, endIdx)
+}
+
+describe('§9 W4-0-G5: closed-set reconciliation against the LIVE plugin source text', () => {
+  it('IN ∪ OUT equals every DEFAULT_SETTINGS top-level key in plugins/plugin-attendance/index.cjs', () => {
+    const block = readDefaultSettingsBlock()
     const liveKeys = new Set<string>()
     // Top-level keys are 2-space-indented `key:` lines (object or scalar values alike).
     for (const line of block.split('\n')) {
@@ -393,6 +462,62 @@ describe('§9 W4-0-G5: closed-set reconciliation against the LIVE plugin source 
     expect([...ATTENDANCE_PUNCH_POLICY_CLOSED_SET_KEYS_IN].sort()).toEqual(
       ['geoFence', 'ipAllowlist', 'minPunchIntervalMinutes', 'punchPolicy'].sort(),
     )
+  })
+
+  // P3-2 (#4541 review): the key-NAME reconciliation above only proves every DEFAULT_SETTINGS key is
+  // classified IN/OUT of the closed set — it says nothing about whether `ATTENDANCE_PUNCH_POLICY_
+  // CLOSED_SET_DEFAULT` (the independently-pinned VALUE mirror `readAttendancePunchPolicyPosture`
+  // actually compares against) still matches the plugin's own literal VALUES for those four IN keys.
+  // This test closes that gap: it parses the LIVE plugin source text for each IN key's own literal
+  // value and deep-diffs it against the mirror, so a value-only drift on EITHER side (the plugin's
+  // default changes, or the mirror is edited without following) reds here even though the key-NAME
+  // test above stays green.
+  it('the closed-set default MIRROR matches the LIVE plugin literal values, key-by-key (P3-2)', () => {
+    const block = readDefaultSettingsBlock()
+
+    // Extract the literal source text for one top-level `key: <value>,` entry inside `block`, using
+    // the SAME brace/bracket-depth-counting technique as `readDefaultSettingsBlock` above
+    // (generalized to stop at a depth-0 comma, or the block's end) — never a hand-rolled
+    // per-shape regex, so a nested object/array inside the value is handled uniformly.
+    function extractValueSource(key: string): string {
+      const marker = new RegExp(`\\n  ${key}:\\s*`)
+      const m = marker.exec(block)
+      if (!m) throw new Error(`key not found in DEFAULT_SETTINGS: ${key}`)
+      const start = m.index + m[0].length
+      let d = 0
+      let end = block.length
+      for (let i = start; i < block.length; i++) {
+        const ch = block[i]
+        if (ch === '{' || ch === '[') d++
+        else if (ch === '}' || ch === ']') d--
+        else if (ch === ',' && d === 0) {
+          end = i
+          break
+        }
+      }
+      return block.slice(start, end).trim()
+    }
+
+    // Evaluated as a JS literal (not JSON.parse) because the source uses single-quoted strings
+    // (e.g. `mode: 'allow'`) — this reads a literal out of THIS repo's own static source file (not
+    // untrusted input), the standard idiom for "parse a value straight out of source text" that a
+    // JSON-only parser cannot handle.
+    function evalLiteral(src: string): unknown {
+      // eslint-disable-next-line no-new-func
+      return new Function(`"use strict"; return (${src});`)()
+    }
+
+    const liveClosedSetDefault = {
+      punchPolicy: evalLiteral(extractValueSource('punchPolicy')),
+      ipAllowlist: evalLiteral(extractValueSource('ipAllowlist')),
+      geoFence: evalLiteral(extractValueSource('geoFence')),
+      minPunchIntervalMinutes: evalLiteral(extractValueSource('minPunchIntervalMinutes')),
+    }
+
+    // Mutation target (P3-2): a change to EITHER side (the plugin's own DEFAULT_SETTINGS literal, or
+    // ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT) without updating the other reds this — e.g.
+    // minPunchIntervalMinutes silently drifting from 1 to some other value on only one side.
+    expect(liveClosedSetDefault).toEqual(ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT)
   })
 })
 
@@ -558,23 +683,25 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
     expect(transactionMock).not.toHaveBeenCalled()
   })
 
-  it('200 for an org member, with the §4.2-locked key set PLUS the disclosed viewerIsPlatformAdmin addition, and a values-free payload', async () => {
+  it('200 for an org member, with the §4.2-locked 13-key set EXACTLY, and a values-free payload', async () => {
     queryMock.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // user_orgs membership: member
-    mockTransactionQueries([
-      { rows: [{ ready: true }] }, // directoryLinked
-      { rows: [OK_COUNTS_ROW] }, // org counts CTE
-      { rows: [] }, // punch policy (no row => default)
-      { rows: [{ bound_recipient_count: 0 }] }, // orgRecipientBinding
-    ])
+    mockTransactionQueries({
+      directoryLinked: { rows: [{ ready: true }] },
+      orgCounts: { rows: [OK_COUNTS_ROW] },
+      punchPolicy: { rows: [] }, // no row => default
+      orgRecipientBinding: { rows: [{ bound_recipient_count: 0 }] },
+    })
     const app = makeApp({ id: 'delegated-admin' })
     pinned.setApp(app)
     const res = await request(pinned.url()).get('/api/attendance-admin/setup-readiness?orgId=org-a')
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     const data = res.body.data
+    // §4.2-locked 13 keys, verbatim — EXACT, not a subset/superset. Mutation target (P2, #4541
+    // review): a prior revision carried a 14th `viewerIsPlatformAdmin` key the pure discriminator
+    // module never consumed; re-adding ANY 14th key here (that one or another) reds this.
     expect(Object.keys(data).sort()).toEqual(
       [
-        // §4.2-locked 13 keys, verbatim:
         'directoryLinked',
         'orgActiveMemberCount',
         'groupCount',
@@ -588,16 +715,12 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
         'notify',
         'previewReady',
         'perStep',
-        // Disclosed, not-yet-owner-ratified 14th key (§3① role-gated remediation contract — see
-        // the response interface's doc comment; do NOT read this assertion as the sign-off).
-        'viewerIsPlatformAdmin',
       ].sort(),
     )
     expect(Object.keys(data.notify).sort()).toEqual(['deliveryRuntime', 'orgRecipientBinding', 'recipientScopeConfig'].sort())
     expect(Object.keys(data.notify.orgRecipientBinding).sort()).toEqual(['boundRecipientCount', 'hasAnyBoundRecipient'].sort())
     expect(data.notify.recipientScopeConfig).toBe('unsupported')
     expect(data.punchPolicyPosture).toBe('default')
-    expect(data.viewerIsPlatformAdmin).toBe(false)
     expect(data.previewReady).toBe(true) // OK_COUNTS_ROW satisfies ①②③⑤
     expect(Object.keys(data.perStep).sort()).toEqual([...ATTENDANCE_SETUP_STEP_IDS].sort())
     // §4.2 `perStep.effectiveTime: {source, posture, effectiveAt?}` — each perStep ENTRY nests
@@ -617,38 +740,22 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
     expect(JSON.stringify(data)).not.toMatch(/password|secret|token/i)
   })
 
-  it('viewerIsPlatformAdmin=true for the platform-admin bypass (single-column-labeled — NOT a substitute for the membership case)', async () => {
+  it('platform-admin bypass (single-column-labeled — NOT a substitute for the membership case): orgId=org-b (foreign) ⇒ 200, zero user_orgs query', async () => {
     // No user_orgs query at all: the platform-admin shortcut in canReadAttendanceDirectoryReadiness
     // returns true before ever touching user_orgs (attendance-admin.ts, hasLegacyAdminClaim/isRbacAdmin).
-    mockTransactionQueries([
-      { rows: [{ ready: false }] },
-      { rows: [OK_COUNTS_ROW] },
-      { rows: [] },
-      { rows: [{ bound_recipient_count: 0 }] },
-    ])
+    mockTransactionQueries({
+      directoryLinked: { rows: [{ ready: false }] },
+      orgCounts: { rows: [OK_COUNTS_ROW] },
+      punchPolicy: { rows: [] },
+      orgRecipientBinding: { rows: [{ bound_recipient_count: 0 }] },
+    })
     const app = makeApp({ id: 'platform-admin' })
     pinned.setApp(app)
     const res = await request(pinned.url()).get('/api/attendance-admin/setup-readiness?orgId=org-b')
     expect(res.status).toBe(200)
-    expect(res.body.data.viewerIsPlatformAdmin).toBe(true)
     // This 200 for a foreign org is the DESIGNED bypass, not proof of the org-membership door — the
     // membership-door proof is case 2 above (403) and the real-DB two-org matrix (G1).
     expect(queryMock).not.toHaveBeenCalled()
-  })
-
-  it('viewerIsPlatformAdmin=false for a delegated org member', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
-    mockTransactionQueries([
-      { rows: [{ ready: false }] },
-      { rows: [OK_COUNTS_ROW] },
-      { rows: [] },
-      { rows: [{ bound_recipient_count: 0 }] },
-    ])
-    const app = makeApp({ id: 'delegated-admin' })
-    pinned.setApp(app)
-    const res = await request(pinned.url()).get('/api/attendance-admin/setup-readiness?orgId=org-a')
-    expect(res.status).toBe(200)
-    expect(res.body.data.viewerIsPlatformAdmin).toBe(false)
   })
 
   it('503 DB_NOT_READY when the schema is not ready', async () => {
@@ -682,12 +789,12 @@ describe('GET /api/attendance-admin/setup-readiness (route)', () => {
     getSharedAttendanceSchedulerMock.mockReturnValue(null)
     try {
       queryMock.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
-      mockTransactionQueries([
-        { rows: [{ ready: false }] },
-        { rows: [OK_COUNTS_ROW] },
-        { rows: [] },
-        { rows: [{ bound_recipient_count: 0 }] },
-      ])
+      mockTransactionQueries({
+        directoryLinked: { rows: [{ ready: false }] },
+        orgCounts: { rows: [OK_COUNTS_ROW] },
+        punchPolicy: { rows: [] },
+        orgRecipientBinding: { rows: [{ bound_recipient_count: 0 }] },
+      })
       const app = makeApp({ id: 'delegated-admin' })
       pinned.setApp(app)
       const res = await request(pinned.url()).get('/api/attendance-admin/setup-readiness?orgId=org-a')

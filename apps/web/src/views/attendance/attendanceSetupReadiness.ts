@@ -78,9 +78,10 @@ export interface AttendanceSetupReadinessNotify {
 }
 
 /** Mirrors `packages/core-backend/src/routes/attendance-admin.ts` AttendanceSetupReadinessResponse
- *  — the §4.2-locked key set PLUS `viewerIsPlatformAdmin`, a disclosed addition NOT in the §4.2
- *  locked list (§3① role-gated remediation contract, W4-1 强制) still pending explicit owner
- *  sign-off — see that file's response-interface doc comment for the full tension writeup. */
+ *  — the §4.2-locked 13-key set, exactly (P2, #4541 review: a prior revision also carried
+ *  `viewerIsPlatformAdmin` as a 14th key; removed — this pure discriminator module never consumed
+ *  it, so it was speculative surface, not something this slice was authorized to add unilaterally.
+ *  See the backend file's response-interface doc comment for the full removal writeup). */
 export interface AttendanceSetupReadinessResponse {
   directoryLinked: boolean
   orgActiveMemberCount: number
@@ -95,7 +96,6 @@ export interface AttendanceSetupReadinessResponse {
   notify: AttendanceSetupReadinessNotify
   previewReady: boolean
   perStep: Readonly<Record<AttendanceSetupStepId, AttendanceSetupReadinessPerStepEntry>>
-  viewerIsPlatformAdmin: boolean
 }
 
 /** §3.2 "判别值域（纯模块判别矩阵的行）...且每信号携带 scope: 'org' | 'deployment'（全局信号显式标

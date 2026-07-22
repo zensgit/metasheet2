@@ -86,6 +86,7 @@ const { query: mockedQuery, transaction: mockedTransaction } = await import('../
 const {
   runAttendanceSetupReadinessReadOnly,
   readAttendanceSetupReadinessOrgCounts,
+  ATTENDANCE_SETUP_READINESS_PER_STEP,
 } = await import('../../src/services/AttendanceSetupReadinessAggregate')
 const queryMock = mockedQuery as unknown as ReturnType<typeof vi.fn>
 const transactionMock = mockedTransaction as unknown as ReturnType<typeof vi.fn>
@@ -319,7 +320,6 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
       pinned.setApp(app)
       const res = await request(pinned.url()).get(`/api/attendance-admin/setup-readiness?orgId=${encodeURIComponent(ORG_A)}`)
       expect(res.status).toBe(200)
-      expect(res.body.data.viewerIsPlatformAdmin).toBe(false)
       expect(res.body.data.orgActiveMemberCount).toBe(1)
     })
 
@@ -343,7 +343,6 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
       pinned.setApp(app)
       const res = await request(pinned.url()).get(`/api/attendance-admin/setup-readiness?orgId=${encodeURIComponent(ORG_B)}`)
       expect(res.status).toBe(200)
-      expect(res.body.data.viewerIsPlatformAdmin).toBe(true)
       // The platform-admin shortcut (hasLegacyAdminClaim/isRbacAdmin) returns true BEFORE ever
       // querying user_orgs — this 200 proves the bypass exists, NOT that the org-membership door
       // works (that is case 2's job, and the real-DB two-org matrix's job as a whole).
@@ -633,6 +632,79 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
         minPunchIntervalMinutes: 1,
       })
       expect(await readPosture()).toBe('customized')
+    })
+
+    // P3-1 (#4541 review): before this fix, ④'s catch-all swallowed a real 42P01 (system_configs
+    // missing) but left the SHARED read-only transaction aborted (Postgres SQLSTATE 25P02) — the
+    // sibling ⑥ orgRecipientBinding read, queued on the SAME client via the §4.1 `Promise.all`, then
+    // failed too, turning ONE optional table's absence into a whole-endpoint 503/500 instead of the
+    // intended "④=unknown, everything else normal, 200". This is the regression proof: real
+    // Postgres, a real missing-table error, asserting the endpoint still returns 200 with every
+    // OTHER signal intact.
+    describe('P3-1: ④ probe failure does not abort the shared read-only transaction', () => {
+      const ORG_P31 = `${PFX}_p31_org`
+      const ADMIN_P31 = `${PFX}_p31_admin`
+      // Rename-out rather than DROP+recreate: identical effect on any query issued against the bare
+      // `system_configs` name (a real Postgres 42P01, not a simulation) with zero DDL-fidelity risk
+      // (no re-derivation of columns/indexes/triggers/constraints) and an atomic, instant restore.
+      // `system_configs` is also read by `ConfigService` outside this test file, so an actual
+      // DROP+CREATE against the shared test Postgres (`vitest.integration.config.ts` pins
+      // `fileParallelism: false`, but that only protects against OTHER test FILES racing — a crash
+      // mid-test would still leave a dropped table for every later suite in this run) is
+      // deliberately avoided; a RENAME is instant and the `finally` below always reverses it.
+      const BACKUP_TABLE_NAME = `system_configs_w40_p31_backup_${RUN}`
+
+      beforeAll(async () => {
+        await seedMembership(ORG_P31, ADMIN_P31, true)
+        const g = await seedGroup(ORG_P31, `${PFX} p31 group`)
+        await seedGroupMember(ORG_P31, g, ADMIN_P31)
+        await seedShift(ORG_P31, `${PFX} p31 shift`)
+        await seedApprovalFlow(ORG_P31, `${PFX} p31 flow`, 'leave', true)
+      })
+      afterAll(async () => {
+        await pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1`, [ORG_P31])
+        await pool.query(`DELETE FROM attendance_shifts WHERE org_id = $1`, [ORG_P31])
+        await pool.query(`DELETE FROM attendance_group_members WHERE org_id = $1`, [ORG_P31])
+        await pool.query(`DELETE FROM attendance_groups WHERE org_id = $1`, [ORG_P31])
+        await pool.query(`DELETE FROM user_orgs WHERE org_id = $1`, [ORG_P31])
+      })
+
+      it('system_configs missing (real 42P01) ⇒ punchPolicyPosture=unknown, every OTHER signal normal, endpoint 200 (not 503/500)', async () => {
+        await pool.query(`ALTER TABLE system_configs RENAME TO ${BACKUP_TABLE_NAME}`)
+        try {
+          const app = makeApp({ id: ADMIN_P31 })
+          pinned.setApp(app)
+          const res = await request(pinned.url()).get(
+            `/api/attendance-admin/setup-readiness?orgId=${encodeURIComponent(ORG_P31)}`,
+          )
+          expect(res.status).toBe(200)
+          // Full-body exact shape (not piecemeal existence checks): every OTHER signal is exactly
+          // what the seeded fixture implies, proving the ④ failure was contained to ④ alone — the
+          // sibling ⑥ orgRecipientBinding read (queued on the SAME shared transaction right after
+          // ④'s SAVEPOINT) is unaffected, which is precisely the regression this test guards.
+          expect(res.body.data).toEqual({
+            directoryLinked: false,
+            orgActiveMemberCount: 1,
+            groupCount: 1,
+            groupsWithMembers: 1,
+            shiftCount: 1,
+            scheduledShiftGroupCount: 0,
+            activeRotationRuleCount: 0,
+            hasRotationRules: false,
+            approvalFlowCount: 1,
+            punchPolicyPosture: 'unknown',
+            notify: {
+              deliveryRuntime: 'not_ready',
+              orgRecipientBinding: { boundRecipientCount: 0, hasAnyBoundRecipient: false },
+              recipientScopeConfig: 'unsupported',
+            },
+            previewReady: true, // ①②③⑤ all ready — ④'s unknown correctly does not gate (§3.2)
+            perStep: ATTENDANCE_SETUP_READINESS_PER_STEP,
+          })
+        } finally {
+          await pool.query(`ALTER TABLE ${BACKUP_TABLE_NAME} RENAME TO system_configs`)
+        }
+      })
     })
   })
 

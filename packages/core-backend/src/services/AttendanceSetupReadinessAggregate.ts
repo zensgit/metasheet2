@@ -278,11 +278,16 @@ export type AttendancePunchPolicyPosture = 'default' | 'customized' | 'unknown'
  *  direction), so this is an independently pinned literal copy of ONLY the closed set — never the
  *  other 20 settings keys, so an unrelated write (e.g. a holiday-sync machine write to
  *  `holidaySync.lastRun`) can never mislabel this posture (§3.1 "整包比对必然误判").
- *  KNOWN DRIFT RISK (flagged, not silently accepted — trilens P3 on the frozen predecessor): if the
- *  plugin's DEFAULT_SETTINGS closed-set defaults ever change, this mirror will not auto-follow; the
- *  §9 W4-0-G5 reconciliation test only checks that the KEY NAMES in the closed set are exhaustively
- *  classified against the live key set, not that this mirror's VALUES still match the plugin's. */
-const ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT = {
+ *  Drift risk between this mirror and the plugin's live literal is closed by §9 W4-0-G5's test
+ *  suite two ways: a KEY-NAME reconciliation (every DEFAULT_SETTINGS top-level key is exhaustively
+ *  classified IN/OUT of the closed set) AND, separately, a VALUE-level reconciliation (P3-2, #4541
+ *  review) that parses the plugin's live source text for these four keys' literal values and
+ *  deep-diffs them against this exact object — see
+ *  `tests/unit/attendance-admin-setup-readiness-w4-0.test.ts`. Exported (not module-private) so
+ *  that value-reconciliation test diffs against the SAME object this module actually compares
+ *  against at runtime, rather than a second, independently-typed copy in the test file that could
+ *  itself drift unnoticed. */
+export const ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT = {
   punchPolicy: {
     unscheduled: { mode: 'allow' },
     merge: { internalWinsOnIn: false, externalWinsOnOut: false },
@@ -347,6 +352,10 @@ function deepEqualJsonValue(a: unknown, b: unknown): boolean {
   return a === b
 }
 
+/** SAVEPOINT name for the ④ probe (P3-1, #4541 review) — see `readAttendancePunchPolicyPosture`'s
+ *  doc comment for why this exists. */
+const ATTENDANCE_PUNCH_POLICY_POSTURE_PROBE_SAVEPOINT = 'attendance_punch_policy_posture_probe'
+
 /**
  * §3④ / OD-W4-4=(c). Reads the ONE deployment-wide `system_configs` row and classifies the §3.1
  * closed-set subset against normalized defaults. Any write to `attendance.settings` is ALWAYS
@@ -357,37 +366,69 @@ function deepEqualJsonValue(a: unknown, b: unknown): boolean {
  * `JSON.parse(String(raw))` on that shape throws `"[object Object]" is not valid JSON`; today's
  * canonical migration creates `value text`, but a legacy-migrated deployment could still carry the
  * older jsonb column, so both shapes are handled here.
+ *
+ * P3-1 (#4541 review) — SAVEPOINT-scoped probe: this function shares ONE Postgres
+ * transaction/connection with the other three §4.1 aggregation reads (`buildAttendanceSetupReadiness`'s
+ * `Promise.all` queues all four on the SAME client). A bare try/catch around the probe was not
+ * enough: once Postgres sees ANY error on a statement inside a transaction, the WHOLE transaction is
+ * marked aborted (SQLSTATE 25P02, "current transaction is aborted") and every subsequent statement
+ * on that connection fails too — so an optional/missing `system_configs` table (42P01) here would
+ * cascade into the sibling `orgRecipientBinding` read failing next, turning ONE probe's fail-closed
+ * `unknown` into a whole-endpoint 503/500 instead of the intended "④=unknown, everything else
+ * normal, 200". A SAVEPOINT scopes the blast radius to just this probe: on any failure (a DB error
+ * OR a synchronous parse error) we `ROLLBACK TO SAVEPOINT`, which restores the shared transaction to
+ * a healthy state before returning — see the real-DB negative test (drops/renames `system_configs`
+ * out from under a live request) in `attendance-setup-readiness-w4-0.db.test.ts`.
  */
 export async function readAttendancePunchPolicyPosture(
   runQuery: AttendanceSetupReadinessQueryFn,
 ): Promise<AttendancePunchPolicyPosture> {
   try {
+    await runQuery(`SAVEPOINT ${ATTENDANCE_PUNCH_POLICY_POSTURE_PROBE_SAVEPOINT}`)
+  } catch {
+    // Could not even open a savepoint (e.g. the shared transaction was already aborted upstream of
+    // this probe) — nothing left here to protect; fail closed.
+    return 'unknown'
+  }
+  try {
     const result = await runQuery<{ value: unknown }>('SELECT value FROM system_configs WHERE key = $1', [
       ATTENDANCE_SETTINGS_KEY,
     ])
     const raw = result.rows[0]?.value
+    let posture: AttendancePunchPolicyPosture
     if (raw === undefined || raw === null) {
       // No row at all: the platform default is in force (never explicitly saved).
-      return 'default'
+      posture = 'default'
+    } else {
+      const parsed: unknown = typeof raw === 'object' ? raw : JSON.parse(String(raw))
+      if (!parsed || typeof parsed !== 'object' || !('punchPolicy' in (parsed as Record<string, unknown>))) {
+        // A row exists but carries no punchPolicy subtree (pre-S0 shape / corrupted write) — cannot
+        // honestly claim default or customized.
+        posture = 'unknown'
+      } else {
+        const p = parsed as Record<string, unknown>
+        const closedSet = {
+          punchPolicy: p.punchPolicy,
+          ipAllowlist: 'ipAllowlist' in p ? p.ipAllowlist : ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT.ipAllowlist,
+          geoFence: 'geoFence' in p ? p.geoFence : ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT.geoFence,
+          minPunchIntervalMinutes:
+            'minPunchIntervalMinutes' in p
+              ? p.minPunchIntervalMinutes
+              : ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT.minPunchIntervalMinutes,
+        }
+        posture = deepEqualJsonValue(closedSet, ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT) ? 'default' : 'customized'
+      }
     }
-    const parsed: unknown = typeof raw === 'object' ? raw : JSON.parse(String(raw))
-    if (!parsed || typeof parsed !== 'object' || !('punchPolicy' in (parsed as Record<string, unknown>))) {
-      // A row exists but carries no punchPolicy subtree (pre-S0 shape / corrupted write) — cannot
-      // honestly claim default or customized.
-      return 'unknown'
-    }
-    const p = parsed as Record<string, unknown>
-    const closedSet = {
-      punchPolicy: p.punchPolicy,
-      ipAllowlist: 'ipAllowlist' in p ? p.ipAllowlist : ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT.ipAllowlist,
-      geoFence: 'geoFence' in p ? p.geoFence : ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT.geoFence,
-      minPunchIntervalMinutes:
-        'minPunchIntervalMinutes' in p
-          ? p.minPunchIntervalMinutes
-          : ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT.minPunchIntervalMinutes,
-    }
-    return deepEqualJsonValue(closedSet, ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT) ? 'default' : 'customized'
+    await runQuery(`RELEASE SAVEPOINT ${ATTENDANCE_PUNCH_POLICY_POSTURE_PROBE_SAVEPOINT}`)
+    return posture
   } catch {
+    try {
+      await runQuery(`ROLLBACK TO SAVEPOINT ${ATTENDANCE_PUNCH_POLICY_POSTURE_PROBE_SAVEPOINT}`)
+    } catch {
+      // Rollback-to-savepoint itself failed — nothing more this function can do; still fail closed
+      // (the shared transaction may end up aborted regardless in this doubly-failed case, but that
+      // was already the pre-fix behaviour for every failure, not a regression).
+    }
     return 'unknown'
   }
 }
