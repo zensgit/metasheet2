@@ -22,7 +22,9 @@ Check 'input contract accepts a bare loopback origin only' (
   (Test-InputContract -Origin 'https://localhost:8900' -Tenant 'tenant') -and
   -not (Test-InputContract -Origin 'https://internal.example' -Tenant 'tenant') -and
   -not (Test-InputContract -Origin 'http://127.0.0.1:8900/prefix' -Tenant 'tenant') -and
-  -not (Test-InputContract -Origin 'http://user@127.0.0.1:8900' -Tenant 'tenant')
+  -not (Test-InputContract -Origin 'http://user@127.0.0.1:8900' -Tenant 'tenant') -and
+  -not (Test-InputContract -Origin 'http://127.0.0.1:8900/?query=1' -Tenant 'tenant') -and
+  -not (Test-InputContract -Origin 'http://127.0.0.1:8900/#fragment' -Tenant 'tenant')
 )
 
 function Complete-SmokeSummary {
@@ -105,11 +107,18 @@ Check 'complete frozen smoke summary satisfies the exact C-stage projection' (
 )
 $duplicate = (Complete-SmokeSummary) + [Environment]::NewLine + 'pass=true'
 Check 'duplicate required smoke fields fail closed' ($null -eq (Get-SmokeFieldMap $duplicate))
+$duplicateHeader = 'STOCK_PREPARATION_PREP_LINE_EXTENDED_SMOKE' + [Environment]::NewLine + (Complete-SmokeSummary)
+Check 'duplicate smoke headers fail closed' ($null -eq (Get-SmokeFieldMap $duplicateHeader))
 $tainted = Get-SmokeFieldMap ((Complete-SmokeSummary) -replace 'externalWrite=false', 'externalWrite=true')
 $taintedResult = New-RcaResult
 Check 'external-write taint cannot pass the smoke verdict' (
   -not (Apply-SmokeVerdict -Result $taintedResult -Fields $tainted -ExitCode 0) -and
   $taintedResult.externalWrite -eq 'true'
+)
+$zeroCreated = Get-SmokeFieldMap ((Complete-SmokeSummary) -replace 'batch:1\|lines:2\|run:1', 'batch:1|lines:0|run:1')
+$zeroCreatedResult = New-RcaResult
+Check 'zero created lines cannot satisfy the initial persist contract' (
+  -not (Apply-SmokeVerdict -Result $zeroCreatedResult -Fields $zeroCreated -ExitCode 0)
 )
 
 $script:Pm2SawDatabaseSecret = $null
@@ -136,6 +145,116 @@ try {
   Remove-Item Function:pm2 -ErrorAction SilentlyContinue
   Remove-Item Env:RCATEST_DATABASE_PASSWORD -ErrorAction SilentlyContinue
   Remove-Item Env:RCATEST_CLOUD_API_KEY -ErrorAction SilentlyContinue
+}
+
+$realPm2Capture = ${function:Invoke-Pm2NativeCapture}
+$realPm2Sample = ${function:Get-Pm2Sample}
+$savedSleep = $script:Sleep
+$savedStableOnlineSeconds = $script:StableOnlineSeconds
+try {
+  function Invoke-Pm2NativeCapture { return @{ stdout = @(); exit = 0 } }
+  $script:StabilityMode = 'stable'
+  $script:StabilitySampleCount = 0
+  function Get-Pm2Sample {
+    $script:StabilitySampleCount++
+    $restartTime = if ($script:StabilityMode -eq 'restart' -and $script:StabilitySampleCount -gt 1) { 2 } else { 1 }
+    return [pscustomobject]@{
+      state = 'online'
+      restartTime = $restartTime
+      uptime = if ($restartTime -eq 1) { 1000 } else { 2000 }
+      authTokenNonEmpty = $false
+      adminTokenNonEmpty = $false
+      plmAutoPersistEnabledTrue = $true
+    }
+  }
+  $script:StableOnlineSeconds = 1
+  $script:Sleep = { param([int]$Seconds) Start-Sleep -Milliseconds 250 }
+  $stable = Invoke-Pm2RestartStable -ExpectedFlagTrue $true
+  Check 'real PM2 stable-window loop takes more than the baseline sample' (
+    $stable.ok -and $script:StabilitySampleCount -gt 1
+  )
+
+  $script:StabilityMode = 'restart'
+  $script:StabilitySampleCount = 0
+  $restarted = Invoke-Pm2RestartStable -ExpectedFlagTrue $true
+  Check 'real PM2 stable-window loop rejects a newer restart sample' (
+    -not $restarted.ok -and $restarted.reason -eq 'PM2_UNSTABLE'
+  )
+} finally {
+  Set-Item Function:Invoke-Pm2NativeCapture -Value $realPm2Capture
+  Set-Item Function:Get-Pm2Sample -Value $realPm2Sample
+  $script:Sleep = $savedSleep
+  $script:StableOnlineSeconds = $savedStableOnlineSeconds
+}
+
+$httpFixtureDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rca-window-http-" + [guid]::NewGuid().ToString('N'))
+$httpServer = $null
+try {
+  New-Item -ItemType Directory -Path $httpFixtureDir | Out-Null
+  $httpServerScript = Join-Path $httpFixtureDir 'server.mjs'
+  $originFile = Join-Path $httpFixtureDir 'origin.txt'
+  $modeFile = Join-Path $httpFixtureDir 'mode.txt'
+  Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'health-ok'
+  Set-Content -LiteralPath $httpServerScript -Encoding ASCII -NoNewline -Value @'
+import fs from 'node:fs'
+import http from 'node:http'
+
+const [originFile, modeFile] = process.argv.slice(2)
+const respond = (res, status, body = null) => {
+  res.writeHead(status, { 'content-type': 'application/json' })
+  res.end(body === null ? '' : JSON.stringify(body))
+}
+const server = http.createServer((req, res) => {
+  const mode = fs.readFileSync(modeFile, 'utf8').trim()
+  if (req.url === '/api/health') {
+    if (mode === 'health-ok') return respond(res, 200, { ok: true })
+    if (mode === 'health-no-content') return respond(res, 204)
+    return respond(res, 503, { ok: false })
+  }
+  if (req.url === '/api/auth/logout' && req.method === 'POST') {
+    if (!String(req.headers.authorization || '').startsWith('Bearer ')) {
+      return respond(res, 401, { success: false })
+    }
+    if (mode === 'logout-ok') return respond(res, 200, { success: true })
+    if (mode === 'logout-string') return respond(res, 200, { success: 'true' })
+    if (mode === 'logout-created') return respond(res, 201, { success: true })
+    return respond(res, 401, { success: false })
+  }
+  return respond(res, 404, { success: false })
+})
+server.listen(0, '127.0.0.1', () => {
+  const address = server.address()
+  fs.writeFileSync(originFile, `http://127.0.0.1:${address.port}`)
+})
+'@
+  $nodePath = (Get-Command node).Source
+  $httpServer = Start-Process -FilePath $nodePath -ArgumentList @($httpServerScript, $originFile, $modeFile) -PassThru
+  for ($attempt = 0; $attempt -lt 50 -and -not (Test-Path -LiteralPath $originFile); $attempt++) {
+    Start-Sleep -Milliseconds 100
+  }
+  if (-not (Test-Path -LiteralPath $originFile)) { throw 'HTTP_FIXTURE_START_FAILED' }
+  $fixtureOrigin = (Get-Content -LiteralPath $originFile -Raw).Trim()
+
+  $healthOk = Invoke-HealthCheck -Origin $fixtureOrigin
+  Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'health-no-content'
+  $healthNoContent = Invoke-HealthCheck -Origin $fixtureOrigin
+  Check 'real health probe accepts exactly HTTP 200' ($healthOk -and -not $healthNoContent)
+
+  $logoutToken = Secure 'logout-token-sentinel'
+  Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'logout-ok'
+  $logoutOk = Invoke-TokenLogout -Token $logoutToken -Origin $fixtureOrigin
+  Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'logout-string'
+  $logoutString = Invoke-TokenLogout -Token $logoutToken -Origin $fixtureOrigin
+  Check 'real logout requires a JSON boolean true response' ($logoutOk -and -not $logoutString)
+
+  Set-Content -LiteralPath $modeFile -Encoding ASCII -NoNewline -Value 'logout-created'
+  Check 'real logout requires exactly HTTP 200' (
+    -not (Invoke-TokenLogout -Token $logoutToken -Origin $fixtureOrigin)
+  )
+} finally {
+  if ($httpServer -and -not $httpServer.HasExited) { $httpServer.Kill() }
+  if ($httpServer) { $httpServer.Dispose() }
+  Remove-Item -LiteralPath $httpFixtureDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $script:ReadbackMode = 'valid'

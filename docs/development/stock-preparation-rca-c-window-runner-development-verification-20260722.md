@@ -92,7 +92,9 @@ explicit owner action after the exact-main artifact is verified.
 
 For pull requests, the workflow explicitly checks out the PR head SHA rather than GitHub's synthetic
 merge commit, records that same SHA in provenance, and rejects the build unless `git rev-parse HEAD`
-equals it. For manual dispatch, both values resolve to the selected ref's `github.sha`.
+equals it. For manual dispatch, both values resolve to the selected ref's `github.sha`. The Actions
+artifact name includes that exact source SHA so a PR build cannot be confused with the reviewed
+post-merge `main` build by name alone.
 
 ## 6. Verification
 
@@ -102,7 +104,7 @@ Local verification after the first adversarial correction:
 | --- | --- |
 | PM2 projection Node tests | 8/8 PASS |
 | PowerShell contract tests | 36/36 PASS |
-| PowerShell behavior tests | 27/27 PASS |
+| PowerShell behavior tests | 34/34 PASS |
 | Sidecar builder and provenance-wiring tests | 3/3 PASS |
 | Frozen extended + MVP + abort-provenance regressions | 95/95 PASS |
 | PowerShell parser | zero errors under the 5.1 grammar |
@@ -120,6 +122,8 @@ Behavior tests additionally prove:
 - duplicate project, zero lines, incomplete batch, and string-booleans fail physical proof;
 - smoke failure restores OFF and performs no readback or retry;
 - helper disappearance after ON cannot suppress the literal-false PM2 restart attempt;
+- the real PM2 stability loop takes repeated samples and rejects a newer restart/uptime baseline;
+- real loopback HTTP probes require exactly `200` health and `200 + {success:true}` logout;
 - restore failure overrides an otherwise green run;
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
@@ -148,6 +152,13 @@ The same review identified three smaller fail-open shapes, all closed here: Powe
 coercion, a vacuous `IndexOf` contract assertion, and deleting the lock inode after release. It also
 identified whole-shell `--update-env` inheritance; the fixed minimum PM2 environment closes that
 risk rather than documenting it away.
+
+A final exact-head read-only pass reported no P1/P2 and a bounded merge-ready verdict. It found that
+the PM2 stability loop and the real health/logout predicates were not behaviorally exercised, and
+that PR and `main` artifacts shared a display name. The follow-up tests execute those real paths and
+the workflow now includes `SOURCE_SHA` in the artifact name. The frozen smoke contract still requires
+the approved config reference as a local child argument; the README now distinguishes that internal
+boundary from the prohibited operator command line and evidence surfaces.
 
 ## 8. Honest Boundary
 

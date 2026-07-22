@@ -48,7 +48,7 @@ jobs:
       - name: Upload exact-SHA executable sidecar
         uses: actions/upload-artifact@v4
         with:
-          name: stock-preparation-rca-c-window-sidecar
+          name: stock-preparation-rca-c-window-sidecar-${{ env.SOURCE_SHA }}
           path: |
             output/stock-preparation-rca-window-sidecar/*.zip
             output/stock-preparation-rca-window-sidecar/*.zip.sha256

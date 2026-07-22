@@ -15,7 +15,9 @@ Prerequisites
 - Windows PowerShell 5.1, Node.js 20, and the existing PM2-managed backend.
 - The deployed product remains the RC-A package pinned by #4437.
 - A short-lived known-good login token and approved config reference are available privately.
-- Do not put either value in this file, a command line, a transcript, or an issue comment.
+- Do not put either value in this file, the operator command line, a transcript, or an issue comment.
+- The runner supplies the config reference only to the frozen helper's required local child argument;
+  do not reproduce that internal argument in operator evidence.
 - Do not start a second run while one is active, and do not retry automatically.
 
 Run
