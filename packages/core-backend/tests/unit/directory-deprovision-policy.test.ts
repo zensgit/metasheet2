@@ -96,6 +96,9 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
       candidateCount: 1,
       usersDeactivatedCount: 1,
       grantsDisabledCount: 1,
+      // Preview mode reports what WOULD be attempted too — same construction as
+      // grantsDisabledCount (review-finding observability fix).
+      membershipDeactivationAttemptedCount: 1,
       abortedReason: null,
     })
   })
@@ -113,6 +116,7 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
     expect(outcome.applied).toBe(true)
     expect(outcome.affected).toEqual([{ directoryAccountId: 'acct-1', localUserId: 'user-1', policy: 'mark_inactive' }])
+    expect(outcome.membershipDeactivationAttemptedCount).toBe(1)
   })
 
   it('enabled + disable_grant_only: revokes DingTalk login, leaves the local user active, but STILL attempts the user_orgs deactivation', async () => {
@@ -125,14 +129,15 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(true)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
-    // W4-PRE-1c (owner 裁决②, 逐字 "策略实际执行"): disable_grant_only is NOT manual_review —
+    // W4-PRE-1c (owner 裁决②, #4522 rev3 review, phrase "策略实际执行" per issuecomment-5042388830):
+    // disable_grant_only is NOT manual_review —
     // it revokes real access (the grant) — so per the owner's own carve-out (only
     // manual_review is excluded), this branch ALSO attempts the user_orgs deactivation, even
     // though it leaves `users.is_active` untouched. Flagged for owner confirmation in the PR
     // body's combination-semantics section: this is a genuinely NEW consequence of
     // disable_grant_only that did not exist before this PR.
     expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
-    expect(outcome).toMatchObject({ grantsDisabledCount: 1, usersDeactivatedCount: 0 })
+    expect(outcome).toMatchObject({ grantsDisabledCount: 1, usersDeactivatedCount: 0, membershipDeactivationAttemptedCount: 1 })
   })
 
   it('enabled + manual_review: touches nothing (including user_orgs), but the offboarding is counted and exposed as pending', async () => {
@@ -145,10 +150,11 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
-    // W4-PRE-1c (owner 裁决②, 逐字: "manual_review 则保持 active 并暴露待人工确认状态"): the
+    // W4-PRE-1c (owner 裁决②, #4522 rev3 review — issuecomment-5042388830: "manual_review 保持
+    // active 并暴露待人工确认状态"): the
     // unique carve-out — no write attempted at all, including user_orgs.
     expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
-    expect(outcome).toMatchObject({ candidateCount: 1, manualReviewCount: 1, affected: [] })
+    expect(outcome).toMatchObject({ candidateCount: 1, manualReviewCount: 1, affected: [], membershipDeactivationAttemptedCount: 0 })
     expect(outcome.manualReviewPending).toEqual([
       { directoryAccountId: 'acct-1', localUserId: 'user-1', orgId: STUB_ORG_ID },
     ])
@@ -213,6 +219,13 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     expect(outcome.applied).toBe(false)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
+    // Review finding: the circuit-breaker's negative — "not passed ⇒ user_orgs is NEVER
+    // touched" — had no test anywhere in the repo. Without this, a future edit that moved the
+    // W4-PRE-1c deactivation call ahead of the abort-and-return (e.g. into the candidate
+    // dedup loop) would abort correctly for grants/users but still flip user_orgs, and every
+    // existing test (including the two in this describe block) would stay green.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
+    expect(outcome.membershipDeactivationAttemptedCount).toBe(0)
   })
 
   it('an oversized batch aborts before any write', async () => {
@@ -230,6 +243,9 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     expect(outcome.abortedReason).toBe('batch_exceeds_max')
     expect(outcome.applied).toBe(false)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
+    // Same breaker-negative coverage as the empty-fetch abort test above.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
+    expect(outcome.membershipDeactivationAttemptedCount).toBe(0)
   })
 })
 

@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 /**
- * W4-PRE-1c item A (owner 裁决②, #4522 rev3 review, 2026-07-22, 逐字):
- * "不要因『单次同步缺失』直接撤销 membership。推荐在 deprovision circuit-breaker 通过、开关
- * 启用且策略实际执行时,同事务失活对应 user_orgs;manual_review 则保持 active 并暴露待人工
- * 确认状态。"
+ * W4-PRE-1c item A (owner 裁决②, #4522 rev3 review, 2026-07-22 — the only GitHub-persisted
+ * text is issuecomment-5042388830's acknowledgment):
+ * "不因单次同步缺失撤销 membership；deprovision circuit-breaker 通过 + 开关启用 + 策略实际
+ * 执行时同事务失活对应 user_orgs；manual_review 保持 active 并暴露待人工确认状态。"
  *
  * Owner's case ① ("真实同步 sweep"): drives the REAL `syncDirectoryIntegration` orchestration
  * over a genuine departure (an account absent from the mocked DingTalk pull), not a hand-

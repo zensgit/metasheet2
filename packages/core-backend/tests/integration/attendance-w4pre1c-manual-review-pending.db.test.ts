@@ -3,14 +3,21 @@ import { query } from '../../src/db/pg'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
 
 /**
- * W4-PRE-1c item B, owner case ④ ("人工复核") — owner 裁决②, 逐字: "manual_review 则保持
+ * W4-PRE-1c item B, owner case ④ ("人工复核") — owner 裁决② (#4522 rev3 review; the only
+ * GitHub-persisted text is issuecomment-5042388830's acknowledgment): "manual_review 保持
  * active 并暴露待人工确认状态".
  *
- * Run with `enabled: true` (not the default-off preview) — deliberately, so a mutation that
- * moves the `user_orgs` deactivation call INSIDE the `manual_review` branch (mutation ③, owner
- * E) actually fires and this test catches it. Running disabled would make such a mutation
- * unreachable regardless of correctness (the write is gated on `enabled` either way) and the
- * test would pass for the wrong reason.
+ * The first two tests run with `enabled: true` (not the default-off preview) — deliberately, so
+ * a mutation that moves the `user_orgs` deactivation call INSIDE the `manual_review` branch
+ * (mutation ③, owner E) actually fires and those tests catch it. Running disabled would make
+ * such a mutation unreachable regardless of correctness (the write is gated on `enabled` either
+ * way) and the test would pass for the wrong reason.
+ *
+ * The third test below is the complement: `manualReviewPending` (item B's body claim — "Populated
+ * … regardless of `enabled`") must ALSO hold with `enabled: false`, which is the shipped default
+ * (`DIRECTORY_DEPROVISION_ENABLED` unset). Without this leg, wrapping the `manualReviewPending.push`
+ * in the `if (options.enabled)` gate would leave the whole exposure silently empty under the
+ * default-off posture while every other test in this file (all `enabled: true`) stayed green.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -125,5 +132,39 @@ describeIfDatabase('W4-PRE-1c case ④ — manual_review keeps membership ACTIVE
     expect(outcome.manualReviewPending).toEqual([{ directoryAccountId: accountId, localUserId: user, orgId }])
 
     await query(`UPDATE directory_integrations SET default_deprovision_policy = 'manual_review' WHERE id = $1`, [integrationId])
+  })
+
+  it('manual_review pending exposure holds with enabled:false too (shipped default — DIRECTORY_DEPROVISION_ENABLED unset)', async () => {
+    const user = uid('pending-disabled')
+    await query(`INSERT INTO users (id, password_hash, is_active) VALUES ($1, 'x', true)`, [user])
+    const external = `${user}-acct`
+    const account = await query<{ id: string }>(
+      `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, is_active)
+       VALUES ($1, $2, $3, 'Fixture', false) RETURNING id::text AS id`,
+      [integrationId, external, `dingtalk:${external}`],
+    )
+    const accountId = account.rows[0].id
+    await query(
+      `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status) VALUES ($1::uuid, $2, 'linked')`,
+      [accountId, user],
+    )
+    await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)`, [user, orgId])
+
+    const outcome = await applyDirectoryDeprovisionPolicies(client, {
+      integrationId,
+      deactivatedAccountIds: [accountId],
+      syncedAccountCount: 50,
+      integrationDefaultPolicy: 'manual_review',
+      enabled: false, // shipped default — item B claims exposure holds here too
+    })
+
+    expect(outcome.applied).toBe(false)
+    expect(outcome.manualReviewCount).toBe(1)
+    // THE LOAD-BEARING ASSERTION for this test: manualReviewPending must be populated even
+    // when the switch is off — a regression that wraps the push in `if (options.enabled)`
+    // would zero this out silently while every OTHER test in this file (all enabled:true)
+    // stays green.
+    expect(outcome.manualReviewPending).toEqual([{ directoryAccountId: accountId, localUserId: user, orgId }])
+    await expect(membershipIsActive(user, orgId)).resolves.toBe(true)
   })
 })

@@ -209,12 +209,17 @@ export class DingTalkGroupDestinationService {
       builder = builder.where((eb) =>
         eb.or([
           eb('sheet_id', '=', normalizedSheetId),
-          // W4-PRE-1c item C (owner 裁决③, #4522 rev3 review, 2026-07-22, 逐字: "现在就统一为
-          // user_orgs.is_active && users.is_active,不留同型后续债"): same finding shape as
+          // W4-PRE-1c item C (owner 裁决③, #4522 rev3 review, 2026-07-22 — the only
+          // GitHub-persisted text is issuecomment-5042388830's acknowledgment: "两处 EXISTS
+          // 统一为 user_orgs.is_active && users.is_active"): same finding shape as
           // `attendance-admin.ts`'s `canReadAttendanceDirectoryReadiness` and `api-tokens.ts`'s
           // `requireOrgMemberAccess` (both already fixed in #4526) — a deactivated PLATFORM
           // account (`users.is_active=false`) must not keep surfacing org-scoped destinations
-          // through a `user_orgs` row that is still `is_active=true`.
+          // through a `user_orgs` row that is still `is_active=true`. This is the byte-identical
+          // twin of the `else` branch's EXISTS below; real-behavioral coverage for THIS branch
+          // specifically lives in `attendance-w4pre1c-departure-permission-negative.db.test.ts`
+          // case ⑤ leg 3 (the original PR shipped only leg 2, which never calls `listDestinations`
+          // with a `sheetId` argument and so never reached this branch — review finding).
           eb.exists(
             eb.selectFrom('user_orgs')
               .innerJoin('users', 'users.id', 'user_orgs.user_id')
@@ -234,8 +239,9 @@ export class DingTalkGroupDestinationService {
     } else {
       builder = builder.where((eb) =>
         eb.or([
-          // W4-PRE-1c item C (owner 裁决③, #4522 rev3 review, 2026-07-22, 逐字: "现在就统一为
-          // user_orgs.is_active && users.is_active,不留同型后续债"): same finding shape as
+          // W4-PRE-1c item C (owner 裁决③, #4522 rev3 review, 2026-07-22 — the only
+          // GitHub-persisted text is issuecomment-5042388830's acknowledgment: "两处 EXISTS
+          // 统一为 user_orgs.is_active && users.is_active"): same finding shape as
           // `attendance-admin.ts`'s `canReadAttendanceDirectoryReadiness` and `api-tokens.ts`'s
           // `requireOrgMemberAccess` (both already fixed in #4526) — a deactivated PLATFORM
           // account (`users.is_active=false`) must not keep surfacing org-scoped destinations

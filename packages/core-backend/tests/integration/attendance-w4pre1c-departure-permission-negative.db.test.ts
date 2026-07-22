@@ -19,6 +19,12 @@ import { DingTalkGroupDestinationService } from '../../src/multitable/dingtalk-g
  * distinguish "the two-clause EXISTS is correct" from "user_orgs alone already excluded the
  * row" (mutation ④, owner E) — a fixture where ONLY user_orgs is deactivated would pass even
  * with the `users.is_active` join deleted.
+ *
+ * Leg 3 (review finding, added after the original PR): `listDestinations` has TWO EXISTS
+ * clauses with the byte-identical dual `is_active` filter — one in the `else` branch (no
+ * sheetId/orgId, covered by leg 2 above) and a twin in the `normalizedSheetId` branch (a
+ * sheetId argument IS passed). Leg 2 never passes a sheetId, so it never reached the twin;
+ * leg 3 repeats the same three assertions WITH a sheetId argument to close that gap.
  */
 vi.mock('../../src/rbac/rbac', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/rbac/rbac')>()
@@ -190,6 +196,83 @@ describeIfDatabase('W4-PRE-1c case ⑤ leg 2 — destination visibility disappea
     await query(`UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`, [activeUser, orgId])
     try {
       const list = await service.listDestinations(activeUser)
+      expect(list.map((d) => d.id)).not.toContain(destinationId)
+    } finally {
+      await query(`UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2`, [activeUser, orgId])
+    }
+  })
+})
+
+describeIfDatabase('W4-PRE-1c case ⑤ leg 3 — destination dual is_active filter on the normalizedSheetId branch twin (real DB, real Kysely)', () => {
+  // Review finding: leg 2 above only ever calls `listDestinations(user)` with NO sheetId
+  // argument, so it exercises the `else` branch's EXISTS clause only. This branch's twin
+  // (`normalizedSheetId` truthy) has the byte-identical dual `user_orgs.is_active AND
+  // users.is_active` EXISTS clause but had ZERO real-behavioral coverage — the ONLY test
+  // that ever passed a sheetId argument was the fully-mocked unit suite, whose `.where()`
+  // chain never invokes its callback (the EXISTS shape is never evaluated there).
+  //
+  // To reach this branch, `listDestinations` must be called WITH a sheetId, and the
+  // destination under test must be reachable via the EXISTS clause (org-scoped, org_id set)
+  // rather than via the direct `sheet_id = normalizedSheetId` match — the fixture's sheetId
+  // argument deliberately does NOT match the destination's (null) sheet_id column, so only
+  // the `sheet_id IS NULL` branch of `eb('sheet_id', '=', ...)` is false and the EXISTS
+  // clause is what actually decides visibility.
+  const activeUser = `${NS}-dest3-active`
+  const deactivatedUserActiveMembership = `${NS}-dest3-deactivated-user`
+  const userIds = [activeUser, deactivatedUserActiveMembership]
+  const orgId = `${NS}-dest3-org`
+  const unrelatedSheetId = `${NS}-dest3-unrelated-sheet`
+  const service = new DingTalkGroupDestinationService(db, vi.fn())
+  let destinationId = ''
+
+  beforeAll(async () => {
+    process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'w4pre1c-test-key'
+    process.env.ENCRYPTION_SALT = process.env.ENCRYPTION_SALT || 'w4pre1c-test-salt'
+
+    await query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+       VALUES ($1, $2, $1, 'Fixture', 'x', 'user', '[]'::jsonb, true, false, NOW(), NOW())`,
+      [activeUser, `${activeUser}@example.test`],
+    )
+    // Same fixture shape as leg 2's mutation-④ target: users.is_active=false, user_orgs.is_active=true.
+    await query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+       VALUES ($1, $2, $1, 'Fixture', 'x', 'user', '[]'::jsonb, false, false, NOW(), NOW())`,
+      [deactivatedUserActiveMembership, `${deactivatedUserActiveMembership}@example.test`],
+    )
+    await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [activeUser, orgId])
+    await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [deactivatedUserActiveMembership, orgId])
+
+    // org-scoped (sheet_id stays NULL) — reachable ONLY via the EXISTS clause when a sheetId
+    // is passed to listDestinations, never via the direct sheet_id match.
+    const destination = await service.createDestination('w4pre1c-creator', {
+      name: `${NS} org destination (sheetId-branch twin)`,
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=w4pre1c-token-3',
+      orgId,
+    })
+    destinationId = destination.id
+  })
+
+  afterAll(async () => {
+    if (destinationId) await query(`DELETE FROM dingtalk_group_destinations WHERE id = $1`, [destinationId])
+    await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [userIds])
+    await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [userIds])
+  })
+
+  it('visible to a genuinely active org member when a sheetId is ALSO passed (positive control, normalizedSheetId branch)', async () => {
+    const list = await service.listDestinations(activeUser, unrelatedSheetId)
+    expect(list.map((d) => d.id)).toContain(destinationId)
+  })
+
+  it('NOT visible when users.is_active=false even though user_orgs.is_active=true, with a sheetId passed (the load-bearing twin of mutation ④)', async () => {
+    const list = await service.listDestinations(deactivatedUserActiveMembership, unrelatedSheetId)
+    expect(list.map((d) => d.id)).not.toContain(destinationId)
+  })
+
+  it('NOT visible when user_orgs.is_active=false, with a sheetId passed (pre-existing filter, unchanged by this PR)', async () => {
+    await query(`UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`, [activeUser, orgId])
+    try {
+      const list = await service.listDestinations(activeUser, unrelatedSheetId)
       expect(list.map((d) => d.id)).not.toContain(destinationId)
     } finally {
       await query(`UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2`, [activeUser, orgId])
