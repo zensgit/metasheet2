@@ -352,6 +352,36 @@ export interface CoreAPI {
   vision?: VisionApi
 }
 
+// W2/P2-3: the scoped provisioning surface handed to a repair callback that runs
+// inside ONE host transaction (see runObjectFieldsRepairTransaction). Every method is
+// bound to the same tx query, so a thrown verify rolls the additive write back.
+export interface MultitableRepairTransactionSurface {
+  findObjectSheet(input: {
+    projectId: string
+    objectId: string
+  }): Promise<{
+    id: string
+    baseId: string | null
+    name: string
+    description: string | null
+  } | null>
+  resolveExistingObjectFieldIds(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, string>>
+  readObjectFieldsContent(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }>>
+  ensureMissingObjectFields(input: {
+    projectId: string
+    objectId: string
+    fields: MultitableProvisioningFieldDescriptor[]
+  }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+}
+
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
   getFieldId(projectId: string, objectId: string, fieldId: string): string
@@ -389,6 +419,12 @@ export interface MultitableProvisioningAPI {
     objectId: string
     fields: MultitableProvisioningFieldDescriptor[]
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+  // W2/P2-3 (round-5 review): run a repair's read → additive-write → re-read → verify
+  // sequence inside ONE host transaction. If `fn` throws (mutated/incomplete/race), the
+  // additive write ROLLS BACK — atomic fail-close, not a post-commit detection canary.
+  runObjectFieldsRepairTransaction<T>(
+    fn: (surface: MultitableRepairTransactionSurface) => Promise<T>,
+  ): Promise<T>
   ensureObject(input: {
     projectId: string
     baseId?: string | null

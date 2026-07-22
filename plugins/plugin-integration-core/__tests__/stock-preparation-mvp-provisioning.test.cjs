@@ -143,6 +143,19 @@ function createContext({ existingObjectIds = [], missingFieldsByObject = {}, fai
       }
       return { addedFieldIds, skippedExistingFieldIds }
     },
+    // W2/P2-3: atomic repair runner. The surface forwards to THIS provisioning object's
+    // CURRENT methods, so a per-test override (e.g. of ensureMissingObjectFields /
+    // readObjectFieldsContent set after createContext) is honored inside the repair body.
+    async runObjectFieldsRepairTransaction(fn) {
+      const p = this
+      calls.runObjectFieldsRepairTransaction = (calls.runObjectFieldsRepairTransaction || 0) + 1
+      return fn({
+        findObjectSheet: (i) => p.findObjectSheet(i),
+        resolveExistingObjectFieldIds: (i) => p.resolveExistingObjectFieldIds(i),
+        readObjectFieldsContent: (i) => p.readObjectFieldsContent(i),
+        ensureMissingObjectFields: (i) => p.ensureMissingObjectFields(i),
+      })
+    },
     async patchObjectFieldProperty(input) {
       calls.patchObjectFieldProperty.push(JSON.parse(JSON.stringify(input)))
       if (failPatch) {

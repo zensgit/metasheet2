@@ -309,22 +309,18 @@ async function ensureStockPreparationMvpTargets({ context, projectId, permission
   }
 }
 
-// W2 repair needs the ADDITIVE-ONLY ensureMissingObjectFields (never ensureObject,
-// whose DO-UPDATE would overwrite existing fields). Same accessor-fail-closed shape.
+// W2/P2-3 repair runs its whole read/write/verify sweep inside ONE host transaction via
+// runObjectFieldsRepairTransaction (atomic fail-close). The tx-bound surface it receives
+// provides the ADDITIVE-ONLY ensureMissingObjectFields (never ensureObject's DO-UPDATE)
+// plus the reads — so the host must expose the transaction runner, not the bare methods.
 function getMvpRepairApi(context) {
   const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
-  if (
-    !provisioning ||
-    typeof provisioning.findObjectSheet !== 'function' ||
-    typeof provisioning.resolveExistingObjectFieldIds !== 'function' ||
-    typeof provisioning.readObjectFieldsContent !== 'function' ||
-    typeof provisioning.ensureMissingObjectFields !== 'function'
-  ) {
+  if (!provisioning || typeof provisioning.runObjectFieldsRepairTransaction !== 'function') {
     throw new StockPreparationTargetProvisioningError(
       503,
       'MVP_REPAIR_API_UNAVAILABLE',
-      'stock-preparation MVP repair requires multitable.provisioning ensureMissingObjectFields API',
-      { requiredMethods: ['findObjectSheet', 'resolveExistingObjectFieldIds', 'readObjectFieldsContent', 'ensureMissingObjectFields'] },
+      'stock-preparation MVP repair requires multitable.provisioning.runObjectFieldsRepairTransaction (atomic repair)',
+      { requiredMethods: ['runObjectFieldsRepairTransaction'] },
     )
   }
   return provisioning
@@ -348,91 +344,99 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
   const scopedProjectId = requiredString(projectId, 'projectId')
   const templates = resolveTargetTemplates(objectIds)
   const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
-  const tables = []
-  for (const template of templates) {
-    const sheet = await provisioning.findObjectSheet({ projectId: scopedProjectId, objectId: template.objectId })
-    if (!sheet) {
-      // Repair only heals an EXISTING table's missing template fields; a wholly
-      // absent table is an ensure/provision concern, not a repair one.
-      throw new StockPreparationTargetProvisioningError(
-        409,
-        'MVP_REPAIR_TARGET_ABSENT',
-        'stock-preparation MVP repair requires an already-provisioned table',
-        { objectId: template.objectId },
-      )
-    }
-    const fieldIds = templateFieldIds(template)
-    const resolved = await provisioning.resolveExistingObjectFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
-    const missingIds = missingLogicalFields(template, resolved)
-    const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
-    const beforeContent = await provisioning.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds })
-    // Build repaired-field descriptors from the SAME builder the fresh ensure path uses
-    // (buildMvpTargetDescriptor, not the raw buildSheetStructureFromMvpTableTemplate) so a
-    // repaired column is byte-for-byte isomorphic to a freshly-provisioned one — including
-    // the frozen `property.stockPreparationMvp` metadata (round-5 review P2: repair must not
-    // emit a structurally-different field than fresh provisioning). Proven by the
-    // fresh-vs-repair full-property equivalence test.
-    const descriptor = buildMvpTargetDescriptor(template)
-    const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
-    const missingDescriptors = []
-    for (const id of missingIds) {
-      const ownership = ownershipById.get(id)
-      if (humanSet.has(id) || ownership === 'human_preserved') {
+  // ATOMIC repair (round-5 review P2-3): repair ALL requested tables inside ONE host
+  // transaction. Any table's verify throw (mutated / incomplete / concurrent-appeared /
+  // absent) propagates out and ROLLS BACK the whole sweep, so a partial multi-table repair
+  // never commits — atomic fail-close, not a post-commit detection canary. Every DB touch
+  // goes through `tx`; pure prep (admin gate, template resolution, ownership) needs no tx.
+  const tables = await provisioning.runObjectFieldsRepairTransaction(async (tx) => {
+    const acc = []
+    for (const template of templates) {
+      const sheet = await tx.findObjectSheet({ projectId: scopedProjectId, objectId: template.objectId })
+      if (!sheet) {
+        // Repair only heals an EXISTING table's missing template fields; a wholly
+        // absent table is an ensure/provision concern, not a repair one.
         throw new StockPreparationTargetProvisioningError(
-          422,
-          'REPAIR_HUMAN_FIELD_FORBIDDEN',
-          'repair may not add a human_preserved column; grow the human whitelist through its own design gate',
-          { objectId: template.objectId, fieldId: id },
+          409,
+          'MVP_REPAIR_TARGET_ABSENT',
+          'stock-preparation MVP repair requires an already-provisioned table',
+          { objectId: template.objectId },
         )
       }
-      if (ownership !== 'plm_system') {
-        // A non-plm_system template field id must be a valid tenant extension id.
-        assertExtensionFieldIdValid(id, { templateFieldIds: fieldIds })
+      const fieldIds = templateFieldIds(template)
+      const resolved = await tx.resolveExistingObjectFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
+      const missingIds = missingLogicalFields(template, resolved)
+      const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
+      const beforeContent = await tx.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds })
+      // Build repaired-field descriptors from the SAME builder the fresh ensure path uses
+      // (buildMvpTargetDescriptor, not the raw buildSheetStructureFromMvpTableTemplate) so a
+      // repaired column is byte-for-byte isomorphic to a freshly-provisioned one — including
+      // the frozen `property.stockPreparationMvp` metadata (round-5 review P2: repair must not
+      // emit a structurally-different field than fresh provisioning). Proven by the
+      // fresh-vs-repair full-property equivalence test.
+      const descriptor = buildMvpTargetDescriptor(template)
+      const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
+      const missingDescriptors = []
+      for (const id of missingIds) {
+        const ownership = ownershipById.get(id)
+        if (humanSet.has(id) || ownership === 'human_preserved') {
+          throw new StockPreparationTargetProvisioningError(
+            422,
+            'REPAIR_HUMAN_FIELD_FORBIDDEN',
+            'repair may not add a human_preserved column; grow the human whitelist through its own design gate',
+            { objectId: template.objectId, fieldId: id },
+          )
+        }
+        if (ownership !== 'plm_system') {
+          // A non-plm_system template field id must be a valid tenant extension id.
+          assertExtensionFieldIdValid(id, { templateFieldIds: fieldIds })
+        }
+        const found = descriptor.fields.find((field) => field.id === id)
+        if (found) missingDescriptors.push(found)
       }
-      const found = descriptor.fields.find((field) => field.id === id)
-      if (found) missingDescriptors.push(found)
+      const result = await tx.ensureMissingObjectFields({
+        projectId: scopedProjectId,
+        objectId: template.objectId,
+        fields: missingDescriptors,
+      })
+      // CONCURRENCY fail-close (round-5 review P2): we submitted ONLY this round's missing
+      // set, so a skipped-existing id means a competing writer inserted that column between
+      // our resolve and our write. We neither added it nor content-verified its row against
+      // the frozen descriptor, so `ready` would be UNPROVEN (id-exists ≠ shape-correct).
+      // Fail closed — repair is idempotent, a retry after the race settles re-verifies.
+      if (result.skippedExistingFieldIds.length) {
+        throw new StockPreparationTargetProvisioningError(
+          409,
+          'REPAIR_CONCURRENT_FIELD_APPEARED',
+          'a missing field was inserted by a concurrent writer during repair; retry after it settles',
+          { objectId: template.objectId, skippedExistingFieldCount: result.skippedExistingFieldIds.length },
+        )
+      }
+      // POST-WRITE completeness re-verify (never report ready unproven).
+      const resolvedAfter = await tx.resolveExistingObjectFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
+      const stillMissing = missingLogicalFields(template, resolvedAfter)
+      if (stillMissing.length) {
+        throw new StockPreparationTargetProvisioningError(
+          409,
+          'MVP_REPAIR_INCOMPLETE',
+          'MVP repair did not reach a complete schema; a field is still missing after the additive write',
+          { objectId: template.objectId, missingFieldCount: stillMissing.length },
+        )
+      }
+      assertNoExistingFieldMutated(beforeContent, await tx.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
+      acc.push({
+        objectId: template.objectId,
+        role: template.role,
+        repaired: result.addedFieldIds.length > 0,
+        mode: result.addedFieldIds.length > 0 ? 'mvp_repaired' : 'mvp_already_ready',
+        addedFieldCount: result.addedFieldIds.length,
+        skippedExistingFieldCount: result.skippedExistingFieldIds.length,
+        schemaCompleteAfter: true,
+        templateVersion: template.version,
+      })
     }
-    const result = await provisioning.ensureMissingObjectFields({
-      projectId: scopedProjectId,
-      objectId: template.objectId,
-      fields: missingDescriptors,
-    })
-    // CONCURRENCY fail-close (round-5 review P2): we submitted ONLY this round's missing
-    // set, so a skipped-existing id means a competing writer inserted that column between
-    // our resolve and our write. We neither added it nor content-verified its row against
-    // the frozen descriptor, so `ready` would be UNPROVEN (id-exists ≠ shape-correct).
-    // Fail closed — repair is idempotent, a retry after the race settles re-verifies.
-    if (result.skippedExistingFieldIds.length) {
-      throw new StockPreparationTargetProvisioningError(
-        409,
-        'REPAIR_CONCURRENT_FIELD_APPEARED',
-        'a missing field was inserted by a concurrent writer during repair; retry after it settles',
-        { objectId: template.objectId, skippedExistingFieldCount: result.skippedExistingFieldIds.length },
-      )
-    }
-    // POST-WRITE completeness re-verify (never report ready unproven).
-    const resolvedAfter = await provisioning.resolveExistingObjectFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
-    const stillMissing = missingLogicalFields(template, resolvedAfter)
-    if (stillMissing.length) {
-      throw new StockPreparationTargetProvisioningError(
-        409,
-        'MVP_REPAIR_INCOMPLETE',
-        'MVP repair did not reach a complete schema; a field is still missing after the additive write',
-        { objectId: template.objectId, missingFieldCount: stillMissing.length },
-      )
-    }
-    assertNoExistingFieldMutated(beforeContent, await provisioning.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
-    tables.push({
-      objectId: template.objectId,
-      role: template.role,
-      repaired: result.addedFieldIds.length > 0,
-      mode: result.addedFieldIds.length > 0 ? 'mvp_repaired' : 'mvp_already_ready',
-      addedFieldCount: result.addedFieldIds.length,
-      skippedExistingFieldCount: result.skippedExistingFieldIds.length,
-      schemaCompleteAfter: true,
-      templateVersion: template.version,
-    })
-  }
+    return acc
+  })
   return {
     ready: true,
     tables,

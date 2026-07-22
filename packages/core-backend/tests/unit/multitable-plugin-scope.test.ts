@@ -501,4 +501,51 @@ describe('multitable plugin scope helper', () => {
       expect(delegate[method]).not.toHaveBeenCalled()
     }
   })
+
+  it('W2/P2-3: runObjectFieldsRepairTransaction scopes every surface call INSIDE the tx', async () => {
+    // The atomic repair runner hands the plugin a tx-bound surface. Every read/write the
+    // repair makes THROUGH that surface must STILL pass assertObjectScope — scope cannot be
+    // dropped just because we are inside a host transaction (never bare-forward a write).
+    const assertObjectScope = vi.fn(async () => {})
+    const innerSurface = {
+      findObjectSheet: vi.fn(async () => ({ id: 's', baseId: null, name: 'n', description: null })),
+      resolveExistingObjectFieldIds: vi.fn(async () => ({ status: 'fld_1' })),
+      readObjectFieldsContent: vi.fn(async () => ({ status: { name: 'Status', type: 'select', property: {}, order: 0 } })),
+      ensureMissingObjectFields: vi.fn(async () => ({ addedFieldIds: ['fld_2'], skippedExistingFieldIds: [] })),
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const delegateRunner = vi.fn(async (fn: any) => fn(innerSurface))
+    const multitable = { provisioning: { runObjectFieldsRepairTransaction: delegateRunner }, records: {} }
+    const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-after-sales', { assertObjectScope })
+    const SCOPE = { projectId: 'tenant_42:after-sales', objectId: 'serviceTicket' }
+
+    // (a) happy path: the surface's write + reads all pass assertObjectScope.
+    const out = await scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => {
+      await tx.resolveExistingObjectFieldIds({ ...SCOPE, fieldIds: ['status'] })
+      await tx.readObjectFieldsContent({ ...SCOPE, fieldIds: ['status'] })
+      return tx.ensureMissingObjectFields({ ...SCOPE, fields: [] })
+    })
+    expect(out).toEqual({ addedFieldIds: ['fld_2'], skippedExistingFieldIds: [] })
+    expect(delegateRunner).toHaveBeenCalledTimes(1)
+    // write + two reads = 3 scoped surface calls, each via assertObjectScope.
+    expect(assertObjectScope.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(assertObjectScope).toHaveBeenCalledWith({ pluginName: 'plugin-after-sales', ...SCOPE })
+
+    // (b) a rejecting hook aborts the surface write BEFORE the inner delegate write runs.
+    const denied = new Error('scope denied')
+    assertObjectScope.mockImplementation(async () => {
+      throw denied
+    })
+    innerSurface.ensureMissingObjectFields.mockClear()
+    await expect(
+      scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => tx.ensureMissingObjectFields({ ...SCOPE, fields: [] })),
+    ).rejects.toBe(denied)
+    expect(innerSurface.ensureMissingObjectFields).not.toHaveBeenCalled()
+
+    // (c) a foreign-namespace project id is rejected by the surface before it delegates.
+    assertObjectScope.mockImplementation(async () => {})
+    await expect(
+      scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => tx.findObjectSheet({ projectId: 'tenant_42:other-plugin', objectId: 'x' })),
+    ).rejects.toThrow()
+  })
 })

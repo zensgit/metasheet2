@@ -33,6 +33,7 @@ import type {
   PluginStorage,
   PluginApiMethod,
   PluginLifecycle,
+  MultitableRepairTransactionSurface,
 } from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
@@ -574,6 +575,37 @@ export class MetaSheetServer {
                 objectId,
                 fields,
               })
+            })
+          },
+          // W2/P2-3 (round-5 review): ATOMIC repair transaction. Runs the caller's whole
+          // read → additive-write → re-read → verify sequence inside ONE DB transaction, so
+          // a thrown verify (mutated/incomplete/race) ROLLS BACK the additive write instead
+          // of leaving it committed. All four surface methods are bound to the SAME tx query;
+          // this is what upgrades the before/after guards from post-commit canaries (safe
+          // only because the wired write is append-only DO NOTHING) to a true atomic
+          // fail-close — the W3-entry gate for wiring repair into production routes.
+          runObjectFieldsRepairTransaction: async (fn) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              const surface: MultitableRepairTransactionSurface = {
+                findObjectSheet: ({ projectId, objectId }) =>
+                  findProvisionedObjectSheet(txQuery, projectId, objectId),
+                resolveExistingObjectFieldIds: ({ projectId, objectId, fieldIds }) =>
+                  resolveExistingMultitableObjectFieldIds({ query: txQuery, projectId, objectId, fieldIds }),
+                readObjectFieldsContent: ({ projectId, objectId, fieldIds }) =>
+                  readMultitableObjectFieldsContent({ query: txQuery, projectId, objectId, fieldIds }),
+                ensureMissingObjectFields: ({ projectId, objectId, fields }) =>
+                  ensureMissingMultitableObjectFields({ query: txQuery, projectId, objectId, fields }),
+              }
+              return fn(surface)
             })
           },
           ensureView: async ({ projectId, sheetId, descriptor }) => {
