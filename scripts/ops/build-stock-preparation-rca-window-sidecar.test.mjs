@@ -35,6 +35,10 @@ test('builder emits the exact no-Git C-stage sidecar contract with complete chec
     assert.equal(provenance.sourceGitCommit, SOURCE_SHA)
     assert.equal(provenance.frozenRuntimeGitCommit, 'd87e086fd1218b4cfb150177d43f2c52904b1d6d')
     assert.equal(provenance.externalWrite, false)
+    assert.equal(
+      provenance.frozenHelperSha256['stock-preparation-rca-window-pm2-sample.mjs'],
+      '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec',
+    )
 
     const checksumEntries = fs.readFileSync(path.join(packageDir, 'SHA256SUMS'), 'utf8').trim().split('\n')
     assert.equal(checksumEntries.length, names.length - 1)
@@ -68,4 +72,5 @@ test('workflow checks out and verifies the exact SHA recorded in provenance', ()
   assert.match(workflow, /SOURCE_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/)
   assert.match(workflow, /ref: \$\{\{ env\.SOURCE_SHA \}\}/)
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$SOURCE_SHA"/)
+  assert.match(workflow, /sha256sum "\$package_name\.zip" > "\$package_name\.zip\.sha256"/)
 })

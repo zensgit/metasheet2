@@ -40,9 +40,11 @@ jobs:
             --output-dir output/stock-preparation-rca-window-sidecar
           package_dir="$(find output/stock-preparation-rca-window-sidecar -mindepth 1 -maxdepth 1 -type d -print -quit)"
           package_name="$(basename "$package_dir")"
-          (cd output/stock-preparation-rca-window-sidecar && zip -X -r "$package_name.zip" "$package_name")
-          sha256sum "output/stock-preparation-rca-window-sidecar/$package_name.zip" \
-            > "output/stock-preparation-rca-window-sidecar/$package_name.zip.sha256"
+          (
+            cd output/stock-preparation-rca-window-sidecar
+            zip -X -r "$package_name.zip" "$package_name"
+            sha256sum "$package_name.zip" > "$package_name.zip.sha256"
+          )
       - name: Upload exact-SHA executable sidecar
         uses: actions/upload-artifact@v4
         with:

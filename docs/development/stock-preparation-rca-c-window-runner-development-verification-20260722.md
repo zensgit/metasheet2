@@ -124,12 +124,12 @@ Behavior tests additionally prove:
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
 
-Twelve committed-head mutations were applied one at a time in a detached worktree and all were
+Fourteen committed-head mutations were applied one at a time in detached worktrees and all were
 killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
 removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
 archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
-redirect refusal removal. Each mutation was restored before the next; the source worktree remained
-clean.
+redirect refusal removal, plus removal of the artifact checkout ref pin and checkout-SHA runtime
+guard. Each mutation was restored before the next; the source worktree remained clean.
 
 ## 7. Independent Adversarial Review
 
@@ -138,6 +138,11 @@ found one blocking P2: an unguarded final PM2 sample could throw under PowerShel
 revocation, helper cleanup, and lock release. The final implementation closes that gap with native
 boundaries and isolated cleanup blocks, then adds the target-shell stderr and cleanup-continuation
 tests above.
+
+The exact-head follow-up found one delivery P2: pull-request checkout defaulted to GitHub's synthetic
+merge commit while provenance named the PR head SHA. The workflow now checks out `SOURCE_SHA`,
+verifies the local HEAD equals it, and records that same value. Two mutations prove both the ref pin
+and runtime equality guard are load-bearing.
 
 The same review identified three smaller fail-open shapes, all closed here: PowerShell boolean
 coercion, a vacuous `IndexOf` contract assertion, and deleting the lock inode after release. It also
