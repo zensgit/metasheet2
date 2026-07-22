@@ -566,7 +566,7 @@
           >
             <div class="template-authoring__canvas-inspector-header">
               <div class="template-authoring__canvas-inspector-title">
-                <strong>{{ selectedCanvasInspectorNode.name || selectedCanvasInspectorNode.key }}</strong>
+                <strong>{{ graphNodeLabel(selectedCanvasInspectorNode.key) }}</strong>
                 <span class="template-authoring__node-type" :data-node-type="selectedCanvasInspectorNode.type">
                   {{ nodeTypeLabel(selectedCanvasInspectorNode.type) }}
                 </span>

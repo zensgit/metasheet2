@@ -496,6 +496,25 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(inspector.textContent).not.toContain('join_1')
   })
 
+  it('uses a business type label when the selected node has no display name', async () => {
+    routeParams = { id: 'tpl_inspector_unnamed' }
+    const graph = buildMixedGraph()
+    const ccNode = graph.nodes.find((node) => node.key === 'cc_1')!
+    ccNode.name = ''
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('cc_1')
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.textContent).toContain('抄送')
+    expect(inspector.textContent).not.toContain('cc_1')
+  })
+
   it('a representative inspector edit writes through to the existing draft save payload', async () => {
     routeParams = { id: 'tpl_inspector_edit' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
