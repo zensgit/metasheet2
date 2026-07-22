@@ -43,15 +43,15 @@
 
 ### #4539 — FWB 生产 authoring 与写回组合
 
-- Head：`a22f2a04b6425a6f07b542fc52fd855148caa3d9`，stacked on #4531。
+- Head：`6f6ebcfce54b92426199f05943035e457c9b831f`，stacked on #4531。
 - UI 支持新建当前表记录与更新审批表单 record-link 指向记录；普通用户全程使用选择器和映射表，不接触 JSON。
 - update target 只由服务端从模板顶层 pinned record-link 推导；跨表确认要求目标表管理能力，保存要求同 actor receipt。
 - 目标 schema 在执行时重读；create/update 都复用 claim + mutation + revision + chained outbox 同事务合同。
 - Kimi K3 找到并推动关闭 3 个 P2：失效 link 显示 raw id、瞬时加载失败无恢复、切换模式静默清空映射。
-- required web gate 355 files / 4277 tests，focused frontend 67/67，生产构建与双端 typecheck 通过。
+- required web gate 355 files / 4277 tests，focused frontend 68/68，生产构建与双端 typecheck 通过。
 - fresh Postgres 完整迁移后 FWB create 18/18、update 15/15、正式矩阵 9/9，共 42/42；确认路由 14/14。
-- 七个判别 mutation 分别钉住 target permission、update hash subject、actor receipt、date lexical guard、
-  stale-link marker、linked-schema retry 与 destructive-switch confirmation。
+- 八个判别 mutation 分别钉住 target permission、update hash subject、actor receipt、date lexical guard、
+  stale-link marker、linked-schema retry、destructive-switch confirmation 与旧抽屉 linked-schema generation guard。
 - 精确 number mapping 仍明确不可选；这不是遗漏，而是普通编辑/查询/公式/汇总/导出全链精度尚未证明。
 
 ## 2. 组合树验证

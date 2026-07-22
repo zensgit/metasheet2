@@ -27,7 +27,7 @@
 | A | #4510 `f6d05814a` | 数据闭环与 Canvas foundation 集成候选 | Draft；大集成 PR，不能与来源 PR 重复落地 |
 | B | #4524 `f52c58545` | 安全 record-link 表单字段与普通用户选择器 | Draft；基于 #4510 |
 | C | #4531 `b0fbd827f` | FWB-2 更新选择的已有记录 | Draft；基于 #4524 |
-| D | #4539 `a22f2a04b` | FWB 新建/更新生产 authoring、server confirmation 与全链组合 | Draft；stacked on #4531 |
+| D | #4539 `6f6ebcfce` | FWB 新建/更新生产 authoring、server confirmation 与全链组合 | Draft；stacked on #4531 |
 | Docs | #4535 `b49f8f244` | 本设计锁、执行台账、收尾验证 | Draft；本次更新后 SHA 另记 |
 
 历史来源 PR #4491、#4342、#4489 的产品内容已被 #4510 吸收并进一步修正。落地时只能选择：
@@ -59,7 +59,7 @@ Canvas 与数据闭环可以并行审阅和落地，因为当前文件所有权�
 
 | 模型/角色 | 本轮使用 | 最适合的后续任务 | 不承担 |
 |---|---|---|---|
-| Kimi K3 | Canvas UX/可访问性与 FWB authoring 长上下文审阅；本轮 FWB 找到 3 个 P2 并由 `a22f2a04b` 关闭 | 信息架构、画布密度、响应式交互、设计一致性 | 安全/并发最终 verdict |
+| Kimi K3 | Canvas UX/可访问性与 FWB authoring 长上下文审阅；本轮 FWB 找到 3 个 P2 并由 `a22f2a04b` 关闭；Codex 末轮再补旧抽屉异步响应代际守卫 `6f6ebcfce` | 信息架构、画布密度、响应式交互、设计一致性 | 安全/并发最终 verdict |
 | ReClaude Opus 4.8 | #4531 authz/oracle 与 #4532 拓扑审阅；#4538/#4539 调用发生 `Execution error`，不计 verdict | transaction、authz、并发、恢复、启动 fail-closed | 自己实现后的唯一审阅者 |
 | Grok | 通过已授权 CLI 发起 #4539 只读审阅；只有产生 exact-head 结论后才记录 verdict | 有明确文件所有权的实现与测试 | 合并授权或不完整审计的“APPROVE” |
 | Codex | 实现修复、合成树、真实测试、最终判定和文档 | hot-file 集成与最终证据归档 | owner 的 ratify/UAT/flag 决定 |
