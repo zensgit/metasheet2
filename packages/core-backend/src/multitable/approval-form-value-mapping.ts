@@ -10,7 +10,8 @@
  *   - select values must be in the target field's CURRENT option set (closed vocabulary — no invention;
  *     the execute-time seam re-derives options from the live field metadata, never from the saved mapping);
  *   - date accepts ONLY explicit calendar-date strings `YYYY-MM-DD` that are real Gregorian dates — no
- *     epoch-ms input, no timezone conversion (lock D8: 日历日字面写入，禁止任何隐式时区转换);
+ *     epoch-ms input, no timezone conversion, and no trimming: the accepted civil date is preserved
+ *     byte-for-byte (lock D8: 日历日字面写入，禁止任何隐式时区转换);
  *   - number preserves EXACT decimal semantics as a CANONICAL DECIMAL STRING (lock D7: decimal 定点字符串
  *     规范化流转). STRING lexemes are exact at arbitrary scale and never pass through JS Number; JSON
  *     NUMERIC inputs are accepted only inside a conservative lossless envelope (finite, safe-integer when
@@ -24,6 +25,8 @@
  * Pure and synchronous — permission rechecks, the same-transaction claim+record+revision+outbox composition,
  * and the config UI are the later FWB-1 slices. No callers yet.
  */
+import { isValidIsoCalendarDate } from '../utils/calendar-date'
+
 export type FwbTargetFieldType = 'text' | 'number' | 'date' | 'select'
 
 export interface FwbFieldMapping {
@@ -53,7 +56,6 @@ export type FwbMappingErrorCode =
   | 'select_value_not_in_options'
   | 'select_options_missing'
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 // Plain decimal grammar ONLY: optional '-', integer digits, optional fraction. No exponent, no '+',
 // no hex/binary, no NaN/Infinity, no bare '.', no '.5'/'5.' — anything else is malformed, never coerced.
 const DECIMAL = /^-?\d+(?:\.\d+)?$/
@@ -111,15 +113,6 @@ function coerceNumber(
   return { ok: true, value: canonical }
 }
 
-function isValidIsoCalendarDate(value: string): boolean {
-  if (!ISO_DATE.test(value)) return false
-  const [year, month, day] = value.split('-').map(Number)
-  if (month < 1 || month > 12 || day < 1) return false
-  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
-  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-  return day <= daysInMonth[month - 1]
-}
-
 function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string } | { ok: false; code: FwbMappingErrorCode } {
   switch (mapping.targetType) {
     case 'text': {
@@ -134,12 +127,11 @@ function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string }
       return { ok: true, v: number.value }
     }
     case 'date': {
-      // Lock D8: explicit calendar-date strings ONLY — no epoch-ms input, no Date construction,
-      // no timezone conversion. Numbers (and everything else) reject.
-      if (typeof raw === 'string') {
-        const value = raw.trim()
-        if (isValidIsoCalendarDate(value)) return { ok: true, v: value }
-      }
+      // Date-ONLY target: the approved value is already a strict `YYYY-MM-DD` civil-date
+      // string (submit-time validation enforced that upstream). Preserve it BYTE-FOR-BYTE —
+      // no trim, and no epoch-ms/Date/datetime-string acceptance: deriving a civil date
+      // from an instant would invent data (and could shift the day across timezones).
+      if (typeof raw === 'string' && isValidIsoCalendarDate(raw)) return { ok: true, v: raw }
       return { ok: false, code: 'not_a_date' }
     }
     case 'select': {

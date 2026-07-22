@@ -20,6 +20,7 @@ import {
   evaluateApprovalConditionFormula,
   type RequesterFormulaContext,
 } from './ApprovalConditionFormula'
+import { isValidIsoCalendarDate } from '../utils/calendar-date'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
@@ -370,7 +371,15 @@ function validateFieldType(
         ? `${field.id} must be a lossless number`
         : null
     case 'date':
+      // Date-ONLY (floating civil date): exactly one real calendar string `YYYY-MM-DD`
+      // (leap-year validated, lexically — never via Date.parse, which would smuggle in
+      // locale strings, datetime suffixes, and instant semantics). No trim: the form
+      // transport passes values through untouched, so padded variants are rejected.
+      return typeof value === 'string' && isValidIsoCalendarDate(value)
+        ? null
+        : `${field.id} must be a date value`
     case 'datetime':
+      // Instant semantics (unchanged): any Date.parse-able string or a valid Date object.
       if (typeof value === 'string') {
         return Number.isNaN(Date.parse(value.trim())) ? `${field.id} must be a date value` : null
       }
@@ -502,8 +511,27 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
       }
       return errors
     }
-    case 'date':
+    case 'date': {
+      // Date-ONLY min/max: compare validated `YYYY-MM-DD` calendar strings directly
+      // (lexicographic order IS chronological order for fixed-width ISO dates) — no epoch
+      // conversion, so the result is identical in every timezone. The VALUE is already
+      // type-validated before constraints run; a defensively re-checked invalid value and
+      // admin-configured min/max props that are not themselves valid calendar dates are
+      // treated as non-enforced (same precedent as an invalid `pattern` regex above).
+      if (typeof value !== 'string' || !isValidIsoCalendarDate(value)) return []
+      const errors: string[] = []
+      const min = getFieldPropString(field, 'min')
+      const max = getFieldPropString(field, 'max')
+      if (min && isValidIsoCalendarDate(min) && value < min) {
+        errors.push(`${field.id} must be on or after ${min}`)
+      }
+      if (max && isValidIsoCalendarDate(max) && value > max) {
+        errors.push(`${field.id} must be on or before ${max}`)
+      }
+      return errors
+    }
     case 'datetime': {
+      // Instant semantics (unchanged): normalize both sides to comparable epochs.
       const valueComparable = normalizeComparableValue(value)
       if (valueComparable === null) return []
 

@@ -37,7 +37,7 @@ const rejectCode = (m: FwbFieldMapping, v: unknown): string => {
 }
 
 describe('FWB-1 form-value mapping (pure, fail-closed)', () => {
-  test('happy path: text/number/date/select all map; numbers normalize to CANONICAL DECIMAL STRINGS', () => {
+  test('happy path: text/number/date/select all map; exact numbers normalize and dates stay byte-identical', () => {
     const r = mapApprovalFormValues(
       [
         M({ formFieldId: 'a', targetFieldId: 'ta', targetType: 'text' }),
@@ -49,6 +49,33 @@ describe('FWB-1 form-value mapping (pure, fail-closed)', () => {
       { a: 42, b: ' 3.5 ', c: '2026-07-15', d: 1000, e: '高' },
     )
     expect(r).toEqual({ ok: true, values: { ta: '42', tb: '3.5', tc: '2026-07-15', td: '1000', te: '高' } })
+  })
+
+  test('date identity: approved YYYY-MM-DD strings are preserved byte-for-byte', () => {
+    for (const value of ['2026-07-15', '2024-02-29', '2000-02-29', '1999-12-31', '2026-01-01']) {
+      const r = mapApprovalFormValues([M({ targetType: 'date' })], { f1: value })
+      expect(r).toEqual({ ok: true, values: { t1: value } })
+    }
+  })
+
+  test('date rejects instants and non-strict shapes instead of inventing a civil date', () => {
+    const cases: Array<[string, unknown]> = [
+      ['epoch-ms number', Date.UTC(2026, 6, 15)],
+      ['epoch-ms number (local-midnight-ish)', 1752537600000],
+      ['ISO datetime string', '2026-07-15T10:00:00Z'],
+      ['ISO datetime with offset', '2026-07-15T23:30:00+08:00'],
+      ['Date object', new Date(Date.UTC(2026, 6, 15))],
+      ['locale string', '7/15/2026'],
+      ['surrounding whitespace (left)', ' 2026-07-15'],
+      ['surrounding whitespace (right)', '2026-07-15 '],
+      ['single-digit month/day', '2026-7-15'],
+      ['year zero', '0000-01-01'],
+    ]
+    for (const [label, value] of cases) {
+      const r = mapApprovalFormValues([M({ targetType: 'date' })], { f1: value })
+      expect(r.ok, label).toBe(false)
+      if (!r.ok) expect(r.errors[0].code, label).toBe('not_a_date')
+    }
   })
 
   test('ALL-OR-NOTHING: one bad mapping rejects the whole action with per-mapping codes', () => {
