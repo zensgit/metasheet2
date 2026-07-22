@@ -839,6 +839,7 @@ jobs:
             tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts \
             tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts \
             tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts \
+            tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
