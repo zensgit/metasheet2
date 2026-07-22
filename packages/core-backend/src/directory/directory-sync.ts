@@ -1552,12 +1552,32 @@ export async function applyDirectoryDeprovisionPolicies(
     return outcome
   }
 
-  // W4-PRE-1d item 2 (owner P2 — "全局账号/授权候选：保留现有『任意位置无活跃绑定』守卫，才允许
-  // 关闭 DingTalk grant 或 users.is_active"): the pre-existing GLOBAL "no active binding
-  // ANYWHERE" guard, relocated from candidate SELECTION (where it wrongly excluded org-A-only
-  // candidacy) to here, where it gates only the grant-disable / platform-user-deactivation
-  // actions. Computed once for every non-`manual_review` org-membership candidate — manual_review
-  // never writes anything regardless, so it is excluded from this batch check entirely.
+  // W4-PRE-1d item 2 (owner P2, #4530 review, issuecomment-5043752399, verbatim — "全局账号/
+  // 授权候选：保留『任意位置无活跃绑定』守卫，才允许关闭 DingTalk grant 或 users.is_active"): the
+  // pre-existing GLOBAL "no active binding ANYWHERE" guard, relocated from candidate SELECTION
+  // (where it wrongly excluded org-A-only candidacy) to here, where it gates only the
+  // grant-disable / platform-user-deactivation actions. Computed once for every non-
+  // `manual_review` org-membership candidate — manual_review never writes anything regardless,
+  // so it is excluded from this batch check entirely.
+  //
+  // Known gap (review finding, deferred — not overlooked): this is a batch-level, no-lock
+  // check-then-act read. It is taken ONCE, before the write loop below, over READ COMMITTED
+  // snapshots for every candidate in the batch. A concurrent transaction that changes this
+  // person's binding elsewhere (another org's departure completing, or a rehire committing a
+  // new linked+active account) between this read and the write loop's `INSERT`/`UPDATE` below
+  // is invisible to this snapshot — unlike `deactivateUserOrgMembershipIfNoOtherActiveBinding`'s
+  // own write-time `SELECT ... FOR UPDATE` re-read for the org-membership write, there is no
+  // equivalent write-time re-check here for the grant/platform-user writes. Concretely: (a) two
+  // concurrent last-org departures for the same person can each see the other's org as still
+  // active and both skip the grant/user-deactivate writes, leaving an enabled DingTalk grant
+  // with zero live bindings and no automatic reconciliation; (b) a same-window rehire can have
+  // its grant/user-deactivate writes applied against a now-stale "globally clear" snapshot. Both
+  // shapes are inherited from the pre-existing (pre-W4-PRE-1d) global guard, which read from an
+  // even earlier point (the old unscoped candidate SELECT) — this relocation does not widen
+  // either window. Closing it needs a lock-strategy or reconciliation-sweep design decision
+  // (e.g. a `users`-row `FOR UPDATE` re-check at write time, mirroring the org-membership
+  // helper) that is outside the owner's verbatim 4-item P2 spec this PR implements — left for
+  // the owner to scope as a follow-up, not silently dropped.
   const nonManualReviewUserIds = Array.from(byUser.entries())
     .filter(([, c]) => c.policy !== 'manual_review')
     .map(([localUserId]) => localUserId)
@@ -1633,6 +1653,15 @@ export async function applyDirectoryDeprovisionPolicies(
     // gated by the GLOBAL "no active binding ANYWHERE" guard — a person still actively employed
     // through a DIFFERENT org's directory keeps DingTalk login and their platform account, even
     // though THIS org's membership was just deactivated above.
+    //
+    // Known gap (review finding, deferred — see this function's `globallyClearUserIds` batch
+    // read above for the forward-direction case; this is the reverse): `globallyClear` here is
+    // the STALE batch snapshot, not re-checked at this write. If a concurrent transaction
+    // commits a brand-new linked+active directory account for this SAME person (rehire, or a
+    // new org's onboarding) in the window between that snapshot and this write, these two writes
+    // still fire against the stale `true`, closing the grant and (mark_inactive) deactivating an
+    // otherwise-currently-employed user. Same inherited-not-widened window as the guard's own
+    // doc-comment above; same deferred lock/reconciliation design decision.
     if (globallyClear) {
       outcome.globalCandidateCount += 1
       outcome.grantsDisabledCount += 1
@@ -5149,12 +5178,18 @@ export async function upsertActiveUserOrgMembership(
 /**
  * W4-PRE-1b item B: safe deactivation. Flips `user_orgs.is_active` to FALSE for
  * (userId, orgId) ONLY WHEN the user holds no OTHER active, linked directory account anywhere in
- * THIS org. Deliberately ORG-SCOPED (unlike the pre-existing `applyDirectoryDeprovisionPolicies`
- * sibling guard, which is intentionally GLOBAL for rehire protection, ~L1396-1400): a user can be
- * active in org A and inactive in org B independently, so the sibling search spans BOTH `local`
- * and `dingtalk` directory accounts of THIS org only (via the `directory_integrations.org_id`
- * join) — never accounts in a different org. Call this AFTER the triggering link mutation has
- * already been written in the same transaction, so a just-severed/reassigned row correctly
+ * THIS org. Deliberately ORG-SCOPED — and, as of W4-PRE-1d (owner P2 item 1, #4530 review,
+ * issuecomment-5043752399), so is `applyDirectoryDeprovisionPolicies`'s own org-membership
+ * candidate-selection guard now (~L1491-1516, joins `directory_integrations.org_id`): the two
+ * predicates are deliberately mirrored (same three clauses: linked, active, same org) so
+ * candidate SELECTION and this WRITE agree on who still "works here". Only
+ * `applyDirectoryDeprovisionPolicies`'s SEPARATE global "no active binding ANYWHERE" guard
+ * (~L1587, gating the DingTalk grant / `users.is_active` writes, not this one) stays GLOBAL, for
+ * rehire protection: a user can be active in org A and inactive in org B independently, so the
+ * sibling search HERE spans BOTH `local` and `dingtalk` directory accounts of THIS org only (via
+ * the `directory_integrations.org_id` join) — never accounts in a different org. Call this AFTER
+ * the triggering link mutation has already been written in the same transaction, so a
+ * just-severed/reassigned row correctly
  * self-excludes from the NOT EXISTS.
  *
  * Boundary (this PR's own reading, presented to the owner as evidence — NOT an adjudicated owner

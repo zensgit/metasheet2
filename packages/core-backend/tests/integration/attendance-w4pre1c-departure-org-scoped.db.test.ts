@@ -8,26 +8,33 @@ import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory
  * pre-existing `directory-deprovision-selection.db.test.ts`; case ①'s own file drives the full
  * `syncDirectoryIntegration` orchestration, which owner named specifically for that case only).
  *
- * Case ② construction note (see PR body's combination-semantics section for the full reasoning):
- * `applyDirectoryDeprovisionPolicies`'s OWN candidate-selection sibling guard is GLOBAL (any
- * OTHER active *directory-linked* account, in ANY org, disqualifies a person from being a
- * candidate at all — pre-existing #4526 "rehire protection" behaviour, unchanged by this PR).
- * So a person who ALSO holds an active directory-linked account in org B would never become a
- * candidate for org A's sweep in the first place — nothing would execute, and the test would
- * prove nothing. Org B's membership here is therefore NOT directory-linked (no
- * `directory_account_links` row) — seeded directly as a `user_orgs` row, exactly the shape a
- * `POST /api/admin/users` explicit-`attendanceOrgId` admission (#4526 item D) would leave
- * behind. This is the only construction that lets org A's policy actually execute while org B
- * stays provably untouched.
+ * DOC-COMMENT CORRECTED post-hoc by W4-PRE-1d (owner P1/P2, #4530 review, issuecomment-
+ * 5043752399) — the file's assertions and fixtures are UNCHANGED and still pass (both cases'
+ * outcomes happen to coincide under the new org-scoped guard, for the reasons below); only the
+ * stale "GLOBAL guard" framing below has been corrected so it does not misdescribe the current
+ * candidate-selection predicate as GLOBAL when it is now ORG-SCOPED.
  *
- * Case ③ framing (owner asked for this explicitly; see PR body): whenever the GLOBAL guard
- * above admits a candidate, the ORG-SCOPED "no other active binding" check INSIDE
- * `deactivateUserOrgMembershipIfNoOtherActiveBinding` (#4526) is provably always satisfied too
- * — global no-sibling-anywhere is a strictly stronger condition than org-scoped no-sibling-
- * here. So this call path can only reach case ③ via the GLOBAL pre-filter (candidateCount: 0,
- * the new user_orgs write is never reached at all), not via the org-scoped helper's own check
- * blocking anything. Presented as evidence for owner review, not an adjudicated claim about the
- * helper being load-bearing on this specific call path.
+ * Case ② construction note (see PR body's combination-semantics section for the full reasoning):
+ * `applyDirectoryDeprovisionPolicies`'s OWN candidate-selection sibling guard was GLOBAL when
+ * this file was written (any OTHER active *directory-linked* account, in ANY org, disqualified a
+ * person from being a candidate at all — pre-existing #4526 "rehire protection" behaviour). As of
+ * W4-PRE-1d it is ORG-SCOPED (same org as the departing account only) — case ②'s org-B sibling
+ * being a BARE `user_orgs` row (no `directory_account_links` row at all) means it was, and still
+ * is, invisible to this guard EITHER way, so this case's outcome is unaffected by the split; it
+ * was never actually exercising the GLOBAL-vs-org-scoped distinction (that gap is exactly what
+ * the owner's P1 finding named, and what `attendance-w4pre1d-departure-candidate-split.db.test.ts`
+ * now covers with a REAL org-B binding instead of this bare stand-in). Org B's membership here is
+ * seeded directly as a `user_orgs` row, exactly the shape a `POST /api/admin/users` explicit-
+ * `attendanceOrgId` admission (#4526 item D) would leave behind.
+ *
+ * Case ③ framing (owner asked for this explicitly; see PR body): the sibling here is in THIS
+ * SAME org (same integration), so both the pre-W4-PRE-1d GLOBAL guard and the current ORG-SCOPED
+ * guard exclude this person from candidacy for the same underlying reason (an active, linked
+ * sibling in org A itself) — this case does not distinguish the two guards either. Whenever
+ * either guard admits a candidate, the org-scoped "no other active binding" check INSIDE
+ * `deactivateUserOrgMembershipIfNoOtherActiveBinding` (#4526) is provably always satisfied too,
+ * so this call path can only reach case ③ via the candidate-selection pre-filter (candidateCount:
+ * 0, the new user_orgs write is never reached at all).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -139,8 +146,10 @@ describeIfDatabase('W4-PRE-1c cases ②③ — org-scoped user_orgs deactivation
       deactivatedAccountIds: [departed],
     })
 
-    // The GLOBAL sibling guard excludes this person from candidacy entirely (pre-existing
-    // #4526 behaviour) — the new user_orgs write is never reached. See file doc-comment.
+    // The (as of W4-PRE-1d, ORG-SCOPED) sibling guard excludes this person from candidacy
+    // entirely — the sibling is active+linked in this SAME org, so both the pre-existing GLOBAL
+    // guard and the current org-scoped one agree here; the new user_orgs write is never reached.
+    // See file doc-comment.
     expect(outcome.candidateCount).toBe(0)
     expect(outcome.affected).toEqual([])
     await expect(membershipIsActive(user, orgA)).resolves.toBe(true)
