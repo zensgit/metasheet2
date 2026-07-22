@@ -524,15 +524,24 @@ describe('buildObjectFieldsRepairSurface (W2/P2-3 atomic repair surface)', () =>
     await surface.findObjectSheet({ projectId: 'tenant_1:plugin', objectId: 'obj' })
     await surface.resolveExistingObjectFieldIds({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
     await surface.readObjectFieldsContent({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
-    await surface.ensureMissingObjectFields({ projectId: 'tenant_1:plugin', objectId: 'obj', fields: [] })
+    // Non-empty fields so ensureMissingObjectFields actually emits an INSERT — otherwise the
+    // WRITE binding is not pinned hermetically (review NIT: an empty-fields ensure emits zero
+    // SQL, so a write-method escape would leave this test green).
+    await surface.ensureMissingObjectFields({
+      projectId: 'tenant_1:plugin',
+      objectId: 'obj',
+      fields: [{ id: 'newField', name: 'New Field', type: 'string' }],
+    })
 
-    const joined = sqls.join(' ; ')
+    const joined = sqls.join(' ; ').toLowerCase()
     // findObjectSheet routed through the spy (meta_sheets) …
     expect(joined).toMatch(/meta_sheets/)
-    // … and resolveExistingObjectFieldIds + readObjectFieldsContent (meta_fields).
-    expect(joined).toMatch(/meta_fields/)
-    // At least the three DB-touching methods used the injected query.
-    expect(sqls.length).toBeGreaterThanOrEqual(3)
+    // … resolveExistingObjectFieldIds + readObjectFieldsContent (meta_fields SELECT) …
+    expect(joined).toMatch(/from meta_fields/)
+    // … and ensureMissingObjectFields (meta_fields INSERT) — the WRITE binding, pinned.
+    expect(joined).toMatch(/insert into meta_fields/)
+    // All four DB-touching methods used the injected query.
+    expect(sqls.length).toBeGreaterThanOrEqual(4)
   })
 })
 

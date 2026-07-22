@@ -55,7 +55,8 @@
 - **变异承重**：每条守卫都跑过"禁用守卫→测试必 RED"；断言不发生必配正控；冻结词表 deepEqual + 运行时消费者 + 源级不变量三层。
 - **审阅轨迹（此刀跳过首审→连吃多轮 HOLD，教训入 [[feedback_adversarial_review_before_pushing_core_cross_package]]）**：
   - R1 2P1+3P2 / R2 1P1+2P2 / R3 4P2 / R4 独立审 1P3+2NIT / R5 owner-codex 0P1+3P2+2P3 — 全修 + 逐一 mutation-verified。
-  - **P2-3 建成后**再经 **独立工作流 3-lens 对抗审**（worktree 隔离）：0 阻塞、5 P3 全闭合（发货 runner glue 抽取可测 / 503 契约 pin / 文档同步）；**advisor** 抓的盲点（coarse-details 无 pin）以源级不变量补齐。
+  - **P2-3 建成后**经**两轮独立对抗审**：① 工作流 3-lens（worktree 隔离）0 阻塞、5 P3 全闭合（发货 runner glue 抽取可测 / 503 契约 pin / 文档同步）；② 直接 adversarial-reviewer（Opus，worktree 隔离）**APPROVE 0 P1 / 0 P2**——全部安全/正确守卫逐一 mutation-verified 承重（各 RED-under-neuter），确认 unarmed。其抓的唯一真 NIT（hermetic 单测未钉 write 绑定：空 fields 不发 SQL）已修（传非空 fields，write 逃逸⇒RED）。**advisor** 抓的盲点（coarse-details 无 pin）以源级不变量补齐。
+  - **审阅认可的 residual（不阻塞、非本刀引入）**：(a) MVP 多表 all-or-nothing 回滚**无直测**——单事务包裹逻辑上蕴含、canonical 单表回滚已证，标 **W3**（需多表 realdb 中途失败用例）；(b) `.cjs` 守卫测试**不在 CI**——STANDING/既存（house memory「plugin-integration-core tests NOT in CI」），修=接 CJS 链进 CI，另议。P2-3 的原子实质**已 CI 覆盖**（`stock-prep-w2-scoped-repair-realdb.test.ts` 在 plugin-tests.yml:487 DATABASE_URL-gated 步、单测在 core-backend 默认步）。
 - **runner-vs-prod 纪律**：发货 `index.ts` runner 抽成被测 `runObjectFieldsRepairTransactionWith` + `buildObjectFieldsRepairSurface`，realdb 与单测都覆盖发货代码，避免"测试自建 runner 空转"（[[feedback_runner_vs_prod_version_gap_vacuous_test]]）。
 
 ---
