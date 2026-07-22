@@ -480,12 +480,20 @@
                   <span>流程节点 {{ versionDiff.nodeChanges }}</span>
                   <span>连线 {{ versionDiff.edgeChanges }}</span>
                 </div>
+                <el-segmented
+                  v-if="versionDiff.totalChanges > 0"
+                  v-model="versionDiffMode"
+                  :options="versionDiffModeOptions"
+                  size="small"
+                  class="template-detail__version-diff-mode"
+                  data-testid="template-version-diff-mode"
+                />
                 <el-empty
                   v-if="versionDiff.totalChanges === 0"
                   description="与上一版本无结构变化"
                   :image-size="48"
                 />
-                <ul v-else class="template-detail__version-change-list">
+                <ul v-else-if="versionDiffMode === 'list'" class="template-detail__version-change-list">
                   <li
                     v-for="change in versionDiff.changes"
                     :key="`${change.entity}-${change.key}-${change.kind}`"
@@ -503,6 +511,62 @@
                     <strong>{{ change.label }}</strong>
                   </li>
                 </ul>
+                <div
+                  v-else-if="versionOverlay && versionOverlayLayout"
+                  class="template-detail__version-overlay"
+                  data-testid="template-version-graph-overlay"
+                >
+                  <p v-if="versionDiff.fieldChanges" class="template-detail__version-overlay-note">
+                    另有 {{ versionDiff.fieldChanges }} 项表单字段变化，请切回列表查看。
+                  </p>
+                  <div
+                    class="template-detail__version-overlay-canvas"
+                    :style="{ width: `${versionOverlayLayout.width}px`, height: `${versionOverlayLayout.height}px` }"
+                  >
+                    <svg
+                      class="template-detail__version-overlay-edges"
+                      :width="versionOverlayLayout.width"
+                      :height="versionOverlayLayout.height"
+                    >
+                      <defs>
+                        <marker id="approval-version-overlay-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                          <path d="M0,0 L7,3 L0,6 Z" fill="currentColor" />
+                        </marker>
+                      </defs>
+                      <path
+                        v-for="line in versionOverlayEdgeLines"
+                        :key="line.key"
+                        :d="line.path"
+                        class="template-detail__version-overlay-edge"
+                        :class="line.change ? `is-${line.change}` : ''"
+                        marker-end="url(#approval-version-overlay-arrow)"
+                        data-testid="template-version-overlay-edge"
+                      />
+                    </svg>
+                    <div
+                      v-for="pos in versionOverlayLayout.nodes"
+                      :key="pos.key"
+                      class="template-detail__version-overlay-node"
+                      :class="versionOverlayNodeChange(pos.key) ? `is-${versionOverlayNodeChange(pos.key)}` : ''"
+                      :style="{
+                        left: `${pos.x}px`,
+                        top: `${pos.y}px`,
+                        width: `${VERSION_OVERLAY_NODE_W}px`,
+                        minHeight: `${VERSION_OVERLAY_NODE_H}px`,
+                      }"
+                      data-testid="template-version-overlay-node"
+                    >
+                      <strong>{{ versionOverlayNodeLabel(pos.key) }}</strong>
+                      <el-tag
+                        v-if="versionOverlayNodeChange(pos.key)"
+                        size="small"
+                        :type="versionChangeTagType(versionOverlayNodeChange(pos.key)!)"
+                      >
+                        {{ versionChangeKindLabel(versionOverlayNodeChange(pos.key)!) }}
+                      </el-tag>
+                    </div>
+                  </div>
+                </div>
               </template>
               <el-alert
                 v-else-if="versionDiffError"
@@ -567,6 +631,12 @@ import {
   type TemplateVersionChangeKind,
   type TemplateVersionDiff,
 } from '../../approvals/templateVersionDiff'
+import { buildVersionGraphOverlay } from '../../approvals/versionGraphOverlay'
+import {
+  computeLayout,
+  GRAPH_LAYOUT_NODE_HEIGHT,
+  GRAPH_LAYOUT_NODE_WIDTH,
+} from '../../approvals/graphLayout'
 import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
 import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
 
@@ -903,7 +973,13 @@ const versionHistoryError = ref('')
 const selectedVersionId = ref<string | null>(null)
 const selectedVersion = ref<ApprovalTemplateVersionDetailDTO | null>(null)
 const selectedBaseline = ref<ApprovalTemplateVersionSummaryDTO | null>(null)
+const selectedBaselineSnapshot = ref<Pick<ApprovalTemplateVersionDetailDTO, 'formSchema' | 'approvalGraph'> | null>(null)
 const versionDiff = ref<TemplateVersionDiff | null>(null)
+const versionDiffMode = ref<'list' | 'canvas'>('list')
+const versionDiffModeOptions = [
+  { label: '变化列表', value: 'list' },
+  { label: '流程画布', value: 'canvas' },
+]
 const versionDiffLoading = ref(false)
 const versionDiffError = ref('')
 const restoringVersionId = ref<string | null>(null)
@@ -916,6 +992,44 @@ const versionDiffTitle = computed(() => {
     ? `v${selectedBaseline.value.version} -> v${selectedVersion.value.version}`
     : `v${selectedVersion.value.version} 初始内容`
 })
+const versionOverlay = computed(() => {
+  if (!selectedVersion.value || !selectedBaselineSnapshot.value || !versionDiff.value) return null
+  return buildVersionGraphOverlay(
+    selectedBaselineSnapshot.value.approvalGraph,
+    selectedVersion.value.approvalGraph,
+    versionDiff.value,
+  )
+})
+const versionOverlayLayout = computed(() => versionOverlay.value ? computeLayout(versionOverlay.value.graph) : null)
+const VERSION_OVERLAY_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
+const VERSION_OVERLAY_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
+const versionOverlayEdgeLines = computed(() => {
+  const overlay = versionOverlay.value
+  const layout = versionOverlayLayout.value
+  if (!overlay || !layout) return []
+  const positions = new Map(layout.nodes.map((node) => [node.key, node]))
+  return overlay.graph.edges.map((edge) => {
+    const source = positions.get(edge.source)
+    const target = positions.get(edge.target)
+    const x1 = (source?.x ?? 0) + GRAPH_LAYOUT_NODE_WIDTH / 2
+    const y1 = (source?.y ?? 0) + GRAPH_LAYOUT_NODE_HEIGHT
+    const x2 = (target?.x ?? 0) + GRAPH_LAYOUT_NODE_WIDTH / 2
+    const y2 = target?.y ?? 0
+    const midY = y1 + (y2 - y1) / 2
+    return {
+      key: edge.key,
+      path: `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`,
+      change: overlay.edgeChanges.get(edge.key),
+    }
+  })
+})
+function versionOverlayNodeChange(nodeKey: string): TemplateVersionChangeKind | undefined {
+  return versionOverlay.value?.nodeChanges.get(nodeKey)
+}
+function versionOverlayNodeLabel(nodeKey: string): string {
+  const node = versionOverlay.value?.graph.nodes.find((candidate) => candidate.key === nodeKey)
+  return node?.name?.trim() || (node ? nodeTypeLabel(node.type) : '流程节点')
+}
 
 const VERSION_STATUS_LABELS: Record<ApprovalTemplateStatus, string> = {
   draft: '草稿',
@@ -966,6 +1080,7 @@ async function loadVersionDetail(versionId: string): Promise<ApprovalTemplateVer
 async function openVersionDiff(row: ApprovalTemplateVersionSummaryDTO) {
   selectedVersionId.value = row.id
   selectedVersion.value = null
+  selectedBaselineSnapshot.value = null
   versionDiff.value = null
   versionDiffError.value = ''
   versionDiffLoading.value = true
@@ -979,6 +1094,7 @@ async function openVersionDiff(row: ApprovalTemplateVersionSummaryDTO) {
     ])
     if (selectedVersionId.value !== row.id) return
     selectedVersion.value = current
+    selectedBaselineSnapshot.value = previous
     versionDiff.value = diffApprovalTemplateVersions(previous, current)
   } catch (e: any) {
     if (selectedVersionId.value === row.id) {
@@ -993,7 +1109,9 @@ function closeVersionDiff() {
   selectedVersionId.value = null
   selectedVersion.value = null
   selectedBaseline.value = null
+  selectedBaselineSnapshot.value = null
   versionDiff.value = null
+  versionDiffMode.value = 'list'
   versionDiffError.value = ''
 }
 
@@ -1243,6 +1361,89 @@ onBeforeUnmount(() => {
 .template-detail__version-change-entity {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+}
+
+.template-detail__version-diff-mode {
+  margin-bottom: 12px;
+}
+
+.template-detail__version-overlay {
+  min-width: 0;
+  max-height: min(66vh, 720px);
+  overflow: auto;
+}
+
+.template-detail__version-overlay-note {
+  margin: 0 0 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.template-detail__version-overlay-canvas {
+  position: relative;
+  min-width: 100%;
+  min-height: 220px;
+  overflow: hidden;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+}
+
+.template-detail__version-overlay-edges {
+  position: absolute;
+  inset: 0;
+  color: var(--el-border-color-darker);
+}
+
+.template-detail__version-overlay-edge {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.template-detail__version-overlay-edge.is-added {
+  color: var(--el-color-success);
+}
+
+.template-detail__version-overlay-edge.is-changed,
+.template-detail__version-overlay-edge.is-moved {
+  color: var(--el-color-warning);
+  stroke-dasharray: 2 3;
+}
+
+.template-detail__version-overlay-edge.is-removed {
+  color: var(--el-color-danger);
+  stroke-dasharray: 5 4;
+}
+
+.template-detail__version-overlay-node {
+  position: absolute;
+  box-sizing: border-box;
+  min-height: 76px;
+  padding: 10px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: var(--ms-bg-card);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.template-detail__version-overlay-node.is-added {
+  border-color: var(--el-color-success);
+}
+
+.template-detail__version-overlay-node.is-changed,
+.template-detail__version-overlay-node.is-moved {
+  border-color: var(--el-color-warning);
+}
+
+.template-detail__version-overlay-node.is-removed {
+  border-color: var(--el-color-danger);
+  border-style: dashed;
+  opacity: 0.72;
 }
 
 @media (max-width: 768px) {
