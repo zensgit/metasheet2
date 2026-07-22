@@ -25,6 +25,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { GRAPH_LAYOUT_NODE_HEIGHT } from '../src/approvals/graphLayout'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const confirmSpy = vi.fn().mockResolvedValue(undefined)
@@ -205,6 +206,21 @@ const ElEmpty = defineComponent({
   },
 })
 
+const ElSegmented = defineComponent({
+  name: 'ElSegmented',
+  props: { modelValue: String, options: Array },
+  emits: ['update:modelValue'],
+  render() {
+    return h('div', { ...this.$attrs }, (this.options as Array<{ label: string; value: string }> | undefined)?.map((option) =>
+      h('button', {
+        type: 'button',
+        'data-selected': this.modelValue === option.value ? 'true' : 'false',
+        onClick: () => this.$emit('update:modelValue', option.value),
+      }, option.label),
+    ))
+  },
+})
+
 function installStubs(app: VueApp<Element>) {
   app.directive('loading', {})
   app.component('ElTable', ElTable)
@@ -212,6 +228,7 @@ function installStubs(app: VueApp<Element>) {
   app.component('ElTag', ElTag)
   app.component('ElAlert', ElAlert)
   app.component('ElEmpty', ElEmpty)
+  app.component('ElSegmented', ElSegmented)
   app.component('ElButton', passthrough('ElButton', 'button'))
   app.component('ElInput', passthrough('ElInput', 'input'))
   app.component('ElSelect', passthrough('ElSelect'))
@@ -401,6 +418,18 @@ describe('B3-09 template version history (TemplateDetailView)', () => {
     expect(diff?.textContent).toContain('流程节点 1')
     expect(diff?.textContent).toContain('报销金额')
     expect(diff?.textContent).toContain('财务审批')
+
+    const canvasMode = Array.from(diff!.querySelectorAll('button')).find((button) => button.textContent === '流程画布')
+    expect(canvasMode).toBeDefined()
+    canvasMode!.click()
+    await nextTick()
+
+    const overlay = diff!.querySelector('[data-testid="template-version-graph-overlay"]')
+    expect(overlay).not.toBeNull()
+    const changedNode = overlay!.querySelector('[data-testid="template-version-overlay-node"]') as HTMLElement
+    expect(changedNode.textContent).toContain('财务审批')
+    expect(changedNode.classList.contains('is-changed')).toBe(true)
+    expect(changedNode.style.minHeight).toBe(`${GRAPH_LAYOUT_NODE_HEIGHT}px`)
   })
 
   it('restores an older version as a new draft using the visible latest-version anchor', async () => {

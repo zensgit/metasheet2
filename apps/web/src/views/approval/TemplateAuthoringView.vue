@@ -488,12 +488,36 @@
             >
               <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
             </el-alert>
-            <div class="template-authoring__canvas-viewport">
+            <div class="template-authoring__canvas-toolbar" data-testid="approval-canvas-toolbar">
+              <el-button-group>
+                <el-button :icon="ZoomOut" title="缩小画布" aria-label="缩小画布" data-testid="approval-canvas-zoom-out" @click="changeCanvasZoom('out')" />
+                <el-button
+                  class="template-authoring__canvas-zoom-label"
+                  aria-label="重置画布缩放为 100%"
+                  data-testid="approval-canvas-zoom-label"
+                  @click="resetCanvasZoom"
+                >
+                  {{ canvasZoomLabel }}
+                </el-button>
+                <el-button :icon="ZoomIn" title="放大画布" aria-label="放大画布" data-testid="approval-canvas-zoom-in" @click="changeCanvasZoom('in')" />
+              </el-button-group>
+              <el-button :icon="FullScreen" data-testid="approval-canvas-fit" @click="fitCanvasToViewport">适应画布</el-button>
+            </div>
+            <div class="template-authoring__canvas-viewport-shell">
               <div
-                class="template-authoring__canvas"
-                data-testid="approval-graph-canvas"
-                :style="{ position: 'relative', height: canvasLayout.height + 'px', width: canvasLayout.width + 'px' }"
+                ref="canvasViewportRef"
+                class="template-authoring__canvas-viewport"
+                role="region"
+                aria-label="审批流程画布"
+                tabindex="0"
+                @scroll="syncCanvasViewportState"
               >
+                <div class="template-authoring__canvas-stage" :style="canvasStageStyle">
+                  <div
+                    class="template-authoring__canvas"
+                    data-testid="approval-graph-canvas"
+                    :style="canvasSurfaceStyle"
+                  >
                 <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
                   <defs>
                     <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
@@ -552,7 +576,45 @@
                     <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
                   </div>
                 </div>
+                  </div>
+                </div>
               </div>
+              <svg
+                class="template-authoring__canvas-minimap"
+                :width="CANVAS_MINIMAP_W"
+                :height="CANVAS_MINIMAP_H"
+                :viewBox="`0 0 ${CANVAS_MINIMAP_W} ${CANVAS_MINIMAP_H}`"
+                role="img"
+                aria-label="画布缩略导航"
+                data-testid="approval-canvas-minimap"
+              >
+                <g :transform="`translate(${canvasMinimap.offsetX} ${canvasMinimap.offsetY}) scale(${canvasMinimap.scale})`">
+                  <path
+                    v-for="line in canvasEdgeLines"
+                    :key="`minimap-${line.key}`"
+                    :d="line.path"
+                    class="template-authoring__canvas-minimap-edge"
+                  />
+                  <rect
+                    v-for="pos in canvasLayout.nodes"
+                    :key="`minimap-${pos.key}`"
+                    :x="pos.x"
+                    :y="pos.y"
+                    :width="CANVAS_NODE_W"
+                    :height="CANVAS_NODE_H"
+                    rx="6"
+                    class="template-authoring__canvas-minimap-node"
+                  />
+                </g>
+                <rect
+                  :x="canvasMinimap.viewport.x"
+                  :y="canvasMinimap.viewport.y"
+                  :width="canvasMinimap.viewport.width"
+                  :height="canvasMinimap.viewport.height"
+                  class="template-authoring__canvas-minimap-window"
+                  data-testid="approval-canvas-minimap-window"
+                />
+              </svg>
             </div>
             <p class="template-authoring__hint">画布用于编排结构（增删节点 / 分支、拖动布局）。点击节点在右侧检查器编辑配置；也可切换「结构列表」。</p>
           </div>
@@ -1182,7 +1244,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { Plus } from '@element-plus/icons-vue'
+import { FullScreen, Plus, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { summarizeConditionBranch, summarizeConditionNode } from '../../approvals/conditionSummary'
@@ -1261,6 +1323,12 @@ import {
   GRAPH_LAYOUT_NODE_WIDTH,
   type GraphLayout,
 } from '../../approvals/graphLayout'
+import {
+  clientToCanvasPoint,
+  computeMinimapFrame,
+  fitCanvasZoom,
+  stepCanvasZoom,
+} from '../../approvals/canvasViewport'
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
@@ -1793,10 +1861,15 @@ function canRemoveNode(node: ApprovalNode): boolean {
 const canvasViewMode = ref<'list' | 'canvas'>('list')
 const selectedCanvasNode = ref<string | null>(null)
 const canvasInspectorRef = ref<HTMLElement | null>(null)
+const canvasViewportRef = ref<HTMLElement | null>(null)
 const nodePositions = ref<Record<string, { x: number; y: number }>>({})
 const draggingCanvasNode = ref<string | null>(null)
+const canvasZoom = ref(1)
+const canvasViewportState = ref({ width: 0, height: 0, scrollLeft: 0, scrollTop: 0 })
 const CANVAS_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
 const CANVAS_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
+const CANVAS_MINIMAP_W = 220
+const CANVAS_MINIMAP_H = 120
 const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(draft.value))
 const canvasLayout = computed<GraphLayout>(() => {
   const layout = computeLayout(canvasEffectiveGraph.value)
@@ -1809,6 +1882,55 @@ const canvasLayout = computed<GraphLayout>(() => {
   }
 })
 const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
+const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
+const canvasStageStyle = computed(() => ({
+  width: `${Math.round(canvasLayout.value.width * canvasZoom.value)}px`,
+  height: `${Math.round(canvasLayout.value.height * canvasZoom.value)}px`,
+}))
+const canvasSurfaceStyle = computed(() => ({
+  position: 'relative' as const,
+  width: `${canvasLayout.value.width}px`,
+  height: `${canvasLayout.value.height}px`,
+  transform: `scale(${canvasZoom.value})`,
+  transformOrigin: '0 0',
+}))
+const canvasMinimap = computed(() => computeMinimapFrame(
+  canvasLayout.value,
+  canvasViewportState.value,
+  canvasZoom.value,
+  { width: CANVAS_MINIMAP_W, height: CANVAS_MINIMAP_H },
+))
+function syncCanvasViewportState(): void {
+  const viewport = canvasViewportRef.value
+  if (!viewport) return
+  canvasViewportState.value = {
+    width: viewport.clientWidth,
+    height: viewport.clientHeight,
+    scrollLeft: viewport.scrollLeft,
+    scrollTop: viewport.scrollTop,
+  }
+}
+async function setCanvasZoom(nextZoom: number): Promise<void> {
+  canvasZoom.value = nextZoom
+  await nextTick()
+  syncCanvasViewportState()
+}
+function changeCanvasZoom(direction: 'in' | 'out'): void {
+  void setCanvasZoom(stepCanvasZoom(canvasZoom.value, direction))
+}
+function resetCanvasZoom(): void {
+  void setCanvasZoom(1)
+}
+async function fitCanvasToViewport(): Promise<void> {
+  const viewport = canvasViewportRef.value
+  if (!viewport) return
+  await setCanvasZoom(fitCanvasZoom(
+    canvasLayout.value,
+    { width: viewport.clientWidth, height: viewport.clientHeight },
+  ))
+  viewport.scrollTo({ left: 0, top: 0 })
+  syncCanvasViewportState()
+}
 function canvasNodeByKey(key: string): ApprovalNode | undefined {
   return canvasEffectiveGraph.value.nodes.find((n) => n.key === key)
 }
@@ -1833,6 +1955,11 @@ watch(canvasEffectiveGraph, (graph) => {
   const key = selectedCanvasNode.value
   if (!key) return
   if (!graph.nodes.some((node) => node.key === key)) clearCanvasSelection()
+})
+watch([canvasViewMode, canvasLayout], async ([mode]) => {
+  if (mode !== 'canvas') return
+  await nextTick()
+  syncCanvasViewportState()
 })
 
 // B2-03 publish pre-flight checklist — aggregates the SAME already-exported validators used
@@ -1895,11 +2022,12 @@ function onCanvasNodeDragEnd(event: DragEvent): void {
   const surface = (event.currentTarget as HTMLElement | null)?.closest('[data-testid="approval-graph-canvas"]')
   const rect = surface?.getBoundingClientRect()
   if (rect) {
+    const point = clientToCanvasPoint(event.clientX, event.clientY, rect, canvasZoom.value)
     nodePositions.value = {
       ...nodePositions.value,
       [draggingCanvasNode.value]: {
-        x: Math.max(0, Math.round(event.clientX - rect.left - CANVAS_NODE_W / 2)),
-        y: Math.max(0, Math.round(event.clientY - rect.top - CANVAS_NODE_H / 2)),
+        x: Math.max(0, Math.round(point.x - CANVAS_NODE_W / 2)),
+        y: Math.max(0, Math.round(point.y - CANVAS_NODE_H / 2)),
       },
     }
   }
@@ -1920,9 +2048,7 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
 // verbatim once the author has touched the field, falling back to the derived join before that
 // (hydrate / a node nobody has edited yet).
 function approvalSourceIdsText(nodeKey: string): string {
-  const v = approvalSourceIds(nodeKey).join(', ')
-  console.log('DEBUG approvalSourceIdsText call ->', JSON.stringify(v), 'ids=', JSON.stringify(approvalSourceIds(nodeKey)))
-  return v
+  return approvalSourceIds(nodeKey).join(', ')
 }
 function setApprovalSourceIdsText(nodeKey: string, text: string): void {
   setApprovalSourceIds(nodeKey, parseIdsText(text))
@@ -2203,6 +2329,9 @@ function moveStep(index: number, delta: -1 | 1) {
 }
 
 async function loadTemplateForEdit() {
+  nodePositions.value = {}
+  selectedCanvasNode.value = null
+  canvasZoom.value = 1
   if (!isEditMode.value) {
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
@@ -2443,6 +2572,7 @@ onMounted(() => {
   void directory.loadRoles()
   void directory.loadFormulaRoles()
   void loadTemplateForEdit()
+  window.addEventListener('resize', syncCanvasViewportState)
 })
 
 // B1-07: discard protection — the editor is the longest-lived form in the approval admin
@@ -2467,6 +2597,7 @@ watch(isDraftDirty, (dirty) => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', syncCanvasViewportState)
   window.onbeforeunload = null
   if (highlightStepTimer) clearTimeout(highlightStepTimer)
 })
@@ -2965,12 +3096,39 @@ pre {
   flex: 1 1 auto;
   min-width: 0;
 }
+.template-authoring__canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 32px;
+  margin-bottom: 8px;
+}
+.template-authoring__canvas-zoom-label {
+  min-width: 58px;
+  font-variant-numeric: tabular-nums;
+}
+.template-authoring__canvas-viewport-shell {
+  position: relative;
+  min-width: 0;
+}
 .template-authoring__canvas-viewport {
+  min-height: 360px;
+  max-height: min(66vh, 720px);
   max-width: 100%;
   overflow: auto;
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
   background: var(--ms-bg-page);
+}
+.template-authoring__canvas-viewport:focus-visible {
+  outline: 2px solid var(--el-color-primary-light-5);
+  outline-offset: 2px;
+}
+.template-authoring__canvas-stage {
+  position: relative;
+  min-width: 1px;
+  min-height: 1px;
 }
 .template-authoring__canvas {
   position: relative;
@@ -3017,6 +3175,37 @@ pre {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
+}
+.template-authoring__canvas-minimap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  box-sizing: border-box;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--el-bg-color) 94%, transparent);
+  box-shadow: var(--el-box-shadow-lighter);
+  pointer-events: none;
+}
+.template-authoring__canvas-minimap-edge {
+  fill: none;
+  stroke: var(--el-border-color-darker);
+  stroke-width: 5;
+}
+.template-authoring__canvas-minimap-node {
+  fill: var(--el-fill-color-light);
+  stroke: var(--el-border-color-darker);
+  stroke-width: 4;
+}
+.template-authoring__canvas-minimap-window {
+  fill: color-mix(in srgb, var(--el-color-primary) 12%, transparent);
+  stroke: var(--el-color-primary);
+  stroke-width: 1.5;
+}
+@media (max-width: 560px) {
+  .template-authoring__canvas-minimap {
+    display: none;
+  }
 }
 .template-authoring__canvas-inspector {
   /* ~400px so ms-w-360 controls fit with body padding; stacks to 100% under 960px. */
