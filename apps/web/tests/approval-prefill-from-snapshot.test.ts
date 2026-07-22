@@ -132,16 +132,34 @@ describe('approvals/prefillFromSnapshot — UX B2-13 (再次提交)', () => {
     expect(prefillFromSnapshot(formSchema, { tags: 'a' })).toEqual({})
   })
 
-  it('date/datetime require a value Date can actually parse', () => {
+  it('date requires a strict real-calendar YYYY-MM-DD string; a datetime/invalid value must NOT repopulate a date input', () => {
     const formSchema = schema([
       { id: 'due', type: 'date', label: '截止日期' },
       { id: 'meet', type: 'datetime', label: '会议时间' },
     ])
+    // Strict civil date prefills byte-for-byte; datetime keeps instant semantics (control).
     expect(prefillFromSnapshot(formSchema, { due: '2026-07-01', meet: '2026-07-01T10:00:00Z' })).toEqual({
       due: '2026-07-01',
       meet: '2026-07-01T10:00:00Z',
     })
+    // Leap-day control (pure calendar arithmetic — identical in every timezone).
+    expect(prefillFromSnapshot(formSchema, { due: '2024-02-29' })).toEqual({ due: '2024-02-29' })
+    // None of these may repopulate a DATE input.
+    expect(prefillFromSnapshot(formSchema, { due: '2026-07-01T10:00:00Z' })).toEqual({})
+    expect(prefillFromSnapshot(formSchema, { due: '2026-07-01 10:00:00' })).toEqual({})
+    expect(prefillFromSnapshot(formSchema, { due: Date.UTC(2026, 6, 1) })).toEqual({})
+    expect(prefillFromSnapshot(formSchema, { due: ' 2026-07-01' })).toEqual({})
+    expect(prefillFromSnapshot(formSchema, { due: '2026-07-01 ' })).toEqual({})
+    expect(prefillFromSnapshot(formSchema, { due: '2026-02-29' })).toEqual({})
+    expect(prefillFromSnapshot(formSchema, { due: '0000-01-01' })).toEqual({})
     expect(prefillFromSnapshot(formSchema, { due: 'not-a-date' })).toEqual({})
+    // Datetime remains parseable as today: datetime strings, date-only strings, epoch numbers.
+    expect(prefillFromSnapshot(formSchema, { meet: '2026-07-01T10:00:00Z' }))
+      .toEqual({ meet: '2026-07-01T10:00:00Z' })
+    expect(prefillFromSnapshot(formSchema, { meet: '2026-07-01' })).toEqual({ meet: '2026-07-01' })
+    expect(prefillFromSnapshot(formSchema, { meet: Date.UTC(2026, 6, 1) }))
+      .toEqual({ meet: Date.UTC(2026, 6, 1) })
+    expect(prefillFromSnapshot(formSchema, { meet: 'not-a-date' })).toEqual({})
   })
 
   it('does not mutate the input snapshot or schema', () => {
