@@ -1308,22 +1308,47 @@ export function resolveDirectoryDeprovisionPolicy(
 
 export type DirectoryDeprovisionOutcome = {
   applied: boolean
-  /** Number of PEOPLE, not accounts — a user reached through two departed accounts counts once. */
+  /**
+   * W4-PRE-1d (owner P2 item 1, #4530 review, issuecomment-5043752399, 2026-07-22): the
+   * ORG-MEMBERSHIP candidate set — number of PEOPLE (not accounts; a user reached through two
+   * departed accounts counts once) who, in THIS run's org, hold no OTHER active linked
+   * directory account in that SAME org. This is now the circuit breaker's own input (owner P2
+   * item 3) — see `evaluateDirectoryDeprovisionCircuitBreaker`'s call site below. Before
+   * W4-PRE-1d this field was computed from a GLOBAL "no active binding ANYWHERE" guard, which
+   * silently dropped a person who departed org A but is still employed in org B out of
+   * candidacy entirely — see the file-level W4-PRE-1d note on `applyDirectoryDeprovisionPolicies`
+   * for the full owner-confirmed defect. That global guard still exists — see
+   * `globalCandidateCount` below — but it no longer gates membership candidacy, only the
+   * grant/platform-user actions.
+   */
   candidateCount: number
   manualReviewCount: number
+  /**
+   * W4-PRE-1d (owner P2 item 2): the GLOBAL candidate set, restricted to non-`manual_review`
+   * org-membership candidates (`candidateCount` above) who ALSO hold no other active linked
+   * directory account ANYWHERE (any org) — the pre-existing "任意位置无活跃绑定" guard,
+   * relocated here from candidate selection. This is the set eligible for
+   * `grantsDisabledCount` / `usersDeactivatedCount` this run; by construction it equals
+   * `grantsDisabledCount` (both increment on the exact same condition, before the `enabled`
+   * gate, mirroring that field's own attempt-not-flip semantics) — named separately so the
+   * SET is visible on its own in run stats/logs per the two-candidate-set observability
+   * requirement, not only inferable from the grant-specific field.
+   */
+  globalCandidateCount: number
   grantsDisabledCount: number
   usersDeactivatedCount: number
   /**
    * W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22, review-finding observability gap):
    * how many PEOPLE this run attempted a `user_orgs` deactivation for — every non-`manual_review`
-   * candidate, i.e. the same set (and same count, by construction) as `grantsDisabledCount`,
-   * since both writes are gated by the exact same `if (options.enabled)` block for the exact
-   * same candidates. Named separately so the `user_orgs` consequence is visible on its own in
-   * run stats/logs rather than requiring the reader to know it is implied by
-   * `grantsDisabledCount`. Like that field, this counts an ATTEMPT (preview mode included) —
-   * it does NOT mean the row actually flipped: `deactivateUserOrgMembershipIfNoOtherActiveBinding`
-   * no-ops (without erroring) when the org-scoped sibling check finds another active binding, or
-   * when no `user_orgs` row exists yet. Whether it actually flipped is not tracked (the shared
+   * org-membership candidate (W4-PRE-1d: no longer the same set as `grantsDisabledCount` — see
+   * that field's own doc-comment on the W4-PRE-1d split), since the write is gated by the exact
+   * same `if (options.enabled)` block for the exact same candidates. Named separately so the
+   * `user_orgs` consequence is visible on its own in run stats/logs rather than requiring the
+   * reader to know it is implied by `grantsDisabledCount`. Like that field, this counts an
+   * ATTEMPT (preview mode included) — it does NOT mean the row actually flipped:
+   * `deactivateUserOrgMembershipIfNoOtherActiveBinding` no-ops (without erroring) when the
+   * org-scoped sibling check finds another active binding, or when no `user_orgs` row exists
+   * yet. Whether it actually flipped is not tracked (the shared
    * helper's `UPDATE` has no `RETURNING`); this is attempt-visibility, not flip-visibility.
    */
   membershipDeactivationAttemptedCount: number
@@ -1333,6 +1358,14 @@ export type DirectoryDeprovisionOutcome = {
     directoryAccountId: string
     localUserId: string
     policy: DirectoryDeprovisionPolicy
+    /**
+     * W4-PRE-1d (owner P2 item 2): whether this person was in `globalCandidateCount` — no
+     * other active linked directory account ANYWHERE (any org) at the time the global check
+     * ran. `false` means org-membership deactivation was (maybe) attempted but grant-disable
+     * and platform-user deactivation were NOT — they stayed exactly as they were. Values-free:
+     * a boolean, not the sibling's identity.
+     */
+    globallyClear: boolean
   }>
   /**
    * W4-PRE-1c item B (owner 裁决②, #4522 rev3 review, 2026-07-22): `manual_review` never
@@ -1395,6 +1428,29 @@ export function evaluateDirectoryDeprovisionCircuitBreaker(options: {
   return null
 }
 
+/**
+ * W4-PRE-1d — candidate-set split (owner P1/P2, #4530 review, issuecomment-5043752399,
+ * 2026-07-22).
+ *
+ * Owner's confirmed P1, verbatim: "全局 sibling guard（directory-sync.ts:1425）把「A 离职但仍
+ * 在 B 任职」的用户整体排除出候选集 ⇒ A/B membership 都保持 active"。Before this PR, the ONE
+ * candidate-selection query used a GLOBAL "no active linked directory account anywhere" guard
+ * for everything: whether a person was a candidate AT ALL, whether their `user_orgs` row for
+ * THIS org got deactivated, and whether their grant/platform account did too. A person who left
+ * org A's directory but is still genuinely employed via org B's directory was globally
+ * disqualified from candidacy — org A's own membership stayed active forever, with no other
+ * mechanism to ever clear it.
+ *
+ * The fix splits candidacy into the two sets the owner named:
+ *   1. ORG-MEMBERSHIP candidates (`candidateCount` / `byUser` below) — org-scoped: excluded
+ *      only by another ACTIVE linked account in THIS SAME org. Governs `user_orgs` deactivation
+ *      AND is now the circuit breaker's input (owner P2 item 3).
+ *   2. GLOBAL candidates (`globalCandidateCount` / `globallyClearUserIds` below) — the
+ *      pre-existing "anywhere" guard, relocated here. Governs ONLY the DingTalk grant-disable
+ *      and (for `mark_inactive`) `users.is_active` writes.
+ * A person can now be set-1-yes/set-2-no: org A membership deactivates, grant and platform
+ * account survive because org B still vouches for them.
+ */
 export async function applyDirectoryDeprovisionPolicies(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   options: {
@@ -1412,6 +1468,7 @@ export async function applyDirectoryDeprovisionPolicies(
     applied: options.enabled,
     candidateCount: 0,
     manualReviewCount: 0,
+    globalCandidateCount: 0,
     grantsDisabledCount: 0,
     usersDeactivatedCount: 0,
     membershipDeactivationAttemptedCount: 0,
@@ -1422,14 +1479,23 @@ export async function applyDirectoryDeprovisionPolicies(
 
   if (options.deactivatedAccountIds.length === 0) return outcome
 
-  // Accounts this run just deactivated, whose linked local user has NO other active linked
-  // directory account ANYWHERE.
+  // W4-PRE-1d (owner P2, #4530 review, issuecomment-5043752399, 2026-07-22): resolved EAGERLY
+  // now — the org-membership candidate SELECT below is itself org-scoped and needs it as a
+  // WHERE parameter. (Pre-W4-PRE-1d this was resolved lazily; that is no longer possible.)
+  const orgId = await resolveDirectoryAccountOrgId(client, options.integrationId)
+
+  // W4-PRE-1d item 1 (owner P2, #4530 review — the owner's own confirmed-fact quote: "全局
+  // sibling guard（directory-sync.ts:1425）把「A 离职但仍在 B 任职」的用户整体排除出候选集 ⇒
+  // A/B membership 都保持 active"):
   //
-  // The sibling guard is deliberately NOT scoped by integration_id, and that is the whole
-  // point: `directory_account_links` is unique on directory_account_id only — local_user_id
-  // carries a plain index — so N accounts map to 1 user. A rehire (the old account departs,
-  // the new one links via the stable unionId) or a second integration would otherwise
-  // deactivate a person who is actively employed, with no way to undo it.
+  // ORG-MEMBERSHIP candidates — accounts this run just deactivated, whose linked local user
+  // has no OTHER active linked directory account in THIS SAME org (`i.org_id = $2`). Mirrors
+  // `deactivateUserOrgMembershipIfNoOtherActiveBinding`'s own org-scoped predicate exactly
+  // (same three clauses: linked, active, same org) so candidate SELECTION and the WRITE agree
+  // on who still "works here". A user who departed org A but is still actively employed in a
+  // DIFFERENT org B is now correctly a candidate for org A (the P1 defect this fixes) — the
+  // separate GLOBAL guard below decides only whether the grant/platform-user actions may also
+  // fire, never whether org A's own membership may be deactivated.
   const candidates = await client.query(
     `SELECT a.id::text AS directory_account_id,
             l.local_user_id,
@@ -1444,11 +1510,13 @@ export async function applyDirectoryDeprovisionPolicies(
           SELECT 1
             FROM directory_account_links sibling_link
             JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
+            JOIN directory_integrations sibling_integration ON sibling_integration.id = sibling.integration_id
            WHERE sibling_link.local_user_id = l.local_user_id
              AND sibling_link.link_status = 'linked'
              AND sibling.is_active = true
+             AND sibling_integration.org_id = $2::text
         )`,
-    [options.deactivatedAccountIds],
+    [options.deactivatedAccountIds, orgId],
   )
 
   // One decision per PERSON, not per account: a user reached through two departed accounts
@@ -1462,6 +1530,10 @@ export async function applyDirectoryDeprovisionPolicies(
     }
   }
 
+  // W4-PRE-1d item 3 (owner P2 — "breaker 改用组织成员候选数（防大批跨组织失活绕上限）"): the
+  // breaker's input is the ORG-MEMBERSHIP candidate count computed above, not a
+  // globally-filtered count — a batch of cross-org membership deactivations can no longer
+  // slip under the cap just because each person also holds an active binding elsewhere.
   outcome.candidateCount = byUser.size
 
   const abortReason = evaluateDirectoryDeprovisionCircuitBreaker({
@@ -1480,15 +1552,34 @@ export async function applyDirectoryDeprovisionPolicies(
     return outcome
   }
 
-  // W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22): resolved LAZILY and at most
-  // ONCE per call — every candidate here was selected for the SAME `options.integrationId`,
-  // hence the SAME org. Only queried the first time it is actually needed (a manual_review
-  // candidate to report, or a non-manual_review write to perform), so a run with neither
-  // never pays for it.
-  let resolvedOrgId: string | null = null
-  const resolveOrgIdOnce = async (): Promise<string> => {
-    if (resolvedOrgId === null) resolvedOrgId = await resolveDirectoryAccountOrgId(client, options.integrationId)
-    return resolvedOrgId
+  // W4-PRE-1d item 2 (owner P2 — "全局账号/授权候选：保留现有『任意位置无活跃绑定』守卫，才允许
+  // 关闭 DingTalk grant 或 users.is_active"): the pre-existing GLOBAL "no active binding
+  // ANYWHERE" guard, relocated from candidate SELECTION (where it wrongly excluded org-A-only
+  // candidacy) to here, where it gates only the grant-disable / platform-user-deactivation
+  // actions. Computed once for every non-`manual_review` org-membership candidate — manual_review
+  // never writes anything regardless, so it is excluded from this batch check entirely.
+  const nonManualReviewUserIds = Array.from(byUser.entries())
+    .filter(([, c]) => c.policy !== 'manual_review')
+    .map(([localUserId]) => localUserId)
+
+  const globallyClearUserIds = new Set<string>()
+  if (nonManualReviewUserIds.length > 0) {
+    const globalClear = await client.query(
+      `SELECT candidate_user AS local_user_id
+         FROM UNNEST($1::text[]) AS candidate_user
+        WHERE NOT EXISTS (
+          SELECT 1
+            FROM directory_account_links sibling_link
+            JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
+           WHERE sibling_link.local_user_id = candidate_user
+             AND sibling_link.link_status = 'linked'
+             AND sibling.is_active = true
+        )`,
+      [nonManualReviewUserIds],
+    )
+    for (const row of globalClear.rows as Array<{ local_user_id: string }>) {
+      globallyClearUserIds.add(row.local_user_id)
+    }
   }
 
   for (const [localUserId, { directoryAccountId, policy }] of byUser) {
@@ -1498,26 +1589,20 @@ export async function applyDirectoryDeprovisionPolicies(
       // 并暴露待人工确认状态") — never a write, membership stays exactly as it was; only the
       // pending-confirmation state is exposed (org/membership-scoped) on the existing
       // run-stats surface.
-      outcome.manualReviewPending.push({ directoryAccountId, localUserId, orgId: await resolveOrgIdOnce() })
+      outcome.manualReviewPending.push({ directoryAccountId, localUserId, orgId })
       continue
     }
 
-    outcome.affected.push({ directoryAccountId, localUserId, policy })
+    const globallyClear = globallyClearUserIds.has(localUserId)
+    outcome.affected.push({ directoryAccountId, localUserId, policy, globallyClear })
 
-    outcome.grantsDisabledCount += 1
-    // Same gate, same candidate set as `grantsDisabledCount` above — see this field's own
-    // doc-comment on `DirectoryDeprovisionOutcome`. Counted here (before the `enabled` check,
-    // like `grantsDisabledCount`) so preview runs also report how many `user_orgs`
-    // deactivation attempts WOULD happen if the switch were flipped on.
+    // W4-PRE-1d: org-membership deactivation is attempted for EVERY org-membership candidate
+    // reaching this point, unconditional on `globallyClear` — the global guard governs only the
+    // grant/platform-user actions below, never this one (owner P2 item 1 vs item 2 split).
+    // Same gate as before (breaker passed + `options.enabled`), see this field's own doc-comment
+    // on `DirectoryDeprovisionOutcome` for the attempt-not-flip distinction.
     outcome.membershipDeactivationAttemptedCount += 1
     if (options.enabled) {
-      await client.query(
-        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-         VALUES ($1, $2, FALSE, $3, NOW(), NOW())
-         ON CONFLICT (provider, local_user_id)
-         DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
-        [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
-      )
       // W4-PRE-1c (owner 裁决②, #4522 rev3 review — the only GitHub-persisted record is the
       // owner's own acknowledgment comment, issuecomment-5042388830: "不因单次同步缺失撤销
       // membership；deprovision circuit-breaker 通过 + 开关启用 + 策略实际执行时同事务失活对应
@@ -1525,44 +1610,58 @@ export async function applyDirectoryDeprovisionPolicies(
       // thread comment carries a longer/earlier original — this IS the citable text, not a
       // paraphrase of something else on record): the circuit breaker already passed (we are
       // past the abort-and-return above), the switch is on (`options.enabled`), and this
-      // policy just executed a REAL write for this person — a grant revoked here, and for
-      // `mark_inactive` the local account too, below. THIS moment — not the DT-OPS-01 sweep
-      // flipping `directory_accounts.is_active` alone — is "策略实际执行", and is what may
-      // deactivate `user_orgs`, same transaction. Reuses #4526's own org-scoped "no other
-      // active binding" rule verbatim (`deactivateUserOrgMembershipIfNoOtherActiveBinding`) —
-      // and that helper's OWN re-read (`SELECT ... FOR UPDATE` then a fresh READ COMMITTED
-      // `NOT EXISTS`) is NOT redundant with this function's global candidate-selection sibling
-      // guard above, despite both checking "no other active binding": guard (1) above is read
-      // ONCE, early, before this loop and before any write in this run; this helper re-checks
-      // AT WRITE TIME under a row lock. A concurrent transaction that commits a brand-new
+      // policy just executed for this person — THIS moment — not the DT-OPS-01 sweep flipping
+      // `directory_accounts.is_active` alone — is "策略实际执行", and is what deactivates
+      // `user_orgs`, same transaction. Reuses #4526's own org-scoped "no other active binding"
+      // rule verbatim (`deactivateUserOrgMembershipIfNoOtherActiveBinding`) — and that helper's
+      // OWN re-read (`SELECT ... FOR UPDATE` then a fresh READ COMMITTED `NOT EXISTS`) is NOT
+      // redundant with this function's own org-scoped candidate-selection guard above, despite
+      // both checking "no other active binding in this org": the guard above is read ONCE,
+      // early, before this loop and before any write in this run; this helper re-checks AT
+      // WRITE TIME under a row lock. A concurrent transaction that commits a brand-new
       // linked+active directory account for this SAME person in this SAME org, in the window
-      // between guard (1)'s read and this call, is invisible to guard (1)'s stale snapshot but
+      // between the guard's read and this call, is invisible to the guard's stale snapshot but
       // IS caught by this helper's fresh re-read — the same write-skew shape #4526 itself fixed
       // with `FOR UPDATE` for concurrent unbinds. So this check is independently load-bearing on
-      // this call path, not merely inherited defense-in-depth; see the PR body's combination-
-      // semantics section (owner review flagged) for the full reasoning. `manual_review` is
-      // excluded by the `continue` above: a single missed sync, or a policy that never executes,
-      // must never itself revoke membership.
-      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, {
-        userId: localUserId,
-        orgId: await resolveOrgIdOnce(),
-      })
+      // this call path, not merely inherited defense-in-depth. `manual_review` is excluded by
+      // the `continue` above: a single missed sync, or a policy that never executes, must never
+      // itself revoke membership.
+      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: localUserId, orgId })
     }
 
-    if (policy === 'mark_inactive') {
-      outcome.usersDeactivatedCount += 1
+    // W4-PRE-1d item 2: grant-disable and (for mark_inactive) platform-user deactivation are
+    // gated by the GLOBAL "no active binding ANYWHERE" guard — a person still actively employed
+    // through a DIFFERENT org's directory keeps DingTalk login and their platform account, even
+    // though THIS org's membership was just deactivated above.
+    if (globallyClear) {
+      outcome.globalCandidateCount += 1
+      outcome.grantsDisabledCount += 1
       if (options.enabled) {
         await client.query(
-          `UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1::text`,
-          [localUserId],
+          `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+           VALUES ($1, $2, FALSE, $3, NOW(), NOW())
+           ON CONFLICT (provider, local_user_id)
+           DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
+          [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
         )
+      }
+
+      if (policy === 'mark_inactive') {
+        outcome.usersDeactivatedCount += 1
+        if (options.enabled) {
+          await client.query(
+            `UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1::text`,
+            [localUserId],
+          )
+        }
       }
     }
   }
 
   if (!options.enabled && outcome.candidateCount > 0) {
     logger.info(
-      `Directory deprovision preview for ${options.integrationId}: ${outcome.candidateCount} person(s) — `
+      `Directory deprovision preview for ${options.integrationId}: ${outcome.candidateCount} org-membership `
+      + `candidate(s) (${outcome.globalCandidateCount} also globally clear) — `
       + `${outcome.grantsDisabledCount} grant(s) and ${outcome.usersDeactivatedCount} local user(s) would be disabled, `
       + `and ${outcome.membershipDeactivationAttemptedCount} org membership(s) (user_orgs) would be deactivation-attempted. `
       + `Affected: ${outcome.affected.map((a) => a.localUserId).join(', ') || '(none)'}. `
@@ -3967,8 +4066,14 @@ export async function syncDirectoryIntegration(
         managerCoverage: managerBindingCoverage.coverage,
         durationMs: Date.now() - runStartedAtMs,
         deprovisionApplied: deprovisionOutcome.applied,
+        // W4-PRE-1d (owner P2 item 1/3): org-membership candidates — the circuit breaker's own
+        // input. See `DirectoryDeprovisionOutcome.candidateCount`'s doc-comment.
         deprovisionCandidateCount: deprovisionOutcome.candidateCount,
         deprovisionManualReviewCount: deprovisionOutcome.manualReviewCount,
+        // W4-PRE-1d (owner P2 item 2, two-candidate-set observability): the GLOBAL candidate
+        // count — non-manual_review org-membership candidates who ALSO have no other active
+        // binding anywhere, i.e. eligible for the grant/platform-user actions below.
+        deprovisionGlobalCandidateCount: deprovisionOutcome.globalCandidateCount,
         deprovisionGrantsDisabledCount: deprovisionOutcome.grantsDisabledCount,
         deprovisionUsersDeactivatedCount: deprovisionOutcome.usersDeactivatedCount,
         // W4-PRE-1c (owner 裁决②, review-finding observability gap): the new user_orgs
@@ -4093,13 +4198,20 @@ export async function syncDirectoryIntegration(
             directoryAccountId: affected.directoryAccountId,
             localUserId: affected.localUserId,
             policy: affected.policy,
-            grantDisabled: true,
-            userDeactivated: affected.policy === 'mark_inactive',
-            // W4-PRE-1c (owner 裁决②, review-finding observability gap): every entry in
-            // `deprovisionOutcome.affected` (this loop's source) attempted the user_orgs
-            // deactivation unconditionally when `applied` is true — same gate as
-            // `grantDisabled` above, see `membershipDeactivationAttemptedCount`'s doc-comment.
-            // Attempted, not necessarily flipped (org-scoped sibling check may have no-op'd it).
+            // W4-PRE-1d (owner P2 item 2): NO LONGER unconditionally true — grant-disable and
+            // platform-user deactivation only actually ran when this person was also globally
+            // clear (no other active binding anywhere). A false here truthfully records that
+            // this org's membership was (maybe) deactivated but the grant/platform account
+            // were left untouched because the person is still active elsewhere.
+            grantDisabled: affected.globallyClear,
+            userDeactivated: affected.policy === 'mark_inactive' && affected.globallyClear,
+            globallyClear: affected.globallyClear,
+            // W4-PRE-1d: every entry in `deprovisionOutcome.affected` (this loop's source)
+            // attempted the org-membership (user_orgs) deactivation unconditionally when
+            // `applied` is true — this is now a SEPARATE gate from `grantDisabled` above (owner
+            // P2 item 1 vs item 2 split), see `membershipDeactivationAttemptedCount`'s
+            // doc-comment. Attempted, not necessarily flipped (the org-scoped sibling check at
+            // write time may have no-op'd it).
             membershipDeactivationAttempted: true,
             triggeredBy,
           },
