@@ -2371,6 +2371,48 @@ describe('ApprovalProductService', () => {
       })
     })
 
+    it('ignores a stray outgoing edge that runtime condition routing can never select', async () => {
+      const graph = conditionDefaultPathGraph({ kind: 'direct_manager' })
+      graph.nodes.splice(-2, 0, {
+        key: 'approval_stray',
+        type: 'approval',
+        config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+      })
+      graph.edges.splice(-1, 0,
+        { key: 'e-cond-stray', source: 'cond_1', target: 'approval_stray' },
+        { key: 'e-stray-join', source: 'approval_stray', target: 'join' },
+      )
+      mockParallelPublish(graph)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate(
+        'tpl-par',
+        { policy: { allowRevoke: true } } as never,
+      )
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+
+    it('without a default, scans the first-outgoing fallback for dynamic conflicts', async () => {
+      const graph = conditionDefaultPathGraph({ kind: 'requester' })
+      const condition = graph.nodes.find((node) => node.key === 'cond_1')!
+      condition.config = {
+        branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+      }
+      const highIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-high')
+      const lowIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-low')
+      ;[graph.edges[highIndex], graph.edges[lowIndex]] = [graph.edges[lowIndex], graph.edges[highIndex]]
+      mockParallelPublish(graph)
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().publishTemplate(
+        'tpl-par',
+        { policy: { allowRevoke: true } } as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester' },
+      })
+    })
+
     it('does NOT reject the same source on two ALTERNATIVE paths of ONE branch alone (within-branch union, not a conflict)', async () => {
       // Both cond_1 paths resolve to requester but branch B is a STATIC role — alternative paths of
       // one branch never run simultaneously, so publish must stay green.
@@ -2381,9 +2423,10 @@ describe('ApprovalProductService', () => {
     })
   })
 
-  describe('parallel branch all-path join reachability (normalize / author)', () => {
-    // Structural gate inside collectBranchAssignees / normalizeApprovalGraph: every
-    // runtime-possible path through a parallel branch must reach the configured join.
+  describe('parallel branch all-path join reachability (author / publish)', () => {
+    // The strict write gate proves every runtime-possible path through a parallel
+    // branch reaches the configured join. Stored reads keep the historical
+    // first-edge compatibility path so a validator tightening cannot brick them.
     // The prior first-outgoing-edge-only walk accepted templates where a condition's
     // FIRST rules edge joined while a non-first / default edge hit end (or dead-ended /
     // nested-parallel / cycled); create/update/publish went green, then a request that
@@ -2558,18 +2601,94 @@ describe('ApprovalProductService', () => {
       expect(pgState.pool.connect).not.toHaveBeenCalled()
     })
 
-    it('GOLDEN: same shape → publishTemplate rejects (stored-graph normalize)', async () => {
-      // Publish re-normalizes the STORED draft via asApprovalGraph → STORED_GRAPH_CONTEXT
-      // (500 APPROVAL_TEMPLATE_GRAPH_INVALID), same message as the author-time gate.
+    it('GOLDEN: same readable historical shape → publishTemplate rejects at the strict write gate', async () => {
       mockPublish(goldenDefaultEndsBeforeJoinGraph())
       const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
       await expect(
         new ApprovalProductService().publishTemplate('tpl-join-reach', { policy: { allowRevoke: true } } as never),
       ).rejects.toMatchObject({
-        statusCode: 500,
-        code: 'APPROVAL_TEMPLATE_GRAPH_INVALID',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
         message: 'approvalGraph parallel branch must reach join before end (at end)',
       })
+    })
+
+    it('compatibility GOLDEN: ordinary reads still return a historical first-edge-valid graph', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const template = {
+        id: 'tpl-join-reach', key: 'join-reach', name: 'Join Reach', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-join-reach', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-join-reach', template_id: 'tpl-join-reach', version: 1, status: 'draft',
+        form_schema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) return { rows: [], rowCount: 0 }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().getTemplate('tpl-join-reach')
+      expect(result?.approvalGraph).toEqual(graph)
+    })
+
+    it('form-only update revalidates the copied historical graph before creating a new version', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const template = {
+        id: 'tpl-join-reach', key: 'join-reach', name: 'Join Reach', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-join-reach', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-join-reach', template_id: 'tpl-join-reach', version: 1, status: 'draft',
+        form_schema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE template_id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('SELECT COALESCE(MAX(version), 0)::text')) return { rows: [{ max_version: '1' }], rowCount: 1 }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{ ...version, id: 'ver-join-reach-2', version: 2, form_schema: JSON.parse(String(params?.[2])) }], rowCount: 1 }
+        }
+        if (statement.startsWith('UPDATE approval_templates SET latest_version_id')) {
+          return { rows: [{ ...template, latest_version_id: 'ver-join-reach-2' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().updateTemplate('tpl-join-reach', {
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+      } as never)).rejects.toMatchObject(goldenReject)
+    })
+
+    it('no-default runtime fallback follows the first outgoing edge as well as declared rule edges', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const condition = graph.nodes.find((node) => node.key === 'cond_1')!
+      condition.config = {
+        branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+      }
+      const highIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-high')
+      const lowIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-low')
+      ;[graph.edges[highIndex], graph.edges[lowIndex]] = [graph.edges[lowIndex], graph.edges[highIndex]]
+      // First outgoing is now the undeclared low edge -> end; the declared high
+      // edge joins. Omitting the firstTarget fallback would false-accept.
+      mockCreateInsert('join-reach-no-default')
+      await expect(new (await import('../../src/services/ApprovalProductService')).ApprovalProductService().createTemplate({
+        key: 'join-reach-no-default',
+        name: 'Join Reach No Default',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)).rejects.toMatchObject(goldenReject)
     })
 
     it('symmetric: non-first RULES edge reaches end (default joins) → create rejects', async () => {
@@ -2753,6 +2872,47 @@ describe('ApprovalProductService', () => {
       expect(result.id).toBe('tpl-join-reach')
       // Sanity: graph size is linear in LAYERS (memoized walk bound), not exponential.
       expect(result.approvalGraph.nodes.length).toBe(5 + LAYERS * 4)
+    })
+
+    it('positive control: a deep valid condition chain does not overflow the JavaScript call stack', async () => {
+      const DEPTH = 4_000
+      const nodes: Array<Record<string, unknown>> = [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'fork', type: 'parallel', config: { branches: ['e-fork-deep', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+        { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+        { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ]
+      const edges: Array<{ key: string; source: string; target: string }> = [
+        { key: 'e-start-fork', source: 'start', target: 'fork' },
+        { key: 'e-fork-deep', source: 'fork', target: 'cond-deep-0' },
+        { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+        { key: 'e-b-join', source: 'branch_b', target: 'join' },
+        { key: 'e-join-end', source: 'join', target: 'end' },
+      ]
+      for (let index = 0; index < DEPTH; index += 1) {
+        const key = `cond-deep-${index}`
+        const edgeKey = `e-cond-deep-${index}`
+        const target = index + 1 < DEPTH ? `cond-deep-${index + 1}` : 'join'
+        nodes.push({
+          key,
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey, rules: [{ fieldId: 'amount', operator: 'gte', value: index }], conjunction: 'and' }],
+          },
+        })
+        edges.push({ key: edgeKey, source: key, target })
+      }
+
+      mockCreateInsert('join-reach-deep')
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().createTemplate({
+        key: 'join-reach-deep',
+        name: 'Join Reach Deep',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: { nodes, edges },
+      } as never)
+      expect(result.approvalGraph.nodes).toHaveLength(DEPTH + 5)
     })
 
     it('positive: stray outgoing edge NOT referenced by condition config must not fail a valid branch', async () => {
