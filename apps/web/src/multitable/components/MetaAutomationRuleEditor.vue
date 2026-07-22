@@ -475,6 +475,7 @@
                 :model-value="fwbWriteModeFor(action)"
                 class="meta-rule-editor__select"
                 data-testid="fwb-write-mode"
+                :aria-label="isZh ? '审批数据写入方式' : 'Approval data write mode'"
                 :disabled="fwbActionReadOnly(action)"
                 @update:model-value="onFwbWriteModeChange(action, $event)"
               >
@@ -487,22 +488,38 @@
                   :model-value="typeof action.config.recordLinkFieldId === 'string' ? action.config.recordLinkFieldId : ''"
                   class="meta-rule-editor__select"
                   data-testid="fwb-record-link-field"
+                  :aria-label="isZh ? '审批表单关联记录字段' : 'Approval-form record-link field'"
                   :disabled="fwbActionReadOnly(action)"
                   :placeholder="isZh ? '选择审批表单中的关联记录字段' : 'Select an approval-form record-link field'"
                   @update:model-value="onFwbRecordLinkFieldChange(action, $event)"
                 >
                   <el-option
-                    v-for="field in fwbRecordLinkFields"
+                    v-for="field in fwbRecordLinkOptionsFor(action)"
                     :key="field.id"
                     :value="field.id"
                     :data-value="field.id"
                     :label="field.label"
+                    :disabled="!field.baseId || !field.sheetId"
                   />
                 </el-select>
               </template>
               <div class="meta-rule-editor__hint" data-testid="fwb-target-sheet-hint">
                 {{ fwbTargetHint(action) }}
               </div>
+              <p
+                v-if="fwbLinkedTargetErrorFor(action)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--danger"
+                data-testid="fwb-linked-target-error"
+                role="alert"
+              >
+                {{ fwbLinkedTargetErrorFor(action) }}
+                <el-button
+                  link
+                  type="primary"
+                  data-testid="fwb-linked-target-retry"
+                  @click="retryFwbLinkedTargetFields(action)"
+                >{{ isZh ? '重试' : 'Retry' }}</el-button>
+              </p>
               <p
                 v-if="fwbActionReadOnly(action)"
                 class="meta-rule-editor__hint meta-rule-editor__hint--warning"
@@ -514,16 +531,17 @@
                 data-testid="fwb-template-fields-missing"
               >{{ isZh ? '请先选择审批完成触发器的模板，以加载可映射的表单字段。' : 'Select an approval-completed template first so form fields can load for mapping.' }}</p>
               <p
-                v-if="fwbConfirmError"
+                v-if="fwbConfirmErrorFor(action)"
                 class="meta-rule-editor__hint meta-rule-editor__hint--danger"
                 data-testid="fwb-confirm-error"
-              >{{ fwbConfirmError }}</p>
+                role="alert"
+              >{{ fwbConfirmErrorFor(action) }}</p>
               <ApprovalFwbMappingEditor
                 :template-fields="fwbTemplateFields"
                 :target-fields="fwbTargetFieldsFor(action)"
                 :model-value="(action.config.fwbMappings as FwbMappingDraft[] | undefined) ?? []"
                 :disabled="fwbActionReadOnly(action)"
-                :loading="fwbConfirmingDraftId === action.draftId"
+                :loading="fwbConfirmingDraftId === action.draftId || fwbLinkedTargetLoadingFor(action)"
                 :is-zh="isZh"
                 :confirmation-state="fwbConfirmationStateFor(action)"
                 @update:model-value="onFwbMappingsUpdate(action, $event)"
@@ -1644,9 +1662,11 @@ const fwbTemplateFields = ref<Array<{ id: string; label: string }>>([])
 const fwbRecordLinkFields = ref<FwbRecordLinkOption[]>([])
 type FwbTargetField = ReturnType<typeof sheetFieldsToFwbTargets>[number]
 const fwbLinkedTargetFields = ref<Record<string, FwbTargetField[]>>({})
+const fwbLinkedTargetErrors = ref<Record<string, string>>({})
+const fwbLinkedTargetLoading = ref<Record<string, true>>({})
 const fwbActiveVersionId = ref('')
 const fwbConfirmingDraftId = ref<string | null>(null)
-const fwbConfirmError = ref('')
+const fwbConfirmErrors = ref<Record<string, string>>({})
 const fwbConfirmationGeneration = new Map<string, number>()
 const fwbConfirmingRequestGeneration = new Map<string, number>()
 let fwbTemplateLoadGeneration = 0
@@ -1896,11 +1916,29 @@ function fwbWriteModeFor(action: DraftAction): 'create' | 'update' {
   return action.config.fwbWriteMode === 'update' ? 'update' : 'create'
 }
 
-function fwbRecordLinkFor(action: DraftAction): FwbRecordLinkOption | null {
-  const fieldId = typeof action.config.recordLinkFieldId === 'string'
-    ? action.config.recordLinkFieldId
+function fwbConfiguredRecordLinkFieldId(action: DraftAction): string {
+  return typeof action.config.recordLinkFieldId === 'string'
+    ? action.config.recordLinkFieldId.trim()
     : ''
+}
+
+function fwbRecordLinkFor(action: DraftAction): FwbRecordLinkOption | null {
+  const fieldId = fwbConfiguredRecordLinkFieldId(action)
   return fwbRecordLinkFields.value.find((field) => field.id === fieldId) ?? null
+}
+
+function fwbRecordLinkOptionsFor(action: DraftAction): FwbRecordLinkOption[] {
+  const options = [...fwbRecordLinkFields.value]
+  const configuredId = fwbConfiguredRecordLinkFieldId(action)
+  if (configuredId && !options.some((field) => field.id === configuredId)) {
+    options.push({
+      id: configuredId,
+      label: isZh.value ? '不可用关联字段' : 'Unavailable record-link field',
+      baseId: '',
+      sheetId: '',
+    })
+  }
+  return options
 }
 
 function fwbTargetFieldsFor(action: DraftAction): FwbTargetField[] {
@@ -1928,6 +1966,11 @@ function fwbTargetHint(action: DraftAction): string {
   }
   const link = fwbRecordLinkFor(action)
   if (!link) {
+    if (fwbConfiguredRecordLinkFieldId(action)) {
+      return isZh.value
+        ? '原关联记录字段已失效，请重新选择；切换后需重新配置字段映射。'
+        : 'The previous record-link field is unavailable. Select another field and reconfigure the mappings.'
+    }
     return isZh.value
       ? '请选择审批表单中的关联记录字段。'
       : 'Select a record-link field from the approval form.'
@@ -1939,7 +1982,11 @@ function fwbTargetHint(action: DraftAction): string {
 
 async function loadFwbLinkedTargetFields(sheetId: string): Promise<void> {
   const id = sheetId.trim()
-  if (!id || fwbLinkedTargetFields.value[id] || !props.client) return
+  if (!id || fwbLinkedTargetFields.value[id] || fwbLinkedTargetLoading.value[id] || !props.client) return
+  fwbLinkedTargetLoading.value = { ...fwbLinkedTargetLoading.value, [id]: true }
+  const nextErrors = { ...fwbLinkedTargetErrors.value }
+  delete nextErrors[id]
+  fwbLinkedTargetErrors.value = nextErrors
   try {
     const result = await props.client.listFields(id)
     fwbLinkedTargetFields.value = {
@@ -1947,9 +1994,64 @@ async function loadFwbLinkedTargetFields(sheetId: string): Promise<void> {
       [id]: sheetFieldsToFwbTargets(Array.isArray(result.fields) ? result.fields : []),
     }
   } catch {
-    // Keep the target empty. Confirmation and save remain fail-closed rather than accepting a
-    // mapping against an unverified target schema.
-    fwbLinkedTargetFields.value = { ...fwbLinkedTargetFields.value, [id]: [] }
+    // Do not cache a transient failure as an empty schema. Confirmation and save stay fail-closed,
+    // while the explicit retry lets the author recover without closing the drawer.
+    fwbLinkedTargetErrors.value = {
+      ...fwbLinkedTargetErrors.value,
+      [id]: isZh.value
+        ? '目标表字段加载失败，无法确认映射。'
+        : 'Target-sheet fields could not be loaded, so the mapping cannot be confirmed.',
+    }
+  } finally {
+    const nextLoading = { ...fwbLinkedTargetLoading.value }
+    delete nextLoading[id]
+    fwbLinkedTargetLoading.value = nextLoading
+  }
+}
+
+function fwbLinkedTargetErrorFor(action: DraftAction): string {
+  const link = fwbRecordLinkFor(action)
+  return link ? (fwbLinkedTargetErrors.value[link.sheetId] ?? '') : ''
+}
+
+function fwbLinkedTargetLoadingFor(action: DraftAction): boolean {
+  const link = fwbRecordLinkFor(action)
+  return !!(link && fwbLinkedTargetLoading.value[link.sheetId])
+}
+
+function retryFwbLinkedTargetFields(action: DraftAction): void {
+  const link = fwbRecordLinkFor(action)
+  if (link) void loadFwbLinkedTargetFields(link.sheetId)
+}
+
+function fwbConfirmErrorFor(action: DraftAction): string {
+  return fwbConfirmErrors.value[action.draftId] ?? ''
+}
+
+function setFwbConfirmError(action: DraftAction, message: string): void {
+  const next = { ...fwbConfirmErrors.value }
+  if (message) next[action.draftId] = message
+  else delete next[action.draftId]
+  fwbConfirmErrors.value = next
+}
+
+async function confirmFwbMappingReset(action: DraftAction): Promise<boolean> {
+  if (!Array.isArray(action.config.fwbMappings) || action.config.fwbMappings.length === 0) return true
+  try {
+    await ElMessageBox.confirm(
+      isZh.value
+        ? '切换写入方式或关联字段会清空当前字段映射，是否继续？'
+        : 'Changing the write mode or record-link field clears the current field mappings. Continue?',
+      isZh.value ? '确认清空映射' : 'Clear field mappings?',
+      {
+        type: 'warning',
+        confirmButtonText: isZh.value ? '清空并切换' : 'Clear and switch',
+        cancelButtonText: isZh.value ? '取消' : 'Cancel',
+      },
+    )
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -1959,18 +2061,24 @@ function resetFwbConfirmation(action: DraftAction): void {
   action.config.fwbConfirmationState = 'unconfirmed'
 }
 
-function onFwbWriteModeChange(action: DraftAction, value: unknown): void {
+async function onFwbWriteModeChange(action: DraftAction, value: unknown): Promise<void> {
   if (fwbActionReadOnly(action)) return
-  action.config.fwbWriteMode = value === 'update' ? 'update' : 'create'
+  const nextMode = value === 'update' ? 'update' : 'create'
+  if (nextMode === fwbWriteModeFor(action) || !await confirmFwbMappingReset(action)) return
+  action.config.fwbWriteMode = nextMode
   if (action.config.fwbWriteMode === 'create') action.config.recordLinkFieldId = ''
   action.config.fwbMappings = []
+  setFwbConfirmError(action, '')
   resetFwbConfirmation(action)
 }
 
-function onFwbRecordLinkFieldChange(action: DraftAction, value: unknown): void {
+async function onFwbRecordLinkFieldChange(action: DraftAction, value: unknown): Promise<void> {
   if (fwbActionReadOnly(action)) return
-  action.config.recordLinkFieldId = typeof value === 'string' ? value : ''
+  const nextFieldId = typeof value === 'string' ? value : ''
+  if (nextFieldId === fwbConfiguredRecordLinkFieldId(action) || !await confirmFwbMappingReset(action)) return
+  action.config.recordLinkFieldId = nextFieldId
   action.config.fwbMappings = []
+  setFwbConfirmError(action, '')
   resetFwbConfirmation(action)
   const link = fwbRecordLinkFor(action)
   if (link) void loadFwbLinkedTargetFields(link.sheetId)
@@ -1986,6 +2094,7 @@ function onFwbMappingsUpdate(action: DraftAction, next: FwbMappingDraft[]): void
   if (fwbActionReadOnly(action)) return
   advanceFwbConfirmationGeneration(action.draftId)
   action.config.fwbMappings = next
+  setFwbConfirmError(action, '')
   action.config.confirmationHash = ''
   action.config.fwbConfirmationState = 'unconfirmed'
 }
@@ -1993,6 +2102,7 @@ function onFwbMappingsUpdate(action: DraftAction, next: FwbMappingDraft[]): void
 function onFwbInvalidateConfirmation(action: DraftAction): void {
   if (fwbActionReadOnly(action)) return
   advanceFwbConfirmationGeneration(action.draftId)
+  setFwbConfirmError(action, '')
   action.config.confirmationHash = ''
   action.config.fwbConfirmationState = 'unconfirmed'
 }
@@ -2013,17 +2123,17 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
     && action.config.sourceTemplateVersionId.trim())
     || fwbActiveVersionId.value
   if (!templateId || !sourceTemplateVersionId) {
-    fwbConfirmError.value = isZh.value
+    setFwbConfirmError(action, isZh.value
       ? '请先选择审批模板（需有已发布版本）。'
-      : 'Select an approval template with an active published version first.'
+      : 'Select an approval template with an active published version first.')
     return
   }
   const writeMode = fwbWriteModeFor(action)
   const recordLink = writeMode === 'update' ? fwbRecordLinkFor(action) : null
   if (writeMode === 'update' && !recordLink) {
-    fwbConfirmError.value = isZh.value
+    setFwbConfirmError(action, isZh.value
       ? '请先选择审批表单中的关联记录字段。'
-      : 'Select an approval-form record-link field first.'
+      : 'Select an approval-form record-link field first.')
     return
   }
   try {
@@ -2045,7 +2155,7 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
   } catch {
     return
   }
-  fwbConfirmError.value = ''
+  setFwbConfirmError(action, '')
   const requestGeneration = advanceFwbConfirmationGeneration(action.draftId)
   const requestSubject = {
     templateId,
@@ -2100,9 +2210,9 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
     if (fwbConfirmationGeneration.get(action.draftId) !== requestGeneration) return
     action.config.confirmationHash = ''
     action.config.fwbConfirmationState = 'unconfirmed'
-    fwbConfirmError.value = e instanceof Error
+    setFwbConfirmError(action, e instanceof Error
       ? e.message
-      : (isZh.value ? '确认失败，请重试。' : 'Confirmation failed — try again.')
+      : (isZh.value ? '确认失败，请重试。' : 'Confirmation failed — try again.'))
   } finally {
     if (fwbConfirmingRequestGeneration.get(action.draftId) === requestGeneration) {
       fwbConfirmingRequestGeneration.delete(action.draftId)
@@ -2134,17 +2244,19 @@ async function loadFwbTemplateSource(templateId: string): Promise<void> {
     // Bind every FWB draft that lacks a version to the currently active one; a version drift
     // invalidates confirmation (hash subject includes sourceTemplateVersionId).
     for (const action of draft.value.actions) {
-      if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue
-      const current = typeof action.config.sourceTemplateVersionId === 'string'
-        ? action.config.sourceTemplateVersionId
-        : ''
-      if (!current && fwbActiveVersionId.value) {
-        action.config.sourceTemplateVersionId = fwbActiveVersionId.value
-      } else if (current && fwbActiveVersionId.value && current !== fwbActiveVersionId.value) {
-        advanceFwbConfirmationGeneration(action.draftId)
-        action.config.sourceTemplateVersionId = fwbActiveVersionId.value
-        action.config.confirmationHash = ''
-        action.config.fwbConfirmationState = 'unconfirmed'
+      if (!isFwbActionType(action.type)) continue
+      if (!fwbActionReadOnly(action)) {
+        const current = typeof action.config.sourceTemplateVersionId === 'string'
+          ? action.config.sourceTemplateVersionId
+          : ''
+        if (!current && fwbActiveVersionId.value) {
+          action.config.sourceTemplateVersionId = fwbActiveVersionId.value
+        } else if (current && fwbActiveVersionId.value && current !== fwbActiveVersionId.value) {
+          advanceFwbConfirmationGeneration(action.draftId)
+          action.config.sourceTemplateVersionId = fwbActiveVersionId.value
+          action.config.confirmationHash = ''
+          action.config.fwbConfirmationState = 'unconfirmed'
+        }
       }
       const link = fwbRecordLinkFor(action)
       if (fwbWriteModeFor(action) === 'update' && link) {
@@ -2961,11 +3073,13 @@ watch(
       resetDeleteRecordAcknowledgements()
       error.value = ''
       saving.value = false
-      fwbConfirmError.value = ''
+      fwbConfirmErrors.value = {}
       fwbConfirmingDraftId.value = null
       fwbConfirmationGeneration.clear()
       fwbConfirmingRequestGeneration.clear()
       fwbLinkedTargetFields.value = {}
+      fwbLinkedTargetErrors.value = {}
+      fwbLinkedTargetLoading.value = {}
       dingTalkDestinationsError.value = ''
       personRecipientSuggestions.value = {}
       personRecipientLoading.value = {}
@@ -3198,6 +3312,7 @@ function buildActionSummarySnapshot(action: DraftAction): ActionSummarySnapshot 
     snapshot.fwbWriteback = {
       mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
       confirmed: fwbConfirmationStateFor(action) === 'confirmed',
+      mode: fwbWriteModeFor(action),
     }
   } else if (action.type === 'send_email') {
     snapshot.email = {

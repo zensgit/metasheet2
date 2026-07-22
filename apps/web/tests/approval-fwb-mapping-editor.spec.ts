@@ -389,6 +389,17 @@ describe('ApprovalFwbMappingEditor', () => {
     expect(events['request-confirmation']).toHaveLength(0)
   })
 
+  it('labels mapping controls and announces confirmation-state changes to assistive technology', async () => {
+    await mountEditor({ modelValue: VALID_DRAFT, confirmationState: 'confirmed' })
+    expect(container!.querySelector('[data-testid="fwb-form-field-select"]')?.getAttribute('aria-label'))
+      .toBe('表单字段 1')
+    expect(container!.querySelector('[data-testid="fwb-target-field-select"]')?.getAttribute('aria-label'))
+      .toBe('目标字段 1')
+    const state = container!.querySelector('[data-testid="fwb-confirmation-state"]')
+    expect(state?.getAttribute('role')).toBe('status')
+    expect(state?.getAttribute('aria-live')).toBe('polite')
+  })
+
   it('en locale renders the generic unavailable marker and reasons in English', async () => {
     await mountEditor({ modelValue: [{ formFieldId: 'ghost_f', targetFieldId: 't_num' }], isZh: false })
     const row = rows()[0]

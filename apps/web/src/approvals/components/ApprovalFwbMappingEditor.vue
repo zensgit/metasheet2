@@ -238,6 +238,7 @@ function requestConfirmation(): void {
         size="small"
         :model-value="row.formFieldId || undefined"
         :placeholder="t('formField')"
+        :aria-label="`${t('formField')} ${index + 1}`"
         :disabled="controlsDisabled"
         data-testid="fwb-form-field-select"
         @update:model-value="setFormField(index, $event)"
@@ -257,6 +258,7 @@ function requestConfirmation(): void {
         size="small"
         :model-value="row.targetFieldId || undefined"
         :placeholder="t('targetField')"
+        :aria-label="`${t('targetField')} ${index + 1}`"
         :disabled="controlsDisabled"
         data-testid="fwb-target-field-select"
         @update:model-value="setTargetField(index, $event)"
@@ -310,6 +312,8 @@ function requestConfirmation(): void {
         :class="`fwb-mapping-editor__state--${confirmationState}`"
         :data-state="confirmationState"
         data-testid="fwb-confirmation-state"
+        role="status"
+        aria-live="polite"
       >{{ stateLabel }}</span>
 
       <el-button

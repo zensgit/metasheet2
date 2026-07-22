@@ -239,6 +239,150 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
     })
   })
 
+  it('marks a removed record-link field unavailable without exposing its raw id as the label', async () => {
+    fwbFlag = true
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client: mockClient(),
+      rule: fakeRule({
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mode: 'update',
+          recordLinkFieldId: 'removed_link_internal_id',
+          mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+          sourceTemplateVersionId: 'ver_1',
+          confirmationHash: 'old-hash',
+        },
+        actions: [{
+          type: 'write_approval_form_values',
+          config: {
+            mode: 'update',
+            recordLinkFieldId: 'removed_link_internal_id',
+            mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+            sourceTemplateVersionId: 'ver_1',
+            confirmationHash: 'old-hash',
+          },
+        }],
+      }),
+    })
+    await flushPromises()
+    ;(container.querySelector('[data-field="actionSummary"]') as HTMLElement | null)?.click()
+    await flushPromises()
+
+    const options = epOptions(container.querySelector('[data-testid="fwb-record-link-field"]') as HTMLElement)
+    expect(options).toContainEqual(expect.objectContaining({
+      value: 'removed_link_internal_id',
+      textContent: 'Unavailable record-link field',
+      disabled: true,
+    }))
+    const hint = container.querySelector('[data-testid="fwb-target-sheet-hint"]')?.textContent ?? ''
+    expect(hint).toMatch(/previous record-link field is unavailable/i)
+    expect(hint).not.toContain('removed_link_internal_id')
+  })
+
+  it('surfaces a transient linked-sheet load failure and retries without reopening the drawer', async () => {
+    fwbFlag = true
+    getTemplateMock.mockResolvedValue({
+      id: 'tpl_1',
+      name: 'Leave',
+      activeVersionId: 'ver_1',
+      formSchema: {
+        fields: [
+          { id: 'form_reason', type: 'text', label: 'Reason', required: true },
+          {
+            id: 'linked_order',
+            type: 'record-link',
+            label: 'Order',
+            required: true,
+            props: { baseId: 'base_target', sheetId: 'sheet_target' },
+          },
+        ],
+      },
+    })
+    const listFields = vi.fn()
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({ fields: [{ id: 'target_name', name: 'Name', type: 'string' }] })
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client: mockClient({ listFields }),
+      rule: fakeRule({
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mode: 'update',
+          recordLinkFieldId: 'linked_order',
+          mappings: [{ formFieldId: 'form_reason', targetFieldId: 'target_name', targetType: 'text' }],
+          sourceTemplateVersionId: 'ver_1',
+          confirmationHash: '',
+        },
+        actions: [{
+          type: 'write_approval_form_values',
+          config: {
+            mode: 'update',
+            recordLinkFieldId: 'linked_order',
+            mappings: [{ formFieldId: 'form_reason', targetFieldId: 'target_name', targetType: 'text' }],
+            sourceTemplateVersionId: 'ver_1',
+            confirmationHash: '',
+          },
+        }],
+      }),
+    })
+    await flushPromises()
+    await flushPromises()
+    ;(container.querySelector('[data-field="actionSummary"]') as HTMLElement | null)?.click()
+    await flushPromises()
+
+    expect(listFields).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[data-testid="fwb-linked-target-error"]')?.textContent)
+      .toMatch(/could not be loaded/i)
+    ;(container.querySelector('[data-testid="fwb-linked-target-retry"]') as HTMLButtonElement).click()
+    await flushPromises()
+    await flushPromises()
+    expect(listFields).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('[data-testid="fwb-linked-target-error"]')).toBeNull()
+    expect(epOptions(container.querySelector('[data-testid="fwb-target-field-select"]') as HTMLElement))
+      .toContainEqual(expect.objectContaining({ value: 'target_name', textContent: 'Name' }))
+  })
+
+  it('does not clear authored mappings when a destructive write-mode switch is cancelled', async () => {
+    fwbFlag = true
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce(new Error('cancelled'))
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client: mockClient(),
+      rule: fakeRule({
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+          sourceTemplateVersionId: 'ver_1',
+          confirmationHash: 'old-hash',
+        },
+        actions: [{
+          type: 'write_approval_form_values',
+          config: {
+            mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+            sourceTemplateVersionId: 'ver_1',
+            confirmationHash: 'old-hash',
+          },
+        }],
+      }),
+    })
+    await flushPromises()
+    ;(container.querySelector('[data-field="actionSummary"]') as HTMLElement | null)?.click()
+    await flushPromises()
+
+    const modeSelect = container.querySelector('[data-testid="fwb-write-mode"]') as HTMLElement
+    await epSetSelect(modeSelect, 'update')
+    await flushPromises()
+    expect(epSelectValue(modeSelect)).toBe('create')
+    expect(container.querySelectorAll('[data-testid="fwb-mapping-row"]')).toHaveLength(1)
+  })
+
   it('does not offer a new FWB action when completion outcomes include rejected', async () => {
     fwbFlag = true
     const { container } = mount({

@@ -93,6 +93,7 @@ export interface ActionSummaryParallelBranch {
 export interface ActionSummaryFwbWriteback {
   mappingCount: number
   confirmed: boolean
+  mode: 'create' | 'update'
 }
 
 export interface ActionSummarySnapshot {
@@ -264,10 +265,13 @@ export function summarizeAutomationAction(snapshot: ActionSummarySnapshot, isZh:
         `${count} 项映射`,
         `${count} field ${plural(count, 'mapping', 'mappings')}`,
       )
+      const modeText = fwb?.mode === 'update'
+        ? pick(isZh, '更新关联记录', 'update linked record')
+        : pick(isZh, '新建记录', 'create record')
       const confirmText = fwb?.confirmed
         ? pick(isZh, '已确认', 'confirmed')
         : pick(isZh, '未确认', 'unconfirmed')
-      return `${label}${sep(isZh)}${mappingText}（${confirmText}）`
+      return `${label}${sep(isZh)}${modeText} · ${mappingText}（${confirmText}）`
     }
 
     case 'parallel_branch': {
