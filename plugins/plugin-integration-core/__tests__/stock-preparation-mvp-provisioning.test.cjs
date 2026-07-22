@@ -93,6 +93,17 @@ function createContext({ existingObjectIds = [], missingFieldsByObject = {}, fai
       }
       return out
     },
+    // W2: DB-backed content — stable {name,type,property} for existing fields.
+    async readObjectFieldsContent(input) {
+      calls.readObjectFieldsContent = calls.readObjectFieldsContent || []
+      calls.readObjectFieldsContent.push({ ...input })
+      const gone = missing[input.objectId] || new Set()
+      const out = {}
+      for (const fieldId of input.fieldIds || []) {
+        if (!gone.has(fieldId)) out[fieldId] = { name: fieldId, type: 'text', property: {} }
+      }
+      return out
+    },
     async ensureObject(input) {
       calls.ensureObject.push({
         projectId: input.projectId,
@@ -504,6 +515,32 @@ async function main() {
     const already = await repairStockPreparationMvpTargets({ context: readyCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] })
     assert.equal(already.tables[0].mode, 'mvp_already_ready')
     assert.equal(already.tables[0].addedFieldCount, 0)
+
+    // (e) POST-WRITE completeness re-verify is LOAD-BEARING for MVP too: neuter the
+    //     additive write so the field stays missing → repair must fail closed.
+    const incompleteCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+    incompleteCtx.context.api.multitable.provisioning.ensureMissingObjectFields = async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] })
+    await rejectsWith(
+      () => repairStockPreparationMvpTargets({ context: incompleteCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
+      StockPreparationTargetProvisioningError,
+      'MVP_REPAIR_INCOMPLETE',
+    )
+
+    // (f) REPAIR_MUTATED_EXISTING_FIELD for MVP: an existing field's content changed
+    //     across the additive write → fail closed.
+    const mutateCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+    let readCount = 0
+    mutateCtx.context.api.multitable.provisioning.readObjectFieldsContent = async (input) => {
+      readCount += 1
+      const out = {}
+      for (const fieldId of input.fieldIds || []) out[fieldId] = { name: fieldId, type: readCount >= 2 ? 'number' : 'text', property: {} }
+      return out
+    }
+    await rejectsWith(
+      () => repairStockPreparationMvpTargets({ context: mutateCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
+      StockPreparationTargetProvisioningError,
+      'REPAIR_MUTATED_EXISTING_FIELD',
+    )
   }
 
   console.log('stock-preparation-mvp-provisioning.test.cjs OK')

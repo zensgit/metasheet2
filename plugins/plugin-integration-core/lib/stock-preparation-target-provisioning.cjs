@@ -427,21 +427,42 @@ async function ensureStockPreparationTarget(input = {}) {
   }
 }
 
+// Shared REPAIR_MUTATED_EXISTING_FIELD guard (MVP + canonical): a pre-existing field
+// whose name/type/property changed across the additive write is a contract violation —
+// coarse details (objectId + count only; never echo field content).
+function assertNoExistingFieldMutated(beforeContent, afterContent, objectId) {
+  let mutated = 0
+  for (const fieldId of Object.keys(beforeContent)) {
+    const before = beforeContent[fieldId]
+    const after = afterContent[fieldId]
+    if (!after || JSON.stringify(before) !== JSON.stringify(after)) mutated += 1
+  }
+  if (mutated > 0) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'REPAIR_MUTATED_EXISTING_FIELD',
+      'repair mutated an existing field; the additive primitive must never touch a pre-existing column',
+      { objectId, mutatedFieldCount: mutated },
+    )
+  }
+}
+
 // W2 canonical repair needs the additive-only ensureMissingObjectFields (never
-// ensureObject's DO UPDATE). Same accessor-fail-closed shape as getProvisioningApi.
+// ensureObject's DO UPDATE) + the content read for the mutation snapshot.
 function getCanonicalRepairApi(context) {
   const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
   if (
     !provisioning ||
     typeof provisioning.findObjectSheet !== 'function' ||
     typeof provisioning.resolveExistingObjectFieldIds !== 'function' ||
+    typeof provisioning.readObjectFieldsContent !== 'function' ||
     typeof provisioning.ensureMissingObjectFields !== 'function'
   ) {
     throw new StockPreparationTargetProvisioningError(
       503,
       'CANONICAL_REPAIR_API_UNAVAILABLE',
       'stock-preparation canonical repair requires multitable.provisioning ensureMissingObjectFields API',
-      { requiredMethods: ['findObjectSheet', 'resolveExistingObjectFieldIds', 'ensureMissingObjectFields'] },
+      { requiredMethods: ['findObjectSheet', 'resolveExistingObjectFieldIds', 'readObjectFieldsContent', 'ensureMissingObjectFields'] },
     )
   }
   return provisioning
@@ -477,6 +498,11 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
   const fieldIds = templateFieldIds(template)
   const resolved = await provisioning.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
   const missingIds = missingLogicalFields(template, resolved)
+  // BEFORE snapshot of the EXISTING fields' content (name/type/property) — the
+  // REPAIR_MUTATED_EXISTING_FIELD positive control (design lock §3.3-4): the additive
+  // write must not touch any pre-existing column, and we PROVE it, not just trust it.
+  const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
+  const beforeContent = await provisioning.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds })
   const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
   const descriptor = buildStockPreparationTargetDescriptor({ template, description: input.description })
   const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
@@ -503,9 +529,6 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     fields: missingDescriptors,
   })
   // POST-WRITE completeness re-verify: `ready:true` must be PROVEN, never asserted.
-  // Each provisioning method is its own transaction, so re-read the object's fields
-  // and fail closed if ANY template field is still absent (a concurrent drop, a
-  // partial write, or a discovery race). Never return ready without confirming it.
   const resolvedAfter = await provisioning.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
   const stillMissing = missingLogicalFields(template, resolvedAfter)
   if (stillMissing.length) {
@@ -516,6 +539,8 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
       { objectId: template.objectId, missingFieldCount: stillMissing.length },
     )
   }
+  // AFTER snapshot: every pre-existing field must be byte-for-byte unchanged.
+  assertNoExistingFieldMutated(beforeContent, await provisioning.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
   return {
     ready: true,
     mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
@@ -555,5 +580,6 @@ module.exports = {
     sandboxStockPreparationTemplate,
     assertAdminPermission,
     getProvisioningApi,
+    assertNoExistingFieldMutated,
   },
 }

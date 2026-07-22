@@ -376,6 +376,12 @@ export interface MultitableProvisioningAPI {
     objectId: string
     fieldIds: string[]
   }): Promise<Record<string, string>>
+  // W2: DB-backed field CONTENT read (repair's before/after mutation snapshot).
+  readObjectFieldsContent(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, { name: string; type: string; property: Record<string, unknown> }>>
   // W2: additive-only field provisioning (ON CONFLICT DO NOTHING) — adds missing
   // template columns to an already-provisioned object without overwriting existing ones.
   ensureMissingObjectFields(input: {

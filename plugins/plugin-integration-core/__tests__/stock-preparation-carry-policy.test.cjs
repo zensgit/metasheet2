@@ -19,6 +19,7 @@ const {
   CARRY_DECISIONS,
   CARRY_WRITE_VIA,
   CARRY_CONFLICT_TYPES,
+  CARRY_POLICY_ERROR_REASONS,
   StockPreparationCarryPolicyError,
   normalizeCarryPolicy,
   classifyCarry,
@@ -64,6 +65,15 @@ function frozenVocabularies() {
   // MANUAL_CONFIRM MUST be the planner literal so apply-writer:487 holds it.
   assert.equal(CARRY_DECISIONS.MANUAL_CONFIRM, DECISIONS.MANUAL_CONFIRM, 'carry manual_confirm == planner MANUAL_CONFIRM')
   assert.equal(CARRY_DECISIONS.MANUAL_CONFIRM, 'manual_confirm')
+  // EXACT frozen vocabularies — sneaking a value in fails closed (review: no silent drift).
+  assert.ok(Object.isFrozen(CARRY_CONFLICT_TYPES) && Object.isFrozen(CARRY_POLICY_ERROR_REASONS))
+  assert.deepEqual([...CARRY_CONFLICT_TYPES], [
+    'carry_ambiguous_component_source',
+    'carry_reattach_requires_confirm',
+    'carry_conflicting_source_content',
+  ])
+  // Every conflictType the module can emit is in the frozen conflict vocabulary.
+  assert.ok(CARRY_POLICY_ERROR_REASONS.includes('UNKNOWN_CONFLICT_TYPE'), 'UNKNOWN_CONFLICT_TYPE is a declared error reason')
 }
 
 function policyNormalization() {

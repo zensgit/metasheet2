@@ -113,6 +113,7 @@ const CARRY_POLICY_ERROR_REASONS = Object.freeze([
   'CARRY_CONFIRM_SHAPE_VIOLATION',
   'AMBIGUITY_MUST_HOLD',
   'UNSUPPORTED_DECISION',
+  'UNKNOWN_CONFLICT_TYPE',
 ])
 
 // The K2 confirm-write marker: a CARRY_VIA_CONFIRM decision is ONLY ever applied
@@ -317,7 +318,7 @@ function makeCarryViaConfirm(newAddRow, source, carryPolicy, carryFields) {
 function makeManualConfirm(newAddRow, carryPolicy, conflictType, matchCount) {
   // conflictType is a CLOSED vocabulary — an out-of-vocab value never surfaces.
   if (!CARRY_CONFLICT_TYPE_SET.has(conflictType)) {
-    fail('UNKNOWN_CONFLICT_TYPE', 'manual_confirm conflictType is outside the frozen vocabulary', { conflictType })
+    fail('UNKNOWN_CONFLICT_TYPE', 'manual_confirm conflictType is outside the frozen vocabulary', {})
   }
   return {
     decision: CARRY_DECISIONS.MANUAL_CONFIRM,

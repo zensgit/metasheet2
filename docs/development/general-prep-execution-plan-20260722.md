@@ -196,9 +196,9 @@ ensureMissingObjectFields({ query, projectId, objectId, fields })
 1. **入口门**:`assertAdminPermission`(mvp-provisioning 既有);
 2. **只修模板缺列**:待加集合 = `missingLogicalFields(template, resolved)`(target-provisioning.cjs:214)——**修复集是模板与现表的差集,不接受调用方自由列**;调用方无法借 repair 塞任意字段;
 3. **命名空间正控**:每个待加字段必须满足 `ownership === 'plm_system'` **或** `assertExtensionFieldIdValid(id, { templateFieldIds })`(extension-namespace.cjs:117)通过——**`human_preserved` 新列被显式 reject**(闭合 reason `REPAIR_HUMAN_FIELD_FORBIDDEN`):human 白名单(templates.cjs:28)是 apply-writer `assertNoHumanFields`(apply-writer.cjs:187)与 carry-policy 的承重词表,扩它是独立设计门,不许从 repair 后门进;
-4. **既有列不可变更式核查**:repair 前后各跑一次 `resolveFieldIds` + 逐既有字段读 `name/type/property` 快照对账,任何漂移 ⇒ 抛 `REPAIR_MUTATED_EXISTING_FIELD`(fail-closed;这是对 DO NOTHING 的**运行时正控**,不只信 SQL);
+4. **既有列不可变更式核查**:repair 前后各跑一次 DB-backed 的 `readObjectFieldsContent`(逐既有字段读 `name/type/property` 内容快照,非 compute-only 的 `resolveFieldIds`),经 `assertNoExistingFieldMutated` 对账,任何漂移 ⇒ 抛 `REPAIR_MUTATED_EXISTING_FIELD`(fail-closed;这是对 DO NOTHING 的**运行时正控**,不只信 SQL);
 5. **fail-closed 原点不动**:`:232-239` 与 `:370-383` 的 throw **一字不改**——ensure 永远不静默修;repair 是**另一个动词**、另一条 admin 路由(`['POST','/api/integration/stock-preparation/mvp/repair','stockPreparationMvpRepair']`,http-routes.cjs :73 `mvp/ensure` 旁),证据模式 `mvp_repaired`;
-6. **模板版本纪律**:模板加列必须同 PR 内含 repair 覆盖测试;模板 `version` 走语义化 minor(v1 → v1.1 记入 evidence),repair evidence 带 `templateVersion` + `addedFields`。
+6. **模板版本纪律**:模板加列必须同 PR 内含 repair 覆盖测试;模板 `version` 走语义化 minor(v1 → v1.1 记入 evidence),repair evidence 带 `templateVersion` + `addedFieldCount`(values-free 计数,非字段清单)。
 
 ### 3.4 验证方式
 

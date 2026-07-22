@@ -52,6 +52,7 @@ import {
   ensureObject as ensureMultitableObject,
   ensureMissingObjectFields as ensureMissingMultitableObjectFields,
   resolveExistingObjectFieldIds as resolveExistingMultitableObjectFieldIds,
+  readObjectFieldsContent as readMultitableObjectFieldsContent,
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
@@ -537,6 +538,20 @@ export class MetaSheetServer {
                 }
               }
               return resolveExistingMultitableObjectFieldIds({ query: txQuery, projectId, objectId, fieldIds })
+            })
+          },
+          // W2: DB-backed field CONTENT read (repair's before/after mutation snapshot).
+          readObjectFieldsContent: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return readMultitableObjectFieldsContent({ query: txQuery, projectId, objectId, fieldIds })
             })
           },
           // W2 template-evolution rung: ADDITIVE-ONLY missing-field provisioning

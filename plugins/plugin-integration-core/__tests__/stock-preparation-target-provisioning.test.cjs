@@ -69,6 +69,16 @@ function createContext({
       }
       return out
     },
+    // W2: DB-backed content — stable {name,type,property} for existing fields.
+    async readObjectFieldsContent(input) {
+      calls.readObjectFieldsContent = calls.readObjectFieldsContent || []
+      calls.readObjectFieldsContent.push(input)
+      const out = {}
+      for (const fieldId of input.fieldIds || []) {
+        if (!currentMissing.has(fieldId)) out[fieldId] = { name: fieldId, type: 'text', property: {} }
+      }
+      return out
+    },
     async ensureObject(input) {
       calls.ensureObject.push({
         projectId: input.projectId,
@@ -451,6 +461,29 @@ async function main() {
     }
     assert.ok(incompleteErr instanceof StockPreparationTargetProvisioningError, 'incomplete repair fails closed')
     assert.equal(incompleteErr.code, 'CANONICAL_REPAIR_INCOMPLETE')
+
+    // (b3) REPAIR_MUTATED_EXISTING_FIELD: if the additive write mutates an existing
+    //      field's content (name/type/property), the before/after snapshot must catch it.
+    const mutateCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    const prov = mutateCtx.context.api.multitable.provisioning
+    let readCount = 0
+    prov.readObjectFieldsContent = async (input) => {
+      // First (before) read: baseline; second (after) read: an existing field mutated.
+      readCount += 1
+      const out = {}
+      for (const fieldId of input.fieldIds || []) {
+        out[fieldId] = { name: fieldId, type: readCount >= 2 ? 'number' : 'text', property: {} }
+      }
+      return out
+    }
+    let mutatedErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: mutateCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      mutatedErr = error
+    }
+    assert.ok(mutatedErr instanceof StockPreparationTargetProvisioningError, 'mutated existing field fails closed')
+    assert.equal(mutatedErr.code, 'REPAIR_MUTATED_EXISTING_FIELD')
 
     // (c) absent target fails closed.
     const absentCtx = createContext({ sheetExists: false })

@@ -36,6 +36,7 @@ const {
     templateFieldIds,
     templateFieldCounts,
     missingLogicalFields,
+    assertNoExistingFieldMutated,
   },
 } = require('./stock-preparation-target-provisioning.cjs')
 
@@ -316,13 +317,14 @@ function getMvpRepairApi(context) {
     !provisioning ||
     typeof provisioning.findObjectSheet !== 'function' ||
     typeof provisioning.resolveExistingObjectFieldIds !== 'function' ||
+    typeof provisioning.readObjectFieldsContent !== 'function' ||
     typeof provisioning.ensureMissingObjectFields !== 'function'
   ) {
     throw new StockPreparationTargetProvisioningError(
       503,
       'MVP_REPAIR_API_UNAVAILABLE',
       'stock-preparation MVP repair requires multitable.provisioning ensureMissingObjectFields API',
-      { requiredMethods: ['findObjectSheet', 'resolveExistingObjectFieldIds', 'ensureMissingObjectFields'] },
+      { requiredMethods: ['findObjectSheet', 'resolveExistingObjectFieldIds', 'readObjectFieldsContent', 'ensureMissingObjectFields'] },
     )
   }
   return provisioning
@@ -362,6 +364,8 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
     const fieldIds = templateFieldIds(template)
     const resolved = await provisioning.resolveExistingObjectFieldIds({ projectId: scopedProjectId, objectId: template.objectId, fieldIds })
     const missingIds = missingLogicalFields(template, resolved)
+    const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
+    const beforeContent = await provisioning.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds })
     const structure = buildSheetStructureFromMvpTableTemplate(template)
     const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
     const missingDescriptors = []
@@ -398,6 +402,7 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         { objectId: template.objectId, missingFieldCount: stillMissing.length },
       )
     }
+    assertNoExistingFieldMutated(beforeContent, await provisioning.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
     tables.push({
       objectId: template.objectId,
       role: template.role,

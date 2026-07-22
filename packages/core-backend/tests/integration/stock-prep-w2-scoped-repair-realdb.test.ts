@@ -22,6 +22,7 @@ import {
   findObjectSheet,
   getObjectSheetId,
   resolveExistingObjectFieldIds,
+  readObjectFieldsContent,
   ensureMissingObjectFields,
   ensureObject,
 } from '../../src/multitable/provisioning'
@@ -71,6 +72,8 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
         withClient((q) => findObjectSheet(q as never, p, objectId)),
       resolveExistingObjectFieldIds: ({ projectId: p, objectId, fieldIds }: { projectId: string; objectId: string; fieldIds: string[] }) =>
         withClient((q) => resolveExistingObjectFieldIds({ query: q as never, projectId: p, objectId, fieldIds })),
+      readObjectFieldsContent: ({ projectId: p, objectId, fieldIds }: { projectId: string; objectId: string; fieldIds: string[] }) =>
+        withClient((q) => readObjectFieldsContent({ query: q as never, projectId: p, objectId, fieldIds })),
       ensureMissingObjectFields: ({ projectId: p, objectId, fields }: { projectId: string; objectId: string; fields: unknown[] }) =>
         withClient(async (q) => {
           await q('BEGIN')

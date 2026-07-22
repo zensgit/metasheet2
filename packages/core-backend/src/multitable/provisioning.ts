@@ -589,6 +589,44 @@ export async function resolveExistingObjectFieldIds(
   return out
 }
 
+export type ReadObjectFieldsContentInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldIds: string[]
+}
+
+// DB-backed field CONTENT (general-prep W2 REPAIR_MUTATED_EXISTING_FIELD snapshot):
+// {logicalId: {name, type, property}} for fields that physically exist. Repair reads
+// this before and after the additive write and asserts existing fields are byte-for-byte
+// unchanged — a runtime positive control on top of the DO-NOTHING primitive.
+export async function readObjectFieldsContent(
+  input: ReadObjectFieldsContentInput,
+): Promise<Record<string, { name: string; type: string; property: Record<string, unknown> }>> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const pairs = (input.fieldIds ?? []).map((logical) => ({
+    logical,
+    physical: stableMetaId('fld', input.projectId, input.objectId, logical),
+  }))
+  const out: Record<string, { name: string; type: string; property: Record<string, unknown> }> = {}
+  if (pairs.length === 0) return out
+  const res = await input.query(
+    `SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
+    [sheetId, pairs.map((pair) => pair.physical)],
+  )
+  const byPhysical = new Map(
+    (res.rows as { id: unknown; name: unknown; type: unknown; property: unknown }[]).map((row) => [
+      String(row.id),
+      { name: String(row.name), type: String(row.type), property: normalizeJson(row.property) },
+    ]),
+  )
+  for (const pair of pairs) {
+    const content = byPhysical.get(pair.physical)
+    if (content) out[pair.logical] = content
+  }
+  return out
+}
+
 export async function ensureObject(
   input: EnsureObjectInput,
 ): Promise<{

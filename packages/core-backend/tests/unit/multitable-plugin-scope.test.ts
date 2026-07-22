@@ -470,4 +470,35 @@ describe('multitable plugin scope helper', () => {
     expect(transactionRecords.createRecord).not.toHaveBeenCalled()
     expect(transactionRecords.patchRecord).not.toHaveBeenCalled()
   })
+
+  it('W2: object-scope check PRECEDES the delegate for the new provisioning methods', async () => {
+    // A rejecting hook must abort BEFORE the underlying read/write delegate runs —
+    // a write-then-check ordering (the mutation the review flagged) must fail this test.
+    const denied = new Error('scope denied')
+    const assertObjectScope = vi.fn(async () => {
+      throw denied
+    })
+    const delegate = {
+      resolveExistingObjectFieldIds: vi.fn(async () => ({ status: 'fld_1' })),
+      readObjectFieldsContent: vi.fn(async () => ({ status: { name: 'Status', type: 'select', property: {} } })),
+      ensureMissingObjectFields: vi.fn(async () => ({ addedFieldIds: ['fld_2'], skippedExistingFieldIds: [] })),
+    }
+    const multitable = { provisioning: { ...delegate }, records: {} }
+    const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-after-sales', { assertObjectScope })
+
+    for (const method of ['resolveExistingObjectFieldIds', 'readObjectFieldsContent', 'ensureMissingObjectFields'] as const) {
+      assertObjectScope.mockClear()
+      await expect(
+        (scoped.provisioning as any)[method]({
+          projectId: 'tenant_42:after-sales',
+          objectId: 'serviceTicket',
+          fieldIds: ['status'],
+          fields: [],
+        }),
+      ).rejects.toBe(denied)
+      // The hook ran; the underlying delegate did NOT (check strictly precedes delegate).
+      expect(assertObjectScope).toHaveBeenCalledTimes(1)
+      expect(delegate[method]).not.toHaveBeenCalled()
+    }
+  })
 })
