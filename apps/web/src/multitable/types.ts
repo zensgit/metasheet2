@@ -1099,6 +1099,8 @@ export type AutomationActionType =
   | 'wait_for_callback'
   | 'condition_branch'
   | 'parallel_branch'
+  // FWB activation: create a new record on the rule sheet from approved form values.
+  | 'write_approval_form_values'
   // Legacy aliases
   | 'notify'
   | 'update_field'

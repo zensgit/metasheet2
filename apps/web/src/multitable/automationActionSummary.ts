@@ -90,6 +90,11 @@ export interface ActionSummaryParallelBranch {
   branchCount: number
 }
 
+export interface ActionSummaryFwbWriteback {
+  mappingCount: number
+  confirmed: boolean
+}
+
 export interface ActionSummarySnapshot {
   type: AutomationActionType
   updateRecord?: ActionSummaryUpdateRecord
@@ -104,6 +109,7 @@ export interface ActionSummarySnapshot {
   deleteRecord?: ActionSummaryDeleteRecord
   conditionBranch?: ActionSummaryConditionBranch
   parallelBranch?: ActionSummaryParallelBranch
+  fwbWriteback?: ActionSummaryFwbWriteback
 }
 
 function pick(isZh: boolean, zh: string, en: string): string {
@@ -247,6 +253,21 @@ export function summarizeAutomationAction(snapshot: ActionSummarySnapshot, isZh:
       if (count === 0) return `${label}${notConfigured(isZh)}`
       const base = `${label}${sep(isZh)}${count} ${pick(isZh, '个分支', plural(count, 'branch', 'branches'))}`
       return cb?.hasDefaultBranch ? `${base}${pick(isZh, ' + 默认分支', ' + default branch')}` : base
+    }
+
+    case 'write_approval_form_values': {
+      const fwb = snapshot.fwbWriteback
+      const count = fwb?.mappingCount ?? 0
+      if (count === 0) return `${label}${notConfigured(isZh)}`
+      const mappingText = pick(
+        isZh,
+        `${count} 项映射`,
+        `${count} field ${plural(count, 'mapping', 'mappings')}`,
+      )
+      const confirmText = fwb?.confirmed
+        ? pick(isZh, '已确认', 'confirmed')
+        : pick(isZh, '未确认', 'unconfirmed')
+      return `${label}${sep(isZh)}${mappingText}（${confirmText}）`
     }
 
     case 'parallel_branch': {
