@@ -15,6 +15,8 @@ describe('fwbRuleAuthoring helpers', () => {
     expect(canSelectNewFwbAction(false, 'approval.completed')).toBe(false)
     expect(canSelectNewFwbAction(true, 'record.created')).toBe(false)
     expect(canSelectNewFwbAction(true, 'approval.completed')).toBe(true)
+    expect(canSelectNewFwbAction(true, 'approval.completed', [])).toBe(false)
+    expect(canSelectNewFwbAction(true, 'approval.completed', ['approved', 'rejected'])).toBe(false)
   })
 
   it('keeps a current FWB type selectable when flag is off (persisted visibility)', () => {
@@ -26,6 +28,7 @@ describe('fwbRuleAuthoring helpers', () => {
     expect(isFwbActionReadOnly(false, 'approval.completed')).toBe(true)
     expect(isFwbActionReadOnly(true, 'record.created')).toBe(true)
     expect(isFwbActionReadOnly(true, 'approval.completed')).toBe(false)
+    expect(isFwbActionReadOnly(true, 'approval.completed', false, ['approved', 'rejected'])).toBe(true)
   })
 
   it('hydrates a persisted config losslessly and starts confirmed when hash present', () => {
@@ -48,19 +51,26 @@ describe('fwbRuleAuthoring helpers', () => {
     })
   })
 
-  it('flag-off save re-emits persisted mappings + server hash (no client re-hash)', () => {
+  it('flag-off save re-emits the complete persisted config without dropping extension keys', () => {
     const draft = draftConfigFromFwbAction({
       mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
       sourceTemplateVersionId: 'ver_1',
       confirmationHash: 'server-hash',
+      mode: 'create',
+      extension: { source: 'future-server', nested: ['kept'] },
     })
     const built = buildFwbActionConfigForSave(draft, sheetFieldsToFwbTargets([
       { id: 't1', name: 'Name', type: 'string' },
     ]), { flagEnabled: false, readOnly: true })
     expect(built).toEqual({
-      mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
-      sourceTemplateVersionId: 'ver_1',
-      confirmationHash: 'server-hash',
+      ok: true,
+      config: {
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+        sourceTemplateVersionId: 'ver_1',
+        confirmationHash: 'server-hash',
+        mode: 'create',
+        extension: { source: 'future-server', nested: ['kept'] },
+      },
     })
   })
 
@@ -75,7 +85,30 @@ describe('fwbRuleAuthoring helpers', () => {
     const built = buildFwbActionConfigForSave(draft, sheetFieldsToFwbTargets([
       { id: 't1', name: 'Name', type: 'string' },
     ]), { flagEnabled: true, readOnly: false })
-    expect(built).toEqual({ error: 'fwb_confirmation_required' })
+    expect(built).toEqual({ ok: false, error: 'fwb_confirmation_required' })
+  })
+
+  it('editable save preserves unknown extension keys and does not confuse an error key with failure', () => {
+    const draft = draftConfigFromFwbAction({
+      mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+      sourceTemplateVersionId: 'ver_1',
+      confirmationHash: 'server-hash',
+      error: 'valid-extension-value',
+      extension: { future: true },
+    })
+    const built = buildFwbActionConfigForSave(draft, sheetFieldsToFwbTargets([
+      { id: 't1', name: 'Name', type: 'string' },
+    ]), { flagEnabled: true, readOnly: false })
+    expect(built).toEqual({
+      ok: true,
+      config: {
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+        sourceTemplateVersionId: 'ver_1',
+        confirmationHash: 'server-hash',
+        error: 'valid-extension-value',
+        extension: { future: true },
+      },
+    })
   })
 
   it('maps sheet + template fields for the editor', () => {

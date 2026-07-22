@@ -19,6 +19,11 @@ vi.mock('../../src/multitable/permission-service', () => ({
   resolveSheetCapabilities: (...args: unknown[]) => resolveSheetCapabilities(...args),
 }))
 
+const canReadApprovalTemplateForAutomation = vi.fn()
+vi.mock('../../src/multitable/automation-approval-template-access', () => ({
+  canReadApprovalTemplateForAutomation: (...args: unknown[]) => canReadApprovalTemplateForAutomation(...args),
+}))
+
 const query = vi.fn()
 vi.mock('../../src/integration/db/connection-pool', () => {
   const client = { query: (...args: unknown[]) => query(...args), getInternalPool: () => null }
@@ -39,6 +44,8 @@ describe('POST /sheets/:sheetId/automations/fwb/confirm', () => {
 
   beforeEach(() => {
     resolveSheetCapabilities.mockReset()
+    canReadApprovalTemplateForAutomation.mockReset()
+    canReadApprovalTemplateForAutomation.mockResolvedValue(true)
     query.mockReset()
     resolveSheetCapabilities.mockResolvedValue({
       access: { userId: 'author_1' },
@@ -193,6 +200,24 @@ describe('POST /sheets/:sheetId/automations/fwb/confirm', () => {
         mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
       })
       .expect(403)
+  })
+
+  it('fails source authorization indistinguishably before reading template schema', async () => {
+    process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
+    canReadApprovalTemplateForAutomation.mockResolvedValue(false)
+    pinned.setApp(buildApp())
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet_1/automations/fwb/confirm')
+      .send({
+        templateId: 'tpl_hidden_or_missing',
+        sourceTemplateVersionId: 'ver_1',
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+      })
+      .expect(404)
+
+    expect(res.body.error?.code).toBe('FWB_SOURCE_UNAVAILABLE')
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('FROM approval_templates'))).toBe(false)
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_fields'))).toBe(false)
   })
 
   it('rejects a stale template version instead of issuing a doomed confirmation', async () => {

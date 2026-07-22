@@ -32,6 +32,7 @@ import { AutomationService } from '../../src/multitable/automation-service'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { AutomationExecutor, type AutomationDeps, type AutomationRule as ExecutorRule } from '../../src/multitable/automation-executor'
 import { deriveFwbConfirmationHash } from '../../src/multitable/approval-fwb-activation'
+import { canReadApprovalTemplateForAutomation } from '../../src/multitable/automation-approval-template-access'
 import type { FwbGateChecks } from '../../src/multitable/approval-fwb-permission-gates'
 import { invalidateUserPerms } from '../../src/rbac/service'
 
@@ -46,6 +47,7 @@ const F_STATUS = `fld_fwbact_status_${TS}`
 const CREATOR = `u_fwbact_creator_${TS}`
 const REQUESTER = `u_fwbact_req_${TS}`
 const APPROVER = `u_fwbact_appr_${TS}`
+const SOURCE_READER = `u_fwbact_source_reader_${TS}`
 
 const q = (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlText, params)
 const queryFn = ((sqlText: string, params?: unknown[]) => poolManager.get().query(sqlText, params)) as never
@@ -75,6 +77,20 @@ const fwbConfig = (
   sourceVersionId = templateVersionId,
   confirmationHash = confirmation(mappings, sourceVersionId),
 ) => ({ mappings, sourceTemplateVersionId: sourceVersionId, confirmationHash })
+
+async function recordConfirmationReceipt(
+  actorId = CREATOR,
+  mappings: unknown = MAPPINGS,
+  sourceVersionId = templateVersionId,
+): Promise<void> {
+  const confirmationHash = confirmation(mappings, sourceVersionId)
+  await q(
+    `INSERT INTO operation_audit_logs
+       (actor_id, actor_type, action, resource_type, resource_id, metadata, meta)
+     VALUES ($1, 'user', 'automation.fwb_confirm', 'automation_fwb_confirmation', $2, $3::jsonb, $3::jsonb)`,
+    [actorId, SHEET_ID, JSON.stringify({ confirmationHash })],
+  )
+}
 
 function setFlags(fwb: boolean, durable: boolean) {
   if (fwb) process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
@@ -193,7 +209,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
               ('approvals:act', 'Approvals Act', 'FWBACT test')
        ON CONFLICT (code) DO NOTHING`,
     )
-    for (const uid of [CREATOR, REQUESTER, APPROVER]) {
+    for (const uid of [CREATOR, REQUESTER, APPROVER, SOURCE_READER]) {
       await q(
         `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
          VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, $3)
@@ -202,6 +218,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       )
     }
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`, [CREATOR])
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`, [SOURCE_READER])
     // rbac/service.isAdmin reads user_roles(role_id='admin') — the platform-admin leg Q6 G1 binds to.
     await q(`INSERT INTO roles (id, name) VALUES ('admin', 'admin') ON CONFLICT (id) DO NOTHING`).catch(() => {})
     await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`, [CREATOR])
@@ -215,6 +232,8 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
     const activeVersion = await q('SELECT active_version_id FROM approval_templates WHERE id = $1', [templateId])
     templateVersionId = String((activeVersion.rows[0] as { active_version_id: string }).active_version_id)
 
+    await recordConfirmationReceipt()
+
     svc = new AutomationService(integrationEventBus, db as never, queryFn)
   })
 
@@ -226,6 +245,11 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       await q('DELETE FROM multitable_automation_executions WHERE rule_id = $1', [ruleId]).catch(() => {})
     }
     await q('DELETE FROM meta_fwb_action_applied WHERE rule_id = ANY($1::text[])', [ruleIds]).catch(() => {})
+    await q(
+      `DELETE FROM operation_audit_logs
+        WHERE action = 'automation.fwb_confirm' AND resource_type = 'automation_fwb_confirmation' AND resource_id = $1`,
+      [SHEET_ID],
+    ).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
@@ -234,6 +258,70 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
+
+  test('save gate requires an actor-bound server receipt, not a reproducible digest alone', async () => {
+    const hash = confirmation()
+    await q(
+      `DELETE FROM operation_audit_logs
+        WHERE actor_id = $1
+          AND action = 'automation.fwb_confirm'
+          AND resource_type = 'automation_fwb_confirmation'
+          AND resource_id = $2
+          AND metadata->>'confirmationHash' = $3`,
+      [CREATOR, SHEET_ID, hash],
+    )
+    try {
+      await expect(svc.createRule(SHEET_ID, {
+        name: 'calculated digest without receipt',
+        triggerType: 'approval.completed',
+        triggerConfig: { templateId, outcomes: ['approved'] },
+        actionType: 'write_approval_form_values',
+        actionConfig: fwbConfig(),
+        createdBy: CREATOR,
+      } as never)).rejects.toThrow(/actor-bound server confirmation receipt/)
+    } finally {
+      await recordConfirmationReceipt()
+    }
+  })
+
+  test('source-template authorization uses one injected DB view for permission and visibility', async () => {
+    try {
+      expect(await canReadApprovalTemplateForAutomation(queryFn, templateId, SOURCE_READER)).toBe(true)
+
+      await q(
+        'UPDATE approval_templates SET visibility_scope = $2::jsonb WHERE id = $1',
+        [templateId, JSON.stringify({ type: 'user', ids: [REQUESTER] })],
+      )
+      expect(await canReadApprovalTemplateForAutomation(queryFn, templateId, SOURCE_READER)).toBe(false)
+
+      await q(
+        'UPDATE approval_templates SET visibility_scope = $2::jsonb WHERE id = $1',
+        [templateId, JSON.stringify({ type: 'all', ids: [] })],
+      )
+      await q(
+        `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:read'`,
+        [SOURCE_READER],
+      )
+      expect(await canReadApprovalTemplateForAutomation(queryFn, templateId, SOURCE_READER)).toBe(false)
+
+      await q(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+        [SOURCE_READER],
+      )
+      expect(await canReadApprovalTemplateForAutomation(queryFn, 'missing-template', SOURCE_READER)).toBe(false)
+    } finally {
+      await q(
+        'UPDATE approval_templates SET visibility_scope = $2::jsonb WHERE id = $1',
+        [templateId, JSON.stringify({ type: 'all', ids: [] })],
+      )
+      await q(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+        [SOURCE_READER],
+      )
+    }
+  })
 
   // ── Save gate (flag OFF throughout — validation is independent of the runtime flag) ─────────────
 
@@ -367,6 +455,39 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       .rejects.toThrow(/creator, modifier, or enabler/)
     const ownerUpdate = await svc.updateRule(tempId, SHEET_ID, { enabled: false }, CREATOR)
     expect(ownerUpdate?.enabled).toBe(false)
+
+    // Audit receipts are retention-bounded. An unchanged, server-validated persisted hash remains
+    // maintainable after its receipt expires, while any changed confirmation subject still requires
+    // a fresh actor-bound receipt.
+    const persistedHash = confirmation()
+    await q(
+      `DELETE FROM operation_audit_logs
+        WHERE actor_id = $1
+          AND action = 'automation.fwb_confirm'
+          AND resource_type = 'automation_fwb_confirmation'
+          AND resource_id = $2
+          AND COALESCE(meta->>'confirmationHash', metadata->>'confirmationHash') = $3`,
+      [CREATOR, SHEET_ID, persistedHash],
+    )
+    try {
+      const maintained = await svc.updateRule(tempId, SHEET_ID, { name: 'receipt expired, config unchanged' }, CREATOR)
+      expect(maintained?.name).toBe('receipt expired, config unchanged')
+      await expect(svc.updateRule(tempId, SHEET_ID, { enabled: true }, CREATOR))
+        .rejects.toThrow(/actor-bound server confirmation receipt/)
+
+      const changedMappings = [
+        { formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select' as const, selectOptions: ['A'] },
+      ]
+      await expect(svc.updateRule(tempId, SHEET_ID, {
+        actionConfig: fwbConfig(changedMappings),
+      }, CREATOR)).rejects.toThrow(/actor-bound server confirmation receipt/)
+    } finally {
+      await recordConfirmationReceipt()
+    }
+    const reenabled = await svc.updateRule(tempId, SHEET_ID, { enabled: true }, CREATOR)
+    expect(reenabled?.enabled).toBe(true)
+    const disabledAgain = await svc.updateRule(tempId, SHEET_ID, { enabled: false }, CREATOR)
+    expect(disabledAgain?.enabled).toBe(false)
 
     // The same canonical field guard used by record writes rejects a per-subject read-only target.
     await q(
@@ -609,6 +730,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
   test('execute-time select recheck uses confirmed-current intersection; additions require re-confirmation (D6/Q6)', async () => {
     // A dedicated rule whose select mapping's SAVED selectOptions include 'B' (valid at save time).
     const selectMappings = [{ formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select' as const, selectOptions: ['A', 'B'] }]
+    await recordConfirmationReceipt(CREATOR, selectMappings)
     const rule = await svc.createRule(SHEET_ID, {
       name: 'fwb select staleness',
       triggerType: 'approval.completed',
@@ -659,6 +781,7 @@ describeIfDatabase('FWB activation — production write_approval_form_values wir
       // Positive control: update the persisted mapping to include C with a fresh server-derived
       // confirmation hash. The same value is now authorized and writes exactly once.
       const reconfirmedMappings = [{ formFieldId: 'summary', targetFieldId: F_STATUS, targetType: 'select' as const, selectOptions: ['A', 'C'] }]
+      await recordConfirmationReceipt(CREATOR, reconfirmedMappings)
       await svc.updateRule(ruleId, SHEET_ID, {
         actionConfig: fwbConfig(reconfirmedMappings),
       }, CREATOR)

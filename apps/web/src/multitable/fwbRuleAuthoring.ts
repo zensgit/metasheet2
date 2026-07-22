@@ -41,6 +41,8 @@ export interface FwbDraftActionConfig {
    * read-only re-save never rewrites or drops the persisted mapping contract.
    */
   fwbPersistedMappings: FwbExecutorMapping[] | null
+  /** Complete server-accepted config, preserved verbatim for flag-off/read-only re-saves. */
+  fwbPersistedRawConfig: Record<string, unknown> | null
   /** True when this action was loaded from a saved rule (not freshly selected in the editor). */
   fwbWasPersisted: boolean
 }
@@ -50,8 +52,13 @@ export function isFwbActionType(type: string | null | undefined): type is FwbAct
 }
 
 /** New FWB selection is allowed only when the runtime flag is ON and the trigger is approval.completed. */
-export function canSelectNewFwbAction(flagEnabled: boolean, triggerType: string): boolean {
-  return flagEnabled && triggerType === 'approval.completed'
+export function canSelectNewFwbAction(
+  flagEnabled: boolean,
+  triggerType: string,
+  outcomes: readonly string[] = ['approved'],
+): boolean {
+  const approvedOnly = outcomes.length === 1 && outcomes[0] === 'approved'
+  return flagEnabled && triggerType === 'approval.completed' && approvedOnly
 }
 
 /**
@@ -62,9 +69,10 @@ export function isFwbActionSelectable(
   flagEnabled: boolean,
   triggerType: string,
   currentType: AutomationActionType,
+  outcomes: readonly string[] = ['approved'],
 ): boolean {
   if (isFwbActionType(currentType)) return true
-  return canSelectNewFwbAction(flagEnabled, triggerType)
+  return canSelectNewFwbAction(flagEnabled, triggerType, outcomes)
 }
 
 /** Read-only when the flag is OFF or the trigger is no longer approval.completed. */
@@ -72,12 +80,20 @@ export function isFwbActionReadOnly(
   flagEnabled: boolean,
   triggerType: string,
   _wasPersisted = false,
+  outcomes: readonly string[] = ['approved'],
 ): boolean {
   if (!flagEnabled) return true
   return triggerType !== 'approval.completed'
+    || outcomes.length !== 1
+    || outcomes[0] !== 'approved'
 }
 
-export function fwbReadOnlyStatusMessage(isZh: boolean, flagEnabled: boolean, triggerType: string): string {
+export function fwbReadOnlyStatusMessage(
+  isZh: boolean,
+  flagEnabled: boolean,
+  triggerType: string,
+  outcomes: readonly string[] = ['approved'],
+): string {
   if (!flagEnabled) {
     return isZh
       ? '审批回写未启用：已保存的回写动作只读保留，不会被静默删除。'
@@ -87,6 +103,11 @@ export function fwbReadOnlyStatusMessage(isZh: boolean, flagEnabled: boolean, tr
     return isZh
       ? '审批回写仅可用于「审批完成」触发器。'
       : 'Approval writeback is only available on the approval.completed trigger.'
+  }
+  if (outcomes.length !== 1 || outcomes[0] !== 'approved') {
+    return isZh
+      ? '审批回写仅支持「通过」结果；将完成结果改为仅通过后方可编辑。'
+      : 'Approval writeback supports the approved outcome only; set outcomes to approved only to edit it.'
   }
   return isZh ? '审批回写当前不可编辑。' : 'Approval writeback is currently not editable.'
 }
@@ -98,12 +119,23 @@ export function emptyFwbDraftConfig(): FwbDraftActionConfig {
     confirmationHash: '',
     fwbConfirmationState: 'unconfirmed',
     fwbPersistedMappings: null,
+    fwbPersistedRawConfig: null,
     fwbWasPersisted: false,
   }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((entry) => cloneJsonValue(entry)) as T
+  if (isPlainRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, cloneJsonValue(entry)]),
+    ) as T
+  }
+  return value
 }
 
 function parseExecutorMappings(raw: unknown): FwbExecutorMapping[] {
@@ -146,6 +178,7 @@ export function draftConfigFromFwbAction(
     // A loaded confirmed hash starts as confirmed; any later mapping mutation invalidates it.
     fwbConfirmationState: confirmationHash ? 'confirmed' : 'unconfirmed',
     fwbPersistedMappings: mappings.length > 0 ? mappings : null,
+    fwbPersistedRawConfig: cloneJsonValue(config),
     fwbWasPersisted: options.persisted,
   }
 }
@@ -190,42 +223,45 @@ export function buildFwbActionConfigForSave(
   draft: FwbDraftActionConfig,
   targetFields: readonly TargetFieldInfo[],
   options: { flagEnabled: boolean; readOnly: boolean },
-): FwbPersistedActionConfig | { error: string } {
+): { ok: true; config: Record<string, unknown> } | { ok: false; error: string } {
   const sourceTemplateVersionId = draft.sourceTemplateVersionId.trim()
   const confirmationHash = draft.confirmationHash.trim()
 
   if (options.readOnly || !options.flagEnabled) {
+    if (draft.fwbPersistedRawConfig) {
+      return { ok: true, config: cloneJsonValue(draft.fwbPersistedRawConfig) }
+    }
     const mappings = draft.fwbPersistedMappings
     if (!mappings || mappings.length === 0) {
-      return { error: 'fwb_persisted_mappings_missing' }
+      return { ok: false, error: 'fwb_persisted_mappings_missing' }
     }
     if (!sourceTemplateVersionId || !confirmationHash) {
-      return { error: 'fwb_confirmation_missing' }
+      return { ok: false, error: 'fwb_confirmation_missing' }
     }
-    return {
-      mappings,
-      sourceTemplateVersionId,
-      confirmationHash,
-    }
+    return { ok: true, config: { mappings, sourceTemplateVersionId, confirmationHash } }
   }
 
   if (!confirmationHash || draft.fwbConfirmationState !== 'confirmed') {
-    return { error: 'fwb_confirmation_required' }
+    return { ok: false, error: 'fwb_confirmation_required' }
   }
   if (!sourceTemplateVersionId) {
-    return { error: 'fwb_template_version_required' }
+    return { ok: false, error: 'fwb_template_version_required' }
   }
 
   try {
     const mappings = toExecutorMappings(draft.fwbMappings, targetFields)
     return {
-      mappings,
-      sourceTemplateVersionId,
-      confirmationHash,
+      ok: true,
+      config: {
+        ...cloneJsonValue(draft.fwbPersistedRawConfig ?? {}),
+        mappings,
+        sourceTemplateVersionId,
+        confirmationHash,
+      },
     }
   } catch {
     // Draft no longer validates — refuse rather than invent mappings.
-    return { error: 'fwb_mapping_invalid' }
+    return { ok: false, error: 'fwb_mapping_invalid' }
   }
 }
 

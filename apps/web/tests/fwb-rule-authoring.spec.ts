@@ -3,11 +3,17 @@ import { createApp, h, nextTick, reactive } from 'vue'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
 import type { AutomationRule } from '../src/multitable/types'
-import { epOptions, epSelectValue } from './helpers/epControls'
+import { epOptions, epSelectValue, epSetSelect } from './helpers/epControls'
 import { useLocale } from '../src/composables/useLocale'
 
 function flushPromises() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => nextTick())
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
 }
 
 let fwbFlag = false
@@ -140,6 +146,22 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
     expect(actionTypeOptions(container)).toContain('write_approval_form_values')
   })
 
+  it('does not offer a new FWB action when completion outcomes include rejected', async () => {
+    fwbFlag = true
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client: mockClient(),
+      rule: fakeRule({
+        triggerType: 'approval.completed',
+        triggerConfig: { templateId: 'tpl_1', outcomes: ['approved', 'rejected'] },
+      }),
+    })
+    await flushPromises()
+    expect(actionTypeOptions(container)).not.toContain('write_approval_form_values')
+  })
+
   it('flag on + wrong trigger does not offer new FWB selection', async () => {
     fwbFlag = true
     const { container } = mount({
@@ -168,6 +190,8 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
           ],
           sourceTemplateVersionId: 'ver_1',
           confirmationHash: 'persisted-hash',
+          mode: 'create',
+          extension: { nested: ['keep-me'] },
         },
         actions: [{
           type: 'write_approval_form_values',
@@ -177,6 +201,8 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
             ],
             sourceTemplateVersionId: 'ver_1',
             confirmationHash: 'persisted-hash',
+            mode: 'create',
+            extension: { nested: ['keep-me'] },
           },
         }],
       }),
@@ -207,6 +233,8 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
           ],
           sourceTemplateVersionId: 'ver_1',
           confirmationHash: 'persisted-hash',
+          mode: 'create',
+          extension: { nested: ['keep-me'] },
         },
         actions: [{
           type: 'write_approval_form_values',
@@ -216,6 +244,8 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
             ],
             sourceTemplateVersionId: 'ver_1',
             confirmationHash: 'persisted-hash',
+            mode: 'create',
+            extension: { nested: ['keep-me'] },
           },
         }],
       }),
@@ -237,6 +267,8 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
     expect(payload.actions[0]?.config.mappings).toEqual([
       { formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' },
     ])
+    expect(payload.actions[0]?.config.mode).toBe('create')
+    expect(payload.actions[0]?.config.extension).toEqual({ nested: ['keep-me'] })
     remount.app.unmount()
   })
 
@@ -349,6 +381,127 @@ describe('MetaAutomationRuleEditor — FWB production authoring', () => {
     expect(payload.actions[0]?.config.confirmationHash).toBe('server-hash-abc')
     // No client-side hash algorithm artifact — only the server response value.
     expect(String(payload.actions[0]?.config.confirmationHash)).not.toMatch(/^client-/)
+  })
+
+  it('ignores a late confirmation response after the action changes type', async () => {
+    fwbFlag = true
+    const pending = deferred<{
+      confirmationHash: string
+      templateId: string
+      sourceTemplateVersionId: string
+      targetSheetId: string
+      targetBaseId: string
+    }>()
+    const client = mockClient({ confirmFwbWriteback: vi.fn(() => pending.promise) })
+    const onSave = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client,
+      onSave,
+      rule: fakeRule({
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+          sourceTemplateVersionId: 'ver_1',
+          confirmationHash: '',
+        },
+        actions: [{
+          type: 'write_approval_form_values',
+          config: {
+            mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+            sourceTemplateVersionId: 'ver_1',
+            confirmationHash: '',
+          },
+        }],
+      }),
+    })
+    await flushPromises()
+    ;(container.querySelector('[data-field="actionSummary"]') as HTMLElement | null)?.click()
+    await flushPromises()
+    ;(container.querySelector('[data-testid="fwb-request-confirmation"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(client.confirmFwbWriteback).toHaveBeenCalledTimes(1)
+
+    epSetSelect(actionTypeSelect(container), 'send_webhook')
+    await flushPromises()
+    pending.resolve({
+      confirmationHash: 'late-server-hash',
+      templateId: 'tpl_1',
+      sourceTemplateVersionId: 'ver_1',
+      targetSheetId: 'sheet_1',
+      targetBaseId: 'base_1',
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(epSelectValue(actionTypeSelect(container))).toBe('send_webhook')
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0][0] as {
+      actions: Array<{ type: string; config: Record<string, unknown> }>
+    }
+    expect(payload.actions[0]?.type).toBe('send_webhook')
+    expect(payload.actions[0]?.config.confirmationHash).toBeUndefined()
+    expect(payload.actions[0]?.config.mappings).toBeUndefined()
+    expect(JSON.stringify(payload.actions[0])).not.toContain('late-server-hash')
+  })
+
+  it('ignores a late confirmation response after the target schema changes', async () => {
+    fwbFlag = true
+    const pending = deferred<{
+      confirmationHash: string
+      templateId: string
+      sourceTemplateVersionId: string
+      targetSheetId: string
+      targetBaseId: string
+    }>()
+    const client = mockClient({ confirmFwbWriteback: vi.fn(() => pending.promise) })
+    const mounted = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      client,
+      rule: fakeRule({
+        actionType: 'write_approval_form_values',
+        actionConfig: {
+          mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+          sourceTemplateVersionId: 'ver_1',
+          confirmationHash: '',
+        },
+        actions: [{
+          type: 'write_approval_form_values',
+          config: {
+            mappings: [{ formFieldId: 'form_reason', targetFieldId: 'fld_name', targetType: 'text' }],
+            sourceTemplateVersionId: 'ver_1',
+            confirmationHash: '',
+          },
+        }],
+      }),
+    })
+    await flushPromises()
+    ;(mounted.container.querySelector('[data-field="actionSummary"]') as HTMLElement | null)?.click()
+    await flushPromises()
+    ;(mounted.container.querySelector('[data-testid="fwb-request-confirmation"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(client.confirmFwbWriteback).toHaveBeenCalledTimes(1)
+
+    mounted.props.fields = [...fields, { id: 'fld_new', name: 'New', type: 'string' }]
+    await flushPromises()
+    pending.resolve({
+      confirmationHash: 'late-schema-hash',
+      templateId: 'tpl_1',
+      sourceTemplateVersionId: 'ver_1',
+      targetSheetId: 'sheet_1',
+      targetBaseId: 'base_1',
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(mounted.container.querySelector('[data-testid="fwb-confirmation-state"]')?.getAttribute('data-state'))
+      .toBe('unconfirmed')
   })
 
   it('does not request a server hash when the author cancels the explicit disclosure confirmation', async () => {

@@ -1550,6 +1550,7 @@ type DraftActionConfig = Record<string, unknown> & {
   confirmationHash?: string
   fwbConfirmationState?: FwbMappingConfirmationState
   fwbPersistedMappings?: FwbExecutorMapping[] | null
+  fwbPersistedRawConfig?: Record<string, unknown> | null
   fwbWasPersisted?: boolean
 }
 
@@ -1609,6 +1610,9 @@ const fwbTemplateFields = ref<Array<{ id: string; label: string }>>([])
 const fwbActiveVersionId = ref('')
 const fwbConfirmingDraftId = ref<string | null>(null)
 const fwbConfirmError = ref('')
+const fwbConfirmationGeneration = new Map<string, number>()
+const fwbConfirmingRequestGeneration = new Map<string, number>()
+let fwbTemplateLoadGeneration = 0
 const fwbTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
 const fwbTargetSchemaSignature = computed(() => JSON.stringify({
   sheetId: props.sheetId,
@@ -1817,7 +1821,12 @@ function selectableActionTypes(currentType: AutomationActionType): AutomationAct
   const types: AutomationActionType[] = [...SUPPORTED_SELECTABLE_ACTION_TYPES]
   // FWB: newly selectable only when flag ON + approval.completed; a loaded FWB action always remains
   // in the option list so it is never silently dropped from the UI.
-  if (isFwbActionSelectable(fwbWritebackEnabled.value, draft.value.triggerType, currentType)) {
+  if (isFwbActionSelectable(
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    currentType,
+    approvalCompletedOutcomes.value,
+  )) {
     if (!types.includes(FWB_ACTION_TYPE)) types.push(FWB_ACTION_TYPE)
   }
   if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
@@ -1831,11 +1840,17 @@ function fwbActionReadOnly(action: DraftAction): boolean {
     fwbWritebackEnabled.value,
     draft.value.triggerType,
     action.config.fwbWasPersisted === true,
+    approvalCompletedOutcomes.value,
   )
 }
 
 function fwbReadOnlyMessage(_action: DraftAction): string {
-  return fwbReadOnlyStatusMessage(isZh.value, fwbWritebackEnabled.value, draft.value.triggerType)
+  return fwbReadOnlyStatusMessage(
+    isZh.value,
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    approvalCompletedOutcomes.value,
+  )
 }
 
 function fwbConfirmationStateFor(action: DraftAction): FwbMappingConfirmationState {
@@ -1844,8 +1859,15 @@ function fwbConfirmationStateFor(action: DraftAction): FwbMappingConfirmationSta
   return action.config.confirmationHash ? 'confirmed' : 'unconfirmed'
 }
 
+function advanceFwbConfirmationGeneration(draftId: string): number {
+  const next = (fwbConfirmationGeneration.get(draftId) ?? 0) + 1
+  fwbConfirmationGeneration.set(draftId, next)
+  return next
+}
+
 function onFwbMappingsUpdate(action: DraftAction, next: FwbMappingDraft[]): void {
   if (fwbActionReadOnly(action)) return
+  advanceFwbConfirmationGeneration(action.draftId)
   action.config.fwbMappings = next
   action.config.confirmationHash = ''
   action.config.fwbConfirmationState = 'unconfirmed'
@@ -1853,13 +1875,18 @@ function onFwbMappingsUpdate(action: DraftAction, next: FwbMappingDraft[]): void
 
 function onFwbInvalidateConfirmation(action: DraftAction): void {
   if (fwbActionReadOnly(action)) return
+  advanceFwbConfirmationGeneration(action.draftId)
   action.config.confirmationHash = ''
   action.config.fwbConfirmationState = 'unconfirmed'
 }
 
 async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecutorMapping[]): Promise<void> {
   if (fwbActionReadOnly(action) || !props.client) return
-  if (!canSelectNewFwbAction(fwbWritebackEnabled.value, draft.value.triggerType) && !action.config.fwbWasPersisted) {
+  if (!canSelectNewFwbAction(
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    approvalCompletedOutcomes.value,
+  ) && !action.config.fwbWasPersisted) {
     return
   }
   const templateId = typeof draft.value.triggerConfig.templateId === 'string'
@@ -1890,7 +1917,16 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
     return
   }
   fwbConfirmError.value = ''
+  const requestGeneration = advanceFwbConfirmationGeneration(action.draftId)
+  const requestSubject = {
+    templateId,
+    sourceTemplateVersionId,
+    targetSchemaSignature: fwbTargetSchemaSignature.value,
+    draftMappings: JSON.stringify(action.config.fwbMappings ?? []),
+    executorMappings: JSON.stringify(mappings),
+  }
   fwbConfirmingDraftId.value = action.draftId
+  fwbConfirmingRequestGeneration.set(action.draftId, requestGeneration)
   action.config.fwbConfirmationState = 'confirming'
   action.config.sourceTemplateVersionId = sourceTemplateVersionId
   try {
@@ -1900,23 +1936,47 @@ async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecut
       sourceTemplateVersionId,
       mappings,
     })
+    const currentAction = draft.value.actions.find((candidate) => candidate.draftId === action.draftId)
+    const currentTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
+      ? draft.value.triggerConfig.templateId.trim()
+      : ''
+    const subjectStillCurrent =
+      currentAction === action
+      && isFwbActionType(currentAction.type)
+      && fwbConfirmationGeneration.get(action.draftId) === requestGeneration
+      && currentTemplateId === requestSubject.templateId
+      && currentAction.config.sourceTemplateVersionId === requestSubject.sourceTemplateVersionId
+      && JSON.stringify(currentAction.config.fwbMappings ?? []) === requestSubject.draftMappings
+      && JSON.stringify(mappings) === requestSubject.executorMappings
+      && fwbTargetSchemaSignature.value === requestSubject.targetSchemaSignature
+      && result.templateId === requestSubject.templateId
+      && result.sourceTemplateVersionId === requestSubject.sourceTemplateVersionId
+      && result.targetSheetId === props.sheetId
+    if (!subjectStillCurrent) return
     action.config.confirmationHash = result.confirmationHash
     action.config.sourceTemplateVersionId = result.sourceTemplateVersionId
     action.config.fwbConfirmationState = 'confirmed'
     // Keep a snapshot of the confirmed executor mappings for lossless re-save if the flag later flips off.
     action.config.fwbPersistedMappings = mappings
   } catch (e: unknown) {
+    if (fwbConfirmationGeneration.get(action.draftId) !== requestGeneration) return
     action.config.confirmationHash = ''
     action.config.fwbConfirmationState = 'unconfirmed'
     fwbConfirmError.value = e instanceof Error
       ? e.message
       : (isZh.value ? '确认失败，请重试。' : 'Confirmation failed — try again.')
   } finally {
-    fwbConfirmingDraftId.value = null
+    if (fwbConfirmingRequestGeneration.get(action.draftId) === requestGeneration) {
+      fwbConfirmingRequestGeneration.delete(action.draftId)
+    }
+    if (fwbConfirmingDraftId.value === action.draftId && !fwbConfirmingRequestGeneration.has(action.draftId)) {
+      fwbConfirmingDraftId.value = null
+    }
   }
 }
 
 async function loadFwbTemplateSource(templateId: string): Promise<void> {
+  const loadGeneration = ++fwbTemplateLoadGeneration
   const id = templateId.trim()
   if (!id) {
     fwbTemplateFields.value = []
@@ -1925,6 +1985,10 @@ async function loadFwbTemplateSource(templateId: string): Promise<void> {
   }
   try {
     const detail = await getTemplate(id)
+    const currentTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
+      ? draft.value.triggerConfig.templateId.trim()
+      : ''
+    if (loadGeneration !== fwbTemplateLoadGeneration || currentTemplateId !== id) return
     fwbTemplateFields.value = templateSchemaToFwbFields(detail.formSchema)
     fwbActiveVersionId.value = typeof detail.activeVersionId === 'string' ? detail.activeVersionId : ''
     // Bind every FWB draft that lacks a version to the currently active one; a version drift
@@ -1937,12 +2001,14 @@ async function loadFwbTemplateSource(templateId: string): Promise<void> {
       if (!current && fwbActiveVersionId.value) {
         action.config.sourceTemplateVersionId = fwbActiveVersionId.value
       } else if (current && fwbActiveVersionId.value && current !== fwbActiveVersionId.value) {
+        advanceFwbConfirmationGeneration(action.draftId)
         action.config.sourceTemplateVersionId = fwbActiveVersionId.value
         action.config.confirmationHash = ''
         action.config.fwbConfirmationState = 'unconfirmed'
       }
     }
   } catch {
+    if (loadGeneration !== fwbTemplateLoadGeneration) return
     fwbTemplateFields.value = []
     fwbActiveVersionId.value = ''
   }
@@ -2752,6 +2818,8 @@ watch(
       saving.value = false
       fwbConfirmError.value = ''
       fwbConfirmingDraftId.value = null
+      fwbConfirmationGeneration.clear()
+      fwbConfirmingRequestGeneration.clear()
       dingTalkDestinationsError.value = ''
       personRecipientSuggestions.value = {}
       personRecipientLoading.value = {}
@@ -2805,6 +2873,7 @@ watch(
       action.config.confirmationHash = ''
       action.config.fwbConfirmationState = 'unconfirmed'
       action.config.sourceTemplateVersionId = ''
+      advanceFwbConfirmationGeneration(action.draftId)
     }
   },
 )
@@ -2818,6 +2887,7 @@ watch(fwbTargetSchemaSignature, (next, previous) => {
     if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue
     action.config.confirmationHash = ''
     action.config.fwbConfirmationState = 'unconfirmed'
+    advanceFwbConfirmationGeneration(action.draftId)
   }
 })
 
@@ -3741,6 +3811,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
 }
 
 function onDraftActionTypeChange(action: DraftAction) {
+  advanceFwbConfirmationGeneration(action.draftId)
   action.config = defaultConfigForActionType(action.type)
   action.persisted = false
   // G-B2-25: a type change clears any manual collapse override so isActionExpanded() falls back
@@ -3759,6 +3830,7 @@ function onDraftActionTypeChange(action: DraftAction) {
 
 function removeAction(idx: number) {
   const [removed] = draft.value.actions.splice(idx, 1)
+  if (removed?.draftId) advanceFwbConfirmationGeneration(removed.draftId)
   if (removed?.draftId) clearActionExpandOverride(removed.draftId)
   if (removed?.draftId && deleteRecordAcknowledgements.value[removed.draftId] !== undefined) {
     const next = { ...deleteRecordAcknowledgements.value }
@@ -4034,13 +4106,14 @@ function buildPayload(): Partial<AutomationRule> {
           : '',
         fwbConfirmationState: fwbConfirmationStateFor(action),
         fwbPersistedMappings: action.config.fwbPersistedMappings ?? null,
+        fwbPersistedRawConfig: action.config.fwbPersistedRawConfig ?? null,
         fwbWasPersisted: action.config.fwbWasPersisted === true,
       }
       const built = buildFwbActionConfigForSave(draftConfig, fwbTargetFields.value, {
         flagEnabled: fwbWritebackEnabled.value,
         readOnly: fwbActionReadOnly(action),
       })
-      if ('error' in built) {
+      if (!built.ok) {
         throw new Error(
           isZh.value
             ? '从审批创建记录需先完成服务端确认，且映射配置必须有效。'
@@ -4049,11 +4122,7 @@ function buildPayload(): Partial<AutomationRule> {
       }
       return {
         type: action.type,
-        config: {
-          mappings: built.mappings,
-          sourceTemplateVersionId: built.sourceTemplateVersionId,
-          confirmationHash: built.confirmationHash,
-        },
+        config: built.config,
       }
     }
     return { type: action.type, config: action.config }
