@@ -77,7 +77,7 @@ owner 复核（2026-07-21，对 re-ratify 首轮呈审）裁定 1P1+3P2；处置
 | owner finding | 处置 | 证据 |
 |---|---|---|
 | [P1] 只做新建准入，无生命周期/存量升级（bind 不写、解绑不失活 ⇒ ①假 missing + stale access） | ✅ #4526：8 生命周期写点（bind/admit/sync-loop auto-match/解绑/rebind 位移/本地建号/归档/显式 org 建人）同事务 upsert 或按「同 org 无其他有效绑定」（#4526 机制语义）条件失活；真实存量 backfill 迁移 `zzzz20260721150000`（幂等、不复活失活行）；S7-5 门补 `users.is_active` 双活（api-tokens/automation-executor 同型点一并） | 七案 F1-F7 + 跨 org 回归真库全绿；rebind 位移对钉钉实证不可达（`user_external_identities` 冲突守卫先抛），防御代码保留 |
-| [P2] 修复动作步骤循环（仅 group/shift 才解析 org） | ✅ #4526：显式 `attendanceOrgId` 参数（`admin-users.ts:3109`），零考勤组/班次前置；F6 用例以 fresh-org 证伪旧循环；「org 存在」采 validate-can-fail（404），双读法呈 owner 待裁 | 锁 §3① 修复动作格已同步改真 |
+| [P2] 修复动作步骤循环（仅 group/shift 才解析 org） | ✅ #4526：显式 `attendanceOrgId` 参数（`admin-users.ts:3109`），零考勤组/班次前置；F6 用例以 fresh-org 证伪旧循环；「org 存在」owner 已裁：validate-can-fail（404，不自动造组织——2026-07-22，#4530 复审确认项①） | 锁 §3① 修复动作格已同步改真 |
 | [P2] 修复动作对受托管理员必 403 | ✅ 锁 §3① 行新增**角色化合同**（W4-1 强制）：平台 admin 见可操作深链；受托 `attendance:admin` 见「联系平台管理员」文案，绝不渲染必然 403 入口 | docs（本 PR）；UI 落地属 W4-1 完成门 |
 | [P2] effectiveTime 合同静默回退 | ✅ 锁 §3.2 恢复 #4509 四态 `immediate|scheduled|manual_activation|undeterminable` + `scheduled` 必带 `effectiveAt`，并记录回退勘误 | docs（本 PR） |
 
