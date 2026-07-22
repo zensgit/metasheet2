@@ -75,7 +75,14 @@
 # links, §3① role-gated step① remediation, §4.5(iii) step⑥ copy negatives, ⑦ manual activation
 # checklist, effectiveTime four-state render, AttendanceView section/task-home/deep-link wiring)
 # plus the fetch-composable spec (HTTP→discriminator folding, enum-strict body validation, §6.1
-# readiness-derived task-home badge)).
+# readiness-derived task-home badge)), and attendance-setup-templates.spec.ts (W4-2 — same design
+# lock §5/§9 W4-2: four-template FE-constant matrix vs Appendix A + 时区禁硬编码 negative
+# (attendanceSetupTemplates.ts), wizard-shell template gallery / open-template emit / ⑦ full
+# read-only impact derivation / checklist template item + §5.3 completion-claim negatives (zh AND
+# en legs), and the mounted AttendanceView §5.2 prefill contract: overwrite-confirm dialog before
+# any write, snapshot undo byte-identical restore incl. editing posture, R3 zero-write walk at
+# the mock network layer, R4 banned switch/trigger door negatives, OD-W4-7 beforeunload +
+# zero-template-storage assertions).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -125,6 +132,7 @@ on:
       - 'apps/web/tests/attendance-setup-readiness.spec.ts'
       - 'apps/web/tests/AttendanceSetupReadiness.spec.ts'
       - 'apps/web/tests/useAttendanceSetupReadiness.spec.ts'
+      - 'apps/web/tests/attendance-setup-templates.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -169,6 +177,7 @@ on:
       - 'apps/web/tests/attendance-setup-readiness.spec.ts'
       - 'apps/web/tests/AttendanceSetupReadiness.spec.ts'
       - 'apps/web/tests/useAttendanceSetupReadiness.spec.ts'
+      - 'apps/web/tests/attendance-setup-templates.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -211,4 +220,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates --reporter=dot
