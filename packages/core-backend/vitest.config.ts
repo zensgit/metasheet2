@@ -382,6 +382,18 @@ export default defineConfig({
       'tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts',
       'tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts',
       'tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts',
+      // W4-PRE-1b real-DB (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, 2026-07-21):
+      // user_orgs full LIFECYCLE — bind/auto-match writers (item A), org-scoped safe-
+      // deactivation writers (item B), the real-stock backfill migration (item C), the S7-5
+      // dual is_active gate (item E), and the explicit attendanceOrgId admin-users path
+      // (item D). DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job
+      // cannot skip-green them; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/attendance-w4pre1b-user-orgs-lifecycle.db.test.ts',
+      'tests/integration/attendance-w4pre1b-user-orgs-sync-automatch.db.test.ts',
+      'tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts',
+      'tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts',
+      'tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
