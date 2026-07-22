@@ -268,6 +268,13 @@ type CreateUserRequestBody = {
   position?: string
   hireDate?: string
   orgId?: string
+  /**
+   * W4-PRE-1b item D: independent explicit org-admission param. Unlike `orgId` above (consumed
+   * only by `resolveAttendanceOnboardingOrgId`'s group/shift-derivation fallback chain), this
+   * one alone is sufficient to onboard `user_orgs` membership with NO attendanceGroupId/
+   * defaultShiftId required — see the resolution block below.
+   */
+  attendanceOrgId?: string
   attendanceGroupId?: string
   defaultShiftId?: string
   defaultShiftStartDate?: string
@@ -463,6 +470,21 @@ function sanitizeOptionalUuid(value: unknown): string | null | undefined {
   const normalized = value.trim()
   if (!normalized) return null
   return UUID_PATTERN.test(normalized) ? normalized : undefined
+}
+
+/**
+ * W4-PRE-1b item D. `org_id` is a free-form TEXT identifier across this codebase (no formal
+ * `organizations` table, no UUID shape requirement — `'default'` itself is not a UUID), so this
+ * mirrors `sanitizeOptionalUuid`'s ABSENT/INVALID split without the UUID regex: absent (undefined/
+ * null/blank-after-trim) → `null`, wrong TYPE → `undefined` (400). Length-capped as basic input
+ * hygiene only, matching the other free-text sanitizers in this file.
+ */
+function sanitizeOptionalOrgId(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  if (!normalized) return null
+  return normalized.slice(0, 200)
 }
 
 function resolveAttendanceOnboardingOrgId(req: Request): string {
@@ -3084,6 +3106,7 @@ export function adminUsersRouter(): Router {
       const cleanHireDate = typeof body.hireDate === 'string' ? sanitizeHireDate(body.hireDate) : null
       const cleanAttendanceGroupId = sanitizeOptionalUuid(body.attendanceGroupId)
       const cleanDefaultShiftId = sanitizeOptionalUuid(body.defaultShiftId)
+      const cleanExplicitAttendanceOrgId = sanitizeOptionalOrgId(body.attendanceOrgId)
       const cleanDefaultShiftStartDate = typeof body.defaultShiftStartDate === 'string' ? sanitizeHireDate(body.defaultShiftStartDate) : null
       const cleanName = typeof body.name === 'string' ? sanitizeName(body.name) : ''
       const preset = getAccessPreset(typeof body.presetId === 'string' ? body.presetId.trim() : '')
@@ -3124,6 +3147,9 @@ export function adminUsersRouter(): Router {
       }
       if (cleanDefaultShiftId === undefined) {
         return jsonError(res, 400, 'INVALID_DEFAULT_SHIFT_ID', 'defaultShiftId must be a UUID or blank')
+      }
+      if (cleanExplicitAttendanceOrgId === undefined) {
+        return jsonError(res, 400, 'INVALID_ATTENDANCE_ORG_ID', 'attendanceOrgId must be a string or blank')
       }
       if (cleanDefaultShiftStartDate === undefined) {
         return jsonError(res, 400, 'INVALID_DEFAULT_SHIFT_START_DATE', 'defaultShiftStartDate must be YYYY-MM-DD or blank')
@@ -3169,9 +3195,45 @@ export function adminUsersRouter(): Router {
         }
       }
 
-      const attendanceOrgId = cleanAttendanceGroupId || cleanDefaultShiftId
+      // W4-PRE-1b item D: the group/shift-derived resolution below is UNCHANGED — every
+      // existing caller that never sends `attendanceOrgId` gets byte-identical behavior. The
+      // new explicit param is evaluated independently and merged in afterward, so it can also
+      // stand alone (no group/shift required) — closing the circular dependency the owner named
+      // (the ONLY prior way to write `user_orgs` from this route required a group/shift ID,
+      // which itself needs a pre-existing org to belong to).
+      const derivedAttendanceOrgId = cleanAttendanceGroupId || cleanDefaultShiftId
         ? resolveAttendanceOnboardingOrgId(req)
         : null
+
+      let attendanceOrgId = derivedAttendanceOrgId
+      if (cleanExplicitAttendanceOrgId) {
+        // The owner's item-D text is "支持显式 attendanceOrgId（不依赖考勤组/班次）⇒ canonical
+        // surface 变为真无条件" — it does not itself say how an unrecognized org id should be
+        // handled, which is this PR's own open adjudication point (see the PR body's
+        // explicit-org-path deviation note). Validated here against `directory_integrations` —
+        // the org anchor every org acquires today (a `provider='local'` row via
+        // `getOrCreateLocalIntegration`, or a `provider='dingtalk'` integration). Deliberately
+        // does NOT auto-create an anchor for an unrecognized org id — that is the alternate
+        // (auto-vivify) reading the PR body flags as NOT shipped; this one ships fail-closed
+        // ("静默 fallback = 契约 bug").
+        const orgAnchor = await query<{ found: number }>(
+          'SELECT 1 AS found FROM directory_integrations WHERE org_id = $1 LIMIT 1',
+          [cleanExplicitAttendanceOrgId],
+        )
+        if (orgAnchor.rows.length === 0) {
+          return jsonError(res, 404, 'ATTENDANCE_ORG_NOT_FOUND', 'attendanceOrgId does not match a known org')
+        }
+        if (derivedAttendanceOrgId && derivedAttendanceOrgId !== cleanExplicitAttendanceOrgId) {
+          return jsonError(
+            res,
+            400,
+            'ATTENDANCE_ORG_CONFLICT',
+            'attendanceOrgId conflicts with the org resolved from attendanceGroupId/defaultShiftId',
+          )
+        }
+        attendanceOrgId = cleanExplicitAttendanceOrgId
+      }
+
       const defaultShiftStartDate = cleanDefaultShiftId
         ? (cleanDefaultShiftStartDate || cleanHireDate || todayUtcDate())
         : null
@@ -3221,8 +3283,10 @@ export function adminUsersRouter(): Router {
 
       // W4-PRE-1 (§3.3 of the Wave-4 onboarding design lock): this route is the first-priority
       // user_orgs write site — it already resolves and validates a KNOWN AUTHORITATIVE org
-      // (attendanceOrgId, only set when attendanceGroupId/defaultShiftId was supplied and
-      // matched against attendance_groups/attendance_shifts.org_id above) but historically wrote
+      // (attendanceOrgId — set either from the group/shift-derivation fallback, matched against
+      // attendance_groups/attendance_shifts.org_id above, OR from W4-PRE-1b's explicit
+      // `attendanceOrgId` body param, validated against `directory_integrations` above — see
+      // that block's comment) but historically wrote
       // users/user_roles/user_permissions/attendance_group_members/attendance_shift_assignments
       // as independent auto-commit statements with no shared transaction boundary. The W4-PRE-1
       // atomicity requirement (a user_orgs write failure must roll back the whole admission —

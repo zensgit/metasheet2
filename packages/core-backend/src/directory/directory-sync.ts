@@ -160,6 +160,7 @@ type DirectoryAccountRow = {
   name: string
   email: string | null
   mobile: string | null
+  is_active: boolean
 }
 
 type DirectoryAccountLinkRow = {
@@ -3510,6 +3511,15 @@ export async function syncDirectoryIntegration(
       // whole backlog. Without it the deprovision executor re-processed every account ever
       // deactivated on every sync — audit spam, and it would stomp a reactivation.
       // RETURNING gives the executor exactly the accounts that departed in THIS run.
+      //
+      // KNOWN OPEN GAP (#4526 review, not fixed this round — needs an owner ruling): this sweep
+      // flips ONLY `directory_accounts.is_active`; it does not call
+      // `deactivateUserOrgMembershipIfNoOtherActiveBinding`, so a departed employee's `user_orgs`
+      // row stays ACTIVE until an admin manually unbinds them (the deprovision executor below is
+      // OFF by default and, even enabled, only ever touches `users.is_active`, never
+      // `user_orgs`). Whether "the directory silently stopped reporting this account" counts as a
+      // BINDING event under this line's own boundary (only unbind/rebind/archive deactivate) is
+      // an open adjudication point — see the PR body's lifecycle table and open items.
       const deactivatedAccountsResult = await client.query(
         `UPDATE directory_accounts
          SET is_active = false, updated_at = NOW()
@@ -3527,7 +3537,7 @@ export async function syncDirectoryIntegration(
           [integrationId],
         ),
         client.query(
-          `SELECT id, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile
+          `SELECT id, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile, is_active
            FROM directory_accounts
            WHERE integration_id = $1`,
           [integrationId],
@@ -3758,6 +3768,32 @@ export async function syncDirectoryIntegration(
 
         if (linkStatus === 'linked' && localUserId && directoryUser) {
           linkedUserIdByExternalUserId.set(account.external_user_id, localUserId)
+        }
+
+        // W4-PRE-1b item A: an `external_identity` re-match confirms a PRE-EXISTING user against
+        // this account without going through `applyDirectoryAccountBindInTransaction` (that
+        // helper only runs for the manual-bind / admit call sites) — this is the "auto-match"
+        // writer named in the owner's #4522 review comment. Gated on the ACTUAL outcome
+        // (`linkStatus === 'linked' && localUserId`), not on `matchStrategy`, so it also covers
+        // `auto_admit` (already-active via `createDirectoryAdmittedUserInTransaction`'s own call
+        // into that helper — this second upsert is then an idempotent no-op, not a double-write)
+        // without hand-maintaining a strategy allowlist. `pending` email/mobile candidate matches
+        // are correctly excluded: they never held an ACTIVE membership through this account (item
+        // A activates membership only for `linked`), so no upsert is due until a human confirms.
+        //
+        // Post-#4526-review fix: additionally gated on `account.is_active` (the account's state
+        // AS OF THIS SYNC — the DT-OPS-01 sweep above already ran, so this reflects the sweep's
+        // result within the same transaction, not a stale pre-sweep value). Without this, an
+        // account that DEPARTED the directory long ago but is still walked every sync (this loop
+        // iterates ALL accounts for the integration, not just this run's batch) short-circuits to
+        // `already_linked` (`resolveDirectoryIdentityMatch` returns early on an existing `linked`
+        // row without inspecting `directory_accounts.is_active`) and would otherwise silently
+        // resurrect a deliberately-unbound `user_orgs` row to ACTIVE on every subsequent resync —
+        // reopening the exact stale-access half of the owner's original P1 finding via this line's
+        // OWN new write point (review finding, #4526). A currently-inactive account never confirms
+        // membership through this writer; only a live account does.
+        if (linkStatus === 'linked' && localUserId && account.is_active) {
+          await upsertActiveUserOrgMembership(client, { userId: localUserId, orgId: integration.org_id })
         }
 
         await client.query(
@@ -4120,6 +4156,10 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     name: user.name,
     email: normalizeOptionalText(user.email),
     mobile: normalizeOptionalText(user.mobile),
+    // Synthetic "as if pulled from the directory right now" row for match-map building only —
+    // `loadMatchMaps` never reads `is_active` (only external_key/union_id/open_id/email/mobile),
+    // so this is a type-shape fill, not a semantic claim about persisted account state.
+    is_active: true,
   }))
   const identityMatchMaps = await loadMatchMaps(pulledAccountsForMatching)
 
@@ -4826,6 +4866,131 @@ export async function batchAdmitDirectoryAccountUsers(
   return outcome
 }
 
+type MembershipWriteClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
+}
+
+/**
+ * W4-PRE-1b (owner CHANGES_REQUESTED on the W4 re-ratify PR, 2026-07-21, item A): resolve the
+ * KNOWN AUTHORITATIVE org for a directory account from its OWN `directory_integrations` row —
+ * never a client-supplied value, never a silent 'default' guess. Fail-closed BEFORE any write if
+ * the integration row cannot be found (foreign-key-orphaned `integration_id`). Shared by every
+ * bind-shaped writer below so the resolution logic (and its fail-closed behavior) lives in
+ * exactly one place. Mirrors the inline resolution #4521 (W4-PRE-1) originally wrote only inside
+ * `createDirectoryAdmittedUserInTransaction`.
+ */
+async function resolveDirectoryAccountOrgId(client: MembershipWriteClient, integrationId: string): Promise<string> {
+  const orgResult = await client.query(
+    `SELECT org_id
+     FROM directory_integrations
+     WHERE id = $1::uuid
+     LIMIT 1`,
+    [integrationId],
+  )
+  const orgId = (orgResult.rows[0] as { org_id?: string } | undefined)?.org_id
+  if (!orgId) {
+    throw new Error('Directory integration not found for account org resolution')
+  }
+  return orgId
+}
+
+/**
+ * W4-PRE-1b item A: same-transaction upsert of an ACTIVE `user_orgs` membership for a user who
+ * is now (or still) bound to a directory account in `orgId`. `ON CONFLICT (user_id, org_id) DO
+ * UPDATE SET is_active = EXCLUDED.is_active` — the branch #4521's own review (P3) noted was DEAD
+ * for the brand-new-user admission path (a fresh user can never already hold a `user_orgs` row)
+ * is made LIVE here: an existing user who was previously deactivated in this org (§ below) and is
+ * now rebound reactivates through this exact conflict path. Shape matches #4521's writer
+ * (admin-users.ts, `INSERT INTO user_orgs ... ON CONFLICT (user_id, org_id) DO UPDATE SET
+ * is_active = EXCLUDED.is_active`).
+ */
+export async function upsertActiveUserOrgMembership(
+  client: MembershipWriteClient,
+  options: { userId: string; orgId: string },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active)
+     VALUES ($1::text, $2::text, TRUE)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+    [options.userId, options.orgId],
+  )
+}
+
+/**
+ * W4-PRE-1b item B: safe deactivation. Flips `user_orgs.is_active` to FALSE for
+ * (userId, orgId) ONLY WHEN the user holds no OTHER active, linked directory account anywhere in
+ * THIS org. Deliberately ORG-SCOPED (unlike the pre-existing `applyDirectoryDeprovisionPolicies`
+ * sibling guard, which is intentionally GLOBAL for rehire protection, ~L1396-1400): a user can be
+ * active in org A and inactive in org B independently, so the sibling search spans BOTH `local`
+ * and `dingtalk` directory accounts of THIS org only (via the `directory_integrations.org_id`
+ * join) — never accounts in a different org. Call this AFTER the triggering link mutation has
+ * already been written in the same transaction, so a just-severed/reassigned row correctly
+ * self-excludes from the NOT EXISTS.
+ *
+ * Boundary (this PR's own reading, presented to the owner as evidence — NOT an adjudicated owner
+ * ruling; see the PR body's "Deactivation boundary semantics" section): only a BINDING event
+ * (unbind / directory-side link removal / same-account rebind that displaces a prior holder) is
+ * treated as calling this. A user's `users.is_active` PATCH (deactivation) never touches
+ * `user_orgs` — the RD-3 dual-is_active read filter (`user_orgs.is_active=true AND
+ * users.is_active=true`) already excludes a deactivated user from every count and gate without a
+ * membership-row write.
+ *
+ * Concurrency (#4526 review fix — cross-transaction write skew): a plain
+ * `UPDATE ... WHERE ... AND NOT EXISTS (...)` is atomic only for ITS OWN target row; the NOT
+ * EXISTS subquery reads OTHER rows (sibling `directory_account_links`/`directory_accounts`)
+ * through this transaction's own READ COMMITTED snapshot, which cannot see a concurrent sibling-
+ * severing transaction's still-uncommitted write. Two concurrent unbinds of a double-bound user's
+ * two DIFFERENT accounts can each legitimately see the OTHER's account as still linked+active
+ * (neither has committed yet), so BOTH skip deactivation — write skew converging to an ACTIVE
+ * `user_orgs` row with ZERO live bindings. The `SELECT ... FOR UPDATE` below serializes the two
+ * calls on the shared (userId, orgId) row: whichever call reaches it second BLOCKS until the
+ * first commits, then re-reads with a FRESH read-committed snapshot that includes the first call's
+ * already-committed severance — so the second call's NOT EXISTS correctly observes both siblings
+ * gone and performs the deactivation. (The first call legitimately still sees the second's sibling
+ * as not-yet-severed and no-ops — that is correct, not a bug: "no other active binding" only
+ * becomes true once BOTH severances are durable, and the lock guarantees exactly one of the two
+ * racing calls observes that fully-converged state.) If no `user_orgs` row exists yet, the lock
+ * finds nothing and the UPDATE below is a no-op either way.
+ */
+export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
+  client: MembershipWriteClient,
+  options: { userId: string; orgId: string },
+): Promise<void> {
+  await client.query(
+    `SELECT 1 FROM user_orgs WHERE user_id = $1::text AND org_id = $2::text FOR UPDATE`,
+    [options.userId, options.orgId],
+  )
+  await client.query(
+    `UPDATE user_orgs
+     SET is_active = FALSE
+     WHERE user_id = $1::text
+       AND org_id = $2::text
+       AND is_active = TRUE
+       AND NOT EXISTS (
+         SELECT 1
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+         JOIN directory_integrations i ON i.id = a.integration_id
+         WHERE l.local_user_id = $1::text
+           AND l.link_status = 'linked'
+           AND a.is_active = TRUE
+           AND i.org_id = $2::text
+       )`,
+    [options.userId, options.orgId],
+  )
+}
+
+/**
+ * `resolveDirectoryAccountOrgId` additionally exposed here (alongside the two functions that are
+ * ALSO directly exported above for ordinary runtime consumers like `local-directory-org.ts`) so
+ * tests can drive the org-resolution seam directly without a full bind/unbind call.
+ */
+export const __userOrgsMembershipInternalsForTests = {
+  resolveDirectoryAccountOrgId,
+  upsertActiveUserOrgMembership,
+  deactivateUserOrgMembershipIfNoOtherActiveBinding,
+}
+
 async function applyDirectoryAccountBindInTransaction(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   options: {
@@ -4842,6 +5007,31 @@ async function applyDirectoryAccountBindInTransaction(
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
+
+  // W4-PRE-1b item A: resolve the account's KNOWN AUTHORITATIVE org up front (fail-closed,
+  // shared helper — see `resolveDirectoryAccountOrgId` above) so every caller of this function
+  // (manual bind, admit-over-existing-account, batch variants) maintains `user_orgs` the same
+  // way #4521 already does for brand-new admissions.
+  const orgId = await resolveDirectoryAccountOrgId(client, account.integration_id)
+
+  // W4-PRE-1b item B (same-account rebind displacement): capture whoever THIS account is
+  // CURRENTLY linked to, BEFORE the link upsert below overwrites it. `ON CONFLICT
+  // (directory_account_id) DO UPDATE local_user_id = EXCLUDED.local_user_id` a few statements
+  // down silently reassigns the account from its prior holder to `localUser` in one step — the
+  // prior holder must be re-evaluated for org-membership deactivation, exactly as an explicit
+  // unbind-then-bind would. Scoped to `link_status = 'linked'` on purpose: a 'pending' email/
+  // mobile match candidate (directory-sync.ts's own sync loop can set `local_user_id` on a
+  // 'pending' row) never held an ACTIVE membership via this account in the first place (item A
+  // only activates membership for 'linked'), so it must not trigger a deactivation.
+  const priorLinkResult = await client.query(
+    `SELECT local_user_id
+     FROM directory_account_links
+     WHERE directory_account_id = $1::uuid
+       AND link_status = 'linked'
+     LIMIT 1`,
+    [normalizedAccountId],
+  )
+  const priorLocalUserId = (priorLinkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id ?? null
 
   const profile = JSON.stringify({
     source: 'directory_admin_bind',
@@ -4971,6 +5161,17 @@ async function applyDirectoryAccountBindInTransaction(
        updated_at = NOW()`,
     [normalizedAccountId, localUser.id, normalizedAdminUserId],
   )
+
+  // W4-PRE-1b item A: the account is now linked to `localUser` — maintain their ACTIVE
+  // membership in the SAME transaction. Runs for every caller (manual bind, admit, batch).
+  await upsertActiveUserOrgMembership(client, { userId: localUser.id, orgId })
+
+  // W4-PRE-1b item B: if this account previously belonged to a DIFFERENT local user, the link
+  // upsert above just displaced them — deactivate their membership in THIS org unless they hold
+  // another active linked account here (org-scoped sibling check, see the helper doc-comment).
+  if (priorLocalUserId && priorLocalUserId !== localUser.id) {
+    await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: priorLocalUserId, orgId })
+  }
 }
 
 async function createDirectoryAdmittedUserInTransaction(
@@ -5056,48 +5257,23 @@ async function createDirectoryAdmittedUserInTransaction(
     }
   }
 
-  // W4-PRE-1 item 1 + item 2 (§3.3 of the Wave-4 onboarding design lock): resolve the
-  // KNOWN AUTHORITATIVE org for this admission from directory_integrations (the account's own
-  // integration row), never from a client-supplied value and never a silent 'default' guess.
-  // Fail-closed BEFORE any write (cheapest-check-first, same discipline as the
-  // DT-HARDEN-02 grant-feasibility assert above) if the integration row cannot be found — this
-  // should not happen in practice (the caller always resolves the account through a live
-  // integration_id) but a foreign-key-orphaned integration_id must not silently admit into no
-  // org, or into a guessed one.
-  const orgResult = await client.query(
-    `SELECT org_id
-     FROM directory_integrations
-     WHERE id = $1::uuid
-     LIMIT 1`,
-    [options.account.integration_id],
-  )
-  const admissionOrgId = (orgResult.rows[0] as { org_id?: string } | undefined)?.org_id
-  if (!admissionOrgId) {
-    throw new Error('Directory integration not found for admitted account org resolution')
-  }
-
   // DT-HARDEN-02: INSERT + bind are one all-or-nothing unit. A bind throw after the INSERT
   // (missing openId/unionId, or an identity already bound to another local user) would
   // otherwise leave a committed orphan once the sync loop swallows the error — the exact
   // hazard this ticket exists to close, and the one the pre-INSERT assert above does not cover.
-  // W4-PRE-1 extends the same all-or-nothing unit to user_orgs: a user_orgs write failure must
+  // W4-PRE-1 extended the same all-or-nothing unit to user_orgs: a user_orgs write failure must
   // also roll the users row back (fresh-DB atomicity leg, §3.3 item 3), not just a bind failure.
+  // W4-PRE-1b: the org resolution + user_orgs write that #4521 inlined HERE now lives inside
+  // `applyDirectoryAccountBindInTransaction` (single site, shared by every bind-shaped writer —
+  // see that function's own comments) — still inside this SAME savepoint, so the atomicity
+  // guarantee is unchanged; only the resolution failure message text moved with it
+  // ('Directory integration not found for account org resolution').
   await client.query('SAVEPOINT directory_admit_user')
   try {
     await client.query(
       `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
        VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
       [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
-    )
-
-    // W4-PRE-1 item 1 (§3.3): maintain user_orgs in the SAME transaction/savepoint as the users
-    // row. A freshly admitted directory user is always active (matches the hardcoded TRUE on the
-    // users INSERT above).
-    await client.query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active)
-       VALUES ($1::text, $2::text, TRUE)
-       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
-      [userId, admissionOrgId],
     )
 
     await applyDirectoryAccountBindInTransaction(client, {
@@ -5801,15 +5977,39 @@ export async function unbindDirectoryAccount(
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
 
-  const [account, previousLinkedUser] = await Promise.all([
-    loadDirectoryBindingTargetAccount(normalizedAccountId),
-    loadDirectoryLinkedUser(normalizedAccountId),
-  ])
+  const account = await loadDirectoryBindingTargetAccount(normalizedAccountId)
   if (!account) throw new Error('Directory account not found')
 
   const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
 
+  // #4526 review fix: `previousLinkedUser` used to be read via `loadDirectoryLinkedUser` OUTSIDE
+  // this transaction (alongside `account`, in the `Promise.all` this replaced). That pre-read was
+  // load-bearing but stale: if this account's link changed between the pre-read and the
+  // transaction body below (e.g. a rapid unbind+rebind of the SAME account), the link UPSERT
+  // below unconditionally severs whoever is linked NOW while the deactivation call only
+  // considered the STALE holder — the CURRENT holder could be left with an active membership and
+  // zero bindings. Reading it here, inside the transaction, with `FOR UPDATE OF l` locking the
+  // `directory_account_links` row for this account closes that window: any concurrent writer of
+  // THIS SAME row (bind/admit/another unbind) now serializes behind this transaction instead of
+  // racing it. `FOR UPDATE OF l` (not a bare `FOR UPDATE`) is required because of the `LEFT JOIN
+  // users u` — Postgres refuses to lock the nullable side of an outer join.
+  let previousLinkedUser: DirectoryAccountLinkedUserRow | null = null
+
   await transaction(async (client) => {
+    const linkedUserLockResult = await client.query(
+      `SELECT l.local_user_id,
+              u.email AS local_user_email,
+              u.username AS local_user_username,
+              u.name AS local_user_name
+       FROM directory_account_links l
+       LEFT JOIN users u ON u.id = l.local_user_id
+       WHERE l.directory_account_id = $1
+       FOR UPDATE OF l
+       LIMIT 1`,
+      [normalizedAccountId],
+    )
+    previousLinkedUser = (linkedUserLockResult.rows[0] as DirectoryAccountLinkedUserRow | undefined) ?? null
+
     if (previousLinkedUser?.local_user_id) {
       const deleteIdentityParams: unknown[] = [
         account.provider,
@@ -5869,6 +6069,17 @@ export async function unbindDirectoryAccount(
          updated_at = NOW()`,
       [normalizedAccountId, normalizedAdminUserId],
     )
+
+    // W4-PRE-1b item B: the account was just severed from `previousLinkedUser` — deactivate
+    // their membership in THIS org (org-scoped sibling check) unless they hold another active
+    // linked directory account here. Runs in the SAME transaction as the link severance above.
+    if (previousLinkedUser?.local_user_id) {
+      const orgId = await resolveDirectoryAccountOrgId(client, account.integration_id)
+      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, {
+        userId: previousLinkedUser.local_user_id,
+        orgId,
+      })
+    }
   })
 
   const summary = await getDirectoryAccountSummary(normalizedAccountId)

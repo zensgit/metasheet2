@@ -214,7 +214,11 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: directory-sync 
       })
 
       expect(caught).not.toBeNull()
-      expect((caught as unknown as Error).message).toBe('Directory integration not found for admitted account org resolution')
+      // W4-PRE-1b centralized org resolution (+ the user_orgs write) into
+      // `applyDirectoryAccountBindInTransaction` (shared by every bind-shaped writer) — the
+      // fail-closed guarantee this test proves is unchanged (no `users` row survives below),
+      // only the resolution failure message text moved with it.
+      expect((caught as unknown as Error).message).toBe('Directory integration not found for account org resolution')
       const userRow = await query(`SELECT id FROM users WHERE username = $1`, [username])
       expect(userRow.rows).toEqual([])
     })
