@@ -2,8 +2,9 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump adds approval-template restore provenance.
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260717-template-version-restore'
+// idempotent DDL. The current bump keeps the version-restore UAT fixture aligned with
+// publish-note and node-entry-epoch migrations already present in production.
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260722-template-version-restore-current-round'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -109,6 +110,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS request_no TEXT`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS form_snapshot JSONB`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS current_node_key TEXT`)
+    await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS node_activation_seq INTEGER NOT NULL DEFAULT 0`)
     await client.query(`
       UPDATE approval_instances
       SET source_system = COALESCE(source_system, 'platform'),
@@ -198,6 +200,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       )
     `)
     await client.query(`ALTER TABLE approval_assignments ADD COLUMN IF NOT EXISTS node_key TEXT`)
+    await client.query(`ALTER TABLE approval_assignments ADD COLUMN IF NOT EXISTS entry_epoch INTEGER`)
     await client.query(`
       DO $$
       DECLARE
@@ -261,6 +264,10 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       ALTER TABLE approval_template_versions
       ADD COLUMN IF NOT EXISTS restored_from_version_id UUID
         REFERENCES approval_template_versions(id) ON DELETE SET NULL
+    `)
+    await client.query(`
+      ALTER TABLE approval_template_versions
+      ADD COLUMN IF NOT EXISTS publish_note TEXT
     `)
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_published_definitions (
