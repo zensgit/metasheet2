@@ -126,6 +126,7 @@ createApp({
           onApply: () => {},
           onCancel: () => {},
           onUndo: () => {},
+          onClose: () => {},
           onNavigate: () => {},
         }),
       )
