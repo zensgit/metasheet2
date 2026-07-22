@@ -129,6 +129,10 @@ jobs:
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
             scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   test:
     runs-on: ubuntu-latest
@@ -268,6 +272,8 @@ jobs:
         run: |
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

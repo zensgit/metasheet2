@@ -23,6 +23,15 @@ on:
       - 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.test.mjs'
       - 'scripts/ops/stock-preparation-rca-abort-provenance.mjs'
       - 'scripts/ops/stock-preparation-rca-abort-provenance.test.mjs'
+      - 'scripts/ops/stock-preparation-rca-window.ps1'
+      - 'scripts/ops/stock-preparation-rca-window-pm2-sample.mjs'
+      - 'scripts/ops/stock-preparation-rca-window-pm2-sample.test.mjs'
+      - 'scripts/ops/build-stock-preparation-rca-window-sidecar.mjs'
+      - 'scripts/ops/build-stock-preparation-rca-window-sidecar.test.mjs'
+      - 'scripts/ops/stock-preparation-rca-window-README.txt'
+      - 'scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1'
+      - 'scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1'
+      - 'scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1'
   workflow_dispatch:
     inputs:
       base_url:
@@ -69,6 +78,10 @@ jobs:
         run: node --test scripts/ops/stock-preparation-mvp-postdeploy-smoke.test.mjs
       - name: Run RC-A abort-provenance diagnostic contract tests (#4437, no server, no DB)
         run: node --test scripts/ops/stock-preparation-rca-abort-provenance.test.mjs
+      - name: Run RC-A C-stage PM2 projection tests (#4437, no server, no DB)
+        run: node --test scripts/ops/stock-preparation-rca-window-pm2-sample.test.mjs
+      - name: Run RC-A C-stage sidecar build contract (#4437, no server, no DB)
+        run: node --test scripts/ops/build-stock-preparation-rca-window-sidecar.test.mjs
 
   smoke:
     name: deployed prep-line extended smoke
