@@ -103,16 +103,18 @@ Local verification after the first adversarial correction:
 | Gate | Result |
 | --- | --- |
 | PM2 projection Node tests | 8/8 PASS |
-| PowerShell contract tests | 36/36 PASS |
-| PowerShell behavior tests | 34/34 PASS |
+| PowerShell contract tests | 37/37 PASS |
+| PowerShell behavior tests | 35/35 PASS |
 | Sidecar builder and provenance-wiring tests | 3/3 PASS |
 | Frozen extended + MVP + abort-provenance regressions | 95/95 PASS |
 | PowerShell parser | zero errors under the 5.1 grammar |
 | Diff hygiene | `git diff --check` PASS |
 
-The Windows job runs the target-shell suite under real Windows PowerShell 5.1. Its PM2 `.cmd` shim
-writes a sentinel to stderr for both `jlist` and `restart`; the projection/restart must still succeed,
-preserve exit 0, exclude the sentinel, and restore `$ErrorActionPreference='Stop'`.
+The Windows job runs both the target-shell suite and the full behavior suite under real Windows
+PowerShell 5.1. Its PM2 `.cmd` shim writes a sentinel to stderr for both `jlist` and `restart`; the
+projection/restart must still succeed, preserve exit 0, exclude the sentinel, and restore
+`$ErrorActionPreference='Stop'`. A contract guard fails if the behavior suite is removed from that
+job.
 
 Behavior tests additionally prove:
 
@@ -122,13 +124,14 @@ Behavior tests additionally prove:
 - duplicate project, zero lines, incomplete batch, and string-booleans fail physical proof;
 - smoke failure restores OFF and performs no readback or retry;
 - helper disappearance after ON cannot suppress the literal-false PM2 restart attempt;
-- the real PM2 stability loop takes repeated samples and rejects a newer restart/uptime baseline;
+- the real PM2 stability loop takes repeated samples and independently rejects restart-time drift
+  with stable uptime and uptime drift with stable restart time;
 - real loopback HTTP probes require exactly `200` health and `200 + {success:true}` logout;
 - restore failure overrides an otherwise green run;
 - final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
 - planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
 
-Twenty-three committed-head mutations were applied one at a time in detached worktrees and all were
+Twenty-six committed-head mutations were applied one at a time in detached worktrees and all were
 killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
 removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
 archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
@@ -136,7 +139,10 @@ redirect refusal removal, plus removal of the artifact checkout ref pin and chec
 guard. The final nine mutations disabled the PM2 stability loop, weakened its baseline comparison,
 broadened the health status, bypassed logout boolean/status checks, removed the SHA-qualified artifact
 name, accepted duplicate smoke headers, accepted zero created lines, and accepted URL query/fragment
-inputs. Each mutation ran in its own disposable worktree; the source worktree remained clean.
+inputs. The final three mutations independently removed the restart-time comparison, removed the
+uptime comparison, and removed the full behavior suite from the real Windows PowerShell 5.1 job;
+each failed its dedicated guard. Every mutation ran in its own disposable worktree; the source
+worktree remained clean.
 
 ## 7. Independent Adversarial Review
 
@@ -159,9 +165,13 @@ risk rather than documenting it away.
 A final exact-head read-only pass reported no P1/P2 and a bounded merge-ready verdict. It found that
 the PM2 stability loop and the real health/logout predicates were not behaviorally exercised, and
 that PR and `main` artifacts shared a display name. The follow-up tests execute those real paths and
-the workflow now includes `SOURCE_SHA` in the artifact name. The frozen smoke contract still requires
-the approved config reference as a local child argument; the README now distinguishes that internal
-boundary from the prohibited operator command line and evidence surfaces.
+the workflow now includes `SOURCE_SHA` in the artifact name. A second pass found that one PM2 fixture
+changed both baseline counters, that the new behavior paths were not yet exercised by Windows
+PowerShell 5.1, and that the HTTP fixture passed temporary paths through `Start-Process`. The final
+tests isolate both counters, run the full behavior suite on the target shell, derive fixture paths
+from `import.meta.url`, and wait for the child process before cleanup. The frozen smoke contract still
+requires the approved config reference as a local child argument; the README distinguishes that
+internal boundary from the prohibited operator command line and evidence surfaces.
 
 ## 8. Honest Boundary
 
