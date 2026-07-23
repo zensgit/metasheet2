@@ -348,9 +348,10 @@ response body**（断言只落 code/enum/count/键集合，body 不进 CI artifa
      `:10612-10635`）；响应级只保留**另行具名**的 `coverageNote` 判别值
      （`'full'|'partial_legacy'`，§3.3④）——响应级**不设** `reasonCode` 键。
    - **⑤ ⇒ lot/event 各自在 item 上携码**：lot item 码源 = **独立冻结的 lot `reasonCode` 枚举 +
-     `source_type`→reasonCode 服务端映射（owner 二轮终审 P2-c）**——`source_type` 是无 CHECK 的
-     自由 TEXT（`zzzz20260603120000:34`），通用扣减函数 `deductLeaveBalance` 接受调用方任意字符串
-     原样落库（`:17530-17573`），**非闭集，不得当稳定码直接透传**；冻结枚举按存量写入点字面值
+     `source_type`→reasonCode 服务端映射（owner 二轮终审 P2-c）**——lot 列 `source_type` 是无 CHECK 的
+     自由 TEXT（`zzzz20260603120000:34`——lot 开放性主证）；旁证：同名 **events 列**（`:66` 同样无
+     CHECK）经通用扣减函数 `deductLeaveBalance` 接受调用方任意字符串原样落库（`:17530-17573`，写
+     `attendance_leave_balance_events`）——两列同型开放，**非闭集，不得当稳定码直接透传**；冻结枚举按存量写入点字面值
      穷尽 = `'annual_accrual'`（登记簿计提 `:17922`）`|'annual_manual_adjust'`（年假手工调整
      `:18162`）`|'overtime_conversion'`（OT 终审计提，dormant `:29788` + bank `:29863`）；
      映射外的未知原值**不得透传**，该 lot item 进 `undeterminable`（原值零回显）；event item
@@ -781,10 +782,11 @@ P3 留存警告时序护栏，header 逐项索引），五项已修订入本版�
    `index.cjs:6215-6223`、plugin `/me` = `:42807-42846`（subject-locked 注释 `:42811`）。
    **2026-07-23 二轮终审修订 rebase**：owner 指出 BEHIND 5，分支重基至 `origin/main` 现势
    `ca625f14a`（`git rebase origin/main` 干净无冲突）；增量漂移账 `74472dc68..ca625f14a` =
-   5 commits——#4547 directory 线 fix（freeze-lock key/txn + directory db test）、#4496/#4500
-   ops CI-wiring 测试（`scripts/ops/`）、**#4548 考勤共库 integration tests 隔离硬化**
+   5 commits——#4547 directory 线 fix（freeze-lock key/txn + directory db test + `vitest.config.ts`
+   exclude 接线）、#4496/#4500 ops CI-wiring 测试（`scripts/ops/`；`plugin-tests.yml` 行数变更属
+   #4496+#4547）、**#4548 考勤共库 integration tests 隔离硬化**
    （`tests/integration/attendance-*.test.ts` 8 文件 + 新 `tests/utils/attendance-settings-row.ts`
-   + `vitest.config.ts` exclude 接线 + `plugin-tests.yml` +3 行——**纯测试隔离设施，改
+   ——**纯测试隔离设施，改
    system_configs `attendance.settings` 行的 save-and-restore，不触任何本锁引用的测试文件**
    （`attendance-admin-directory-readiness-s7-5.test.ts` 不在 diff 中，`:82-189` 复开验证有效））、
    #4549 docs——`git diff --stat 74472dc68..ca625f14a` 实证**考勤 runtime/路由/权限/迁移/前端
