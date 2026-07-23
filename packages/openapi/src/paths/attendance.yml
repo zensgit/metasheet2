@@ -1330,6 +1330,7 @@ paths:
                 timezone: { type: string }
                 workStartTime: { type: string }
                 workEndTime: { type: string }
+                isOvernight: { type: boolean }
                 lateGraceMinutes: { type: integer }
                 earlyGraceMinutes: { type: integer }
                 roundingMinutes: { type: integer }
@@ -1432,6 +1433,10 @@ paths:
               properties:
                 userId: { type: string }
                 shiftId: { type: string }
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate: { type: string, format: date }
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
@@ -1442,6 +1447,11 @@ paths:
                 shift_id:
                   type: string
                   description: Legacy snake_case alias for shiftId.
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date:
                   type: string
                   format: date
@@ -1508,12 +1518,21 @@ paths:
               properties:
                 userId: { type: string }
                 shiftId: { type: string }
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate: { type: string, format: date }
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
                 user_id: { type: string }
                 shift_id: { type: string }
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date: { type: string, format: date }
                 end_date: { type: string, format: date, nullable: true }
                 is_active: { type: boolean }
@@ -1883,6 +1902,9 @@ paths:
                 timezone: { type: string }
                 ruleSetId: { type: string }
                 description: { type: string }
+                attendanceType:
+                  type: string
+                  enum: [fixed_shift, scheduled_shift, free_time]
                 orgId: { type: string }
               required: [name, timezone]
       responses:
@@ -1942,6 +1964,10 @@ paths:
                 timezone: { type: string }
                 ruleSetId: { type: string }
                 description: { type: string }
+                attendanceType:
+                  type: string
+                  enum: [fixed_shift, scheduled_shift, free_time]
+                  description: Accepted for parity with create; runtime rejects type changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED).
                 orgId: { type: string }
       responses:
         '200':

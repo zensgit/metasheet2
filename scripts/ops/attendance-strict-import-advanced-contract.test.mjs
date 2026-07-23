@@ -80,3 +80,15 @@ test('required strict contract case executes this verifier contract', () => {
 
   assert.match(strictCase, /node --test \.\/scripts\/ops\/attendance-strict-import-advanced-contract\.test\.mjs/)
 })
+
+test('required openapi contract case executes attendance runtime-parity contract', () => {
+  const openapiCase = gateContractRunner.slice(
+    gateContractRunner.indexOf('if [[ "$CASE_ID" == "openapi" ]]'),
+    gateContractRunner.indexOf('if [[ "$CASE_ID" == "dashboard" ]]'),
+  )
+
+  assert.match(
+    openapiCase,
+    /node --test \.\/scripts\/ops\/attendance-openapi-parity-4556-contract\.test\.mjs/,
+  )
+})
