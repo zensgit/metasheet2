@@ -25,6 +25,53 @@ Related narrow fix: PR #4558, merged as
 Related contract-parity fix: PR #4560, merged as
 `9f989396b765dac7ef87dfd0e689a69e5be8bec8`
 
+W3 safety erratum (2026-07-24; normative fail-closed clarification of the
+ratified accounting and rollout rules, with no new owner decision):
+
+- this erratum defines W3 safety completion gates only. It does not authorize
+  W3 start or merge, a flag/config transition, deployment, production
+  migration, or issue closure. Those actions still require their separately
+  recorded authorization and gates.
+
+- "feature flag default OFF" means a shift with more than one persisted
+  segment is authoring-only until authoritative segment calculation is
+  enabled for the org. While OFF, each of the following must return a typed
+  `422` and write nothing when a multi-segment shift is selected: fixed
+  schedule apply/rebuild, automatic matching, draft assignment create/update,
+  active assignment create/update, rotation rule create/update and generated
+  rotation assignment create/update, shift-swap create/final approval, and
+  schedule-dispatch create/final approval.
+- a shift already referenced by any active assignment, rotation, pending swap,
+  or pending/published dispatch cannot be changed from one segment to multiple
+  segments while the flag is OFF;
+- the canonical shift writer includes delete. Delete and every writer that
+  creates a shift reference use one transaction-level lock protocol so a
+  reference cannot be inserted between the reference check and parent delete;
+- delete returns a typed `409` and writes nothing for any
+  `attendance_shift_assignments` row (including ended/inactive history), any
+  `attendance_rotation_rules.shift_sequence` reference (with
+  `attendance_rotation_assignments` protected indirectly through its rule),
+  a pending `attendance_shift_swap_requests` requester/counterparty snapshot,
+  or a pending/published
+  `attendance_schedule_dispatch_requests.target_shift_id`. Delete never relies
+  on FK cascade to remove those references.
+- rejected swap snapshots, cancelled dispatch snapshots, and
+  `attendance_auto_shift_auto_write_run_items.candidate_shift_id` are immutable
+  historical evidence rather than live references. They do not block delete,
+  remain stored, and any read that can no longer resolve the shift must return
+  a neutral deleted/unavailable label without exposing the raw UUID.
+- rollback in sections 6 and 7 means switching authoritative reads back to
+  the legacy envelope. It never means dropping or destructively rewriting
+  persisted segment rows. A flag/config transition to legacy is rejected
+  atomically while active multi-segment references exist. If runtime observes
+  that invalid state despite the transition guard, calculation fails closed
+  with an explicit configuration conflict and never evaluates the legacy
+  envelope.
+- schema migration `down()` is not runtime rollback. It must query the segment
+  table before any DDL: with any row present it throws and leaves schema/data
+  unchanged; only an empty table may be dropped, together with constraints
+  introduced solely by that migration.
+
 ## 0. Purpose and authorization boundary
 
 This lock turns the requirements in issue #4556 and the supplied
@@ -470,12 +517,20 @@ The employee and admin record views show:
 2. Backfill every legacy shift to one segment in a replay-safe migration.
 3. Verify fresh DB, upgrade DB, and collision/invalid legacy fixtures.
 4. Ship dual-read with feature flag default OFF.
+   While OFF, multi-segment shifts may be created and edited for preview, but
+   every reference-producing path listed in the W3 safety erratum returns
+   `422` with zero writes when one is selected. Existing active references also
+   block conversion from one segment to multiple segments.
 5. Shadow-calculate segment results and compare with legacy results; do not
    write authoritative totals.
 6. Enable for a synthetic staging org only.
 7. Run overnight, multi-segment, flex, correction, import, and approval matrices.
-8. Opt in named orgs; keep rollback to legacy reads while no segmented shift is
-   active.
+8. Opt in named orgs. Rollback switches authoritative calculation back to
+   legacy reads only after the org has no active multi-segment shift
+   references. The transition is atomic and rejects instead of changing modes
+   when the precondition fails. A defensive runtime check fails closed if the
+   persisted mode and references are inconsistent. Segment schema and data
+   remain intact.
 9. Remove dual-write only in a later, separately authorized cleanup.
 
 No migration may rewrite historical attendance results.
@@ -490,7 +545,23 @@ No migration may rewrite historical attendance results.
 - concurrent membership overlap rejection;
 - inclusive boundary transition (`D - 1` to `D`) without a gap or double winner;
 - cross-org FK and query isolation;
-- rollback leaves both legacy envelope and segments unchanged.
+- flag-OFF `422` plus zero-write evidence for fixed schedule apply/rebuild,
+  automatic matching, draft and active assignment create/update, rotation rule
+  and generated assignment create/update, shift-swap create/final approval,
+  and schedule-dispatch create/final approval;
+- existing-reference delete returns `409` with zero writes for each durable
+  blocker and state named in the W3 safety erratum; rejected/cancelled/history
+  fixtures prove the non-blocking evidence rows remain intact and redact an
+  unresolved raw shift UUID;
+- concurrent shift delete and reference insertion cannot cascade-delete a
+  newly created reference;
+- legacy-mode transition with active multi-segment references is rejected and
+  leaves the prior authoritative mode unchanged; an injected inconsistent
+  state fails closed without legacy-envelope calculation;
+- runtime rollback leaves both legacy envelope and segments unchanged; a
+  destructive schema rollback is forbidden once segment data exists;
+- migration `down()` aborts without DDL when rows exist and is replay-safe on
+  an empty/fresh database.
 
 ### 7.2 Calculation
 
@@ -620,7 +691,15 @@ Scope:
 - segment migration/backfill;
 - typed service and API;
 - shift editor;
-- flag remains OFF for authoritative calculation.
+- flag remains OFF for authoritative calculation;
+- multi-segment authoring is preview-only while OFF, enforced by the canonical
+  assignability guard at every reference-producing path;
+- create, update, and delete share the canonical transactional shift service,
+  including the delete/reference lock protocol;
+- referenced shifts are never deleted by cascade; every durable reference class
+  named in the W3 safety erratum returns `409`;
+- migration `down()` is fail-closed and non-destructive when segment rows
+  exist, and runtime rollback never executes schema DDL.
 
 Suggested implementation: Kimi K3 for schema/service; Luna-class model for UI;
 Codex integrates and reviews.
