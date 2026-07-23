@@ -281,7 +281,7 @@ export function parallelDynamicAssigneeConflicts(graph: ApprovalGraph): string[]
       }
       for (const fingerprint of branchFingerprints) {
         if (seenAcrossBranches.has(fingerprint)) {
-          errors.push(`并行节点 ${node.key} 的多个分支使用了相同的动态审批人来源（${fingerprint}），发起审批时会因重复审批人失败，请为各分支配置不同的审批人`)
+          errors.push('多个并行分支使用了相同的动态审批人来源，发起审批时会因重复审批人失败，请为各分支配置不同的审批人')
         } else {
           seenAcrossBranches.add(fingerprint)
         }

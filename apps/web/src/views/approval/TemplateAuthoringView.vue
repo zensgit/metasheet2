@@ -1283,6 +1283,7 @@ import {
   updateTemplate,
   type ApprovalRoutePreview,
 } from '../../approvals/api'
+import { describeTemplateAuthoringError } from '../../approvals/templateAuthoringErrors'
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
@@ -2483,8 +2484,8 @@ async function loadTemplateForEdit() {
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
     snapshotDraft()
-  } catch (error: any) {
-    loadError.value = error?.message ?? '加载审批模板失败'
+  } catch (error: unknown) {
+    loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
   } finally {
     loading.value = false
   }
@@ -2534,8 +2535,8 @@ async function persistDraft() {
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
-  } catch (error: any) {
-    loadError.value = error?.message ?? '保存模板失败'
+  } catch (error: unknown) {
+    loadError.value = describeTemplateAuthoringError(error, '保存模板失败')
     return null
   } finally {
     saving.value = false
@@ -2557,8 +2558,8 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
-  } catch (error: any) {
-    loadError.value = error?.message ?? '创建常用模板失败'
+  } catch (error: unknown) {
+    loadError.value = describeTemplateAuthoringError(error, '创建常用模板失败')
   } finally {
     creatingPresetId.value = null
   }
@@ -2599,8 +2600,8 @@ async function confirmPublish() {
     })
     ElMessage.success('模板已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
-  } catch (error: any) {
-    loadError.value = error?.message ?? '发布模板失败'
+  } catch (error: unknown) {
+    loadError.value = describeTemplateAuthoringError(error, '发布模板失败')
   } finally {
     publishing.value = false
   }

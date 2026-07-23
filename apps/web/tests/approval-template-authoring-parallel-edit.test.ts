@@ -383,8 +383,9 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
   it('flags requester × requester across two branches (the old untouched-starter shape — 409s every request)', () => {
     const errors = parallelDynamicAssigneeConflicts(withBranchSources([{ kind: 'requester' }], [{ kind: 'requester' }]))
     expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('fork_1')
-    expect(errors[0]).toContain('requester')
+    expect(errors[0]).toContain('多个并行分支')
+    expect(errors[0]).not.toContain('fork_1')
+    expect(errors[0]).not.toContain('requester')
   })
 
   it('flags identical parameterized sources: same manager_at_level level, same form_field_user field', () => {
@@ -499,8 +500,8 @@ describe('parallelDynamicAssigneeConflicts — condition paths inside a parallel
   it('GOLDEN (owner case): condition DEFAULT path resolves to requester, branch B is requester → 1 conflict naming requester', () => {
     const errors = parallelDynamicAssigneeConflicts(conditionDefaultPathGraph([{ kind: 'requester' }]))
     expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('fork_1')
-    expect(errors[0]).toContain('requester')
+    expect(errors[0]).not.toContain('fork_1')
+    expect(errors[0]).not.toContain('requester')
   })
 
   it('does NOT flag when every condition path yields a DIFFERENT source than branch B (negative control)', () => {
@@ -551,7 +552,7 @@ describe('parallelDynamicAssigneeConflicts — condition paths inside a parallel
     }
     const errors = parallelDynamicAssigneeConflicts(graph)
     expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('requester')
+    expect(errors[0]).not.toContain('requester')
   })
 
   it('flags a conflict hidden behind the RULES edge when the default edge happens to be declared first', () => {
@@ -567,7 +568,7 @@ describe('parallelDynamicAssigneeConflicts — condition paths inside a parallel
     }
     const errors = parallelDynamicAssigneeConflicts(defaultEdgeFirst)
     expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('dept_head')
+    expect(errors[0]).not.toContain('dept_head')
   })
 
   it('flags a conflict reachable only through a DEEP condition chain (condition → condition, default → default)', () => {
@@ -613,7 +614,7 @@ describe('parallelDynamicAssigneeConflicts — condition paths inside a parallel
     }
     const errors = parallelDynamicAssigneeConflicts(deepChain)
     expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('requester')
+    expect(errors[0]).not.toContain('requester')
   })
 
   it('does NOT double-flag the same source on two ALTERNATIVE paths of ONE branch (within-branch union, not multiset)', () => {
