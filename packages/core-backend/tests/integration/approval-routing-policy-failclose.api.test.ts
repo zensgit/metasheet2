@@ -11,6 +11,7 @@ import {
   createLocalDepartment,
   switchLocalPrimaryDepartment,
 } from '../../src/directory/local-directory-org'
+import { grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 /**
  * B5-b owner P1 — the routing-policy FAIL-CLOSE at approval create + shared preview substrate,
@@ -63,6 +64,7 @@ async function canListen(): Promise<boolean> {
   })
 }
 async function tok(base: string, userId: string): Promise<string> {
+  await grantApprovalWriteForIntegrationActor(userId)
   const res = await fetch(`${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
   return ((await res.json()) as { token: string }).token
 }

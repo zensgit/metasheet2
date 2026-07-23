@@ -317,7 +317,7 @@ export async function projectRecordLinkFormSnapshotsForViewerBatch(
   ]
   if (missingVersionIds.length > 0) {
     const result = await queryFn(
-      `SELECT id, form_schema FROM approval_template_versions WHERE id = ANY($1::text[])`,
+      `SELECT id, form_schema FROM approval_template_versions WHERE id = ANY($1::uuid[])`,
       [missingVersionIds],
     )
     for (const id of missingVersionIds) schemaMap.set(id, null)

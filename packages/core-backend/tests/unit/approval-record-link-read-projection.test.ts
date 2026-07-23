@@ -180,6 +180,29 @@ describe('projectRecordLinkFormSnapshotForViewer', () => {
 })
 
 describe('projectRecordLinkFormSnapshotsForViewerBatch — null schema list', () => {
+  it('loads missing form schemas through the UUID-typed template-version boundary', async () => {
+    permissionState.isRecordReadDeniedForUserStrict.mockResolvedValue(false)
+    const versionId = '11111111-1111-4111-8111-111111111111'
+    const baseQuery = queryFnAuthorized({ ownerId: 'viewer-ok' })
+    const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
+      const normalized = sql.replace(/\s+/g, ' ')
+      if (normalized.includes('FROM approval_template_versions')) {
+        expect(normalized).toContain('id = ANY($1::uuid[])')
+        expect(params).toEqual([[versionId]])
+        return { rows: [{ id: versionId, form_schema: schema }] }
+      }
+      return baseQuery(sql, params)
+    })
+
+    const out = await projectRecordLinkFormSnapshotsForViewerBatch(
+      [{ formSnapshot: { linked: { recordId: 'list-ok' } }, templateVersionId: versionId }],
+      'viewer-ok',
+      queryFn,
+    )
+
+    expect(out).toEqual([{ linked: { recordId: 'list-ok' } }])
+  })
+
   it('list rows with null template version / seeded null schema fail-closed (positive control keeps id when schema present)', async () => {
     permissionState.isRecordReadDeniedForUserStrict.mockResolvedValue(false)
     const queryFn = queryFnAuthorized({ ownerId: 'viewer-ok' })
