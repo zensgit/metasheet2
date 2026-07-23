@@ -714,7 +714,59 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
   // zero-assignment failed history) — deepEqual on the FULL basis/conclusion shape, not existence.
   // -----------------------------------------------------------------------------------------------
   describe('§9 W5-0-G1: break-the-chain real-DB negatives', () => {
-    it('④ no-snapshot org (OD-W5-9 legacy edge, distinct from G4\'s unmapped-source-type case): a MAPPED lot with a NULL overtime_source column ⇒ the `overtimeSource` key is OMITTED entirely, deepEqual on the whole lot item', async () => {
+    it('② legacy record without tier meta keys ⇒ tier basis env is EXACTLY {source:{kind:record,ref:attendance_records.meta.tier}, version:{posture:undeterminable}} (deepEqual, real DB)', async () => {
+      const orgId = `${PFX}_g1_e2_org`
+      const userId = `${PFX}_g1_e2_user`
+      const workDate = '2026-07-18'
+      await seedMembership(orgId, userId, true)
+      // seedRecord never sets meta.severe_late_count/etc — this IS the "legacy row" shape.
+      await seedRecord(orgId, userId, workDate, { status: 'late', lateMinutes: 12 })
+      const app = makeApp({ id: userId })
+      pinned.setApp(app)
+      const res = await request(pinned.url()).get(
+        `/api/attendance/decision-trace?orgId=${orgId}&category=late_early&workDate=${workDate}`,
+      )
+      expect(res.status).toBe(200)
+      expect(res.body.data.conclusion.severeLateCount).toBeNull()
+      expect(res.body.data.conclusion.severeLateMinutes).toBeNull()
+      expect(res.body.data.conclusion.absenceLateCount).toBeNull()
+      const tierEnv = res.body.data.basis.find((b: { source: { ref: string } }) => b.source.ref === 'attendance_records.meta.tier')
+      expect(tierEnv).toEqual({ source: { kind: 'record', ref: 'attendance_records.meta.tier' }, version: { posture: 'undeterminable' } })
+    })
+
+    it('③ auto-generated absent row ⇒ generation-source basis env is EXACTLY {source:{kind:policy_gate,ref:auto_absence_generation}, version:{posture:undeterminable}} (deepEqual, real DB — no job/run marker exists to cite)', async () => {
+      const orgId = `${PFX}_g1_e3_org`
+      const userId = `${PFX}_g1_e3_user`
+      const workDate = '2026-07-19'
+      await seedMembership(orgId, userId, true)
+      await seedRecord(orgId, userId, workDate, { status: 'absent' })
+      const app = makeApp({ id: userId })
+      pinned.setApp(app)
+      const res = await request(pinned.url()).get(
+        `/api/attendance/decision-trace?orgId=${orgId}&category=missing_punch&workDate=${workDate}`,
+      )
+      expect(res.status).toBe(200)
+      const genEnv = res.body.data.basis.find((b: { source: { ref: string } }) => b.source.ref === 'auto_absence_generation')
+      expect(genEnv).toEqual({ source: { kind: 'policy_gate', ref: 'auto_absence_generation' }, version: { posture: 'undeterminable' } })
+    })
+
+    it('④ request with no valid segmentation snapshot (legacy / never segmented) ⇒ snapshot basis env is EXACTLY {source:{kind:snapshot,ref:...overtimeSegmentation}, version:{posture:undeterminable}} (deepEqual, real DB)', async () => {
+      const orgId = `${PFX}_g1_e4_org`
+      const userId = `${PFX}_g1_e4_user`
+      const workDate = '2026-07-20'
+      await seedMembership(orgId, userId, true)
+      const requestId = await seedOvertimeRequest(orgId, userId, workDate, { minutes: 45 }) // no overtimeSegmentation key at all
+      const app = makeApp({ id: userId })
+      pinned.setApp(app)
+      const res = await request(pinned.url()).get(
+        `/api/attendance/decision-trace?orgId=${orgId}&category=overtime_segmentation&requestId=${requestId}`,
+      )
+      expect(res.status).toBe(200)
+      const snapEnv = res.body.data.basis.find((b: { source: { ref: string } }) => b.source.ref === 'attendance_requests.metadata.overtimeSegmentation')
+      expect(snapEnv).toEqual({ source: { kind: 'snapshot', ref: 'attendance_requests.metadata.overtimeSegmentation' }, version: { posture: 'undeterminable' } })
+    })
+
+    it('⑤ (OD-W5-9 legacy edge, distinct from G4\'s unmapped-source-type case): a MAPPED lot with a NULL overtime_source column ⇒ the `overtimeSource` key is OMITTED entirely, deepEqual on the whole lot item', async () => {
       const orgId = `${PFX}_g1_e5_org`
       const userId = `${PFX}_g1_e5_user`
       await seedMembership(orgId, userId, true)
