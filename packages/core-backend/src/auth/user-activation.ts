@@ -2,8 +2,11 @@
  * T1 — user activation axis helpers (design lock Rev 4.2 + PR #4559 review fixes).
  *
  * Dual axis:
- * - activation_status: pending_activation | activated (closed set; unknown is fail-closed)
- * - is_active: platform availability (security / offboarding)
+ * - activation_status: **exact** pending_activation | activated only (closed set)
+ * - is_active: platform availability
+ *
+ * After migration, the column is NOT NULL + CHECK. Application code must not treat
+ * null/undefined/'' as activated (fail-closed closed set).
  *
  * Pending-create runtime is env-gated and **defaults OFF**.
  */
@@ -22,8 +25,7 @@ export const ACCOUNT_ACTIVATION_INVALID_CODE = 'ACCOUNT_ACTIVATION_INVALID'
 export const PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE = 'PENDING_ACTIVATE_BYPASS_FORBIDDEN'
 
 /**
- * When true, directory auto/manual admission creates pending_activation users
- * (is_active=false, no active user_orgs, grant off, unusable password, no temp credentials).
+ * When true, directory auto/manual admission creates pending_activation users.
  * Default false.
  */
 export function isDirectoryPendingActivationEnabled(): boolean {
@@ -33,33 +35,19 @@ export function isDirectoryPendingActivationEnabled(): boolean {
 }
 
 /**
- * Parse activation_status with **fail-closed** semantics for unknown values.
- * - exact `pending_activation` / `activated` only
- * - null/undefined/'' treated as `activated` solely for pre-migration row shapes
- *   (column missing / not yet selected); after migration the column is NOT NULL
- * - any other string is invalid (gate must deny)
+ * Closed-set parser: only the two exact strings are valid.
+ * null/undefined/''/unknown → invalid (fail-closed).
  */
 export function parseUserActivationStatus(
   raw: unknown,
 ): { ok: true; status: UserActivationStatus } | { ok: false; status: 'invalid' } {
-  if (raw === null || raw === undefined) {
-    return { ok: true, status: 'activated' }
-  }
   if (typeof raw !== 'string') {
     return { ok: false, status: 'invalid' }
   }
   const value = raw.trim()
-  if (value === '') return { ok: true, status: 'activated' }
   if (value === 'pending_activation') return { ok: true, status: 'pending_activation' }
   if (value === 'activated') return { ok: true, status: 'activated' }
   return { ok: false, status: 'invalid' }
-}
-
-/** @deprecated prefer parseUserActivationStatus — kept for narrow call sites that only need pending check */
-export function normalizeUserActivationStatus(raw: unknown): UserActivationStatus {
-  const parsed = parseUserActivationStatus(raw)
-  if (!parsed.ok) return 'activated' // callers that only check pending should use parse + gate
-  return parsed.status
 }
 
 export function isUserPendingActivation(raw: unknown): boolean {
@@ -80,8 +68,7 @@ export type UserAuthGateDenial = {
 }
 
 /**
- * Shared gate for password login, token refresh/verify, DingTalk SSO login, API tokens.
- * Does not evaluate DingTalk grants (caller-specific).
+ * Shared gate for password login, token refresh/verify, DingTalk SSO, API tokens.
  */
 export function evaluateUserAuthenticationGate(
   user: UserAuthGateInput,

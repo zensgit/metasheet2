@@ -511,6 +511,7 @@ describe('auth login routes', () => {
       expect.stringContaining('must_change_password = FALSE'),
       ['hashed-password', 'user-1'],
     )
+    expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('local_password_set = TRUE')
     expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
       updatedBy: 'user-1',
       reason: 'password-change-required-cleared',

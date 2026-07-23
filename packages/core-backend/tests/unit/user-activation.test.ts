@@ -32,9 +32,12 @@ describe('user-activation helpers (T1)', () => {
     expect(isDirectoryPendingActivationEnabled()).toBe(false)
   })
 
-  it('parses activation_status with fail-closed unknown values', () => {
-    expect(parseUserActivationStatus(null)).toEqual({ ok: true, status: 'activated' })
-    expect(parseUserActivationStatus('')).toEqual({ ok: true, status: 'activated' })
+  it('parses activation_status as closed set (only exact strings; null/empty invalid)', () => {
+    // After migration: NOT NULL + CHECK — null/undefined/'' are not activated.
+    expect(parseUserActivationStatus(null)).toEqual({ ok: false, status: 'invalid' })
+    expect(parseUserActivationStatus(undefined)).toEqual({ ok: false, status: 'invalid' })
+    expect(parseUserActivationStatus('')).toEqual({ ok: false, status: 'invalid' })
+    expect(parseUserActivationStatus('   ')).toEqual({ ok: false, status: 'invalid' })
     expect(parseUserActivationStatus('pending_activation')).toEqual({
       ok: true,
       status: 'pending_activation',

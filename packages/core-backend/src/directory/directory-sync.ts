@@ -606,7 +606,11 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
   }
   temporaryPassword?: string
   inviteToken: string | null
-  onboarding: ReturnType<typeof buildOnboardingPacket>
+  /** Null when pending_activation — no usable password / login messaging. */
+  onboarding: ReturnType<typeof buildOnboardingPacket> | null
+  /** Actual grant applied (pending forces false regardless of request). */
+  enableDingTalkGrantApplied: boolean
+  activationStatus: 'pending_activation' | 'activated'
 }
 
 export type DirectoryAccountBatchAdmissionOutcome = {
@@ -6349,6 +6353,22 @@ export async function admitDirectoryAccountUser(
     ? generatedPassword
     : undefined
 
+  // Pending: no misleading onboarding (no usable password, cannot login until T3 activate).
+  const onboarding = pendingMode
+    ? null
+    : buildOnboardingPacket({
+      email: cleanEmail || null,
+      accountLabel: resolveDirectoryAdmissionAccountLabel({
+        email: cleanEmail || null,
+        username: cleanUsername,
+        mobile: cleanMobile,
+        userId,
+      }),
+      temporaryPassword: returnTempPassword ?? null,
+      preset: null,
+      inviteToken: resolvedInviteToken,
+    })
+
   return {
     account: summary,
     previousLocalUser: previousLinkedUser?.local_user_id
@@ -6369,18 +6389,11 @@ export async function admitDirectoryAccountUser(
     },
     temporaryPassword: returnTempPassword,
     inviteToken: resolvedInviteToken,
-    onboarding: buildOnboardingPacket({
-      email: cleanEmail || null,
-      accountLabel: resolveDirectoryAdmissionAccountLabel({
-        email: cleanEmail || null,
-        username: cleanUsername,
-        mobile: cleanMobile,
-        userId,
-      }),
-      temporaryPassword: returnTempPassword ?? null,
-      preset: null,
-      inviteToken: resolvedInviteToken,
-    }),
+    // When pending, onboarding is null — callers must not invent temp-password messaging.
+    onboarding,
+    // Actual grant applied (pending forces false).
+    enableDingTalkGrantApplied: enableDingTalkGrant,
+    activationStatus: pendingMode ? 'pending_activation' : 'activated',
   }
 }
 

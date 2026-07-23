@@ -895,6 +895,8 @@ export function adminDirectoryRouter(): Router {
             name: result.user.name,
             mobile: result.user.mobile,
             generatedPassword: typeof result.temporaryPassword === 'string',
+            activationStatus: result.activationStatus,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
           },
         }),
         auditLog({
@@ -915,6 +917,8 @@ export function adminDirectoryRouter(): Router {
             externalUserId: result.account.externalUserId,
             corpId: result.account.corpId,
             mode: 'manual_admission',
+            activationStatus: result.activationStatus,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
           },
         }),
       ])
@@ -924,7 +928,10 @@ export function adminDirectoryRouter(): Router {
         user: result.user,
         temporaryPassword: result.temporaryPassword,
         inviteToken: result.inviteToken,
+        // Null when pending — do not invent login/temp-password messaging.
         onboarding: result.onboarding,
+        activationStatus: result.activationStatus,
+        enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
       })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to create and bind local user for directory account')
@@ -1035,6 +1042,8 @@ export function adminDirectoryRouter(): Router {
             generatedPassword: typeof result.temporaryPassword === 'string',
             mode: 'bulk_manual_admission',
             selectionSize: accountIds.length,
+            activationStatus: result.activationStatus,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
           },
         }),
         auditLog({
@@ -1054,7 +1063,10 @@ export function adminDirectoryRouter(): Router {
             localUserUsername: result.user.username,
             externalUserId: result.account.externalUserId,
             corpId: result.account.corpId,
-            enableDingTalkGrant,
+            // Actual applied value (pending forces false), not the request echo.
+            enableDingTalkGrant: result.enableDingTalkGrantApplied,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
+            activationStatus: result.activationStatus,
             mode: 'bulk_manual_admission',
             selectionSize: accountIds.length,
           },
@@ -1064,6 +1076,10 @@ export function adminDirectoryRouter(): Router {
       if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
         throw new Error(outcome.failed[0].error)
       }
+
+      // Report applied grant (truthful); request may have been forced off in pending mode.
+      const enableDingTalkGrantApplied = outcome.succeeded[0]?.enableDingTalkGrantApplied
+        ?? false
 
       jsonOk(res, {
         items: outcome.succeeded.map((result) => result.account),
@@ -1075,12 +1091,17 @@ export function adminDirectoryRouter(): Router {
           username: result.user.username,
           mobile: result.user.mobile,
           temporaryPassword: result.temporaryPassword ?? '',
+          // Null when pending — no "管理员单独告知" / login URL packet.
           onboarding: result.onboarding,
+          activationStatus: result.activationStatus,
+          enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
         })),
         updatedCount: outcome.succeeded.length,
         failedCount: outcome.failed.length,
         failed: outcome.failed,
-        enableDingTalkGrant,
+        enableDingTalkGrantRequested: enableDingTalkGrant,
+        enableDingTalkGrant: enableDingTalkGrantApplied,
+        enableDingTalkGrantApplied,
       })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to batch create and bind local users for directory accounts')

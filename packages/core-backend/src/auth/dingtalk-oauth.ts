@@ -18,6 +18,7 @@ import {
   readDingTalkAllowedCorpIds,
 } from '../integrations/dingtalk/runtime-policy'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import { evaluateUserAuthenticationGate } from './user-activation'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 
 const logger = new Logger('DingTalkOAuth')
@@ -555,7 +556,7 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
             COALESCE(name, '') AS name,
             COALESCE(role, 'user') AS role,
             COALESCE(is_active, TRUE) AS is_active,
-            COALESCE(activation_status, 'activated') AS activation_status
+            activation_status
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -573,7 +574,7 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
               COALESCE(u.name, '') AS name,
               COALESCE(u.role, 'user') AS role,
               COALESCE(u.is_active, TRUE) AS is_active,
-              COALESCE(u.activation_status, 'activated') AS activation_status
+              u.activation_status
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
@@ -607,30 +608,23 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
 }
 
 function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
-  // Use shared gate so unknown activation_status fail-closes (PR #4559 review).
-  // Inline import-free duplicate kept only for oauth package-graph; messages match user-activation.ts.
-  if (localUser.role === 'disabled' || localUser.is_active === false) {
-    throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+  // Shared closed-set gate (PR #4559): only exact pending_activation | activated.
+  const denial = evaluateUserAuthenticationGate({
+    is_active: localUser.is_active,
+    role: localUser.role,
+    activation_status: localUser.activation_status,
+  })
+  if (!denial) return
+  if (denial.code === 'ACCOUNT_PENDING_ACTIVATION' || denial.code === 'ACCOUNT_ACTIVATION_INVALID') {
+    throw createPolicyError(denial.message, {
       statusCode: 403,
-      code: 'local_user_disabled',
+      code: denial.code,
     })
   }
-  const raw =
-    localUser.activation_status === null || localUser.activation_status === undefined
-      ? 'activated'
-      : String(localUser.activation_status).trim()
-  if (raw === 'pending_activation') {
-    throw createPolicyError('Account is pending activation and cannot sign in with DingTalk', {
-      statusCode: 403,
-      code: 'ACCOUNT_PENDING_ACTIVATION',
-    })
-  }
-  if (raw !== '' && raw !== 'activated') {
-    throw createPolicyError('Account activation status is invalid', {
-      statusCode: 403,
-      code: 'ACCOUNT_ACTIVATION_INVALID',
-    })
-  }
+  throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+    statusCode: 403,
+    code: 'local_user_disabled',
+  })
 }
 
 // W4-PRE-1 policy (§3.3 item 2 of the Wave-4 onboarding design lock, docs/development/
@@ -683,7 +677,7 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
                  COALESCE(name, '') AS name,
                  COALESCE(role, 'user') AS role,
                  COALESCE(is_active, TRUE) AS is_active,
-                 COALESCE(activation_status, 'activated') AS activation_status`,
+                 activation_status`,
       [userId, email, name, passwordHash],
     )
 

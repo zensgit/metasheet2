@@ -33,7 +33,8 @@ import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
+import { parseUserActivationStatus } from '../auth/user-activation'
 import { listUserPermissions } from '../rbac/service'
 import { secretManager } from '../security/SecretManager'
 import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
@@ -480,9 +481,7 @@ async function getInviteTarget(userId: string, email: string) {
     activation_status: string | null
     updated_at: string
   }>(
-    `SELECT id, email, name, is_active,
-            COALESCE(activation_status, 'activated') AS activation_status,
-            updated_at
+    `SELECT id, email, name, is_active, activation_status, updated_at
      FROM users
      WHERE id = $1 AND email = $2`,
     [userId, email],
@@ -755,42 +754,54 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
 
     // T1 P1: pending users must not be activated via invite accept (T3 owns activation).
     // Fail closed with zero writes so invite is not consumed and state cannot half-commit.
-    const activationStatus = String(target.activation_status ?? 'activated').trim()
-    if (activationStatus === 'pending_activation') {
-      return res.status(403).json({
-        success: false,
-        error: 'Account is pending activation; invite acceptance is not allowed',
-        code: 'ACCOUNT_PENDING_ACTIVATION',
-      })
-    }
-    if (activationStatus !== 'activated') {
+    const parsedActivation = parseUserActivationStatus(target.activation_status)
+    if (!parsedActivation.ok) {
       return res.status(403).json({
         success: false,
         error: 'Account activation status is invalid',
         code: 'ACCOUNT_ACTIVATION_INVALID',
       })
     }
+    if (parsedActivation.status === 'pending_activation') {
+      return res.status(403).json({
+        success: false,
+        error: 'Account is pending activation; invite acceptance is not allowed',
+        code: 'ACCOUNT_PENDING_ACTIVATION',
+      })
+    }
 
     const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
-    await query(
-      `UPDATE users
-       SET password_hash = $1,
-           must_change_password = FALSE,
-           local_password_set = TRUE,
-           is_active = true,
-           name = COALESCE(NULLIF($2, ''), name),
-           updated_at = NOW()
-       WHERE id = $3 AND email = $4
-         AND COALESCE(activation_status, 'activated') = 'activated'`,
-      [passwordHash, requestedName, payload.userId, payload.email],
-    )
+    // Single transaction: user password write (must affect a row) + invite consume.
+    // Zero-row UPDATE (race / activation drift) aborts before invite is consumed.
+    await transaction(async (client) => {
+      const updated = await client.query(
+        `UPDATE users
+         SET password_hash = $1,
+             must_change_password = FALSE,
+             local_password_set = TRUE,
+             is_active = true,
+             name = COALESCE(NULLIF($2, ''), name),
+             updated_at = NOW()
+         WHERE id = $3 AND email = $4
+           AND activation_status = 'activated'
+         RETURNING id`,
+        [passwordHash, requestedName, payload.userId, payload.email],
+      )
+      if (!updated.rows[0]) {
+        throw Object.assign(new Error('Invite target could not be updated'), {
+          code: 'INVITE_TARGET_UPDATE_MISMATCH',
+        })
+      }
+      await markInviteAccepted(token, {
+        consumedBy: payload.userId,
+        client,
+      })
+    })
 
+    // Best-effort post-commit; user+invite already durable together.
     await revokeUserSessions(payload.userId, {
       updatedBy: payload.userId,
       reason: 'invite-accepted',
-    })
-    await markInviteAccepted(token, {
-      consumedBy: payload.userId,
     })
 
     const result = await authService.login(payload.email, password, {
@@ -822,6 +833,13 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    if ((error as { code?: string })?.code === 'INVITE_TARGET_UPDATE_MISMATCH') {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite target could not be updated; token was not consumed',
+        code: 'INVITE_TARGET_UPDATE_MISMATCH',
+      })
+    }
     logger.error('Invite acceptance error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,
@@ -867,6 +885,7 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       `UPDATE users
        SET password_hash = $1,
            must_change_password = FALSE,
+           local_password_set = TRUE,
            updated_at = NOW()
        WHERE id = $2`,
       [passwordHash, authenticated.user.id],

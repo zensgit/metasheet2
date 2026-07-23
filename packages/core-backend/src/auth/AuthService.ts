@@ -124,6 +124,11 @@ export class AuthService {
     return trimmed.length > 0 ? trimmed : undefined
   }
 
+  /**
+   * Dev-only exception (NODE_ENV !== production && RBAC_TOKEN_TRUST): trusts JWT claims
+   * without DB activation gate. Production never enables this path. Not a substitute for
+   * T1 fail-closed verifyToken DB path.
+   */
   private buildTrustedTokenUser(
     payload: TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
   ): User | null {
@@ -158,6 +163,8 @@ export class AuthService {
       permissions,
       ...(tenantId ? { tenantId } : {}),
       is_active: true,
+      activation_status: 'activated',
+      local_password_set: true,
       created_at: new Date(0),
       updated_at: new Date(0),
       roles,
@@ -385,8 +392,8 @@ export class AuthService {
             permissions: resolved.permissions,
             is_active: row.is_active,
             must_change_password: row.must_change_password,
-            activation_status: row.activation_status ?? 'activated',
-            local_password_set: row.local_password_set !== false,
+            activation_status: row.activation_status,
+            local_password_set: row.local_password_set,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -477,8 +484,8 @@ export class AuthService {
             permissions: resolved.permissions,
             is_active: row.is_active,
             must_change_password: row.must_change_password,
-            activation_status: row.activation_status ?? 'activated',
-            local_password_set: row.local_password_set !== false,
+            activation_status: row.activation_status,
+            local_password_set: row.local_password_set,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
