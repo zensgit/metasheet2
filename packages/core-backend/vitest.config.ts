@@ -432,6 +432,13 @@ export default defineConfig({
       // excluded here so the no-DB job cannot skip-green it; wired whole-file into the attendance
       // real-DB step in plugin-tests.yml.
       'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
+      // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §9): dual-host decision-trace
+      // authorization matrix (G1/G7), allowlist/org-scoping negative controls (G2), the ⑤ raw
+      // source_type fixture (G4), not_in_effect vs undeterminable (G5), and snapshot-exclusivity
+      // (G6) against real Postgres. DATABASE_URL-gated describeIfDatabase; excluded here so the
+      // no-DB job cannot skip-green it; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/attendance-decision-trace-w5-0.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

@@ -1228,7 +1228,22 @@ export async function readAttendanceDecisionTraceSettingsGates(
     ATTENDANCE_SETTINGS_KEY,
   ])
   const raw = result.rows[0]?.value
-  const value = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  // §11.1 legacy-schema note (same dual shape `readAttendancePunchPolicyPosture` handles,
+  // `AttendanceSetupReadinessAggregate.ts:364-368`): today's canonical migration creates
+  // `system_configs.value text` (`z20251231_create_system_configs.ts:14`, confirmed against the
+  // real dev DB — the pg driver returns a STRING here, never an auto-parsed object), but a
+  // legacy-migrated deployment could still carry an older `jsonb` column where the driver DOES
+  // auto-parse. Handle both shapes; a malformed/corrupt row fails closed to `{}` (every gate reads
+  // `false`), never throws.
+  let value: Record<string, unknown> = {}
+  if (raw !== undefined && raw !== null) {
+    try {
+      const parsed: unknown = typeof raw === 'object' ? raw : JSON.parse(String(raw))
+      if (parsed && typeof parsed === 'object') value = parsed as Record<string, unknown>
+    } catch {
+      value = {}
+    }
+  }
   const boolAt = (key: string, subkey: string): boolean => {
     const section = value[key]
     if (!section || typeof section !== 'object') return false
