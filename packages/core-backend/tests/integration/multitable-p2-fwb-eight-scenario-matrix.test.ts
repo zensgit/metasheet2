@@ -88,7 +88,6 @@ let ruleId = ''
 
 const MAPPINGS = [
   { formFieldId: 'summary', targetFieldId: F_TITLE, targetType: 'text' as const },
-  { formFieldId: 'amount', targetFieldId: F_AMOUNT, targetType: 'number' as const },
 ]
 
 function setFlags(fwb: boolean, durable: boolean) {
@@ -235,6 +234,13 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       await q('DELETE FROM multitable_automation_executions WHERE rule_id = $1', [ruleId]).catch(() => {})
       await q('DELETE FROM automation_rules WHERE id = $1', [ruleId]).catch(() => {})
     }
+    await q(
+      `DELETE FROM operation_audit_logs
+        WHERE action = 'automation.fwb_confirm'
+          AND resource_type = 'automation_fwb_confirmation'
+          AND resource_id = $1`,
+      [SHEET_ID],
+    ).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
@@ -338,6 +344,20 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
     const activeVersion = await q('SELECT active_version_id FROM approval_templates WHERE id = $1', [templateId])
     templateVersionId = String((activeVersion.rows[0] as { active_version_id: string }).active_version_id)
 
+    const confirmationHash = deriveFwbConfirmationHash({
+      templateId,
+      sourceTemplateVersionId: templateVersionId,
+      targetBaseId: BASE_ID,
+      targetSheetId: SHEET_ID,
+      mappings: MAPPINGS,
+    })
+    await q(
+      `INSERT INTO operation_audit_logs
+         (actor_id, actor_type, action, resource_type, resource_id, metadata, meta)
+       VALUES ($1, 'user', 'automation.fwb_confirm', 'automation_fwb_confirmation', $2, $3::jsonb, $3::jsonb)`,
+      [CREATOR, SHEET_ID, JSON.stringify({ confirmationHash })],
+    )
+
     svc = new AutomationService(integrationEventBus, kyselyDb as never, queryFn)
     // REAL save gate: placement, D1 outcome lock, mapping validation, Q6 confirmation hash + creator
     // authority all run inside createRule (the per-boundary negatives live in the FWB activation spec).
@@ -349,13 +369,7 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       actionConfig: {
         mappings: MAPPINGS,
         sourceTemplateVersionId: templateVersionId,
-        confirmationHash: deriveFwbConfirmationHash({
-          templateId,
-          sourceTemplateVersionId: templateVersionId,
-          targetBaseId: BASE_ID,
-          targetSheetId: SHEET_ID,
-          mappings: MAPPINGS,
-        }),
+        confirmationHash,
       },
       createdBy: CREATOR,
     } as never)
@@ -377,7 +391,8 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       expect(await sheetRecordCount()).toBe(1)
       expect(await claimsFor(instanceA)).toBe(1)
       const rec = await q('SELECT data FROM meta_records WHERE sheet_id = $1', [SHEET_ID])
-      expect((rec.rows[0] as { data: Record<string, unknown> }).data).toMatchObject({ [F_TITLE]: 'S6 net-once', [F_AMOUNT]: 42 })
+      expect((rec.rows[0] as { data: Record<string, unknown> }).data).toMatchObject({ [F_TITLE]: 'S6 net-once' })
+      expect((rec.rows[0] as { data: Record<string, unknown> }).data).not.toHaveProperty(F_AMOUNT)
       expect(await sheetRevisionCount()).toBe(1)
       expect(await outboxCountLike(`${evtA}::fwb::`)).toBe(1)
 

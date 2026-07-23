@@ -23,3 +23,15 @@ describe('approval Canvas V2 feature flag parsing', () => {
     expect(extractFeaturesFromPayload(payload).approvalCanvasV2).toBe(expected)
   })
 })
+
+describe('approval FWB writeback feature flag parsing', () => {
+  it.each([
+    [{ data: { user: { features: { approvalFwbWriteback: true } } } }, true],
+    [{ data: { user: { features: { approval_fwb_writeback: true } } } }, true],
+    [{ data: { user: { features: { approvalFwbWriteback: false, approval_fwb_writeback: true } } } }, false],
+    [{ data: { user: { features: { approvalFwbWriteback: 'true' } } } }, undefined],
+    [{ data: { user: { features: {} } } }, undefined],
+  ])('parses only an explicit boolean from supported payload keys', (payload, expected) => {
+    expect(extractFeaturesFromPayload(payload).approvalFwbWriteback).toBe(expected)
+  })
+})

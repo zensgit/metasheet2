@@ -71,6 +71,8 @@ const ruleIds: string[] = []
 
 const MAPPINGS = [
   { formFieldId: 'summary', targetFieldId: F_TITLE, targetType: 'text' as const },
+]
+const NUMBER_MAPPINGS = [
   { formFieldId: 'amount', targetFieldId: F_AMOUNT, targetType: 'number' as const },
 ]
 
@@ -128,6 +130,18 @@ function updateConfig(
       recordLinkFieldId,
     ),
   }
+}
+
+async function recordConfirmationReceipt(
+  confirmationHash: string,
+  actorId = CREATOR,
+): Promise<void> {
+  await q(
+    `INSERT INTO operation_audit_logs
+       (actor_id, actor_type, action, resource_type, resource_id, metadata, meta)
+     VALUES ($1, 'user', 'automation.fwb_confirm', 'automation_fwb_confirmation', $2, $3::jsonb, $3::jsonb)`,
+    [actorId, RULE_SHEET, JSON.stringify({ confirmationHash })],
+  )
 }
 
 function approvalTemplateRequest(linkBaseId: string, linkSheetId: string) {
@@ -468,6 +482,8 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
     const activeVersion = await q('SELECT active_version_id FROM approval_templates WHERE id = $1', [templateId])
     templateVersionId = String((activeVersion.rows[0] as { active_version_id: string }).active_version_id)
 
+    await recordConfirmationReceipt(updateConfirmation())
+
     svc = new AutomationService(integrationEventBus, db as never, queryFn)
   })
 
@@ -479,6 +495,13 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
       await q('DELETE FROM multitable_automation_executions WHERE rule_id = $1', [ruleId]).catch(() => {})
       await q('DELETE FROM meta_fwb_action_applied WHERE rule_id = $1', [ruleId]).catch(() => {})
     }
+    await q(
+      `DELETE FROM operation_audit_logs
+        WHERE action = 'automation.fwb_confirm'
+          AND resource_type = 'automation_fwb_confirmation'
+          AND resource_id = $1`,
+      [RULE_SHEET],
+    ).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])', [[TARGET_SHEET, SECONDARY_SHEET, CROSS_SHEET, RULE_SHEET]]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[TARGET_SHEET, SECONDARY_SHEET, CROSS_SHEET, RULE_SHEET]]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[TARGET_SHEET, SECONDARY_SHEET, CROSS_SHEET, RULE_SHEET]]).catch(() => {})
@@ -502,6 +525,11 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
       ...base,
       actionConfig: updateConfig({ mode: 'patch' }),
     } as never)).rejects.toThrow(/unknown_mode/)
+
+    await expect(svc.createRule(RULE_SHEET, {
+      ...base,
+      actionConfig: updateConfig({ mappings: NUMBER_MAPPINGS }),
+    } as never)).rejects.toThrow(/exact_number_mapping_unavailable/)
 
     await expect(svc.createRule(RULE_SHEET, {
       ...base,
@@ -583,7 +611,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         triggerPayload(instanceId, evt),
       )
       expect(run.steps[0]?.status).toBe('success')
-      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'updated-A', [F_AMOUNT]: 42 })
+      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'updated-A', [F_AMOUNT]: 1 })
       expect(await recordData(REC_B)).toMatchObject({ [F_TITLE]: 'before-B', [F_AMOUNT]: 99 })
       expect(await claimCount(instanceId, ruleId)).toBe(1)
       expect(await revisionCount(REC_A)).toBe(1)
@@ -613,6 +641,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         recordLinkFieldId: 'linked_secondary',
       }),
     }
+    await recordConfirmationReceipt(String(secondaryConfig.confirmationHash))
     const saved = await svc.createRule(RULE_SHEET, {
       name: 'fwb2 action-scoped gates',
       triggerType: 'approval.completed',
@@ -702,7 +731,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
       )
       expect(run.steps.map((step) => step.status)).toEqual(['success', 'failed'])
       expect(String(run.steps[1]?.error ?? '')).toContain('confirmation_recorded')
-      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'primary-applied', [F_AMOUNT]: 73 })
+      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'primary-applied', [F_AMOUNT]: 0 })
       expect(await recordData(secondaryRecord)).toMatchObject({ [F_SECONDARY_TITLE]: 'secondary-before' })
       expect(await claimCount(instanceId, ruleId)).toBe(1)
       expect(await outboxCountLike(`${eventId}::fwb::`)).toBe(1)
@@ -941,7 +970,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
       await q(
         `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
          VALUES ($1,$2,'user',$3,true,true)`,
-        [TARGET_SHEET, F_AMOUNT, CREATOR],
+        [TARGET_SHEET, F_TITLE, CREATOR],
       )
       try {
         // Production §11 Q6 gates (field writability is real).
@@ -958,7 +987,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         await q(
           `DELETE FROM field_permissions
             WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'user' AND subject_id = $3`,
-          [TARGET_SHEET, F_AMOUNT, CREATOR],
+          [TARGET_SHEET, F_TITLE, CREATOR],
         )
       }
     } finally {
@@ -999,7 +1028,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         `INSERT INTO field_permissions
            (sheet_id, field_id, subject_type, subject_id, visible, read_only)
          VALUES ($1,$2,'user',$3,TRUE,TRUE)`,
-        [TARGET_SHEET, F_AMOUNT, CREATOR],
+        [TARGET_SHEET, F_TITLE, CREATOR],
       )
 
       runPromise = buildExecutor({ fwbGateChecksFactory: productionGateFactory }).execute(
@@ -1023,7 +1052,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         `DELETE FROM field_permissions
           WHERE sheet_id = $1 AND field_id = $2
             AND subject_type = 'user' AND subject_id = $3`,
-        [TARGET_SHEET, F_AMOUNT, CREATOR],
+        [TARGET_SHEET, F_TITLE, CREATOR],
       ).catch(() => {})
       setFlags(false, false)
     }
@@ -1085,7 +1114,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         triggerPayload(ownInstance, `evt_fwb2_own_${TS}`),
       )
       expect(ownRun.steps[0]?.status).toBe('success')
-      expect(await recordData(ownRecord)).toMatchObject({ [F_TITLE]: 'own-updated', [F_AMOUNT]: 1 })
+      expect(await recordData(ownRecord)).toMatchObject({ [F_TITLE]: 'own-updated', [F_AMOUNT]: 0 })
 
       const foreignInstance = await startInstance({ summary: 'must-not-update', amount: 2, linked: { recordId: foreignRecord } })
       await approveInstance(foreignInstance)
@@ -1159,7 +1188,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
       const run3 = await executor.execute(executorRule(ruleId, cfg), triggerPayload(instanceB, `evt_fwb2_net3_${TS}`))
       expect(run3.steps[0]?.status).toBe('success')
       expect(await claimCount(instanceB, ruleId)).toBe(1)
-      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'net-once-2', [F_AMOUNT]: 11 })
+      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'net-once-2', [F_AMOUNT]: 0 })
     } finally {
       setFlags(false, false)
     }
@@ -1205,7 +1234,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
         triggerPayload(instanceId, `evt_fwb2_atomic2_${TS}`),
       )
       expect(run2.steps[0]?.status).toBe('success')
-      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'atomic', [F_AMOUNT]: 7 })
+      expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'atomic', [F_AMOUNT]: 0 })
       expect(await claimCount(instanceId, ruleId)).toBe(1)
       expect(await revisionCount(REC_A)).toBeGreaterThanOrEqual(1)
       expect(await outboxCountLike(`evt_fwb2_atomic2_${TS}::fwb::`)).toBe(1)
@@ -1263,6 +1292,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
           recordLinkFieldId: 'linked',
         }),
       }
+      await recordConfirmationReceipt(String(crossCfg.confirmationHash))
       const crossRule = await svc.createRule(RULE_SHEET, {
         name: 'fwb2 production cross-base rule',
         triggerType: 'approval.completed',
