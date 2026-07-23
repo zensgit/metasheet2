@@ -1,5 +1,6 @@
 import { createHash } from 'crypto'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
+import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
   MultitableProvisioningFieldDescriptor,
   MultitableProvisioningFieldType,
@@ -504,6 +505,170 @@ export async function createView(
     throw new Error(`Failed to create view: ${input.viewId}`)
   }
   return { created: true, view }
+}
+
+export type EnsureMissingObjectFieldsInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fields: MultitableProvisioningFieldDescriptor[]
+}
+
+export type EnsureMissingObjectFieldsResult = {
+  addedFieldIds: string[]
+  skippedExistingFieldIds: string[]
+}
+
+// ADDITIVE-ONLY field primitive (general-prep W2 template-evolution rung). Unlike
+// `ensureFields` (INSERT ... ON CONFLICT DO UPDATE — it overwrites name/type/property/
+// order, which would destroy option-sync-written options and tenant renames on an
+// already-provisioned table), this uses ON CONFLICT (id) DO NOTHING — the createView
+// precedent. Existing field rows are CONSTRUCTIVELY untouchable: there is no UPDATE and
+// no DELETE statement in this function body, so "add-only, never mutate, never drop" is
+// guaranteed by the statement set itself, not by convention. Returns values-free evidence
+// (field ids + counts only). Physical ids are computed exactly as ensureObject does, so a
+// later template field lands on the same stable id an `ensure` would have used.
+export async function ensureMissingObjectFields(
+  input: EnsureMissingObjectFieldsInput,
+): Promise<EnsureMissingObjectFieldsResult> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const addedFieldIds: string[] = []
+  const skippedExistingFieldIds: string[] = []
+  const fields = input.fields ?? []
+  for (const [index, field] of fields.entries()) {
+    const physicalId = stableMetaId('fld', input.projectId, input.objectId, field.id)
+    const order = typeof field.order === 'number' ? field.order : index
+    const res = await input.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        physicalId,
+        sheetId,
+        field.name.trim(),
+        field.type,
+        JSON.stringify(buildFieldProperty(field)),
+        order,
+      ],
+    )
+    if ((res.rowCount ?? 0) > 0) addedFieldIds.push(physicalId)
+    else skippedExistingFieldIds.push(physicalId)
+  }
+  return { addedFieldIds, skippedExistingFieldIds }
+}
+
+export type ResolveExistingObjectFieldIdsInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldIds: string[]
+}
+
+// DB-BACKED field existence (general-prep W2). `resolveObjectFieldIds` only COMPUTES
+// stable ids (it maps every requested logical id, whether or not the row exists), so
+// it can never tell a repair which fields are genuinely missing. This one queries
+// meta_fields and returns {logicalId: physicalId} ONLY for fields that physically
+// exist — so `missingLogicalFields(template, resolved)` returns the truly-missing set.
+export async function resolveExistingObjectFieldIds(
+  input: ResolveExistingObjectFieldIdsInput,
+): Promise<Record<string, string>> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const pairs = (input.fieldIds ?? []).map((logical) => ({
+    logical,
+    physical: stableMetaId('fld', input.projectId, input.objectId, logical),
+  }))
+  const out: Record<string, string> = {}
+  if (pairs.length === 0) return out
+  const res = await input.query(
+    `SELECT id FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
+    [sheetId, pairs.map((pair) => pair.physical)],
+  )
+  const present = new Set((res.rows as { id: unknown }[]).map((row) => String(row.id)))
+  for (const pair of pairs) {
+    if (present.has(pair.physical)) out[pair.logical] = pair.physical
+  }
+  return out
+}
+
+export type ReadObjectFieldsContentInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldIds: string[]
+}
+
+// DB-backed field CONTENT (general-prep W2 REPAIR_MUTATED_EXISTING_FIELD snapshot):
+// {logicalId: {name, type, property}} for fields that physically exist. Repair reads
+// this before and after the additive write and asserts existing fields are byte-for-byte
+// unchanged — a runtime positive control on top of the DO-NOTHING primitive.
+export async function readObjectFieldsContent(
+  input: ReadObjectFieldsContentInput,
+): Promise<Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }>> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const pairs = (input.fieldIds ?? []).map((logical) => ({
+    logical,
+    physical: stableMetaId('fld', input.projectId, input.objectId, logical),
+  }))
+  const out: Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }> = {}
+  if (pairs.length === 0) return out
+  // Snapshot the full column IDENTITY of an existing field: name/type/property AND
+  // `order` (the only other mutable, schema-affecting column). This is the before/after
+  // positive control behind assertNoExistingFieldMutated — it must cover every column a
+  // renumbering write could touch, so the "never touch a pre-existing column" contract is
+  // literally true even if the wired write primitive later stops being append-only.
+  // `updated_at` is intentionally excluded: it is a housekeeping timestamp, not column
+  // identity, and would false-positive on any legitimate re-touch.
+  const res = await input.query(
+    `SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
+    [sheetId, pairs.map((pair) => pair.physical)],
+  )
+  const byPhysical = new Map(
+    (res.rows as { id: unknown; name: unknown; type: unknown; property: unknown; order: unknown }[]).map((row) => [
+      String(row.id),
+      { name: String(row.name), type: String(row.type), property: normalizeJson(row.property), order: Number(row.order) },
+    ]),
+  )
+  for (const pair of pairs) {
+    const content = byPhysical.get(pair.physical)
+    if (content) out[pair.logical] = content
+  }
+  return out
+}
+
+// W2/P2-3: build the atomic-repair tx surface — binds ALL FOUR provisioning methods a repair
+// needs to the SAME `query`. This is the SINGLE place that wiring lives, so index.ts's
+// runObjectFieldsRepairTransaction and the real-DB test both use it: a divergence (one method
+// escaping to a different connection, breaking atomicity) is impossible to introduce per-method,
+// and the shipped binding is exercised by the real-DB rollback test — closing the runner-vs-prod
+// gap (a hand-mirrored test runner would have left the shipped surface unverified).
+export function buildObjectFieldsRepairSurface(
+  query: MultitableProvisioningQueryFn,
+): MultitableRepairTransactionSurface {
+  return {
+    findObjectSheet: ({ projectId, objectId }) => findObjectSheet(query, projectId, objectId),
+    resolveExistingObjectFieldIds: ({ projectId, objectId, fieldIds }) =>
+      resolveExistingObjectFieldIds({ query, projectId, objectId, fieldIds }),
+    readObjectFieldsContent: ({ projectId, objectId, fieldIds }) =>
+      readObjectFieldsContent({ query, projectId, objectId, fieldIds }),
+    ensureMissingObjectFields: ({ projectId, objectId, fields }) =>
+      ensureMissingObjectFields({ query, projectId, objectId, fields }),
+  }
+}
+
+// W2/P2-3: the atomic-repair GLUE, extracted so it is unit-testable independently of the
+// MetaSheetServer/poolManager bootstrap. `withTxQuery` is the caller's transaction runner —
+// it must invoke `run` exactly once with a SINGLE tx-bound query and roll back if `run`
+// throws. This function builds the repair surface from that one query and hands it to `fn`;
+// a throw from `fn` (a verify failure) propagates straight out so the caller's transaction
+// rolls back. index.ts wires `withTxQuery` to poolManager.get().transaction, so the shipped
+// runner IS this tested function over the (independently-correct) transaction primitive —
+// closing the runner-vs-prod gap the review flagged (P3): a rework that split the write and
+// verify into two transactions, or swallowed the throw, is caught by this function's tests.
+export async function runObjectFieldsRepairTransactionWith<T>(
+  withTxQuery: <R>(run: (query: MultitableProvisioningQueryFn) => Promise<R>) => Promise<R>,
+  fn: (surface: MultitableRepairTransactionSurface) => Promise<T>,
+): Promise<T> {
+  return withTxQuery((txQuery) => fn(buildObjectFieldsRepairSurface(txQuery)))
 }
 
 export async function ensureObject(
