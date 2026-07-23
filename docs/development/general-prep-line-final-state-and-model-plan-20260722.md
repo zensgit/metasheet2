@@ -7,9 +7,9 @@
 
 ---
 
-## 1. 一句话结论
+## 1. 一句话结论（精确当前状态）
 
-**可建（无外部门卡）的开发已全部完成**：地基实证（P1a）、四个 pure 能力模块（P1b/P4/P3）、模板演进 rung（W2 ensure+repair）、**以及 W3-entry 的原子组合事务原语（P2-3）**——全部构建 + 测试 + 逐一 mutation-verified，**未 arm / 未接生产路由**。余下每一项都卡在 **owner 决策 / 未合依赖 / 需求门**，非代码侧能推进。
+**实现基本完成、全部 unarmed**：地基实证（P1a）、四个 pure 能力模块（P1b/P4/P3）、模板演进 rung（W2 ensure+repair）、W3-entry 原子组合事务原语（P2-3）——全部构建 + 逐一 mutation-verified。**owner 复核的 P2（发货 index.ts runner 未被测）已修**：加 host 集成测试真调 `MetaSheetServer.createCoreAPI().multitable.provisioning.runObjectFieldsRepairTransaction`，照 reviewer 原样把发货 runner 改恒抛 ⇒ 该测试 RED（其余套件仍绿），runner-vs-prod gap 真正闭合。**尚余**：fresh CI（已 dispatch 运行中，跑 real-DB 白名单）+ **owner exact-head 短复审** —— 二者过后才宣布 W2/P2-3 clean。余下能力项（W3/G1/P0/P5/P7/P-T3）全卡在 owner 决策 / 未合依赖 / 需求门。
 
 ---
 
