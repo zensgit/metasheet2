@@ -921,7 +921,7 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     expect(started.status, await started.clone().text()).toBeLessThan(300)
   })
 
-  it('submit rejects sheet-readable but base-unreadable filler (values-free; no picker bypass)', async () => {
+  it('submit and picker reject when only base-read is absent, then accept when only base-read is granted', async () => {
     const NO_BASE = `rl-nobase-${TS}`
     const noBaseTok = await tok(
       base,
@@ -932,6 +932,10 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     const pool = poolManager.get()
     await pool.query(
       `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'multitable:read') ON CONFLICT DO NOTHING`,
+      [NO_BASE],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:write') ON CONFLICT DO NOTHING`,
       [NO_BASE],
     )
     try {
@@ -950,30 +954,70 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     // Ensure base is owned by FILLER (not NO_BASE) and NO_BASE is not admin.
     await pool.query(`UPDATE meta_bases SET owner_id = $1 WHERE id = $2`, [FILLER, baseId])
     await pool.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [NO_BASE]).catch(() => {})
+    await pool.query(
+      `UPDATE users SET permissions = '[]'::jsonb, is_admin = false WHERE id = $1`,
+      [NO_BASE],
+    ).catch(() => {})
+    await pool.query(
+      `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'multitable:base:read'`,
+      [NO_BASE],
+    ).catch(() => {})
 
-    const bad = await req(base, '/api/approvals', noBaseTok, {
+    const badSubmit = await req(base, '/api/approvals', noBaseTok, {
       method: 'POST',
       body: {
         templateId: tid,
         formData: { linked: { recordId: readableRecordId } },
       },
     })
-    expect(bad.status).toBe(400)
-    const shape = publicValidationShape(await bad.json())
+    expect(badSubmit.status).toBe(400)
+    const shape = publicValidationShape(await badSubmit.json())
     expect(shape.code).toBe('VALIDATION_ERROR')
     expect(shape.errors).toContain('linked record is not readable')
     expect(shape.text).not.toContain(readableRecordId)
     expect(shape.text).not.toContain(baseId)
 
-    // Positive control under the same template with a base-readable filler still works.
-    const ok = await req(base, '/api/approvals', fillerTok, {
+    const badPicker = await req(
+      base,
+      `/api/approvals/record-link-options?baseId=${encodeURIComponent(baseId)}&sheetId=${encodeURIComponent(sheetId)}&limit=5`,
+      noBaseTok,
+    )
+    expect(badPicker.status).toBe(404)
+    const pickerBody = await badPicker.text()
+    expect(pickerBody).not.toContain(readableRecordId)
+    expect(pickerBody).not.toContain(baseId)
+    expect(pickerBody).not.toContain(sheetId)
+
+    // Positive control: change exactly one authority dimension. Sheet-read, row-read,
+    // approvals:write, template, and record stay unchanged.
+    await pool.query(
+      `INSERT INTO permissions (code, name, description)
+       VALUES ('multitable:base:read', 'Base Read', 'record-link base-read discriminator')
+       ON CONFLICT (code) DO NOTHING`,
+    ).catch(() => {})
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       VALUES ($1, 'multitable:base:read') ON CONFLICT DO NOTHING`,
+      [NO_BASE],
+    )
+
+    const okSubmit = await req(base, '/api/approvals', noBaseTok, {
       method: 'POST',
       body: {
         templateId: tid,
         formData: { linked: { recordId: readableRecordId } },
       },
     })
-    expect(ok.status, await ok.clone().text()).toBeLessThan(300)
+    expect(okSubmit.status, await okSubmit.clone().text()).toBeLessThan(300)
+
+    const okPicker = await req(
+      base,
+      `/api/approvals/record-link-options?baseId=${encodeURIComponent(baseId)}&sheetId=${encodeURIComponent(sheetId)}&limit=5`,
+      noBaseTok,
+    )
+    expect(okPicker.status, await okPicker.clone().text()).toBe(200)
+    const okPickerBody = await okPicker.json() as { records: Array<{ id: string }> }
+    expect(okPickerBody.records.some((record) => record.id === readableRecordId)).toBe(true)
 
     await pool.query(`DELETE FROM user_permissions WHERE user_id = $1`, [NO_BASE]).catch(() => {})
     await pool.query(`DELETE FROM spreadsheet_permissions WHERE subject_id = $1`, [NO_BASE]).catch(() => {})
