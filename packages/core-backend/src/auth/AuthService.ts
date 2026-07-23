@@ -14,6 +14,7 @@ import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from
 import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
+import { evaluateUserAuthenticationGate } from './user-activation'
 
 export interface User {
   id: string
@@ -26,6 +27,8 @@ export interface User {
   tenantId?: string
   is_active?: boolean
   must_change_password?: boolean
+  activation_status?: string
+  local_password_set?: boolean
   created_at: Date
   updated_at: Date
   // Index signature for compatibility with Express.Request.user
@@ -36,6 +39,9 @@ export interface User {
 interface UserRow extends User {
   password_hash: string
 }
+
+const USER_AUTH_SELECT =
+  'id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, activation_status, local_password_set, created_at, updated_at'
 
 export interface TokenPayload {
   userId: string
@@ -255,14 +261,15 @@ export class AuthService {
         return null
       }
 
-      // 验证密码
-      const isValid = await bcrypt.compare(password, user.password_hash)
-      if (!isValid) {
+      // Password usability gate before bcrypt (pending / SSO-only accounts).
+      const gate = evaluateUserAuthenticationGate(user, { requireLocalPassword: true })
+      if (gate) {
         return null
       }
 
-      // 检查用户状态
-      if (user.role === 'disabled' || user.is_active === false) {
+      // 验证密码
+      const isValid = await bcrypt.compare(password, user.password_hash)
+      if (!isValid) {
         return null
       }
 
@@ -317,7 +324,7 @@ export class AuthService {
         return null
       }
 
-      // 加密密码
+      // 加密密码 — self-service register is always activated + local password set
       const passwordHash = await bcrypt.hash(password, this.config.saltRounds)
       const enableAttendanceSelfService = supportsAttendanceSelfService(process.env.PRODUCT_MODE)
       const registrationPermissions = [
@@ -361,7 +368,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE id = $1',
+          `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1`,
           [userId]
         )
 
@@ -378,6 +385,8 @@ export class AuthService {
             permissions: resolved.permissions,
             is_active: row.is_active,
             must_change_password: row.must_change_password,
+            activation_status: row.activation_status ?? 'activated',
+            local_password_set: row.local_password_set !== false,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -399,6 +408,8 @@ export class AuthService {
           permissions: ['*:*'],
           is_active: true,
           must_change_password: false,
+          activation_status: 'activated',
+          local_password_set: true,
           password_hash: await bcrypt.hash('dev123', this.config.saltRounds),
           created_at: new Date(),
           updated_at: new Date()
@@ -431,7 +442,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          `SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at
+          `SELECT ${USER_AUTH_SELECT}
            FROM users
            WHERE lower(email) = $1
               OR lower(username) = $2
@@ -466,6 +477,8 @@ export class AuthService {
             permissions: resolved.permissions,
             is_active: row.is_active,
             must_change_password: row.must_change_password,
+            activation_status: row.activation_status ?? 'activated',
+            local_password_set: row.local_password_set !== false,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -537,9 +550,14 @@ export class AuthService {
         const pool = poolManager.get()
         const permissionsJson = JSON.stringify(userData.permissions)
         const result = await pool.query(
-          `INSERT INTO users (id, email, name, password_hash, role, permissions, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
-           RETURNING id, email, name, role, permissions, must_change_password, created_at, updated_at`,
+          `INSERT INTO users (
+             id, email, name, password_hash, role, permissions,
+             activation_status, local_password_set, is_active,
+             created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'activated', TRUE, TRUE, NOW(), NOW())
+           RETURNING id, email, name, role, permissions, must_change_password,
+                     activation_status, local_password_set, is_active, created_at, updated_at`,
           [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson]
         )
 
@@ -627,7 +645,10 @@ export class AuthService {
 
       // 获取用户最新信息
       const user = await this.getUserById(userId)
-      if (!user || user.role === 'disabled' || user.is_active === false) {
+      if (!user) {
+        return null
+      }
+      if (evaluateUserAuthenticationGate(user)) {
         return null
       }
 

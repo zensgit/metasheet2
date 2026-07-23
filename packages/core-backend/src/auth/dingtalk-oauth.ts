@@ -56,6 +56,7 @@ interface LocalUserRow {
   name: string
   role: string
   is_active: boolean
+  activation_status?: string | null
 }
 
 export type DingTalkOAuthIntent = 'login' | 'bind'
@@ -553,7 +554,8 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
             email,
             COALESCE(name, '') AS name,
             COALESCE(role, 'user') AS role,
-            COALESCE(is_active, TRUE) AS is_active
+            COALESCE(is_active, TRUE) AS is_active,
+            COALESCE(activation_status, 'activated') AS activation_status
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -570,7 +572,8 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
               u.email,
               COALESCE(u.name, '') AS name,
               COALESCE(u.role, 'user') AS role,
-              COALESCE(u.is_active, TRUE) AS is_active
+              COALESCE(u.is_active, TRUE) AS is_active,
+              COALESCE(u.activation_status, 'activated') AS activation_status
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
@@ -604,10 +607,19 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
 }
 
 function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
+  // Lazy import avoided — keep oauth free of circular deps by inlining gate messages.
   if (localUser.role === 'disabled' || localUser.is_active === false) {
     throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
       statusCode: 403,
       code: 'local_user_disabled',
+    })
+  }
+  const activation =
+    typeof localUser.activation_status === 'string' ? localUser.activation_status.trim() : 'activated'
+  if (activation === 'pending_activation') {
+    throw createPolicyError('Account is pending activation and cannot sign in with DingTalk', {
+      statusCode: 403,
+      code: 'ACCOUNT_PENDING_ACTIVATION',
     })
   }
 }
@@ -651,13 +663,18 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
 
   try {
     const result = await query<LocalUserRow>(
-      `INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 'user', NOW(), NOW())
+      `INSERT INTO users (
+         id, email, name, password_hash, role,
+         activation_status, local_password_set, is_active,
+         created_at, updated_at
+       )
+       VALUES ($1, $2, $3, $4, 'user', 'activated', FALSE, TRUE, NOW(), NOW())
        RETURNING id,
                  email,
                  COALESCE(name, '') AS name,
                  COALESCE(role, 'user') AS role,
-                 COALESCE(is_active, TRUE) AS is_active`,
+                 COALESCE(is_active, TRUE) AS is_active,
+                 COALESCE(activation_status, 'activated') AS activation_status`,
       [userId, email, name, passwordHash],
     )
 

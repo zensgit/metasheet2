@@ -36,6 +36,7 @@ import {
 import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import { isDirectoryPendingActivationEnabled } from '../auth/user-activation'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
@@ -5342,9 +5343,21 @@ async function applyDirectoryAccountBindInTransaction(
     enableDingTalkGrant: boolean
     account: DirectoryBindingTargetAccountRow
     localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'username' | 'name'>
+    /**
+     * T1 pending create: link + identity only — no active user_orgs until activate (Action C).
+     * Default false preserves W4-PRE-1b membership maintenance for normal bind/admit.
+     */
+    skipUserOrgMembership?: boolean
   },
 ): Promise<void> {
-  const { normalizedAccountId, normalizedAdminUserId, enableDingTalkGrant, account, localUser } = options
+  const {
+    normalizedAccountId,
+    normalizedAdminUserId,
+    enableDingTalkGrant,
+    account,
+    localUser,
+    skipUserOrgMembership = false,
+  } = options
   const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
   if (!identityExternalKey) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
@@ -5506,8 +5519,10 @@ async function applyDirectoryAccountBindInTransaction(
   )
 
   // W4-PRE-1b item A: the account is now linked to `localUser` — maintain their ACTIVE
-  // membership in the SAME transaction. Runs for every caller (manual bind, admit, batch).
-  await upsertActiveUserOrgMembership(client, { userId: localUser.id, orgId })
+  // membership in the SAME transaction. Skipped for pending_activation creates (T1 design lock).
+  if (!skipUserOrgMembership) {
+    await upsertActiveUserOrgMembership(client, { userId: localUser.id, orgId })
+  }
 
   // W4-PRE-1b item B: if this account previously belonged to a DIFFERENT local user, the link
   // upsert above just displaced them — deactivate their membership in THIS org unless they hold
@@ -5532,6 +5547,13 @@ async function createDirectoryAdmittedUserInTransaction(
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
+  // T1: pending-create runtime is default OFF. When enabled, admit creates pending users
+  // (is_active=false, no active user_orgs, grant off). When off, preserve pre-T1 behavior.
+  const pendingMode = isDirectoryPendingActivationEnabled()
+  const enableDingTalkGrant = pendingMode ? false : options.enableDingTalkGrant
+  const isActive = pendingMode ? false : true
+  const activationStatus = pendingMode ? 'pending_activation' : 'activated'
+  const localPasswordSet = pendingMode ? false : true
   // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row — the cheapest
   // and most common orphan cause (grant requested for an account that cannot hold one).
   // But this alone is not sufficient: applyDirectoryAccountBindInTransaction (called AFTER
@@ -5540,7 +5562,7 @@ async function createDirectoryAdmittedUserInTransaction(
   // throws, swallowed by the sync loop's catch, historically committed an orphan. The
   // SAVEPOINT around INSERT+bind (below) makes the whole admission all-or-nothing: a bind
   // that throws for ANY reason rolls the users row back, so the loop's swallow is safe.
-  assertDirectoryAccountCanEnableDingTalkGrant(options.account, options.enableDingTalkGrant)
+  assertDirectoryAccountCanEnableDingTalkGrant(options.account, enableDingTalkGrant)
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
   }
@@ -5614,15 +5636,37 @@ async function createDirectoryAdmittedUserInTransaction(
   await client.query('SAVEPOINT directory_admit_user')
   try {
     await client.query(
-      `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-       VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
-      [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+      `INSERT INTO users (
+         id, email, username, name, mobile, password_hash, must_change_password,
+         role, permissions, is_active, is_admin,
+         activation_status, local_password_set,
+         created_at, updated_at
+       )
+       VALUES (
+         $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean,
+         'user', $8::jsonb, $9::boolean, FALSE,
+         $10::text, $11::boolean,
+         NOW(), NOW()
+       )`,
+      [
+        userId,
+        options.email,
+        options.username,
+        options.name,
+        options.mobile,
+        options.passwordHash,
+        options.mustChangePassword,
+        JSON.stringify([]),
+        isActive,
+        activationStatus,
+        localPasswordSet,
+      ],
     )
 
     await applyDirectoryAccountBindInTransaction(client, {
       normalizedAccountId: options.account.id,
       normalizedAdminUserId: options.adminUserId,
-      enableDingTalkGrant: options.enableDingTalkGrant,
+      enableDingTalkGrant,
       account: options.account,
       localUser: {
         id: userId,
@@ -5630,6 +5674,7 @@ async function createDirectoryAdmittedUserInTransaction(
         username: options.username,
         name: options.name,
       },
+      skipUserOrgMembership: pendingMode,
     })
   } catch (error) {
     // Undo the users INSERT (and recover the transaction if the throw came from a failed
