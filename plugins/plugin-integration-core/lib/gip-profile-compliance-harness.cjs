@@ -1,0 +1,319 @@
+'use strict'
+
+// GIP-D0 profile compliance harness — a LATENT contract (not wired to any runtime).
+//
+// RATIFY SCOPE (owner 2026-07-23, GIP-D0 @ d58ec38f4): item (2) of the three unlocked
+// pieces — the certification battery every CertifiedReadActionProfile candidate must
+// pass BEFORE its own (still-gated) certification door can even be considered. The
+// harness itself certifies nothing: it returns a values-free battery report. Running
+// it green is NECESSARY, never SUFFICIENT — each concrete profile still passes its
+// own independent gate.
+//
+// Battery shape (scale-D0 §8 instantiated at the schema level): every check is a
+// MUTANT probe — the harness derives an illegal variant from the candidate and
+// asserts the frozen schema REJECTS it (fail-closed). A schema that accepts any
+// mutant fails the battery. This is the "guard must be load-bearing" discipline
+// executed mechanically, per candidate, in CI-runnable form.
+
+const {
+  GipProfileContractError,
+  normalizeCertifiedReadActionProfile,
+  deriveRecoveryStrategy,
+  validateConsistencyEvidence,
+  validateCompletenessEvidence,
+  GIP_RECOVERY_STRATEGIES,
+} = require('./gip-profile-certification-contracts.cjs')
+
+// Independent recovery oracle (review P3: C10 only checked membership+stability, so a
+// wrong-but-stable derivation drifted past the battery). This re-derives from the
+// certificate coordinates by the frozen scale-D0 §2 matrix; C10 asserts the shipped
+// deriveRecoveryStrategy AGREES — a mutation of the shipped derivation now REDs C10.
+function oracleRecoveryStrategy(certificate) {
+  if (certificate.acquisitionMode === 'BOUNDED_READ') return 'WHOLE_RERUN'
+  if (certificate.acquisitionMode === 'SEALED_EXPORT') return 'CHUNK_RESUME'
+  const proofs = certificate.supportedConsistencyProofs || []
+  if (certificate.continuationLifetime === 'DURABLE_TOKEN'
+    && (proofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')
+      || (certificate.acquisitionMode === 'CHANGE_FEED' && proofs.includes('MONOTONIC_VERSION_PIN')))) {
+    return 'PAGE_RESUME'
+  }
+  return 'WHOLE_ROUND_RESTART'
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+// The EXACT battery roster — summarize emits ONLY these ids (review P2: a crafted
+// report must not smuggle caller content through the values-free projection).
+const BATTERY_CHECK_IDS = Object.freeze([
+  'C1_schema_valid',
+  'C2_unknown_acquisition_rejected',
+  'C2b_duplicate_set_entry_rejected',
+  'C3_empty_completeness_rejected',
+  'C4_applymode_smuggle_rejected',
+  'C5_recovery_declaration_rejected',
+  'C6_sealed_export_without_manifest_rejected',
+  'C7_change_feed_without_pin_rejected',
+  'C8_durable_token_without_immutable_rejected',
+  'C9_bounded_read_lifetime_rejected',
+  'C10_recovery_derived_stable',
+  'C11a_required_empty_proofclasses_rejected',
+  'C11b_notrequired_nonempty_rejected',
+  'C11c_successful_empty_used_rejected',
+  'C11d_unsupported_used_rejected',
+  'C11e_undeclared_combination_rejected',
+])
+const BATTERY_CHECK_ID_SET = new Set(BATTERY_CHECK_IDS)
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+// A check passes when the mutated candidate is REJECTED with the expected frozen
+// reason. Accepting the mutant — or rejecting it with an undeclared/unexpected
+// reason — fails the check. Values-free: the report carries check ids, ok flags and
+// reason codes only, never candidate content.
+function expectRejection(checkId, expectedReasons, run) {
+  try {
+    run()
+    return Object.freeze({ checkId, ok: false, observed: 'accepted_mutant' })
+  } catch (error) {
+    if (error instanceof GipProfileContractError && expectedReasons.includes(error.reason)) {
+      return Object.freeze({ checkId, ok: true, observed: error.reason })
+    }
+    return Object.freeze({
+      checkId,
+      ok: false,
+      observed: error instanceof GipProfileContractError ? error.reason : 'non_contract_error',
+    })
+  }
+}
+
+// Run the schema-level compliance battery for ONE candidate read-action profile.
+// Returns { passed, checks[] } — values-free, deterministic, hermetic.
+function runReadActionProfileComplianceBattery(candidate) {
+  const checks = []
+
+  // C1 — the candidate itself must normalize cleanly (schema-valid baseline).
+  let normalized = null
+  try {
+    normalized = normalizeCertifiedReadActionProfile(candidate)
+    checks.push(Object.freeze({ checkId: 'C1_schema_valid', ok: true, observed: 'normalized' }))
+  } catch (error) {
+    checks.push(Object.freeze({
+      checkId: 'C1_schema_valid',
+      ok: false,
+      observed: error instanceof GipProfileContractError ? error.reason : 'non_contract_error',
+    }))
+    // Without a valid baseline no mutant probe is meaningful — report and stop.
+    return Object.freeze({ passed: false, checks: Object.freeze(checks) })
+  }
+
+  const base = clone(candidate)
+
+  // C2 — unknown acquisition mode must be rejected (closed vocabulary).
+  {
+    const mutant = clone(base)
+    mutant.certificate.acquisitionMode = 'TELEPATHIC_READ'
+    checks.push(expectRejection('C2_unknown_acquisition_rejected', ['ACQUISITION_MODE_INVALID'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C2b — duplicate entries in a closed set must be rejected (set semantics, not bag).
+  {
+    const mutant = clone(base)
+    mutant.certificate.supportedCompletenessProofs = [...mutant.certificate.supportedCompletenessProofs]
+    mutant.certificate.supportedCompletenessProofs.push(mutant.certificate.supportedCompletenessProofs[0])
+    checks.push(expectRejection('C2b_duplicate_set_entry_rejected', ['COMPLETENESS_PROOFS_INVALID'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C3 — empty supportedCompletenessProofs must be rejected (successful-run invariant).
+  {
+    const mutant = clone(base)
+    mutant.certificate.supportedCompletenessProofs = []
+    checks.push(expectRejection('C3_empty_completeness_rejected', ['COMPLETENESS_PROOFS_EMPTY'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C4 — applyMode smuggled into a READ certificate must be rejected (P2 axis split).
+  {
+    const mutant = clone(base)
+    mutant.certificate.applyMode = 'SYNCHRONOUS_UOW'
+    checks.push(expectRejection('C4_applymode_smuggle_rejected', ['APPLY_MODE_FORBIDDEN_ON_READ_PROFILE'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C5 — a declared recovery strategy must be rejected (recovery is DERIVED).
+  {
+    const mutant = clone(base)
+    mutant.certificate.recoveryStrategy = 'PAGE_RESUME'
+    checks.push(expectRejection('C5_recovery_declaration_rejected', ['RECOVERY_DECLARATION_FORBIDDEN'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C6 — SEALED_EXPORT without SIGNED_MANIFEST must be rejected.
+  {
+    const mutant = clone(base)
+    mutant.certificate.acquisitionMode = 'SEALED_EXPORT'
+    mutant.certificate.supportedCompletenessProofs = ['SHORT_PAGE']
+    delete mutant.certificate.completenessCombinationRules
+    checks.push(expectRejection('C6_sealed_export_without_manifest_rejected', ['ILLEGAL_CAPABILITY_COMBINATION'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C7 — CHANGE_FEED without MONOTONIC_VERSION_PIN must be rejected.
+  {
+    const mutant = clone(base)
+    mutant.certificate.acquisitionMode = 'CHANGE_FEED'
+    mutant.certificate.supportedConsistencyProofs = []
+    checks.push(expectRejection('C7_change_feed_without_pin_rejected', ['ILLEGAL_CAPABILITY_COMBINATION'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C8 — DURABLE_TOKEN without IMMUTABLE_SNAPSHOT_TOKEN must be rejected.
+  {
+    const mutant = clone(base)
+    mutant.certificate.acquisitionMode = 'PAGED_READ'
+    mutant.certificate.continuationLifetime = 'DURABLE_TOKEN'
+    mutant.certificate.supportedConsistencyProofs = ['SOURCE_SNAPSHOT_TXN']
+    checks.push(expectRejection('C8_durable_token_without_immutable_rejected', ['ILLEGAL_CAPABILITY_COMBINATION'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C9 — BOUNDED_READ with a non-SINGLE_REQUEST lifetime must be rejected.
+  {
+    const mutant = clone(base)
+    mutant.certificate.acquisitionMode = 'BOUNDED_READ'
+    mutant.certificate.continuationLifetime = 'CONNECTION_BOUND'
+    checks.push(expectRejection('C9_bounded_read_lifetime_rejected', ['ILLEGAL_CAPABILITY_COMBINATION'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
+  // C10 — recovery derivation must land inside the frozen strategy vocabulary and be
+  //        stable (same certificate ⇒ same strategy; derived, deterministic).
+  {
+    const first = deriveRecoveryStrategy(normalized.certificate)
+    const second = deriveRecoveryStrategy(normalized.certificate)
+    const expected = oracleRecoveryStrategy(normalized.certificate)
+    const ok = GIP_RECOVERY_STRATEGIES.includes(first) && first === second && first === expected
+    checks.push(Object.freeze({ checkId: 'C10_recovery_derived_stable', ok, observed: ok ? first : 'derivation_drift_or_unstable' }))
+  }
+
+  // C11 — evidence-shape validators must be load-bearing against this certificate.
+  {
+    checks.push(expectRejection('C11a_required_empty_proofclasses_rejected', ['CONSISTENCY_EVIDENCE_INVALID'],
+      () => validateConsistencyEvidence(normalized, {
+        consistencyRequirementStatus: 'REQUIRED',
+        proofClasses: [],
+      })))
+    checks.push(expectRejection('C11b_notrequired_nonempty_rejected', ['CONSISTENCY_EVIDENCE_INVALID'],
+      () => validateConsistencyEvidence(normalized, {
+        consistencyRequirementStatus: 'NOT_REQUIRED',
+        proofClasses: ['SOURCE_SNAPSHOT_TXN'],
+      })))
+    checks.push(expectRejection('C11c_successful_empty_used_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
+      () => validateCompletenessEvidence(normalized, {
+        runOutcome: 'successful',
+        usedCompletenessProofs: [],
+      })))
+    // A successful run claiming a proof the certificate does not support: pick a
+    // proof outside the supported set (there is always one unless all three are
+    // supported AND every combination is declared — then use an undeclared combo).
+    const supported = normalized.certificate.supportedCompletenessProofs
+    const outside = ['SHORT_PAGE', 'DECLARED_TOTAL', 'SIGNED_MANIFEST'].find((p) => !supported.includes(p))
+    if (outside) {
+      checks.push(expectRejection('C11d_unsupported_used_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
+        () => validateCompletenessEvidence(normalized, {
+          runOutcome: 'successful',
+          usedCompletenessProofs: [outside],
+        })))
+    } else {
+      const undeclaredCombo = ['SHORT_PAGE', 'DECLARED_TOTAL', 'SIGNED_MANIFEST']
+      const declared = normalized.certificate.completenessCombinationRules.some(
+        (combo) => [...combo].sort().join('+') === [...undeclaredCombo].sort().join('+'),
+      )
+      checks.push(declared
+        ? Object.freeze({ checkId: 'C11d_unsupported_used_rejected', ok: true, observed: 'not_applicable_all_combos_declared' })
+        : expectRejection('C11d_unsupported_used_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
+          () => validateCompletenessEvidence(normalized, {
+            runOutcome: 'successful',
+            usedCompletenessProofs: undeclaredCombo,
+          })))
+    }
+  }
+
+  // C11e — the combination-declared invariant must be load-bearing for TYPICAL
+  //         candidates too (review: C11d's out-of-support pick let the combination
+  //         check be deleted silently). Build an UNDECLARED combination from within
+  //         the supported set when possible.
+  {
+    // FULL non-empty powerset of the supported set (review P2: pair-only search let
+    // "all pairs + triple declared, no singletons" evade the negative control).
+    const supported = normalized.certificate.supportedCompletenessProofs
+    const declaredKeys = new Set(
+      normalized.certificate.completenessCombinationRules.map((combo) => [...combo].sort().join('+')),
+    )
+    let undeclared = null
+    for (let mask = 1; mask < (1 << supported.length) && !undeclared; mask += 1) {
+      const subset = supported.filter((_, index) => (mask >> index) & 1)
+      if (!declaredKeys.has([...subset].sort().join('+'))) undeclared = subset
+    }
+    checks.push(undeclared === null
+      // Every non-empty subset is declared: state that EXPLICITLY — no negative
+      // probe ran, and none is possible for this candidate.
+      ? Object.freeze({ checkId: 'C11e_undeclared_combination_rejected', ok: true, observed: 'not_applicable_all_combinations_declared' })
+      : expectRejection('C11e_undeclared_combination_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
+        () => validateCompletenessEvidence(normalized, {
+          runOutcome: 'successful',
+          usedCompletenessProofs: undeclared,
+        })))
+  }
+
+  const passed = checks.every((entry) => entry.ok === true)
+  return Object.freeze({ passed, checks: Object.freeze(checks) })
+}
+
+// Values-free projection helper for evidence surfaces: ids + booleans + reason codes.
+const REPORT_INVALID_SUMMARY = Object.freeze({ passed: false, checkCount: 0, failedCheckIds: Object.freeze(['REPORT_INVALID']) })
+
+function summarizeBatteryForEvidence(report) {
+  if (!isPlainObject(report) || !Array.isArray(report.checks)) return REPORT_INVALID_SUMMARY
+  // Entry shapes are validated strictly; ids must be EXACTLY the frozen roster in
+  // roster order — no duplicates, no omissions (review P2: membership-only allowed
+  // short and repeated rosters through). The ONLY other legal shape is the schema
+  // abort: a single C1 failure.
+  for (const entry of report.checks) {
+    if (!isPlainObject(entry) || typeof entry.checkId !== 'string'
+      || typeof entry.ok !== 'boolean' || typeof entry.observed !== 'string'
+      || !BATTERY_CHECK_ID_SET.has(entry.checkId)) {
+      return REPORT_INVALID_SUMMARY
+    }
+  }
+  const ids = report.checks.map((entry) => entry.checkId)
+  const fullRoster = ids.length === BATTERY_CHECK_IDS.length
+    && ids.every((id, index) => id === BATTERY_CHECK_IDS[index])
+  const abortShape = ids.length === 1 && ids[0] === 'C1_schema_valid' && report.checks[0].ok === false
+  if (!fullRoster && !abortShape) return REPORT_INVALID_SUMMARY
+  // `passed` is DERIVED from the validated checks — a caller-supplied contradictory
+  // flag invalidates the whole report rather than being echoed.
+  const derived = report.checks.every((entry) => entry.ok === true)
+  if (report.passed !== derived) return REPORT_INVALID_SUMMARY
+  // recursively frozen — consistent with REPORT_INVALID_SUMMARY (review P3: the
+  // success projection was mutable after the fact).
+  return Object.freeze({
+    passed: derived,
+    checkCount: report.checks.length,
+    failedCheckIds: Object.freeze(
+      report.checks.filter((entry) => entry.ok !== true).map((entry) => entry.checkId),
+    ),
+  })
+}
+
+module.exports = {
+  BATTERY_CHECK_IDS,
+  runReadActionProfileComplianceBattery,
+  summarizeBatteryForEvidence,
+  __internals: { expectRejection },
+}

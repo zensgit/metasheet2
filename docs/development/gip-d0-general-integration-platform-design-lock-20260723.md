@@ -1,8 +1,8 @@
 # GIP-D0 — 通用集成平台分层设计锁（Scenario / CertifiedReadActionProfile / Binding / Run）
 
-**日期**：2026-07-23　**状态**：**PROPOSED（未 ratify）**——owner 对平台化探讨裁 APPROVE-WITH-HARDENING（1 P1 + 4 P2 + 表述修正），本稿全量吸收。
+**日期**：2026-07-23　**状态**：**RATIFIED（owner 2026-07-23，exact head d58ec38f4）**。**Ratify 解锁范围（窄）**：仅 profile schema + 合规 harness + 只读 qualification spike——**不**解锁具体 profile（逐个过门）、D2 runtime、外部写回、#4437 改轨或 rollout。（本稿此前经五轮 owner 审阅全量吸收后定稿。）
 **定位**：企业系统数据协同平台的分层合同。备料只是第一个场景 preset；模型不限定"配置 PLM 和 ERP"。
-**边界**：本锁不解锁 D2/runtime，不改变 #4437 当前验收路线——**#4437 继续使用现有 approved-config/adapter 路径**；其行为是 `bridge.bounded_read.v1` 的**候选 grounding**，不要求实体机识别 profile ID，正式命名须待独立认证门。ratify 前零实现。
+**边界**：本锁不解锁 D2/runtime，不改变 #4437 当前验收路线——**#4437 继续使用现有 approved-config/adapter 路径**；其行为是 `bridge.bounded_read.v1` 的**候选 grounding**，不要求实体机识别 profile ID，正式命名须待独立认证门。实现限于 ratify 解锁三件（schema/harness/只读 spike），其余各自门后。
 
 ---
 
@@ -244,6 +244,6 @@ secretVersionId        = 仅进安全证据与运行时重验；永不进入业�
 
 ## 10. 边界
 
-- 本锁 PROPOSED；ratify 前零实现（仅只读 spike）；
+- 本锁 **RATIFIED（窄范围）**：实现限于解锁三件（profile schema / 合规 harness / 只读 qualification spike）——具体 profile 认证、D2 runtime、外部写回、rollout 各自门后；
 - 不解锁 D2/runtime；不改 #4437 验收路线；
 - 与 scale-kernel D0（内核机制）、W3/G1 设计锁并行独立；scale-D0 §2 矩阵经本锁降为认证 schema（已在该文标注 A1 修订）。

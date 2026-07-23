@@ -1,6 +1,6 @@
 # MR-D0-A1 — 物料对账 charter 时序语义修订（crossRoleTemporalPolicy 选型裁决稿）
 
-**日期**：2026-07-23　**状态**：**OWNER 待裁决稿（pending-ruling draft）**——正文含复审拟定默认，owner 尚未 ratify
+**日期**：2026-07-23　**状态**：**RATIFIED — 选项 A（owner 2026-07-23）**：维持 `DISCLOSE_ONLY`，**不叠加** `MAX_CAPTURE_GAP`；选项 B（`COMMON_EFFECTIVE_CUT`）保留为未来独立 amendment（前置 = §3 四机制 + D1 amendment + D3a runtime），不影响当前 D1
 **修订对象**：`stock-preparation-v2-material-master-reconciliation-charter-20260719.md`（RATIFIED）§2.2 跨侧时序语义在 GIP-D0 词表下的**命名与可选升级**。
 **边界**：本修订不改 #4437 验收路线、不解锁 D2/runtime；选项 A 下对已完成的 D1 实现**零变更**。
 
@@ -50,14 +50,14 @@ crossRoleTemporalPolicy:
 
 作为 **freshness SLO** 附加：全部源角色读窗口须落在 T_gap 内，超窗 fail-closed（专用码）。evidence 显式标注其为 **SLO 而非一致性证明**。T_gap 由场景冻结，binding 不可放宽。
 
-## 5. 复审建议记录（拟定默认——**非 owner ratification**）
+## 5. 裁决记录（owner decision）
 
-**复审建议（reviewer recommendation，2026-07-23；P3 订正：上轮为审阅建议，非 owner 明确 ratify）**：
-- **拟定默认：A（维持 `DISCLOSE_ONLY`）**；
-- **暂不叠加 `MAX_CAPTURE_GAP`**；
-- **B 保留为待补证明合同的未来选项**（前置 = §3 四机制 + D1 amendment + D3a runtime）。
+**owner 裁决（2026-07-23，明确 RATIFY）**：
+- **主政策：A（维持 `DISCLOSE_ONLY`）**；
+- **不叠加 `MAX_CAPTURE_GAP`**；
+- **B 保留为待补证明合同的未来独立 amendment**（前置 = §3 四机制 + D1 amendment + D3a runtime），不影响当前 D1。
 
-**owner decision 待 owner 明确发出 ratify 后方可记录**。届时落地：charter 加一行命名映射注记（`DISCLOSE_ONLY` = §2.2 现行语义）即毕。
+落地：charter 的命名映射注记（`DISCLOSE_ONLY` = §2.2 现行语义）由本节承载——charter 本体不改写（RATIFIED 文本不动，修订以 amendment 文件叠加，本文件即是）。
 
 ## 6. ratify 解锁范围订正（owner P2，联动 GIP-D0）
 
