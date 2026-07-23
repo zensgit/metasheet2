@@ -1,10 +1,21 @@
 # Attendance Shift and Group Advanced Capability Design Lock
 
-Status: **PROPOSED**
+Status: **RATIFIED**
 
 Date: 2026-07-23
 
 Tracks: issue #4556
+
+Ratification record:
+
+- owner decision: `按推荐值 RATIFY #4561`;
+- reviewed proposal: PR #4561 at
+  `40f41b6e6c441922c72f45591e48e8d818d76fee`;
+- decision: OD-4556-1 through OD-4556-12 are accepted exactly as recommended
+  in section 8, with no deviations;
+- authorization: this ratification unlocks W1 only. Each later slice remains
+  sequential and separately gated. It does not authorize a runtime flag,
+  deployment, production migration, or issue closure.
 
 Evidence baseline: `origin/main@9f989396b765dac7ef87dfd0e689a69e5be8bec8`
 
@@ -27,10 +38,11 @@ The source request mixes three different classes of work:
 3. genuinely missing domain behavior that changes attendance or overtime
    accounting.
 
-This document separates those classes. It is **not** authorization to enable a
-new calculation path, migrate production data, change a runtime flag, or close
-issue #4556. Runtime slices remain blocked until the owner ratifies the open
-decisions in section 8.
+This document separates those classes. The owner ratified the section 8
+decisions on 2026-07-23. That decision authorizes W1 after this lock lands on
+`main`; it is **not** authorization to enable a new calculation path, migrate
+production data, change a runtime flag, or close issue #4556. Later runtime
+slices remain blocked by their declared sequence and independent gates.
 
 The OpenAPI parity slice in section 9.1 is exempt from that hold because it only
 documents behavior that the current runtime already exposes or accepts.
@@ -533,7 +545,11 @@ Each mutation must have a named failing leg.
 - no raw ID fallback;
 - route return preserves group and stage.
 
-## 8. Owner decisions required for runtime
+## 8. Owner decisions - ratified
+
+All twelve recommendations below are **DECIDED** exactly as written. The owner
+accepted them without deviation on 2026-07-23 by stating
+`按推荐值 RATIFY #4561`.
 
 | ID | Decision | Recommendation |
 | --- | --- | --- |
@@ -550,8 +566,8 @@ Each mutation must have a named failing leg.
 | OD-4556-11 | Historical recalculation | Explicit operator action only; never automatic after configuration changes |
 | OD-4556-12 | Existing group type change | Keep the in-place lock; offer copy-to-new-group plus effective-dated membership transition |
 
-Ratification must record any deviation from these recommendations before the
-corresponding runtime slice starts.
+Any future deviation requires a design-lock amendment and a new owner
+ratification before the affected runtime slice starts.
 
 ## 9. Development slices and model allocation
 
