@@ -1,7 +1,7 @@
 # 通用备料 D0 — 规模化数据同步内核设计锁（三产品模式 × 正交 capability 矩阵）
 
 **日期**：2026-07-23　**状态**：**PROPOSED（草案，未 ratify）**——owner 裁定"可进入 D0 起草，还不能 ratify"；本稿吸收其两项 P1 修正（capability 正交化、large-bom-jobs 仅可复用合同形状）与全部细则修正。
-**分支**：`claude/prep-p1a-substrate-proof-20260722`。**与 #4437 关系**：不互为 blocker——#4437 用**基础模式**完成有界机制验收，不等待本 D0。**纪律**：ratify 前零实现（仅允许只读 feasibility spike）、零 arm、不动现有守卫一字。
+**交付面**：doc-only 分支（owner P1：文档审阅不与运行时代码混面）。**与 #4437 关系**：不互为 blocker——**#4437 继续使用现有 approved-config/adapter 路径**完成有界机制验收（其行为是基础组合的**候选 grounding**，不要求实体机识别任何 profile/模式 ID），不等待本 D0。**纪律**：ratify 前零实现（仅允许只读 feasibility spike）、零 arm、不动现有守卫一字。
 
 ---
 
@@ -34,11 +34,15 @@
 > 旧四类（BOUNDED_KEY_READ 等）混合了采集/一致性/续读/证明多维度（如 SNAPSHOT_KEYSET_READ 同时说分页与一致性、SEALED_EXPORT_MANIFEST 同时说传输与恢复）。**改为五个正交维度**，每维冻结枚举；组合合法性与恢复策略**由矩阵推导**，不另设自由表。
 
 ```
-acquisitionMode:      BOUNDED_READ | PAGED_READ | SEALED_EXPORT | CHANGE_FEED
-consistencyProof:     SOURCE_SNAPSHOT_TXN | IMMUTABLE_SNAPSHOT_TOKEN | MONOTONIC_VERSION_PIN
-continuationLifetime: SINGLE_REQUEST | CONNECTION_BOUND | DURABLE_TOKEN
-completenessProof:    SHORT_PAGE | DECLARED_TOTAL | SIGNED_MANIFEST
-applyMode:            SYNCHRONOUS_UOW | STAGED_GENERATION
+── source 认证 schema（CertifiedReadActionProfile，四维）──
+acquisitionMode:            BOUNDED_READ | PAGED_READ | SEALED_EXPORT | CHANGE_FEED
+supportedConsistencyProofs: ⊆ { SOURCE_SNAPSHOT_TXN, IMMUTABLE_SNAPSHOT_TOKEN,
+                                MONOTONIC_VERSION_PIN }   （集合；可空=诚实"无快照证明"）
+continuationLifetime:       SINGLE_REQUEST | CONNECTION_BOUND | DURABLE_TOKEN
+completenessProof:          SHORT_PAGE | DECLARED_TOTAL | SIGNED_MANIFEST
+
+── 独立第五轴（CertifiedApplyProfile，非 source 维度）──
+applyMode:                  SYNCHRONOUS_UOW | STAGED_GENERATION
 ```
 
 **A2 修正（owner P2）**：profile 认证书对一致性维声明**集合** `supportedConsistencyProofs: [] | [...]`——三值闭集**不扩**；**空集 = 诚实声明"无快照证明"**（不是第四种证明，"有界"不得伪装成一致性）。空集可否被接受由**场景角色政策**决定：stock-prep 的 bom_source 可按场景策略接受（基础模式单页读），material-reconciliation 的角色**必须拒绝**。
@@ -53,7 +57,7 @@ applyMode:            SYNCHRONOUS_UOW | STAGED_GENERATION
 
 | 组合 | 模式 |
 |---|---|
-| `BOUNDED_READ × supportedConsistencyProofs:[]（无快照证明，场景政策定可否接受） × SINGLE_REQUEST × SHORT_PAGE × SYNCHRONOUS_UOW` | 基础（即 #4437 出口②形态） |
+| `BOUNDED_READ × supportedConsistencyProofs:[]（无快照证明，场景政策定可否接受） × SINGLE_REQUEST × SHORT_PAGE × SYNCHRONOUS_UOW` | 基础（#4437 出口②形态的候选 grounding） |
 | `PAGED_READ × SOURCE_SNAPSHOT_TXN × CONNECTION_BOUND × SHORT_PAGE/DECLARED_TOTAL × STAGED_GENERATION` | 高级（live 快照读，断线整轮） |
 | `PAGED_READ × IMMUTABLE_SNAPSHOT_TOKEN × DURABLE_TOKEN × SHORT_PAGE/DECLARED_TOTAL × STAGED_GENERATION` | 高级（可续页） |
 | `SEALED_EXPORT × IMMUTABLE_SNAPSHOT_TOKEN(导出即冻结) × DURABLE_TOKEN(chunk 续传) × SIGNED_MANIFEST × STAGED_GENERATION` | 高级（导出） |
@@ -63,20 +67,23 @@ applyMode:            SYNCHRONOUS_UOW | STAGED_GENERATION
 
 ---
 
-## 3. 共同执行内核管线（三模式共享）
+## 3. 执行内核管线（按 applyMode 显式分叉——P1 修正：基础不强行过 staging/generation）
+
+**共同前段**：`approved config -> capability preflight（判定；双向不静默；入 evidence）`。
+**一致性证明步骤按场景 requirement 执行**：场景接受空 proof 集时，evidence 记录 **"场景未要求"**——**不得伪造 proof class**。
 
 ```
-approved config
-  -> capability preflight            （矩阵判定；双向不静默；结果入 evidence）
-  -> attempt/job                     （基础=同步 attempt；高级/企业=durable job）
-  -> source-consistency proof        （§6.1，按 consistencyProof 维度）
-  -> transactional page/chunk checkpoint（读取、checkpoint、页证据同事务原子落地）
-  -> private staging                 （未 seal 前对 persist/diff 不可见）
-  -> canonical digest                （仓内冻结规范化序列化 + sha256/分区 Merkle root）
-  -> sealed artifact                 （封印=digest+行数+identity/multiplicity+chunk receipt 集）
-  -> multiset-aware SQL diff         （§7；禁裸 EXCEPT）
-  -> checkpointed apply              （STAGED_GENERATION，§4）
-  -> immutable run evidence          （values-free）
+SYNCHRONOUS_UOW（基础）:
+  bounded read -> validate -> one UOW -> evidence
+
+STAGED_GENERATION（高级/企业）:
+  job -> source-consistency proof（§6.1）
+      -> transactional page/chunk checkpoint（读取、checkpoint、页证据同事务原子落地）
+      -> private staging（未 seal 前对 persist/diff 不可见）
+      -> canonical digest -> sealed artifact（封印=digest+行数+identity/multiplicity+chunk receipt 集）
+      -> multiset-aware SQL diff（§7；禁裸 EXCEPT）
+      -> checkpointed apply -> CAS flip（§4）
+      -> immutable run evidence
 ```
 
 **全程冻结原则**：values-free evidence / 幂等 / fail-closed。**artifact 本体是业务行数据（非 values-free）**——归私有治理面（租户隔离、留存策略、访问审计）；evidence 只含 count/hash/version/proof-class；**artifact 引用与内容不得出现在公开 issue/PR**。
@@ -104,7 +111,15 @@ applied row count
 4. 最后一个**短事务 CAS 翻转** active pointer，**同事务**落 run/audit 终态；
 5. 失败 generation **永不公开**——可重试或按 retention 清理。
 
-**解除 24,999 行写入墙**：chunked apply 使单事务不再约束总量。**前置**：先把该墙的 provenance 钉进实现票（本仓 grep 无此字面量——若为运行时实测墙，须写明测得条件与真实约束表达式：PG 参数上限/单事务时长/锁竞争中的哪个），数字有出处才谈"解除"。
+**24,999 行上限的真实根因（P1 订正——前稿"单事务写入墙/仓内无出处"皆错）**：仓内已精确冻结（`stock-preparation-sync-run-persist.cjs` :76-86）：
+
+```
+READ_PAGE_LIMIT        = 500
+READ_MAX_PAGES         = 50
+PERSIST_MAX_PLAN_LINES = 500 × 50 − 1   （H-3 守卫，:566-569）
+```
+
+它是 **exact-replay 的完整性可证上限**——比有界重放读更大的 plan 能被创建却**永远无法被精确重放**（每次重试 409 `PERSIST_EXISTING_BATCH_READ_UNPROVABLE`）；−1 因完整性只能靠**短页**证明（50 满页=恰 25,000 行落在读循环外不可证）。**不是** PG 参数上限、也不是单事务写入上限。**chunked apply 本身不能解除此门**：新 generation 必须提供**可证的完整分页读取或 sealed digest replay** 作为替代证明，且该替代证明 **mutation-green 之后**才可移除旧 H-3 守卫。
 
 ---
 

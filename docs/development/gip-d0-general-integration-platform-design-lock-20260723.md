@@ -2,7 +2,7 @@
 
 **日期**：2026-07-23　**状态**：**PROPOSED（未 ratify）**——owner 对平台化探讨裁 APPROVE-WITH-HARDENING（1 P1 + 4 P2 + 表述修正），本稿全量吸收。
 **定位**：企业系统数据协同平台的分层合同。备料只是第一个场景 preset；模型不限定"配置 PLM 和 ERP"。
-**边界**：本锁不解锁 D2/runtime，不改变 #4437 当前验收路线（#4437 走 `stock_preparation.v1 × bridge.bounded_read.v1` 基础模式）；ratify 前零实现。
+**边界**：本锁不解锁 D2/runtime，不改变 #4437 当前验收路线——**#4437 继续使用现有 approved-config/adapter 路径**；其行为是 `bridge.bounded_read.v1` 的**候选 grounding**，不要求实体机识别 profile ID，正式命名须待独立认证门。ratify 前零实现。
 
 ---
 
@@ -22,11 +22,12 @@
 ## 1. 四层模型
 
 ```
-Scenario Definition        业务场景定义（备料、物料对账、供应商同步…）：一方发布、版本化
-CertifiedReadActionProfile 受认证读动作（connector kind + 具名 action + 版本 + 能力认证书）：一方认证
-CertifiedApplyProfile      受认证内部落库形态（INTERNAL_APPLY_TARGET 专属）：一方认证
-Customer Binding           客户配置：谁家系统担任哪个角色、映射、范围、策略：闭合 schema 内客户自助
-Run                        固定上述版本后执行，保存完整血缘与证据
+Scenario Definition   业务场景定义（备料、物料对账、供应商同步…）：一方发布、版本化
+Certification         认证层（含两类认证物）：一方认证、版本化
+                        ├─ CertifiedReadActionProfile（读动作：connector kind + 具名 action + 版本 + 能力认证书）
+                        └─ CertifiedApplyProfile（内部落库形态，INTERNAL_APPLY_TARGET 专属）
+Customer Binding      客户配置：谁家系统担任哪个角色、映射、范围、策略：闭合 schema 内客户自助
+Run                   固定上述版本后执行，保存完整血缘与证据
 ```
 
 **Run 血缘 pin（P2 修正：多角色下单一五元组不成立——固定排序的角色向量）**：
@@ -42,7 +43,7 @@ roleBindings[] = roleId -> actionProfileVersion
 executionMode/applyProfileVersion
 ```
 
-（roleBindings 按 roleId 固定排序参与指纹；审计血缘不可改写。）
+（roleBindings 按 roleId 固定排序参与指纹；每角色成员先折叠为 `roleBindingFingerprint`（§6），再参与整体指纹；审计血缘不可改写。）
 
 **快照 token 保管纪律**：原始 snapshot token **不进入**公开 values-free evidence——仅内部加密保存（续读所需）；公开证据只含 **proof class + 域隔离摘要 + 读窗口**。
 
@@ -78,12 +79,22 @@ ScenarioExecutionMode  = 各角色 ReadActionProfile × ApplyProfile 的受测�
 BindingQualification
   = system/object/key/scope/mapping 对该 action-profile 前置条件的实例级证明
     （唯一排序键实证、快照能力实证、范围有界实证、映射解析实证……逐前置逐条）
+
+qualificationDigest =
+  H(profileVersion + action/queryPresetVersion
+    + systemContentKey + configContentKey
+    + objectKey + canonicalObjectVersion
+    + normalized qualification evidence)
+
+qualifyBinding(...) = server-generated, values-free, input-bound, optionally expiring
 ```
+
+**权威形状冻结（P2 修正）**：资格由**服务端生成**、values-free、**输入绑定**（digest 绑定上列全部输入——防跨对象/跨配置复用）、可设有效期。**Preflight 产生候选资格；Activate 与 run-start 必须重新执行同一资格函数**——客户不能提交或复用 qualification。
 
 **v1 read-action profile 清单**（首批实现，架构按通用建；**GIP-D0 ratify 不一次性解锁本清单——每个 profile 仍独立过自己的认证门**）：
 
 ```
-bridge.bounded_read.v1        （撑 #4437 当前验收）
+bridge.bounded_read.v1        （#4437 现行 approved-config/adapter 行为的候选 grounding——#4437 不要求识别 profile ID）
 bridge.sealed_snapshot.v1     （大规模客户；先过 feasibility spike）
 sql.snapshot_keyset.v1        （第二类通用连接器）
 sql.change_tracking.v1        （有真实需求后）
@@ -162,14 +173,20 @@ crossRoleTemporalPolicy:
 - **config version**（现存实现，`read-source-config-store.cjs` :23-27）：持久状态 `draft → approved → retired`；**preflight 是操作步骤，不是状态迁移**；运行读取面 approved-only fail-closed（`getForRuntime` 先例）。
 - **binding version**（MR charter §4.5 已锁）：`draft_candidate → preflight_passed → approved → superseded / revoked`；**`active` 不是存储状态**——是"被场景 `active_binding_version_id` 指针指向"的派生谓词；指针切换 = 原子激活事务，revoke 同事务清指针；不原地修改 active binding。
 
-**systemContentKey（P2 修正吸收，对齐 charter §4.6"认证主体引用"）**：
+**systemContentKey（P1 修正吸收：系统身份不含 action profile，对齐 RATIFIED charter §4.6）**：
 
 ```
-systemContentKey = hash(profile/version + endpoint identity + data scope + stable authPrincipalKey)
-secretVersionId  = 仅进安全证据与运行时重验；永不进入业务 baseline lineage
+systemContentKey       = hash(system/connector kind + endpoint identity
+                              + stable authPrincipalKey + authTenantScopeKey)
+
+roleBindingFingerprint = hash(actionProfileVersion + configContentKey
+                              + canonicalObjectVersion + qualificationDigest
+                              + systemContentKey)
+
+secretVersionId        = 仅进安全证据与运行时重验；永不进入业务 baseline lineage
 ```
 
-同一主体换密钥 ⇒ **不**重建业务基线；主体或数据权限范围变化 ⇒ 必须重验并产生新血缘。
+**分界**：object/filter/data-selection scope 属于 **config/binding**（由 `configContentKey` 承载）；认证主体的**租户/权限域**（`authTenantScopeKey`）才属于 system identity。**升级读取实现（actionProfileVersion）不改变 systemContentKey**——不会被误判为"换了外部系统"（action profile 已在 roleBindings[] 单独 pin）。同一主体换密钥 ⇒ **不**重建业务基线；主体或数据权限范围变化 ⇒ 必须重验并产生新血缘。
 
 **预算合法域**：binding 预算 ≤ min(profile 认证上限, 租户配额)，preflight 校验。
 
@@ -194,7 +211,7 @@ secretVersionId  = 仅进安全证据与运行时重验；永不进入业务 bas
 
 ## 9. 实施序
 
-1. `stock_preparation.v1` scenario preset #1 + `bridge.bounded_read.v1`（撑 #4437，**不等本锁**）；
+1. `stock_preparation.v1` scenario preset #1 + `bridge.bounded_read.v1` 认证（#4437 继续走现有 approved-config/adapter 路径、**不等本锁**；其行为是该 profile 的候选 grounding，正式命名待独立认证门）；
 2. 本 GIP-D0 冻结 + **MR-D0-A1 时序语义裁决** → ratify 门。**ratify 解锁范围（P2 修正，窄）**：仅解锁 **profile schema、合规 harness、只读 qualification spike**——**每个具体 profile 仍独立过自己的门**，五个 profile 不因本锁一次性解锁；
 3. `bridge.sealed_snapshot.v1`（先 feasibility spike，对比交互分页真实改动面，不预断）；
 4. `sql.snapshot_keyset.v1`；
