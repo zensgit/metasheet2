@@ -64,7 +64,7 @@ CertifiedReadActionProfile
   = connector kind + action/queryPreset + implementation version + capability certificate
 ```
 
-**capability certificate schema** = scale-kernel D0 **四维**坐标（acquisition / consistency / continuation / completeness——`applyMode` 拆出，见下）+ 完整合同（一致性证明方式集 `supportedConsistencyProofs`（**可为空集=诚实声明"无快照证明"**，由场景角色政策决定可否接受）、完整性证明方式、恢复许可、最大规模、唯一排序键要求、manifest/token/cursor 形状、失败词表）+ **合规测试电池**（D0 §8 电池按 action-profile 实例化，CI 常驻）。**矩阵为认证分类学；运行时只可选被认证的具名 action-profile，不可自由组合维度。**
+**capability certificate schema** = scale-kernel D0 **四维**坐标（acquisition / consistency / continuation / completeness——`applyMode` 拆出，见下）+ 完整合同（一致性证明方式集 `supportedConsistencyProofs`（**可为空集=诚实声明"无快照证明"**，由场景角色政策决定可否接受）、**完整性证明方式集 `supportedCompletenessProofs`**、恢复许可、最大规模、唯一排序键要求、manifest/token/cursor 形状、失败词表）+ **合规测试电池**（D0 §8 电池按 action-profile 实例化，CI 常驻）。**矩阵为认证分类学；运行时只可选被认证的具名 action-profile，不可自由组合维度。**
 
 **apply 维度独立认证（不混入 source 侧）**：
 
@@ -159,9 +159,11 @@ probeBindingQualification()   事务外访问外部源，生成候选资格证�
 verifyBindingQualification()  纯本地、事务安全：重读并核验 digest、输入绑定、有效期与状态——零外部 I/O
 ```
 
-- **Preflight** = probe（事务外）→ 产生候选资格；
+- **Preflight（pre-run，事务外）** = probe → 产生/刷新候选资格。可在临近 run 前由调度或操作流程触发，但它**是 Preflight 操作**，不属于 Run-start；
 - **Activate** = 短事务内仅 `verify`（核验 digest/输入/有效期/状态，**不做外部探测**）；
-- **Run-start** = 先做**新鲜 probe（事务外）**，再用**短事务** `verify` 本地输入并 pin。
+- **Run-start proper** = **短事务内仅 `verify` + pin**——**不含任何外部 probe**。资格过期/失效 ⇒ **fail-closed**（如 `QUALIFICATION_EXPIRED`），要求**重新 Preflight** 后再启 run。
+
+（P1 定名纪律：外部探测**只**存在于 Preflight。若未来要把外部 probe 纳入 Run-start，那是 **charter amendment**，不得称为"对齐现有 charter"。）
 
 UI 展示**逐角色缺口**（"demand_source 的连接器无法证明完整性 → 出口：换 profile / 收窄范围"——#4437 三叉决策树的产品化），**不得**计算抽象 min(profileMode)。**双向不静默**（不降级不升级），判定入 run evidence。
 

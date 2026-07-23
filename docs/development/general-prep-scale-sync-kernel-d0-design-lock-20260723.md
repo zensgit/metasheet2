@@ -45,7 +45,15 @@ supportedCompletenessProofs: ⊆ { SHORT_PAGE, DECLARED_TOTAL, SIGNED_MANIFEST }
 applyMode:                  SYNCHRONOUS_UOW | STAGED_GENERATION
 ```
 
-**A3 修正（owner P2）**：完整性维同为**集合**声明 `supportedCompletenessProofs`；每次 run 的 evidence 另钉 **`usedCompletenessProofs`**（本次实际采用的证明集合）；`SIGNED_MANIFEST` 的**组合规则在 profile 认证书内冻结**（如 SEALED_EXPORT 必含 SIGNED_MANIFEST、可否与 DECLARED_TOTAL 并用由认证书宣告）——run 不得采用认证书未宣告的证明。
+**A3 修正（owner P2）**：完整性维同为**集合**声明 `supportedCompletenessProofs`；每次 run 的 evidence 另钉 **`usedCompletenessProofs`**（本次实际采用的证明集合），并冻结不变量：
+
+```
+successful run ⇒ usedCompletenessProofs ≠ []
+               ∧ usedCompletenessProofs ⊆ supportedCompletenessProofs
+               ∧ 该组合被 profile 认证书接受
+```
+
+`SIGNED_MANIFEST` 的**组合规则在 profile 认证书内冻结**（如 SEALED_EXPORT 必含 SIGNED_MANIFEST、可否与 DECLARED_TOTAL 并用由认证书宣告）——run 不得采用认证书未宣告的证明；**空 used 集的"成功"运行是非法形状**。
 
 **A2 修正（owner P2）**：profile 认证书对一致性维声明**集合** `supportedConsistencyProofs: [] | [...]`——三值闭集**不扩**；**空集 = 诚实声明"无快照证明"**（不是第四种证明，"有界"不得伪装成一致性）。空集可否被接受由**场景角色政策**决定：stock-prep 的 bom_source 可按场景策略接受（基础模式单页读），material-reconciliation 的角色**必须拒绝**。
 
@@ -76,10 +84,11 @@ applyMode:                  SYNCHRONOUS_UOW | STAGED_GENERATION
 
 ```
 consistencyRequirementStatus: REQUIRED | NOT_REQUIRED
-proofClasses:                 NOT_REQUIRED ⇒ []（空数组）
+proofClasses:  NOT_REQUIRED ⇒ []（空数组）
+               REQUIRED     ⇒ 非空 ∧ ⊆ 该 profile 的 supportedConsistencyProofs
 ```
 
-**`NONE` 永不进入 proof-class 枚举**——"未要求"由 status 字段承载，不得伪造 proof class。
+双向闭合：`REQUIRED + []` 是**非法形状**（fail-closed），`NOT_REQUIRED + 非空` 同样非法。**`NONE` 永不进入 proof-class 枚举**——"未要求"由 status 字段承载，不得伪造 proof class。
 
 ```
 SYNCHRONOUS_UOW（基础）:
