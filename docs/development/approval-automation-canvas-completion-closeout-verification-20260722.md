@@ -70,7 +70,7 @@ Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独�
 | formula + graph + product service unit | **3 files / 221 passed** | 动态依赖、区间恒真证明、历史静态公式跳过与动态正控 |
 | combined real-DB | **6 files / 92 passed** | template authoring/restore 7、record-link 39、FWB create 18、update 15、write 4、S1-S8 9 |
 | backend `tsc --noEmit` | pass | 最终组合 head 类型面 |
-| authoring error + parallel preflight web | **2 files / 33 passed** | machine-code 文案、未知错误 fallback、raw node/source 不可见 |
+| authoring error + parallel preflight + mounted view web | **3 files / 98 passed** | machine-code 文案、未知错误 fallback、raw node/source 不可见、SFC 接线 |
 | frontend `vue-tsc --noEmit` | pass | 错误映射与 authoring 接线类型面 |
 
 动态依赖守卫的“始终允许”变异使 AST、运行时和保存三条指定规格同时变红；区间恒真守卫的“始终否”变异
