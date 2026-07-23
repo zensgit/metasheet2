@@ -172,7 +172,11 @@ export async function resolveAttendanceDecisionTraceActor(
   if (row.is_active === false) {
     return { displayLabel: '已停用用户', identityPosture: 'inactive' }
   }
-  const label = (row.name && row.name.trim()) || (row.email && row.email.trim()) || '已注册用户'
+  // §5.1 masking table, "裸内部 user id" row: email is NOT an allowlisted field for trace actor
+  // display (only displayName or a neutral label) — falling back to email would leak PII outside
+  // the §3.1 allowlist (owner review finding, W5-0 fix-round). A resolved user with no `name` gets
+  // the neutral label, same as the unresolved/inactive branches.
+  const label = (row.name && row.name.trim()) || '已注册用户'
   return { displayLabel: label, identityPosture: 'resolved' }
 }
 
@@ -554,10 +558,14 @@ export type AttendanceSuggestedRequestType = 'leave' | 'missed_check_in' | 'miss
 
 /** Mirrors `classifyOwedPunchRecord` (`index.cjs:25932-25956`) EXACTLY — same decision table, same
  *  closed set of reason strings. Not imported (core-backend has no sanctioned static import of the
- *  plugin CJS runtime), reproduced here as the authoritative TS copy for the trace read path; drift
- *  risk is closed by the contract test parsing the plugin source text (mirrors the W4-0 punch-policy
- *  closed-set reconciliation precedent). NEVER invents a new reason string beyond this table (§3.1
- *  hard rule 4). */
+ *  plugin CJS runtime), reproduced here as the authoritative TS copy for the trace read path.
+ *  KNOWN LIMITATION (disclosed, not a completion-door claim): `classifyOwedPunchRecord` and
+ *  `suggestRequestType` are closures scoped inside their route handlers in `index.cjs`, not
+ *  top-level exports (unlike `resolveOvertimeDayTypeFromEffectiveCalendarItem`, which IS exported
+ *  via `__attendanceOvertimeSegmentationForTests` and could support a real cross-runtime equivalence
+ *  test) — this copy's drift protection today is manual code-review re-sync on any future edit to
+ *  the plugin decision table, NOT an automated contract test. NEVER invents a new reason string
+ *  beyond this table (§3.1 hard rule 4). */
 export function classifyAttendanceOwedPunch(row: {
   status: string | null
   is_workday: boolean | null
@@ -689,6 +697,26 @@ export async function buildMissingPunchTrace(
       })
     }
   }
+  // §3.3③E4 "终审 adjustment 审计事件" — the generic write-time audit event every non-outdoor-punch/
+  // shift-swap/schedule-dispatch request type gets on resolution (`index.cjs:30077-30097`,
+  // `event_type='adjustment', source='request'`). Distinct from the `attendance_requests` row above
+  // (which only proves the REQUEST exists) — this proves an ADJUSTMENT was actually recorded against
+  // the day.
+  const adjustmentEvent = await runQuery<{ occurred_at: string }>(
+    `SELECT occurred_at
+       FROM attendance_events
+      WHERE org_id = $1 AND user_id = $2 AND work_date = $3
+        AND event_type = 'adjustment' AND source = 'request'
+      ORDER BY occurred_at DESC
+      LIMIT 1`,
+    [orgId, userId, workDate],
+  )
+  if (adjustmentEvent.rows[0]) {
+    basis.push({
+      source: { kind: 'audit', ref: 'attendance_events' },
+      version: { posture: 'snapshot_frozen', asOf: adjustmentEvent.rows[0].occurred_at },
+    })
+  }
 
   return {
     category: 'missing_punch',
@@ -713,6 +741,9 @@ const OVERTIME_SEGMENTATION_VERSION = 1
 
 export type AttendanceOvertimeDayType = 'workday' | 'restday' | 'holiday'
 export type AttendanceOvertimeCoverageNote = 'full' | 'partial_legacy'
+/** Mirrors `OVERTIME_DAY_TYPES` (`index.cjs`, same three-value closed set the plugin's own
+ *  segmentation snapshot builder validates against). */
+const OVERTIME_DAY_TYPES: ReadonlySet<string> = new Set(['workday', 'restday', 'holiday'])
 
 export interface AttendanceOvertimeSegmentationTraceResponse {
   category: 'overtime_segmentation'
@@ -723,7 +754,12 @@ export interface AttendanceOvertimeSegmentationTraceResponse {
     holidayMinutes: number
     totalMinutes: number
     segmentationVersion: number | null
-    segments: Array<{ dayType: AttendanceOvertimeDayType; minutes: number; reasonCode: string; holidayName: string | null }>
+    // `reasonCode` is OMITTED (not a placeholder literal) when the stored `effectiveSource` for
+    // that date is not a recognized non-empty string — same discipline as ⑤'s
+    // `sourceResolution:'unknown_source'` branch (§3.1 hard rule 5⑤ precedent; G4 "未知 code
+    // fail-closed", never a fabricated code outside the closed set actually written by
+    // `resolveOvertimeDayTypeFromEffectiveCalendarItem`, `index.cjs:10612-10635`).
+    segments: Array<{ dayType: AttendanceOvertimeDayType; minutes: number; reasonCode?: string; holidayName: string | null }>
   }
   basis: AttendanceDecisionTraceBasisEnv[]
   confidence: AttendanceDecisionTraceConfidence
@@ -759,12 +795,23 @@ export async function buildOvertimeSegmentationTrace(
 
   const metadata = (row.metadata ?? {}) as Record<string, unknown>
   const snapshot = metadata.overtimeSegmentation as Record<string, unknown> | undefined
+  // §3.2 "分段生效时点=终审时刻": a snapshot is only the FINAL, terminal-review-anchored decision
+  // once `resolved_at` is set (the write path overwrites the submit-time snapshot exactly when the
+  // request is resolved, `index.cjs:29706-29717`) — treating a still-pending request's submit-time
+  // snapshot as `coverageNote:'full'` would present a not-yet-finalized value with false confidence
+  // (R4). `snapshot.dayType` is also validated here (never `?? 'restday'` — a malformed/legacy
+  // `dayType` outside the closed set falls through to the `partial_legacy` branch instead of a
+  // fabricated default, §3.1 hard rule 3).
   const snapshotValid =
-    snapshot &&
+    !!snapshot &&
     typeof snapshot === 'object' &&
     snapshot.version === OVERTIME_SEGMENTATION_VERSION &&
-    snapshot.engine === OVERTIME_SEGMENTATION_ENGINE
-  const resolvedAt = row.resolved_at ?? row.updated_at
+    snapshot.engine === OVERTIME_SEGMENTATION_ENGINE &&
+    OVERTIME_DAY_TYPES.has(snapshot.dayType as string) &&
+    row.resolved_at != null
+  // Never fabricated from `updated_at` (§3.2 "不得伪造时点") — `undefined` when the request has not
+  // been through terminal review; envs below fail closed to `undeterminable` rather than borrow it.
+  const resolvedAt = row.resolved_at ?? undefined
 
   const basis: AttendanceDecisionTraceBasisEnv[] = []
   const segments: AttendanceOvertimeSegmentationTraceResponse['conclusion']['segments'] = []
@@ -779,15 +826,38 @@ export async function buildOvertimeSegmentationTrace(
     restdayMinutes = Number(segs.restdayMinutes) || 0
     holidayMinutes = Number(segs.holidayMinutes) || 0
     totalMinutes = Number(snapshot!.totalMinutes) || 0
-    const calendar = (snapshot!.calendar ?? {}) as Record<string, unknown>
-    const dayType = (snapshot!.dayType as AttendanceOvertimeDayType) ?? 'restday'
-    const minutesForType = dayType === 'workday' ? workdayMinutes : dayType === 'holiday' ? holidayMinutes : restdayMinutes
-    segments.push({
-      dayType,
-      minutes: minutesForType,
-      reasonCode: typeof calendar.effectiveSource === 'string' ? calendar.effectiveSource : 'unknown',
-      holidayName: typeof calendar.holidayName === 'string' ? calendar.holidayName : null,
-    })
+    // §9 W5-0-G7 two-user ⑤ fidelity note carried over to ④: `crossesMidnight` snapshots
+    // (`buildCrossMidnightOvertimeSegmentationSnapshot`, `index.cjs:10669-10715`) carry a `perDate`
+    // array — one entry PER SPANNED DATE, each with its own `dayType`/`minutes`/`calendar`. Walking
+    // it (instead of collapsing to the primary date only) keeps Σsegments[].minutes === totalMinutes
+    // and preserves each date's own `reasonCode`/`holidayName` (R2 — no discarded storage rows).
+    const perDate = Array.isArray(snapshot!.perDate) ? (snapshot!.perDate as Array<Record<string, unknown>>) : null
+    const segmentSources: Array<{ dayType: unknown; minutes: unknown; calendar: unknown }> =
+      perDate && perDate.length > 0
+        ? perDate.map((entry) => ({ dayType: entry.dayType, minutes: entry.minutes, calendar: entry.calendar }))
+        : [
+            {
+              dayType: snapshot!.dayType,
+              minutes:
+                snapshot!.dayType === 'workday'
+                  ? workdayMinutes
+                  : snapshot!.dayType === 'holiday'
+                    ? holidayMinutes
+                    : restdayMinutes,
+              calendar: snapshot!.calendar,
+            },
+          ]
+    for (const entry of segmentSources) {
+      const dayType = OVERTIME_DAY_TYPES.has(entry.dayType as string) ? (entry.dayType as AttendanceOvertimeDayType) : 'restday'
+      const calendar = (entry.calendar ?? {}) as Record<string, unknown>
+      const effectiveSource = typeof calendar.effectiveSource === 'string' && calendar.effectiveSource ? calendar.effectiveSource : undefined
+      segments.push({
+        dayType,
+        minutes: Number(entry.minutes) || 0,
+        ...(effectiveSource ? { reasonCode: effectiveSource } : {}),
+        holidayName: typeof calendar.holidayName === 'string' ? calendar.holidayName : null,
+      })
+    }
     basis.push({
       source: { kind: 'snapshot', ref: 'attendance_requests.metadata.overtimeSegmentation' },
       version: { posture: 'snapshot_frozen', asOf: resolvedAt, snapshotVersion: String(OVERTIME_SEGMENTATION_VERSION) },
@@ -798,7 +868,7 @@ export async function buildOvertimeSegmentationTrace(
   }
 
   const overtimeRule = metadata.overtimeRule
-  if (overtimeRule && typeof overtimeRule === 'object') {
+  if (overtimeRule && typeof overtimeRule === 'object' && resolvedAt) {
     basis.push({
       source: { kind: 'snapshot', ref: 'attendance_requests.metadata.overtimeRule' },
       version: { posture: 'snapshot_frozen', asOf: resolvedAt },
@@ -816,7 +886,7 @@ export async function buildOvertimeSegmentationTrace(
   const approvalFlow = metadata.approvalFlow
   basis.push({
     source: { kind: 'audit', ref: 'attendance_requests.metadata.approvalFlow' },
-    version: approvalFlow ? { posture: 'snapshot_frozen', asOf: resolvedAt } : { posture: 'undeterminable' },
+    version: approvalFlow && resolvedAt ? { posture: 'snapshot_frozen', asOf: resolvedAt } : { posture: 'undeterminable' },
   })
   // §3.3④E4 engine-gate: a snapshot present on THIS request always wins (§3.1 hard rule 6, "快照排
   // 他") — the engine gate is only informative for requests that never got a snapshot (legacy /
@@ -882,6 +952,12 @@ export async function buildCompTimeBalanceTrace(
   runQuery: AttendanceDecisionTraceQueryFn,
   settingsEnabled: { compTimeFromOvertime: boolean; overtimeBankPolicy: boolean },
 ): Promise<AttendanceCompTimeBalanceTraceResponse> {
+  // §3.3⑤E4 / OD-W5-6=(a) "seventh read face": the payroll-cycle-settlement snapshot is folded in
+  // as ITS OWN basis environment here — not exposed as a `conclusion` field (the §3.1 ⑤ conclusion
+  // shape is frozen as "L5a shape + comp_time projection", no settlements key), so a snapshot that
+  // already exists on this ledger is never presented as "unknown" (owner verbatim: "已有权威快照不
+  // 应人为降成 unknown"). This is a READ of `attendance_payroll_cycle_settlements` — no write.
+  const settlements = await readAttendancePayrollCycleSettlements(orgId, userId, runQuery)
   const summaryResult = await runQuery<{ granted: string; exhausted: string; expired: string }>(
     `SELECT
        COALESCE(SUM(CASE WHEN e.event_type = 'grant' THEN e.delta_minutes ELSE 0 END), 0) AS granted,
@@ -941,22 +1017,34 @@ export async function buildCompTimeBalanceTrace(
     }
   })
 
+  // §3.1 hard rule 2 ("not_in_effect 与 undeterminable 是两个判别值") applied to the ledger legs:
+  // an EMPTY ledger while `compTimeFromOvertime` is OFF is the dormant-org policy fact the rule's
+  // own worked example names ("dormant org 的零调休余额...是『调休计提策略未启用』"); an EMPTY
+  // ledger while the engine is ON is a real gap (OD-W5-4: rejected/never-pooled leaves no row to
+  // cite) and stays `undeterminable`. A non-empty ledger is always `snapshot_frozen` regardless of
+  // the current gate (a lot granted while the policy was on stays a real fact after the policy is
+  // later turned off — §3.1 hard rule 6, snapshot exclusivity).
+  const dormantLedgerPosture: AttendanceDecisionTraceVersionPosture = settingsEnabled.compTimeFromOvertime
+    ? 'undeterminable'
+    : 'not_in_effect'
+
   const basis: AttendanceDecisionTraceBasisEnv[] = [
     {
       source: { kind: 'ledger', ref: 'attendance_leave_balances' },
-      version: lots.length > 0 ? { posture: 'snapshot_frozen', asOf: lots[0].grantedAt } : { posture: 'undeterminable' },
+      version: lots.length > 0 ? { posture: 'snapshot_frozen', asOf: lots[0].grantedAt } : { posture: dormantLedgerPosture },
     },
     {
       source: { kind: 'ledger', ref: 'attendance_leave_balance_events' },
       version:
         eventsResult.rows.length > 0
           ? { posture: 'snapshot_frozen', asOf: eventsResult.rows[0].occurred_at }
-          : { posture: 'undeterminable' },
+          : { posture: dormantLedgerPosture },
     },
     {
       source: { kind: 'policy_gate', ref: 'compTimeFromOvertime' },
       version: { posture: settingsEnabled.compTimeFromOvertime ? 'current_live_no_history' : 'not_in_effect' },
     },
+    attendancePayrollCycleSettlementBasisEnv(settlements, settingsEnabled.overtimeBankPolicy),
   ]
 
   return {
@@ -1125,9 +1213,12 @@ export async function buildApproverSourceTrace(
     metadata: Record<string, unknown> | null
     updated_at: string
   }>(
+    // §3.3⑥E1 "当前有效指派的决策标记" — `is_active = true` only (the active-unique-index partial
+    // predicate, `approval-schema-bootstrap.ts:196`); a superseded/deactivated assignment row must
+    // never surface as a live step (owner review finding, W5-0 fix-round).
     `SELECT assignment_type, assignee_id, source_step, metadata, updated_at
        FROM approval_assignments
-      WHERE instance_id = $1
+      WHERE instance_id = $1 AND is_active = true
       ORDER BY source_step ASC, created_at ASC`,
     [instanceId],
   )
