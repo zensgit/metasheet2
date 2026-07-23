@@ -14,7 +14,8 @@
 > §4.6/§6.2/§7-Wave5/§8.1/§9/§11/§13）。对标账本
 > `attendance-dingtalk-benchmark-target-and-tracker-20260601.md` 中**不存在** explainability 专项行
 > （全文 grep `解释|explain|可解释` 零命中，实证）——章程 §7-Wave5 是本波的唯一上游授权，本锁不
-> 凭记忆补写对手行为细节（章程 §1.2 L47-48 + OD-VX4 双重禁止，沿 W4 锁 §1-7 同款边界）。
+> 凭记忆补写对手行为细节（章程 §1.2 L47-48「未核实能力不得写成已对标/已超越」禁止，沿 W4 锁 §1-7
+> 同款边界）。
 > **锚点基线 = `bbcb8caf3`**（§11.1；本锁分支基 `f55d99e12`，漂移账 `bbcb8caf3..f55d99e12` = 仅
 > +1 份 docs 文件（W4 验证 MD），考勤 runtime 文件零漂移 ⇒ 全部锚点在分支基上继续有效）。
 > 引用纪律：`plugins/plugin-attendance/index.cjs`（~43k 行）与 `AttendanceView.vue`（~28k 行）为高频
@@ -187,7 +188,8 @@
 **OUT（显式）**：任何**写路径**（R1——含「顺手修复」记录/余额/指派）；策略/规则**版本化 schema 变更**
 （OD-W5-3 呈 owner，若立项走独立前置票）；resolver 决策/失败原因**持久化**（OD-W5-2 同上）；record
 规则快照**回填/新增写入**（OD-W5-8 同上）；被拒写入事件（422 fail-closed）落库（OD-W5-4 同上）；
-`balance_events` FK CASCADE 修复（OD-W5-5 独立修复票）；comp_time 手工调整原语（既有 G1 OUT 边界，
+`balance_events` FK CASCADE 修复（OD-W5-5 独立修复票）；主管面（章程 §3.2 persona）解释开面
+（OD-W5-10 显式呈 owner，现拟 OUT——见 §4.1）；comp_time 手工调整原语（既有 G1 OUT 边界，
 本锁不重开）；S7 flag / scheduler env / 任何默认 OFF 开关的翻转（staged opt-in 纪律；「引擎关闭」
 在本合同中是**要如实解释的策略事实**，不是要修的缺陷）；对手行为细节对照（§1 header）；移动原生/
 硬件（章程红线 9）。
@@ -282,7 +284,11 @@ values-free by construction，§5.1 遮罩清单约束一切文本字段）：
 - 依据链：E1 记录环（分钟列 + tier meta keys——tier 环按 §3.2 末行「结果快照，阈值无快照」如实
   标注）；E2 阈值环（`current_live_no_history`：当前生效 rule/shift 的宽限与 tier 阈值投影）；
   E3 更正环（同①E3，AE-1 审计不可变、无 FK、删除免疫——这是全仓「操作记录」环的姿态标杆）；
-  E4 补救环（time_correction 补卡请求及其 MP-3 快照，`snapshot_frozen @ requestEvaluatedAt`）。
+  E4 补救环（可选，**若存在**与该记录关联的补救请求则引：MP-2/MP-3 链
+  （`deriveMakeupAnomalyFacts`/`buildMakeupPunchPolicySnapshot`）语义面向**缺卡补救**（§1-3），
+  迟到/早退适用的请求类型与快照引用条件在 W5-0 设计内明确；引用时 `snapshot_frozen @
+  requestEvaluatedAt`，**禁**把 MP-3 快照跨语义借用为迟到/早退的阈值依据；无关联请求 ⇒ 该环
+  省略，不算断环）。
 - 断环：legacy 行无 tier keys ⇒ tier 环 `undeterminable`（**禁**把 report 侧的 fallback-0 读作
   「无严重迟到」证据——那是计数约定不是事实断言）。
 **③ 缺卡（missing_punch）**
@@ -351,8 +357,11 @@ values-free by construction，§5.1 遮罩清单约束一切文本字段）：
 - **员工 self 面（若 OD-W5-1 裁入 v1）**：主体**永远是 token subject**（`/api/attendance/leave-balances/me`
   的 token-subject-locked 先例 `:42809-42831`——注释逐字「the subject is ALWAYS the authenticated
   requester」），不接受 userId 参数；响应走 §5.1 员工档遮罩。
-- **主管面不入 v1**：章程 §3.2 的 scope 约束（assignment/scheduler scope）需要独立的授权推导，
-  超出只读合同范围——显式 OUT，防 scope 放大。
+- **主管面 v1 开面 = OD-W5-10 显式裁量（现拟 OUT）**：章程 §3.2 把「查看规则依据」逐字列为主管
+  persona 核心任务（L132-133），同时要求「不得暴露超出其组织/assignment/scheduler scope 的数据或
+  管理动作」——主管面解释需要独立的授权推导（assignment/scheduler scope），超出本只读合同范围；
+  鉴于该 persona 在章程中的中心地位，此收窄不作隐式默认，升为 owner 显式裁量（OD-W5-10），防
+  scope 放大。
 **4.2 只读结构约束**：全部 trace 查询在 `READ ONLY` 事务内（`runAttendanceSetupReadinessReadOnly`
 先例 `:457`）；禁首词/正则式「只读校验」；W4-0-G2 的 writable-CTE 与多语句必拒测试同型复用
 （§9 W5-0-G3）。
@@ -385,6 +394,8 @@ SQL values-free 断言同型）。
 | 审批 comment 正文 | 既有审批面职责，不入 trace | **禁** | trace 只引用记录存在性+时刻 |
 | 班次起止/宽限分钟/tier 阈值（规则参数） | 允许 | 允许（本人当前生效规则） | 「为什么算迟到」的解释本体；非个人数据非秘密 |
 | holidayName（快照内节假日名） | 允许 | 允许 | 日历规则性事实 |
+| 分段快照 day-type provenance：`effectiveSource`/`holidaySource`（来源闭集枚举）+ `policyId`（日历策略标识） | 允许 | 允许 | §3.3④ 白名单可透出的规则性标识（与 basis 环 `source.ref` 同类，`buildOvertimeSegmentationSnapshot :10612-10635`）；非个人数据非秘密——本行与 §3.3④ 为同一单一真源 |
+| 分段快照 `holidayRefId`（裸内部日历行 id） | **禁**（day-type 来源以 holidaySource/holidayName 表述） | **禁** | 裸内部 id 纪律同上「裸内部 user id」行（无名册可解析 ⇒ 直接剔除）；§3.3④ 白名单不含该键 |
 
 **by construction 要求**：遮罩在后端响应组装层白名单实现（挑入而非删除），前端纯模块再做一次白名单
 解析（双层，前端层是防御纵深不是权威）——「客户端 values-free 要边界解析」纪律。
@@ -452,6 +463,12 @@ SQL values-free 断言同型）。
 | OD-W5-7 | **comp_time 余额 UI 硬编码 annual** | 三处 `leaveTypeCode='annual'`（`AttendanceView.vue:24106/:24155/:24435`）使 comp_time 解释有 API 无 UI。(a) W5-1 顺带参数化（碰热文件既有区块，扩大 W5-1 diff）；(b) 独立小票（热文件串行排队）。二者均不改后端 |
 | OD-W5-8 | **状态类规则快照缺失** | record 不落规则 provenance（§1-1）。(a) v1 接受 `current_live_no_history` 口径（本合同现拟）；(b) 立前置票给 `upsertAttendanceRecord` 冻结规则快照（写路径变更 + 存量行永远无快照的双轨现实）。(b) 不入 W5 切片 |
 | OD-W5-9 | **lot 读投影补 `overtime_source`** | 列在库（`zzzz20260624160000:13`）不在读投影（`:42739-42744`）。(a) W5-0 内把该列纳入 trace/L5a 读投影（只读 SELECT 加列 + 响应键集合变更 + 脱敏审查）；(b) 保持现状，per-source 环恒 `undeterminable`。(a) 是既有端点响应形状变更，需兼容性回归（章程红线 5） |
+| OD-W5-10 | **主管面（章程 §3.2 persona）解释开面** | 章程 §3.2 L132-133 逐字把「查看规则依据」列为主管核心任务，同时约束「不得暴露超出其组织/assignment/scheduler scope 的数据或管理动作」——主管面需要独立的 assignment/scheduler scope 授权推导与第三档遮罩清单。(a) v1 显式 OUT（本合同现拟，§4.1——防 scope 放大，主管排障暂由 admin 面（若 OD-W5-1 裁入）承担）；(b) 立独立后续票（授权推导 + §5.1 扩展主管档，独立设计门后再开）。二者均不改 v1 六类合同形状（§3.1） |
+
+> 注：表中「本合同现拟」是合同正文必须先落一个可执行姿态时的描述性 cross-ref，**不构成
+> recommended 标记**——owner 对每条 OD 的选择不受「现拟」约束，任一选项（含 (b)/(c)）均可裁；
+> 裁与「现拟」不同选项时按 §10-② 修订入锁即可（W4 §8-附 P2-5b 教训针对的是 prescriptive
+> recommended 旗，此处澄清其适用边界）。
 
 ## 9. 切片（严格串行——章程 L364 交付顺序逐字「先只读决策轨迹，再上下文帮助」；每片完成门 =
 章程 §8.1 十一门 + 本锁红线负向断言 + Opus 对抗审 0 P1/P2 + PR 门禁记录）
@@ -493,7 +510,7 @@ SQL values-free 断言同型）。
 
 **Ratify 流程（严格顺序）**：
 ① 本锁 PR 合入（docs-only，PROPOSED 入仓——合入**不等于**生效）
-→ ② owner 审阅：核对 §0 红线转写、§3 合同、§5 遮罩清单，并逐项裁决 OD-W5-1..9（记录于 ratify
+→ ② owner 审阅：核对 §0 红线转写、§3 合同、§5 遮罩清单，并逐项裁决 OD-W5-1..10（记录于 ratify
 comment 或修订入锁）；同时确认 W4 收口态势（§ header）是否构成 W5-0 前置余项
 → ③ owner 终裁 comment = PROPOSED → RATIFIED 的唯一生效凭据（模型不得代翻——章程 §10-Owner 条款）
 → ④ 章程 §15 Wave 5 行同步（DATA-CONTRACT-GATED → 设计已 ratify / runtime 未开始；随 ratify 批次
