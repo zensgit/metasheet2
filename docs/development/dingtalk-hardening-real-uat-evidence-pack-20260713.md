@@ -35,10 +35,26 @@ blocker.
 
 | # | Precondition | Status |
 | --- | --- | --- |
-| P1 | Deploy-host disk resolved (#159 — **CLOSED** 2026-07-12, storage-health recovery confirmed) | done (infra only — does not itself satisfy P2/P3) |
+| P1 | Deploy-host disk healthy — **execution-time requirement, not a dated fact**: the **latest** `Attendance Remote Storage Health (Prod)` workflow run must be **SUCCESS at the moment UAT execution starts** (check the workflow's run list right then; a green run from an earlier date does not carry). See the P1 status note below this table. | ⬜ verify at execution time |
 | P2 | The exact target SHA is deployed and its identity is confirmable (`git rev-parse HEAD` on the deploy host, or the image tag) | ⬜ record SHA: `______` |
 | P3 | Access to a real DingTalk corp (staging tenant or an authorized customer sandbox) with: an admin account, Stream app credentials, an interactive-card template, and **at least two** local accounts bound to DingTalk (one designated approval assignee "A", one non-assignee "B") | ⬜ |
 | P4 | `LOG_LEVEL=info` (or `debug`) on the deployed instance — **not** `warn`/`error`. `scripts/dev-optimized-start.sh` defaults to `warn`, which silently swallows the corp-anchor probe log line and makes "no log line" ambiguous between "prod-safe default silence" and "the probe never fired." Confirm before Section C. | ⬜ |
+
+**P1 status note (2026-07-22 de-staling; this paragraph records history, the gate itself is the
+execution-time check in the table above):** this pack originally recorded P1 as done, citing
+issue #159's 2026-07-12 closure. That closure claim is stale — #159
+([Attendance P1] Storage health alert, <https://github.com/zensgit/metasheet2/issues/159>) is
+**RE-OPENED**: the scheduled `Attendance Remote Storage Health (Prod)` runs are failing again with
+`reason=FS_USAGE_TOO_HIGH df_used_pct=100` (issue-automation comments on runs 29798071648 /
+29887991598), and the 2026-07-22 `DingTalk OAuth Stability Recording (Lite)` run
+[29963440905](https://github.com/zensgit/metasheet2/actions/runs/29963440905) failed on the same
+disk leg — its `stability.json` records `storage.root.usePercent=100` against `maxUsePercent=95`
+(`scripts/ops/dingtalk-oauth-stability-check.sh` `MAX_ROOT_USE_PERCENT=95`) while the OAuth
+metrics legs themselves were healthy (`oauthMetricsPresent=true`, zero state-operation errors,
+`health.status=ok`). Because disk state moves independently of this document, P1 is a
+**live gate**: re-verify the latest `Attendance Remote Storage Health (Prod)` run is SUCCESS at
+execution time — do not cite this note, any issue state, or any dated run as the satisfaction
+evidence.
 
 **Executed by:** ______  **Date:** ______  **Target SHA:** ______
 
