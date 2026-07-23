@@ -331,6 +331,16 @@ jobs:
             tests/unit/attendance-live-punch-work-date.test.ts \
             --reporter=dot
 
+      # #4556 W3: canonical shift segment service unit matrix (segment validation,
+      # envelope derivation, dual-read synthesis, capability flag, assignability
+      # guard, historical-label redaction). Explicit whole-file gate so it cannot
+      # drift out of the default suite.
+      - name: Run attendance shift segments W3 unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-shift-segments-service.test.ts \
+            --reporter=dot
+
       - name: Run linting
         if: matrix.node-version == '20.x'
         run: |
@@ -922,6 +932,8 @@ jobs:
             tests/integration/attendance-schedule-dispatch.test.ts \
             tests/integration/attendance-makeup-punch-policy.test.ts \
             tests/integration/attendance-result-edit.test.ts \
+            tests/integration/attendance-shift-segments-migration.db.test.ts \
+            tests/integration/attendance-shift-segments-writer-matrix.db.test.ts \
             --reporter=dot
 
       - name: Upload test results

@@ -309,6 +309,26 @@ const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const DEFAULT_ATTENDANCE_ORG_ID = 'default'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
+const ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED =
+  'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED'
+
+class AttendanceShiftReferenceUnavailableError extends Error {
+  readonly status = 422
+  readonly code = ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED
+  readonly details: Array<{ field: string; message: string }>
+
+  constructor(segmentCount: number) {
+    super(
+      `Shift has ${segmentCount} segments; authoritative segment calculation is disabled for this org, ` +
+      'so default user onboarding cannot reference a multi-segment shift',
+    )
+    this.name = 'AttendanceShiftReferenceUnavailableError'
+    this.details = [{
+      field: 'defaultShiftId',
+      message: 'Multi-segment shift is authoring preview-only while segment calculation is disabled',
+    }]
+  }
+}
 const ADMIN_USER_PROFILE_SELECT = `
   id,
   email,
@@ -422,6 +442,16 @@ async function fetchUserAccessSnapshot(userId: string) {
     roles,
     permissions,
     isAdmin,
+  }
+}
+
+class AttendanceDefaultShiftNotFoundError extends Error {
+  readonly status = 404
+  readonly code = 'DEFAULT_SHIFT_NOT_FOUND'
+
+  constructor() {
+    super('Default shift not found')
+    this.name = 'AttendanceDefaultShiftNotFoundError'
   }
 }
 
@@ -3295,6 +3325,34 @@ export function adminUsersRouter(): Router {
       // (not a second/competing one — every write below moved from `query()` to `client.query()`
       // inside this one call).
       await transaction(async (client) => {
+        if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
+          // W3 safety erratum: this core route is a reference producer outside the
+          // attendance plugin. Lock the same parent row that canonical shift delete
+          // locks FOR UPDATE, and reject preview-only multi-segment shifts before any
+          // user/onboarding write. W4 must replace this hard block only in the same
+          // reviewed change that adds authoritative segment calculation.
+          const lockedShift = await client.query(
+            `SELECT s.id,
+                    (
+                      SELECT COUNT(*)::int
+                        FROM attendance_shift_segments seg
+                       WHERE seg.org_id = s.org_id
+                         AND seg.shift_id = s.id
+                    ) AS segment_count
+               FROM attendance_shifts s
+              WHERE s.id = $1 AND s.org_id = $2
+              FOR SHARE`,
+            [cleanDefaultShiftId, attendanceOrgId],
+          )
+          if (!lockedShift.rows.length) {
+            throw new AttendanceDefaultShiftNotFoundError()
+          }
+          const segmentCount = Number(lockedShift.rows[0]?.segment_count ?? 0)
+          if (segmentCount > 1) {
+            throw new AttendanceShiftReferenceUnavailableError(segmentCount)
+          }
+        }
+
         await client.query(
           `INSERT INTO users (
              id, email, username, name, mobile, employee_no, department, position, hire_date,
@@ -3462,6 +3520,12 @@ export function adminUsersRouter(): Router {
         attendanceOnboarding,
       })
     } catch (error) {
+      if (error instanceof AttendanceShiftReferenceUnavailableError) {
+        return jsonError(res, error.status, error.code, error.message, error.details)
+      }
+      if (error instanceof AttendanceDefaultShiftNotFoundError) {
+        return jsonError(res, error.status, error.code, error.message)
+      }
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
       }

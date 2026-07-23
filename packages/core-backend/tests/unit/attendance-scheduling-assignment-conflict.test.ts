@@ -447,6 +447,9 @@ describe('attendance scheduling assignment conflict guard', () => {
 
   it('applies fixed-schedule group plans by locking users, skipping exact matches, and inserting only missing rows', async () => {
     const pendingRows = [
+      // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
+      [{ id: 'shift-a' }],
+      [{ total: 0 }],
       [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }],
       [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }],
       [{ user_id: 'user-create' }, { user_id: 'user-skip' }],
@@ -530,6 +533,9 @@ describe('attendance scheduling assignment conflict guard', () => {
 
   it('uses one producer run id across multiple fixed-schedule creates without mutating skips', async () => {
     const pendingRows = [
+      // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
+      [{ id: 'shift-a' }],
+      [{ total: 0 }],
       [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }],
       [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }],
       [{ user_id: 'user-a' }, { user_id: 'user-b' }, { user_id: 'user-skip' }],
@@ -594,6 +600,9 @@ describe('attendance scheduling assignment conflict guard', () => {
 
   it('leaves open-ended fixed-schedule creates under an explicit null-ended producer key', async () => {
     const pendingRows = [
+      // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
+      [{ id: 'shift-a' }],
+      [{ total: 0 }],
       [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }],
       [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }],
       [{ user_id: 'user-a' }],
@@ -646,6 +655,9 @@ describe('attendance scheduling assignment conflict guard', () => {
   it('refuses fixed-schedule group applies without inserting when a blocking conflict exists', async () => {
     const db = {
       query: vi.fn()
+        // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
+        .mockResolvedValueOnce([{ id: 'shift-a' }])
+        .mockResolvedValueOnce([{ total: 0 }])
         .mockResolvedValueOnce([{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }])
         .mockResolvedValueOnce([{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }])
         .mockResolvedValueOnce([{ user_id: 'user-conflict' }])

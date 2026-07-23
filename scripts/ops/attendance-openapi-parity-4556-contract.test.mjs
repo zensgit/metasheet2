@@ -260,3 +260,196 @@ test('W1 admin API exposes only timeline GET and atomic transition POST', () => 
     'transition responses must cover every reachable route status',
   )
 })
+
+test('W3 AttendanceShift exposes segments, calculationMode, plannedMinutes, and capabilities', () => {
+  const base = loadYaml(basePath)
+  const shift = requireSchema(base, 'AttendanceShift')
+
+  const segments = requireProperty(shift, 'segments', 'AttendanceShift')
+  assert.equal(segments.type, 'array', 'AttendanceShift.segments must be an array')
+  assert.equal(
+    segments.items?.$ref,
+    '#/components/schemas/AttendanceShiftSegment',
+    'AttendanceShift.segments must reference AttendanceShiftSegment',
+  )
+
+  assertEnumExact(
+    requireProperty(shift, 'calculationMode', 'AttendanceShift'),
+    ['envelope', 'segments'],
+    'AttendanceShift.calculationMode',
+  )
+
+  const plannedMinutes = requireProperty(shift, 'plannedMinutes', 'AttendanceShift')
+  assert.equal(plannedMinutes.type, 'integer', 'AttendanceShift.plannedMinutes must be integer')
+
+  const capabilities = requireProperty(shift, 'capabilities', 'AttendanceShift')
+  assert.equal(
+    capabilities.$ref,
+    '#/components/schemas/AttendanceShiftCapabilities',
+    'AttendanceShift.capabilities must reference AttendanceShiftCapabilities',
+  )
+})
+
+test('W3 AttendanceShiftSegment schema carries day offsets with deprecated snake twins', () => {
+  const base = loadYaml(basePath)
+  const segment = requireSchema(base, 'AttendanceShiftSegment')
+
+  const segmentIndex = requireProperty(segment, 'segmentIndex', 'AttendanceShiftSegment')
+  assert.equal(segmentIndex.type, 'integer')
+  assert.equal(segmentIndex.minimum, 0)
+  assert.equal(segmentIndex.maximum, 2)
+  assert.equal(requireProperty(segment, 'segment_index', 'AttendanceShiftSegment').deprecated, true)
+
+  const startDayOffset = requireProperty(segment, 'startDayOffset', 'AttendanceShiftSegment')
+  assert.deepEqual(startDayOffset.enum, [0], 'startDayOffset is fixed to 0 in v1')
+  assert.equal(requireProperty(segment, 'start_day_offset', 'AttendanceShiftSegment').deprecated, true)
+
+  const endDayOffset = requireProperty(segment, 'endDayOffset', 'AttendanceShiftSegment')
+  assert.equal(endDayOffset.type, 'integer')
+  assert.equal(endDayOffset.minimum, 0)
+  assert.equal(endDayOffset.maximum, 1)
+  assert.equal(requireProperty(segment, 'end_day_offset', 'AttendanceShiftSegment').deprecated, true)
+
+  for (const twin of ['start_time', 'end_time']) {
+    assert.equal(
+      requireProperty(segment, twin, 'AttendanceShiftSegment').deprecated,
+      true,
+      `AttendanceShiftSegment.${twin} must be deprecated`,
+    )
+  }
+})
+
+test('W3 AttendanceShiftSegmentInput is strict and requires startTime/endTime', () => {
+  const base = loadYaml(basePath)
+  const input = requireSchema(base, 'AttendanceShiftSegmentInput')
+  const strictTimePattern = '^(?:[01]\\d|2[0-3]):[0-5]\\d$'
+  assert.equal(input.additionalProperties, false, 'unknown segment properties must be rejected')
+  assert.deepEqual(input.required, ['startTime', 'endTime'])
+  assert.equal(
+    requireProperty(input, 'startTime', 'AttendanceShiftSegmentInput').pattern,
+    strictTimePattern,
+    'input startTime must describe the same strict HH:MM contract as runtime',
+  )
+  assert.equal(
+    requireProperty(input, 'endTime', 'AttendanceShiftSegmentInput').pattern,
+    strictTimePattern,
+    'input endTime must describe the same strict HH:MM contract as runtime',
+  )
+  assert.deepEqual(
+    requireProperty(input, 'startDayOffset', 'AttendanceShiftSegmentInput').enum,
+    [0],
+    'input startDayOffset is fixed to 0 in v1',
+  )
+  const endDayOffset = requireProperty(input, 'endDayOffset', 'AttendanceShiftSegmentInput')
+  assert.equal(endDayOffset.minimum, 0)
+  assert.equal(endDayOffset.maximum, 1)
+})
+
+test('W3 capabilities are values-safe and show authoritative segment calculation disabled by default', () => {
+  const base = loadYaml(basePath)
+  const capabilities = requireSchema(base, 'AttendanceShiftCapabilities')
+  const segmentCalculation = requireProperty(capabilities, 'segmentCalculation', 'AttendanceShiftCapabilities')
+
+  const defaultEnabled = requireProperty(segmentCalculation, 'defaultEnabled', 'segmentCalculation')
+  assert.deepEqual(defaultEnabled.enum, [false], 'defaultEnabled must be pinned to false')
+
+  const enabled = requireProperty(segmentCalculation, 'enabled', 'segmentCalculation')
+  assert.equal(enabled.type, 'boolean')
+  const authoritativeResults = requireProperty(segmentCalculation, 'authoritativeResults', 'segmentCalculation')
+  assert.equal(authoritativeResults.type, 'boolean')
+
+  assertEnumExact(
+    requireProperty(segmentCalculation, 'multiSegmentAuthoring', 'segmentCalculation'),
+    ['preview_only', 'enabled'],
+    'segmentCalculation.multiSegmentAuthoring',
+  )
+  assertEnumExact(
+    requireProperty(segmentCalculation, 'flag', 'segmentCalculation'),
+    ['ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'],
+    'segmentCalculation.flag',
+  )
+
+  // Values-safe: no org/member/user values leak through the capability block.
+  for (const forbidden of ['orgId', 'org_id', 'userId', 'user_id', 'members', 'memberCount']) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(segmentCalculation.properties ?? {}, forbidden),
+      false,
+      `segmentCalculation must not expose ${forbidden}`,
+    )
+  }
+})
+
+test('W3 cancelled-dispatch evidence contract permits a redacted deleted shift reference', () => {
+  const base = loadYaml(basePath)
+  const dispatch = requireSchema(base, 'AttendanceScheduleDispatchRequest')
+  const targetShiftId = requireProperty(dispatch, 'targetShiftId', 'AttendanceScheduleDispatchRequest')
+  assert.equal(targetShiftId.type, 'string')
+  assert.equal(targetShiftId.nullable, true, 'historical cancelled dispatch targetShiftId must allow null')
+  assert.equal(
+    requireProperty(dispatch, 'targetShiftLabel', 'AttendanceScheduleDispatchRequest').type,
+    'string',
+  )
+  assertEnumExact(
+    requireProperty(dispatch, 'targetShiftStatus', 'AttendanceScheduleDispatchRequest'),
+    ['available', 'deleted'],
+    'AttendanceScheduleDispatchRequest.targetShiftStatus',
+  )
+})
+
+test('W3 rejected/cancelled shift-swap evidence permits redacted deleted shift references', () => {
+  const base = loadYaml(basePath)
+  const swap = requireSchema(base, 'AttendanceShiftSwapRequest')
+
+  for (const prefix of ['requester', 'counterparty']) {
+    for (const idField of [`${prefix}ShiftId`, `${prefix}_shift_id`]) {
+      const id = requireProperty(swap, idField, 'AttendanceShiftSwapRequest')
+      assert.equal(id.type, 'string')
+      assert.equal(id.nullable, true, `${idField} must allow null after evidence-preserving shift deletion`)
+    }
+    assert.equal(
+      requireProperty(swap, `${prefix}ShiftLabel`, 'AttendanceShiftSwapRequest').type,
+      'string',
+    )
+    assertEnumExact(
+      requireProperty(swap, `${prefix}ShiftStatus`, 'AttendanceShiftSwapRequest'),
+      ['available', 'deleted'],
+      `AttendanceShiftSwapRequest.${prefix}ShiftStatus`,
+    )
+  }
+})
+
+test('W3 shift POST/PUT request bodies accept strict 1..3 segments and declare typed rejections', () => {
+  const attendance = loadYaml(attendancePath)
+
+  for (const [apiPath, method] of [
+    ['/api/attendance/shifts', 'post'],
+    ['/api/attendance/shifts/{id}', 'put'],
+  ]) {
+    const schema = requestBodySchema(attendance, apiPath, method)
+    assert.equal(schema.additionalProperties, false, `${method.toUpperCase()} ${apiPath} must stay strict`)
+    const segments = requireProperty(schema, 'segments', `${method.toUpperCase()} ${apiPath}`)
+    assert.equal(segments.type, 'array')
+    assert.equal(segments.minItems, 1)
+    assert.equal(segments.maxItems, 3)
+    assert.equal(
+      segments.items?.$ref,
+      '#/components/schemas/AttendanceShiftSegmentInput',
+      `${method.toUpperCase()} ${apiPath} segments must reference AttendanceShiftSegmentInput`,
+    )
+    const required = Array.isArray(schema.required) ? schema.required : []
+    assert.ok(!required.includes('segments'), `${method.toUpperCase()} ${apiPath} must not require segments`)
+  }
+
+  const post = loadYaml(attendancePath).paths['/api/attendance/shifts']
+  assert.deepEqual(
+    requestBodySchema(attendance, '/api/attendance/shifts', 'post').required,
+    ['name'],
+    'POST /api/attendance/shifts required list drifted',
+  )
+  assert.ok(post.post.responses['422'], 'POST shift must declare the typed 422 segment rejection')
+
+  const byId = loadYaml(attendancePath).paths['/api/attendance/shifts/{id}']
+  assert.ok(byId.put.responses['422'], 'PUT shift must declare the typed 422 segment rejection')
+  assert.ok(byId.put.responses['409'], 'PUT shift must declare the typed 409 conversion block')
+  assert.ok(byId.delete.responses['409'], 'DELETE shift must declare the typed 409 delete blocker')
+})
