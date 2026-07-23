@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
@@ -9,6 +9,11 @@ import { Pool } from 'pg'
 import http from 'http'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
 import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
+import {
+  snapshotAttendanceSettingsRow,
+  restoreAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
 
 const require = createRequire(import.meta.url)
 type AttendancePluginTestModule = {
@@ -295,6 +300,13 @@ attendanceIntegrationDescribe(
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
   let importUploadDir: string | undefined
+  // Shared-DB isolation for the deployment-wide `system_configs` 'attendance.settings' row: this
+  // file has ~15 PUT /api/attendance/settings sites and is the FIRST attendance suite in
+  // plugin-tests.yml's shared step — any state it leaks poisons every later settings-sensitive
+  // suite (recorded W4 finding: shiftCompliance bleeding into attendance-schedule-dispatch).
+  // Snapshot once, restore the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
+  let settingsRowPool: Pool | undefined
+  let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -373,6 +385,9 @@ attendanceIntegrationDescribe(
       await pool.end()
     }
 
+    settingsRowPool = new Pool({ connectionString: dbUrl, max: 1 })
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(settingsRowPool)
+
     // Important: load MetaSheetServer only after DATABASE_URL is set,
     // since the DB pool is initialized during module import.
     const { MetaSheetServer } = await import('../../src/index')
@@ -400,7 +415,21 @@ attendanceIntegrationDescribe(
     getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.()
   })
 
+  afterEach(async () => {
+    // Exact-restore the settings row after EVERY test (including failed ones): a test that PUT
+    // settings and then failed before its own in-test restore must not leak state into the next
+    // test here — or into any later suite sharing this Postgres. The beforeEach cache reset above
+    // then makes the next test actually re-read the restored row instead of a primed cache.
+    if (settingsRowPool) {
+      await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot)
+    }
+  })
+
   afterAll(async () => {
+    if (settingsRowPool) {
+      await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot).catch(() => undefined)
+      await settingsRowPool.end().catch(() => undefined)
+    }
     if (server && (server as any).stop) {
       await server.stop()
     }
