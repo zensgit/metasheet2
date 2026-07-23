@@ -5610,6 +5610,59 @@ attendanceIntegrationDescribe(
     }
   })
 
+  // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §2/§7, OD-W5-9=(a)): the L5a
+  // activeLots SELECT now projects `overtime_source` — purely additive (only the new key is
+  // asserted here; every OTHER key's presence/values are already covered by the L5a tests above,
+  // which stay green unmodified — proving this is a pure compatibility extension, not a behaviour
+  // change). A non-null value round-trips on BOTH hosts (admin + /me); a legacy NULL-source lot
+  // (pre-v1-1b, or any lot never tagged) stays honestly absent/null — never fabricated.
+  it('④/年假 L5a + /me — overtime_source projection (OD-W5-9): non-null value round-trips on both hosts; legacy NULL lot stays null', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-w50-admin-${runSuffix}`
+    const meId = `al-w50-me-${runSuffix}`
+    const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    const meTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meId}&roles=employee&perms=attendance:read`)
+    const meToken = (meTokenRes.body as { token?: string } | undefined)?.token
+    if (!adminToken || !meToken) { await pool.end().catch(() => undefined); return }
+    try {
+      const taggedLot = (await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, overtime_source)
+         VALUES ('default',$1,'comp_time',480,480,'overtime_conversion',$2,'active','2026-01-01','workday') RETURNING id`,
+        [meId, `w50:${runSuffix}:tagged`],
+      )).rows[0].id
+      const legacyLot = (await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+         VALUES ('default',$1,'comp_time',240,240,'overtime_conversion',$2,'active','2026-01-01') RETURNING id`,
+        [meId, `w50:${runSuffix}:legacy`],
+      )).rows[0].id
+
+      const adminRes = await requestJson(
+        `${baseUrl}/api/attendance/leave-balances?userId=${encodeURIComponent(meId)}&leaveTypeCode=comp_time`,
+        { headers: { Authorization: `Bearer ${adminToken}` } },
+      )
+      expect(adminRes.status, JSON.stringify(adminRes.body)).toBe(200)
+      const adminLots = (adminRes.body as { data?: { activeLots?: Array<{ id: string; overtime_source: string | null }> } })?.data?.activeLots ?? []
+      expect(adminLots.find((l) => l.id === taggedLot)?.overtime_source).toBe('workday')
+      expect(adminLots.find((l) => l.id === legacyLot)?.overtime_source ?? null).toBeNull()
+
+      const meRes = await requestJson(
+        `${baseUrl}/api/attendance/leave-balances/me?leaveTypeCode=comp_time`,
+        { headers: { Authorization: `Bearer ${meToken}` } },
+      )
+      expect(meRes.status, JSON.stringify(meRes.body)).toBe(200)
+      const meLots = (meRes.body as { data?: { activeLots?: Array<{ id: string; overtime_source: string | null }> } })?.data?.activeLots ?? []
+      expect(meLots.find((l) => l.id === taggedLot)?.overtime_source).toBe('workday')
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = $1`, [meId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('attendance rules /me — returns a token-subject rule summary, rejects overrides, and does not leak admin settings', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
