@@ -13,6 +13,10 @@ const helpers = attendancePlugin.__attendanceLivePunchWorkDateForTests as {
     workDate: string,
     fallbackTimezone: string
   ) => boolean
+  parseImportedPunchDateTimes: (options: Record<string, unknown>) => {
+    firstInAt: Date | null
+    lastOutAt: Date | null
+  }
   resolvePunchWorkDateByShiftWindow: (options: Record<string, unknown>) => Promise<{
     workDate: string
     context: { rule?: Record<string, unknown> } | null
@@ -103,15 +107,77 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
     expect(helpers.isPunchWithinShiftWindow(overlap, current, '2026-07-16', 'Asia/Shanghai')).toBe(true)
   })
 
+  it('maps time-only overnight import punches onto D and D+1 consistently', () => {
+    const parsed = helpers.parseImportedPunchDateTimes({
+      firstInValue: '22:00',
+      lastOutValue: '06:00',
+      workDate: '2026-07-24',
+      rule: overnightRule(),
+    })
+    expect(parsed.firstInAt?.toISOString()).toBe('2026-07-24T14:00:00.000Z')
+    expect(parsed.lastOutAt?.toISOString()).toBe('2026-07-24T22:00:00.000Z')
+
+    const explicitDates = helpers.parseImportedPunchDateTimes({
+      firstInValue: '2026-07-24 22:00',
+      lastOutValue: '2026-07-25 06:00',
+      workDate: '2026-07-24',
+      rule: overnightRule(),
+    })
+    expect(explicitDates.firstInAt?.toISOString()).toBe('2026-07-24T14:00:00.000Z')
+    expect(explicitDates.lastOutAt?.toISOString()).toBe('2026-07-24T22:00:00.000Z')
+  })
+
   it('resolvePunchWorkDateByShiftWindow re-anchors only when current misses and previous overnight matches', async () => {
     const currentContext = { rule: overnightRule() } // D+1 same overnight profile (starts 22:00) — 05:55 misses
     const previousContext = { rule: overnightRule() }
+    // W2 shared resolver loads published candidates (org-scoped join). Mock both
+    // candidate loaders and resolveWorkContext fallbacks.
+    const nightAssignment = {
+      assignment_id: 'asg-prev',
+      org_id: 'default',
+      user_id: 'u1',
+      shift_id: 'sh-overnight',
+      slot_index: 0,
+      start_date: '2026-07-15',
+      end_date: '2026-07-16',
+      is_active: true,
+      publish_status: 'published',
+      assignment_kind: 'regular',
+      shift_name: 'Night',
+      shift_timezone: 'Asia/Shanghai',
+      shift_work_start_time: '22:00',
+      shift_work_end_time: '06:00',
+      shift_is_overnight: true,
+    }
     const fakeDb = {
       query: async (sql: string, params?: unknown[]) => {
-        // resolveWorkContext path: holidays / rotation / assignments / settings
-        if (String(sql).includes('attendance_shift_assignments')) {
+        const text = String(sql)
+        if (text.includes('FROM attendance_shifts WHERE id = $1 AND org_id = $2')) {
+          if (params?.[0] === 'sh-overnight' && params?.[1] === 'default') {
+            return [{
+              id: 'sh-overnight',
+              org_id: 'default',
+              name: 'Night',
+              timezone: 'Asia/Shanghai',
+              work_start_time: '22:00',
+              work_end_time: '06:00',
+              is_overnight: true,
+              late_grace_minutes: 10,
+              early_grace_minutes: 10,
+              rounding_minutes: 5,
+              working_days: [1, 2, 3, 4, 5],
+            }]
+          }
+          return []
+        }
+        if (text.includes('FROM attendance_shift_assignments') && text.includes('JOIN attendance_shifts')) {
+          // Candidate loader returns the overnight assignment covering both dates.
+          return [nightAssignment]
+        }
+        if (text.includes('attendance_shift_assignments')) {
+          // resolveWorkContext LIMIT 1 path
           const workDate = String(params?.[2] ?? '')
-          if (workDate === '2026-07-15') {
+          if (workDate === '2026-07-15' || workDate === '2026-07-16') {
             return [{
               id: 'asg-prev',
               org_id: 'default',
@@ -135,9 +201,11 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
           }
           return []
         }
-        if (String(sql).includes('attendance_holidays')) return []
-        if (String(sql).includes('attendance_rotation')) return []
-        if (String(sql).includes('system_configs') || String(sql).includes('attendance.settings')) return []
+        if (text.includes('attendance_holidays')) return []
+        if (text.includes('attendance_rotation')) return []
+        if (text.includes('attendance_records')) return []
+        if (text.includes('attendance_requests')) return []
+        if (text.includes('system_configs') || text.includes('attendance.settings')) return []
         return []
       },
     }
@@ -170,7 +238,6 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
       timezone: 'Asia/Shanghai',
     })
     expect(stays.workDate).toBe('2026-07-15')
-    expect(stays.context).toBe(previousContext)
   })
 
   it('negative control: without overnight previous assignment, post-midnight punch keeps calendar date', async () => {
@@ -180,6 +247,8 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
         if (String(sql).includes('attendance_shift_assignments')) return []
         if (String(sql).includes('attendance_holidays')) return []
         if (String(sql).includes('attendance_rotation')) return []
+        if (String(sql).includes('attendance_records')) return []
+        if (String(sql).includes('attendance_requests')) return []
         return []
       },
     }
@@ -195,5 +264,53 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
       timezone: 'Asia/Shanghai',
     })
     expect(resolved.workDate).toBe('2026-07-16')
+  })
+
+  it('rejects malformed cross-org candidates instead of falling back to the calendar date', async () => {
+    const fakeDb = {
+      query: async (sql: string) => {
+        const text = String(sql)
+        if (text.includes('FROM attendance_shift_assignments') && text.includes('JOIN attendance_shifts')) {
+          return [{
+            assignment_id: 'asg-foreign',
+            org_id: 'foreign-org',
+            user_id: 'u1',
+            shift_id: 'sh-foreign',
+            slot_index: 0,
+            start_date: '2026-07-16',
+            end_date: null,
+            is_active: true,
+            publish_status: 'published',
+            assignment_kind: 'regular',
+            shift_name: 'Foreign',
+            shift_timezone: 'Asia/Shanghai',
+            shift_work_start_time: '09:00',
+            shift_work_end_time: '18:00',
+            shift_is_overnight: false,
+          }]
+        }
+        if (text.includes('attendance_rotation')) return []
+        if (text.includes('attendance_records')) return []
+        if (text.includes('attendance_requests')) return []
+        if (text.includes('system_configs') || text.includes('attendance.settings')) return []
+        return []
+      },
+    }
+
+    await expect(
+      helpers.resolvePunchWorkDateByShiftWindow({
+        db: fakeDb,
+        orgId: 'default',
+        userId: 'u1',
+        occurredAt: new Date('2026-07-16T02:00:00.000Z'),
+        workDate: '2026-07-16',
+        context: { rule: dayRule() },
+        defaultRule: dayRule(),
+        timezone: 'Asia/Shanghai',
+      })
+    ).rejects.toMatchObject({
+      status: 422,
+      code: 'WORK_DATE_ATTRIBUTION_UNRESOLVED',
+    })
   })
 })
