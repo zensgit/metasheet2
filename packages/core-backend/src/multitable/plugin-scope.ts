@@ -249,9 +249,13 @@ export function createPluginScopedMultitableApi(
         return multitable.provisioning.ensureMissingObjectFields(input)
       },
       // W2/P2-3: forward the ATOMIC repair transaction, wrapping the tx-bound surface so
-      // scope STILL applies INSIDE the transaction — every read/write the repair callback
-      // makes through `surface` re-checks assertProjectIdAllowedForPlugin + assertObjectScope
-      // (never bare-forward a write capability, even inside a host tx).
+      // scope STILL applies INSIDE the transaction. The READ/WRITE methods
+      // (resolveExistingObjectFieldIds, readObjectFieldsContent, ensureMissingObjectFields)
+      // re-check assertProjectIdAllowedForPlugin + assertObjectScope — a write capability is
+      // never bare-forwarded, even inside a host tx. `findObjectSheet` is DISCOVERY-ONLY: it
+      // gets the project-namespace check only, NOT object-scope — identical to the non-tx
+      // `findObjectSheet` forward above (object ownership is enforced by the subsequent
+      // scoped content reads, so a bare findObjectSheet cannot leak object data).
       runObjectFieldsRepairTransaction: async (fn) => {
         return multitable.provisioning.runObjectFieldsRepairTransaction(async (surface) => {
           const scoped: MultitableRepairTransactionSurface = {

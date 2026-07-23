@@ -502,10 +502,11 @@ describe('multitable plugin scope helper', () => {
     }
   })
 
-  it('W2/P2-3: runObjectFieldsRepairTransaction scopes every surface call INSIDE the tx', async () => {
+  it('W2/P2-3: runObjectFieldsRepairTransaction object-scopes every READ/WRITE surface call INSIDE the tx (findObjectSheet is discovery-only)', async () => {
     // The atomic repair runner hands the plugin a tx-bound surface. Every read/write the
     // repair makes THROUGH that surface must STILL pass assertObjectScope — scope cannot be
     // dropped just because we are inside a host transaction (never bare-forward a write).
+    // findObjectSheet is discovery-only: project-namespace check, no object-scope (case c).
     const assertObjectScope = vi.fn(async () => {})
     const innerSurface = {
       findObjectSheet: vi.fn(async () => ({ id: 's', baseId: null, name: 'n', description: null })),

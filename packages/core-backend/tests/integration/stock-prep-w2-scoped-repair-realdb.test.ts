@@ -28,6 +28,22 @@ import {
   buildObjectFieldsRepairSurface,
 } from '../../src/multitable/provisioning'
 import { createPluginScopedMultitableApi } from '../../src/multitable/plugin-scope'
+import { MetaSheetServer } from '../../src/index'
+
+// Narrow view of the SHIPPED core API — just the repair runner we drive end-to-end.
+type ShippedRepairSurface = {
+  findObjectSheet: (i: { projectId: string; objectId: string }) => Promise<unknown>
+  resolveExistingObjectFieldIds: (i: { projectId: string; objectId: string; fieldIds: string[] }) => Promise<Record<string, string>>
+  readObjectFieldsContent: (i: { projectId: string; objectId: string; fieldIds: string[] }) => Promise<Record<string, unknown>>
+  ensureMissingObjectFields: (i: { projectId: string; objectId: string; fields: unknown[] }) => Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+}
+type ShippedCoreApiShape = {
+  multitable: {
+    provisioning: {
+      runObjectFieldsRepairTransaction: <T>(fn: (surface: ShippedRepairSurface) => Promise<T>) => Promise<T>
+    }
+  }
+}
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const targetProvisioning = require(
@@ -246,5 +262,57 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
 
     // Restore a clean end state for any later test (real repair, real commit).
     await targetProvisioning.repairStockPreparationCanonicalTarget({ context, projectId, permission: 'admin' })
+  })
+
+  it('REAL production wiring: index.ts createCoreAPI() runObjectFieldsRepairTransaction is transactional (SHIPPED runner)', async () => {
+    // Drive the ACTUAL shipped runner from MetaSheetServer.createCoreAPI() — not the in-test
+    // runner and not the extracted helper. This closes the runner-vs-prod gap (review P2):
+    // disabling index.ts's runObjectFieldsRepairTransaction (e.g. `throw`) REDs THIS test,
+    // whereas the other suites (in-test runner / direct helper call) stay green. Follows the
+    // G18 precedent (multitable-d2-sidedoor-delete-recoverability-realdb.test.ts).
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const coreApi = (server as unknown as { createCoreAPI: () => ShippedCoreApiShape }).createCoreAPI()
+    const shippedRunner = coreApi.multitable.provisioning.runObjectFieldsRepairTransaction
+    expect(typeof shippedRunner).toBe('function')
+
+    // Make the plm field genuinely missing so the runner has something to add.
+    const before = await withClient((q) =>
+      resolveExistingObjectFieldIds({ query: q as never, projectId, objectId: MAIN_OBJECT_ID, fieldIds: [PLM_FIELD] }),
+    )
+    const physicalId = before[PLM_FIELD]
+    expect(physicalId).toBeTruthy()
+    await pool.query(`DELETE FROM meta_fields WHERE id = $1`, [physicalId])
+
+    const missingDescriptor = targetProvisioning
+      .buildStockPreparationTargetDescriptor({})
+      .fields.find((f: { id: string }) => f.id === PLM_FIELD)
+    expect(missingDescriptor).toBeTruthy()
+
+    // (1) add-then-throw INSIDE the shipped runner → the additive INSERT must ROLL BACK
+    //     (proves the shipped runner opens a real transaction and propagates the throw).
+    let threw: unknown = null
+    try {
+      await shippedRunner(async (surface) => {
+        await surface.ensureMissingObjectFields({ projectId, objectId: MAIN_OBJECT_ID, fields: [missingDescriptor] })
+        throw new Error('force-rollback')
+      })
+    } catch (e) {
+      threw = e
+    }
+    expect((threw as Error | null)?.message).toBe('force-rollback')
+    const afterRollback = await withClient((q) =>
+      resolveExistingObjectFieldIds({ query: q as never, projectId, objectId: MAIN_OBJECT_ID, fieldIds: [PLM_FIELD] }),
+    )
+    expect(afterRollback[PLM_FIELD]).toBeUndefined()
+
+    // (2) a non-throwing fn COMMITS through the shipped runner (also reds an always-throw
+    //     mutant of the shipped runner, since this await would reject).
+    await shippedRunner(async (surface) =>
+      surface.ensureMissingObjectFields({ projectId, objectId: MAIN_OBJECT_ID, fields: [missingDescriptor] }),
+    )
+    const afterCommit = await withClient((q) =>
+      resolveExistingObjectFieldIds({ query: q as never, projectId, objectId: MAIN_OBJECT_ID, fieldIds: [PLM_FIELD] }),
+    )
+    expect(afterCommit[PLM_FIELD]).toBeTruthy()
   })
 })
