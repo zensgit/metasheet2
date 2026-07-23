@@ -50,9 +50,13 @@ import {
   getObjectFieldId as getProvisionedObjectFieldId,
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
+  ensureMissingObjectFields as ensureMissingMultitableObjectFields,
+  resolveExistingObjectFieldIds as resolveExistingMultitableObjectFieldIds,
+  readObjectFieldsContent as readMultitableObjectFieldsContent,
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
+  runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
 import {
@@ -525,6 +529,86 @@ export class MetaSheetServer {
                 descriptor,
               })
             })
+          },
+          // W2: DB-backed field existence — repair discovers genuinely-missing
+          // template fields from meta_fields (resolveFieldIds is compute-only and
+          // never omits a field, so it cannot drive a repair).
+          resolveExistingObjectFieldIds: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return resolveExistingMultitableObjectFieldIds({ query: txQuery, projectId, objectId, fieldIds })
+            })
+          },
+          // W2: DB-backed field CONTENT read (repair's before/after mutation snapshot).
+          readObjectFieldsContent: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return readMultitableObjectFieldsContent({ query: txQuery, projectId, objectId, fieldIds })
+            })
+          },
+          // W2 template-evolution rung: ADDITIVE-ONLY missing-field provisioning
+          // (DO NOTHING) so an already-provisioned table can gain a new template
+          // column without the DO-UPDATE overwrite `ensureObject` would inflict.
+          ensureMissingObjectFields: async ({ projectId, objectId, fields }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMissingMultitableObjectFields({
+                query: txQuery,
+                projectId,
+                objectId,
+                fields,
+              })
+            })
+          },
+          // W2/P2-3 (round-5 review): ATOMIC repair transaction. Runs the caller's whole
+          // read → additive-write → re-read → verify sequence inside ONE DB transaction, so
+          // a thrown verify (mutated/incomplete/race) ROLLS BACK the additive write instead
+          // of leaving it committed. All four surface methods are bound to the SAME tx query;
+          // this is what upgrades the before/after guards from post-commit canaries (safe
+          // only because the wired write is append-only DO NOTHING) to a true atomic
+          // fail-close — the W3-entry gate for wiring repair into production routes.
+          runObjectFieldsRepairTransaction: async (fn) => {
+            // The whole runner is the tested glue runObjectFieldsRepairTransactionWith over
+            // the poolManager transaction primitive: ONE transaction, surface built from its
+            // query, throw ⇒ rollback. No atomicity logic lives inline here.
+            return runObjectFieldsRepairTransactionWith(
+              (run) =>
+                poolManager.get().transaction(async ({ query }) => {
+                  const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                    const result = await query(sql, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                    }
+                  }
+                  return run(txQuery)
+                }),
+              fn,
+            )
           },
           ensureView: async ({ projectId, sheetId, descriptor }) => {
             return poolManager.get().transaction(async ({ query }) => {

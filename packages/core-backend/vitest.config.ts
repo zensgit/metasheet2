@@ -199,6 +199,16 @@ export default defineConfig({
       // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
       'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
+      // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
+      // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
+      // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
+      // repeatable-read-DEFAULT service pool (the file amends DATABASE_URL with
+      // `options=-c default_transaction_isolation=repeatable\ read` before the pool is built).
+      // Drives the REAL syncDirectoryIntegration / createOrgTransfer with a mocked DingTalk
+      // client against real Postgres. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
+      // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
+      'tests/integration/directory-source-freeze-lock-correctness.db.test.ts',
       // T2-Gate evidence (§3.4): the (provider, external_key) collision MECHANISM — unique-index
       // pin, bare-unionId derivation pin, and the end-to-end wholesale second-corp sync failure
       // signature the staging two-corp runbook greps for. Real sync + mocked DingTalk client.
@@ -411,10 +421,31 @@ export default defineConfig({
       // readiness-gate + DingTalk destination permission negatives (case ⑤). DATABASE_URL-gated
       // describeIfDatabase; excluded here so the no-DB job cannot skip-green them; wired
       // whole-file into the attendance real-DB step in plugin-tests.yml.
+      // W4-PRE-1d (owner candidate-set split, #4534): real-DB dual-integration departure matrix.
+      // DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring —
+      // this exclude line was the missing second point, caught by the W4 wave-MD pre-review).
+      'tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts',
       'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts',
+      // W4-0 real-DB (§9 of attendance-vnext-wave4-onboarding-design-lock-20260721.md): the
+      // setup-readiness aggregate's G1 (two-org forgery + platform-admin bypass), G2 (SET
+      // TRANSACTION READ ONLY actually rejecting a bare write / writable CTE / multi-statement
+      // batch against real Postgres — a mock cannot prove this), G3 (① two positive controls), G4
+      // (⑥ three notify signals + previewReady independence), and G5 (④ closed-set posture
+      // against a real system_configs row) matrices. DATABASE_URL-gated describeIfDatabase;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
+      // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §9): dual-host decision-trace
+      // authorization matrix (G1/G7), allowlist/org-scoping negative controls (G2), the ⑤ raw
+      // source_type fixture (G4), not_in_effect vs undeterminable (G5), and snapshot-exclusivity
+      // (G6) against real Postgres. DATABASE_URL-gated describeIfDatabase; excluded here so the
+      // no-DB job cannot skip-green it; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/attendance-decision-trace-w5-0.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

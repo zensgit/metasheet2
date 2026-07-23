@@ -551,7 +551,7 @@ owner 已采用以下推荐值：
 | Wave 2 / issue #4355 | #4370 **RATIFIED**（owner 2026-07-21，OD-O1..O4 全按推荐值接受；post-#4359 doc-sync 复核 NO-DRIFT）| 未开始 | 未开始 | RATIFIED / landing——#4370 合入后即从新 main 开 runtime PR（§14 步骤 4）|
 | Wave 3 / issue #4353 | #4414 stacked draft，head `8a10cdea5` | 旧基线实现存在，不可直接合 | 仅 stacked-base checks；无 main current-base required gate | RE-PORT-GATED |
 | Wave 4 onboarding | 设计锁 `attendance-vnext-wave4-onboarding-design-lock-20260721.md`（**RATIFIED——待 owner 终裁 comment 生效**（re-ratify PR，§10 步③）：errata #4513=`57d89bc1d` 吸收④=(c) `manual_review_required`/③补信号/①前置票后，前置票 **W4-PRE-1 链已落地** #4521=`e20371b1a`+1b #4526=`3727cd92e`+1c #4530=`1a209a5cc`+1d #4534=`3d1b6cfaa`（各过 Opus 门；canonical surface=`POST /api/admin/users` 已回填 §3①；受控离职语义按 owner 裁决②③；`DIRECTORY_DEPROVISION_ENABLED` 默认 OFF），owner 终裁以 re-ratify PR comment 为凭据） | 未开始（W4-0 解冻可开工——从 re-ratify 合入后 main 起片；历史 WIP `claude/w4-0-setup-readiness-20260721`=`b2789cce7`（曾开 #4514 已 CLOSED 未合并）**仅作材料库逐项 re-port，禁整分支复活**——owner 裁决③） | 未开始 | RATIFIED / landing——W4-0 → W4-1 → W4-2（锁 §9 切片序，严格串行）；验证 MD 每片必出 |
-| Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |
+| Wave 5 explainability | 数据合同设计锁 `attendance-vnext-wave5-explainability-data-contract-lock-20260722.md`（**RATIFIED——owner 终裁 2026-07-23**，凭据 = #4546 RATIFY comment @07:30Z，对象 merged SHA `15a256fe2`，三轮终审 9P2/1P3 全吸收 + OD-W5-1..11 全裁） | 未开始（授权序：W5-0 → W5-7 前置票 → W5-1 → W5-2，每片独立门；operator/W5-5/W5-10 runtime 不在授权内） | 未开始 | RATIFIED / runtime 依 §9 串行开工 |
 | S7 runtime flag | 已交付并验证 | main 已有，默认 OFF | #4483 verification 已合且为刷新基线祖先 | OPERATOR-OPT-IN，非本线完成项 |
 | 原生/硬件/飞书/多午夜 | 不在本总纲 | 未授权 | N/A | OUT / 独立立项 |
 

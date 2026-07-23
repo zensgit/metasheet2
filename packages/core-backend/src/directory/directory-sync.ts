@@ -3158,6 +3158,55 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   await deliverDirectorySyncFailureAlert({ integrationId, integrationName, runId, message })
 }
 
+/**
+ * Terminal run state for a DELIBERATE abort: the apply-time freeze recheck found an active
+ * org transfer and rolled the apply back (see `DirectorySyncFrozenByTransferError`).
+ *
+ * A frozen source is a deliberate transfer state, not an outage — every other surface in this
+ * lane already says so (the scheduler skips quietly, the route answers a deliberate 409 that
+ * must never page monitoring). Routing this through `markSyncFailure` contradicted all of them
+ * and, worse, was not self-healing: `directory_integrations.last_error` is only cleared inside
+ * the SUCCESSFUL apply transaction, and the freeze is exactly what prevents a successful apply —
+ * so a multi-day transfer (the designed steady state) left the integration reading "errored"
+ * for its whole duration and fed `countConsecutiveFailedRuns` escalation.
+ *
+ * What this leaves behind instead:
+ *  - the run reaches a TERMINAL, non-'running' state, so the partial unique index frees the
+ *    lease immediately and nothing has to wait for stale-lease reclaim;
+ *  - status is 'aborted', a distinct value: `countConsecutiveFailedRuns` filters
+ *    `status IN ('completed','failed')`, so a deliberate abort can never drive failure
+ *    escalation, and no migration is needed (the column is bare `text`, no CHECK constraint);
+ *  - `error_message` stays NULL — the admin run panel styles that field as an error;
+ *    the reason lives in `meta` (which no summary/toast surface reads);
+ *  - `directory_integrations` is NOT touched at all: no `last_error`, no `last_sync_at` bump
+ *    (nothing was synced);
+ *  - no `directory_sync_alerts` 'sync_failed' row and therefore no failure-alert delivery.
+ *
+ * Unlike `markSyncFailure` this UPDATE IS guarded on `status = 'running'`: if the lease was
+ * reclaimed while this run was alive, the row already carries the reclaimer's truthful
+ * `failed`/orphaned record and this run no longer owns it — overwriting it with a softer
+ * 'aborted' would erase a real liveness incident. Either way the row is terminal and the
+ * lease is free.
+ */
+async function markSyncAbortedByFreeze(runId: string, transferId: string): Promise<void> {
+  await query(
+    `UPDATE directory_sync_runs
+        SET status = 'aborted',
+            finished_at = NOW(),
+            meta = COALESCE(meta, '{}'::jsonb) || jsonb_build_object(
+              'abortReason', 'frozen_by_org_transfer',
+              'transferId', $2::text
+            ),
+            updated_at = NOW()
+      WHERE id = $1
+        AND status = 'running'`,
+    [runId, transferId],
+  )
+  logger.info(
+    `Directory sync run ${runId} aborted: source frozen by active org transfer ${transferId} (deliberate state, not a failure)`,
+  )
+}
+
 export function buildUniqueLocalUserMatchMap(
   rows: LocalUserRow[],
   readKey: (row: LocalUserRow) => string,
@@ -3493,7 +3542,7 @@ async function claimDirectorySyncRun(
 }
 
 export async function syncDirectoryIntegration(
-  integrationId: string,
+  rawIntegrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler' = 'manual',
   /**
@@ -3508,8 +3557,18 @@ export async function syncDirectoryIntegration(
   autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[]
 }> {
   const governedUserIds = new Set<string>()
-  const integration = await getIntegrationRow(integrationId)
+  const integration = await getIntegrationRow(rawIntegrationId)
   if (!integration) throw new Error('Directory integration not found')
+  // T2 lock-correctness P1: the manual-sync route passes req.params.integrationId VERBATIM
+  // (admin-directory.ts). `directory_integrations.id` is a uuid column, so a case-variant
+  // (e.g. uppercase) id still resolves THIS row via uuid casting — but the shared source
+  // freeze advisory lock hashes the RAW TEXT key (`hashtext(sourceSyncFreezeLockKey(id))`),
+  // so an uppercase caller would hash a DIFFERENT lock key than the transfer side's
+  // DB-canonical `source.id` and silently lose sync↔freeze mutual exclusion (a freeze
+  // committing after the entry check could race this sync's local apply). Canonicalize to
+  // the DB-read-back id here, and use it for EVERYTHING downstream: entry freeze check,
+  // stale-run reclaim, run-lease claim, apply-txn lock, under-lock recheck, and every write.
+  const integrationId = integration.id
 
   const config = parseIntegrationConfig(integration)
   // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
@@ -3596,7 +3655,18 @@ export async function syncDirectoryIntegration(
     const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
 
     await transaction(async (client) => {
-      // T2 P1: shared source freeze lock is the FIRST operation of the local-apply transaction.
+      // T2 lock-correctness P2 (PB4-3 idiom — see local-directory-org.ts's reparent guard): the
+      // pool wrapper issues a bare BEGIN, so on a deployment where default_transaction_isolation
+      // is 'repeatable read' this transaction's snapshot would be taken by the
+      // pg_advisory_xact_lock SELECT itself — BEFORE the lock is granted — and the post-lock
+      // freeze recheck below would read a pre-freeze snapshot, missing a freeze that committed
+      // while we waited on the lock. Pin READ COMMITTED as the FIRST statement (SET TRANSACTION
+      // must precede the transaction's first query) so the recheck takes a fresh per-statement
+      // snapshot. Under the production RC default this is a no-op; its mechanism is proven in
+      // directory-source-freeze-lock-correctness.db.test.ts (RR-default pool harness).
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      // T2 P1: shared source freeze lock is the first REAL operation of the local-apply
+      // transaction (nothing but the isolation pin above may precede it).
       // Transfer create / freeze=true refreeze take the same key before writing freeze state.
       // Re-check under the lock before ANY directory upsert, absence sweep, membership rewrite,
       // identity/link write, local-user admission, group projection, deprovision, integration
@@ -4298,6 +4368,14 @@ export async function syncDirectoryIntegration(
       autoAdmissionOnboardingPackets,
     }
   } catch (error) {
+    // A freeze that linearized first is a DELIBERATE abort, not an integration failure —
+    // the apply already rolled back, so there is nothing to alert on. Take the terminal
+    // abort path (see `markSyncAbortedByFreeze`) and re-throw the error UNCHANGED, so the
+    // route's deliberate 409 mapping and the scheduler's quiet info-skip are untouched.
+    if (error instanceof DirectorySyncFrozenByTransferError) {
+      await markSyncAbortedByFreeze(runId, error.transferId)
+      throw error
+    }
     const message = readErrorMessage(error, 'Directory sync failed')
     await markSyncFailure(integrationId, runId, message)
     throw error

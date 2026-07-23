@@ -1954,6 +1954,160 @@ describe('Attendance admin regressions', () => {
     expect(card.querySelector('[data-annual-ops-error-adjust]')?.textContent || '').toContain('not an active member')
   })
 
+  // ===== OD-W5-7 comp_time balance UI leaveTypeCode parameterization =====
+  // docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md §9
+  // backlog table, decision (b): parameterize the three `leaveTypeCode='annual'` hardcodes
+  // (loadAnnualSelfBalance, loadAnnualLeaveBalance, previewAnnualAdjust) so a future caller
+  // (W5-1 comp_time UI) can request a non-annual leave-type balance through the SAME read path.
+  // No UI exists yet to drive a non-'annual' code (that wiring is W5-1's, out of scope here) —
+  // the three functions are defineExpose'd from AttendanceView.vue for this reason only; the
+  // "byte-stable" tests below still exercise the real UI triggers (mount / button clicks) with
+  // ZERO arguments to prove the default path is untouched end-to-end.
+  describe('OD-W5-7 leaveTypeCode parameterization', () => {
+    const balanceSummaryPayload = (leaveTypeCode: string, userId: string) => ({
+      ok: true,
+      data: {
+        userId,
+        summary: { leaveTypeCode, grantedMinutes: 2400, remainingMinutes: 1800, exhaustedMinutes: 600, expiredMinutes: 0 },
+        activeLots: [],
+        recentEvents: [],
+        eventLimit: 50,
+      },
+    })
+
+    // -- site 1: loadAnnualSelfBalance (self-service /me, mount auto-fetch) --
+
+    it('byte-stable: overview mount auto-fetch (zero args) issues the exact pre-parameterization /me URL', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances/me')) return jsonResponse(200, balanceSummaryPayload('annual', 'self'))
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'overview' })
+      app.mount(container!)
+      await flushUi(10)
+      const meCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.includes('/leave-balances/me'))
+      expect(meCalls).toEqual(['/api/attendance/leave-balances/me?leaveTypeCode=annual'])
+    })
+
+    it('comp_time channel: loadAnnualSelfBalance(\'comp_time\') issues the exact comp_time /me URL (mock-layer assertion)', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances/me')) {
+          const parsed = new URL(url, 'http://localhost')
+          return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'self'))
+        }
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'overview' })
+      const vm: any = app.mount(container!)
+      await flushUi(10) // let the mount-time default ('annual') auto-fetch settle first
+      vi.mocked(apiFetch).mockClear()
+      await vm.loadAnnualSelfBalance('comp_time')
+      await flushUi(4)
+      const meCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.includes('/leave-balances/me'))
+      expect(meCalls).toEqual(['/api/attendance/leave-balances/me?leaveTypeCode=comp_time'])
+    })
+
+    // -- site 2: loadAnnualLeaveBalance (admin console lookup) --
+
+    it('byte-stable: admin lookup button click (zero args) issues the exact pre-parameterization query', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u1'))
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+      await flushUi(4)
+      const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
+      const input = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
+      input.value = 'u1'
+      input.dispatchEvent(new Event('input'))
+      await flushUi(2)
+      section.querySelector<HTMLButtonElement>('.attendance__admin-actions button')!.click()
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u1&leaveTypeCode=annual'])
+    })
+
+    it('comp_time channel: loadAnnualLeaveBalance(\'comp_time\') issues the exact comp_time admin-lookup query (mock-layer assertion)', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) {
+          const parsed = new URL(url, 'http://localhost')
+          return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'u1'))
+        }
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      const vm: any = app.mount(container!)
+      await flushUi(8)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+      await flushUi(4)
+      const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
+      const input = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
+      input.value = 'u1'
+      input.dispatchEvent(new Event('input'))
+      await flushUi(2)
+      vi.mocked(apiFetch).mockClear()
+      await vm.loadAnnualLeaveBalance('comp_time')
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u1&leaveTypeCode=comp_time'])
+    })
+
+    // -- site 3: previewAnnualAdjust (manual-adjustment card, client preview) --
+
+    it('byte-stable: manual-adjust Preview click (zero args) issues the exact pre-parameterization query', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u2'))
+        if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+      const section = await openOpsSection()
+      const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+      const inputs = card.querySelectorAll<HTMLInputElement>('input')
+      inputs[0].value = 'u2'; inputs[0].dispatchEvent(new Event('input'))
+      await flushUi(2)
+      Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Preview'))!.click()
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u2&leaveTypeCode=annual'])
+    })
+
+    it('comp_time channel: previewAnnualAdjust(\'comp_time\') issues the exact comp_time preview query (mock-layer assertion)', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) {
+          const parsed = new URL(url, 'http://localhost')
+          return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'u2'))
+        }
+        if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      const vm: any = app.mount(container!)
+      await flushUi(8)
+      const section = await openOpsSection()
+      const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+      const inputs = card.querySelectorAll<HTMLInputElement>('input')
+      inputs[0].value = 'u2'; inputs[0].dispatchEvent(new Event('input'))
+      await flushUi(2)
+      vi.mocked(apiFetch).mockClear()
+      await vm.previewAnnualAdjust('comp_time')
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u2&leaveTypeCode=comp_time'])
+    })
+  })
+
   // ===== #3925 S6 bulk annual-leave balance adjustment (design-lock 2026-07-10) =====
   function addAnnualBulkAdjustTargetUser(section: HTMLElement, userId: string) {
     selectUserPicker(section, '#attendance-annual-bulk-adjust-user-picker', userId)

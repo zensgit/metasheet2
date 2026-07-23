@@ -14393,6 +14393,78 @@ async function resolveWorkContext(options) {
   return context
 }
 
+function getPunchShiftWindow(context, workDate, fallbackTimezone) {
+  const rule = context?.rule
+  const workStartTime = normalizeTimeString(rule?.workStartTime ?? rule?.work_start_time)
+  const workEndTime = normalizeTimeString(rule?.workEndTime ?? rule?.work_end_time)
+  if (!workStartTime || !workEndTime) return null
+  const timezone = typeof rule?.timezone === 'string' && rule.timezone.trim()
+    ? rule.timezone.trim()
+    : fallbackTimezone
+  const isOvernight = resolveOvernightFlag(rule?.isOvernight ?? rule?.is_overnight, workStartTime, workEndTime)
+  const endDate = isOvernight ? addDaysToDateKey(workDate, 1) : workDate
+  const startAt = buildZonedDate(workDate, workStartTime, timezone)
+  const endAt = buildZonedDate(endDate, workEndTime, timezone)
+  if (!startAt || !endAt || endAt.getTime() <= startAt.getTime()) return null
+  return { startAt, endAt, timezone, isOvernight }
+}
+
+function isPunchWithinShiftWindow(occurredAt, context, workDate, fallbackTimezone) {
+  const window = getPunchShiftWindow(context, workDate, fallbackTimezone)
+  if (!window || !(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) return false
+  const occurredAtMs = occurredAt.getTime()
+  return occurredAtMs >= window.startAt.getTime() && occurredAtMs <= window.endAt.getTime()
+}
+
+async function resolvePunchWorkDateByShiftWindow(options) {
+  const {
+    db,
+    orgId,
+    userId,
+    occurredAt,
+    workDate,
+    context,
+    defaultRule,
+    timezone,
+  } = options
+
+  // A punch shortly after local midnight may still belong to the previous day's
+  // overnight shift. Evaluate both date candidates against their actual shift
+  // windows instead of letting the calendar date alone decide the attendance row.
+  if (!userId || !workDate || !(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) {
+    return { workDate, context, timezone }
+  }
+
+  // Prefer the calendar day's own matching shift when windows overlap (or when
+  // the punch is simply a normal same-day punch). Skip the previous-day lookup.
+  if (isPunchWithinShiftWindow(occurredAt, context, workDate, timezone)) {
+    return { workDate, context, timezone }
+  }
+
+  const previousWorkDate = addDaysToDateKey(workDate, -1)
+  if (!previousWorkDate) return { workDate, context, timezone }
+
+  const previousContext = await resolveWorkContext({
+    db,
+    orgId,
+    userId,
+    workDate: previousWorkDate,
+    defaultRule,
+  })
+  const previousWindow = getPunchShiftWindow(previousContext, previousWorkDate, timezone)
+  // Only a genuine overnight previous shift may claim a post-midnight punch.
+  if (!previousWindow?.isOvernight) return { workDate, context, timezone }
+  if (!isPunchWithinShiftWindow(occurredAt, previousContext, previousWorkDate, timezone)) {
+    return { workDate, context, timezone }
+  }
+
+  return {
+    workDate: previousWorkDate,
+    context: previousContext,
+    timezone: previousWindow.timezone ?? timezone,
+  }
+}
+
 async function loadHolidayMapByDates(db, orgId, workDates) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   if (!Array.isArray(workDates) || workDates.length === 0) return new Map()
@@ -21333,6 +21405,11 @@ module.exports = {
   // exported nested one bag down, so the top-level optional call silently no-op'd
   // and the 60s settings cache leaked across tests in the shared attendance suite.
   resetAttendanceSettingsCacheForTests,
+  __attendanceLivePunchWorkDateForTests: {
+    getPunchShiftWindow,
+    isPunchWithinShiftWindow,
+    resolvePunchWorkDateByShiftWindow,
+  },
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
@@ -25411,6 +25488,20 @@ module.exports = {
               })
             }
           }
+
+          const punchWorkDate = await resolvePunchWorkDateByShiftWindow({
+            db,
+            orgId,
+            userId,
+            occurredAt,
+            workDate,
+            context,
+            defaultRule: baseRule,
+            timezone,
+          })
+          workDate = punchWorkDate.workDate
+          context = punchWorkDate.context
+          timezone = punchWorkDate.timezone
 
           // Punch-policy S1 (#2203): block a punch on a day with no schedule when the org opted into
           // unscheduled.mode='block'. workDate is the FINAL (tz-recalculated) date. Default 'allow' and
@@ -42736,8 +42827,13 @@ module.exports = {
          WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'`,
         [orgId, userId, leaveTypeCode]
       )
+      // W5-0 (OD-W5-9=(a), design-lock 2026-07-22 §2/§7): project `overtime_source` — the column has
+      // been on `attendance_leave_balances` since v1-1b (`zzzz20260624160000`), but this SELECT never
+      // read it, so per-source bank provenance was invisible even to admin. Purely additive: legacy
+      // NULLs pass through unchanged (no per-source lot is fabricated a value); every existing key
+      // above is untouched (compat regression: `attendance-plugin.test.ts` ④/年假 L5a cases).
       const activeLots = await db.query(
-        `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status, granted_at, expires_at
+        `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status, granted_at, expires_at, overtime_source
          FROM attendance_leave_balances
          WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'
          ORDER BY expires_at ASC NULLS LAST, granted_at ASC, id ASC`,

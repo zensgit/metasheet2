@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
@@ -9,6 +9,11 @@ import { Pool } from 'pg'
 import http from 'http'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
 import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
+import {
+  snapshotAttendanceSettingsRow,
+  restoreAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
 
 const require = createRequire(import.meta.url)
 type AttendancePluginTestModule = {
@@ -112,6 +117,12 @@ function localDateKeyOffset(days: number): string {
 
 function utcDateKeyOffset(days: number): string {
   const date = new Date()
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
+}
+
+function addDaysToDateKeyForTest(dateKey: string, days: number): string {
+  const date = new Date(`${dateKey}T00:00:00.000Z`)
   date.setUTCDate(date.getUTCDate() + days)
   return date.toISOString().slice(0, 10)
 }
@@ -295,6 +306,13 @@ attendanceIntegrationDescribe(
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
   let importUploadDir: string | undefined
+  // Shared-DB isolation for the deployment-wide `system_configs` 'attendance.settings' row: this
+  // file has ~15 PUT /api/attendance/settings sites and is the FIRST attendance suite in
+  // plugin-tests.yml's shared step — any state it leaks poisons every later settings-sensitive
+  // suite (recorded W4 finding: shiftCompliance bleeding into attendance-schedule-dispatch).
+  // Snapshot once, restore the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
+  let settingsRowPool: Pool | undefined
+  let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -373,6 +391,9 @@ attendanceIntegrationDescribe(
       await pool.end()
     }
 
+    settingsRowPool = new Pool({ connectionString: dbUrl, max: 1 })
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(settingsRowPool)
+
     // Important: load MetaSheetServer only after DATABASE_URL is set,
     // since the DB pool is initialized during module import.
     const { MetaSheetServer } = await import('../../src/index')
@@ -400,7 +421,21 @@ attendanceIntegrationDescribe(
     getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.()
   })
 
+  afterEach(async () => {
+    // Exact-restore the settings row after EVERY test (including failed ones): a test that PUT
+    // settings and then failed before its own in-test restore must not leak state into the next
+    // test here — or into any later suite sharing this Postgres. The beforeEach cache reset above
+    // then makes the next test actually re-read the restored row instead of a primed cache.
+    if (settingsRowPool) {
+      await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot)
+    }
+  })
+
   afterAll(async () => {
+    if (settingsRowPool) {
+      await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot).catch(() => undefined)
+      await settingsRowPool.end().catch(() => undefined)
+    }
     if (server && (server as any).stop) {
       await server.stop()
     }
@@ -5581,6 +5616,59 @@ attendanceIntegrationDescribe(
     }
   })
 
+  // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §2/§7, OD-W5-9=(a)): the L5a
+  // activeLots SELECT now projects `overtime_source` — purely additive (only the new key is
+  // asserted here; every OTHER key's presence/values are already covered by the L5a tests above,
+  // which stay green unmodified — proving this is a pure compatibility extension, not a behaviour
+  // change). A non-null value round-trips on BOTH hosts (admin + /me); a legacy NULL-source lot
+  // (pre-v1-1b, or any lot never tagged) stays honestly absent/null — never fabricated.
+  it('④/年假 L5a + /me — overtime_source projection (OD-W5-9): non-null value round-trips on both hosts; legacy NULL lot stays null', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-w50-admin-${runSuffix}`
+    const meId = `al-w50-me-${runSuffix}`
+    const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    const meTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meId}&roles=employee&perms=attendance:read`)
+    const meToken = (meTokenRes.body as { token?: string } | undefined)?.token
+    if (!adminToken || !meToken) { await pool.end().catch(() => undefined); return }
+    try {
+      const taggedLot = (await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, overtime_source)
+         VALUES ('default',$1,'comp_time',480,480,'overtime_conversion',$2,'active','2026-01-01','workday') RETURNING id`,
+        [meId, `w50:${runSuffix}:tagged`],
+      )).rows[0].id
+      const legacyLot = (await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+         VALUES ('default',$1,'comp_time',240,240,'overtime_conversion',$2,'active','2026-01-01') RETURNING id`,
+        [meId, `w50:${runSuffix}:legacy`],
+      )).rows[0].id
+
+      const adminRes = await requestJson(
+        `${baseUrl}/api/attendance/leave-balances?userId=${encodeURIComponent(meId)}&leaveTypeCode=comp_time`,
+        { headers: { Authorization: `Bearer ${adminToken}` } },
+      )
+      expect(adminRes.status, JSON.stringify(adminRes.body)).toBe(200)
+      const adminLots = (adminRes.body as { data?: { activeLots?: Array<{ id: string; overtime_source: string | null }> } })?.data?.activeLots ?? []
+      expect(adminLots.find((l) => l.id === taggedLot)?.overtime_source).toBe('workday')
+      expect(adminLots.find((l) => l.id === legacyLot)?.overtime_source ?? null).toBeNull()
+
+      const meRes = await requestJson(
+        `${baseUrl}/api/attendance/leave-balances/me?leaveTypeCode=comp_time`,
+        { headers: { Authorization: `Bearer ${meToken}` } },
+      )
+      expect(meRes.status, JSON.stringify(meRes.body)).toBe(200)
+      const meLots = (meRes.body as { data?: { activeLots?: Array<{ id: string; overtime_source: string | null }> } })?.data?.activeLots ?? []
+      expect(meLots.find((l) => l.id === taggedLot)?.overtime_source).toBe('workday')
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = $1`, [meId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('attendance rules /me — returns a token-subject rule summary, rejects overrides, and does not leak admin settings', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -8324,6 +8412,358 @@ attendanceIntegrationDescribe(
       expect(recordRows[0]?.status).toBe('normal')
     } finally {
       await pool.end().catch(() => undefined)
+    }
+  })
+
+  it('anchors live overnight check-in/out punches to one normal work_date D record (staging 22:00-06:00)', async () => {
+    if (!baseUrl) return
+
+    // Staging reproduction: Asia/Shanghai 22:00–06:00 on day D; check-in D 22:05 and
+    // check-out D+1 05:55 must both store work_date=D and yield one 470-minute normal row
+    // (calendar-date anchoring previously split them into two partial rows).
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-live-overnight-${runSuffix}`
+    const workDate = utcDateKeyOffset(-3)
+    const nextDate = addDaysToDateKeyForTest(workDate, 1)
+    const firstInAt = new Date(`${workDate}T22:05:00+08:00`).toISOString()
+    const lastOutAt = new Date(`${nextDate}T05:55:00+08:00`).toISOString()
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    let shiftId: string | undefined
+    const pool = new Pool({ connectionString: attendanceIntegrationDbUrl })
+
+    try {
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Live overnight ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '22:00',
+          end_time: '06:00',
+          is_overnight: true,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(shiftRes.status).toBe(201)
+      shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) return
+
+      const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userId, shiftId, startDate: workDate, isActive: true }),
+      })
+      expect(assignmentRes.status).toBe(201)
+
+      const punchInRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          eventType: 'check_in',
+          occurredAt: firstInAt,
+          timezone: 'Asia/Shanghai',
+          source: 'integration-live-overnight',
+          location: { lat: 0, lng: 0 },
+        }),
+      })
+      expect(punchInRes.status).toBe(200)
+
+      const punchOutRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          eventType: 'check_out',
+          occurredAt: lastOutAt,
+          timezone: 'Asia/Shanghai',
+          source: 'integration-live-overnight',
+          location: { lat: 0, lng: 0 },
+        }),
+      })
+      expect(punchOutRes.status).toBe(200)
+
+      const events = await pool.query(
+        `SELECT work_date::text, event_type
+           FROM attendance_events
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY occurred_at`,
+        [userId, 'default']
+      )
+      expect(events.rows).toEqual([
+        { work_date: workDate, event_type: 'check_in' },
+        { work_date: workDate, event_type: 'check_out' },
+      ])
+
+      const records = await pool.query(
+        `SELECT work_date::text, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status
+           FROM attendance_records
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY work_date`,
+        [userId, 'default']
+      )
+      expect(records.rows).toHaveLength(1)
+      expect(records.rows[0]?.work_date).toBe(workDate)
+      expect(records.rows[0]?.first_in_at?.toISOString()).toBe(firstInAt)
+      expect(records.rows[0]?.last_out_at?.toISOString()).toBe(lastOutAt)
+      expect(Number(records.rows[0]?.work_minutes)).toBe(470)
+      expect(Number(records.rows[0]?.late_minutes)).toBe(0)
+      expect(Number(records.rows[0]?.early_leave_minutes)).toBe(0)
+      expect(records.rows[0]?.status).toBe('normal')
+    } finally {
+      await pool.query('DELETE FROM attendance_requests WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (shiftId) {
+        await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1 AND shift_id = $2', [userId, shiftId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+      }
+      await pool.end()
+    }
+  })
+
+  it('keeps non-overnight live punches on the calendar work_date (no overnight re-anchor regression)', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-live-dayshift-${runSuffix}`
+    const workDate = utcDateKeyOffset(-3)
+    const firstInAt = new Date(`${workDate}T09:05:00+08:00`).toISOString()
+    const lastOutAt = new Date(`${workDate}T17:55:00+08:00`).toISOString()
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    let shiftId: string | undefined
+    const pool = new Pool({ connectionString: attendanceIntegrationDbUrl })
+
+    try {
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Live day shift ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '09:00',
+          end_time: '18:00',
+          is_overnight: false,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(shiftRes.status).toBe(201)
+      shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) return
+
+      const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userId, shiftId, startDate: workDate, isActive: true }),
+      })
+      expect(assignmentRes.status).toBe(201)
+
+      for (const [eventType, occurredAt] of [
+        ['check_in', firstInAt],
+        ['check_out', lastOutAt],
+      ] as const) {
+        const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            eventType,
+            occurredAt,
+            timezone: 'Asia/Shanghai',
+            source: 'integration-live-dayshift',
+            location: { lat: 0, lng: 0 },
+          }),
+        })
+        expect(punchRes.status).toBe(200)
+      }
+
+      const events = await pool.query(
+        `SELECT work_date::text, event_type
+           FROM attendance_events
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY occurred_at`,
+        [userId, 'default']
+      )
+      expect(events.rows).toEqual([
+        { work_date: workDate, event_type: 'check_in' },
+        { work_date: workDate, event_type: 'check_out' },
+      ])
+
+      const records = await pool.query(
+        `SELECT work_date::text, first_in_at, last_out_at, work_minutes, status
+           FROM attendance_records
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY work_date`,
+        [userId, 'default']
+      )
+      expect(records.rows).toHaveLength(1)
+      expect(records.rows[0]?.work_date).toBe(workDate)
+      expect(records.rows[0]?.first_in_at?.toISOString()).toBe(firstInAt)
+      expect(records.rows[0]?.last_out_at?.toISOString()).toBe(lastOutAt)
+      expect(Number(records.rows[0]?.work_minutes)).toBe(530)
+      expect(records.rows[0]?.status).toBe('normal')
+    } finally {
+      await pool.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (shiftId) {
+        await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1 AND shift_id = $2', [userId, shiftId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+      }
+      await pool.end()
+    }
+  })
+
+  it('prefers current-day matching shift when overnight previous window overlaps post-midnight', async () => {
+    if (!baseUrl) return
+
+    // D overnight 22:00–06:00 + D+1 morning 06:00–14:00: a punch at the exact
+    // shared boundary matches both windows. Current day must win.
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-live-overlap-${runSuffix}`
+    const overnightDate = utcDateKeyOffset(-3)
+    const morningDate = addDaysToDateKeyForTest(overnightDate, 1)
+    const overlapPunchAt = new Date(`${morningDate}T06:00:00+08:00`).toISOString()
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    let overnightShiftId: string | undefined
+    let morningShiftId: string | undefined
+    const pool = new Pool({ connectionString: attendanceIntegrationDbUrl })
+
+    try {
+      const overnightShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Overlap overnight ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '22:00',
+          end_time: '06:00',
+          is_overnight: true,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(overnightShiftRes.status).toBe(201)
+      overnightShiftId = (overnightShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(overnightShiftId).toBeTruthy()
+      if (!overnightShiftId) return
+
+      const morningShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Overlap morning ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '06:00',
+          end_time: '14:00',
+          is_overnight: false,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(morningShiftRes.status).toBe(201)
+      morningShiftId = (morningShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(morningShiftId).toBeTruthy()
+      if (!morningShiftId) return
+
+      const overnightAssign = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId,
+          shiftId: overnightShiftId,
+          startDate: overnightDate,
+          endDate: overnightDate,
+          isActive: true,
+        }),
+      })
+      expect(overnightAssign.status).toBe(201)
+
+      const morningAssign = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId,
+          shiftId: morningShiftId,
+          startDate: morningDate,
+          endDate: morningDate,
+          isActive: true,
+        }),
+      })
+      expect(morningAssign.status).toBe(201)
+
+      const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          eventType: 'check_in',
+          occurredAt: overlapPunchAt,
+          timezone: 'Asia/Shanghai',
+          source: 'integration-live-overlap',
+          location: { lat: 0, lng: 0 },
+        }),
+      })
+      expect(punchRes.status).toBe(200)
+
+      const events = await pool.query(
+        `SELECT work_date::text, event_type
+           FROM attendance_events
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY occurred_at`,
+        [userId, 'default']
+      )
+      expect(events.rows).toEqual([
+        { work_date: morningDate, event_type: 'check_in' },
+      ])
+    } finally {
+      await pool.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (overnightShiftId) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [overnightShiftId]).catch(() => undefined)
+      }
+      if (morningShiftId) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [morningShiftId]).catch(() => undefined)
+      }
+      await pool.end()
     }
   })
 

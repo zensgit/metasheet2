@@ -1434,6 +1434,50 @@
               </div>
             </div>
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.setup)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.setup)"
+              data-attendance-setup-readiness-section
+            >
+              <AttendanceSetupReadiness
+                :tr="tr"
+                :steps="setupReadinessSteps"
+                :summary="setupReadinessSummary"
+                :load-state="setupReadinessState"
+                :viewer-is-platform-admin="setupViewerIsPlatformAdmin"
+                :pending-template-id="setupTemplatePendingTemplateId"
+                @select-section="selectAdminSection"
+                @open-template="openSetupTemplate"
+                @reload="loadSetupReadiness(normalizedOrgId())"
+              />
+              <!-- W4-2 (§5.2): template-prefill confirm/undo dialog. The forms live in THIS host
+                   (same-host prefill), so the orchestration state (snapshot/pending) lives here. -->
+              <AttendanceSetupTemplatePrefillDialog
+                v-if="setupTemplateDialog && setupTemplateDialogTemplate"
+                :tr="tr"
+                :stage="setupTemplateDialog.stage"
+                :template="setupTemplateDialogTemplate"
+                :plan="setupTemplatePlan"
+                :current-group="attendanceGroupForm"
+                :current-shift="shiftForm"
+                :pristine-group="setupTemplatePristineGroup"
+                :pristine-shift="setupTemplatePristineShift"
+                :group-editing-id="attendanceGroupEditingId"
+                :shift-editing-id="shiftEditingId"
+                :org-timezone="setupTemplateDialog.orgTimezone"
+                :timezone="setupTemplateDialog.timezoneChoice"
+                :timezone-options="timezoneOptions"
+                :shift-preset-key="setupTemplateDialog.shiftPresetKey"
+                @update:timezone="setupTemplateDialog.timezoneChoice = $event"
+                @update:shift-preset-key="setupTemplateDialog.shiftPresetKey = $event"
+                @apply="applySetupTemplate"
+                @cancel="cancelSetupTemplateConfirm"
+                @undo="undoSetupTemplate"
+                @close="closeSetupTemplateDialogKeepPrefill"
+                @navigate="navigateSetupTemplate"
+              />
+            </div>
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes)"
@@ -9712,6 +9756,17 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
+import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
+import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
+import { attendanceSetupPrefillPending } from './attendance/attendanceSetupPrefillLeaveGuard'
+import {
+  buildAttendanceSetupTemplatePrefillPlan,
+  captureAttendanceSetupPrefillSnapshot,
+  getAttendanceSetupTemplate,
+  resolveAttendanceSetupOrgTimezone,
+  type AttendanceSetupPrefillSnapshot,
+  type AttendanceSetupTemplateId,
+} from './attendance/attendanceSetupTemplates'
 import AttendanceCalendarPolicyQuickAdd from './attendance/AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
@@ -9727,7 +9782,7 @@ import {
   toPayloadSteps as toApprovalPayloadSteps,
   type AttendanceApprovalStep as AttendanceApprovalStepModel,
 } from './attendance/attendanceApprovalSteps'
-import { useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
+import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
@@ -9840,6 +9895,7 @@ import {
   useAttendanceAdminRail,
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
+import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
   applyPayrollSummaryFieldsToConfig,
   buildPayrollSummaryFieldOptionsFromReportFields,
@@ -14396,6 +14452,263 @@ function hasExplicitAdminSectionTarget(): boolean {
 const adminTaskHomeOpen = ref(!hasExplicitAdminSectionTarget())
 const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHomeOpen.value)
 
+// W4-1 (Wave 4 onboarding design-lock §6/§9 W4-1): seven-step setup-readiness wizard shell.
+// The composable owns fetch/state; this parent only wires load triggers + canonical navigation
+// (charter §6.2 "暂留父层: section 权限过滤、active id、数据加载").
+const {
+  state: setupReadinessState,
+  steps: setupReadinessSteps,
+  summary: setupReadinessSummary,
+  needsAttention: setupReadinessNeedsAttention,
+  lastOrgId: setupReadinessLastOrgId,
+  loadReadiness: loadSetupReadiness,
+} = useAttendanceSetupReadiness()
+
+// §3① role contract (W4-1 强制): the step① remediation branches on the viewer being a PLATFORM
+// admin (the /api/admin/users surface is ensurePlatformAdmin-gated). Same client-side signal as
+// UserManagementView.vue's `adminAllowed` (useAuth().hasAdminAccess(), evaluated once at setup —
+// role claims are session-stable). Fail-closed: if the signal is unavailable (e.g. a partial
+// useAuth test double), the viewer is treated as a DELEGATED admin — contact-your-admin copy,
+// never a 403-bound entry.
+const setupViewerIsPlatformAdmin = typeof auth.hasAdminAccess === 'function' ? auth.hasAdminAccess() : false
+
+const setupSectionActive = computed(() =>
+  showAdminSectionWorkspace.value && adminActiveSectionId.value === ATTENDANCE_ADMIN_SECTION_IDS.setup,
+)
+
+// Load triggers (OD-W4-7: readiness is recomputed on every entry — no persisted wizard state):
+// entering the setup section always re-derives; opening the admin task home loads so the §6.1
+// readiness-derived "未完成" hint can render (never visit-history based). Charter §8.3 org 切换:
+// the badge/matrix must track the CURRENT org — a load fires whenever a readiness-consuming
+// surface (wizard section or task home) is on screen and the org changes, and re-opening the
+// task home refreshes when the loaded org no longer matches (org changed while it was closed).
+const setupTaskHomeVisible = computed(() =>
+  showAdmin.value && adminTaskHomeOpen.value && !adminForbidden.value,
+)
+
+watch(setupSectionActive, (active) => {
+  if (active) void loadSetupReadiness(normalizedOrgId())
+}, { immediate: true })
+
+watch(setupTaskHomeVisible, (open) => {
+  if (!open) return
+  const target = resolveAttendanceReadinessOrgId(normalizedOrgId())
+  if (shouldReloadSetupReadinessOnSurfaceOpen(setupReadinessState.value, setupReadinessLastOrgId.value, target)) {
+    void loadSetupReadiness(normalizedOrgId())
+  }
+}, { immediate: true })
+
+watch(orgId, () => {
+  if (setupSectionActive.value || setupTaskHomeVisible.value) void loadSetupReadiness(normalizedOrgId())
+})
+
+// ---------------------------------------------------------------------------
+// W4-2 (design-lock §5/§9 W4-2): template-prefill orchestration. The four templates are FE
+// constants (attendanceSetupTemplates.ts); this host owns the §5.2 contract end to end:
+//   open (snapshot + timezone resolution) → confirm dialog (affected fields + dirty warning +
+//   required timezone choice) → apply (write BOTH forms, clear editing ids so a save CREATES
+//   instead of PUT-overwriting a selected record) → undo (byte-identical snapshot restore) —
+// and the OD-W4-7 unsaved-prefill leave warning. The wizard performs no request anywhere in
+// this flow (R3/R4): every write stays each canonical form's own save button.
+// ---------------------------------------------------------------------------
+
+const setupTemplateDialog = ref<null | {
+  stage: 'confirm' | 'applied'
+  templateId: AttendanceSetupTemplateId
+  shiftPresetKey: string | null
+  timezoneChoice: string
+  orgTimezone: string | null
+  snapshot: AttendanceSetupPrefillSnapshot
+}>(null)
+
+// Applied-but-unsaved prefill tracker (per target form). Cleared by: undo (both), a successful
+// group save, and each form's reset (reset discards the prefilled content, so the leave warning
+// must not keep firing for content that no longer exists).
+const setupTemplatePrefillPending = ref<{
+  group: boolean
+  shift: boolean
+  templateId: AttendanceSetupTemplateId | null
+}>({ group: false, shift: false, templateId: null })
+
+const setupTemplatePendingTemplateId = computed<AttendanceSetupTemplateId | null>(() =>
+  setupTemplatePrefillPending.value.group || setupTemplatePrefillPending.value.shift
+    ? setupTemplatePrefillPending.value.templateId
+    : null,
+)
+
+const setupTemplateDialogTemplate = computed(() =>
+  setupTemplateDialog.value ? getAttendanceSetupTemplate(setupTemplateDialog.value.templateId) : null,
+)
+
+const setupTemplatePlan = computed(() => {
+  const dialog = setupTemplateDialog.value
+  if (!dialog) return null
+  return buildAttendanceSetupTemplatePrefillPlan({
+    templateId: dialog.templateId,
+    shiftPresetKey: dialog.shiftPresetKey,
+    timezone: dialog.timezoneChoice,
+    pickLabel: (label) => tr(label.en, label.zh),
+  })
+})
+
+// Pristine baselines for the dialog's "target form already has content" warning — the exact
+// values resetAttendanceGroupForm/resetShiftForm write (structural mirror; a drift here only
+// affects the warning, never the always-on confirm gate).
+const setupTemplatePristineGroup = {
+  name: '',
+  code: '',
+  timezone: defaultTimezone,
+  ruleSetId: '',
+  attendanceType: 'fixed_shift',
+  description: '',
+}
+const setupTemplatePristineShift = {
+  name: 'Standard Shift',
+  timezone: defaultTimezone,
+  workStartTime: '09:00',
+  workEndTime: '18:00',
+  lateGraceMinutes: 10,
+  earlyGraceMinutes: 10,
+  roundingMinutes: 5,
+  workingDays: '1,2,3,4,5',
+}
+
+function openSetupTemplate(templateId: AttendanceSetupTemplateId): void {
+  const template = getAttendanceSetupTemplate(templateId)
+  if (!template) return
+  // §5.2④: the org's explicit timezone = the single distinct explicit value across this org's
+  // saved attendance groups (each was explicitly part of a saved group payload). None/ambiguous ⇒
+  // null ⇒ the dialog REQUIRES a user choice; the browser timezone is never used as the org zone.
+  const orgTimezone = resolveAttendanceSetupOrgTimezone(
+    attendanceGroups.value.map((group) => group.timezone),
+  )
+  setupTemplateDialog.value = {
+    stage: 'confirm',
+    templateId,
+    shiftPresetKey: template.shiftPresets[0]?.key ?? null,
+    timezoneChoice: orgTimezone ?? '',
+    orgTimezone,
+    // §5.2② snapshot BEFORE any write — exactly the state apply mutates.
+    snapshot: captureAttendanceSetupPrefillSnapshot({
+      group: attendanceGroupForm,
+      shift: shiftForm,
+      groupEditingId: attendanceGroupEditingId.value,
+      shiftEditingId: shiftEditingId.value,
+    }),
+  }
+}
+
+function applySetupTemplate(): void {
+  const dialog = setupTemplateDialog.value
+  const plan = setupTemplatePlan.value
+  if (!dialog || !plan || dialog.stage !== 'confirm') return
+  // Create-new posture: never leave an existing record selected — a follow-up save must POST a
+  // new resource, not PUT-overwrite whichever record happened to be loaded into the form.
+  attendanceGroupEditingId.value = null
+  attendanceGroupForm.name = plan.group.name
+  attendanceGroupForm.attendanceType = plan.group.attendanceType as AttendanceGroupType
+  attendanceGroupForm.timezone = plan.group.timezone
+  if (plan.shift) {
+    shiftEditingId.value = null
+    shiftForm.name = plan.shift.name
+    shiftForm.timezone = plan.shift.timezone
+    shiftForm.workStartTime = plan.shift.workStartTime
+    shiftForm.workEndTime = plan.shift.workEndTime
+    shiftForm.lateGraceMinutes = plan.shift.lateGraceMinutes
+    shiftForm.earlyGraceMinutes = plan.shift.earlyGraceMinutes
+    shiftForm.roundingMinutes = plan.shift.roundingMinutes
+    shiftForm.workingDays = plan.shift.workingDays
+  }
+  setupTemplatePrefillPending.value = {
+    group: true,
+    shift: Boolean(plan.shift),
+    templateId: dialog.templateId,
+  }
+  dialog.stage = 'applied'
+}
+
+function cancelSetupTemplateConfirm(): void {
+  // Confirm-stage cancel: nothing was applied, nothing to restore.
+  setupTemplateDialog.value = null
+}
+
+function closeSetupTemplateDialogKeepPrefill(): void {
+  // Applied-stage side-effect-free close (a11y contract): keep the prefilled forms AND the
+  // pending-unsaved tracker (leave warnings stay armed); only the dialog and its undo snapshot
+  // are released — exactly what the dialog's undo-scope copy promises.
+  setupTemplateDialog.value = null
+}
+
+function undoSetupTemplate(): void {
+  const dialog = setupTemplateDialog.value
+  if (!dialog) return
+  const snapshot = dialog.snapshot
+  attendanceGroupEditingId.value = snapshot.groupEditingId
+  attendanceGroupForm.name = snapshot.group.name
+  attendanceGroupForm.code = snapshot.group.code
+  attendanceGroupForm.timezone = snapshot.group.timezone
+  attendanceGroupForm.ruleSetId = snapshot.group.ruleSetId
+  attendanceGroupForm.attendanceType = snapshot.group.attendanceType as AttendanceGroupType
+  attendanceGroupForm.description = snapshot.group.description
+  shiftEditingId.value = snapshot.shiftEditingId
+  shiftForm.name = snapshot.shift.name
+  shiftForm.timezone = snapshot.shift.timezone
+  shiftForm.workStartTime = snapshot.shift.workStartTime
+  shiftForm.workEndTime = snapshot.shift.workEndTime
+  shiftForm.lateGraceMinutes = snapshot.shift.lateGraceMinutes
+  shiftForm.earlyGraceMinutes = snapshot.shift.earlyGraceMinutes
+  shiftForm.roundingMinutes = snapshot.shift.roundingMinutes
+  shiftForm.workingDays = snapshot.shift.workingDays
+  setupTemplatePrefillPending.value = { group: false, shift: false, templateId: null }
+  setupTemplateDialog.value = null
+}
+
+function navigateSetupTemplate(sectionId: string): void {
+  setupTemplateDialog.value = null
+  selectAdminSection(sectionId)
+}
+
+function clearSetupTemplatePrefillPending(form: 'group' | 'shift'): void {
+  const pending = setupTemplatePrefillPending.value
+  if (!pending[form]) return
+  const next = { ...pending, [form]: false }
+  if (!next.group && !next.shift) next.templateId = null
+  setupTemplatePrefillPending.value = next
+}
+
+// OD-W4-7② 未保存离开提示: while an applied template prefill is unsaved, THREE distinct ways of
+// leaving can lose it (the prefilled forms are in-memory only):
+//   1. page unload/refresh — the window beforeunload handler below;
+//   2. leaving the /attendance route (vue-router navigation to another top-level view) — covered
+//      by AttendanceExperienceView's onBeforeRouteLeave, which consults the shared
+//      attendanceSetupPrefillPending signal synced here;
+//   3. attendance-shell top-tab switches (overview/reports/admin/import swap `component :is`,
+//      unmounting this host) — AttendanceExperienceView.selectTab consults the same signal.
+// In-host admin SECTION switches lose nothing (sections are v-show in this host), so they need no
+// confirm. Template selection is never persisted (no localStorage draft), so OD-W4-7③'s
+// userId+orgId storage-key requirement is N/A by construction — the spec asserts zero
+// template-related storage writes instead.
+function handleSetupTemplateBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!setupTemplatePendingTemplateId.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+watch(setupTemplatePendingTemplateId, (pendingId) => {
+  attendanceSetupPrefillPending.value = pendingId !== null
+})
+
+onMounted(() => {
+  window.addEventListener('beforeunload', handleSetupTemplateBeforeUnload)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', handleSetupTemplateBeforeUnload)
+  // Host gone ⇒ the in-memory prefill is gone too: clear the shared in-app leave signal so a
+  // stale `true` can never block navigation after this host unmounts.
+  attendanceSetupPrefillPending.value = false
+})
+
 const {
   adminSectionBinding,
   scrollToAdminSection,
@@ -14490,10 +14803,20 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
     ),
     actions: [
       {
+        // W4-1 (design-lock §6.1): first action of the people-groups group. The light
+        // "未完成" hint is readiness-derived (§6.1/OD-W4-2(c): steps ①②③⑤ non-ready;
+        // advisory ④⑥ never trigger it) — NEVER visit-history based.
+        key: 'setup-readiness',
+        label: setupReadinessNeedsAttention.value
+          ? tr('Setup readiness · incomplete', '启用准备 · 未完成')
+          : tr('Setup readiness', '启用准备'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.setup,
+        primary: true,
+      },
+      {
         key: 'attendance-groups',
         label: tr('Attendance groups', '考勤组'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
-        primary: true,
       },
       {
         key: 'group-members',
@@ -23776,11 +24099,18 @@ const annualSelfBalanceLoading = ref(false)
 const annualSelfBalanceError = ref<string | null>(null)
 const annualSelfBalanceSummary = computed(() => annualSelfBalance.value?.summary ?? null)
 
-async function loadAnnualSelfBalance(): Promise<void> {
+// OD-W5-7 (docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md
+// §9 backlog table, decision (b)): leaveTypeCode is parameterized here — default 'annual' is
+// BYTE IDENTICAL to the prior hardcoded literal for every existing (arg-less) caller — so a
+// future caller (W5-1 comp_time UI) can request a non-annual leave-type balance through the SAME
+// read path. Zero backend change: /api/attendance/leave-balances/me already accepts an optional
+// free-form leaveTypeCode and defaults to 'annual' server-side too.
+async function loadAnnualSelfBalance(leaveTypeCode: string = 'annual'): Promise<void> {
   annualSelfBalanceLoading.value = true
   annualSelfBalanceError.value = null
   try {
-    const response = await apiFetch('/api/attendance/leave-balances/me?leaveTypeCode=annual')
+    const query = buildQuery({ leaveTypeCode })
+    const response = await apiFetch(`/api/attendance/leave-balances/me?${query.toString()}`)
     if (response.status === 401 || response.status === 403) {
       annualSelfBalance.value = null
       return
@@ -23818,7 +24148,9 @@ async function loadSelfAttendanceRules(): Promise<void> {
   }
 }
 
-async function loadAnnualLeaveBalance() {
+// OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
+// byte identical to the prior hardcoded literal for every existing (arg-less) caller.
+async function loadAnnualLeaveBalance(leaveTypeCode: string = 'annual') {
   // clear any prior result up front so an empty ID / failed / 403 / errored query never leaves a stale balance
   // from a previously-queried user on screen (the view renders solely on v-if="annualBalanceData").
   annualBalanceData.value = null
@@ -23829,7 +24161,7 @@ async function loadAnnualLeaveBalance() {
   }
   annualBalanceLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId(), userId: targetUser, leaveTypeCode: 'annual' })
+    const query = buildQuery({ orgId: normalizedOrgId(), userId: targetUser, leaveTypeCode })
     const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -24100,7 +24432,9 @@ const annualAdjustError = ref<string | null>(null)
 const annualAdjustPreview = ref<{ user: string; before: number; after: number } | null>(null)
 const annualAdjustIdemKey = ref('')
 
-async function previewAnnualAdjust(): Promise<void> {
+// OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
+// byte identical to the prior hardcoded literal for every existing (arg-less) caller.
+async function previewAnnualAdjust(leaveTypeCode: string = 'annual'): Promise<void> {
   const userId = annualAdjustForm.userId.trim()
   annualAdjustError.value = null
   annualAdjustPreview.value = null
@@ -24109,7 +24443,7 @@ async function previewAnnualAdjust(): Promise<void> {
     return
   }
   try {
-    const query = buildQuery({ orgId: normalizedOrgId(), userId, leaveTypeCode: 'annual' })
+    const query = buildQuery({ orgId: normalizedOrgId(), userId, leaveTypeCode })
     const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -25571,6 +25905,9 @@ async function deleteRotationAssignment(id: string) {
 }
 
 function resetShiftForm() {
+  // W4-2: a reset discards any template-prefilled shift content (save success also lands here) —
+  // stop the unsaved-prefill leave warning for this form.
+  clearSetupTemplatePrefillPending('shift')
   shiftEditingId.value = null
   shiftForm.name = 'Standard Shift'
   shiftForm.timezone = defaultTimezone
@@ -26334,6 +26671,9 @@ async function deleteRuleSet(id: string) {
 }
 
 function resetAttendanceGroupForm() {
+  // W4-2: a reset discards any template-prefilled group content — stop the unsaved-prefill
+  // leave warning for this form.
+  clearSetupTemplatePrefillPending('group')
   attendanceGroupActiveStage.value = 'basics'
   attendanceGroupEditingId.value = null
   attendanceGroupForm.name = ''
@@ -26561,6 +26901,10 @@ async function saveAttendanceGroup() {
       throw new Error(readErrorMessage(data, tr('Failed to save attendance group', '保存考勤分组失败')))
     }
     adminForbidden.value = false
+    // W4-2: a successful group save persists the (possibly template-prefilled) content — the
+    // unsaved-prefill leave warning for this form must stop (the group save path keeps the form
+    // populated instead of resetting, so the reset-side clear never fires here).
+    clearSetupTemplatePrefillPending('group')
     const savedGroup = data.data as AttendanceGroup | undefined
     await loadAttendanceGroups()
     if (savedGroup?.id) {
@@ -28280,6 +28624,19 @@ const holidaySectionBindings = {
   saveHoliday,
   deleteHoliday,
 }
+
+// OD-W5-7 test seam ONLY (docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md
+// §9 backlog table): a <script setup> SFC cannot `export` a function for direct unit import, and there is
+// deliberately no UI to drive a non-'annual' leaveTypeCode yet (that wiring is W5-1's, out of scope here —
+// OD-W5-7=(b) independent ticket). defineExpose is the only seam that lets a spec invoke the three
+// parameterized balance functions with a non-default argument to prove the leaveTypeCode plumbing actually
+// forwards through to the outgoing query (not just that a default value exists). No template/user-facing
+// change — exposed for `apps/web/tests/attendance-admin-regressions.spec.ts` only.
+defineExpose({
+  loadAnnualSelfBalance,
+  loadAnnualLeaveBalance,
+  previewAnnualAdjust,
+})
 </script>
 
 <style scoped>

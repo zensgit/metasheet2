@@ -1520,6 +1520,30 @@
             "type": "string",
             "nullable": true
           },
+          "attendanceType": {
+            "type": "string",
+            "enum": [
+              "fixed_shift",
+              "scheduled_shift",
+              "free_time"
+            ]
+          },
+          "attendance_type": {
+            "type": "string",
+            "enum": [
+              "fixed_shift",
+              "scheduled_shift",
+              "free_time"
+            ],
+            "deprecated": true
+          },
+          "memberCount": {
+            "type": "integer"
+          },
+          "member_count": {
+            "type": "integer",
+            "deprecated": true
+          },
           "createdAt": {
             "type": "string",
             "format": "date-time",
@@ -2577,6 +2601,17 @@
           },
           "shift_id": {
             "type": "string",
+            "deprecated": true
+          },
+          "slotIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "slot_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2,
             "deprecated": true
           },
           "startDate": {
@@ -11098,6 +11133,9 @@
                   "workEndTime": {
                     "type": "string"
                   },
+                  "isOvernight": {
+                    "type": "boolean"
+                  },
                   "lateGraceMinutes": {
                     "type": "integer"
                   },
@@ -11325,6 +11363,11 @@
                   "shiftId": {
                     "type": "string"
                   },
+                  "slotIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2
+                  },
                   "startDate": {
                     "type": "string",
                     "format": "date"
@@ -11347,6 +11390,12 @@
                   "shift_id": {
                     "type": "string",
                     "description": "Legacy snake_case alias for shiftId."
+                  },
+                  "slot_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2,
+                    "description": "Legacy snake_case alias for slotIndex."
                   },
                   "start_date": {
                     "type": "string",
@@ -11466,6 +11515,11 @@
                   "shiftId": {
                     "type": "string"
                   },
+                  "slotIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2
+                  },
                   "startDate": {
                     "type": "string",
                     "format": "date"
@@ -11486,6 +11540,12 @@
                   },
                   "shift_id": {
                     "type": "string"
+                  },
+                  "slot_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2,
+                    "description": "Legacy snake_case alias for slotIndex."
                   },
                   "start_date": {
                     "type": "string",
@@ -12327,6 +12387,14 @@
                   "description": {
                     "type": "string"
                   },
+                  "attendanceType": {
+                    "type": "string",
+                    "enum": [
+                      "fixed_shift",
+                      "scheduled_shift",
+                      "free_time"
+                    ]
+                  },
                   "orgId": {
                     "type": "string"
                   }
@@ -12460,6 +12528,15 @@
                   },
                   "description": {
                     "type": "string"
+                  },
+                  "attendanceType": {
+                    "type": "string",
+                    "enum": [
+                      "fixed_shift",
+                      "scheduled_shift",
+                      "free_time"
+                    ],
+                    "description": "Accepted for parity with create; runtime rejects type changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED)."
                   },
                   "orgId": {
                     "type": "string"

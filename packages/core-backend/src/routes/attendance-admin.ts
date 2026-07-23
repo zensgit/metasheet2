@@ -7,6 +7,38 @@ import { MAX_MANAGER_CHAIN_LEVELS } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
 import { ensurePlatformAdmin } from './admin-users'
+import { isDatabaseSchemaError } from '../utils/database-errors'
+import {
+  ATTENDANCE_SETUP_READINESS_PER_STEP,
+  ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
+  computeAttendanceSetupReadinessDeliveryRuntime,
+  computeAttendanceSetupReadinessPreviewReady,
+  readAttendanceSetupReadinessOrgCounts,
+  readAttendanceSetupReadinessOrgRecipientBinding,
+  readAttendancePunchPolicyPosture,
+  runAttendanceSetupReadinessReadOnly,
+  type AttendanceSetupReadinessOrgCounts,
+  type AttendanceSetupReadinessNotify,
+  type AttendanceSetupReadinessPerStepEntry,
+  type AttendanceSetupStepId,
+  type AttendancePunchPolicyPosture,
+} from '../services/AttendanceSetupReadinessAggregate'
+import {
+  ATTENDANCE_DECISION_TRACE_NOT_FOUND,
+  buildApproverSourceTrace,
+  buildCompTimeBalanceTrace,
+  buildLateEarlyTrace,
+  buildMissingPunchTrace,
+  buildOvertimeSegmentationTrace,
+  buildTodayStatusTrace,
+  isAttendanceDecisionTraceCategory,
+  readAttendanceDecisionTraceSettingsGates,
+  runAttendanceDecisionTraceReadOnly,
+  type AttendanceDecisionTraceCategory,
+  type AttendanceDecisionTraceQueryFn,
+  type AttendanceDecisionTraceResponse,
+  type AttendanceDecisionTraceSettingsGates,
+} from '../services/AttendanceDecisionTrace'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -389,6 +421,85 @@ export async function canReadAttendanceDirectoryReadiness(
   return member.rows.length > 0
 }
 
+// ---------------------------------------------------------------------------------------------
+// W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED §3/§4/§9): seven-step setup-readiness
+// aggregate. §4.1 OD-W4-1=(a): same org-membership door as S7-5 (`canReadAttendanceDirectoryReadiness`,
+// reused verbatim), and authorization ALWAYS completes before this function is ever invoked — a
+// foreign-org 403 issues zero aggregation SQL, zero transactions (§9 W4-0-G1 case 2). Every
+// aggregation read happens inside ONE `SET TRANSACTION READ ONLY` transaction (R1 / §9 W4-0-G2);
+// the query/posture/notify computations themselves live in
+// `services/AttendanceSetupReadinessAggregate.ts` — this function only assembles them plus the
+// pre-existing `readOrgDirectoryReadiness` (S7-5) into the §4.2-locked response shape.
+// ---------------------------------------------------------------------------------------------
+
+/** Mirrors the §4.2-locked response key set EXACTLY — `directoryLinked` ... `perStep` are the
+ *  §4.2-locked 13 keys verbatim (`perStep` nested as `perStep[stepId].effectiveTime`, per the
+ *  lock's own `perStep.effectiveTime: {...}` JSON-block notation). A prior revision of this file
+ *  also carried `viewerIsPlatformAdmin` as a disclosed, not-yet-owner-ratified 14th key (P2, #4541
+ *  review) — removed: the pure discriminator module
+ *  (`apps/web/src/views/attendance/attendanceSetupReadiness.ts`) has zero consumption of it, so it
+ *  was speculative surface for the §3① role-gated remediation contract, not something this slice
+ *  was authorized to add unilaterally. W4-1, if it needs viewer-role data for that contract, gets
+ *  it via its own owner request to extend this shape — not by resurrecting this field. `scope` is
+ *  NOT a wire field (kept as code-level documentation only, per the design lock's own §4.2
+ *  illustration, which marks scope via comments rather than a runtime key). */
+export interface AttendanceSetupReadinessResponse {
+  directoryLinked: boolean
+  orgActiveMemberCount: number
+  groupCount: number
+  groupsWithMembers: number
+  shiftCount: number
+  scheduledShiftGroupCount: number
+  activeRotationRuleCount: number
+  hasRotationRules: boolean
+  approvalFlowCount: number
+  punchPolicyPosture: AttendancePunchPolicyPosture
+  notify: AttendanceSetupReadinessNotify
+  previewReady: boolean
+  perStep: Readonly<Record<AttendanceSetupStepId, AttendanceSetupReadinessPerStepEntry>>
+}
+
+/** §4.2/§4.5 deployment-scoped signal registry (code-level documentation of the design lock's own
+ *  §4.2 `// scope=...` comments, NOT a response field — see §4.2 键集 note above). Every response
+ *  key NOT listed here is org-scoped. Kept exported so a contract test can assert this list against
+ *  the design lock text rather than re-deriving it from prose each time. */
+export const ATTENDANCE_SETUP_READINESS_DEPLOYMENT_SCOPED_FIELDS = [
+  'punchPolicyPosture',
+  'notify.deliveryRuntime',
+  'notify.recipientScopeConfig',
+] as const
+
+async function buildAttendanceSetupReadiness(orgId: string): Promise<AttendanceSetupReadinessResponse> {
+  return runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+    const [directory, counts, punchPolicyPosture, orgRecipientBinding] = await Promise.all([
+      readOrgDirectoryReadiness(orgId, readOnlyQuery),
+      readAttendanceSetupReadinessOrgCounts(orgId, readOnlyQuery),
+      readAttendancePunchPolicyPosture(readOnlyQuery),
+      readAttendanceSetupReadinessOrgRecipientBinding(orgId, readOnlyQuery),
+    ])
+    const notify: AttendanceSetupReadinessNotify = {
+      deliveryRuntime: computeAttendanceSetupReadinessDeliveryRuntime(),
+      orgRecipientBinding,
+      recipientScopeConfig: ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
+    }
+    return {
+      directoryLinked: directory.hasLinkedDirectoryAccounts,
+      orgActiveMemberCount: counts.orgActiveMemberCount,
+      groupCount: counts.groupCount,
+      groupsWithMembers: counts.groupsWithMembers,
+      shiftCount: counts.shiftCount,
+      scheduledShiftGroupCount: counts.scheduledShiftGroupCount,
+      activeRotationRuleCount: counts.activeRotationRuleCount,
+      hasRotationRules: counts.activeRotationRuleCount > 0,
+      approvalFlowCount: counts.approvalFlowCount,
+      punchPolicyPosture,
+      notify,
+      previewReady: computeAttendanceSetupReadinessPreviewReady(counts),
+      perStep: ATTENDANCE_SETUP_READINESS_PER_STEP,
+    } satisfies AttendanceSetupReadinessResponse
+  })
+}
+
 export function attendanceAdminRouter(): Router {
   const r = Router()
 
@@ -419,6 +530,38 @@ export function attendanceAdminRouter(): Router {
     } catch (_error) {
       // Values-free seam: never leak raw DB / driver messages to the client.
       return jsonError(res, 500, 'DIRECTORY_READINESS_FAILED', 'Failed to load directory readiness')
+    }
+  })
+
+  // W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED §4.1 OD-W4-1=(a)): seven-step
+  // setup-readiness aggregate. Same org-membership door as S7-5 above
+  // (`canReadAttendanceDirectoryReadiness`, reused verbatim) — authorization completes BEFORE
+  // `buildAttendanceSetupReadiness` is ever called, so a foreign-org 403 issues zero aggregation
+  // SQL and opens zero transactions (§9 W4-0-G1 case 2). Response is values-free by construction
+  // (§4.2): counts, booleans, and closed enums only — never IDs, names, credentials, or raw
+  // configuration values.
+  r.get('/api/attendance-admin/setup-readiness', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      const userId = getAttendanceAdminRequestUserId(req)
+      if (!userId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for setup readiness')
+      }
+      const readiness = await buildAttendanceSetupReadiness(orgId)
+      return jsonOk(res, readiness)
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables not ready')
+      }
+      // Values-free seam: never leak raw DB / driver messages to the client.
+      return jsonError(res, 500, 'SETUP_READINESS_FAILED', 'Failed to load setup readiness')
     }
   })
 
@@ -977,6 +1120,231 @@ export function attendanceAdminRouter(): Router {
       }
     } catch (error) {
       return jsonError(res, 500, 'DELIVERY_REDELIVER_FAILED', (error as Error)?.message || 'Failed to redeliver notification')
+    }
+  })
+
+  // -----------------------------------------------------------------------------------------------
+  // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §3/§4/§9 — see
+  // docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md): six
+  // read-only decision-trace endpoints, DUAL-HOSTED per §4.1 (owner terminal-review P2-1):
+  //   - admin:  GET /api/attendance-admin/decision-trace  — inside the router-level
+  //             `rbacGuard('attendance','admin')` (`:492` above) + delegated-admin org-membership
+  //             door (`canReadAttendanceDirectoryReadiness`, reused verbatim, S7-5/W4-0 precedent).
+  //   - self:   GET /api/attendance/decision-trace         — deliberately registered under a path
+  //             that does NOT start with `/api/attendance-admin`, so `r.use('/api/attendance-admin',
+  //             rbacGuard('attendance','admin'))` above never applies to it (Express `router.use`
+  //             is a path-PREFIX match). Guarded instead by `rbacGuard('attendance','read')` — the
+  //             existing self-service permission (`ATTENDANCE_SELF_SERVICE_PERMISSIONS`,
+  //             `auth/AuthService.ts:57`). `user` is ALWAYS the token subject
+  //             (`getAttendanceAdminRequestUserId`, same helper as the admin host) — a `userId`
+  //             query parameter is REJECTED outright (400), never silently ignored (§4.1 "绝不接受
+  //             userId 参数" — silent-ignore would itself be a contract bug, same posture as hard
+  //             rule 3's silent-fallback ban).
+  //
+  // Evidence-chain construction lives entirely in `services/AttendanceDecisionTrace.ts` — this
+  // block is authorization + org resolution + thin dispatch only (§4.1: "every trace SQL" only
+  // fires AFTER authorization/org-resolution passes — `runAttendanceDecisionTraceReadOnly` is
+  // invoked strictly after every 400/401/403 branch below returns, so a rejected request opens
+  // ZERO trace SQL / ZERO transactions, W4-0-G1 case 2 precedent, §9 W5-0-G7).
+  // -----------------------------------------------------------------------------------------------
+
+  const ATTENDANCE_DECISION_TRACE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+  interface AttendanceDecisionTraceParsedQuery {
+    category: AttendanceDecisionTraceCategory
+    workDate?: string
+    requestId?: string
+    instanceId?: string
+  }
+
+  // NOTE: `strict`/`strictNullChecks` is OFF in this package's tsconfig (`packages/core-backend/
+  // tsconfig.json`), under which TS does NOT narrow a `{ok:true;value}|{ok:false;code;message}`
+  // discriminated union on a plain `if (!parsed.ok)` check (verified empirically — the boolean-
+  // literal discriminant only narrows under `strictNullChecks`). A single shape with optional
+  // fields sidesteps that entirely rather than fighting the compiler config.
+  interface AttendanceDecisionTraceParseResult {
+    ok: boolean
+    value?: AttendanceDecisionTraceParsedQuery
+    code?: string
+    message?: string
+  }
+
+  /** §3.1 hard rule 3 (enum-strict) / §9 W5-0-G4: an unrecognized or missing `category` is a 400,
+   *  NEVER a silent fallback to some default category. Each category's REQUIRED companion
+   *  parameter (workDate for ①②③, requestId for ④, instanceId for ⑥) is validated here too — a
+   *  missing/malformed one is also a 400, not a query that silently returns an empty/undeterminable
+   *  trace for the wrong reason. */
+  function parseAttendanceDecisionTraceQuery(req: Request): AttendanceDecisionTraceParseResult {
+    const categoryRaw = typeof req.query.category === 'string' ? req.query.category.trim() : ''
+    if (!categoryRaw) {
+      return { ok: false, code: 'CATEGORY_REQUIRED', message: 'category is required' }
+    }
+    if (!isAttendanceDecisionTraceCategory(categoryRaw)) {
+      return { ok: false, code: 'CATEGORY_INVALID', message: 'category is not a recognized decision-trace category' }
+    }
+    if (categoryRaw === 'today_status' || categoryRaw === 'late_early' || categoryRaw === 'missing_punch') {
+      const workDate = typeof req.query.workDate === 'string' ? req.query.workDate.trim() : ''
+      if (!ATTENDANCE_DECISION_TRACE_DATE_RE.test(workDate)) {
+        return { ok: false, code: 'WORK_DATE_REQUIRED', message: 'workDate (YYYY-MM-DD) is required for this category' }
+      }
+      return { ok: true, value: { category: categoryRaw, workDate } }
+    }
+    if (categoryRaw === 'overtime_segmentation') {
+      const requestId = typeof req.query.requestId === 'string' ? req.query.requestId.trim() : ''
+      if (!UUID_RE.test(requestId)) {
+        return { ok: false, code: 'REQUEST_ID_REQUIRED', message: 'requestId (uuid) is required for this category' }
+      }
+      return { ok: true, value: { category: categoryRaw, requestId } }
+    }
+    if (categoryRaw === 'approver_source') {
+      const instanceId = typeof req.query.instanceId === 'string' ? req.query.instanceId.trim() : ''
+      if (!instanceId) {
+        return { ok: false, code: 'INSTANCE_ID_REQUIRED', message: 'instanceId is required for this category' }
+      }
+      return { ok: true, value: { category: categoryRaw, instanceId } }
+    }
+    // comp_time_balance needs no extra target id (org+user scoped, mirrors L5a).
+    return { ok: true, value: { category: categoryRaw } }
+  }
+
+  async function dispatchAttendanceDecisionTrace(
+    orgId: string,
+    userId: string,
+    parsed: AttendanceDecisionTraceParsedQuery,
+    readOnlyQuery: AttendanceDecisionTraceQueryFn,
+    gates: AttendanceDecisionTraceSettingsGates,
+  ): Promise<AttendanceDecisionTraceResponse | typeof ATTENDANCE_DECISION_TRACE_NOT_FOUND> {
+    switch (parsed.category) {
+      case 'today_status':
+        return buildTodayStatusTrace(orgId, userId, parsed.workDate as string, readOnlyQuery)
+      case 'late_early':
+        return buildLateEarlyTrace(orgId, userId, parsed.workDate as string, readOnlyQuery)
+      case 'missing_punch':
+        return buildMissingPunchTrace(orgId, userId, parsed.workDate as string, readOnlyQuery)
+      case 'overtime_segmentation':
+        return buildOvertimeSegmentationTrace(
+          orgId,
+          userId,
+          parsed.requestId as string,
+          readOnlyQuery,
+          gates.overtimeSegmentation,
+        )
+      case 'comp_time_balance':
+        return buildCompTimeBalanceTrace(orgId, userId, readOnlyQuery, gates)
+      case 'approver_source':
+        return buildApproverSourceTrace(
+          orgId,
+          userId,
+          parsed.instanceId as string,
+          readOnlyQuery,
+          gates.dynamicAssigneeSourcesEnabled,
+        )
+      /* istanbul ignore next -- `isAttendanceDecisionTraceCategory` already narrowed the closed set */
+      default:
+        return ATTENDANCE_DECISION_TRACE_NOT_FOUND
+    }
+  }
+
+  r.get('/api/attendance-admin/decision-trace', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      const requestUserId = getAttendanceAdminRequestUserId(req)
+      if (!requestUserId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, requestUserId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for decision trace')
+      }
+      const targetUserId = String(req.query.userId || '').trim()
+      if (!targetUserId) {
+        return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      }
+      const parsed = parseAttendanceDecisionTraceQuery(req)
+      if (!parsed.ok || !parsed.value) {
+        return jsonError(res, 400, parsed.code || 'CATEGORY_INVALID', parsed.message || 'Invalid decision-trace query')
+      }
+
+      const result = await runAttendanceDecisionTraceReadOnly(async (readOnlyQuery) => {
+        const gates = await readAttendanceDecisionTraceSettingsGates(readOnlyQuery)
+        return dispatchAttendanceDecisionTrace(orgId, targetUserId, parsed.value, readOnlyQuery, gates)
+      })
+      if (result === ATTENDANCE_DECISION_TRACE_NOT_FOUND) {
+        return jsonError(res, 404, 'DECISION_TRACE_TARGET_NOT_FOUND', 'No such decision-trace target')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables missing')
+      }
+      // Values-free seam: never leak raw DB / driver messages to the client.
+      return jsonError(res, 500, 'DECISION_TRACE_FAILED', 'Failed to load decision trace')
+    }
+  })
+
+  r.get('/api/attendance/decision-trace', rbacGuard('attendance', 'read'), async (req: Request, res: Response) => {
+    try {
+      // §4.1 "绝不接受 userId 参数": presence alone is rejected — never silently ignored (that would
+      // be the exact silent-fallback shape hard rule 3 forbids for other closed-set inputs).
+      if (Object.prototype.hasOwnProperty.call(req.query, 'userId')) {
+        return jsonError(res, 400, 'USER_ID_NOT_ACCEPTED', 'userId is not accepted on the self decision-trace host')
+      }
+      const subject = getAttendanceAdminRequestUserId(req)
+      if (!subject) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+
+      // §4.1 self multi-org four-leg (owner two-round-terminal-review P2-d) — same dual is_active
+      // predicate as `canReadAttendanceDirectoryReadiness` (`:397-404`), never the plugin's
+      // client-trusted `getOrgId(req)` fallback.
+      const memberships = await query<{ org_id: string }>(
+        `SELECT uo.org_id
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+          WHERE uo.user_id = $1 AND uo.is_active = true AND u.is_active = true
+          ORDER BY uo.org_id ASC`,
+        [subject],
+      )
+      const activeOrgIds = memberships.rows.map((row) => row.org_id)
+      const requestedOrgId = String(req.query.orgId || '').trim()
+      let orgId: string
+      if (activeOrgIds.length === 0) {
+        return jsonError(res, 403, 'FORBIDDEN', 'No active org membership')
+      } else if (!requestedOrgId && activeOrgIds.length === 1) {
+        orgId = activeOrgIds[0]
+      } else if (!requestedOrgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required (multiple active org memberships)')
+      } else if (activeOrgIds.includes(requestedOrgId)) {
+        orgId = requestedOrgId
+      } else {
+        return jsonError(res, 403, 'FORBIDDEN', 'orgId does not match an active org membership')
+      }
+
+      const parsed = parseAttendanceDecisionTraceQuery(req)
+      if (!parsed.ok || !parsed.value) {
+        return jsonError(res, 400, parsed.code || 'CATEGORY_INVALID', parsed.message || 'Invalid decision-trace query')
+      }
+
+      // §4.1 subject-constrained horizontal authorization (owner three-round-terminal-review P2-1):
+      // `subject` (never a client value) is threaded into EVERY builder as the ownership column
+      // value alongside `orgId` — this is the query-internal predicate the two-user/same-org G7
+      // matrix mutates against, not a pre-gate.
+      const result = await runAttendanceDecisionTraceReadOnly(async (readOnlyQuery) => {
+        const gates = await readAttendanceDecisionTraceSettingsGates(readOnlyQuery)
+        return dispatchAttendanceDecisionTrace(orgId, subject, parsed.value, readOnlyQuery, gates)
+      })
+      if (result === ATTENDANCE_DECISION_TRACE_NOT_FOUND) {
+        return jsonError(res, 404, 'DECISION_TRACE_TARGET_NOT_FOUND', 'No such decision-trace target')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables missing')
+      }
+      return jsonError(res, 500, 'DECISION_TRACE_FAILED', 'Failed to load decision trace')
     }
   })
 
