@@ -16,6 +16,7 @@ import type {
 import { ServiceError } from './ApprovalBridgeService'
 import {
   approvalConditionFormulaHasDynamicDependency,
+  approvalConditionFormulaIsProvablyAlwaysTrue,
   evaluateApprovalConditionFormula,
   type RequesterFormulaContext,
 } from './ApprovalConditionFormula'
@@ -1115,10 +1116,12 @@ export class ApprovalGraphExecutor {
       // unreachable; for a pre-existing stored graph the branch is skipped and routing falls
       // through to later branches / the default edge (the intended "else" mechanism).
       if (!branch.formula && branch.rules.length === 0) continue
-      // Legacy stored graphs may contain a literal-only formula such as `1 == 1`.
-      // Treat it like the empty-rules capture shape: skip it instead of routing every
-      // request through the first branch. Invalid formulas still throw below.
+      // Legacy stored graphs may contain a literal-only or identity-tautology formula.
+      // Treat either like the empty-rules capture shape: skip it instead of routing every
+      // request through the first branch. Schema-independent proofs are available here;
+      // invalid formulas still throw below.
       if (branch.formula && !approvalConditionFormulaHasDynamicDependency(branch.formula.expression)) continue
+      if (branch.formula && approvalConditionFormulaIsProvablyAlwaysTrue(branch.formula.expression)) continue
       const result = branch.formula
         ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData, this.options.requesterContext ?? null)
         : (() => {

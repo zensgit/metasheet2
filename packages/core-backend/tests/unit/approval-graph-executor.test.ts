@@ -214,6 +214,42 @@ describe('ApprovalGraphExecutor', () => {
     expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
   })
 
+  it('skips a LEGACY identity-tautology formula branch instead of capturing every request', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-identity', rules: [], formula: { expression: '{amount} == {amount}' } },
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'identity-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-identity', source: 'route', target: 'identity-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-identity-end', source: 'identity-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState().currentNodeKey).toBe('high-review')
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
+  })
+
   it('routes a requester.department branch from threaded requesterContext, fail-closed on absent (RA-1a)', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [

@@ -348,7 +348,8 @@ describe('G-3 validation preview (UX-only; backend normalizeApprovalGraph is fin
       fork_1: { nodeKey: 'fork_1', joinMode: 'majority' as never },
     }
     const errors = validateParallelEdits(edits)
-    expect(errors.some((message) => message.includes('fork_1') && message.includes('汇聚模式无效'))).toBe(true)
+    expect(errors.some((message) => message.includes('汇聚模式无效'))).toBe(true)
+    expect(errors.join(' ')).not.toContain('fork_1')
   })
 
   it('surfaces the out-of-set joinMode error through validateTemplateDraft when the draft carries parallel edits', () => {

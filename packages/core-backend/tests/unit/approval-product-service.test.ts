@@ -1524,6 +1524,32 @@ describe('ApprovalProductService', () => {
       })
       expect(pgState.pool.connect).not.toHaveBeenCalled()
     })
+
+    it('rejects an identity formula branch before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-identity-tautology',
+        name: 'Formula Identity Tautology',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} == {amount}' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
+        details: { branchIndex: 0 },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
   })
 
   it('accepts authoring-MVP form-field-user assignee sources when creating a template', async () => {

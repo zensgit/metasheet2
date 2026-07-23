@@ -136,7 +136,7 @@ export function validateParallelEdits(edits: ParallelEdits): string[] {
   const errors: string[] = []
   for (const edit of Object.values(edits)) {
     if (!isParallelJoinMode(edit.joinMode)) {
-      errors.push(`并行节点 ${edit.nodeKey} 的汇聚模式无效`)
+      errors.push('并行节点的汇聚模式无效')
     }
   }
   return errors

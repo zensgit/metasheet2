@@ -597,6 +597,50 @@ function numericRange(ast: FormulaAst, schema: FormSchema): NumericRange | null 
   return min <= max ? { min, max } : null
 }
 
+function formulaAstEquals(left: FormulaAst, right: FormulaAst): boolean {
+  if (left.kind !== right.kind) return false
+  switch (left.kind) {
+    case 'number':
+      return right.kind === 'number' && left.value === right.value
+    case 'string':
+      return right.kind === 'string' && left.value === right.value
+    case 'boolean':
+      return right.kind === 'boolean' && left.value === right.value
+    case 'null':
+      return right.kind === 'null'
+    case 'field':
+      return right.kind === 'field'
+        && left.path.length === right.path.length
+        && left.path.every((part, index) => part === right.path[index])
+    case 'requester':
+      return right.kind === 'requester' && left.attr === right.attr
+    case 'aggregate':
+      return right.kind === 'aggregate'
+        && left.fn === right.fn
+        && left.path.length === right.path.length
+        && left.path.every((part, index) => part === right.path[index])
+    case 'membership':
+      return right.kind === 'membership'
+        && left.attr === right.attr
+        && left.elements.length === right.elements.length
+        && left.elements.every((element, index) => element === right.elements[index])
+    case 'unary':
+      return right.kind === 'unary'
+        && left.op === right.op
+        && formulaAstEquals(left.expr, right.expr)
+    case 'binary':
+      return right.kind === 'binary'
+        && left.op === right.op
+        && formulaAstEquals(left.left, right.left)
+        && formulaAstEquals(left.right, right.right)
+    case 'compare':
+      return right.kind === 'compare'
+        && left.op === right.op
+        && formulaAstEquals(left.left, right.left)
+        && formulaAstEquals(left.right, right.right)
+  }
+}
+
 function compareRangeTruth(
   op: Extract<FormulaAst, { kind: 'compare' }>['op'],
   left: NumericRange,
@@ -642,6 +686,11 @@ function formulaTruth(ast: FormulaAst, schema: FormSchema): FormulaTruth {
     return left === 'always_false' && right === 'always_false' ? 'always_false' : 'unknown'
   }
   if (ast.kind === 'compare') {
+    if (formulaAstEquals(ast.left, ast.right)) {
+      return ast.op === '==' || ast.op === '>=' || ast.op === '<='
+        ? 'always_true'
+        : 'always_false'
+    }
     const left = numericRange(ast.left, schema)
     const right = numericRange(ast.right, schema)
     return left && right ? compareRangeTruth(ast.op, left, right) : 'unknown'
@@ -656,7 +705,7 @@ function formulaTruth(ast: FormulaAst, schema: FormSchema): FormulaTruth {
  */
 export function approvalConditionFormulaIsProvablyAlwaysTrue(
   expression: string,
-  schema: FormSchema,
+  schema: FormSchema = { fields: [] },
 ): boolean {
   return formulaTruth(parseFormula(expression), schema) === 'always_true'
 }

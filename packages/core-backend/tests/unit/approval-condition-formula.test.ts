@@ -120,6 +120,14 @@ describe('approval condition formula evaluator (FC-1)', () => {
       }],
     })).toBe(false)
   })
+
+  it('proves identity comparisons without requiring schema metadata', () => {
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} == {amount}')).toBe(true)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= {amount}')).toBe(true)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('requester.department == requester.department')).toBe(true)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} > {amount}')).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} == {other}')).toBe(false)
+  })
 })
 
 describe('requester namespace (RA-1a — department only)', () => {
