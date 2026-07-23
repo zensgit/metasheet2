@@ -1008,6 +1008,62 @@ components:
           type: string
           format: date-time
           nullable: true
+    AttendanceCalculationGroupMembership:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+        userId:
+          type: string
+        groupId:
+          type: string
+          format: uuid
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        assignedBy:
+          type: string
+        assignedReason:
+          type: string
+        assignedCorrelationId:
+          type: string
+        closedBy:
+          type: string
+          nullable: true
+        closedReason:
+          type: string
+          nullable: true
+        closedCorrelationId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - orgId
+        - userId
+        - groupId
+        - effectiveFrom
+        - effectiveTo
+        - assignedBy
+        - assignedReason
+        - assignedCorrelationId
+        - closedBy
+        - closedReason
+        - closedCorrelationId
+        - createdAt
+        - updatedAt
     AttendancePayrollTemplate:
       type: object
       properties:

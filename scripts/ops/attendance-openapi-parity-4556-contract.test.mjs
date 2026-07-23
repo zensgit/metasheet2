@@ -174,3 +174,89 @@ test('assignment POST/PUT request schemas include slotIndex min 0 and legacy slo
     'POST assignment must not invent required slotIndex',
   )
 })
+
+test('W1 calculation-group membership schema exposes effective dates and durable audit context', () => {
+  const base = loadYaml(basePath)
+  const membership = requireSchema(base, 'AttendanceCalculationGroupMembership')
+  const required = membership.required || []
+  assert.deepEqual(
+    required,
+    [
+      'id',
+      'orgId',
+      'userId',
+      'groupId',
+      'effectiveFrom',
+      'effectiveTo',
+      'assignedBy',
+      'assignedReason',
+      'assignedCorrelationId',
+      'closedBy',
+      'closedReason',
+      'closedCorrelationId',
+      'createdAt',
+      'updatedAt',
+    ],
+    'AttendanceCalculationGroupMembership required fields drifted',
+  )
+  assert.equal(
+    requireProperty(membership, 'effectiveFrom', 'AttendanceCalculationGroupMembership').format,
+    'date',
+  )
+  assert.equal(
+    requireProperty(membership, 'effectiveTo', 'AttendanceCalculationGroupMembership').nullable,
+    true,
+  )
+})
+
+test('W1 admin API exposes only timeline GET and atomic transition POST', () => {
+  const attendance = loadYaml(attendancePath)
+  const list = attendance.paths?.['/api/attendance-admin/calculation-group-memberships']
+  const transition =
+    attendance.paths?.['/api/attendance-admin/calculation-group-memberships/transition']
+  assert.deepEqual(Object.keys(list || {}), ['get'], 'W1 timeline path method surface drifted')
+  assert.deepEqual(
+    Object.keys(transition || {}),
+    ['post'],
+    'W1 transition path method surface drifted',
+  )
+
+  const listParameters = list.get.parameters || []
+  assert.deepEqual(
+    listParameters.map((parameter) => [parameter.name, parameter.required]),
+    [
+      ['orgId', true],
+      ['userId', true],
+    ],
+  )
+
+  const transitionSchema = requestBodySchema(
+    attendance,
+    '/api/attendance-admin/calculation-group-memberships/transition',
+    'post',
+  )
+  assert.deepEqual(
+    transitionSchema.required,
+    ['orgId', 'userId', 'targetGroupId', 'effectiveOn', 'reason'],
+  )
+  assert.equal(transitionSchema.properties.targetGroupId.format, 'uuid')
+  assert.equal(transitionSchema.properties.effectiveOn.format, 'date')
+  assert.equal(transitionSchema.properties.reason.minLength, 1)
+  assert.equal(transitionSchema.properties.correlationId.maxLength, 128)
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(transitionSchema.properties, 'actorId'),
+    false,
+    'actor identity must come from authentication, not the request body',
+  )
+
+  assert.deepEqual(
+    Object.keys(list.get.responses).sort(),
+    ['200', '400', '401', '403', '500', '503'],
+    'timeline responses must cover every reachable route status',
+  )
+  assert.deepEqual(
+    Object.keys(transition.post.responses).sort(),
+    ['200', '400', '401', '403', '404', '409', '422', '500', '503'],
+    'transition responses must cover every reachable route status',
+  )
+})

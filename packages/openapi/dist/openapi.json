@@ -1578,6 +1578,79 @@
           }
         }
       },
+      "AttendanceCalculationGroupMembership": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "effectiveFrom": {
+            "type": "string",
+            "format": "date"
+          },
+          "effectiveTo": {
+            "type": "string",
+            "format": "date",
+            "nullable": true
+          },
+          "assignedBy": {
+            "type": "string"
+          },
+          "assignedReason": {
+            "type": "string"
+          },
+          "assignedCorrelationId": {
+            "type": "string"
+          },
+          "closedBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "closedReason": {
+            "type": "string",
+            "nullable": true
+          },
+          "closedCorrelationId": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "orgId",
+          "userId",
+          "groupId",
+          "effectiveFrom",
+          "effectiveTo",
+          "assignedBy",
+          "assignedReason",
+          "assignedCorrelationId",
+          "closedBy",
+          "closedReason",
+          "closedCorrelationId",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
       "AttendancePayrollTemplate": {
         "type": "object",
         "properties": {
@@ -12632,6 +12705,233 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/attendance-admin/calculation-group-memberships": {
+      "get": {
+        "summary": "List a user's effective calculation-group membership timeline",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "userId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ordered, non-overlapping membership timeline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/AttendanceCalculationGroupMembership"
+                          }
+                        }
+                      },
+                      "required": [
+                        "items"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "Calculation-group timeline read failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/attendance-admin/calculation-group-memberships/transition": {
+      "post": {
+        "summary": "Transition a user to a calculation group on an inclusive effective date",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "orgId": {
+                    "type": "string"
+                  },
+                  "userId": {
+                    "type": "string"
+                  },
+                  "targetGroupId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "effectiveOn": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "correlationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "orgId",
+                  "userId",
+                  "targetGroupId",
+                  "effectiveOn",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transition applied or replayed idempotently",
+            "headers": {
+              "X-Correlation-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "correlationId": {
+                          "type": "string"
+                        },
+                        "outcome": {
+                          "type": "string",
+                          "enum": [
+                            "transitioned",
+                            "unchanged"
+                          ]
+                        },
+                        "membership": {
+                          "$ref": "#/components/schemas/AttendanceCalculationGroupMembership"
+                        }
+                      },
+                      "required": [
+                        "correlationId",
+                        "outcome",
+                        "membership"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "Target user is not active in the requested organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Calculation-group transition failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }

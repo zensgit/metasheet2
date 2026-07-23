@@ -80,6 +80,7 @@
     "openapi:validate": "pnpm --filter @metasheet/openapi validate",
     "openapi:generate:sdk": "pnpm --filter @metasheet/openapi generate:sdk",
     "openapi:guard": "pnpm --filter @metasheet/openapi generate:sdk && pnpm --filter @metasheet/openapi guard:codegen",
+    "verify:attendance-calculation-group-membership:w1": "node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs",
     "verify:multitable-yjs:contract": "node --test scripts/ops/multitable-yjs-contract-parity.test.mjs",
     "ops:multitable-dangling-link-sweep": "node scripts/ops/multitable-dangling-link-sweep.mjs",
     "verify:multitable-release:phase3": "node scripts/ops/multitable-phase3-release-gate.mjs --gate release:phase3",

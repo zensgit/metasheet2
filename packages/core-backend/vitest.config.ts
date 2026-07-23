@@ -450,6 +450,9 @@ export default defineConfig({
       // no-DB job cannot skip-green it; wired whole-file into the attendance real-DB step in
       // plugin-tests.yml.
       'tests/integration/attendance-decision-trace-w5-0.db.test.ts',
+      // #4561 W1: database exclusion/concurrency and effective-date transition proof.
+      // Kept out of the no-DB run and explicitly wired into plugin-tests.yml.
+      'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
