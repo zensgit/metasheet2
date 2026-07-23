@@ -537,6 +537,32 @@ function astReferencesRequesterAttribute(ast: FormulaAst, attr: string): boolean
   }
 }
 
+function astHasDynamicDependency(ast: FormulaAst): boolean {
+  switch (ast.kind) {
+    case 'field':
+    case 'aggregate':
+    case 'requester':
+    case 'membership':
+      return true
+    case 'unary':
+      return astHasDynamicDependency(ast.expr)
+    case 'binary':
+    case 'compare':
+      return astHasDynamicDependency(ast.left) || astHasDynamicDependency(ast.right)
+    default:
+      return false
+  }
+}
+
+/**
+ * Whether a condition formula depends on request-specific data. This deliberately
+ * answers a structural question only; it does not attempt to prove that a
+ * field-dependent expression is a semantic tautology.
+ */
+export function approvalConditionFormulaHasDynamicDependency(expression: string): boolean {
+  return astHasDynamicDependency(parseFormula(expression))
+}
+
 /**
  * Token-aware: does the formula reference `requester.<attr>` as an actual reserved requester TOKEN —
  * not a string literal like "requester.department" or a field name that merely contains the text?

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   APPROVAL_CONDITION_FORMULA_LIMITS,
+  approvalConditionFormulaHasDynamicDependency,
   assertApprovalConditionFormulaValidForSchema,
   evaluateApprovalConditionFormula,
   extractRequesterRoleLiterals,
@@ -86,6 +87,15 @@ describe('approval condition formula evaluator (FC-1)', () => {
     } finally {
       limits.maxFieldReferences = original
     }
+  })
+
+  it('classifies request-data dependencies from the parsed AST', () => {
+    expect(approvalConditionFormulaHasDynamicDependency('1 == 1')).toBe(false)
+    expect(approvalConditionFormulaHasDynamicDependency('TRUE AND NOT FALSE')).toBe(false)
+    expect(approvalConditionFormulaHasDynamicDependency('{amount} >= -1')).toBe(true)
+    expect(approvalConditionFormulaHasDynamicDependency('SUM({items.amount}) >= 1')).toBe(true)
+    expect(approvalConditionFormulaHasDynamicDependency('requester.department == "finance"')).toBe(true)
+    expect(approvalConditionFormulaHasDynamicDependency('requester.role in ["approver"]')).toBe(true)
   })
 })
 

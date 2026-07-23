@@ -481,6 +481,87 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     expect(pointerAfterAccept.rows[0].latest_version_id).toBe(accepted.id)
   })
 
+  it('rejects dependency-free condition formulas at create, update, publish, and restore while accepting a field-dependent formula', async () => {
+    const conditionGraph = (expression: string) => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression } }],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'high', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-high', source: 'route', target: 'high' },
+        { key: 'edge-low', source: 'route', target: 'low' },
+        { key: 'edge-high-end', source: 'high', target: 'end' },
+        { key: 'edge-low-end', source: 'low', target: 'end' },
+      ],
+    })
+    const templateRequest = (key: string, expression: string) => ({
+      key,
+      name: 'Formula dependency gate',
+      visibilityScope: { type: 'all', ids: [] },
+      formSchema: authoringFormSchema(),
+      approvalGraph: conditionGraph(expression),
+    })
+    const expectStaticRejection = async (response: Response) => {
+      expect(response.status).toBe(400)
+      const payload = await response.json() as { error: { code: string; details?: Record<string, unknown> } }
+      expect(payload.error.code).toBe('APPROVAL_CONDITION_FORMULA_STATIC')
+      expect(payload.error.details).toEqual({ branchIndex: 0 })
+    }
+
+    await expectStaticRejection(await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: templateRequest(`uat-static-create-${Date.now()}`, '1 == 1'),
+    }))
+
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: templateRequest(`uat-dynamic-create-${Date.now()}`, '{amount} >= -1'),
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+
+    await expectStaticRejection(await jsonRequest(baseUrl, `/api/approval-templates/${created.id}`, adminToken, {
+      method: 'PATCH',
+      body: { approvalGraph: conditionGraph('1 == 1') },
+    }))
+
+    const pool = poolManager.get()
+    const inserted = await pool.query<{ id: string }>(
+      `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+       VALUES ($1, 2, 'draft', $2, $3)
+       RETURNING id`,
+      [created.id, JSON.stringify(authoringFormSchema()), JSON.stringify(conditionGraph('1 == 1'))],
+    )
+    const staticVersionId = inserted.rows[0].id
+
+    await expectStaticRejection(await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/versions/${staticVersionId}/restore`,
+      adminToken,
+      { method: 'POST', body: { expectedLatestVersionId: created.latestVersionId } },
+    ))
+
+    await pool.query('UPDATE approval_templates SET latest_version_id = $1 WHERE id = $2', [staticVersionId, created.id])
+    await expectStaticRejection(await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/publish`,
+      adminToken,
+      { method: 'POST', body: { policy: { allowRevoke: true } } },
+    ))
+  })
+
   // P3-2 (review 20260717c): the belongs-to-template (IDOR) guard was only discriminated in the
   // mocked unit lane; this is the real-DB negative — a version id that exists but belongs to a
   // DIFFERENT template must 404 without writing anything.

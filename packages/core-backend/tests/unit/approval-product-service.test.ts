@@ -1470,6 +1470,32 @@ describe('ApprovalProductService', () => {
       } as never)).rejects.toThrow(/unknown field reference/)
       expect(pgState.pool.connect).not.toHaveBeenCalled()
     })
+
+    it('rejects a literal-only formula branch before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-static',
+        name: 'Formula Static',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '1 == 1' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_STATIC',
+        details: { branchIndex: 0 },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
   })
 
   it('accepts authoring-MVP form-field-user assignee sources when creating a template', async () => {

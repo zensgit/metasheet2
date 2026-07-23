@@ -58,6 +58,7 @@ import {
 } from './approval-attachment-reconciler'
 import {
   ApprovalConditionFormulaError,
+  approvalConditionFormulaHasDynamicDependency,
   assertApprovalConditionFormulaValidForSchema,
   extractRequesterRoleLiterals,
   formulaReferencesRequesterAttribute,
@@ -1481,8 +1482,9 @@ function runtimeSuccessorTargets(
  * `branch.rules.every(...)`, which is vacuously TRUE over `[]` — an empty branch silently captures
  * ALL traffic (first-match-wins) and dead-codes the default edge and every later branch. The
  * fall-through "else" is the node's `defaultEdgeKey` — a separate mechanism — so an empty rules
- * array in a non-formula branch is never legitimate. (A FORMULA branch legitimately carries
- * `rules: []`; those are exempt.)
+ * array in a non-formula branch is never legitimate. A formula branch may carry `rules: []`
+ * only when its parsed AST depends on request-specific form/requester data. A literal-only
+ * formula is another match-all capture shape and is rejected by the same choke points.
  *
  * Deliberately NOT inside `normalizeApprovalGraph`: `asApprovalGraph` re-normalizes STORED rows on
  * plain reads, and a retroactive reject there could brick reads of existing templates. Instead this
@@ -1498,14 +1500,27 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph): void {
     if (!Array.isArray(config.branches)) continue
     config.branches.forEach((branch, branchIndex) => {
       if (!isRecord(branch)) return
-      const hasFormula = isRecord(branch.formula)
+      const formula = isRecord(branch.formula) ? branch.formula : null
+      const formulaExpression = formula && typeof formula.expression === 'string'
+        ? formula.expression
+        : null
+      const hasDynamicFormula = formulaExpression !== null
+        && approvalConditionFormulaHasDynamicDependency(formulaExpression)
       const rules = branch.rules
-      if (!hasFormula && Array.isArray(rules) && rules.length === 0) {
+      if (formulaExpression === null && Array.isArray(rules) && rules.length === 0) {
         throw new ServiceError(
           `approvalGraph node ${node.key} condition branch ${branchIndex + 1} has no rules and no formula — an empty rules branch would match every request`,
           400,
           'APPROVAL_CONDITION_BRANCH_RULES_EMPTY',
           { nodeKey: node.key, branchIndex },
+        )
+      }
+      if (formulaExpression !== null && !hasDynamicFormula) {
+        throw new ServiceError(
+          'Condition formula must depend on request data',
+          400,
+          'APPROVAL_CONDITION_FORMULA_STATIC',
+          { branchIndex },
         )
       }
     })
