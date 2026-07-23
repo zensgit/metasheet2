@@ -148,6 +148,12 @@ const ALLOWLIST: Record<string, Record<string, { disposition: Disposition; reaso
       reason: 'W0-1 v3.7 STRICT precheck (precheckSheetHistoryIntegrityStrict): liveById internal hydration map used ONLY for the content-projection layer\'s live-vs-latest-snapshot equality check; the function returns only {ok, reason} — never echoes record data to any response',
     },
   },
+  'services/approval-record-link-options.ts': {
+    'data: r.data': {
+      disposition: 'INTERNAL',
+      reason: 'record-link picker keeps the cell map only for server-side display fallback over preferredFieldIds already derived from the viewer field-permission scope; the response emits only {id, display}, and real-DB tests pin hidden/denied fields to the generic label',
+    },
+  },
 }
 
 describe('n2 raw record-data projection guard — egress-guard blind-spot closure', () => {
