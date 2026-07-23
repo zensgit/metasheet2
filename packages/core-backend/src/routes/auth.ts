@@ -771,9 +771,22 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
     }
 
     const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
-    // Single transaction: user password write (must affect a row) + invite consume.
-    // Zero-row UPDATE (race / activation drift) aborts before invite is consumed.
+    // Single transaction: consume invite ledger FIRST (status='pending' + RETURNING),
+    // then write user password. Zero-row on either step aborts and rolls back.
+    // Ledger-first prevents concurrent accepts from both rewriting password:
+    // only one can claim the pending row; the loser never reaches the user UPDATE.
     await transaction(async (client) => {
+      const ledger = await markInviteAccepted(token, {
+        consumedBy: payload.userId,
+        client,
+      })
+      if (!ledger) {
+        // missing / revoked / already-consumed / schema-missing → null
+        throw Object.assign(new Error('Invite ledger could not be consumed'), {
+          code: 'INVITE_LEDGER_CONSUME_FAILED',
+        })
+      }
+
       const updated = await client.query(
         `UPDATE users
          SET password_hash = $1,
@@ -792,10 +805,6 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
           code: 'INVITE_TARGET_UPDATE_MISMATCH',
         })
       }
-      await markInviteAccepted(token, {
-        consumedBy: payload.userId,
-        client,
-      })
     })
 
     // Best-effort post-commit; user+invite already durable together.
@@ -833,11 +842,19 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
-    if ((error as { code?: string })?.code === 'INVITE_TARGET_UPDATE_MISMATCH') {
+    const code = (error as { code?: string })?.code
+    if (code === 'INVITE_TARGET_UPDATE_MISMATCH') {
       return res.status(409).json({
         success: false,
         error: 'Invite target could not be updated; token was not consumed',
         code: 'INVITE_TARGET_UPDATE_MISMATCH',
+      })
+    }
+    if (code === 'INVITE_LEDGER_CONSUME_FAILED') {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite token is missing, revoked, or already consumed',
+        code: 'INVITE_LEDGER_CONSUME_FAILED',
       })
     }
     logger.error('Invite acceptance error', error instanceof Error ? error : undefined)

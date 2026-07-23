@@ -1619,6 +1619,8 @@ describe('adminDirectoryRouter', () => {
         acceptInviteUrl: 'https://example.com/invite/abc',
         inviteMessage: '请使用邀请链接加入平台',
       },
+      activationStatus: 'activated',
+      enableDingTalkGrantApplied: true,
     })
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
@@ -1654,6 +1656,8 @@ describe('adminDirectoryRouter', () => {
         },
         temporaryPassword: 'Temp#123456',
         inviteToken: 'invite-token-fixed',
+        activationStatus: 'activated',
+        enableDingTalkGrantApplied: true,
       },
     })
   })
@@ -1713,6 +1717,8 @@ describe('adminDirectoryRouter', () => {
         acceptInviteUrl: '',
         inviteMessage: '账号：liqing',
       },
+      activationStatus: 'activated',
+      enableDingTalkGrantApplied: true,
     })
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
@@ -1914,6 +1920,8 @@ describe('adminDirectoryRouter', () => {
             acceptInviteUrl: '',
             inviteMessage: '账号：dt_0447654442691174_account1',
           },
+          activationStatus: 'activated',
+          enableDingTalkGrantApplied: false,
         },
       ],
       failed: [{ accountId: 'account-2', error: 'User with this username already exists' }],
@@ -1940,6 +1948,8 @@ describe('adminDirectoryRouter', () => {
         source: 'directory_bulk_manual_admission',
         mode: 'bulk_manual_admission',
         selectionSize: 2,
+        activationStatus: 'activated',
+        enableDingTalkGrantApplied: false,
       }),
     }))
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -1948,6 +1958,8 @@ describe('adminDirectoryRouter', () => {
       resourceId: 'account-1',
       meta: expect.objectContaining({
         enableDingTalkGrant: false,
+        enableDingTalkGrantApplied: false,
+        activationStatus: 'activated',
         mode: 'bulk_manual_admission',
         selectionSize: 2,
       }),
@@ -1961,11 +1973,15 @@ describe('adminDirectoryRouter', () => {
           userId: 'user-1',
           username: 'dt_0447654442691174_account1',
           temporaryPassword: 'Temp#123456',
+          activationStatus: 'activated',
+          enableDingTalkGrantApplied: false,
         }],
         updatedCount: 1,
         failedCount: 1,
         failed: [{ accountId: 'account-2', error: expect.stringContaining('username') }],
         enableDingTalkGrant: false,
+        enableDingTalkGrantApplied: false,
+        enableDingTalkGrantRequested: false,
       },
     })
   })

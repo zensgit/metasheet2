@@ -206,9 +206,7 @@ describe('auth invite routes', () => {
           updated_at: '2026-03-13T00:00:00.000Z',
         }],
       })
-      // UPDATE users ... RETURNING id (must be non-empty)
-      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
-      // markInviteAccepted inside same transaction
+      // markInviteAccepted FIRST (ledger-first) — must RETURNING non-empty
       .mockResolvedValueOnce({
         rows: [{
           id: 'invite-1',
@@ -227,6 +225,8 @@ describe('auth invite routes', () => {
           updated_at: '2026-03-13T00:05:00.000Z',
         }],
       })
+      // UPDATE users ... RETURNING id (must be non-empty)
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
     bcryptMocks.hash.mockResolvedValue('hashed-password')
     sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:05:00.000Z' })
     authServiceMocks.login.mockResolvedValue({
@@ -253,17 +253,17 @@ describe('auth invite routes', () => {
     expect(response.statusCode).toBe(200)
     expect(bcryptMocks.hash).toHaveBeenCalledWith('WelcomePass9A', 10)
     expect(pgMocks.transaction).toHaveBeenCalled()
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('user_invites')
     expect(pgMocks.query).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining('UPDATE users'),
       ['hashed-password', 'Alpha User', 'user-1', 'alpha@example.com'],
     )
-    const updateSql = String(pgMocks.query.mock.calls[1]?.[0] || '')
+    const updateSql = String(pgMocks.query.mock.calls[2]?.[0] || '')
     expect(updateSql).toContain('must_change_password = FALSE')
     expect(updateSql).toContain('local_password_set = TRUE')
     expect(updateSql).toContain('RETURNING id')
     expect(updateSql).toContain("activation_status = 'activated'")
-    expect(String(pgMocks.query.mock.calls[2]?.[0] || '')).toContain('user_invites')
     expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
       updatedBy: 'user-1',
       reason: 'invite-accepted',
@@ -314,7 +314,7 @@ describe('auth invite routes', () => {
     expect(authServiceMocks.login).not.toHaveBeenCalled()
   })
 
-  it('stops with 409 when UPDATE returns zero rows (no invite consume)', async () => {
+  it('stops with 409 when user UPDATE returns zero rows (ledger already claimed → txn rolls back)', async () => {
     inviteTokenMocks.verifyInviteToken.mockReturnValue({
       type: 'invite',
       userId: 'user-1',
@@ -333,7 +333,26 @@ describe('auth invite routes', () => {
           updated_at: '2026-03-13T00:00:00.000Z',
         }],
       })
-      // Zero-row UPDATE (race / activation drift)
+      // Ledger consume succeeds
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'invite-1',
+          user_id: 'user-1',
+          email: 'alpha@example.com',
+          preset_id: 'attendance-employee',
+          product_mode: 'attendance',
+          role_id: null,
+          invited_by: 'admin-1',
+          invite_token: 'invite-accept-token',
+          status: 'accepted',
+          accepted_at: '2026-03-13T00:05:00.000Z',
+          consumed_by: 'user-1',
+          last_sent_at: '2026-03-13T00:00:00.000Z',
+          created_at: '2026-03-13T00:00:00.000Z',
+          updated_at: '2026-03-13T00:05:00.000Z',
+        }],
+      })
+      // Zero-row user UPDATE (race / activation drift) → throw rolls back ledger too
       .mockResolvedValueOnce({ rows: [] })
     bcryptMocks.hash.mockResolvedValue('hashed-password')
 
@@ -346,10 +365,179 @@ describe('auth invite routes', () => {
 
     expect(response.statusCode).toBe(409)
     expect((response.body as Record<string, any>).code).toBe('INVITE_TARGET_UPDATE_MISMATCH')
-    // Only getInviteTarget + zero-row UPDATE; markInviteAccepted must not run
-    expect(pgMocks.query).toHaveBeenCalledTimes(2)
-    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('UPDATE users')
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('user_invites')
+    expect(String(pgMocks.query.mock.calls[2]?.[0] || '')).toContain('UPDATE users')
     expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
     expect(authServiceMocks.login).not.toHaveBeenCalled()
+  })
+
+  it('stops with 409 when invite ledger RETURNING is empty (missing / already-consumed)', async () => {
+    inviteTokenMocks.verifyInviteToken.mockReturnValue({
+      type: 'invite',
+      userId: 'user-1',
+      email: 'alpha@example.com',
+      presetId: 'attendance-employee',
+      iat: Math.floor(Date.now() / 1000) - 60,
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          is_active: true,
+          activation_status: 'activated',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+      // Ledger consume zero rows (missing or already accepted)
+      .mockResolvedValueOnce({ rows: [] })
+    bcryptMocks.hash.mockResolvedValue('hashed-password')
+
+    const response = await invokeRoute('post', '/invite/accept', {
+      body: {
+        token: 'invite-missing-ledger',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).code).toBe('INVITE_LEDGER_CONSUME_FAILED')
+    // getInviteTarget + ledger UPDATE only; users password write must not run
+    expect(pgMocks.query).toHaveBeenCalledTimes(2)
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('user_invites')
+    expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
+    expect(authServiceMocks.login).not.toHaveBeenCalled()
+  })
+
+  it('stops with 409 when invite ledger is revoked (status != pending → zero RETURNING)', async () => {
+    inviteTokenMocks.verifyInviteToken.mockReturnValue({
+      type: 'invite',
+      userId: 'user-1',
+      email: 'alpha@example.com',
+      presetId: 'attendance-employee',
+      iat: Math.floor(Date.now() / 1000) - 60,
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          is_active: true,
+          activation_status: 'activated',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+      // UPDATE ... WHERE status='pending' matches nothing for revoked rows
+      .mockResolvedValueOnce({ rows: [] })
+    bcryptMocks.hash.mockResolvedValue('hashed-password')
+
+    const response = await invokeRoute('post', '/invite/accept', {
+      body: {
+        token: 'invite-revoked-token',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).code).toBe('INVITE_LEDGER_CONSUME_FAILED')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('UPDATE users'))).toBe(false)
+    expect(authServiceMocks.login).not.toHaveBeenCalled()
+  })
+
+  it('dual concurrent accept: only one claims pending ledger; loser never writes password', async () => {
+    // Shared in-memory ledger status simulates two DB connections racing on status='pending'.
+    let ledgerStatus: 'pending' | 'accepted' | 'revoked' = 'pending'
+    let passwordWriteCount = 0
+    const inviteRow = {
+      id: 'invite-1',
+      user_id: 'user-1',
+      email: 'alpha@example.com',
+      preset_id: 'attendance-employee',
+      product_mode: 'attendance' as const,
+      role_id: 'attendance_employee',
+      invited_by: 'admin-1',
+      invite_token: 'invite-race-token',
+      status: 'accepted' as const,
+      accepted_at: '2026-03-13T00:05:00.000Z',
+      consumed_by: 'user-1',
+      last_sent_at: '2026-03-13T00:00:00.000Z',
+      created_at: '2026-03-13T00:00:00.000Z',
+      updated_at: '2026-03-13T00:05:00.000Z',
+    }
+
+    pgMocks.transaction.mockImplementation(
+      async (handler: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+        const clientQuery = vi.fn(async (sql: string, _params?: unknown[]) => {
+          const text = String(sql)
+          if (text.includes('user_invites') && text.includes("status = 'pending'")) {
+            if (ledgerStatus !== 'pending') {
+              return { rows: [] }
+            }
+            ledgerStatus = 'accepted'
+            return { rows: [{ ...inviteRow, status: 'accepted' }] }
+          }
+          if (text.includes('UPDATE users') && text.includes('password_hash')) {
+            passwordWriteCount += 1
+            return { rows: [{ id: 'user-1' }] }
+          }
+          return { rows: [] }
+        })
+        return handler({ query: clientQuery as unknown as typeof pgMocks.query })
+      },
+    )
+
+    inviteTokenMocks.verifyInviteToken.mockReturnValue({
+      type: 'invite',
+      userId: 'user-1',
+      email: 'alpha@example.com',
+      presetId: 'attendance-employee',
+      iat: Math.floor(Date.now() / 1000) - 60,
+    })
+    // Each accept does its own getInviteTarget via shared pool query
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('FROM users') && String(sql).includes('email')) {
+        return {
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            is_active: true,
+            activation_status: 'activated',
+            updated_at: '2026-03-13T00:00:00.000Z',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+    bcryptMocks.hash.mockResolvedValue('hashed-password')
+    sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:05:00.000Z' })
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: 'alpha@example.com',
+        name: 'Alpha',
+        role: 'user',
+        permissions: [],
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-race',
+    })
+
+    const body = { token: 'invite-race-token', password: 'WelcomePass9A' }
+    const [first, second] = await Promise.all([
+      invokeRoute('post', '/invite/accept', { body }),
+      invokeRoute('post', '/invite/accept', { body }),
+    ])
+
+    const statuses = [first.statusCode, second.statusCode].sort()
+    expect(statuses).toEqual([200, 409])
+    const loser = first.statusCode === 409 ? first : second
+    expect((loser.body as Record<string, any>).code).toBe('INVITE_LEDGER_CONSUME_FAILED')
+    // Only the winner reaches password write
+    expect(passwordWriteCount).toBe(1)
+    expect(authServiceMocks.login).toHaveBeenCalledTimes(1)
   })
 })
