@@ -95,6 +95,7 @@ on:
       - 'apps/web/src/views/AttendanceView.vue'
       - 'apps/web/src/views/attendance/**'
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
+      - 'apps/web/tests/attendance-shift-segments.spec.ts'
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRail.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRailNavigation.spec.ts'
@@ -140,6 +141,7 @@ on:
       - 'apps/web/src/views/AttendanceView.vue'
       - 'apps/web/src/views/attendance/**'
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
+      - 'apps/web/tests/attendance-shift-segments.spec.ts'
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRail.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRailNavigation.spec.ts'
@@ -220,4 +222,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates --reporter=dot

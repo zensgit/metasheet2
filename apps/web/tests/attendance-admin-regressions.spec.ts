@@ -844,6 +844,225 @@ describe('Attendance admin regressions', () => {
     container = null
   })
 
+  type ShiftWrite = {
+    url: string
+    method: string
+    body: Record<string, unknown>
+  }
+
+  function attendanceShiftFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: 'shift-day',
+      name: 'Day shift',
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      isOvernight: false,
+      lateGraceMinutes: 10,
+      earlyGraceMinutes: 10,
+      roundingMinutes: 5,
+      workingDays: [1, 2, 3, 4, 5],
+      ...overrides,
+    }
+  }
+
+  function installShiftSegmentApi(shifts: Array<Record<string, unknown>>): ShiftWrite[] {
+    const writes: ShiftWrite[] = []
+    const fallback = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (/^\/api\/attendance\/shifts(?:\?.*)?$/.test(url) && method === 'GET') {
+        return jsonResponse(200, { ok: true, data: { items: shifts, total: shifts.length } })
+      }
+      if (url === '/api/attendance/shifts' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        writes.push({ url, method, body })
+        return jsonResponse(201, { ok: true, data: { shift: { id: 'shift-created', ...body } } })
+      }
+      if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'PUT') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        writes.push({ url, method, body })
+        return jsonResponse(200, { ok: true, data: { shift: { id: url.split('/').pop(), ...body } } })
+      }
+      if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'DELETE') {
+        writes.push({ url, method, body: {} })
+        return jsonResponse(200, { ok: true, data: { deleted: true } })
+      }
+      return fallback ? fallback(input, init) : emptyAttendanceResponse()
+    })
+    return writes
+  }
+
+  async function mountShiftAdmin(): Promise<HTMLElement> {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const shiftsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-shifts"]')
+    expect(shiftsNav).toBeTruthy()
+    shiftsNav!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-shifts')
+    expect(section).toBeTruthy()
+    return section!
+  }
+
+  it('normalizes legacy shifts, preserves ordered segments on edit, and exposes preview-only limits', async () => {
+    const splitShift = attendanceShiftFixture({
+      id: 'shift-split',
+      name: 'Split shift',
+      workStartTime: '08:00',
+      workEndTime: '17:00',
+      segments: [
+        { id: 'segment-b', segmentIndex: 1, startTime: '13:00', startDayOffset: 0, endTime: '17:00', endDayOffset: 0 },
+        { id: 'segment-a', segmentIndex: 0, startTime: '08:00', startDayOffset: 0, endTime: '12:00', endDayOffset: 0 },
+      ],
+      plannedMinutes: 480,
+      capabilities: {
+        segmentCalculation: {
+          enabled: false,
+          authoritativeResults: false,
+          multiSegmentAuthoring: 'preview_only',
+        },
+      },
+    })
+    const writes = installShiftSegmentApi([
+      attendanceShiftFixture(),
+      splitShift,
+    ])
+    const section = await mountShiftAdmin()
+
+    const rows = Array.from(section.querySelectorAll<HTMLTableRowElement>('tbody tr'))
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.querySelector('[data-attendance-shift-list-segments]')?.textContent).toContain('09:00-18:00')
+    expect(rows[1]!.querySelector('[data-attendance-shift-list-segments]')?.textContent).toContain('08:00-12:00 / 13:00-17:00')
+    expect(rows[1]!.querySelector('[data-attendance-shift-list-preview-only]')?.textContent).toContain('Preview only')
+
+    const editButton = Array.from(rows[1]!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Edit')
+    expect(editButton).toBeTruthy()
+    editButton!.click()
+    await flushUi(3)
+
+    expect(section.querySelectorAll('[data-attendance-shift-segment-row]')).toHaveLength(2)
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="0"]')?.value).toBe('08:00')
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="1"]')?.value).toBe('13:00')
+    const preview = section.querySelector<HTMLElement>('[data-attendance-shift-segment-preview]')
+    expect(preview?.dataset.plannedMinutes).toBe('480')
+    expect(preview?.dataset.gapMinutes).toBe('60')
+    const warning = section.querySelector<HTMLElement>('[data-attendance-shift-segment-preview-only]')
+    expect(warning?.textContent).toContain('assigned, rotated, swapped, dispatched, published, or auto-matched')
+
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi(6)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatchObject({
+      url: '/api/attendance/shifts/shift-split',
+      method: 'PUT',
+      body: {
+        name: 'Split shift',
+        timezone: 'Asia/Shanghai',
+        segments: [
+          { segmentIndex: 0, startTime: '08:00', startDayOffset: 0, endTime: '12:00', endDayOffset: 0 },
+          { segmentIndex: 1, startTime: '13:00', startDayOffset: 0, endTime: '17:00', endDayOffset: 0 },
+        ],
+      },
+    })
+    expect(writes[0]!.body).not.toHaveProperty('workStartTime')
+    expect(writes[0]!.body).not.toHaveProperty('workEndTime')
+    expect(writes[0]!.body).not.toHaveProperty('isOvernight')
+  })
+
+  it('adds, reorders, and removes shift segments while calculating paid time without gaps', async () => {
+    installShiftSegmentApi([])
+    const section = await mountShiftAdmin()
+    setInput(section, '[data-attendance-shift-segment-start="0"]', '08:00')
+    setInput(section, '[data-attendance-shift-segment-end="0"]', '12:00')
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-add]')!.click()
+    await flushUi(2)
+    setInput(section, '[data-attendance-shift-segment-start="1"]', '13:00')
+    setInput(section, '[data-attendance-shift-segment-end="1"]', '17:00')
+    await flushUi(2)
+
+    const preview = section.querySelector<HTMLElement>('[data-attendance-shift-segment-preview]')
+    expect(preview?.dataset.plannedMinutes).toBe('480')
+    expect(preview?.dataset.gapMinutes).toBe('60')
+    expect(section.querySelector('[data-attendance-shift-segment-preview-only]')).toBeTruthy()
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-up="1"]')!.click()
+    await flushUi(2)
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="0"]')?.value).toBe('13:00')
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="1"]')?.value).toBe('08:00')
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-remove="1"]')!.click()
+    await flushUi(2)
+    expect(section.querySelectorAll('[data-attendance-shift-segment-row]')).toHaveLength(1)
+    expect(section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-remove="0"]')?.disabled).toBe(true)
+  })
+
+  it('blocks overlapping segments before any write and emits the exact create payload after correction', async () => {
+    const writes = installShiftSegmentApi([])
+    const section = await mountShiftAdmin()
+    setInput(section, '#attendance-shift-name', 'Split shift')
+    const timezone = section.querySelector<HTMLSelectElement>('#attendance-shift-timezone')
+    expect(timezone).toBeTruthy()
+    timezone!.value = 'Asia/Shanghai'
+    timezone!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '[data-attendance-shift-segment-start="0"]', '09:00')
+    setInput(section, '[data-attendance-shift-segment-end="0"]', '12:00')
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-add]')!.click()
+    await flushUi(2)
+    setInput(section, '[data-attendance-shift-segment-start="1"]', '11:00')
+    setInput(section, '[data-attendance-shift-segment-end="1"]', '17:00')
+    await flushUi(2)
+
+    expect(section.querySelector('[data-attendance-shift-segment-errors]')?.textContent).toContain('overlaps or is out of order')
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi(3)
+    expect(writes).toEqual([])
+
+    setInput(section, '[data-attendance-shift-segment-start="1"]', '13:00')
+    await flushUi(2)
+    expect(section.querySelector('[data-attendance-shift-segment-errors]')).toBeNull()
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi(6)
+
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toEqual({
+      url: '/api/attendance/shifts',
+      method: 'POST',
+      body: {
+        name: 'Split shift',
+        timezone: 'Asia/Shanghai',
+        segments: [
+          { segmentIndex: 0, startTime: '09:00', startDayOffset: 0, endTime: '12:00', endDayOffset: 0 },
+          { segmentIndex: 1, startTime: '13:00', startDayOffset: 0, endTime: '17:00', endDayOffset: 0 },
+        ],
+        lateGraceMinutes: 10,
+        earlyGraceMinutes: 10,
+        roundingMinutes: 5,
+        workingDays: [1, 2, 3, 4, 5],
+      },
+    })
+  })
+
+  it('states the reference-blocking shift deletion contract before calling the API', async () => {
+    const writes = installShiftSegmentApi([attendanceShiftFixture()])
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const section = await mountShiftAdmin()
+    const deleteButton = Array.from(section.querySelectorAll<HTMLButtonElement>('tbody tr button'))
+      .find(button => button.textContent?.trim() === 'Delete')
+    expect(deleteButton).toBeTruthy()
+    deleteButton!.click()
+    await flushUi(2)
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining(
+      'blocked while assignments, rotation rules, pending swaps, or pending/published dispatches',
+    ))
+    expect(writes).toEqual([])
+    confirm.mockRestore()
+  })
+
   it('does not preload admin-only attendance data on the employee overview surface', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
