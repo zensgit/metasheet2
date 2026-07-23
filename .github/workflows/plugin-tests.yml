@@ -239,6 +239,11 @@ jobs:
       - name: Stock-preparation P4 repair CI wiring contract
         run: node --test scripts/ops/stock-preparation-p4-repair-ci-wiring.test.mjs
 
+      # Approval data-closure real-DB suites use the same two-point contract: excluded from the
+      # default no-DB collection and invoked as whole files in a required real-DB step.
+      - name: Approval data-closure CI wiring contract
+        run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
+
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
@@ -343,6 +348,24 @@ jobs:
             tests/unit/storageServiceLocalProvider.test.ts \
             tests/unit/filesStorageKey.test.ts \
             tests/unit/filesAcl.test.ts \
+            --reporter=dot
+
+      - name: Run B3-07 approval-attachment unit canaries
+        # The approval-attachment pipeline's no-DB units (route contracts, storage containment + the
+        # shared-substrate object-store adapter, boot/O3 storage resolution, fail-closed scanner seam,
+        # validation allowlist, GC drain, reconciler) are repeated as explicit canaries here so their
+        # ownership remains visible and robust if broader default discovery changes. Wired as WHOLE
+        # FILE runs (a name filter matching zero tests exits green and hides regressions).
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/approval-attachment-routes.test.ts \
+            tests/unit/approval-attachment-storage.test.ts \
+            tests/unit/approval-attachment-s3.test.ts \
+            tests/unit/approval-attachment-scan.test.ts \
+            tests/unit/approval-attachment-runtime.test.ts \
+            tests/unit/approval-attachment-validation.test.ts \
+            tests/unit/approval-attachment-gc-drain.test.ts \
+            tests/unit/approval-attachment-reconciler.test.ts \
             --reporter=dot
 
       - name: Start Postgres
@@ -656,6 +679,10 @@ jobs:
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
             tests/integration/multitable-fwb-write-action-realdb.test.ts \
+            tests/integration/multitable-fwb-activation-realdb.test.ts \
+            tests/integration/approval-attachment-gc-realdb.test.ts \
+            tests/integration/approval-attachment-bind-reconcile-realdb.test.ts \
+            tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
@@ -710,6 +737,7 @@ jobs:
             tests/integration/approval-amount-total-check.api.test.ts \
             tests/integration/approval-wp1-parallel-gateway.api.test.ts \
             tests/integration/approval-bridge-redaction-regression.test.ts \
+            tests/integration/approval-attachment-pipeline-realdb.test.ts \
             tests/integration/approval-metrics-people-teams.test.ts \
             tests/integration/approval-node-sla-remind.test.ts \
             tests/integration/approval-node-timeout-effects.test.ts \
@@ -855,6 +883,7 @@ jobs:
             tests/integration/multitable-automation-producer-emit-realdb.test.ts \
             tests/integration/multitable-automation-producer-family2-realdb.test.ts \
             tests/integration/multitable-durable-startup-failclosed.db.test.ts \
+            tests/integration/multitable-p2-fwb-eight-scenario-matrix.test.ts \
             tests/integration/multitable-automation-producer-family5-realdb.test.ts \
             tests/integration/multitable-automation-producer-family4-realdb.test.ts \
             tests/integration/multitable-automation-producer-family1-realdb.test.ts \

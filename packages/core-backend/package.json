@@ -34,6 +34,7 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1090.0",
     "@metasheet/mssql-readonly-utils": "workspace:*",
     "@types/bcryptjs": "^3.0.0",
     "@wendellhu/redi": "^1.1.0",

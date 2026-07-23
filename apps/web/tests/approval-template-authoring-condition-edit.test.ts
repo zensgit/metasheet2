@@ -469,6 +469,33 @@ describe('G-2 validation preview (UX-only; backend normalizeApprovalGraph is fin
     expect(validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).toEqual([])
   })
 
+  // P1 F1(b): a rules-mode branch with ZERO rules must be an error — the runtime evaluates
+  // `rules.every(...)`, vacuously TRUE over `[]`, so an empty branch would capture ALL traffic
+  // (first-match-wins) and dead-code the default edge. The fall-through "else" is `defaultEdgeKey`,
+  // a separate mechanism — an empty rules array is never a legitimate way to express it.
+  it('flags a rules-mode branch with ZERO rules (empty branch would match every request)', () => {
+    const edits: ConditionEdits = {
+      cond_1: {
+        nodeKey: 'cond_1',
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'rules', conjunction: 'and', rules: [], formulaExpression: '' }],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+    const errors = validateConditionEdits(edits, formSchema, CONDITION_GRAPH)
+    expect(errors.some((message) => message.includes('需要至少一条规则'))).toBe(true)
+  })
+
+  it('does NOT flag a FORMULA branch for having empty rules (formula is the predicate there)', () => {
+    const edits: ConditionEdits = {
+      cond_1: {
+        nodeKey: 'cond_1',
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'formula', conjunction: 'and', rules: [], formulaExpression: '{amount} >= 5000' }],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+    expect(validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).toEqual([])
+  })
+
   it('surfaces the rule-fieldId error through validateTemplateDraft when the draft carries condition edits', () => {
     const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(CONDITION_GRAPH))
     draft.conditionEdits!.cond_1.branches[0].rules[0].fieldId = 'ghost'

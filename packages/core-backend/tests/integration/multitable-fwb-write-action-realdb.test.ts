@@ -28,6 +28,7 @@ const gatesAll = (ok = true): FwbGateChecks => ({
   canManageSheetAccess: async () => ok,
   canReadTemplate: async () => ok,
   canWriteSheet: async () => ok,
+  canWriteTargetFields: async () => ok,
   hasRecordedConfirmation: async () => ok,
 })
 const seam: FwbRecordWriteSeam = {

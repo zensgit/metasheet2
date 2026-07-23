@@ -166,7 +166,10 @@ function resolveApprovalTenantId(req: Request): string | undefined {
   return normalized.length > 0 ? normalized : undefined
 }
 
-function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
+// Exported for the approval-attachment upload route (§4.1 template-access gate): the attachment
+// runtime evaluates the SAME request-derived visibility actor this router feeds into
+// applyTemplateVisibilityFilter — one actor derivation, no drift between create and upload.
+export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
   const userId = resolveApprovalActorId(req)
   if (!userId) return undefined
   const roles = resolveApprovalActorRoles(req)

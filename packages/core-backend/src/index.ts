@@ -87,6 +87,10 @@ import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import {
+  approvalAttachmentRefsJsonParser,
+  isApprovalAttachmentsEnabled,
+} from './routes/approval-attachments'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
@@ -281,6 +285,7 @@ export class MetaSheetServer {
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
+  private stopApprovalAttachmentWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
   // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
   // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
@@ -1158,6 +1163,13 @@ export class MetaSheetServer {
     // T1-2 inbound automation webhooks need the exact raw JSON bytes for HMAC verification and a
     // narrower body limit than the general API. Parse this prefix before the global JSON parser.
     this.app.use('/api/multitable/automation/webhooks', automationWebhookJsonParser)
+
+    // `/refs` has a 64 KB contract. This exact-path parser MUST run before the global 10 MB parser;
+    // mounting it only in the late attachment router is ineffective once `req.body` already exists.
+    // Flag OFF remains a byte-for-byte no-op: no parser and therefore no attachment-specific refusal.
+    if (isApprovalAttachmentsEnabled()) {
+      this.app.post('/api/approval/attachments/refs', approvalAttachmentRefsJsonParser)
+    }
 
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))
@@ -2104,6 +2116,15 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
+    shutdownTasks.push(Promise.resolve().then(async () => {
+      try {
+        // stop awaits any in-flight GC/purge/reconcile tick before the pool closes.
+        await this.stopApprovalAttachmentWorkers?.()
+        this.stopApprovalAttachmentWorkers = undefined
+      } catch (err) {
+        this.logger.warn(`Approval attachment workers stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
         if (this.yjsCleanupTimer) {
@@ -2631,6 +2652,29 @@ export class MetaSheetServer {
         throw e
       }
       this.logger.error('Durable delivery dispatch loop initialization failed (flag OFF — nothing suppressed, legacy path delivers); continuing', e as Error)
+    }
+
+    // B3-07 approval attachment pipeline (#4195 §7/§9) — flag-gated boot: route mount + GC sweep +
+    // purge drain + bucket reconciler. APPROVAL_ATTACHMENTS_ENABLED OFF ⇒ bootApprovalAttachmentRuntime
+    // returns null: nothing mounts, nothing ticks, byte-identical startup (D5/G1). Flag ON ⇒ the boot
+    // resolves storage per the ratified O3 decision (production requires the built-in S3-compatible
+    // provider's complete bucket+region configuration; otherwise uploads/downloads fail closed 503;
+    // dev/test probe a local-FS root) and a FAILED probe/boot ABORTS startup — the same doctrine as
+    // durableBootFailureDisposition (flag ON means a storage-less boot is an outage, not a degrade).
+    try {
+      const { bootApprovalAttachmentRuntime } = await import('./services/approval-attachment-runtime')
+      const attachmentRuntime = await bootApprovalAttachmentRuntime({ db: poolManager.get(), logger: this.logger })
+      if (attachmentRuntime) {
+        this.app.use(attachmentRuntime.router)
+        if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+          this.stopApprovalAttachmentWorkers = attachmentRuntime.startWorkers()
+        }
+        this.logger.info('Approval attachment pipeline initialized (APPROVAL_ATTACHMENTS_ENABLED)')
+      }
+    } catch (e) {
+      // Only reachable flag-ON (flag-OFF returns null before anything fallible) ⇒ always fail-closed.
+      this.logger.error('Approval attachment runtime boot FAILED with APPROVAL_ATTACHMENTS_ENABLED=true — aborting startup (fail-closed: an unusable blob store must not boot a live upload surface)', e as Error)
+      throw e
     }
 
     // AI usage ledger retention sweep (ladder #9): a periodic bounded DELETE of

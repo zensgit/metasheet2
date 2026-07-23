@@ -208,7 +208,7 @@
               <el-input
                 v-model="draft.visibilityIdsText"
                 :disabled="readOnly || draft.visibilityType === 'all'"
-                placeholder="逗号分隔 id"
+                placeholder="逗号分隔，按所选范围填写"
               />
             </div>
           </el-form-item>
@@ -255,9 +255,7 @@
             </div>
           </div>
           <div class="template-authoring__grid">
-            <el-form-item label="字段 ID">
-              <el-input v-model="field.id" :disabled="readOnly" />
-            </el-form-item>
+            <!-- D1 hygiene: field.id is auto-generated / load-preserved; not an ordinary control. -->
             <el-form-item label="字段名称">
               <el-input v-model="field.label" :disabled="readOnly" />
             </el-form-item>
@@ -308,11 +306,7 @@
                   size="small"
                   class="template-authoring__detail-table"
                 >
-                  <el-table-column label="子字段 ID" min-width="120">
-                    <template #default="{ row }">
-                      <el-input v-model="row.id" :disabled="readOnly" placeholder="如 product" />
-                    </template>
-                  </el-table-column>
+                  <!-- D1 hygiene: detail column id is auto-generated / load-preserved; not ordinary UI. -->
                   <el-table-column label="名称" min-width="120">
                     <template #default="{ row }">
                       <el-input v-model="row.label" :disabled="readOnly" placeholder="如 品名" />
@@ -470,7 +464,7 @@
              READ-ONLY summaries (G-3 / G-4), and every non-condition node + all edges are preserved
              byte-for-byte on save. Nothing renders as a bare "unsupported". -->
         <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
-        <div v-if="graphReadOnly" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
+        <div v-if="graphReadOnly && canvasV2Enabled" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
           <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
           <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
         </div>
@@ -478,7 +472,7 @@
         <!-- D-1/D-5 visual canvas: auto-laid-out nodes + SVG edges + topology toolbar + live validity.
              The mouse-drag GESTURE is manual/E2E QA; everything else is unit-covered. Node config is
              edited in the「结构列表」view (D-6 toggle). -->
-        <div v-if="graphReadOnly && canvasViewMode === 'canvas'">
+        <div v-if="graphReadOnly && canvasV2Enabled && canvasViewMode === 'canvas'">
           <el-alert
             v-if="canvasValidity.length"
             type="warning"
@@ -526,7 +520,7 @@
               @dragstart="onCanvasNodeDragStart(pos.key)"
               @dragend="onCanvasNodeDragEnd($event)"
             >
-              <strong>{{ canvasNodeByKey(pos.key)?.name || pos.key }}</strong>
+              <strong>{{ canvasNodeByKey(pos.key)?.name?.trim() || '未命名节点' }}</strong>
               <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
                 {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
               </span>
@@ -541,7 +535,7 @@
           <p class="template-authoring__hint">画布用于查看与编排结构（增删节点 / 分支、拖动布局）。各节点的审批人 / 规则配置请切换到「结构列表」编辑。</p>
         </div>
 
-        <div v-if="graphReadOnly && canvasViewMode === 'list'" data-testid="approval-graph-readonly-list">
+        <div v-if="graphReadOnly && (!canvasV2Enabled || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
             :key="node.key"
@@ -549,7 +543,7 @@
             data-testid="approval-graph-node-row"
           >
             <div class="template-authoring__item-toolbar">
-              <strong>{{ node.name || node.key }}</strong>
+              <strong>{{ node.name?.trim() || '未命名节点' }}</strong>
               <span class="template-authoring__node-type" :data-node-type="node.type">
                 {{ nodeTypeLabel(node.type) }}
               </span>
@@ -600,7 +594,8 @@
                 data-testid="approval-condition-branch"
               >
                 <div class="template-authoring__condition-branch-head">
-                  <span>分支「{{ liveBranchSummary(branch) }}」→ {{ branch.edgeKey }}</span>
+                  <!-- D1 ordinary-user hygiene: readable predicate only; edge keys stay in the model/payload, not the DOM. -->
+                  <span>分支「{{ liveBranchSummary(branch) }}」</span>
                   <el-select
                     :model-value="branch.predicateMode"
                     size="small"
@@ -643,7 +638,7 @@
                       <el-option
                         v-for="field in conditionFieldOptions"
                         :key="field.id"
-                        :label="field.label"
+                        :label="fieldDisplayLabel(field)"
                         :value="field.id"
                       />
                     </el-select>
@@ -750,19 +745,17 @@
                         :title="`插入 requester.role in [&quot;${role.id}&quot;]`"
                         :data-testid="`approval-condition-formula-insert-role-${role.id}`"
                         @click="insertConditionFormulaRoleMembership(branch, role.id)"
-                      >{{ directory.formatRoleLabel(role) }}</el-button>
+                      >{{ directoryRoleDisplayLabel(role) }}</el-button>
                     </template>
                   </div>
                   <div class="template-authoring__condition-formula-dryrun">
-                    <el-input
-                      :model-value="conditionFormulaDryRunSample(node.key, branch.edgeKey)"
-                      type="textarea"
-                      :rows="2"
-                      :disabled="readOnly"
-                      placeholder='样例数据 JSON，例如 {"amount": 5000}'
-                      data-testid="approval-condition-formula-dry-run-sample"
-                      @update:model-value="(text: string) => setConditionFormulaDryRunSample(node.key, branch.edgeKey, text)"
-                    />
+                    <!-- D1: values-first — reuse 试运行 sampleFormData; no ordinary JSON textarea. -->
+                    <p
+                      class="template-authoring__hint"
+                      data-testid="approval-condition-formula-dry-run-sample-hint"
+                    >
+                      使用「测试发布」页的试运行样例值进行测试
+                    </p>
                     <div class="template-authoring__condition-formula-dryrun-actions">
                       <el-button
                         size="small"
@@ -795,7 +788,7 @@
                   <el-option
                     v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
                     :key="edgeKey"
-                    :label="edgeKey"
+                    :label="conditionDefaultEdgeLabel(node.key, edgeKey)"
                     :value="edgeKey"
                   />
                 </el-select>
@@ -827,10 +820,11 @@
                   />
                 </el-select>
               </el-form-item>
-              <!-- branches + join target are preserved topology (not editable here). -->
+              <!-- branches + join target are preserved topology (not editable here).
+                   D1 hygiene: show human node names, never raw edge/node keys. -->
               <ul class="template-authoring__node-summary" data-testid="approval-parallel-topology">
-                <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.join('、') || '（无）' }}</li>
-                <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey || '（无）' }}</li>
+                <li>并行分支：{{ parallelBranchLabels(node) }}</li>
+                <li>汇聚节点：{{ graphNodeDisplayName((node.config as ParallelNodeConfig).joinNodeKey) }}</li>
               </ul>
             </div>
 
@@ -859,18 +853,50 @@
                 </el-select>
               </el-form-item>
               <el-form-item label="抄送对象">
+                <!-- D1: typed directory picker (user remote / role list); no allow-create raw IDs. -->
                 <el-select
-                  v-model="ccEditFor(node.key)!.targetIds"
+                  v-if="ccEditFor(node.key)!.targetType === 'user'"
+                  :model-value="ccEditFor(node.key)!.targetIds"
                   multiple
                   filterable
-                  allow-create
-                  default-first-option
+                  remote
+                  :remote-method="onUserSearch"
+                  :loading="directory.usersLoading.value"
                   size="small"
                   :disabled="readOnly"
                   class="ms-w-360"
-                  placeholder="输入用户/角色 ID 后回车"
+                  placeholder="搜索用户名 / 邮箱"
                   data-testid="approval-cc-target-ids"
-                />
+                  @update:model-value="(ids: string[]) => setCcTargetIds(node.key, ids)"
+                  @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                >
+                  <el-option
+                    v-for="user in directory.users.value"
+                    :key="user.id"
+                    :label="directoryUserDisplayLabel(user)"
+                    :value="user.id"
+                  />
+                </el-select>
+                <el-select
+                  v-else
+                  :model-value="ccEditFor(node.key)!.targetIds"
+                  multiple
+                  filterable
+                  size="small"
+                  :disabled="readOnly"
+                  class="ms-w-360"
+                  placeholder="选择角色"
+                  data-testid="approval-cc-target-ids"
+                  @update:model-value="(ids: string[]) => setCcTargetIds(node.key, ids)"
+                  @visible-change="(visible: boolean) => visible && syncCcOptions(node.key)"
+                >
+                  <el-option
+                    v-for="role in directory.roles.value"
+                    :key="role.id"
+                    :label="directoryRoleDisplayLabel(role)"
+                    :value="role.id"
+                  />
+                </el-select>
               </el-form-item>
             </div>
 
@@ -900,10 +926,7 @@
                   />
                 </el-select>
               </el-form-item>
-              <!-- G-B2-18: same directory typeahead as the linear-step picker (line ~973) — the
-                   composable is shared (one users/roles fetch backs both surfaces), only the
-                   template wiring is duplicated per editor. The manual-ID input stays as the
-                   advanced fallback (directory search doesn't guarantee full id coverage). -->
+              <!-- G-B2-18 + D1: typed directory pickers only (no ordinary manual-ID path). -->
               <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
                 <el-form-item v-if="approvalSourceKind(node.key) === 'static_user'" label="选择用户">
                   <el-select
@@ -916,7 +939,7 @@
                     size="small"
                     :disabled="readOnly"
                     class="ms-w-360"
-                    placeholder="搜索用户名 / 邮箱 / ID"
+                    placeholder="搜索用户名 / 邮箱"
                     data-testid="approval-node-source-user-picker"
                     @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
                     @visible-change="(visible: boolean) => visible && onUserSearch('')"
@@ -924,7 +947,7 @@
                     <el-option
                       v-for="user in directory.users.value"
                       :key="user.id"
-                      :label="directory.formatUserLabel(user)"
+                      :label="directoryUserDisplayLabel(user)"
                       :value="user.id"
                     />
                   </el-select>
@@ -944,34 +967,32 @@
                     <el-option
                       v-for="role in directory.roles.value"
                       :key="role.id"
-                      :label="directory.formatRoleLabel(role)"
+                      :label="directoryRoleDisplayLabel(role)"
                       :value="role.id"
                     />
                   </el-select>
                 </el-form-item>
-                <el-form-item label="手动输入 ID（高级）">
-                  <el-input
-                    :model-value="approvalSourceIdsText(node.key)"
-                    :disabled="readOnly"
-                    placeholder="逗号或换行分隔"
-                    data-testid="approval-node-source-ids-text"
-                    @update:model-value="(text: string) => setApprovalSourceIdsText(node.key, text)"
-                  />
-                </el-form-item>
               </template>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
-                label="表单用户字段 ID"
+                label="表单用户字段"
               >
-                <el-input
+                <el-select
                   :model-value="approvalSourceFieldId(node.key)"
                   size="small"
                   :disabled="readOnly"
                   class="ms-w-240"
-                  placeholder="顶层 user 字段 ID"
+                  placeholder="选择表单用户字段"
                   data-testid="approval-node-source-field"
                   @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, fieldId)"
-                />
+                >
+                  <el-option
+                    v-for="field in userFields"
+                    :key="field.id"
+                    :label="fieldDisplayLabel(field)"
+                    :value="field.id"
+                  />
+                </el-select>
               </el-form-item>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'manager_at_level' || approvalSourceKind(node.key) === 'continuous_managers'"
@@ -997,7 +1018,7 @@
                 show-icon
                 class="template-authoring__placeholder-hint"
                 data-testid="approval-node-placeholder-hint"
-                title="此为占位审批角色，发布前请替换为真实角色 ID"
+                title="此为占位审批角色，发布前请替换为真实角色"
                 description="占位角色无人可认领，未替换将无法发布该模板。"
               />
             </div>
@@ -1119,7 +1140,7 @@
                 :loading="directory.usersLoading.value"
                 :disabled="readOnly"
                 class="ms-w-100pct"
-                placeholder="搜索用户名 / 邮箱 / ID"
+                placeholder="搜索用户名 / 邮箱"
                 data-testid="approval-step-user-picker"
                 @update:model-value="(ids: string[]) => setStepIds(step, ids)"
                 @visible-change="(visible: boolean) => visible && onUserSearch('')"
@@ -1127,7 +1148,7 @@
                 <el-option
                   v-for="user in directory.users.value"
                   :key="user.id"
-                  :label="directory.formatUserLabel(user)"
+                  :label="directoryUserDisplayLabel(user)"
                   :value="user.id"
                 />
               </el-select>
@@ -1146,20 +1167,17 @@
                 <el-option
                   v-for="role in directory.roles.value"
                   :key="role.id"
-                  :label="directory.formatRoleLabel(role)"
+                  :label="directoryRoleDisplayLabel(role)"
                   :value="role.id"
                 />
               </el-select>
             </el-form-item>
-            <el-form-item v-if="step.sourceKind === 'static_user' || step.sourceKind === 'static_role'" label="手动输入 ID（高级）">
-              <el-input v-model="step.idsText" :disabled="readOnly" placeholder="逗号或换行分隔" data-testid="approval-step-ids-text" />
-            </el-form-item>
             <el-form-item v-if="step.sourceKind === 'form_field_user'" label="表单用户字段">
-              <el-select v-model="step.fieldId" :disabled="readOnly" class="ms-w-100pct">
+              <el-select v-model="step.fieldId" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-source-field">
                 <el-option
                   v-for="field in userFields"
                   :key="field.id"
-                  :label="`${field.label} (${field.id})`"
+                  :label="fieldDisplayLabel(field)"
                   :value="field.id"
                 />
               </el-select>
@@ -1206,7 +1224,7 @@
               class="template-authoring__field-perm-row"
               data-testid="approval-step-field-permission-row"
             >
-              <span class="template-authoring__field-perm-label">{{ field.label || field.id }}（{{ field.id }}）</span>
+              <span class="template-authoring__field-perm-label">{{ fieldDisplayLabel(field) }}</span>
               <el-select
                 :model-value="stepFieldAccess(step, field.id)"
                 :disabled="readOnly"
@@ -1234,19 +1252,8 @@
         </div>
       </el-card>
 
-      <el-card v-show="activeAuthoringSection === 'review'" class="template-authoring__panel" shadow="never">
-        <template #header>
-          <strong>JSON 预览</strong>
-        </template>
-        <el-collapse>
-          <el-collapse-item title="formSchema" name="form">
-            <pre data-testid="approval-template-form-preview">{{ formSchemaPreview }}</pre>
-          </el-collapse-item>
-          <el-collapse-item title="approvalGraph" name="graph">
-            <pre data-testid="approval-template-graph-preview">{{ approvalGraphPreview }}</pre>
-          </el-collapse-item>
-        </el-collapse>
-      </el-card>
+      <!-- D1 ordinary-user hygiene: JSON formSchema/approvalGraph preview removed from the review
+           step. Payload builders are unchanged; try-run remains the user-facing dry-run surface. -->
 
       <!-- RP-3 (route-preview lock, B3-06) FE 试运行面板: read-only dry-run of the LAST-SAVED
            draft graph — never writes an instance/assignment/notification. Compute-at-click via
@@ -1273,7 +1280,7 @@
           <el-form-item label="样例发起人（留空 = 以当前管理员身份预览）">
             <ApprovalUserPicker
               v-model="sampleRequesterId"
-              placeholder="搜索用户名 / 邮箱 / ID（可留空）"
+              placeholder="搜索用户名 / 邮箱（可留空）"
               data-testid="approval-template-tryrun-requester-picker"
             />
           </el-form-item>
@@ -1289,14 +1296,14 @@
           <template v-for="field in requesterVisibleFields" :key="field.id">
             <el-form-item
               v-if="!sampleFieldUnsupportedReason(field)"
-              :label="field.label || field.id"
+              :label="fieldDisplayLabel(field)"
               data-testid="approval-template-tryrun-field"
             >
               <!-- text -->
               <el-input
                 v-if="field.type === 'text'"
                 v-model="sampleFormData[field.id]"
-                :placeholder="field.placeholder || `请输入${field.label}`"
+                :placeholder="field.placeholder || `请输入${fieldDisplayLabel(field)}`"
               />
               <!-- textarea -->
               <el-input
@@ -1304,7 +1311,7 @@
                 v-model="sampleFormData[field.id]"
                 type="textarea"
                 :rows="2"
-                :placeholder="field.placeholder || `请输入${field.label}`"
+                :placeholder="field.placeholder || `请输入${fieldDisplayLabel(field)}`"
               />
               <!-- number -->
               <el-input-number
@@ -1317,7 +1324,7 @@
                 v-else-if="field.type === 'date'"
                 v-model="sampleFormData[field.id]"
                 type="date"
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               />
               <!-- datetime -->
@@ -1325,14 +1332,14 @@
                 v-else-if="field.type === 'datetime'"
                 v-model="sampleFormData[field.id]"
                 type="datetime"
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               />
               <!-- select -->
               <el-select
                 v-else-if="field.type === 'select'"
                 v-model="sampleFormData[field.id]"
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               >
                 <el-option
@@ -1347,7 +1354,7 @@
                 v-else-if="field.type === 'multi-select'"
                 v-model="sampleFormData[field.id]"
                 multiple
-                :placeholder="field.placeholder || `请选择${field.label}`"
+                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               >
                 <el-option
@@ -1369,7 +1376,7 @@
               class="template-authoring__hint template-authoring__wide"
               data-testid="approval-template-tryrun-field-unsupported"
             >
-              {{ field.label || field.id }}：{{ sampleFieldUnsupportedReason(field) }}
+              {{ fieldDisplayLabel(field) }}：{{ sampleFieldUnsupportedReason(field) }}
             </div>
           </template>
         </el-form>
@@ -1390,7 +1397,7 @@
                 :key="entry.field.id"
                 data-testid="approval-template-tryrun-hidden-field"
               >
-                <span class="template-authoring__tryrun-hidden-label">{{ entry.field.label || entry.field.id }}</span>
+                <span class="template-authoring__tryrun-hidden-label">{{ fieldDisplayLabel(entry.field) }}</span>
                 <span class="template-authoring__tryrun-hidden-reason">{{ entry.reason }}</span>
               </li>
             </ul>
@@ -1541,7 +1548,8 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { summarizeConditionBranch, summarizeConditionNode } from '../../approvals/conditionSummary'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import { summarizeConditionBranch } from '../../approvals/conditionSummary'
 import {
   createTemplate,
   dryRunApprovalConditionFormula,
@@ -1626,6 +1634,8 @@ import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 const route = useRoute()
 const router = useRouter()
 const { canManageTemplates } = useApprovalPermissions()
+const { features: productFeatures } = useFeatureFlags()
+const canvasV2Enabled = computed(() => productFeatures.value.approvalCanvasV2 === true)
 
 const loading = ref(false)
 const saving = ref(false)
@@ -1660,7 +1670,6 @@ const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaselin
 function snapshotDraft() {
   draftBaseline.value = JSON.stringify(draft.value)
 }
-const conditionFormulaDryRunSamples = ref<Record<string, string>>({})
 const conditionFormulaDryRunResults = ref<Record<string, string>>({})
 const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
 
@@ -1746,31 +1755,111 @@ function nodeTypeLabel(type: string): string {
 // One read-only descriptor per node config, covering ALL three complex types (condition / parallel
 // / cc) plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
 // without summarisable config (start/end).
+function fieldDisplayLabel(field: { label?: string | null }): string {
+  const label = field.label?.trim()
+  return label ? label : '未命名字段'
+}
+
+/** Ordinary-user directory labels never fall back to the raw directory id. */
+function directoryUserDisplayLabel(user: { name?: string | null; email?: string | null }): string {
+  const name = user.name?.trim()
+  const email = user.email?.trim()
+  if (name) return email ? `${name} · ${email}` : name
+  return email || '未知用户'
+}
+
+function directoryRoleDisplayLabel(role: { name?: string | null }): string {
+  const name = role.name?.trim()
+  return name || '未知角色'
+}
+
+function graphNodeDisplayName(nodeKey: string | null | undefined): string {
+  if (!nodeKey) return '（无）'
+  const node = draft.value.preservedGraph?.nodes.find((entry) => entry.key === nodeKey)
+  return node?.name?.trim() || '（未命名节点）'
+}
+
+/** D1 hygiene: resolve a parallel fork edge key to its target node name (never show the raw key). */
+function parallelBranchLabels(node: ApprovalNode): string {
+  const cfg = node.config as ParallelNodeConfig
+  const branches = cfg.branches ?? []
+  if (branches.length === 0) return '（无）'
+  const edges = draft.value.preservedGraph?.edges ?? []
+  return branches.map((edgeKey, index) => {
+    const edge = edges.find((entry) => entry.key === edgeKey)
+    if (edge?.target) return graphNodeDisplayName(edge.target)
+    return `分支 ${index + 1}`
+  }).join('、')
+}
+
+/**
+ * D1 ordinary-user edge-key label for the default-branch picker.
+ * Prefer the matching branch's readable predicate, else the edge's target node name.
+ * Value binding stays the raw edgeKey (payload unchanged).
+ */
+function conditionDefaultEdgeLabel(conditionNodeKey: string, edgeKey: string): string {
+  const edit = conditionEditFor(conditionNodeKey)
+  const branch = edit?.branches.find((entry) => entry.edgeKey === edgeKey)
+  if (branch) {
+    const summary = liveBranchSummary(branch)
+    if (summary && summary !== '（无规则）') return summary
+  }
+  const edge = draft.value.preservedGraph?.edges.find((entry) => entry.key === edgeKey)
+  if (edge?.target) return graphNodeDisplayName(edge.target)
+  return '默认分支'
+}
+
 function nodeConfigSummary(node: ApprovalNode): string[] {
   const config = node.config as Record<string, unknown>
   if (node.type === 'condition') {
     const cfg = config as unknown as ConditionNodeConfig
-    // G-B2-19: readable predicates（「金额 > 5000」）lead; edge keys stay as secondary provenance.
-    return summarizeConditionNode(cfg, buildFormSchema(draft.value))
+    const schema = buildFormSchema(draft.value)
+    // D1 hygiene: readable predicates only — no edge-key secondary provenance in ordinary DOM.
+    const lines = (cfg.branches ?? []).map(
+      (branch) => `分支「${summarizeConditionBranch(branch, schema)}」`,
+    )
+    if (cfg.defaultEdgeKey) {
+      const edge = draft.value.preservedGraph?.edges.find((entry) => entry.key === cfg.defaultEdgeKey)
+      lines.push(`默认分支 → ${edge?.target ? graphNodeDisplayName(edge.target) : '（已配置）'}`)
+    }
+    return lines
   }
   if (node.type === 'parallel') {
     const cfg = config as unknown as ParallelNodeConfig
     return [
-      `并行分支：${(cfg.branches ?? []).join('、') || '（无）'}`,
-      `汇聚节点：${cfg.joinNodeKey ?? '（无）'}`,
+      `并行分支：${parallelBranchLabels(node)}`,
+      `汇聚节点：${graphNodeDisplayName(cfg.joinNodeKey)}`,
       `汇聚模式：${cfg.joinMode ?? '（无）'}`,
     ]
   }
   if (node.type === 'cc') {
     const cfg = config as unknown as CcNodeConfig
+    // H2: CC still has no directory picker — targetIds remain the only carrier. Show type only
+    // so ordinary DOM does not dump raw assignee IDs; the editable picker still holds the values.
     return [
       `抄送类型：${cfg.targetType === 'role' ? '角色' : '用户'}`,
-      `抄送对象：${(cfg.targetIds ?? []).join('、') || '（无）'}`,
+      `抄送对象：${(cfg.targetIds ?? []).length ? `已选 ${(cfg.targetIds ?? []).length} 个` : '（无）'}`,
     ]
   }
   if (node.type === 'approval') {
     const sources = Array.isArray(config.assigneeSources) ? config.assigneeSources as ApprovalAssigneeSource[] : []
-    return sources.map((source) => `审批人：${assigneeSourceSummary(source)}`)
+    // Prefer human labels; for static_user/static_role avoid dumping raw id lists in read-only rows
+    // (typed pickers own those values when the node is editable).
+    return sources.map((source) => {
+      if (source.kind === 'static_user') {
+        const count = source.userIds?.length ?? 0
+        return `审批人：指定用户${count ? `（${count} 人）` : '（无）'}`
+      }
+      if (source.kind === 'static_role') {
+        const count = source.roleIds?.length ?? 0
+        return `审批人：指定角色${count ? `（${count} 个）` : '（无）'}`
+      }
+      if (source.kind === 'form_field_user') {
+        const field = draft.value.fields.find((entry) => entry.id === source.fieldId)
+        return `审批人：表单用户字段：${field ? fieldDisplayLabel(field) : '（未选）'}`
+      }
+      return `审批人：${assigneeSourceSummary(source)}`
+    })
   }
   return []
 }
@@ -1801,7 +1890,7 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
 const conditionFieldOptions = computed(() =>
   draft.value.fields
     .filter((field) => field.id.trim())
-    .map((field) => ({ id: field.id.trim(), label: field.label.trim() || field.id.trim() })),
+    .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
 const conditionFormulaInsertOptions = computed(() =>
   approvalFormulaInsertOptions(buildFormSchema(draft.value)),
@@ -1864,15 +1953,6 @@ function insertConditionFormulaRoleMembership(branch: ConditionBranchEdit, roleI
 function conditionFormulaDryRunKey(nodeKey: string, edgeKey: string): string {
   return `${nodeKey}:${edgeKey}`
 }
-function conditionFormulaDryRunSample(nodeKey: string, edgeKey: string): string {
-  return conditionFormulaDryRunSamples.value[conditionFormulaDryRunKey(nodeKey, edgeKey)] ?? '{}'
-}
-function setConditionFormulaDryRunSample(nodeKey: string, edgeKey: string, text: string): void {
-  conditionFormulaDryRunSamples.value = {
-    ...conditionFormulaDryRunSamples.value,
-    [conditionFormulaDryRunKey(nodeKey, edgeKey)]: text,
-  }
-}
 function conditionFormulaDryRunResult(nodeKey: string, edgeKey: string): string {
   return conditionFormulaDryRunResults.value[conditionFormulaDryRunKey(nodeKey, edgeKey)] ?? ''
 }
@@ -1891,25 +1971,14 @@ function setConditionFormulaDryRunLoading(nodeKey: string, edgeKey: string, load
     [conditionFormulaDryRunKey(nodeKey, edgeKey)]: loadingValue,
   }
 }
+// D1 values-first: dry-run reads the same typed 试运行 sampleFormData (no per-branch JSON parse).
 async function dryRunConditionFormula(nodeKey: string, branch: ConditionBranchEdit): Promise<void> {
   const expression = branch.formulaExpression.trim()
-  const resultKey = conditionFormulaDryRunKey(nodeKey, branch.edgeKey)
   if (!expression) {
     setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, '请输入公式')
     return
   }
-  let formData: Record<string, unknown>
-  try {
-    const parsed = JSON.parse(conditionFormulaDryRunSamples.value[resultKey] ?? '{}') as unknown
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('样例数据必须是 JSON 对象')
-    }
-    formData = parsed as Record<string, unknown>
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '样例数据不是有效 JSON'
-    setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, `样例数据错误：${message}`)
-    return
-  }
+  const formData: Record<string, unknown> = { ...sampleFormData.value }
   setConditionFormulaDryRunLoading(nodeKey, branch.edgeKey, true)
   try {
     const result = await dryRunApprovalConditionFormula({
@@ -2035,8 +2104,10 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
 function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
   try {
     draft.value = applyTopologyToComplexDraft(draft.value, op)
-  } catch (error) {
-    loadError.value = error instanceof Error ? error.message : '拓扑修改失败'
+  } catch {
+    // Topology helpers include internal node/edge keys in diagnostics. Those identifiers are useful
+    // to developers but are not an author-facing vocabulary and must not leak into the editor banner.
+    loadError.value = '该拓扑操作不适用于当前流程结构'
   }
 }
 function onAddConditionBranch(nodeKey: string): void {
@@ -2058,9 +2129,16 @@ function canInsertAfter(node: ApprovalNode): boolean {
   return node.type !== 'end' && topologyEdgeCount(node.key, 'source') === 1
 }
 function canRemoveNode(node: ApprovalNode): boolean {
-  return (node.type === 'approval' || node.type === 'cc')
+  const isLinearRemovable = (node.type === 'approval' || node.type === 'cc')
     && topologyEdgeCount(node.key, 'target') === 1
     && topologyEdgeCount(node.key, 'source') === 1
+  if (!isLinearRemovable) return false
+  try {
+    removeLinearNode(buildApprovalGraph(draft.value), node.key)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ── D-1/D-5/D-6 visual canvas (bespoke SVG/HTML — the render is DATA, so it's unit-testable; only the
@@ -2110,7 +2188,7 @@ const publishApprovalFlowIssues = computed<string[]>(() => [
 const publishPlaceholderRoleKeys = computed<string[]>(() => placeholderRoleNodeKeys(draft.value.approvalNodeEdits ?? {}))
 const publishPlaceholderRoleIssues = computed<string[]>(() =>
   publishPlaceholderRoleKeys.value.map(
-    (key) => `审批节点「${canvasNodeByKey(key)?.name || key}」仍为占位审批角色，请先替换为真实角色`,
+    (key) => `审批节点「${canvasNodeByKey(key)?.name?.trim() || '未命名节点'}」仍为占位审批角色，请先替换为真实角色`,
   ),
 )
 const publishChecklist = computed<PublishChecklistItem[]>(() => [
@@ -2169,14 +2247,6 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
 // buffer is the raw carrier instead (never part of node.config / the saved graph): read back
 // verbatim once the author has touched the field, falling back to the derived join before that
 // (hydrate / a node nobody has edited yet).
-function approvalSourceIdsText(nodeKey: string): string {
-  const v = approvalSourceIds(nodeKey).join(', ')
-  console.log('DEBUG approvalSourceIdsText call ->', JSON.stringify(v), 'ids=', JSON.stringify(approvalSourceIds(nodeKey)))
-  return v
-}
-function setApprovalSourceIdsText(nodeKey: string, text: string): void {
-  setApprovalSourceIds(nodeKey, parseIdsText(text))
-}
 function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
   setApprovalSourceIds(nodeKey, ids)
 }
@@ -2217,9 +2287,6 @@ function onStepFieldAccessChange(step: ApprovalStepDraft, fieldId: string, acces
   step.fieldPermissions = setStepFieldPermission(step.fieldPermissions, fieldId, access)
 }
 
-const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
-const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
-
 // Directory typeahead for static_user / static_role assignee sources. The picker is purely
 // additive: it reads/writes the SAME step.idsText carrier (parseIdsText in, ', ' join out, the
 // exact separator formatIds uses), so sourceFromStep / buildApprovalGraph consume it unchanged.
@@ -2236,8 +2303,7 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
   // Keep already-selected ids visible as chips even if the new search page omits them —
-  // across BOTH pickers that share this one composable instance (linear steps + G-B2-18
-  // complex-graph nodes).
+  // across linear steps, complex approval nodes, and CC user targets.
   for (const step of draft.value.steps) {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
@@ -2245,6 +2311,11 @@ async function onUserSearch(query: string): Promise<void> {
   for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) {
     if (approvalSourceKind(nodeKey) !== 'static_user') continue
     for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
+  }
+  for (const nodeKey of Object.keys(draft.value.ccEdits ?? {})) {
+    const edit = ccEditFor(nodeKey)
+    if (!edit || edit.targetType !== 'user') continue
+    for (const id of edit.targetIds) directory.ensureUserOptionVisible(id)
   }
 }
 
@@ -2262,11 +2333,8 @@ function syncAllStepOptions(): void {
   for (const step of draft.value.steps) syncStepOptions(step)
 }
 
-// G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to the complex-graph
-// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey, one entry per editable
-// approval node — see approvalNodeEditFor). Also re-seeds (or clears) the manual-ID text buffer
-// so a source-KIND switch never leaves the OTHER kind's stale typed text showing — the buffer is
-// keyed only by nodeKey, not by (nodeKey, kind), so it must be reset whenever kind changes.
+// G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to complex-graph
+// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey).
 function syncApprovalNodeOptions(nodeKey: string): void {
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'static_user') {
@@ -2278,6 +2346,27 @@ function syncApprovalNodeOptions(nodeKey: string): void {
 
 function syncAllApprovalNodeOptions(): void {
   for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
+}
+
+function setCcTargetIds(nodeKey: string, ids: string[]): void {
+  const edit = ccEditFor(nodeKey)
+  if (!edit) return
+  edit.targetIds = ids
+  syncCcOptions(nodeKey)
+}
+
+function syncCcOptions(nodeKey: string): void {
+  const edit = ccEditFor(nodeKey)
+  if (!edit) return
+  if (edit.targetType === 'user') {
+    for (const id of edit.targetIds) directory.ensureUserOptionVisible(id)
+  } else {
+    for (const id of edit.targetIds) directory.ensureRoleOptionVisible(id)
+  }
+}
+
+function syncAllCcOptions(): void {
+  for (const nodeKey of Object.keys(draft.value.ccEdits ?? {})) syncCcOptions(nodeKey)
 }
 
 function clearErrors() {
@@ -2352,7 +2441,7 @@ function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
 function visibilityFieldOptions(current: FieldAuthoringDraft) {
   return draft.value.fields
     .filter((field) => field.localId !== current.localId && field.id.trim().length > 0)
-    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: field.label.trim() || field.id.trim() }))
+    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) }))
 }
 
 function addStep() {
@@ -2392,6 +2481,7 @@ async function loadTemplateForEdit() {
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
+    syncAllCcOptions()
     snapshotDraft()
   } catch (error: any) {
     loadError.value = error?.message ?? '加载审批模板失败'
@@ -2463,6 +2553,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
+    syncAllCcOptions()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
@@ -2535,7 +2626,7 @@ const routePreviewError = ref('')
 const templateIdForPreview = computed(() => draft.value.templateId ?? '')
 
 const tryRunDisabledReason = computed<string>(() => {
-  if (!templateIdForPreview.value) return '请先保存草稿以获取模板 ID，才能试运行'
+  if (!templateIdForPreview.value) return '请先保存草稿，才能试运行'
   if (isDraftDirty.value) return '有未保存的更改，请先保存再试运行'
   return ''
 })
@@ -2578,10 +2669,10 @@ watch(isDraftDirty, (dirty) => {
 })
 
 // The sample form renders off the SAME formSchema the template actually routes on
-// (buildFormSchema(draft.value) — identical source as the "JSON 预览" card above), so an author
-// never types a sample value the template can't see. `detail` (repeating sub-form rows) and
-// `attachment` (no working upload pipeline yet — see ApprovalNewView's own honest stopgap) are
-// skipped with an inline note rather than faked; every other field type gets a plain input.
+// (buildFormSchema(draft.value)), so an author never types a sample value the template can't see.
+// `detail` (repeating sub-form rows) and `attachment` (no working upload pipeline yet — see
+// ApprovalNewView's own honest stopgap) are skipped with an inline note rather than faked; every
+// other field type gets a plain input.
 const templateFormFields = computed<FormField[]>(() => buildFormSchema(draft.value).fields)
 
 // G-B2-21: the requester-view split for the 试运行 sample values. Delegates visibility to the
@@ -2606,7 +2697,7 @@ const conditionNodeSummaries = computed(() =>
     .filter((node) => node.type === 'condition')
     .map((node) => ({
       key: node.key,
-      label: node.name || node.key,
+      label: node.name?.trim() || '未命名节点',
       lines: nodeConfigSummary(node),
     })),
 )

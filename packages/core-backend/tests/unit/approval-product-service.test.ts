@@ -1242,6 +1242,20 @@ describe('ApprovalProductService', () => {
       }))).rejects.toThrow(/detail cannot be nested inside a detail group/)
     })
 
+    it('rejects attachment fields inside detail rows (attachment v1 is top-level only)', async () => {
+      const previous = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+      try {
+        await expect(create(wrap({
+          id: 'items', type: 'detail', label: '明细',
+          columns: [{ id: 'proof', type: 'attachment', label: '附件' }],
+        }))).rejects.toThrow(/attachment fields are not allowed inside detail groups/)
+      } finally {
+        if (previous === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        else process.env.APPROVAL_ATTACHMENTS_ENABLED = previous
+      }
+    })
+
     it('rejects an unknown sub-field type', async () => {
       await expect(create(wrap({
         id: 'items', type: 'detail', label: '明细', columns: [{ id: 'x', type: 'bogus', label: 'x' }],
@@ -2076,6 +2090,308 @@ describe('ApprovalProductService', () => {
       )
       const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_1')
       expect((node?.config as Record<string, unknown>).timeout).toEqual({ afterMinutes: 30, effect: 'remind' })
+    })
+  })
+
+  describe('empty condition-branch rules gate (author / publish validation)', () => {
+    // A rules-mode branch with `rules: []` evaluates as `[].every(...)` === TRUE at runtime — it
+    // would silently capture ALL traffic (first-match-wins) and dead-code the default edge. The
+    // gate raises its own code at create / update / publish (like validateNodeTimeoutConfigs),
+    // NEVER inside normalizeApprovalGraph's stored-graph path (plain reads must not brick).
+    // Negative control for the formula exemption: the FC-1 describe above proves createTemplate
+    // ACCEPTS formula branches carrying `rules: []` — dropping the exemption REDs those tests.
+    function emptyBranchGraph() {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'route',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'edge-high', rules: [] }], defaultEdgeKey: 'edge-low' },
+          },
+          { key: 'high', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+          { key: 'low', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-route', source: 'start', target: 'route' },
+          { key: 'edge-high', source: 'route', target: 'high' },
+          { key: 'edge-low', source: 'route', target: 'low' },
+          { key: 'edge-high-end', source: 'high', target: 'end' },
+          { key: 'edge-low-end', source: 'low', target: 'end' },
+        ],
+      }
+    }
+
+    it('rejects a rules-mode branch with EMPTY rules at createTemplate, before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate({
+        key: 'empty-branch-tpl',
+        name: 'Empty Branch Template',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: emptyBranchGraph(),
+      } as never)).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_CONDITION_BRANCH_RULES_EMPTY' })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects an already-STORED empty-rules branch at PUBLISH (a legacy draft can never reach a published definition)', async () => {
+      const template = {
+        id: 'tpl-empty-branch', key: 'empty-branch', name: 'Empty Branch', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-eb', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-eb', template_id: 'tpl-empty-branch', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: emptyBranchGraph(),
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-empty-branch', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_CONDITION_BRANCH_RULES_EMPTY' })
+    })
+  })
+
+  describe('parallel dynamic-assignee conflict publish gate (F2)', () => {
+    // Provably-identical DYNAMIC sources across parallel branches resolve to the same user on
+    // EVERY request, so fan-out raises the typed 409 APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT
+    // 100% of the time — publish now rejects the same shape with the same code (status 400).
+    // Different kinds / different parameters must NOT be flagged (they may be legal; the runtime
+    // guard owns org-shape-dependent collisions), and the publish policy's mergeAdjacentApprover
+    // exemption mirrors allowParallelDuplicateAssignees for statics.
+    function parallelDynamicGraph(sourceA: unknown, sourceB: unknown) {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['edge-fork-a', 'edge-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          { key: 'branch_a', type: 'approval', config: { assigneeSources: [sourceA], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [sourceB], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-fork', source: 'start', target: 'fork' },
+          { key: 'edge-fork-a', source: 'fork', target: 'branch_a' },
+          { key: 'edge-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'edge-a-join', source: 'branch_a', target: 'join' },
+          { key: 'edge-b-join', source: 'branch_b', target: 'join' },
+          { key: 'edge-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    function mockParallelPublish(graph: unknown) {
+      const template = {
+        id: 'tpl-par', key: 'par', name: 'Parallel', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-par', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-par', template_id: 'tpl-par', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+          return { rows: [{ id: 'pub-par', template_id: 'tpl-par', template_version_id: 'ver-par', runtime_graph: JSON.parse(String(params?.[2])), is_active: true, published_at: new Date() }], rowCount: 1 }
+        }
+        if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
+        if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
+        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    it('rejects requester×requester branches at publish with the runtime conflict code (the old untouched-starter shape)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'requester' }, { kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT' })
+    })
+
+    it('rejects same-parameter dynamic sources (manager_at_level 2 × manager_at_level 2)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'manager_at_level', level: 2 }, { kind: 'manager_at_level', level: 2 }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT' })
+    })
+
+    it('publishes DIFFERENT dynamic kinds / DIFFERENT parameters clean (no false positive)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'requester' }, { kind: 'direct_manager' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
+
+      mockParallelPublish(parallelDynamicGraph({ kind: 'manager_at_level', level: 1 }, { kind: 'manager_at_level', level: 2 }))
+      const second = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(second.publishedDefinitionId).toBe('pub-par')
+    })
+
+    it('exempts a publish policy carrying autoApproval.mergeAdjacentApprover (mirrors allowParallelDuplicateAssignees)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'requester' }, { kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate(
+        'tpl-par',
+        { policy: { allowRevoke: true, autoApproval: { mergeAdjacentApprover: true } } } as never,
+      )
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+
+    // ── Owner P2 (review #4433): a CONDITION nested inside a parallel branch must not hide its
+    // alternative paths from the publish gate. The old walk followed each node's FIRST outgoing
+    // edge only, so a conflict behind a condition's default (or any non-first) edge published
+    // green and then 409'd every matching request at runtime. The fixed walk enumerates ALL
+    // condition paths up to the join and intersects the per-branch source SETS across branches.
+    // FE mirror goldens: apps/web/tests/approval-template-authoring-parallel-edit.test.ts
+    // ('condition paths inside a parallel branch (owner P2)') — keep in lockstep. ──
+
+    // Owner's constructed case: branch A = condition (rules path → <highPathSource>, DEFAULT path →
+    // requester — rules edge declared FIRST so the old walk never reached the requester),
+    // branch B = <branchBSource>.
+    function conditionDefaultPathGraph(branchBSource: unknown, highPathSource: unknown = { kind: 'dept_head' }) {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeSources: [highPathSource], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_low', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [branchBSource], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          // Rules edge FIRST, default edge SECOND — first-edge-only traversal missed approval_low.
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    it('GOLDEN (owner case): condition DEFAULT path resolves to requester, branch B is requester → publish rejects naming requester', async () => {
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester', conflictingNodeKeys: ['approval_low', 'branch_b'] },
+      })
+    })
+
+    it('publishes clean when every condition path yields a DIFFERENT source than branch B (negative control)', async () => {
+      // Paths yield dept_head / requester; branch B is direct_manager — nothing provably identical.
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'direct_manager' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+
+    it('rejects a conflict hidden behind the RULES edge when the default edge is declared first', async () => {
+      // Default edge (→ approval_low, requester) declared FIRST; the dept_head conflict sits behind
+      // the RULES edge, which a first-edge-only walk would never enter. Branch B = dept_head.
+      const graph = conditionDefaultPathGraph({ kind: 'dept_head' })
+      const condEdgeKeys = new Set(['e-cond-high', 'e-cond-low'])
+      const [highEdge, lowEdge] = graph.edges.filter((edge) => condEdgeKeys.has(edge.key))
+      graph.edges = graph.edges.map((edge) => (edge.key === 'e-cond-high' ? lowEdge : edge.key === 'e-cond-low' ? highEdge : edge))
+      mockParallelPublish(graph)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'dept_head' },
+      })
+    })
+
+    it('rejects a conflict reachable only through a DEEP condition chain (condition → condition, default → default)', async () => {
+      const deepChain = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'e-c1-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 10000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c1-c2' },
+          },
+          {
+            key: 'cond_2',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'e-c2-mid', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c2-low' },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_mid', type: 'approval', config: { assigneeSources: [{ kind: 'manager_at_level', level: 1 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_low', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          // Rules edges declared first at BOTH levels — the conflicting requester sits two default
+          // hops deep (cond_1 default → cond_2 default → approval_low).
+          { key: 'e-c1-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-c1-c2', source: 'cond_1', target: 'cond_2' },
+          { key: 'e-c2-mid', source: 'cond_2', target: 'approval_mid' },
+          { key: 'e-c2-low', source: 'cond_2', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-mid-join', source: 'approval_mid', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      mockParallelPublish(deepChain)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester', conflictingNodeKeys: ['approval_low', 'branch_b'] },
+      })
+    })
+
+    it('does NOT reject the same source on two ALTERNATIVE paths of ONE branch alone (within-branch union, not a conflict)', async () => {
+      // Both cond_1 paths resolve to requester but branch B is a STATIC role — alternative paths of
+      // one branch never run simultaneously, so publish must stay green.
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'static_role', roleIds: ['legal'] }, { kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
     })
   })
 
@@ -5526,6 +5842,32 @@ describe('ApprovalProductService', () => {
       visibilityScope: { type: 'all', ids: [] },
       formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
       approvalGraph: graph,
+    })
+
+    it('rejects an empty parallel branch that connects the fork directly to its join', async () => {
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['empty', 'review'], joinMode: 'any', joinNodeKey: 'end' } },
+          { key: 'reviewer', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['reviewer-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'start-fork', source: 'start', target: 'fork' },
+          { key: 'empty', source: 'fork', target: 'end' },
+          { key: 'review', source: 'fork', target: 'reviewer' },
+          { key: 'review-end', source: 'reviewer', target: 'end' },
+        ],
+        policy: { allowRevoke: true },
+      }
+      const rejection = createTemplate(baseRequest(graph))
+      await expect(rejection).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        statusCode: 400,
+      })
+      await expect(rejection).rejects.not.toMatchObject({
+        message: expect.stringMatching(/fork|empty|end/),
+      })
     })
 
     it('rejects a threshold node whose N exceeds the distinct static approver count', async () => {

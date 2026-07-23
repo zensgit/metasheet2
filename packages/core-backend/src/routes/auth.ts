@@ -29,6 +29,8 @@ import { createUserSession, getUserSession, listUserSessions, revokeUserSession,
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
+import { isApprovalAttachmentsEnabled } from './approval-attachments'
+import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { query } from '../db/pg'
 import { listUserPermissions } from '../rbac/service'
@@ -281,6 +283,12 @@ function buildFeaturePayload(authUser: User) {
     attendanceAdmin,
     attendanceImport,
     plm,
+    // B3-07 (#4195): surfaces the APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF) to the
+    // web client so the fill view swaps the B2-28 placeholder for the real uploader ONLY flag-ON.
+    approvalAttachments: isApprovalAttachmentsEnabled(),
+    // Canvas V2 is an independent, default-OFF authoring rollout. It is never inferred from admin
+    // role, product mode, or plugin state; the legacy structured editor remains the fallback.
+    approvalCanvasV2: isApprovalCanvasV2Enabled(),
     mode,
   }
 }

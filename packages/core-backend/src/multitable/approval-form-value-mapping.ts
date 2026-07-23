@@ -8,8 +8,9 @@
  *   - a value that cannot be coerced to the target type → per-mapping error, action rejected (a form value
  *     is business data — writing a mangled coercion would fabricate audit-adjacent data);
  *   - select values must be in the target field's option set (closed vocabulary — no invention);
- *   - date accepts ISO `YYYY-MM-DD` or epoch-ms number, normalized to ISO; number accepts finite numbers or
- *     numeric strings (trimmed); text is stringified from string/number/boolean ONLY (objects rejected).
+ *   - date accepts ISO `YYYY-MM-DD` or epoch-ms number, normalized to ISO; number accepts only decimal
+ *     values that remain lossless in JS and fit the execute-time target precision; text is stringified
+ *     from string/number/boolean ONLY (objects rejected).
  *
  * Pure and synchronous — permission rechecks, the same-transaction claim+record+revision+outbox composition,
  * and the config UI are the later FWB-1 slices. No callers yet.
@@ -24,6 +25,8 @@ export interface FwbFieldMapping {
   targetType: FwbTargetFieldType
   /** required for targetType 'select': the CLOSED set of allowed option values. */
   selectOptions?: readonly string[]
+  /** execute-time target number-field precision; absent means no configured decimal-place cap. */
+  numberPrecision?: number
 }
 
 export type FwbMappingResult =
@@ -34,12 +37,60 @@ export type FwbMappingErrorCode =
   | 'unsupported_target_type'
   | 'missing_required_value'
   | 'not_a_number'
+  | 'number_not_lossless'
+  | 'number_precision_exceeded'
   | 'not_a_date'
   | 'not_text'
   | 'select_value_not_in_options'
   | 'select_options_missing'
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.(\d+))?$/
+
+function normalizedDecimal(raw: string): { value: number; scale: number; significantDigits: number } | null {
+  const trimmed = raw.trim()
+  const match = DECIMAL.exec(trimmed)
+  if (!match) return null
+  const unsigned = trimmed.startsWith('-') ? trimmed.slice(1) : trimmed
+  const [integerPart, fractionPart = ''] = unsigned.split('.')
+  const fraction = fractionPart.replace(/0+$/, '')
+  const significant = `${integerPart}${fraction}`.replace(/^0+/, '') || '0'
+  const value = Number(trimmed)
+  if (!Number.isFinite(value)) return null
+  return { value, scale: fraction.length, significantDigits: significant.length }
+}
+
+function coerceNumber(
+  mapping: FwbFieldMapping,
+  raw: unknown,
+): { ok: true; value: number } | { ok: false; code: FwbMappingErrorCode } {
+  const parsed = typeof raw === 'number'
+    ? normalizedDecimal(String(raw))
+    : (typeof raw === 'string' ? normalizedDecimal(raw) : null)
+  if (!parsed) return { ok: false, code: 'not_a_number' }
+  if (Number.isInteger(parsed.value)) {
+    if (!Number.isSafeInteger(parsed.value)) return { ok: false, code: 'number_not_lossless' }
+  } else if (parsed.significantDigits > 15) {
+    // JSON/JS has already lost the source lexeme by this point. Reject values whose represented
+    // precision exceeds the reliably round-trippable decimal envelope instead of writing an approximation.
+    return { ok: false, code: 'number_not_lossless' }
+  }
+  const precision = mapping.numberPrecision
+  if (
+    precision !== undefined
+    && (!Number.isSafeInteger(precision) || precision < 0 || parsed.scale > precision)
+  ) return { ok: false, code: 'number_precision_exceeded' }
+  return { ok: true, value: parsed.value }
+}
+
+function isValidIsoCalendarDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false
+  const [year, month, day] = value.split('-').map(Number)
+  if (month < 1 || month > 12 || day < 1) return false
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= daysInMonth[month - 1]
+}
 
 function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string | number } | { ok: false; code: FwbMappingErrorCode } {
   switch (mapping.targetType) {
@@ -50,14 +101,14 @@ function coerce(mapping: FwbFieldMapping, raw: unknown): { ok: true; v: string |
       return { ok: false, code: 'not_text' }
     }
     case 'number': {
-      if (typeof raw === 'number' && Number.isFinite(raw)) return { ok: true, v: raw }
-      if (typeof raw === 'string' && raw.trim() !== '' && Number.isFinite(Number(raw.trim()))) return { ok: true, v: Number(raw.trim()) }
-      return { ok: false, code: 'not_a_number' }
+      const number = coerceNumber(mapping, raw)
+      if ('code' in number) return number
+      return { ok: true, v: number.value }
     }
     case 'date': {
-      if (typeof raw === 'string' && ISO_DATE.test(raw.trim())) {
-        const t = Date.parse(raw.trim() + 'T00:00:00Z')
-        if (Number.isFinite(t)) return { ok: true, v: raw.trim() }
+      if (typeof raw === 'string') {
+        const value = raw.trim()
+        if (isValidIsoCalendarDate(value)) return { ok: true, v: value }
       }
       if (typeof raw === 'number' && Number.isFinite(raw)) {
         const d = new Date(raw)

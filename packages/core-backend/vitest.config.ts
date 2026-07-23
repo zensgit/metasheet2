@@ -349,6 +349,9 @@ export default defineConfig({
       'tests/integration/multitable-automation-producer-emit-realdb.test.ts',
       // P1#2c producer family 2 (executor Class-A record events) REPLACE site goldens: real DB, same shape.
       'tests/integration/multitable-automation-producer-family2-realdb.test.ts',
+      // The formal P2×ledger×FWB eight-scenario acceptance matrix (S1-S8, real DB, constructed crash/
+      // concurrency) — the month plan's gate for flag enablement. Runs on merged main content.
+      'tests/integration/multitable-p2-fwb-eight-scenario-matrix.test.ts',
       // Owner P1s (head 5afe30f26): REAL MetaSheetServer.start() fail-closed matrix — flag ON + missing
       // AutomationService / disabled retry scheduler must ABORT startup; flag OFF keeps legacy degrade.
       'tests/integration/multitable-durable-startup-failclosed.db.test.ts',
@@ -539,6 +542,21 @@ export default defineConfig({
       'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
       // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
       'tests/integration/multitable-fwb-write-action-realdb.test.ts',
+      // FWB activation — production write_approval_form_values wiring (save gate + real trigger chain +
+      // atomicity/net-once/fail-closed goldens): real Postgres only — excluded HERE so it cannot
+      // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-fwb-activation-realdb.test.ts',
+      // approval attachment GC worker (TTL sweep + purge-intent drain) — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-gc-realdb.test.ts',
+      // attachment bind (form-freeze) + bucket reconciler — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-bind-reconcile-realdb.test.ts',
+      // attachment PRODUCTION pipeline (flag-gated boot mount + submit-txn bind + template-access +
+      // auth-proxied download) over a booted server — real-DB. Two-point wiring (approval real-DB lane).
+      'tests/integration/approval-attachment-pipeline-realdb.test.ts',
+      // attachment scan_state + purge-intent storage_key unique upgrade path (real DB, isolated schema).
+      // Two-point wiring — excluded HERE so it cannot skip-green in the no-DB lane.
+      'tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

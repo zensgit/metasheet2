@@ -49,6 +49,12 @@ import {
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
+import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
+import {
+  ApprovalAttachmentBindError,
+  bindAttachmentsOnSubmit,
+  collectAttachmentIdsByField,
+} from './approval-attachment-reconciler'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -352,9 +358,9 @@ const FORM_FIELD_TYPES = new Set([
   'detail',
 ])
 
-// Leaf sub-field types allowed inside a `detail` group's columns (everything except `detail`
-// itself — one nesting level only). `attachment` is permitted at the type/contract layer;
-// the authoring UI (C-3) governs which are offered.
+// Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
+// this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
+// contract for existing templates.
 const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
 )
@@ -801,6 +807,13 @@ function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_V
   const fields = value.fields.map((field, index) => normalizeFormField(field, index, context))
   if (new Set(fields.map((field) => field.id)).size !== fields.length) {
     failValidation(context, 'formSchema field ids must be unique')
+  }
+  if (isApprovalAttachmentsEnabled()) {
+    for (const field of fields) {
+      if (field.type === 'detail' && field.columns?.some((column) => column.type === 'attachment')) {
+        failValidation(context, 'attachment fields are not allowed inside detail groups')
+      }
+    }
   }
   validateFormFieldVisibilityRules(fields, context)
 
@@ -1279,6 +1292,160 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
   }
 }
 
+/**
+ * Fingerprint of a DYNAMIC assignee source: equal fingerprints ⇒ the sources PROVABLY resolve to
+ * the same user(s) for every request (same kind + same parameters). Static kinds return null —
+ * duplicate static assignees across parallel branches are already rejected inside
+ * `normalizeApprovalGraph` (`collectBranchAssignees`). FE mirror:
+ * apps/web/src/approvals/parallelEdit.ts `dynamicAssigneeSourceFingerprint` — keep in lockstep.
+ */
+function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): string | null {
+  switch (source.kind) {
+    case 'requester':
+    case 'direct_manager':
+    case 'dept_head':
+      return source.kind
+    case 'continuous_managers':
+      return `continuous_managers:${source.levels}`
+    case 'manager_at_level':
+      return `manager_at_level:${source.level}`
+    case 'form_field_user':
+      return `form_field_user:${source.fieldId}`
+    default:
+      return null
+  }
+}
+
+/**
+ * Publish preflight: reject a parallel gateway whose branches carry PROVABLY-IDENTICAL dynamic
+ * assignee sources. Such branches resolve to the same user(s) on EVERY request, so fan-out's
+ * `assertNoActiveAssignmentConflicts` raises the typed 409
+ * `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` for 100% of instances — authoring was false-green.
+ * Raised here with the SAME code (status 400: an authoring-time config error, like
+ * `APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED`) so the shape can never reach a published definition.
+ *
+ * Only provably-identical sources are flagged: DIFFERENT kinds (requester vs direct_manager) or
+ * DIFFERENT parameters (manager_at_level 1 vs 2) may still collide for SOME org shapes and remain
+ * the runtime guard's job — publish cannot know the org. Deliberately publish-scoped (NOT
+ * create/update, NOT normalize): stored drafts must stay readable and re-saveable while being
+ * fixed. The caller skips it when the publish policy carries `autoApproval.mergeAdjacentApprover`
+ * — the same exemption `allowParallelDuplicateAssignees` grants the static check, because the
+ * merge machinery legitimately absorbs same-approver overlap.
+ *
+ * Traversal (review #4433 owner P2): the walk enumerates EVERY runtime-reachable path inside a
+ * branch — NOT just the first-outgoing-edge chain. A condition node fans out over ALL of its
+ * outgoing edges (every rules-branch edge AND the default edge: which path fires is
+ * form-data-dependent, so publish must treat each as possible); every other node type follows its
+ * first outgoing edge (linear in a normalized graph). The branch's fingerprint set is therefore
+ * the UNION over all condition paths up to the join node, and a conflict is flagged when SOME
+ * path through one branch and SOME path through another carry the identical dynamic source —
+ * exactly the pairings for which the runtime 409 is reachable. Cycles are cut with a per-branch
+ * visited set. A nested parallel node (normalize rejects it on the first-edge path and the canvas
+ * F4 guard cannot author one, but a non-first condition path of a legacy graph could carry one)
+ * is treated defensively as a PASS-THROUGH fan-out over all its outgoing edges: its sub-branches
+ * are all simultaneously active, so every source reachable through it belongs to this outer
+ * branch's set.
+ * Fingerprints are deduped WITHIN a branch first (sequential same-source nodes — or the same
+ * source on two ALTERNATIVE paths of one branch — are not a parallel conflict) and then compared
+ * across branches. FE mirror: apps/web/src/approvals/parallelEdit.ts
+ * `parallelDynamicAssigneeConflicts` — SAME traversal, keep in lockstep.
+ */
+function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph): void {
+  const edgeByKey = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const outgoingTargets = new Map<string, string[]>()
+  for (const edge of approvalGraph.edges) {
+    const targets = outgoingTargets.get(edge.source)
+    if (targets) targets.push(edge.target)
+    else outgoingTargets.set(edge.source, [edge.target])
+  }
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const parallelConfig = node.config as { branches: string[]; joinNodeKey: string }
+    const seenAcrossBranches = new Map<string, string>()
+    for (const branchEdgeKey of parallelConfig.branches) {
+      const branchFingerprints = new Map<string, string>()
+      const entryKey = edgeByKey.get(branchEdgeKey)?.target
+      // FIFO worklist in edge-declaration order (deterministic carrier node per fingerprint); the
+      // visited set both cuts cycles and bounds the walk to each node at most once per branch.
+      const queue: string[] = entryKey === undefined ? [] : [entryKey]
+      const visited = new Set<string>()
+      for (let head = 0; head < queue.length; head += 1) {
+        const currentKey = queue[head]
+        if (currentKey === parallelConfig.joinNodeKey || visited.has(currentKey)) continue
+        visited.add(currentKey)
+        const current = nodeByKey.get(currentKey)
+        if (!current) continue
+        if (current.type === 'approval') {
+          const sources = (current.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+          for (const source of sources) {
+            const fingerprint = dynamicAssigneeSourceFingerprint(source)
+            if (fingerprint && !branchFingerprints.has(fingerprint)) branchFingerprints.set(fingerprint, current.key)
+          }
+        }
+        const targets = outgoingTargets.get(currentKey) ?? []
+        if (current.type === 'condition' || current.type === 'parallel') {
+          // Condition: EVERY outgoing edge (each rules branch + the default) is a possible runtime
+          // path. Parallel (defensive — see doc above): pass-through fan-out over all sub-branches.
+          for (const target of targets) queue.push(target)
+        } else if (targets.length > 0) {
+          // Linear node — follow its first outgoing edge, as before.
+          queue.push(targets[0])
+        }
+      }
+      for (const [fingerprint, carrierNodeKey] of branchFingerprints) {
+        const priorNodeKey = seenAcrossBranches.get(fingerprint)
+        if (priorNodeKey !== undefined) {
+          throw new ServiceError(
+            'approvalGraph parallel branches must not resolve to the same approver set',
+            400,
+            'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+            { nodeKey: node.key, source: fingerprint, conflictingNodeKeys: [priorNodeKey, carrierNodeKey] },
+          )
+        }
+        seenAcrossBranches.set(fingerprint, carrierNodeKey)
+      }
+    }
+  }
+}
+
+/**
+ * Reject a rules-mode condition branch whose `rules` array is EMPTY. The runtime
+ * (`ApprovalGraphExecutor.resolveConditionTarget`) evaluates a rules-mode branch as
+ * `branch.rules.every(...)`, which is vacuously TRUE over `[]` — an empty branch silently captures
+ * ALL traffic (first-match-wins) and dead-codes the default edge and every later branch. The
+ * fall-through "else" is the node's `defaultEdgeKey` — a separate mechanism — so an empty rules
+ * array in a non-formula branch is never legitimate. (A FORMULA branch legitimately carries
+ * `rules: []`; those are exempt.)
+ *
+ * Deliberately NOT inside `normalizeApprovalGraph`: `asApprovalGraph` re-normalizes STORED rows on
+ * plain reads, and a retroactive reject there could brick reads of existing templates. Instead this
+ * raises its own code directly (status 400) at the create / update / publish choke points, exactly
+ * like `validateNodeTimeoutConfigs`, so all three surface the same error while stored-graph READS
+ * stay unaffected (the runtime additionally fails closed on legacy graphs: an empty rules-mode
+ * branch never matches).
+ */
+function validateConditionBranchRules(approvalGraph: ApprovalGraph): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'condition') continue
+    const config = node.config as { branches?: unknown }
+    if (!Array.isArray(config.branches)) continue
+    config.branches.forEach((branch, branchIndex) => {
+      if (!isRecord(branch)) return
+      const hasFormula = isRecord(branch.formula)
+      const rules = branch.rules
+      if (!hasFormula && Array.isArray(rules) && rules.length === 0) {
+        throw new ServiceError(
+          `approvalGraph node ${node.key} condition branch ${branchIndex + 1} has no rules and no formula — an empty rules branch would match every request`,
+          400,
+          'APPROVAL_CONDITION_BRANCH_RULES_EMPTY',
+          { nodeKey: node.key, branchIndex },
+        )
+      }
+    })
+  }
+}
+
 function normalizeApprovalGraph(
   value: unknown,
   context: ValidationContext,
@@ -1534,7 +1701,13 @@ function normalizeApprovalGraph(
       if (!edge || edge.source !== node.key) {
         failValidation(
           context,
-          `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`,
+          'approvalGraph parallel gateway references an invalid branch edge',
+        )
+      }
+      if (edge.target === parallelConfig.joinNodeKey) {
+        failValidation(
+          context,
+          'approvalGraph parallel branch must contain at least one body node',
         )
       }
     }
@@ -1542,7 +1715,7 @@ function normalizeApprovalGraph(
     if (!joinNode) {
       failValidation(
         context,
-        `approvalGraph parallel node ${node.key} references unknown join node ${parallelConfig.joinNodeKey}`,
+        'approvalGraph parallel gateway references an invalid join node',
       )
     }
 
@@ -1569,7 +1742,7 @@ function normalizeApprovalGraph(
           if (seen.has(assignee)) {
             failValidation(
               context,
-              `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+              'approvalGraph parallel branches must not contain the same approver',
             )
           }
           seen.add(assignee)
@@ -1601,20 +1774,20 @@ function collectBranchAssignees(
   while (currentKey) {
     if (currentKey === joinNodeKey) return assignees
     if (visited.has(currentKey)) {
-      failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
+      failValidation(context, 'approvalGraph parallel branch contains a cycle')
     }
     visited.add(currentKey)
     const node = nodeByKey.get(currentKey)
     if (!node) {
-      failValidation(context, `approvalGraph parallel branch references unknown node ${currentKey}`)
+      failValidation(context, 'approvalGraph parallel branch references an invalid node')
     }
     if (node.type === 'parallel') {
-      failValidation(context, `approvalGraph parallel branch cannot contain nested parallel node ${node.key}`)
+      failValidation(context, 'approvalGraph parallel branches cannot contain a nested parallel gateway')
     }
     if (node.type === 'end') {
       failValidation(
         context,
-        `approvalGraph parallel branch must reach join before end (at ${node.key})`,
+        'approvalGraph parallel branch must reach its join before the end node',
       )
     }
     if (node.type === 'approval') {
@@ -1627,7 +1800,7 @@ function collectBranchAssignees(
       // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
       if (approvalConfig.approvalMode === 'threshold') {
         throw new ServiceError(
-          `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
+          "approvalGraph approvalMode 'threshold' is not supported inside a parallel region",
           400,
           'APPROVAL_THRESHOLD_IN_PARALLEL',
         )
@@ -1654,7 +1827,7 @@ function collectBranchAssignees(
   }
   failValidation(
     context,
-    `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
+    'approvalGraph parallel branch never reaches its configured join',
   )
 }
 
@@ -2908,6 +3081,7 @@ export class ApprovalProductService {
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateConditionBranchRules(approvalGraph)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -3064,6 +3238,7 @@ export class ApprovalProductService {
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
+        validateConditionBranchRules(nextApprovalGraph)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -3172,10 +3347,18 @@ export class ApprovalProductService {
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateConditionBranchRules(approvalGraph)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
       assertNoUnconfiguredPlaceholderRoles(approvalGraph)
+      // F2 preflight: parallel branches with provably-identical DYNAMIC approver sources 409 every
+      // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
+      // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
+      // allowParallelDuplicateAssignees exemption the static duplicate check gets in asRuntimeGraph).
+      if (policy.autoApproval?.mergeAdjacentApprover !== true) {
+        assertNoParallelDynamicAssigneeConflicts(approvalGraph)
+      }
       const runtimeGraph = buildRuntimeGraph(approvalGraph, policy)
 
       const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(
@@ -3543,6 +3726,7 @@ export class ApprovalProductService {
     runtimeGraph: RuntimeGraph
     requesterSnapshot: ApprovalRequesterSnapshot
     executor: ApprovalGraphExecutor
+    attachmentsEnabled: boolean
   }> {
     if (!pool) throw new Error('Database not available')
 
@@ -3589,7 +3773,10 @@ export class ApprovalProductService {
         if (!allowedFieldIds.has(key)) delete normalizedFormData[key]
       }
     }
-    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData)
+    const attachmentsEnabled = isApprovalAttachmentsEnabled()
+    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData, {
+      attachmentValueMode: attachmentsEnabled ? 'ids' : 'legacy',
+    })
     if (validationErrors.length > 0) {
       throw new ServiceError(
         'Approval form data is invalid',
@@ -3833,7 +4020,15 @@ export class ApprovalProductService {
         roles: requesterSnapshot.directoryRoles ?? [],
       },
     })
-    return { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor }
+    return {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+    }
   }
 
   /**
@@ -3973,7 +4168,15 @@ export class ApprovalProductService {
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
     // RP-1: prefix extracted verbatim into assembleCreationContext (shared with previewApprovalRoute).
-    const { bundle, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
+    const {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+    } =
       await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
@@ -4027,6 +4230,42 @@ export class ApprovalProductService {
           initial.currentNodeKey,
         ],
       )
+
+      // B3-07 §4.4 form-freeze bind (flag-gated, #4195): bind the submitter's staged (unbound)
+      // attachment uploads to this instance INSIDE the create transaction — the same txn that froze
+      // the id arrays into form_snapshot above, so a half-bound state is impossible. Any unbindable
+      // id (missing / foreign / already bound / GC-claimed) throws → the WHOLE create rolls back
+      // (fail-closed, G4). Flag OFF ⇒ zero behavior: no attachment values reach normalizedFormData
+      // (B2-28 strips them client-side and no upload endpoint exists to mint ids), and this block
+      // does not run.
+      if (attachmentsEnabled) {
+        const attachmentIdsByField = (() => {
+          try {
+            return collectAttachmentIdsByField(formSchema, normalizedFormData)
+          } catch {
+            throw new ServiceError('Approval attachment references are invalid', 400, 'APPROVAL_ATTACHMENT_BIND_FAILED')
+          }
+        })()
+        if (Object.keys(attachmentIdsByField).length > 0) {
+          try {
+            await bindAttachmentsOnSubmit(
+              client,
+              actor.userId,
+              actor.tenantId?.trim() || 'default',
+              instanceId,
+              attachmentIdsByField,
+            )
+          } catch (error) {
+            // Cap/count/total violations are 413; other unbindable ids stay 400. Values-free body either way.
+            const status = error instanceof ApprovalAttachmentBindError ? error.httpStatus : 400
+            throw new ServiceError(
+              'Approval attachments could not be bound',
+              status,
+              status === 413 ? 'APPROVAL_ATTACHMENT_CAP_EXCEEDED' : 'APPROVAL_ATTACHMENT_BIND_FAILED',
+            )
+          }
+        }
+      }
 
       // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
       // same-transaction auto-approval cascade at this node carries that same epoch (§7).
