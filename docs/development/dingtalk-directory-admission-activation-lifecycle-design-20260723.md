@@ -5,7 +5,7 @@
 - Locked: 2026-07-23（owner 批准，与 deprovision Rev 4.2 两篇一并升 lock）
 - Scope: 本地化部署下「同步 ≠ 建档 ≠ 开通登录」；邮箱可空；手机/邮箱可同步但非钉钉身份主键
 - Companion: `docs/development/dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md` (implementation design lock / Rev 4.2)
-- Baseline: `origin/main @ 15a256fe2`（自 `ca625f14a` 对本线相关代码 **scoped diff = 0**；事实基线仍成立）
+- Baseline: `origin/main @ 1bcfc86b8`（自 `ca625f14a` 对本线相关代码 **scoped diff = 0**；事实基线仍成立）
 - **design lock ≠ T1 GO：本次批准不授权启动 T1**（总序 lock → T1 → T2 → T3 → D* → canary，另令开工）
 - Related code:
   - `directory-sync.ts` — auto-admit、bind、`user_orgs` upsert
@@ -352,6 +352,6 @@ Implementation design lock（两篇 Rev 4.2，2026-07-23 已批准）
 | 2026-07-23 | 2 | pending + is_active 等中间稿 |
 | 2026-07-23 | 3 | 双轴、pending 不变量、intent=activate 初稿 |
 | 2026-07-23 | 4 | `local_password_set` 存量 true；alias 全局 UNIQUE；SSO 源有效性；仍 draft |
-| 2026-07-23 | 4.1 | `normalizeLoginIdentifier` + T2a/T2b；baseline 15a256fe2；仍 draft |
+| 2026-07-23 | 4.1 | `normalizeLoginIdentifier` + T2a/T2b；baseline 1bcfc86b8；仍 draft |
 | 2026-07-23 | 4.2 | 版本对齐 deprovision 4.2（本文件无新 P1）；draft |
 | 2026-07-23 | 4.2-lock | owner 批准与 deprovision 4.2 两篇一并升 **implementation design lock**；承重合同见 companion §14；**T1 未授权** |

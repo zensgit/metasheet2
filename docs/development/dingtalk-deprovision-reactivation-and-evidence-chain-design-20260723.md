@@ -4,7 +4,7 @@
 - Status: **implementation design lock / Rev 4.2**
 - Locked: 2026-07-23（owner 批准两篇一并升 lock）
 - Scope: 打开 `DIRECTORY_DEPROVISION_ENABLED` 之前，把「权威 effect 账本 + prospective planner + 全写者 per-user 锁 + event 恢复（含 drift）」设计正确
-- Baseline: **`origin/main @ 15a256fe2`**；相对 `ca625f14a` 本线相关代码 **scoped diff = 0**（membership + globally-clear 事实基线仍成立）
+- Baseline: **`origin/main @ 1bcfc86b8`**；相对 `ca625f14a` 本线相关代码 **scoped diff = 0**（membership + globally-clear 事实基线仍成立）
 - Companion: `docs/development/dingtalk-directory-admission-activation-lifecycle-design-20260723.md` (implementation design lock / Rev 4.2)
 - **design lock ≠ T1 GO：本次批准不授权启动 T1**（总序仍为 lock → T1 → T2 → T3 → D1…D7 → canary，另令开工）
 - Related:
@@ -35,7 +35,7 @@ Prospective planner、三 effect 意图、event 恢复、全写者锁意图、ma
 
 ### 0.4 Rev 4 → Rev 4.1（已关）
 
-强制 INSERT trigger 意图、immutability、零 effect 零写、account is_active inventory、baseline 15a256fe2。
+强制 INSERT trigger 意图、immutability、零 effect 零写、account is_active inventory、baseline 1bcfc86b8。
 
 ### 0.5 Rev 4.1 → Rev 4.2（本轮 LOCKED）
 
@@ -420,7 +420,7 @@ deprovisionEnabled, deprovisionMaxBatch, integrationDefaultPolicy
 
 | 序 | 工作 | 说明 |
 |----|------|------|
-| D0 | Writer inventory（**含 directory_accounts.is_active**）+ 锁点；对照 main@15a256fe2 | 码前必做 |
+| D0 | Writer inventory（**含 directory_accounts.is_active**）+ 锁点；对照 main@1bcfc86b8 | 码前必做 |
 | **D1** | **manual_review 创建默认**（code + DB default，**不回填**） | 安全默认提前 |
 | **D2** | **只读 `planDirectoryDeprovision` + prospective 排除**；Preview 接线；正控测试 | 先 planner |
 | **D3** | Ledger schema + **强制 trigger/immutability** + generation/supersede helpers | 权威源 |
@@ -498,7 +498,7 @@ Design lock (admission Rev 4.2 + deprovision Rev 4.2)
   - 旁路写者 **generation++ AND supersede**（不可只做一腿）  
   - 零 effect 零写；`directory_accounts.is_active` 入 writer inventory + 竞态  
   - rehire vs force-reactivate 双路径  
-- [x] baseline 锚点 `15a256fe2`（相对 `ca625f14a` 本线 scoped diff = 0）  
+- [x] baseline 锚点 `1bcfc86b8`（相对 `ca625f14a` 本线 scoped diff = 0）  
 - [x] 总序：lock → T1→T2→T3 → D1…D7 → canary  
 - [x] **design lock ≠ T1 GO** — 本次批准 **不授权** 启动 T1  
 
