@@ -1127,10 +1127,101 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-graph-node-row"]').length).toBe(rowsBefore + 1) // a new approval node appeared
 
+    // P1 fix (review #4433 F1): the added branch seeds an INCOMPLETE starter rule — saving as-is
+    // is BLOCKED (an empty/unconfigured branch must never publish and capture all traffic).
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+
+    // Configure the new branch's rule field, then save persists the new structure.
+    const ruleFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newRuleField = ruleFields[ruleFields.length - 1] as HTMLSelectElement
+    newRuleField.value = 'amount'
+    newRuleField.dispatchEvent(new Event('change'))
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
-    expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // the added branch is saved
+    const branches = payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches
+    expect(branches).toHaveLength(2) // the added branch is saved
+    expect(branches[1].rules[0].fieldId).toBe('amount') // …with its configured rule, never rules: []
+  })
+
+  it('promotes a blank linear template into graph authoring when a condition gateway is inserted', async () => {
+    await mountView()
+    const insert = container!.querySelector('[data-testid^="approval-step-insert-condition-after-"]') as HTMLButtonElement
+    insert.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).not.toBeNull()
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]')).toHaveLength(6)
+    expect(container!.querySelector('[data-node-type="condition"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const field = container!.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement
+    field.value = 'field_1'
+    field.dispatchEvent(new Event('change'))
+    setInput('approval-template-key', 'conditional')
+    setInput('approval-template-name', '条件审批')
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const graph = (createTemplateSpy.mock.calls[0]?.[0] as any).approvalGraph
+    const condition = graph.nodes.find((candidate: any) => candidate.type === 'condition')
+    expect(condition.config.branches[0].rules[0].fieldId).toBe('field_1')
+    expect(graph.edges.some((edge: any) => edge.key === condition.config.defaultEdgeKey)).toBe(true)
+  })
+
+  it('promotes a blank linear template into a two-branch parallel graph and edits its join mode', async () => {
+    await mountView()
+    const insert = container!.querySelector('[data-testid^="approval-step-insert-parallel-after-"]') as HTMLButtonElement
+    insert.click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]')).toHaveLength(6)
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const joinMode = container!.querySelector('[data-testid="approval-parallel-join-mode"]') as HTMLSelectElement
+    joinMode.value = 'any'
+    joinMode.dispatchEvent(new Event('change'))
+    setInput('approval-template-key', 'parallel')
+    setInput('approval-template-name', '并行审批')
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const graph = (createTemplateSpy.mock.calls[0]?.[0] as any).approvalGraph
+    const parallel = graph.nodes.find((candidate: any) => candidate.type === 'parallel')
+    expect(parallel.config.joinMode).toBe('any')
+    expect(parallel.config.branches).toHaveLength(2)
+    expect(graph.edges.filter((edge: any) => edge.source === parallel.key)).toHaveLength(2)
+  })
+
+  it('keeps approval mode, self-approval, and field permissions editable in graph authoring', async () => {
+    routeParams = { id: 'tpl_graph_policy' }
+    getTemplateSpy.mockResolvedValue(
+      buildTemplate({
+        approvalGraph: buildG5ComplexGraph({
+          assigneeSources: [{ kind: 'direct_manager' }],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'error',
+        }),
+      }),
+    )
+    await mountView()
+    await flushUi()
+    const mode = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    mode.value = 'all'
+    mode.dispatchEvent(new Event('change'))
+    const merge = container!.querySelector('[data-testid="approval-node-merge-with-requester"]') as HTMLInputElement
+    merge.checked = true
+    merge.dispatchEvent(new Event('change'))
+    const fieldAccess = container!.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
+    fieldAccess.value = 'hidden'
+    fieldAccess.dispatchEvent(new Event('change'))
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const graph = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
+    const approval = graph.nodes.find((candidate: any) => candidate.key === 'approval_1')
+    expect(approval.config.approvalMode).toBe('all')
+    expect(approval.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+    expect(approval.config.fieldPermissions).toEqual([{ fieldId: 'amount', access: 'hidden' }])
   })
 
   it('FC-2 wiring: switching a condition branch to formula writes formula to the save payload while topology stays byte-identical', async () => {
@@ -1278,10 +1369,54 @@ describe('TemplateAuthoringView', () => {
     ;(container!.querySelector('[data-testid="approval-canvas-add-condition-cond_1"]') as HTMLButtonElement).click()
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(before + 1) // new node on canvas
+    // P1 fix (review #4433 F1): the canvas-added branch seeds an INCOMPLETE starter rule too —
+    // configure it in the list view before the save can go through (empty branch never saves clean).
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const ruleFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newRuleField = ruleFields[ruleFields.length - 1] as HTMLSelectElement
+    newRuleField.value = 'amount'
+    newRuleField.dispatchEvent(new Event('change'))
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // saved
+  })
+
+  it('F4: no +并行 affordance INSIDE a parallel branch (backend rejects nested parallel), while +条件 stays offered', async () => {
+    routeParams = { id: 'tpl_nested_guard' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'fork_1', type: 'parallel', name: '并行', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+          { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'app_b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['legal'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork_1' },
+          { key: 'e-fork-a', source: 'fork_1', target: 'app_a' },
+          { key: 'e-fork-b', source: 'fork_1', target: 'app_b' },
+          { key: 'e-a-join', source: 'app_a', target: 'join_1' },
+          { key: 'e-b-join', source: 'app_b', target: 'join_1' },
+          { key: 'e-join-end', source: 'join_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+    // In-region branch node: parallel insert HIDDEN, condition insert still offered.
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-app_a"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-topology-insert-condition-after-app_a"]')).not.toBeNull()
+    // Out-of-region single-out nodes (start / the join) keep the parallel insert.
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-start"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-join_1"]')).not.toBeNull()
   })
 
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {

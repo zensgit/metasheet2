@@ -1,7 +1,7 @@
 import type { ApprovalGraph } from '../types/approval'
 
 // D-1/D-5 canvas foundation — PURE, fully unit-testable (no .vue, no DOM): a longest-path layered
-// layout (node → {x,y,layer}) and a structural validity check (dangling edges / unreachable nodes /
+// vertical layout (node → {x,y,layer}) and a structural validity check (dangling edges / unreachable nodes /
 // no-path-to-end). Bespoke over a graph library on purpose: layout is data, so it's verifiable here,
 // and the canvas component just renders these coordinates + the FE preview reflects these issues
 // (the backend `normalizeApprovalGraph` remains the final arbiter on save).
@@ -20,16 +20,16 @@ export interface GraphLayout {
   height: number
 }
 
-const X_SPACING = 220
-const Y_SPACING = 110
+export const GRAPH_LAYOUT_NODE_WIDTH = 190
+export const GRAPH_LAYOUT_NODE_HEIGHT = 96
+const X_SPACING = 230
+const Y_SPACING = 150
 const X_MARGIN = 40
 const Y_MARGIN = 40
 
 /**
- * Longest-path layered layout: each node's LAYER = the longest path from `start` to it (so a node
- * that rejoins multiple branches sits after all of them), and its ORDER is its slot within the layer.
- * Deterministic (input order), DAG-assuming (approval graphs are DAGs); a node unreachable from start
- * is placed in a trailing layer rather than dropped, so nothing vanishes from the canvas.
+ * Vertical longest-path layout: each node's layer is the longest path from `start` to it, so a
+ * branch join sits below every branch. Same-layer nodes spread horizontally and each row is centered.
  */
 export function computeLayout(graph: ApprovalGraph): GraphLayout {
   const start = graph.nodes.find((n) => n.type === 'start')?.key ?? graph.nodes[0]?.key
@@ -56,18 +56,20 @@ export function computeLayout(graph: ApprovalGraph): GraphLayout {
   }
   const nodes: NodeLayout[] = []
   let maxLayer = 0
-  let maxOrder = 0
-  for (const [l, keys] of byLayer) {
+  const maxLayerSize = Math.max(1, ...Array.from(byLayer.values(), (keys) => keys.length))
+  const width = X_MARGIN * 2 + GRAPH_LAYOUT_NODE_WIDTH + (maxLayerSize - 1) * X_SPACING
+  for (const [l, keys] of [...byLayer.entries()].sort(([a], [b]) => a - b)) {
     maxLayer = Math.max(maxLayer, l)
+    const rowWidth = GRAPH_LAYOUT_NODE_WIDTH + (keys.length - 1) * X_SPACING
+    const rowStart = (width - rowWidth) / 2
     keys.forEach((key, order) => {
-      maxOrder = Math.max(maxOrder, order)
-      nodes.push({ key, layer: l, order, x: X_MARGIN + l * X_SPACING, y: Y_MARGIN + order * Y_SPACING })
+      nodes.push({ key, layer: l, order, x: rowStart + order * X_SPACING, y: Y_MARGIN + l * Y_SPACING })
     })
   }
   return {
     nodes,
-    width: X_MARGIN * 2 + maxLayer * X_SPACING + 160,
-    height: Y_MARGIN * 2 + maxOrder * Y_SPACING + 60,
+    width,
+    height: Y_MARGIN * 2 + maxLayer * Y_SPACING + GRAPH_LAYOUT_NODE_HEIGHT,
   }
 }
 

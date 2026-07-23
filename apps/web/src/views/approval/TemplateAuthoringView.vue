@@ -61,13 +61,11 @@
       data-testid="approval-template-unsupported-alert"
     />
 
-    <!-- G-1..G-5: a complex graph is preserved, not unsupported — informational, save stays enabled.
-         G-2 condition rules, G-3 parallel joinMode, G-4 cc targets, and G-5 approval-node source are
-         all editable; branches / join target / all edges are preserved topology. -->
+    <!-- Complex graphs remain editable. Unknown node config still fails closed above. -->
     <el-alert
       v-if="!unsupportedReason && graphReadOnlyMessage"
       :title="graphReadOnlyMessage"
-      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行节点可编辑汇聚模式，抄送节点可编辑抄送对象，审批节点可编辑审批人来源。分支拓扑与连线在保存时原样保留。"
+      description="画布用于编排节点与分支；结构列表用于编辑审批人、条件、并行汇聚、抄送和字段权限。"
       type="info"
       show-icon
       :closable="false"
@@ -451,7 +449,7 @@
       <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>{{ graphReadOnly ? '审批流程（结构）' : '审批步骤' }}</strong>
+            <strong>审批流程</strong>
             <el-button
               v-if="!graphReadOnly"
               size="small"
@@ -465,10 +463,7 @@
           </div>
         </template>
 
-        <!-- G-1/G-2: structured render of a preserved complex graph. condition nodes are EDITABLE
-             (G-2 — branch rules / conjunction / default edge); parallel / cc / approval stay
-             READ-ONLY summaries (G-3 / G-4), and every non-condition node + all edges are preserved
-             byte-for-byte on save. Nothing renders as a bare "unsupported". -->
+        <!-- Complex graphs use a canvas for topology and a structured list for node configuration. -->
         <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
         <div v-if="graphReadOnly" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
           <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
@@ -489,52 +484,57 @@
           >
             <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
           </el-alert>
-          <div
-            class="template-authoring__canvas"
-            data-testid="approval-graph-canvas"
-            :style="{ position: 'relative', height: canvasLayout.height + 'px', width: canvasLayout.width + 'px' }"
-          >
-            <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
-              <defs>
-                <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
-                  <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
-                </marker>
-              </defs>
-              <line
-                v-for="line in canvasEdgeLines"
-                :key="line.key"
-                :x1="line.x1"
-                :y1="line.y1"
-                :x2="line.x2"
-                :y2="line.y2"
-                stroke="#bbb"
-                stroke-width="1.5"
-                marker-end="url(#approval-canvas-arrow)"
-                data-testid="approval-canvas-edge"
-              />
-            </svg>
+          <div class="template-authoring__canvas-viewport">
             <div
-              v-for="pos in canvasLayout.nodes"
-              :key="pos.key"
-              class="template-authoring__canvas-node"
-              :class="{ 'is-selected': selectedCanvasNode === pos.key }"
-              :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: CANVAS_NODE_W + 'px' }"
-              :data-canvas-node="pos.key"
-              data-testid="approval-canvas-node"
-              :draggable="!readOnly"
-              @click="selectedCanvasNode = pos.key"
-              @dragstart="onCanvasNodeDragStart(pos.key)"
-              @dragend="onCanvasNodeDragEnd($event)"
+              class="template-authoring__canvas"
+              data-testid="approval-graph-canvas"
+              :style="{ position: 'relative', height: canvasLayout.height + 'px', width: canvasLayout.width + 'px' }"
             >
-              <strong>{{ canvasNodeByKey(pos.key)?.name || pos.key }}</strong>
-              <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
-                {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
-              </span>
-              <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
-                <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
-                <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
-                <el-button v-if="canInsertAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">下方插入</el-button>
-                <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
+              <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
+                <defs>
+                  <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                    <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
+                  </marker>
+                </defs>
+                <path
+                  v-for="line in canvasEdgeLines"
+                  :key="line.key"
+                  :d="line.path"
+                  stroke="#bbb"
+                  stroke-width="1.5"
+                  fill="none"
+                  marker-end="url(#approval-canvas-arrow)"
+                  data-testid="approval-canvas-edge"
+                />
+              </svg>
+              <div
+                v-for="pos in canvasLayout.nodes"
+                :key="pos.key"
+                class="template-authoring__canvas-node"
+                :class="{ 'is-selected': selectedCanvasNode === pos.key }"
+                :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: CANVAS_NODE_W + 'px' }"
+                :data-canvas-node="pos.key"
+                data-testid="approval-canvas-node"
+                :draggable="!readOnly"
+                @click="selectedCanvasNode = pos.key"
+                @dragstart="onCanvasNodeDragStart(pos.key)"
+                @dragend="onCanvasNodeDragEnd($event)"
+              >
+                <strong>{{ canvasNodeByKey(pos.key)?.name || pos.key }}</strong>
+                <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
+                  {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+                </span>
+                <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
+                  <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
+                  <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
+                  <template v-if="canInsertAfter(canvasNodeByKey(pos.key)!)">
+                    <el-button size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">+审批</el-button>
+                    <el-button size="small" :data-testid="`approval-canvas-insert-condition-${pos.key}`" @click.stop="onInsertConditionAfter(pos.key)">+条件</el-button>
+                    <!-- F4: no +并行 inside a parallel branch — the backend rejects nested parallel. -->
+                    <el-button v-if="canInsertParallelAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-parallel-${pos.key}`" @click.stop="onInsertParallelAfter(pos.key)">+并行</el-button>
+                  </template>
+                  <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
+                </div>
               </div>
             </div>
           </div>
@@ -574,6 +574,19 @@
                   :data-testid="`approval-topology-insert-after-${node.key}`"
                   @click="onInsertApprovalAfter(node.key)"
                 >下方插入审批</el-button>
+                <el-button
+                  v-if="canInsertAfter(node)"
+                  size="small"
+                  :data-testid="`approval-topology-insert-condition-after-${node.key}`"
+                  @click="onInsertConditionAfter(node.key)"
+                >下方添加条件</el-button>
+                <!-- F4: no 并行 insert inside a parallel branch — the backend rejects nested parallel. -->
+                <el-button
+                  v-if="canInsertParallelAfter(node)"
+                  size="small"
+                  :data-testid="`approval-topology-insert-parallel-after-${node.key}`"
+                  @click="onInsertParallelAfter(node.key)"
+                >下方添加并行</el-button>
                 <el-button
                   v-if="canRemoveNode(node)"
                   size="small"
@@ -1000,6 +1013,64 @@
                 title="此为占位审批角色，发布前请替换为真实角色 ID"
                 description="占位角色无人可认领，未替换将无法发布该模板。"
               />
+              <div class="template-authoring__grid template-authoring__approval-node-policy">
+                <el-form-item label="审批模式">
+                  <el-select
+                    :model-value="approvalNodeMode(node.key)"
+                    :disabled="readOnly"
+                    class="ms-w-100pct"
+                    data-testid="approval-node-mode"
+                    @update:model-value="(mode: ApprovalMode) => setApprovalNodeMode(node.key, mode)"
+                  >
+                    <el-option label="单人通过" value="single" />
+                    <el-option label="全部通过" value="all" />
+                    <el-option label="任一通过" value="any" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="空审批人策略">
+                  <el-select
+                    :model-value="approvalNodeEmptyPolicy(node.key)"
+                    :disabled="readOnly"
+                    class="ms-w-100pct"
+                    data-testid="approval-node-empty-policy"
+                    @update:model-value="(policy: EmptyAssigneePolicy) => setApprovalNodeEmptyPolicy(node.key, policy)"
+                  >
+                    <el-option label="报错" value="error" />
+                    <el-option label="自动通过" value="auto-approve" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="自审策略">
+                  <el-checkbox
+                    :model-value="approvalNodeMergeWithRequester(node.key)"
+                    :disabled="readOnly"
+                    data-testid="approval-node-merge-with-requester"
+                    @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
+                  >发起人自动通过（自审合并）</el-checkbox>
+                </el-form-item>
+              </div>
+              <div class="template-authoring__field-perms" data-testid="approval-node-field-permissions">
+                <div class="template-authoring__field-perms-head"><strong>字段权限</strong></div>
+                <div
+                  v-for="field in fieldPermissionFields"
+                  :key="field.id"
+                  class="template-authoring__field-perm-row"
+                  data-testid="approval-node-field-permission-row"
+                >
+                  <span class="template-authoring__field-perm-label">{{ field.label || field.id }}（{{ field.id }}）</span>
+                  <el-select
+                    :model-value="approvalNodeFieldAccess(node.key, field.id)"
+                    :disabled="readOnly"
+                    size="small"
+                    class="ms-w-130"
+                    :data-testid="`approval-node-field-access-${field.id}`"
+                    @update:model-value="(access: NodeFieldAccess) => setApprovalNodeFieldAccess(node.key, field.id, access)"
+                  >
+                    <el-option label="可编辑" value="editable" />
+                    <el-option label="只读" value="readonly" />
+                    <el-option label="隐藏" value="hidden" />
+                  </el-select>
+                </div>
+              </div>
             </div>
 
             <!-- approval (legacy / no edit) / other — read-only summary. -->
@@ -1067,6 +1138,18 @@
               >
                 在下方插入步骤
               </el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly"
+                :data-testid="`approval-step-insert-condition-after-${step.localId}`"
+                @click="insertConditionAfterStep(index)"
+              >下方添加条件分支</el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly"
+                :data-testid="`approval-step-insert-parallel-after-${step.localId}`"
+                @click="insertParallelAfterStep(index)"
+              >下方添加并行分支</el-button>
               <el-button size="small" type="danger" :disabled="readOnly || draft.steps.length === 1" @click="removeStep(index)">删除</el-button>
             </div>
           </div>
@@ -1579,6 +1662,7 @@ import {
   validateTemplateApprovalFlow,
   placeholderRoleNodeKeys,
   approvalFormulaInsertOptions,
+  parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
@@ -1592,16 +1676,25 @@ import {
   type CcNodeEdit,
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
-  applyTopologyToComplexDraft,
+  applyTopologyToDraft,
   moveItemToIndex,
 } from '../../approvals/templateAuthoring'
 import {
   addConditionBranch,
   addParallelBranch,
   appendApprovalNode,
+  collectParallelRegionNodeKeys,
+  insertConditionGateway,
+  insertParallelGateway,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
-import { computeLayout, graphValidityIssues, type GraphLayout } from '../../approvals/graphLayout'
+import {
+  computeLayout,
+  graphValidityIssues,
+  GRAPH_LAYOUT_NODE_HEIGHT,
+  GRAPH_LAYOUT_NODE_WIDTH,
+  type GraphLayout,
+} from '../../approvals/graphLayout'
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
@@ -1612,9 +1705,11 @@ import type {
   ApprovalAssigneeSourceKind,
   ApprovalAssigneeType,
   ApprovalGraph,
+  ApprovalMode,
   ApprovalNode,
   CcNodeConfig,
   ConditionNodeConfig,
+  EmptyAssigneePolicy,
   FormField,
   NodeFieldAccess,
   ParallelJoinMode,
@@ -1670,9 +1765,9 @@ const commonTemplatePresets = COMMON_APPROVAL_TEMPLATE_PRESETS
 const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates.value)
 // Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
 const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupportedReason.value))
-// A complex graph is shown via the read-only structured node list (`graphPreviewNodes`); the
-// linear steps editor is hidden. The graph is preserved on save, so this does NOT disable save.
-const graphReadOnly = computed(() => Boolean(graphReadOnlyMessage.value))
+// A draft enters graph authoring when it carries preservedGraph. Linear drafts are promoted when
+// the author inserts their first condition or parallel gateway.
+const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
 const draftStateLabel = computed(() => {
   if (!isEditMode.value && !isDraftDirty.value) return '新模板'
@@ -1994,6 +2089,43 @@ function approvalNodeEditFor(nodeKey: string): ApprovalNodeSourceEdit | undefine
 function approvalNodeFirstSource(nodeKey: string): ApprovalAssigneeSource | undefined {
   return approvalNodeEditFor(nodeKey)?.assigneeSources[0]
 }
+function approvalNodeMode(nodeKey: string): ApprovalMode {
+  return approvalNodeEditFor(nodeKey)?.approvalMode ?? 'single'
+}
+function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (edit) edit.approvalMode = mode
+}
+function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
+  return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
+}
+function setApprovalNodeEmptyPolicy(nodeKey: string, policy: EmptyAssigneePolicy): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (edit) edit.emptyAssigneePolicy = policy
+}
+function approvalNodeMergeWithRequester(nodeKey: string): boolean {
+  return Boolean(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy?.mergeWithRequester)
+}
+function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  const policy = edit.autoApprovalPolicy && edit.autoApprovalPolicy !== null
+    ? { ...edit.autoApprovalPolicy }
+    : {}
+  if (enabled) policy.mergeWithRequester = true
+  else delete policy.mergeWithRequester
+  edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
+}
+function approvalNodeFieldAccess(nodeKey: string, fieldId: string): NodeFieldAccess {
+  return approvalNodeEditFor(nodeKey)?.fieldPermissions?.find((permission) => permission.fieldId === fieldId)?.access ?? 'editable'
+}
+function setApprovalNodeFieldAccess(nodeKey: string, fieldId: string, access: NodeFieldAccess): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  const next = (edit.fieldPermissions ?? []).filter((permission) => permission.fieldId !== fieldId)
+  if (access !== 'editable') next.push({ fieldId, access })
+  edit.fieldPermissions = next
+}
 // Replace ONLY the primary (first) source; preserve any extra sources verbatim (no flatten).
 function setApprovalNodeSource(nodeKey: string, source: ApprovalAssigneeSource): void {
   const edit = approvalNodeEditFor(nodeKey)
@@ -2028,13 +2160,13 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
   return publishPlaceholderRoleKeys.value.includes(nodeKey)
 }
 
-// ── D-2/D-3 topology authoring (structural graph edits via graphTopologyEdit + applyTopologyToComplexDraft) ──
+// ── Topology authoring (structural graph edits via graphTopologyEdit + applyTopologyToDraft) ──
 // Each op runs on the EFFECTIVE graph (configs applied) and re-seeds the draft, so the structured
 // editors stay in sync. Guards mirror the engine preconditions so a shown button never throws; a
 // (defensive) throw surfaces as loadError. The interactive free-drag canvas is the gated next slice.
 function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
   try {
-    draft.value = applyTopologyToComplexDraft(draft.value, op)
+    draft.value = applyTopologyToDraft(draft.value, op)
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : '拓扑修改失败'
   }
@@ -2048,6 +2180,14 @@ function onAddParallelBranch(nodeKey: string): void {
 function onInsertApprovalAfter(nodeKey: string): void {
   runTopologyOp((graph) => appendApprovalNode(graph, nodeKey))
 }
+function onInsertConditionAfter(nodeKey: string): void {
+  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey))
+  canvasViewMode.value = 'canvas'
+}
+function onInsertParallelAfter(nodeKey: string): void {
+  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey))
+  canvasViewMode.value = 'canvas'
+}
 function onRemoveNode(nodeKey: string): void {
   runTopologyOp((graph) => removeLinearNode(graph, nodeKey))
 }
@@ -2056,6 +2196,15 @@ function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
 }
 function canInsertAfter(node: ApprovalNode): boolean {
   return node.type !== 'end' && topologyEdgeCount(node.key, 'source') === 1
+}
+// F4: never OFFER a nested parallel — the backend rejects it at save ("cannot contain nested
+// parallel node"), and the canvas lock requires guiding toward valid shapes rather than building a
+// 422. Condition-in-parallel stays legal, so only the +并行 affordance is gated by region membership.
+const parallelRegionKeys = computed<Set<string>>(() =>
+  collectParallelRegionNodeKeys(draft.value.preservedGraph ?? { nodes: [], edges: [] }),
+)
+function canInsertParallelAfter(node: ApprovalNode): boolean {
+  return canInsertAfter(node) && !parallelRegionKeys.value.has(node.key)
 }
 function canRemoveNode(node: ApprovalNode): boolean {
   return (node.type === 'approval' || node.type === 'cc')
@@ -2071,8 +2220,8 @@ const canvasViewMode = ref<'list' | 'canvas'>('list')
 const selectedCanvasNode = ref<string | null>(null)
 const nodePositions = ref<Record<string, { x: number; y: number }>>({})
 const draggingCanvasNode = ref<string | null>(null)
-const CANVAS_NODE_W = 150
-const CANVAS_NODE_H = 56
+const CANVAS_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
+const CANVAS_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
 const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(draft.value))
 const canvasLayout = computed<GraphLayout>(() => {
   const layout = computeLayout(canvasEffectiveGraph.value)
@@ -2106,6 +2255,11 @@ const publishFormFieldIssues = computed<string[]>(() => validateTemplateFormFiel
 const publishApprovalFlowIssues = computed<string[]>(() => [
   ...validateTemplateApprovalFlow(draft.value),
   ...canvasValidity.value,
+  // F2 publish preflight: parallel branches with provably-identical DYNAMIC approver sources 409
+  // every request at runtime; the backend publish gate rejects the same shape
+  // (APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT). Checklist-scoped (like the placeholder-role
+  // item): the draft still SAVES — publish is what the conflicting shape can never reach.
+  ...parallelDynamicAssigneeConflicts(canvasEffectiveGraph.value),
 ])
 const publishPlaceholderRoleKeys = computed<string[]>(() => placeholderRoleNodeKeys(draft.value.approvalNodeEdits ?? {}))
 const publishPlaceholderRoleIssues = computed<string[]>(() =>
@@ -2127,13 +2281,12 @@ const canvasEdgeLines = computed(() => {
   return canvasEffectiveGraph.value.edges.map((edge) => {
     const s = pos.get(edge.source)
     const t = pos.get(edge.target)
-    return {
-      key: edge.key,
-      x1: (s?.x ?? 0) + CANVAS_NODE_W,
-      y1: (s?.y ?? 0) + CANVAS_NODE_H / 2,
-      x2: t?.x ?? 0,
-      y2: (t?.y ?? 0) + CANVAS_NODE_H / 2,
-    }
+    const x1 = (s?.x ?? 0) + CANVAS_NODE_W / 2
+    const y1 = (s?.y ?? 0) + CANVAS_NODE_H
+    const x2 = (t?.x ?? 0) + CANVAS_NODE_W / 2
+    const y2 = t?.y ?? 0
+    const midY = y1 + (y2 - y1) / 2
+    return { key: edge.key, path: `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}` }
   })
 })
 function onCanvasNodeDragStart(key: string): void {
@@ -2364,6 +2517,14 @@ function addStep() {
 // own doc in templateAuthoring.ts for exactly what counts as "still default").
 function insertStep(index: number) {
   draft.value.steps = insertStepAt(draft.value.steps, index)
+}
+
+function insertConditionAfterStep(index: number) {
+  onInsertConditionAfter(`approval_${index + 1}`)
+}
+
+function insertParallelAfterStep(index: number) {
+  onInsertParallelAfter(`approval_${index + 1}`)
 }
 
 function removeStep(index: number) {
@@ -3146,6 +3307,17 @@ pre {
     position: static;
   }
 
+  .template-authoring__header :deep(.ms-page-header__top) {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .template-authoring__header :deep(.ms-page-header__actions) {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
   .template-authoring__validation-summary,
   .template-authoring__content {
     scroll-margin-top: var(--ms-space-3);
@@ -3154,6 +3326,10 @@ pre {
   .template-authoring__actions,
   .template-authoring__actions :deep(.el-button) {
     width: 100%;
+  }
+
+  .template-authoring__actions :deep(.el-button) {
+    flex: 1;
   }
 
   .template-authoring__steps {
@@ -3180,11 +3356,15 @@ pre {
   gap: 8px;
   margin-bottom: 12px;
 }
-.template-authoring__canvas {
-  position: relative;
+.template-authoring__canvas-viewport {
+  max-width: 100%;
   overflow: auto;
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
+  background: var(--ms-bg-page);
+}
+.template-authoring__canvas {
+  position: relative;
   background: var(--ms-bg-page);
   min-height: 200px;
 }
@@ -3205,6 +3385,7 @@ pre {
   gap: 2px;
   cursor: grab;
   font-size: 12px;
+  min-height: 96px;
 }
 .template-authoring__canvas-node.is-selected {
   border-color: var(--el-color-primary);
