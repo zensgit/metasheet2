@@ -1,11 +1,13 @@
 # 审批、自动化与 Canvas 组合收口执行台账（2026-07-22）
 
-**状态：COMPOSED AND LOCALLY VERIFIED / DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / NOT LANDED**
+**状态：IMPLEMENTED ON MAIN / MERGED-MAIN MATRIX PASS / UAT AND FLAGS PENDING**
 
-记录基线：`origin/main@ee39a13eb9db27d01c89cb19f0644b546c711347`。组合根：#4540
-`3d034c9508261a14187b4ef9ada7624c6b5b7db9`；最终数据栈头：#4539
-`5da02bf3edbcc60cbceb3f4cd63c6c0c4937b889`。
-本台账记录实现和证据，不构成合并、UAT 或启用授权。
+merged-main 记录基线：`origin/main@adbd092fd30b0a17ce914106aa5bffa5053af346`。串行 squash：
+#4540 `cd3d3372b9ddfa8530be687a43c3b4b54d726997` -> #4524
+`974d3c8b9aa83c3bd19d993ea946c0b600c1b0d0` -> #4531
+`0b59321ed0a40ed1cebcd77623651de15c209752` -> #4539
+`adbd092fd30b0a17ce914106aa5bffa5053af346`。
+本台账记录实现、合入和验证证据，不构成 UAT、部署或启用授权。
 
 ## 1. 已在 main 的底座
 
@@ -20,16 +22,16 @@
 | Lane | PR / exact head | 内容 | 组合处置 |
 |---|---|---|---|
 | Data root | #4510 `f6d05814a8` | 附件、FWB activation、画布基础和 CI | 被 #4540 吸收 |
-| Record-link | #4524 `b4ede85a2d` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
-| FWB update | #4531 `29519209c2` | 更新受约束已有记录 | 已叠到 #4524 |
-| FWB composition | #4539 `5da02bf3ed` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
+| Record-link | #4524 `974d3c8b9` | 安全 record-link 字段、选择器与 DB 权限正控 | 已按序 squash 到 main |
+| FWB update | #4531 `0b59321ed` | 更新受约束已有记录 | 已按序 squash 到 main |
+| FWB composition | #4539 `adbd092fd` | 新建/更新 authoring 与生产组合 | 已按序 squash 到 main；merged-main 验收基线 |
 | Canvas root | #4433 `fc5477d7e4` | 分支编排与纵向画布 | 被 #4540 吸收 |
 | Canvas all-path | #4532 `762dc0fd5` | 条件内并行路径全部汇合 | 被 #4540 吸收 |
 | Canvas inspector | #4533 `babc6d975` | 共享检查器、键盘和响应式 | 被 #4540 吸收 |
 | Version restore | #4536 `3bb327a93` | diff/restore 与当前校验 | 被 #4540 吸收 |
 | Navigation | #4537 `b2f69116b` | zoom/pan/minimap/overlay | 被 #4540 吸收 |
 | Reorder | #4538 `a3562083af` | 同区域语义重排 | 被 #4540 吸收 |
-| Integration | #4540 `3d034c9508` | 两条线的唯一联合解析与测试面 | Draft，owner review |
+| Integration | #4540 `cd3d3372b` | 两条线的唯一联合解析与测试面 | 已按序 squash 到 main |
 
 ## 3. 组合审阅发现与修复
 
@@ -43,7 +45,7 @@
    fixture 中建立并清理真实 `approvals:write` DB 授权，最终 record-link + authoring UAT 45/45。
 8. 条件分支允许无规则但带公式时，纯字面量或受字段边界保证的恒真公式可捕获全部流量；新增 AST 动态依赖
    判定和基于必填数值字段 `min/max` 的保守区间证明。创建/更新/发布/恢复拒绝无动态依赖及可证明恒真公式；
-   历史静态公式在运行时跳过并继续 fallback。无法证明恒真的动态公式保留。
+   历史静态或 capture-prone 公式在运行时 values-free 409，不能静默进入 fallback。无法证明恒真的动态公式保留。
 9. record-link 的 base-read 产品门正确但测试没有把它设为唯一变量；新增同一 actor/template/sheet/record 的
    submit + picker 负例，再只补 `multitable:base:read` 得到双正控，防止未来删门后 required 真库仍绿。
 10. 复核生产 FWB 路径确认所有 `targetType: 'number'` 映射当前均被
@@ -52,8 +54,15 @@
     还会回显任意后端 message；改为无标识符的业务文案及 machine-code allowlist，未知 API/本地错误统一使用
     values-free fallback。附件 runtime 已确认在 flag 分支内 dynamic import，无需再改。
 12. 外部复核构造出 `{amount} == {amount}` 与 `requester.department == requester.department`：它们带动态引用，
-    却仍会恒真捕获分支。新增递归 AST 结构等价证明；创建/更新/发布/恢复拒绝，历史模板运行时跳过。并行编辑
-    的本地拒绝文案也改为通用业务提示，不再携带 corrupt draft 的 raw node key。
+    却仍会恒真捕获分支。semantic truth 与 capture policy 已拆分；创建/更新/发布/恢复拒绝 capture-prone
+    结构，历史模板运行时 values-free 409。并行编辑的本地拒绝文案也改为通用业务提示，不再携带 corrupt
+    draft 的 raw node key。
+13. #4524 重叠后的 required 真库暴露两项旧基线问题：审批 fixture 只给 JWT wildcard、未建立最终 DB
+    `approvals:write` 权限，以及 record-link 列表投影把 UUID 与 `text[]` 比较。保留产品 default-deny 门，
+    统一让 integration actor 建立 DB 权限；投影改为 `uuid[]` 并补单测。19 个受影响 integration 文件
+    在新库上 107/107。
+14. #4531 和 #4539 均在父层实际落 main 后重叠；#4539 11/11 提交 `range-diff` 等价。最终 merged-main
+    新库迁移通过，FWB create 18/18、update 15/15、S1-S8 9/9。
 
 ## 4. 多模型使用与最终责任
 
@@ -66,17 +75,16 @@
 
 代理结论只绑定其读取的 exact head；不能跨 rebase 或替代测试、CI 和 owner 决策。
 
-## 5. 推荐落地顺序
+## 5. 落地记录与后续顺序
 
-1. 审阅并串行合入 #4540 -> #4524 -> #4531 -> #4539；不要再合入 #4540 已吸收的 #4510/#4433-#4538 完整内容。
-2. 每个 child 落地后把下一 PR retarget 到 main，并确认产品提交 range-diff 不漂移、required checks 重新过绿。
-3. 最终 child 落 main 后，在 merged main 重跑新库迁移、FWB activation、S1-S8、附件、版本恢复、required web 和生产构建。
-4. 更新本三件套为 merged-main exact heads 后，才进入真实租户 UAT。
-5. flags 按 durable -> Class A -> Class B -> FWB -> attachments/Canvas staged rollout 分级开启。
+1. #4540 -> #4524 -> #4531 -> #4539 已串行 squash 到 main；每层在 retarget 后重新通过 required checks。
+2. 每次 rebase 均保留旧头并执行 `range-diff`；#4539 的 11 个独有提交逐一 patch-equivalent。
+3. merged main 空库迁移成功；FWB create、FWB update 与 S1-S8 正式矩阵 3 files / 42 tests 通过。
+4. 三件套更新到 merged-main exact heads 后，才进入真实租户 UAT。
+5. flags 仍按 durable -> Class A -> Class B -> FWB -> attachments/Canvas staged rollout 分级开启。
 
 ## 6. 当前 owner 门
 
-- #4540 与后续 FWB child 栈的审阅/合入；
 - 来源 PR 的 supersede/关闭处置，避免重复落地；
 - 真实企业、真实模板、真实附件和真实多维表 UAT；
 - 分级 flag 与观察窗口；

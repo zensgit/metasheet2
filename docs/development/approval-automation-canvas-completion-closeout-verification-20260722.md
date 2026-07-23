@@ -1,10 +1,10 @@
 # 审批、自动化与 Canvas 组合收口验证（2026-07-22）
 
-**结论：ENGINEERING STACK VERIFIED THROUGH DRAFT #4539; NOT MERGED, UAT'D OR ENABLED**
+**结论：ENGINEERING STACK LANDED ON MAIN; MERGED-MAIN MATRIX PASS; NOT UAT'D OR ENABLED**
 
-本文对组合根 #4540 `ca207f8e8930479bec27a4fb86a90a7a0fc41039` 及其重排后的最终数据栈头
-#4539 `60d42499547a0b01a7c1bdfb43aede0c6fc58c5a` 的本地验证负责。
-Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独立状态。
+本文对组合根 #4540 `cd3d3372b9ddfa8530be687a43c3b4b54d726997` 及最终数据栈
+#4539 `adbd092fd30b0a17ce914106aa5bffa5053af346` 在 merged main 上的验证负责。
+远端 CI、合入 main、merged-main 验收、真实租户 UAT 和生产启用是五个独立状态。
 
 ## 1. 为什么需要组合 PR
 
@@ -90,7 +90,7 @@ activation 均 fail closed。两者对 formula dry-run 的判断不一致：Code
 
 | Gate | 结果 | 证明范围 |
 |---|---:|---|
-| formula + graph + product service unit | **3 files / 224 passed** | AST 恒等式、保存门、历史模板 runtime fallback |
+| formula + graph + product service unit | **3 files / 224 passed** | AST 恒等式、保存门、历史模板 runtime fail-closed |
 | combined real-DB | **6 files / 92 passed** | template authoring/restore 7、record-link 39、FWB create 18、update 15、write 4、S1-S8 9 |
 | authoring errors + parallel preflight + mounted inspector | **3 files / 44 passed** | 通用并行错误不含 raw key、authoring 错误与真实 SFC 接线 |
 | backend `tsc --noEmit` + frontend `vue-tsc --noEmit` | pass | 最终组合 head 类型面 |
@@ -133,6 +133,32 @@ exact-head 本地证据：
 #4539 只额外增加 required editor gate 提交。GitHub 一度只刷新 #4531 的 branch ref、未刷新 PR ref；对同一
 base 执行无语义变化的 PR 重算后，两者均指向 `da565853c`。
 
+### 2.6 2026-07-23 按序落地与 merged-main 验收
+
+owner 给出“按序落地”授权后，四层严格按依赖串行 squash：
+
+1. #4540 -> `cd3d3372b9ddfa8530be687a43c3b4b54d726997`
+2. #4524 -> `974d3c8b9aa83c3bd19d993ea946c0b600c1b0d0`
+3. #4531 -> `0b59321ed0a40ed1cebcd77623651de15c209752`
+4. #4539 -> `adbd092fd30b0a17ce914106aa5bffa5053af346`
+
+每个 child 都在父层实际合入后 retarget 到 `main`，保存旧头，以 exact remote SHA 执行
+`--force-with-lease`，并在新基线上重新通过 required checks。#4539 的 11 个独有提交在最终
+`range-diff` 中逐一 `=`。
+
+在 detached `origin/main@adbd092fd30b0a17ce914106aa5bffa5053af346` 上新建 PostgreSQL 数据库并从空库
+执行全部迁移，随后运行正式生产链：
+
+| Gate | 结果 | 证明范围 |
+|---|---:|---|
+| FWB create activation | 18/18 | 保存/执行权限、同事务写回、net-once、结构路径 identity |
+| FWB update activation | 15/15 | record-link 目标、锁/撤权 TOCTOU、原子回滚、跨 Base 门 |
+| S1-S8 full-chain matrix | 9/9（含 setup/正控） | source commit、reclaim、zombie fence、manifest skew、FWB chained outbox |
+| merged-main combined | **3 files / 42 tests** | 上述范围全部在 merged main 的生产 seam 上通过 |
+
+测试中的预期 fail-closed 日志来自故障注入；套件最终为 42/42，通过且无跳过。本轮没有执行真实租户 UAT，
+也没有修改 durable、Class A、Class B、FWB、attachments 或 Canvas flag。
+
 ## 3. 数值写回的真实边界
 
 当前生产链可写回 `text`、`select`、`date` 与 `record-link`；创建新记录、更新受约束已有记录和审批节点确认值
@@ -164,29 +190,29 @@ exact-head 结算：22 SUCCESS / 1 SKIPPED / 0 失败，包含 `test (18.x)`、`
 因此本节证明的是所列 exact heads 的测试结论，不把它扩张为此刻 0-behind；合入前仍须机械追平热 main，
 并按依赖顺序逐层 retarget/重结算。
 
+最终落地结算见 §2.6：四个 PR 均在各自 retarget 后通过 required checks 并已进入 main；merged-main
+验收绑定 `adbd092fd30b0a17ce914106aa5bffa5053af346`。
+
 ## 5. 尚未完成
-
-### 工程/落地
-
-1. #4540 -> #4524 -> #4531 -> #4539 均为 Draft/未合入；外部复核修复 heads 已远端过绿。
-2. 子栈已完成重排、本地 exact-head 复验与当前 stacked-base CI，但仍须按依赖顺序串行审合并逐层 retarget 到 main。
-3. merged-main 上的 8 场景、附件、版本恢复与 required web 仍需正式复跑。
 
 ### Owner-only
 
-1. 审阅并合入组合 PR，处置被吸收的来源 PR；
+1. 处置仍打开的被吸收来源 PR，避免重复落地；
 2. 真实租户 UAT：独立表单、审批节点确认值、结果写回、新建/更新记录、附件、版本恢复；
 3. 按 durable -> Class A -> Class B -> FWB -> attachments/Canvas 分级开启并观察；
-4. 决定下一轮是否投资 D0-D4 数值写回、自由连线、大图虚拟化和移动端原生编排。
+4. 决定下一轮是否投资 D0-D4 数值写回、算术比较恒真证明扩展、自由连线、大图虚拟化和移动端原生编排。
 
 ## 6. FINAL 条件
 
-只有以下条件全部满足，才能把这两条线标记为 `FINAL`：
+以下工程条件已经满足：
 
 - #4540 -> #4524 -> #4531 -> #4539 已按序在 main，最终 required checks 全绿；
-- merged main 新库迁移和 S1-S8 生产链通过；
+- merged main 新库迁移和 S1-S8/FWB create/update 生产链通过。
+
+以下产品条件仍未满足，因此不能把整条产品线标记为 `FINAL`：
+
 - 新建记录、更新 record-link 记录、decision-value、附件与版本恢复均有真实租户正反例；number 在 D0-D4
   独立完成前必须继续 fail closed；
 - flags 分级开启后没有重复写、poison、stuck lease、权限 oracle、raw-id 泄露或 legacy 丢事件。
 
-在此之前，准确状态是“工程组合已在 Draft exact head 上验证；等待审合、merged-main gate、UAT 与启用”。
+当前准确状态是“基础工程已落 main 且 merged-main gate 通过；等待真实租户 UAT 与分级启用”。

@@ -1,9 +1,10 @@
 # 审批、自动化与 Canvas 组合收口设计锁（2026-07-22）
 
-**状态：IMPLEMENTED ON DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / OWNER REVIEW REQUIRED**
+**状态：IMPLEMENTED ON MAIN / MERGED-MAIN MATRIX PASS / UAT AND FLAGS PENDING**
 
 本文锁定两条必须一起验证的产品线：可视化审批 Canvas，以及审批表单/过程/结果写回多维表的数据闭环。
-它不授权合并、UAT、部署或 flag 变更，也不把来源 PR 的独立绿灯当成组合态证明。
+它记录 owner 已授权并完成的串行合入，但不授权 UAT、部署或 flag 变更，也不把来源 PR 的独立绿灯当成
+merged-main 组合态证明。
 
 ## 1. 产品验收目标
 
@@ -33,9 +34,10 @@
 5. 鼠标、Enter、Space 和受约束的语义重排必须等价；不提供运行时无法接受的跨区域拖排。
 6. 桌面检查器保持窄栏；窄屏改为全宽且自动揭示，不产生页面级横向滚动。
 7. 公式条件必须至少依赖表单字段、聚合值、发起人属性或成员关系；纯字面量/无动态依赖公式在创建、更新、
-   发布和历史恢复时 fail closed，历史遗留静态公式在运行时不得捕获全部流量。AST 两侧结构完全相同的
-   `==`/`>=`/`<=` 比较也按恒真捕获拒绝，历史模板运行时跳过并继续后续/default 分支。对必填数值字段，
-   authoring 还须依据已配置的 `min/max` 保守拒绝可证明恒真的比较；无法证明的一律保留，不用采样值猜测语义。
+   发布和历史恢复时 fail closed。结构恒等式由独立 capture policy 拒绝，只有对当前 schema 可证明 total 的
+   表达式才可被 semantic prover 判为恒真；可选字段自比较不得冒充恒真。历史遗留静态或 capture-prone
+   公式在运行时返回 values-free 409，不得静默落入 default 分支。对必填数值字段，authoring 还须依据已配置的
+   `min/max` 保守拒绝可证明恒真的比较；无法证明的一律保留，不用采样值猜测语义。
 
 ### 3.2 模板版本
 
@@ -69,8 +71,8 @@
 #4510 数据根与 #4433 -> #4538 Canvas 栈重叠 22 个关键文件，包括 `TemplateAuthoringView.vue`、拓扑工具、
 `ApprovalProductService`、路由、executor 和 CI run-list。因此二者不能作为“文件不重叠”的独立落地线处理。
 
-Draft #4540 是 Canvas 与数据根唯一经过组合冲突解析的根；#4524 -> #4531 -> #4539 是重排到该根上的唯一 FWB child
-序列。来源 PR 可以保留为审阅证据，但不得与 #4540 重复 squash，也不得跳过 child 依赖顺序。
+#4540 是 Canvas 与数据根唯一经过组合冲突解析并已落入 main 的根；#4524 -> #4531 -> #4539 已按该依赖顺序
+串行落地。来源 PR 可以保留为审阅证据，但不得与已合入的组合根重复落地。
 组合解析必须保留：
 
 - 数据线的附件、FWB、typed picker、values-first dry-run 与安全门；
