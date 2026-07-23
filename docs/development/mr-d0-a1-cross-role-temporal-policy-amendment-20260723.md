@@ -50,14 +50,14 @@ crossRoleTemporalPolicy:
 
 作为 **freshness SLO** 附加：全部源角色读窗口须落在 T_gap 内，超窗 fail-closed（专用码）。evidence 显式标注其为 **SLO 而非一致性证明**。T_gap 由场景冻结，binding 不可放宽。
 
-## 5. 裁决记录
+## 5. 复审建议记录（拟定默认——**非 owner ratification**）
 
-**owner 复审（2026-07-23）裁定**：
-- **主政策：A（维持 `DISCLOSE_ONLY`）**；
+**复审建议（reviewer recommendation，2026-07-23；P3 订正：上轮为审阅建议，非 owner 明确 ratify）**：
+- **拟定默认：A（维持 `DISCLOSE_ONLY`）**；
 - **暂不叠加 `MAX_CAPTURE_GAP`**；
 - **B 保留为待补证明合同的未来选项**（前置 = §3 四机制 + D1 amendment + D3a runtime）。
 
-落地：charter 加一行命名映射注记（`DISCLOSE_ONLY` = §2.2 现行语义）即毕；本修订随 GIP-D0 干净分支交付，正式 ratify 时一并落定。
+**owner decision 待 owner 明确发出 ratify 后方可记录**。届时落地：charter 加一行命名映射注记（`DISCLOSE_ONLY` = §2.2 现行语义）即毕。
 
 ## 6. ratify 解锁范围订正（owner P2，联动 GIP-D0）
 
