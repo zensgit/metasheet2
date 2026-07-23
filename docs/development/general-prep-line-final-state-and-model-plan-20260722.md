@@ -13,7 +13,7 @@
 
 **平台线新增交付（gated on ratify）**：scale-kernel D0 + GIP-D0 平台分层锁 + MR-D0-A1 时序待裁决稿——五轮 owner 审阅（HOLD→窄 HOLD）全量吸收，doc-only 分支 `claude/gip-d0-platform-docs-20260723`（base=最新 main，仅 3 文档，diff --check 干净）**待 owner 逐字短复审 → ratify**（ratify 仅解锁 profile schema / 合规 harness / 只读 qualification spike；五个 profile 仍逐个过门）。
 
-**实现基本完成、全部 unarmed**：地基实证（P1a）、四个 pure 能力模块（P1b/P4/P3）、模板演进 rung（W2 ensure+repair）、W3-entry 原子组合事务原语（P2-3）——全部构建 + 逐一 mutation-verified。**owner 复核的 P2（发货 index.ts runner 未被测）已修**：加 host 集成测试真调 `MetaSheetServer.createCoreAPI().multitable.provisioning.runObjectFieldsRepairTransaction`，照 reviewer 原样把发货 runner 改恒抛 ⇒ 该测试 RED（其余套件仍绿），runner-vs-prod gap 真正闭合。**尚余**：fresh CI（已 dispatch 运行中，跑 real-DB 白名单）+ **owner exact-head 短复审** —— 二者过后才宣布 W2/P2-3 clean。余下能力项（W3/G1/P0/P5/P7/P-T3）全卡在 owner 决策 / 未合依赖 / 需求门。
+**实现基本完成、全部 unarmed**：地基实证（P1a）、四个 pure 能力模块（P1b/P4/P3）、模板演进 rung（W2 ensure+repair）、W3-entry 原子组合事务原语（P2-3）——全部构建 + 逐一 mutation-verified。**owner 复核的 P2（发货 index.ts runner 未被测）已修**：加 host 集成测试真调 `MetaSheetServer.createCoreAPI().multitable.provisioning.runObjectFieldsRepairTransaction`，照 reviewer 原样把发货 runner 改恒抛 ⇒ 该测试 RED（其余套件仍绿），runner-vs-prod gap 真正闭合。**尚余**：仅 **owner exact-head 短复审**（fresh CI 已全绿，见上）——过后才宣布 W2/P2-3 clean。余下能力项（W3/G1/P0/P5/P7/P-T3）全卡在 owner 决策 / 未合依赖 / 需求门。
 
 ---
 
