@@ -1,6 +1,6 @@
 # MR-D0-A1 — 物料对账 charter 时序语义修订（crossRoleTemporalPolicy 选型裁决稿）
 
-**日期**：2026-07-23　**状态**：**PROPOSED（owner 裁决文档）**
+**日期**：2026-07-23　**状态**：**OWNER 待裁决稿（pending-ruling draft）**——正文含复审拟定默认，owner 尚未 ratify
 **修订对象**：`stock-preparation-v2-material-master-reconciliation-charter-20260719.md`（RATIFIED）§2.2 跨侧时序语义在 GIP-D0 词表下的**命名与可选升级**。
 **边界**：本修订不改 #4437 验收路线、不解锁 D2/runtime；选项 A 下对已完成的 D1 实现**零变更**。
 
