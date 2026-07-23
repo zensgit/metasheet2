@@ -153,8 +153,16 @@ flush 后读到行；本地 exact-head 单独复跑 15/15 后只重跑失败 job
 #4540 全部 required checks 为绿。#4524/#4531/#4539 新 heads 的实际 path-trigger checks 也已成功；串行 retarget 到 main
 后仍必须让完整 required set 在新基线上重新结算。
 
-2026-07-23 P2 修复后的四层 heads 已重新推送，远端 required checks 正在按新 SHA 重新结算。本地 exact-head 证据见
-§2.5；在 GitHub 对各 PR 的新 head 返回最终结果前，不称 CI 全绿。#4535 本次文档更新也以自己的新 head 结算为准。
+2026-07-23 P2 修复后的组合根 #4540 `ca207f8e8930479bec27a4fb86a90a7a0fc41039` 已完成远端
+exact-head 结算：22 SUCCESS / 1 SKIPPED / 0 失败，包含 `test (18.x)`、`test (20.x)`、`web-tests`、
+`approval-web-guard`、`multitable-web-guard`、migration replay、contracts、e2e 与 coverage。
+#4524/#4531/#4539 的 stacked-base path-trigger checks 全绿；#4535
+`6a8e3c242c067f5388e7b3569830b2a3e478f377` 的 12 项 checks 也全绿。
+
+上述结算完成后，main 从本栈重排基线 `1bcfc86b86f250c789d199660fc36da7b04e9a4d` 前进 4 个
+钉钉设计文档/CI 触发提交至 `48a4250441ef44b6d8cef20a70eafbd1bbad5de3`，未触及本栈产品文件。
+因此本节证明的是所列 exact heads 的测试结论，不把它扩张为此刻 0-behind；合入前仍须机械追平热 main，
+并按依赖顺序逐层 retarget/重结算。
 
 ## 5. 尚未完成
 
