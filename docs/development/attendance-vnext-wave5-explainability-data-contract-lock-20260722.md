@@ -691,9 +691,10 @@ admin/self，manager 由 W5-10 管」）——据此收敛为 **admin/self 双�
     双锁；未知 code fail-closed 走「无法确定依据」态）；静默 fallback ⇒ 红；**码位判别断言
     （owner 终审 P2-2）**：①②③ 响应级单 `reasonCode` 在场（标量）且 ④⑤⑥ 响应级零 `reasonCode`
     键、④ 段级/⑤ item 级/⑥ step 级码在场——逐类 exact key set 恒等；**⑤ 未知原值负例
-    （owner 二轮终审 P2-c）**：真库 fixture 造映射外 `source_type` 任意字符串（deductLeaveBalance
-    可写入任意值的既成事实）⇒ 该 lot item `reasonCode` 缺席 + item `undeterminable` + 响应全文
-    零出现该原值字符串（透传 = 红）；mutation：把 ④ 段级码上提为
+    （owner 二轮终审 P2-c）**：真库 fixture **直接向 lot 表 `attendance_leave_balances` INSERT 一条
+    映射外 `source_type` 任意字符串行**（L34 无 CHECK 允许——注意勿经 `deductLeaveBalance` 造数：
+    该函数写的是 events 列，lot 断言会因 fixture 落错表而空过）⇒ 该 lot item `reasonCode` 缺席 +
+    item `undeterminable` + 响应全文零出现该原值字符串（透传 = 红）；mutation：把 ④ 段级码上提为
     响应级单码 / 把 ① 响应级码改为数组 ⇒ 各自精确红（scalar-or-array 双读 = 红）；把 ⑤ 映射改为
     裸 `source_type` 透传 ⇒ 未知原值负例精确红。
   - **W5-0-G5 `not_in_effect` ≠ `undeterminable`**：dormant org（引擎 OFF）⇒ `not_in_effect` 正控；
