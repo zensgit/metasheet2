@@ -209,6 +209,55 @@ async function requireAttendanceTable(pool: Pool, tableName: string): Promise<vo
   }
 }
 
+async function ensurePublishedShiftCandidateForTest(
+  pool: Pool,
+  input: {
+    orgId?: string
+    userId: string
+    workDate: string
+    createdShiftIds: Set<string>
+  },
+): Promise<void> {
+  const orgId = input.orgId ?? 'default'
+  const existing = await pool.query(
+    `SELECT a.shift_id
+       FROM attendance_shift_assignments a
+       JOIN attendance_shifts s
+         ON s.id = a.shift_id
+        AND s.org_id = a.org_id
+      WHERE a.org_id = $1
+        AND a.user_id = $2
+        AND a.start_date <= $3::date
+        AND COALESCE(a.end_date, a.start_date) >= $3::date
+        AND a.is_active = true
+        AND a.publish_status = 'published'
+      LIMIT 1`,
+    [orgId, input.userId, input.workDate],
+  )
+  if (existing.rowCount) return
+
+  const shiftId = randomUUID()
+  const assignmentId = randomUUID()
+  try {
+    await pool.query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, working_days, is_overnight)
+       VALUES ($1, $2, $3, 'UTC', '09:00', '18:00', '[1,2,3,4,5]'::jsonb, false)`,
+      [shiftId, orgId, `w2-overtime-fixture-${input.userId}-${input.workDate}`],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status)
+       VALUES ($1, $2, $3, $4, 0, $5::date, $5::date, true, 'published')`,
+      [assignmentId, orgId, input.userId, shiftId, input.workDate],
+    )
+    input.createdShiftIds.add(shiftId)
+  } catch (error) {
+    await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+    throw error
+  }
+}
+
 function expectChunkConfigMatchesEngine(engine: unknown, chunkConfig: any) {
   expect(typeof chunkConfig?.itemsChunkSize).toBe('number')
   expect(typeof chunkConfig?.recordsChunkSize).toBe('number')
@@ -592,24 +641,6 @@ attendanceIntegrationDescribe(
       }
     }
 
-    if (overtimeRuleId) {
-      const overtimeRequestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          workDate,
-          requestType: 'overtime',
-          overtimeRuleId,
-          minutes: 90,
-        }),
-      })
-
-      expect(overtimeRequestRes.status).toBe(201)
-    }
-
     const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
       method: 'POST',
       headers: {
@@ -647,6 +678,24 @@ attendanceIntegrationDescribe(
     expect(assignmentRes.status).toBe(201)
     const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
     expect(assignmentId).toBeTruthy()
+
+    if (overtimeRuleId) {
+      const overtimeRequestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          workDate,
+          requestType: 'overtime',
+          overtimeRuleId,
+          minutes: 90,
+        }),
+      })
+
+      expect(overtimeRequestRes.status).toBe(201)
+    }
 
     // Fixed far-future date, NOT `Date.now() + 7 days`. Holidays here live in the shared 'default' org and
     // are not cleaned up, so a near-term relative date can collide with another test's fixed workDate: on
@@ -6006,6 +6055,7 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
@@ -6029,6 +6079,7 @@ attendanceIntegrationDescribe(
       const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
       const setFlag = (enabled: boolean) => putSettings({ compTimeFromOvertime: { enabled } })
       const createOvertime = async (workDate: string, minutes: number) => {
+        await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
         const res = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, minutes }) })
         expect(res.status).toBe(201)
         const id = (res.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
@@ -6394,6 +6445,10 @@ attendanceIntegrationDescribe(
       if (createdRequestIds.length > 0) {
         await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
       }
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -6411,6 +6466,7 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     const holidayDate = '2036-10-01'
     const offDate = '2036-10-02'
     const crossDate = '2036-10-03'
@@ -6455,6 +6511,7 @@ attendanceIntegrationDescribe(
         body: JSON.stringify({ overtimeSegmentation: { enabled } }),
       })
       const createOvertime = async (workDate: string, body: Record<string, unknown> = {}) => {
+        await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
         const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
           method: 'POST',
           headers,
@@ -6565,6 +6622,10 @@ attendanceIntegrationDescribe(
       }
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -6580,6 +6641,7 @@ attendanceIntegrationDescribe(
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     let originalSettings: Record<string, unknown> = {}
     let token: string | undefined
     const workDate = '2037-06-12' // June → no DST transition in any tz, so the local-midnight offset is stable
@@ -6620,6 +6682,8 @@ attendanceIntegrationDescribe(
         overtimeRuleId = ((listRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.name === `ns3-ot-${runSuffix}`)?.id
       }
       if (!overtimeRuleId) return
+
+      await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
 
       // learn the user's work timezone so the window crosses LOCAL midnight regardless of the org default.
       const calRes = await requestJson(`${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(userId)}`, { headers: { Authorization: `Bearer ${token}` } })
@@ -6684,6 +6748,10 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM attendance_records WHERE user_id = $1 AND work_date::text = ANY($2::text[])', [userId, [workDate, nextDate, farDate]]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -6774,6 +6842,7 @@ attendanceIntegrationDescribe(
     let cycleId: string | undefined
     let overtimeRuleId: string | undefined
     let originalSettings: Record<string, unknown> = {}
+    const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
@@ -6791,6 +6860,11 @@ attendanceIntegrationDescribe(
       expect([201, 409]).toContain(otRuleRes.status)
       overtimeRuleId = (otRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
       expect(overtimeRuleId).toBeTruthy()
+      await ensurePublishedShiftCandidateForTest(pool, {
+        userId,
+        workDate: '2026-09-10',
+        createdShiftIds,
+      })
       const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate: '2026-09-10', requestType: 'overtime', overtimeRuleId, minutes: 600 }) })
       expect(reqRes.status).toBe(201)
       const otId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
@@ -6835,6 +6909,10 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
       if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycles WHERE id = $1', [cycleId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       await pool.end().catch(() => undefined)
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
     }
@@ -6970,6 +7048,7 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     const holidayId = randomUUID()
     let overtimeRuleId: string | undefined
     try {
@@ -7014,6 +7093,11 @@ attendanceIntegrationDescribe(
       expect(saveSettingsRes.status).toBe(200)
 
       const createAndApprove = async (workDateInput: string, minutes: number) => {
+        await ensurePublishedShiftCandidateForTest(pool, {
+          userId,
+          workDate: workDateInput,
+          createdShiftIds,
+        })
         const createRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
           method: 'POST',
           headers,
@@ -7093,6 +7177,10 @@ attendanceIntegrationDescribe(
       }
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -7491,6 +7579,7 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
@@ -7510,6 +7599,7 @@ attendanceIntegrationDescribe(
       expect(overtimeRuleId).toBeTruthy()
       const setCompTime = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ compTimeFromOvertime: body }) })
       const approveOvertime = async (workDate: string, minutes: number) => {
+        await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
         const create = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, minutes }) })
         expect(create.status).toBe(201)
         const id = (create.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
@@ -7572,6 +7662,10 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
       if (createdRequestIds.length > 0) {
         await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
       }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass

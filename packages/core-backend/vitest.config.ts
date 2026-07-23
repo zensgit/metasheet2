@@ -453,6 +453,15 @@ export default defineConfig({
       // #4561 W1: database exclusion/concurrency and effective-date transition proof.
       // Kept out of the no-DB run and explicitly wired into plugin-tests.yml.
       'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
+      // #4556 W2: shared work-date resolver real-DB matrix (overlap precedence, overnight,
+      // multi-shift ambiguity, frozen recompute, overtime anchor, adapter parity).
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
+      // whole-file into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-work-date-resolver-w2.db.test.ts',
+      // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
+      // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
+      // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
+      'tests/integration/attendance-result-edit.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
