@@ -29,7 +29,7 @@
 
 ## 2. 正交 capability 矩阵（P1-1 修正后冻结）
 
-> **A1 修订（2026-07-23，GIP-D0 联动）**：本矩阵**降为 CertifiedSourceProfile 的认证 schema**——运行时只可选择被认证的具名 profile（`bridge.bounded_read.v1` 等），**不得**自由组合维度；组合空间只在 profile 认证时使用（坐标声明 + §8 电池按 profile 实例化为合规套件）。见 `gip-d0-general-integration-platform-design-lock-20260723.md` §3。
+> **A1 修订（2026-07-23，GIP-D0 联动）**：本矩阵**降为 CertifiedReadActionProfile 的认证 schema**（其中 `applyMode` 维度拆出，独立为 CertifiedApplyProfile——read-action 认证书只含 acquisition/consistency/continuation/completeness 四维）——运行时只可选择被认证的具名 action-profile（`bridge.bounded_read.v1` 等），**不得**自由组合维度；组合空间只在认证时使用（坐标声明 + §8 电池按 profile 实例化为合规套件）。见 `gip-d0-general-integration-platform-design-lock-20260723.md` §3。
 
 > 旧四类（BOUNDED_KEY_READ 等）混合了采集/一致性/续读/证明多维度（如 SNAPSHOT_KEYSET_READ 同时说分页与一致性、SEALED_EXPORT_MANIFEST 同时说传输与恢复）。**改为五个正交维度**，每维冻结枚举；组合合法性与恢复策略**由矩阵推导**，不另设自由表。
 
@@ -41,6 +41,8 @@ completenessProof:    SHORT_PAGE | DECLARED_TOTAL | SIGNED_MANIFEST
 applyMode:            SYNCHRONOUS_UOW | STAGED_GENERATION
 ```
 
+**A2 修正（owner P2）**：profile 认证书对一致性维声明**集合** `supportedConsistencyProofs: [] | [...]`——三值闭集**不扩**；**空集 = 诚实声明"无快照证明"**（不是第四种证明，"有界"不得伪装成一致性）。空集可否被接受由**场景角色政策**决定：stock-prep 的 bom_source 可按场景策略接受（基础模式单页读），material-reconciliation 的角色**必须拒绝**。
+
 **恢复策略（推导，非另配）**：
 - `CONNECTION_BOUND` 一致性（快照随连接死）断线 ⇒ **整轮重读**（续页=跨快照缝合，禁止）；
 - `IMMUTABLE_SNAPSHOT_TOKEN` + `DURABLE_TOKEN` ⇒ **允许续页**（durable snapshot token 是**冻结的一致性机制**，非未来扩展位——temporal/AS OF、库快照、导出冻结件皆属之）；
@@ -51,7 +53,7 @@ applyMode:            SYNCHRONOUS_UOW | STAGED_GENERATION
 
 | 组合 | 模式 |
 |---|---|
-| `BOUNDED_READ × (源天然有界) × SINGLE_REQUEST × SHORT_PAGE × SYNCHRONOUS_UOW` | 基础（即 #4437 出口②形态） |
+| `BOUNDED_READ × supportedConsistencyProofs:[]（无快照证明，场景政策定可否接受） × SINGLE_REQUEST × SHORT_PAGE × SYNCHRONOUS_UOW` | 基础（即 #4437 出口②形态） |
 | `PAGED_READ × SOURCE_SNAPSHOT_TXN × CONNECTION_BOUND × SHORT_PAGE/DECLARED_TOTAL × STAGED_GENERATION` | 高级（live 快照读，断线整轮） |
 | `PAGED_READ × IMMUTABLE_SNAPSHOT_TOKEN × DURABLE_TOKEN × SHORT_PAGE/DECLARED_TOTAL × STAGED_GENERATION` | 高级（可续页） |
 | `SEALED_EXPORT × IMMUTABLE_SNAPSHOT_TOKEN(导出即冻结) × DURABLE_TOKEN(chunk 续传) × SIGNED_MANIFEST × STAGED_GENERATION` | 高级（导出） |

@@ -24,31 +24,41 @@ crossRoleTemporalPolicy:
 ## 2. 选项 A（默认）：维持 `DISCLOSE_ONLY`
 
 - **语义零变更**：charter §2.2 现行行为在 GIP 词表下的命名即 `DISCLOSE_ONLY`；
-- D1 已实现的「run 记录双侧读窗口证据」即本政策的证据要求；
+- **实现现状订正（owner P2）**：D1 是 **schema-only、latent**（"no routes, no sheet provisioning, no env reads, no runtime, no migrations"——D1 文档 :7-8）——**D1 模板已含 per-role 时间字段，但尚无 runtime 生产证据**；「run 记录双侧读窗口证据」是 charter 对未来 runtime（D3a+）的要求，届时落地；
 - 伪差异的解释责任在消费侧（对账报告披露双侧读窗口，用户据此判读）；
-- 实施成本：**0**。
+- 实施成本：**0**（本政策不改变 D1 的 schema-only 边界）。
 
-## 3. 选项 B：升级 `COMMON_EFFECTIVE_CUT`
+## 3. 选项 B：升级 `COMMON_EFFECTIVE_CUT`（证明合同——owner P1 硬化后）
 
-**语义**：两侧各自证明其快照**受同一业务截止点约束**（例：双方都只取"生效日期 ≤ T"且该谓词在各自快照内可证），从而把"读窗口不同时"从误差项中剔除——**这仍不是全局事务**，只是把比较基准从"采集时刻"换成"业务截止点"。
+**语义**：两侧各自证明其快照**受同一业务截止点 T 约束**——**这仍不是全局事务**，只是把比较基准从"采集时刻"换成"业务截止点"。
 
-**升级需新定义（实现前置）**：
-1. 每侧的**业务截止键**（源侧必须存在可信的生效/变更时间列，且列语义经 owner 批准入 binding）；
-2. **证明形状**：截止谓词在该侧 `sourceConsistencyProof` 快照内可证（谓词下推 + 快照内验证）；
-3. 失败词表新增（如 `EFFECTIVE_CUT_UNPROVABLE`，fail-closed）；
-4. 两侧能力前置：任一侧无可信业务时间列 ⇒ 该场景实例只能 `DISCLOSE_ONLY`（preflight 判定，不静默）。
+**关键否定（P1）**：对普通 current-state 表做 `effective/changed time <= T` 过滤**不能**重建 AS OF T——某行在 T 后被更新，旧值已丢失；过滤只会**漏掉该行**，不会还原 T 时刻状态。谓词下推 ≠ 时点重建。
 
-**成本/风险**：需改 D1 读取面与证据面（新守卫 + 词表 + 测试电池）；依赖源侧业务时间列的**可信度**（新的信任面，需逐源评估）。
+**B 至少只能接受以下四种机制之一（每侧独立满足）**：
+1. 数据库**原生 temporal / AS OF T**；
+2. **绑定 T 的不可变 snapshot/export**；
+3. **完整有效期历史模型**：`[validFrom, validTo)` + 删除语义 + 覆盖证明；
+4. 可从**不可变事件日志**确定性折叠到 T。
+
+**T 的产生纪律**：T 必须由**场景冻结的服务器策略**产生并写入 **run pin**——不得由单次请求自由 steering。
+
+**失败语义**：任一角色不满足四机制 ⇒ **拒绝 B 的 binding 激活**（fail-closed，如 `EFFECTIVE_CUT_UNPROVABLE`）；改用 A 必须**显式创建并审批新 binding**——**不得自动回退**。
+
+**实施前置（owner P2）**：B 需要 **D1 合同 amendment + D3a runtime/证据实现**（D1 当前 schema-only，无读取 runtime 可改）；依赖源侧时点机制的可信度（新的信任面，逐源评估）。
 
 ## 4. 可叠加项：`MAX_CAPTURE_GAP`（与 A/B 正交）
 
-作为 **freshness SLO** 附加：全部源角色读窗口须落在 T 内，超窗 fail-closed（专用码）。evidence 显式标注其为 **SLO 而非一致性证明**。适用动机：控制披露窗口的宽度上限，改善对账报告可判读性。T 由场景冻结，binding 不可放宽。
+作为 **freshness SLO** 附加：全部源角色读窗口须落在 T_gap 内，超窗 fail-closed（专用码）。evidence 显式标注其为 **SLO 而非一致性证明**。T_gap 由场景冻结，binding 不可放宽。
 
-## 5. 裁决请求（owner 单选 + 可选叠加）
+## 5. 裁决记录
 
-| 项 | 选择 |
-|---|---|
-| 主政策 | ☐ A：维持 `DISCLOSE_ONLY`（默认，零变更）　☐ B：升级 `COMMON_EFFECTIVE_CUT`（按 §3 前置排期） |
-| 叠加 | ☐ 增加 `MAX_CAPTURE_GAP` SLO（T=场景冻结值）　☐ 不加 |
+**owner 复审（2026-07-23）裁定**：
+- **主政策：A（维持 `DISCLOSE_ONLY`）**；
+- **暂不叠加 `MAX_CAPTURE_GAP`**；
+- **B 保留为待补证明合同的未来选项**（前置 = §3 四机制 + D1 amendment + D3a runtime）。
 
-裁决落定后：A ⇒ charter 加一行命名映射注记即毕；B ⇒ 开独立实现票（不并入 W2/W3 任何在飞刀）。
+落地：charter 加一行命名映射注记（`DISCLOSE_ONLY` = §2.2 现行语义）即毕；本修订随 GIP-D0 干净分支交付，正式 ratify 时一并落定。
+
+## 6. ratify 解锁范围订正（owner P2，联动 GIP-D0）
+
+GIP-D0 ratify **仅解锁**：profile schema、合规 harness、只读 qualification spike——**每个具体 profile 仍独立过自己的门**，v1 清单中的五个 profile 不因 ratify 一次性解锁。
