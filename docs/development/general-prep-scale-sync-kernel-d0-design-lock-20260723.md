@@ -1,6 +1,6 @@
 # 通用备料 D0 — 规模化数据同步内核设计锁（三产品模式 × 正交 capability 矩阵）
 
-**日期**：2026-07-23　**状态**：**PROPOSED（草案，未 ratify）**——owner 裁定"可进入 D0 起草，还不能 ratify"；本稿吸收其两项 P1 修正（capability 正交化、large-bom-jobs 仅可复用合同形状）与全部细则修正。
+**日期**：2026-07-23　**状态**：**PROPOSED（仍未独立 ratify——保持此态）**。GIP-D0 已 RATIFIED 并将本矩阵降为认证 schema（A1 注记），但**本锁自身的 ratify 独立待决**：generation/staging/diff/apply 等内核机制的实现门未开。本稿吸收 owner 两项 P1 修正（capability 正交化、large-bom-jobs 仅可复用合同形状）与全部细则修正。
 **交付面**：doc-only 分支（owner P1：文档审阅不与运行时代码混面）。**与 #4437 关系**：不互为 blocker——**#4437 继续使用现有 approved-config/adapter 路径**完成有界机制验收（其行为是基础组合的**候选 grounding**，不要求实体机识别任何 profile/模式 ID），不等待本 D0。**纪律**：ratify 前零实现（仅允许只读 feasibility spike）、零 arm、不动现有守卫一字。
 
 ---
