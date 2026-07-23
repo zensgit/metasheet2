@@ -30,8 +30,10 @@ const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'PROBE_SQL_NOT_READ_ONLY',
   'PROBE_QUERY_FAILED',
   'ORDERING_KEY_DUPLICATE_FOUND',
+  'ORDERING_KEY_NULL_FOUND',
   'QUALIFICATION_NOT_OBJECT',
   'QUALIFICATION_DIGEST_MISMATCH',
+  'QUALIFICATION_ENVELOPE_MISMATCH',
   'QUALIFICATION_EXPIRED',
   'QUALIFICATION_STATUS_INVALID',
 ])
@@ -77,8 +79,13 @@ function requiredString(value, field) {
 const ISO_UTC_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
 function requiredUtcInstant(value, field) {
   const text = requiredString(value, field)
-  if (!ISO_UTC_SECONDS.test(text) || Number.isNaN(Date.parse(text))) {
-    fail('QUALIFICATION_INPUT_INVALID', 'timestamps must be strict UTC ISO-8601 (YYYY-MM-DDThh:mm:ssZ)', { field })
+  const parsed = Date.parse(text)
+  // Format pin AND calendar round-trip: Date.parse NORMALIZES impossible calendar
+  // dates (2026-02-30 → 2026-03-02, review P2) — only a value that reproduces itself
+  // byte-for-byte through toISOString is a real instant.
+  if (!ISO_UTC_SECONDS.test(text) || Number.isNaN(parsed)
+    || new Date(parsed).toISOString() !== text.replace(/Z$/, '.000Z')) {
+    fail('QUALIFICATION_INPUT_INVALID', 'timestamps must be strict, calendar-valid UTC ISO-8601 (YYYY-MM-DDThh:mm:ssZ)', { field })
   }
   return text
 }
@@ -92,6 +99,11 @@ function stableStringify(value) {
     // ss([]) is a digest collision). Evidence is server-built; undefined anywhere is
     // a programming error — fail loud, never collide (review NIT).
     fail('QUALIFICATION_INPUT_INVALID', 'digest material must not contain undefined', {})
+  }
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    // JSON.stringify(NaN/Infinity) === 'null' — a digest collision with null
+    // (review P2). Evidence is server-built; non-finite anywhere is a bug.
+    fail('QUALIFICATION_INPUT_INVALID', 'digest material must not contain non-finite numbers', {})
   }
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableStringify(entry)).join(',')}]`
@@ -134,13 +146,37 @@ function quoteIdentifier(name) {
 // Ordering-key uniqueness NEGATIVE probe (GIP-D0 §6.2 / scale-D0 §6.2): a view must
 // PROVE a stable total order — the duplicate-key probe must return ZERO rows within
 // the SAME snapshot the read would use. SELECT-only by construction.
-function buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns }) {
-  const object = quoteIdentifier(objectName)
+function normalizeKeyColumns(keyColumns) {
   if (!Array.isArray(keyColumns) || keyColumns.length === 0) {
     fail('QUALIFICATION_INPUT_INVALID', 'keyColumns must be a non-empty array', { field: 'keyColumns' })
   }
-  const cols = keyColumns.map((column) => quoteIdentifier(column)).join(', ')
+  const seen = new Set()
+  for (const column of keyColumns) {
+    const name = requiredString(column, 'keyColumns')
+    if (seen.has(name)) {
+      // A duplicated column declaration cannot strengthen an order and hides a
+      // mis-configured composite key (review P2) — reject, never dedupe silently.
+      fail('QUALIFICATION_INPUT_INVALID', 'keyColumns must not contain duplicate columns', { field: 'keyColumns' })
+    }
+    seen.add(name)
+  }
+  return [...seen]
+}
+
+function buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns }) {
+  const object = quoteIdentifier(objectName)
+  const cols = normalizeKeyColumns(keyColumns).map((column) => quoteIdentifier(column)).join(', ')
   return `SELECT ${cols}, COUNT(*) AS duplicate_count FROM ${object} GROUP BY ${cols} HAVING COUNT(*) > 1 LIMIT 1`
+}
+
+// A NULL in any ordering-key component breaks total order (NULL is incomparable; no
+// null-order/cursor contract is ratified) — any such row fails qualification closed.
+function buildOrderingKeyNullProbeSql({ objectName, keyColumns }) {
+  const object = quoteIdentifier(objectName)
+  const predicate = normalizeKeyColumns(keyColumns)
+    .map((column) => `${quoteIdentifier(column)} IS NULL`)
+    .join(' OR ')
+  return `SELECT 1 AS null_key_row FROM ${object} WHERE ${predicate} LIMIT 1`
 }
 
 // The probe refuses to execute anything but a single SELECT — read-only is a
@@ -163,16 +199,11 @@ function assertReadOnlySql(sql) {
 // query fn; the spike never opens/joins a transaction). Produces a CANDIDATE
 // qualification whose digest binds every input. Values-free evidence: counts and
 // booleans only — never key values, never row content.
-async function probeBindingQualification(input) {
-  if (!isPlainObject(input) || typeof input.query !== 'function') {
-    fail('QUALIFICATION_INPUT_INVALID', 'probe needs a query function and a plain-object input', {})
-  }
-  const objectName = requiredString(input.objectKey, 'objectKey')
-  const keyColumns = input.keyColumns
-  const sql = assertReadOnlySql(buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns }))
+async function runReadOnlyProbe(query, sql) {
+  const text = assertReadOnlySql(sql)
   let rows
   try {
-    const result = await input.query(sql)
+    const result = await query(text)
     rows = Array.isArray(result && result.rows) ? result.rows : null
   } catch (_error) {
     fail('PROBE_QUERY_FAILED', 'qualification probe query failed', { errorType: 'source_runtime' })
@@ -180,33 +211,68 @@ async function probeBindingQualification(input) {
   if (rows === null) {
     fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable row plane', {})
   }
-  if (rows.length > 0) {
+  return rows
+}
+
+// Lifecycle fields are AUTHENTICATED (review P2): the ratified 6-input tuple stays
+// the qualificationDigest; status/expiresAt are bound by a second envelope digest —
+// copying a qualification with a later expiresAt breaks the envelope, fail-closed.
+function computeEnvelopeDigest({ qualificationDigest, status, expiresAt }) {
+  return crypto.createHash('sha256').update(stableStringify({
+    qualificationDigest: requiredString(qualificationDigest, 'qualificationDigest'),
+    status: requiredString(status, 'status'),
+    expiresAt: expiresAt === undefined ? null : requiredString(expiresAt, 'expiresAt'),
+  })).digest('hex')
+}
+
+async function probeBindingQualification(input) {
+  if (!isPlainObject(input) || typeof input.query !== 'function') {
+    fail('QUALIFICATION_INPUT_INVALID', 'probe needs a query function and a plain-object input', {})
+  }
+  const objectName = requiredString(input.objectKey, 'objectKey')
+  const keyColumns = normalizeKeyColumns(input.keyColumns)
+  const duplicateRows = await runReadOnlyProbe(
+    input.query,
+    buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns }),
+  )
+  if (duplicateRows.length > 0) {
     // Fail closed — and do NOT echo the duplicated key values (values-free).
     fail('ORDERING_KEY_DUPLICATE_FOUND', 'ordering key is not a stable total order on this object', {
-      duplicateGroupsSampled: rows.length,
+      duplicateGroupsSampled: duplicateRows.length,
     })
   }
+  const nullRows = await runReadOnlyProbe(
+    input.query,
+    buildOrderingKeyNullProbeSql({ objectName, keyColumns }),
+  )
+  if (nullRows.length > 0) {
+    // NULL key components are incomparable — no total order (review P2). Values-free.
+    fail('ORDERING_KEY_NULL_FOUND', 'ordering key has NULL components on this object', {})
+  }
   const evidence = Object.freeze({
-    probeKind: 'ordering_key_uniqueness_negative',
+    probeKind: 'ordering_key_total_order_negative',
     checkedKeyColumnCount: keyColumns.length,
     duplicateGroupsFound: 0,
+    nullKeyRowsFound: 0,
     probedAt: requiredUtcInstant(input.probedAt, 'probedAt'),
   })
-  const digestInput = {
+  const qualificationDigest = computeQualificationDigest({
     actionProfileVersion: input.actionProfileVersion,
     systemContentKey: input.systemContentKey,
     configContentKey: input.configContentKey,
     objectKey: objectName,
     canonicalObjectVersion: input.canonicalObjectVersion,
     evidence,
-  }
+  })
+  const expiresAt = input.expiresAt !== undefined
+    ? requiredUtcInstant(input.expiresAt, 'expiresAt')
+    : undefined
   return Object.freeze({
     status: 'candidate',
-    qualificationDigest: computeQualificationDigest(digestInput),
+    qualificationDigest,
+    envelopeDigest: computeEnvelopeDigest({ qualificationDigest, status: 'candidate', expiresAt }),
     evidence,
-    ...(input.expiresAt !== undefined
-      ? { expiresAt: requiredUtcInstant(input.expiresAt, 'expiresAt') }
-      : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
   })
 }
 
@@ -221,6 +287,16 @@ function verifyBindingQualification({ qualification, expectedInputs, now }) {
   }
   if (!QUALIFICATION_STATUSES.includes(qualification.status) || qualification.status !== 'candidate') {
     fail('QUALIFICATION_STATUS_INVALID', 'only a candidate qualification is verifiable', {})
+  }
+  // AUTHENTICATE lifecycle before trusting it (review P2): status/expiresAt are
+  // envelope-bound — a copy with a postponed expiresAt fails here, not fail-open.
+  const expectedEnvelope = computeEnvelopeDigest({
+    qualificationDigest: qualification.qualificationDigest,
+    status: qualification.status,
+    expiresAt: qualification.expiresAt,
+  })
+  if (qualification.envelopeDigest !== expectedEnvelope) {
+    fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
   }
   if (qualification.expiresAt !== undefined) {
     const nowInstant = Date.parse(requiredUtcInstant(now, 'now'))
@@ -249,7 +325,9 @@ module.exports = {
   QUALIFICATION_STATUSES,
   GipQualificationError,
   computeQualificationDigest,
+  computeEnvelopeDigest,
   buildOrderingKeyDuplicateProbeSql,
+  buildOrderingKeyNullProbeSql,
   probeBindingQualification,
   verifyBindingQualification,
   __internals: {

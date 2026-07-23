@@ -28,6 +28,28 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+// The EXACT battery roster — summarize emits ONLY these ids (review P2: a crafted
+// report must not smuggle caller content through the values-free projection).
+const BATTERY_CHECK_IDS = Object.freeze([
+  'C1_schema_valid',
+  'C2_unknown_acquisition_rejected',
+  'C2b_duplicate_set_entry_rejected',
+  'C3_empty_completeness_rejected',
+  'C4_applymode_smuggle_rejected',
+  'C5_recovery_declaration_rejected',
+  'C6_sealed_export_without_manifest_rejected',
+  'C7_change_feed_without_pin_rejected',
+  'C8_durable_token_without_immutable_rejected',
+  'C9_bounded_read_lifetime_rejected',
+  'C10_recovery_derived_stable',
+  'C11a_required_empty_proofclasses_rejected',
+  'C11b_notrequired_nonempty_rejected',
+  'C11c_successful_empty_used_rejected',
+  'C11d_unsupported_used_rejected',
+  'C11e_undeclared_combination_rejected',
+])
+const BATTERY_CHECK_ID_SET = new Set(BATTERY_CHECK_IDS)
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -210,21 +232,21 @@ function runReadActionProfileComplianceBattery(candidate) {
   //         check be deleted silently). Build an UNDECLARED combination from within
   //         the supported set when possible.
   {
+    // FULL non-empty powerset of the supported set (review P2: pair-only search let
+    // "all pairs + triple declared, no singletons" evade the negative control).
     const supported = normalized.certificate.supportedCompletenessProofs
     const declaredKeys = new Set(
       normalized.certificate.completenessCombinationRules.map((combo) => [...combo].sort().join('+')),
     )
     let undeclared = null
-    if (supported.length >= 2) {
-      for (let i = 0; i < supported.length && !undeclared; i += 1) {
-        for (let j = i + 1; j < supported.length && !undeclared; j += 1) {
-          const pair = [supported[i], supported[j]]
-          if (!declaredKeys.has([...pair].sort().join('+'))) undeclared = pair
-        }
-      }
+    for (let mask = 1; mask < (1 << supported.length) && !undeclared; mask += 1) {
+      const subset = supported.filter((_, index) => (mask >> index) & 1)
+      if (!declaredKeys.has([...subset].sort().join('+'))) undeclared = subset
     }
     checks.push(undeclared === null
-      ? { checkId: 'C11e_undeclared_combination_rejected', ok: true, observed: 'not_applicable_no_undeclared_pair' }
+      // Every non-empty subset is declared: state that EXPLICITLY — no negative
+      // probe ran, and none is possible for this candidate.
+      ? { checkId: 'C11e_undeclared_combination_rejected', ok: true, observed: 'not_applicable_all_combinations_declared' }
       : expectRejection('C11e_undeclared_combination_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
         () => validateCompletenessEvidence(normalized, {
           runOutcome: 'successful',
@@ -241,6 +263,13 @@ function summarizeBatteryForEvidence(report) {
   if (!isPlainObject(report) || !Array.isArray(report.checks)) {
     return { passed: false, checkCount: 0, failedCheckIds: ['REPORT_INVALID'] }
   }
+  // Emit ONLY roster ids (review P2): any entry outside the frozen roster makes the
+  // whole report untrusted — coarse REPORT_INVALID, never an echo of caller content.
+  for (const entry of report.checks) {
+    if (!isPlainObject(entry) || !BATTERY_CHECK_ID_SET.has(entry.checkId)) {
+      return { passed: false, checkCount: 0, failedCheckIds: ['REPORT_INVALID'] }
+    }
+  }
   return {
     passed: report.passed === true,
     checkCount: report.checks.length,
@@ -249,6 +278,7 @@ function summarizeBatteryForEvidence(report) {
 }
 
 module.exports = {
+  BATTERY_CHECK_IDS,
   runReadActionProfileComplianceBattery,
   summarizeBatteryForEvidence,
   __internals: { expectRejection },

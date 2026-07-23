@@ -8,6 +8,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 
 const {
+  BATTERY_CHECK_IDS,
   runReadActionProfileComplianceBattery,
   summarizeBatteryForEvidence,
   __internals,
@@ -107,9 +108,62 @@ function batteryCoversAllFamilies() {
   }
 }
 
-// 5. summarize is fail-closed on garbage.
+// 5. summarize is fail-closed on garbage AND on out-of-roster check ids (review P2:
+//    the values-free projection must never echo caller-controlled ids).
 function summarizeFailClosed() {
   assert.deepEqual(summarizeBatteryForEvidence(null), { passed: false, checkCount: 0, failedCheckIds: ['REPORT_INVALID'] })
+  const MARKER = 'caller_smuggled_check_id_marker'
+  const crafted = { passed: false, checks: [{ checkId: MARKER, ok: false, observed: 'x' }] }
+  const summary = summarizeBatteryForEvidence(crafted)
+  assert.deepEqual(summary, { passed: false, checkCount: 0, failedCheckIds: ['REPORT_INVALID'] })
+  assert.ok(!JSON.stringify(summary).includes(MARKER))
+  // the roster itself is exact-pinned and exported
+  assert.deepEqual([...BATTERY_CHECK_IDS], [
+    'C1_schema_valid',
+    'C2_unknown_acquisition_rejected',
+    'C2b_duplicate_set_entry_rejected',
+    'C3_empty_completeness_rejected',
+    'C4_applymode_smuggle_rejected',
+    'C5_recovery_declaration_rejected',
+    'C6_sealed_export_without_manifest_rejected',
+    'C7_change_feed_without_pin_rejected',
+    'C8_durable_token_without_immutable_rejected',
+    'C9_bounded_read_lifetime_rejected',
+    'C10_recovery_derived_stable',
+    'C11a_required_empty_proofclasses_rejected',
+    'C11b_notrequired_nonempty_rejected',
+    'C11c_successful_empty_used_rejected',
+    'C11d_unsupported_used_rejected',
+    'C11e_undeclared_combination_rejected',
+  ])
+}
+
+// 6. C11e full-powerset (review P2): "all pairs + triple, NO singletons" must still
+//    exercise a real negative probe (an undeclared SINGLETON exists); only a candidate
+//    declaring EVERY non-empty subset gets the explicit not-applicable marker.
+function c11ePowerset() {
+  const allThree = ['SHORT_PAGE', 'DECLARED_TOTAL', 'SIGNED_MANIFEST']
+  const pairs = [['SHORT_PAGE', 'DECLARED_TOTAL'], ['SHORT_PAGE', 'SIGNED_MANIFEST'], ['DECLARED_TOTAL', 'SIGNED_MANIFEST']]
+  const evasion = fixtureProfile({
+    certificate: {
+      supportedCompletenessProofs: allThree,
+      completenessCombinationRules: [...pairs, allThree],
+    },
+  })
+  const evasionReport = runReadActionProfileComplianceBattery(evasion)
+  const evasionC11e = evasionReport.checks.find((entry) => entry.checkId === 'C11e_undeclared_combination_rejected')
+  assert.equal(evasionC11e.observed, 'COMPLETENESS_EVIDENCE_INVALID', 'undeclared singleton must be probed')
+  assert.equal(evasionReport.passed, true)
+
+  const exhaustive = fixtureProfile({
+    certificate: {
+      supportedCompletenessProofs: allThree,
+      completenessCombinationRules: [...allThree.map((proof) => [proof]), ...pairs, allThree],
+    },
+  })
+  const exhaustiveReport = runReadActionProfileComplianceBattery(exhaustive)
+  const exhaustiveC11e = exhaustiveReport.checks.find((entry) => entry.checkId === 'C11e_undeclared_combination_rejected')
+  assert.equal(exhaustiveC11e.observed, 'not_applicable_all_combinations_declared')
 }
 
 function main() {
@@ -119,6 +173,7 @@ function main() {
   reportIsValuesFree()
   batteryCoversAllFamilies()
   summarizeFailClosed()
+  c11ePowerset()
   console.log('gip-profile-compliance-harness.test.cjs OK')
 }
 

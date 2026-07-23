@@ -11,7 +11,9 @@ const {
   QUALIFICATION_ERROR_REASONS,
   GipQualificationError,
   computeQualificationDigest,
+  computeEnvelopeDigest,
   buildOrderingKeyDuplicateProbeSql,
+  buildOrderingKeyNullProbeSql,
   probeBindingQualification,
   verifyBindingQualification,
   __internals,
@@ -56,8 +58,10 @@ function frozenVocabulary() {
     'PROBE_SQL_NOT_READ_ONLY',
     'PROBE_QUERY_FAILED',
     'ORDERING_KEY_DUPLICATE_FOUND',
+    'ORDERING_KEY_NULL_FOUND',
     'QUALIFICATION_NOT_OBJECT',
     'QUALIFICATION_DIGEST_MISMATCH',
+    'QUALIFICATION_ENVELOPE_MISMATCH',
     'QUALIFICATION_EXPIRED',
     'QUALIFICATION_STATUS_INVALID',
   ])
@@ -106,6 +110,12 @@ function probeSqlReadOnly() {
   rejectsWith(() => __internals.assertReadOnlySql('SELECT * FROM x FOR UPDATE'), 'PROBE_SQL_NOT_READ_ONLY')
   // identifier hygiene: embedded quotes doubled, never raw
   assert.equal(__internals.quoteIdentifier('we"ird'), '"we""ird"')
+  // NULL probe shape (total order needs null-free key components)
+  const nullSql = buildOrderingKeyNullProbeSql({ objectName: 'fixture_view', keyColumns: ['item_no', 'rev'] })
+  assert.match(nullSql, /^SELECT 1 AS null_key_row FROM "fixture_view" WHERE "item_no" IS NULL OR "rev" IS NULL LIMIT 1$/)
+  assert.equal(__internals.assertReadOnlySql(nullSql), nullSql)
+  // duplicate keyColumns declaration is rejected, never silently deduped (review P2)
+  rejectsWith(() => buildOrderingKeyDuplicateProbeSql({ objectName: 'v', keyColumns: ['k', 'k'] }), 'QUALIFICATION_INPUT_INVALID')
 }
 
 // ── 4. Probe: uniqueness pass / duplicate fail-closed (values-free) ──
@@ -120,10 +130,15 @@ async function probeBehaviour() {
     expiresAt: '2026-07-24T00:00:00Z',
   })
   assert.equal(qualification.status, 'candidate')
+  assert.equal(qualification.evidence.probeKind, 'ordering_key_total_order_negative')
   assert.equal(qualification.evidence.duplicateGroupsFound, 0)
+  assert.equal(qualification.evidence.nullKeyRowsFound, 0)
   assert.equal(qualification.evidence.checkedKeyColumnCount, 2)
-  assert.equal(seenSql.length, 1)
-  assert.match(seenSql[0], /^SELECT /)
+  assert.ok(typeof qualification.envelopeDigest === 'string' && qualification.envelopeDigest.length === 64)
+  // TWO read-only probes: duplicate-group + null-key (total order, review P2)
+  assert.equal(seenSql.length, 2)
+  assert.match(seenSql[0], /HAVING COUNT\(\*\) > 1/)
+  assert.match(seenSql[1], /IS NULL/)
 
   // duplicates ⇒ fail closed, and the thrown error must NOT echo key values
   const SECRET = 'secret_item_A17'
@@ -133,6 +148,13 @@ async function probeBehaviour() {
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   assert.ok(!JSON.stringify({ m: caught.message, d: caught.details }).includes(SECRET),
     'duplicate-key failure must stay values-free')
+
+  // NULL key components ⇒ fail closed (second probe)
+  let call = 0
+  const nullQuery = async () => { call += 1; return call === 1 ? { rows: [] } : { rows: [{ null_key_row: 1 }] } }
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'ORDERING_KEY_NULL_FOUND')
 
   await rejectsWithAsync(() => probeBindingQualification({
     ...BASE_INPUTS, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
@@ -180,9 +202,11 @@ async function verifyBehaviour() {
   rejectsWith(() => verifyBindingQualification({
     qualification, expectedInputs: { ...BASE_INPUTS }, now: '07/25/2026',
   }), 'QUALIFICATION_INPUT_INVALID')
+  // a COPY with malformed expiresAt is a lifecycle tamper — the envelope catches it
+  // BEFORE format validation (authenticate-then-parse, review P2 ordering)
   rejectsWith(() => verifyBindingQualification({
     qualification: { ...qualification, expiresAt: 'tomorrow' }, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-23T12:00:00Z',
-  }), 'QUALIFICATION_INPUT_INVALID')
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
   // probe-side pin: malformed probedAt/expiresAt fail closed at generation time
   await rejectsWithAsync(() => probeBindingQualification({
     ...BASE_INPUTS, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: 'not-a-time',
@@ -190,6 +214,20 @@ async function verifyBehaviour() {
 
   // digest material must not contain undefined (collision fail-closed, review NIT)
   rejectsWith(() => computeQualificationDigest({ ...BASE_INPUTS, evidence: { a: undefined } }), 'QUALIFICATION_INPUT_INVALID')
+  // …nor non-finite numbers (NaN collides with null under JSON semantics, review P2)
+  rejectsWith(() => computeQualificationDigest({ ...BASE_INPUTS, evidence: { a: NaN } }), 'QUALIFICATION_INPUT_INVALID')
+
+  // LIFECYCLE AUTHENTICATION (review P2): copying the qualification with a LATER
+  // expiresAt must break the envelope — the postpone attack fails closed.
+  const postponed = { ...qualification, expiresAt: '2027-01-01T00:00:00Z' }
+  rejectsWith(() => verifyBindingQualification({
+    qualification: postponed, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-25T00:00:00Z',
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
+
+  // impossible calendar dates are rejected even though Date.parse normalizes them
+  rejectsWith(() => verifyBindingQualification({
+    qualification, expectedInputs: { ...BASE_INPUTS }, now: '2026-02-30T00:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
 
   // PURE-LOCAL invariant: verify takes no query fn — source-level pin
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'gip-binding-qualification-spike.cjs'), 'utf8')
@@ -201,8 +239,13 @@ async function verifyBehaviour() {
   // assertReadOnlySql. Source-level by necessity (the builder is safe by
   // construction, so no input can behaviorally expose an unwired guard) — the pin
   // still REDs the "remove the guard call" mutation.
-  const probeBody = src.slice(src.indexOf('async function probeBindingQualification'), src.indexOf('function verifyBindingQualification'))
-  assert.ok(/assertReadOnlySql\(/.test(probeBody), 'probe must wire assertReadOnlySql on its execution path')
+  const helperStart = src.indexOf('async function runReadOnlyProbe')
+  const probeStart = src.indexOf('async function probeBindingQualification')
+  const helperBody = src.slice(helperStart, probeStart)
+  const probeBody = src.slice(probeStart, src.indexOf('function verifyBindingQualification'))
+  assert.ok(/assertReadOnlySql\(/.test(helperBody), 'runReadOnlyProbe must wire assertReadOnlySql')
+  assert.ok(/runReadOnlyProbe\(/.test(probeBody), 'probe must route every query through runReadOnlyProbe')
+  assert.ok(!/input\.query\(/.test(probeBody), 'probe must never call input.query directly (guard bypass)')
 }
 
 async function main() {

@@ -184,7 +184,37 @@ function crossDimensionLegality() {
   const shaped = normalizeCertifiedReadActionProfile(fixtureProfile({
     certificate: { manifestShape: { keyId: 'shape' }, tokenShape: { kind: 'opaque' }, cursorShape: { kind: 'offset' }, failureVocabulary: ['X_FAILED'] },
   }))
-  assert.deepEqual(shaped.certificate.failureVocabulary, ['X_FAILED'])
+  assert.deepEqual([...shaped.certificate.failureVocabulary], ['X_FAILED'])
+
+  // DEEP immutability (review P2): opaque fields are owned frozen CLONES — caller
+  // mutation after normalization must not change the certified result, and direct
+  // mutation of the certified result must throw (strict mode + deep freeze).
+  const shapeInput = { keyId: 'k1', nested: { rotation: ['a'] } }
+  const cloned = normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { manifestShape: shapeInput } }))
+  shapeInput.nested.rotation.push('b')
+  shapeInput.keyId = 'k2'
+  assert.equal(cloned.certificate.manifestShape.keyId, 'k1', 'caller mutation must not reach the certificate')
+  assert.deepEqual([...cloned.certificate.manifestShape.nested.rotation], ['a'])
+  assert.throws(() => { cloned.certificate.manifestShape.nested.rotation.push('x') }, TypeError)
+  assert.throws(() => { cloned.certificate.manifestShape.keyId = 'x' }, TypeError)
+
+  // strict JSON domain: NaN / functions inside opaque fields fail closed
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { manifestShape: { bad: NaN } } })), 'CERTIFICATE_UNKNOWN_FIELD')
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { tokenShape: { fn: () => 1 } } })), 'CERTIFICATE_UNKNOWN_FIELD')
+
+  // strict TOP-LEVEL shape: unknown top-level input fields fail closed
+  rejectsWith(() => normalizeCertifiedReadActionProfile({ ...fixtureProfile(), smuggledTop: 1 }), 'PROFILE_NOT_OBJECT')
+
+  // CANONICAL set order: equivalent sets normalize identically (vocabulary order)
+  const reordered = normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: { supportedCompletenessProofs: ['DECLARED_TOTAL', 'SHORT_PAGE'] },
+  }))
+  assert.deepEqual([...reordered.certificate.supportedCompletenessProofs], ['SHORT_PAGE', 'DECLARED_TOTAL'])
+
+  // duplicate combination declaration fails closed
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: { completenessCombinationRules: [['SHORT_PAGE'], ['SHORT_PAGE']] },
+  })), 'COMPLETENESS_COMBINATION_INVALID')
 }
 
 // ── 5. Recovery derivation matrix (derived, never declared) ──

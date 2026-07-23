@@ -138,6 +138,32 @@ function nonBlankString(value) {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
 }
 
+// Strict JSON domain for opaque certificate fields (review P2): only null, finite
+// numbers, booleans, strings, plain arrays/objects — no undefined, no functions, no
+// NaN/Infinity, no exotic prototypes. Returns an owned deep-frozen CLONE so a caller
+// mutating its input after normalization can never change the certified result.
+function deepCloneFrozenJson(value, field) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      fail('CERTIFICATE_UNKNOWN_FIELD', 'certificate fields must stay in the strict JSON domain', { field })
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((entry) => deepCloneFrozenJson(entry, field)))
+  }
+  if (isPlainObject(value)) {
+    const out = {}
+    for (const key of Object.keys(value)) {
+      out[key] = deepCloneFrozenJson(value[key], field)
+    }
+    return Object.freeze(out)
+  }
+  // undefined, functions, symbols, class instances, bigint …
+  fail('CERTIFICATE_UNKNOWN_FIELD', 'certificate fields must stay in the strict JSON domain', { field })
+}
+
 // Membership-checked, DUPLICATE-free set drawn from a closed vocabulary. Coarse
 // details: counts and field name only — never the offending values.
 function normalizeClosedSet(value, vocabulary, field, reason) {
@@ -154,7 +180,9 @@ function normalizeClosedSet(value, vocabulary, field, reason) {
     }
     seen.add(entry)
   }
-  return Object.freeze([...seen])
+  // CANONICAL order (review P2): equivalent sets normalize identically — members are
+  // re-ordered by their frozen vocabulary index, never by caller order.
+  return Object.freeze(vocabulary.filter((entry) => seen.has(entry)))
 }
 
 // profileId naming pattern: <connectorKind>.<action>.v<positiveInt> — e.g. the
@@ -194,6 +222,15 @@ const READ_CERTIFICATE_FIELDS = Object.freeze([
 function normalizeCertifiedReadActionProfile(input) {
   if (!isPlainObject(input)) {
     fail('PROFILE_NOT_OBJECT', 'certified read-action profile must be a plain object', {})
+  }
+  // Strict TOP-LEVEL shape too (review P2: unknown top-level fields were silently
+  // ignored — the profile is a closed shape end to end).
+  for (const key of Object.keys(input)) {
+    if (!['profileId', 'connectorKind', 'actionId', 'implementationVersion', 'certificate'].includes(key)) {
+      fail('PROFILE_NOT_OBJECT', 'profile carries an undeclared top-level field', {
+        fieldCount: Object.keys(input).length,
+      })
+    }
   }
   const profileId = nonBlankString(input.profileId)
   if (!profileId || !PROFILE_ID_PATTERN.test(profileId)) {
@@ -270,6 +307,7 @@ function normalizeCertifiedReadActionProfile(input) {
       || certificate.completenessCombinationRules.length === 0) {
       fail('COMPLETENESS_COMBINATION_INVALID', 'completenessCombinationRules must be a non-empty array of proof sets', {})
     }
+    const seenCombos = new Set()
     combinations = certificate.completenessCombinationRules.map((combo) => {
       const normalized = normalizeClosedSet(
         combo,
@@ -285,8 +323,15 @@ function normalizeCertifiedReadActionProfile(input) {
           fail('COMPLETENESS_COMBINATION_INVALID', 'a declared combination uses an unsupported proof', {})
         }
       }
+      const key = normalized.join('+')
+      if (seenCombos.has(key)) {
+        fail('COMPLETENESS_COMBINATION_INVALID', 'a proof combination is declared twice', {})
+      }
+      seenCombos.add(key)
       return normalized
     })
+    // canonical LIST order: by size, then joined canonical members.
+    combinations.sort((a, b) => (a.length - b.length) || (a.join('+') < b.join('+') ? -1 : 1))
   }
 
   // ── Frozen cross-dimension legality (only the rules the ratified lock states) ──
@@ -338,16 +383,18 @@ function normalizeCertifiedReadActionProfile(input) {
       continuationLifetime,
       supportedCompletenessProofs,
       completenessCombinationRules: Object.freeze(combinations),
-      ...(certificate.maxScale !== undefined ? { maxScale: certificate.maxScale } : {}),
+      ...(certificate.maxScale !== undefined
+        ? { maxScale: deepCloneFrozenJson(certificate.maxScale, 'maxScale') } : {}),
       ...(certificate.orderingKeyRequirement !== undefined
-        ? { orderingKeyRequirement: certificate.orderingKeyRequirement }
-        : {}),
-      ...(certificate.manifestShape !== undefined ? { manifestShape: certificate.manifestShape } : {}),
-      ...(certificate.tokenShape !== undefined ? { tokenShape: certificate.tokenShape } : {}),
-      ...(certificate.cursorShape !== undefined ? { cursorShape: certificate.cursorShape } : {}),
+        ? { orderingKeyRequirement: deepCloneFrozenJson(certificate.orderingKeyRequirement, 'orderingKeyRequirement') } : {}),
+      ...(certificate.manifestShape !== undefined
+        ? { manifestShape: deepCloneFrozenJson(certificate.manifestShape, 'manifestShape') } : {}),
+      ...(certificate.tokenShape !== undefined
+        ? { tokenShape: deepCloneFrozenJson(certificate.tokenShape, 'tokenShape') } : {}),
+      ...(certificate.cursorShape !== undefined
+        ? { cursorShape: deepCloneFrozenJson(certificate.cursorShape, 'cursorShape') } : {}),
       ...(certificate.failureVocabulary !== undefined
-        ? { failureVocabulary: certificate.failureVocabulary }
-        : {}),
+        ? { failureVocabulary: deepCloneFrozenJson(certificate.failureVocabulary, 'failureVocabulary') } : {}),
     }),
   })
 }
