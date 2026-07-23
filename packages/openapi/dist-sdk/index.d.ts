@@ -2548,6 +2548,7 @@ export interface paths {
                         timezone?: string;
                         workStartTime?: string;
                         workEndTime?: string;
+                        isOvernight?: boolean;
                         lateGraceMinutes?: number;
                         earlyGraceMinutes?: number;
                         roundingMinutes?: number;
@@ -2673,6 +2674,7 @@ export interface paths {
                     "application/json": {
                         userId: string;
                         shiftId: string;
+                        slotIndex?: number;
                         /** Format: date */
                         startDate: string;
                         /** Format: date */
@@ -2683,6 +2685,8 @@ export interface paths {
                         user_id?: string;
                         /** @description Legacy snake_case alias for shiftId. */
                         shift_id?: string;
+                        /** @description Legacy snake_case alias for slotIndex. */
+                        slot_index?: number;
                         /**
                          * Format: date
                          * @description Legacy snake_case alias for startDate.
@@ -2748,6 +2752,7 @@ export interface paths {
                     "application/json": {
                         userId?: string;
                         shiftId?: string;
+                        slotIndex?: number;
                         /** Format: date */
                         startDate?: string;
                         /** Format: date */
@@ -2756,6 +2761,8 @@ export interface paths {
                         orgId?: string;
                         user_id?: string;
                         shift_id?: string;
+                        /** @description Legacy snake_case alias for slotIndex. */
+                        slot_index?: number;
                         /** Format: date */
                         start_date?: string;
                         /** Format: date */
@@ -3269,6 +3276,8 @@ export interface paths {
                         timezone: string;
                         ruleSetId?: string;
                         description?: string;
+                        /** @enum {string} */
+                        attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
                         orgId?: string;
                     };
                 };
@@ -3352,6 +3361,11 @@ export interface paths {
                         timezone?: string;
                         ruleSetId?: string;
                         description?: string;
+                        /**
+                         * @description Accepted for parity with create; runtime rejects type changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED).
+                         * @enum {string}
+                         */
+                        attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
                         orgId?: string;
                     };
                 };
@@ -14870,6 +14884,16 @@ export interface components {
             timezone?: string;
             ruleSetId?: string | null;
             description?: string | null;
+            /** @enum {string} */
+            attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
+            /**
+             * @deprecated
+             * @enum {string}
+             */
+            attendance_type?: "fixed_shift" | "scheduled_shift" | "free_time";
+            memberCount?: number;
+            /** @deprecated */
+            member_count?: number;
             /** Format: date-time */
             createdAt?: string | null;
             /** Format: date-time */
@@ -15218,6 +15242,9 @@ export interface components {
             shiftId?: string;
             /** @deprecated */
             shift_id?: string;
+            slotIndex?: number;
+            /** @deprecated */
+            slot_index?: number;
             /** Format: date */
             startDate?: string;
             /**
@@ -16355,7 +16382,18 @@ export interface operations {
             };
             400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
+            /** @description Forbidden - approvals:write permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example Insufficient permissions */
+                        error: string;
+                    };
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };
@@ -16401,11 +16439,23 @@ export interface operations {
             };
             400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
+            /** @description Forbidden - approvals:write permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example Insufficient permissions */
+                        error: string;
+                    };
+                };
+            };
             /**
              * @description Target sheet not found / base mismatch / unreadable (shared no-oracle shape).
              *     Body is the same approval error envelope as other 4xx routes
-             *     (`code` + `message`, never distinguishes missing vs denied).
+             *     (`ok: false` with nested `error.code` + `error.message`; it never
+             *     distinguishes missing from denied).
              */
             404: {
                 headers: {
