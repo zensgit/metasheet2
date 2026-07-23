@@ -162,6 +162,10 @@ function crossDimensionLegality() {
   rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({
     certificate: { continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN'] },
   })), 'ILLEGAL_CAPABILITY_COMBINATION')
+  // MONOTONIC_VERSION_PIN anchors DURABLE_TOKEN ONLY on CHANGE_FEED — not on PAGED_READ.
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: { acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'] },
+  })), 'ILLEGAL_CAPABILITY_COMBINATION')
   // …and the legal variants of the same rules pass:
   normalizeCertifiedReadActionProfile(fixtureProfile({
     certificate: { acquisitionMode: 'SEALED_EXPORT', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: ['SIGNED_MANIFEST'] },
@@ -169,6 +173,18 @@ function crossDimensionLegality() {
   normalizeCertifiedReadActionProfile(fixtureProfile({
     certificate: { acquisitionMode: 'CHANGE_FEED', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'], supportedCompletenessProofs: ['DECLARED_TOTAL'] },
   }))
+  // scale-D0 §2 legal-combination table ROW 5 (enterprise): CHANGE_FEED × MONOTONIC_VERSION_PIN
+  // × DURABLE_TOKEN(水位) × {DECLARED_TOTAL} — MUST be legal (review P2: the earlier blanket
+  // DURABLE_TOKEN→IMMUTABLE rule wrongly rejected the doc-frozen enterprise coordinates).
+  const enterprise = normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: { acquisitionMode: 'CHANGE_FEED', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'], supportedCompletenessProofs: ['DECLARED_TOTAL'] },
+  }))
+  assert.equal(enterprise.certificate.continuationLifetime, 'DURABLE_TOKEN')
+  // GIP-D0 §3 complete-contract components are expressible (opaque at schema level).
+  const shaped = normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: { manifestShape: { keyId: 'shape' }, tokenShape: { kind: 'opaque' }, cursorShape: { kind: 'offset' }, failureVocabulary: ['X_FAILED'] },
+  }))
+  assert.deepEqual(shaped.certificate.failureVocabulary, ['X_FAILED'])
 }
 
 // ── 5. Recovery derivation matrix (derived, never declared) ──
@@ -178,6 +194,8 @@ function recoveryDerivation() {
     [{ acquisitionMode: 'SEALED_EXPORT', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'] }, 'CHUNK_RESUME'],
     [{ acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'] }, 'PAGE_RESUME'],
     [{ acquisitionMode: 'PAGED_READ', continuationLifetime: 'CONNECTION_BOUND', supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN'] }, 'WHOLE_ROUND_RESTART'],
+    // enterprise watermark resume (scale-D0 §2 row 5's DURABLE_TOKEN(水位))
+    [{ acquisitionMode: 'CHANGE_FEED', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'] }, 'PAGE_RESUME'],
   ]
   for (const [certificate, expected] of cases) {
     assert.equal(deriveRecoveryStrategy(certificate), expected)
@@ -219,6 +237,11 @@ function evidenceShapes() {
   // non-successful outcomes carry no completeness claim
   const failed = validateCompletenessEvidence(profile, { runOutcome: 'failed' })
   assert.deepEqual([...failed.usedCompletenessProofs], [])
+  // non-successful outcomes normalize to the COARSE token — arbitrary caller strings
+  // are never echoed into the frozen evidence shape (review NIT).
+  assert.equal(failed.runOutcome, 'not_successful')
+  const weird = validateCompletenessEvidence(profile, { runOutcome: 'caller_arbitrary_marker_xyz' })
+  assert.equal(weird.runOutcome, 'not_successful')
 }
 
 // ── 8. Role-type gate ──

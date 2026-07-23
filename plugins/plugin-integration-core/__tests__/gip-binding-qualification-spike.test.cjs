@@ -100,7 +100,10 @@ function probeSqlReadOnly() {
   assert.equal(__internals.assertReadOnlySql(sql), sql)
   rejectsWith(() => __internals.assertReadOnlySql('DELETE FROM x'), 'PROBE_SQL_NOT_READ_ONLY')
   rejectsWith(() => __internals.assertReadOnlySql('SELECT 1; DROP TABLE x'), 'PROBE_SQL_NOT_READ_ONLY')
-  rejectsWith(() => __internals.assertReadOnlySql('SELECT 1 INTO y FROM x UPDATE'), 'PROBE_SQL_NOT_READ_ONLY')
+  rejectsWith(() => __internals.assertReadOnlySql('SELECT 1 INTO y FROM x'), 'PROBE_SQL_NOT_READ_ONLY')
+  rejectsWith(() => __internals.assertReadOnlySql("SELECT setval('s', 9)"), 'PROBE_SQL_NOT_READ_ONLY')
+  rejectsWith(() => __internals.assertReadOnlySql('SELECT pg_advisory_lock(1)'), 'PROBE_SQL_NOT_READ_ONLY')
+  rejectsWith(() => __internals.assertReadOnlySql('SELECT * FROM x FOR UPDATE'), 'PROBE_SQL_NOT_READ_ONLY')
   // identifier hygiene: embedded quotes doubled, never raw
   assert.equal(__internals.quoteIdentifier('we"ird'), '"we""ird"')
 }
@@ -126,16 +129,16 @@ async function probeBehaviour() {
   const SECRET = 'secret_item_A17'
   const dupQuery = async () => ({ rows: [{ item_no: SECRET, rev: 'B', duplicate_count: 3 }] })
   const caught = await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: 't',
+    ...BASE_INPUTS, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   assert.ok(!JSON.stringify({ m: caught.message, d: caught.details }).includes(SECRET),
     'duplicate-key failure must stay values-free')
 
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: 't',
+    ...BASE_INPUTS, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: async () => ({}), keyColumns: ['k'], probedAt: 't',
+    ...BASE_INPUTS, query: async () => ({}), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
 }
 
@@ -143,7 +146,7 @@ async function probeBehaviour() {
 async function verifyBehaviour() {
   const query = async () => ({ rows: [] })
   const qualification = await probeBindingQualification({
-    ...BASE_INPUTS, query, keyColumns: ['item_no'], probedAt: 't0', expiresAt: '2026-07-24T00:00:00Z',
+    ...BASE_INPUTS, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
 
   const ok = verifyBindingQualification({
@@ -169,14 +172,37 @@ async function verifyBehaviour() {
 
   // status gate: only 'candidate' verifiable
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, status: 'revoked' }, expectedInputs: { ...BASE_INPUTS }, now: 't',
+    qualification: { ...qualification, status: 'revoked' }, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_STATUS_INVALID')
+
+  // TIMESTAMP PIN (review P3: lexicographic fail-open inversion) — a non-ISO `now`
+  // must fail CLOSED, never silently verify an expired qualification.
+  rejectsWith(() => verifyBindingQualification({
+    qualification, expectedInputs: { ...BASE_INPUTS }, now: '07/25/2026',
+  }), 'QUALIFICATION_INPUT_INVALID')
+  rejectsWith(() => verifyBindingQualification({
+    qualification: { ...qualification, expiresAt: 'tomorrow' }, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-23T12:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
+  // probe-side pin: malformed probedAt/expiresAt fail closed at generation time
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: 'not-a-time',
+  }), 'QUALIFICATION_INPUT_INVALID')
+
+  // digest material must not contain undefined (collision fail-closed, review NIT)
+  rejectsWith(() => computeQualificationDigest({ ...BASE_INPUTS, evidence: { a: undefined } }), 'QUALIFICATION_INPUT_INVALID')
 
   // PURE-LOCAL invariant: verify takes no query fn — source-level pin
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'gip-binding-qualification-spike.cjs'), 'utf8')
   const verifyBody = src.slice(src.indexOf('function verifyBindingQualification'), src.indexOf('module.exports'))
   assert.ok(!/\bquery\b/.test(verifyBody) && !/\bawait\b/.test(verifyBody),
     'verifyBindingQualification must stay pure-local (no query fn, no await)')
+
+  // WIRING pin (review P3): the probe's ONLY execution path must run through
+  // assertReadOnlySql. Source-level by necessity (the builder is safe by
+  // construction, so no input can behaviorally expose an unwired guard) — the pin
+  // still REDs the "remove the guard call" mutation.
+  const probeBody = src.slice(src.indexOf('async function probeBindingQualification'), src.indexOf('function verifyBindingQualification'))
+  assert.ok(/assertReadOnlySql\(/.test(probeBody), 'probe must wire assertReadOnlySql on its execution path')
 }
 
 async function main() {

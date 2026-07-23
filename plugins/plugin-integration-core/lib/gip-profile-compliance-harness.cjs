@@ -82,6 +82,15 @@ function runReadActionProfileComplianceBattery(candidate) {
       () => normalizeCertifiedReadActionProfile(mutant)))
   }
 
+  // C2b — duplicate entries in a closed set must be rejected (set semantics, not bag).
+  {
+    const mutant = clone(base)
+    mutant.certificate.supportedCompletenessProofs = [...mutant.certificate.supportedCompletenessProofs]
+    mutant.certificate.supportedCompletenessProofs.push(mutant.certificate.supportedCompletenessProofs[0])
+    checks.push(expectRejection('C2b_duplicate_set_entry_rejected', ['COMPLETENESS_PROOFS_INVALID'],
+      () => normalizeCertifiedReadActionProfile(mutant)))
+  }
+
   // C3 — empty supportedCompletenessProofs must be rejected (successful-run invariant).
   {
     const mutant = clone(base)
@@ -194,6 +203,33 @@ function runReadActionProfileComplianceBattery(candidate) {
             usedCompletenessProofs: undeclaredCombo,
           })))
     }
+  }
+
+  // C11e — the combination-declared invariant must be load-bearing for TYPICAL
+  //         candidates too (review: C11d's out-of-support pick let the combination
+  //         check be deleted silently). Build an UNDECLARED combination from within
+  //         the supported set when possible.
+  {
+    const supported = normalized.certificate.supportedCompletenessProofs
+    const declaredKeys = new Set(
+      normalized.certificate.completenessCombinationRules.map((combo) => [...combo].sort().join('+')),
+    )
+    let undeclared = null
+    if (supported.length >= 2) {
+      for (let i = 0; i < supported.length && !undeclared; i += 1) {
+        for (let j = i + 1; j < supported.length && !undeclared; j += 1) {
+          const pair = [supported[i], supported[j]]
+          if (!declaredKeys.has([...pair].sort().join('+'))) undeclared = pair
+        }
+      }
+    }
+    checks.push(undeclared === null
+      ? { checkId: 'C11e_undeclared_combination_rejected', ok: true, observed: 'not_applicable_no_undeclared_pair' }
+      : expectRejection('C11e_undeclared_combination_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
+        () => validateCompletenessEvidence(normalized, {
+          runOutcome: 'successful',
+          usedCompletenessProofs: undeclared,
+        })))
   }
 
   const passed = checks.every((entry) => entry.ok === true)

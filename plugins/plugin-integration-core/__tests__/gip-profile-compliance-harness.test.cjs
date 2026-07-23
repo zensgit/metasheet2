@@ -10,6 +10,7 @@ const path = require('node:path')
 const {
   runReadActionProfileComplianceBattery,
   summarizeBatteryForEvidence,
+  __internals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-profile-compliance-harness.cjs'))
 
 function fixtureProfile(overrides = {}) {
@@ -38,6 +39,7 @@ function cleanCandidatePasses() {
   assert.deepEqual(report.checks.map((entry) => entry.checkId), [
     'C1_schema_valid',
     'C2_unknown_acquisition_rejected',
+    'C2b_duplicate_set_entry_rejected',
     'C3_empty_completeness_rejected',
     'C4_applymode_smuggle_rejected',
     'C5_recovery_declaration_rejected',
@@ -50,7 +52,22 @@ function cleanCandidatePasses() {
     'C11b_notrequired_nonempty_rejected',
     'C11c_successful_empty_used_rejected',
     'C11d_unsupported_used_rejected',
+    'C11e_undeclared_combination_rejected',
   ])
+  // for the default fixture (2 supported proofs, singleton combos) C11e must be a REAL probe
+  const c11e = report.checks.find((entry) => entry.checkId === 'C11e_undeclared_combination_rejected')
+  assert.equal(c11e.observed, 'COMPLETENESS_EVIDENCE_INVALID')
+}
+
+// The harness's own accepted-mutant branch is LOAD-BEARING (review P2): a fixture
+// run() that does NOT throw must yield ok:false/'accepted_mutant'; a wrong-reason
+// throw must yield ok:false; only the expected rejection yields ok:true.
+function expectRejectionIsLoadBearing() {
+  const accepted = __internals.expectRejection('probe', ['SOME_REASON'], () => {})
+  assert.deepEqual(accepted, { checkId: 'probe', ok: false, observed: 'accepted_mutant' })
+  const wrong = __internals.expectRejection('probe', ['SOME_REASON'], () => { throw new Error('plain') })
+  assert.equal(wrong.ok, false)
+  assert.equal(wrong.observed, 'non_contract_error')
 }
 
 // 2. A schema-broken candidate fails at C1 and the battery stops (no vacuous green).
@@ -70,7 +87,7 @@ function reportIsValuesFree() {
   assert.ok(!JSON.stringify(report).includes(MARKER), 'battery report must not carry candidate content')
   const summary = summarizeBatteryForEvidence(report)
   assert.equal(summary.passed, true)
-  assert.equal(summary.checkCount, 14)
+  assert.equal(summary.checkCount, 16)
   assert.deepEqual(summary.failedCheckIds, [])
   assert.ok(!JSON.stringify(summary).includes(MARKER))
 }
@@ -82,7 +99,7 @@ function batteryCoversAllFamilies() {
     fixtureProfile(), // PAGED_READ / CONNECTION_BOUND
     fixtureProfile({ certificate: { acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'] } }),
     fixtureProfile({ certificate: { acquisitionMode: 'SEALED_EXPORT', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: ['SIGNED_MANIFEST'] } }),
-    fixtureProfile({ certificate: { acquisitionMode: 'CHANGE_FEED', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'], supportedCompletenessProofs: ['DECLARED_TOTAL'] } }),
+    fixtureProfile({ certificate: { acquisitionMode: 'CHANGE_FEED', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'], supportedCompletenessProofs: ['DECLARED_TOTAL'] } }), // scale-D0 §2 row 5
   ]
   for (const candidate of families) {
     const report = runReadActionProfileComplianceBattery(candidate)
@@ -97,6 +114,7 @@ function summarizeFailClosed() {
 
 function main() {
   cleanCandidatePasses()
+  expectRejectionIsLoadBearing()
   brokenCandidateFails()
   reportIsValuesFree()
   batteryCoversAllFamilies()

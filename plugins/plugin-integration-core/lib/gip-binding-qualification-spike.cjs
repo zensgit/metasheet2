@@ -70,9 +70,29 @@ function requiredString(value, field) {
   return value.trim()
 }
 
+// Timestamps are pinned to strict second-precision UTC ISO-8601 and compared
+// NUMERICALLY — a raw lexicographic compare over mixed representations silently
+// verifies an EXPIRED qualification (review P3: fail-open inversion). Any other
+// format fails closed.
+const ISO_UTC_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
+function requiredUtcInstant(value, field) {
+  const text = requiredString(value, field)
+  if (!ISO_UTC_SECONDS.test(text) || Number.isNaN(Date.parse(text))) {
+    fail('QUALIFICATION_INPUT_INVALID', 'timestamps must be strict UTC ISO-8601 (YYYY-MM-DDThh:mm:ssZ)', { field })
+  }
+  return text
+}
+
 // Deterministic serialization: sorted keys, no whitespace variance — the SAME
 // stableStringify shape used by the large-bom sealed-artifact digest precedent.
 function stableStringify(value) {
+  if (value === undefined) {
+    // undefined has no JSON form: JSON.stringify would emit the bare token
+    // `undefined` (and silently DROP undefined array entries — ss([undefined]) ===
+    // ss([]) is a digest collision). Evidence is server-built; undefined anywhere is
+    // a programming error — fail loud, never collide (review NIT).
+    fail('QUALIFICATION_INPUT_INVALID', 'digest material must not contain undefined', {})
+  }
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableStringify(entry)).join(',')}]`
   }
@@ -127,9 +147,14 @@ function buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns }) {
 // runtime guard here, not a comment.
 function assertReadOnlySql(sql) {
   const text = String(sql).trim()
+  // Write-free, not merely "starts with SELECT": SELECT ... INTO creates a table,
+  // setval/nextval mutate sequences, advisory locks take server state, FOR UPDATE/
+  // SHARE takes row locks (review findings). The builder is safe by construction —
+  // this guard is defense-in-depth and is wired on the probe's ONLY execution path.
   if (!/^SELECT\b/i.test(text) || /;/.test(text)
-    || /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY)\b/i.test(text)) {
-    fail('PROBE_SQL_NOT_READ_ONLY', 'qualification probe may only execute a single SELECT', {})
+    || /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY|INTO|SETVAL|NEXTVAL|PG_ADVISORY_LOCK|PG_ADVISORY_XACT_LOCK|PG_TRY_ADVISORY_LOCK)\b/i.test(text)
+    || /\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(text)) {
+    fail('PROBE_SQL_NOT_READ_ONLY', 'qualification probe may only execute a single write-free SELECT', {})
   }
   return text
 }
@@ -165,7 +190,7 @@ async function probeBindingQualification(input) {
     probeKind: 'ordering_key_uniqueness_negative',
     checkedKeyColumnCount: keyColumns.length,
     duplicateGroupsFound: 0,
-    probedAt: requiredString(input.probedAt, 'probedAt'),
+    probedAt: requiredUtcInstant(input.probedAt, 'probedAt'),
   })
   const digestInput = {
     actionProfileVersion: input.actionProfileVersion,
@@ -180,7 +205,7 @@ async function probeBindingQualification(input) {
     qualificationDigest: computeQualificationDigest(digestInput),
     evidence,
     ...(input.expiresAt !== undefined
-      ? { expiresAt: requiredString(input.expiresAt, 'expiresAt') }
+      ? { expiresAt: requiredUtcInstant(input.expiresAt, 'expiresAt') }
       : {}),
   })
 }
@@ -198,8 +223,9 @@ function verifyBindingQualification({ qualification, expectedInputs, now }) {
     fail('QUALIFICATION_STATUS_INVALID', 'only a candidate qualification is verifiable', {})
   }
   if (qualification.expiresAt !== undefined) {
-    const nowText = requiredString(now, 'now')
-    if (String(qualification.expiresAt) <= nowText) {
+    const nowInstant = Date.parse(requiredUtcInstant(now, 'now'))
+    const expiresInstant = Date.parse(requiredUtcInstant(qualification.expiresAt, 'expiresAt'))
+    if (expiresInstant <= nowInstant) {
       fail('QUALIFICATION_EXPIRED', 'qualification expired; a fresh Preflight is required', {})
     }
   }

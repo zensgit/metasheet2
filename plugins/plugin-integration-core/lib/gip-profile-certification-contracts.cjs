@@ -162,6 +162,12 @@ function normalizeClosedSet(value, vocabulary, field, reason) {
 // lineage fields agree on ONE spelling; certifying any concrete id stays gated.
 const PROFILE_ID_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+\.v[1-9][0-9]*$/
 
+// GIP-D0 §3 "complete contract" components are all expressible: the four schema
+// dimensions + combination rules + maxScale + orderingKeyRequirement + the declared
+// SHAPES (manifest/token/cursor) and the profile's failure vocabulary. Shape/vocab
+// fields are carried opaquely at schema level — their DEEP validation belongs to each
+// profile's own certification gate. 恢复许可 (recovery permission) is intentionally
+// NOT a field: it is satisfied by derivation (declaring it stays forbidden).
 const READ_CERTIFICATE_FIELDS = Object.freeze([
   'acquisitionMode',
   'supportedConsistencyProofs',
@@ -170,6 +176,10 @@ const READ_CERTIFICATE_FIELDS = Object.freeze([
   'completenessCombinationRules',
   'maxScale',
   'orderingKeyRequirement',
+  'manifestShape',
+  'tokenShape',
+  'cursorShape',
+  'failureVocabulary',
 ])
 
 // ── CertifiedReadActionProfile (read-action certification; FOUR source dimensions) ──
@@ -298,14 +308,20 @@ function normalizeCertifiedReadActionProfile(input) {
       rule: 'CHANGE_FEED_REQUIRES_VERSION_PIN',
     })
   }
-  // 4. DURABLE_TOKEN continuation is only sound over an immutable snapshot token —
-  //    a connection-bound snapshot dies with the connection (resume = cross-snapshot
-  //    stitching, forbidden).
-  if (continuationLifetime === 'DURABLE_TOKEN'
-    && !supportedConsistencyProofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')) {
-    fail('ILLEGAL_CAPABILITY_COMBINATION', 'DURABLE_TOKEN continuation requires IMMUTABLE_SNAPSHOT_TOKEN', {
-      rule: 'DURABLE_TOKEN_REQUIRES_IMMUTABLE_SNAPSHOT',
-    })
+  // 4. DURABLE_TOKEN continuation needs a DURABLE consistency anchor: an immutable
+  //    snapshot token, or — for CHANGE_FEED — the monotonic version pin (the CT/CDC
+  //    watermark IS its durable token; scale-D0 §2 legal-combination table row 5:
+  //    CHANGE_FEED × MONOTONIC_VERSION_PIN × DURABLE_TOKEN(水位) is LEGAL). A
+  //    connection-bound snapshot alone cannot anchor resume (cross-snapshot stitching).
+  if (continuationLifetime === 'DURABLE_TOKEN') {
+    const immutableAnchor = supportedConsistencyProofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')
+    const watermarkAnchor = acquisitionMode === 'CHANGE_FEED'
+      && supportedConsistencyProofs.includes('MONOTONIC_VERSION_PIN')
+    if (!immutableAnchor && !watermarkAnchor) {
+      fail('ILLEGAL_CAPABILITY_COMBINATION', 'DURABLE_TOKEN continuation requires a durable consistency anchor', {
+        rule: 'DURABLE_TOKEN_REQUIRES_DURABLE_ANCHOR',
+      })
+    }
   }
 
   return Object.freeze({
@@ -326,6 +342,12 @@ function normalizeCertifiedReadActionProfile(input) {
       ...(certificate.orderingKeyRequirement !== undefined
         ? { orderingKeyRequirement: certificate.orderingKeyRequirement }
         : {}),
+      ...(certificate.manifestShape !== undefined ? { manifestShape: certificate.manifestShape } : {}),
+      ...(certificate.tokenShape !== undefined ? { tokenShape: certificate.tokenShape } : {}),
+      ...(certificate.cursorShape !== undefined ? { cursorShape: certificate.cursorShape } : {}),
+      ...(certificate.failureVocabulary !== undefined
+        ? { failureVocabulary: certificate.failureVocabulary }
+        : {}),
     }),
   })
 }
@@ -341,9 +363,14 @@ function deriveRecoveryStrategy(certificate) {
   }
   if (certificate.acquisitionMode === 'BOUNDED_READ') return 'WHOLE_RERUN'
   if (certificate.acquisitionMode === 'SEALED_EXPORT') return 'CHUNK_RESUME'
+  const proofs = Array.isArray(certificate.supportedConsistencyProofs)
+    ? certificate.supportedConsistencyProofs
+    : []
   if (certificate.continuationLifetime === 'DURABLE_TOKEN'
-    && Array.isArray(certificate.supportedConsistencyProofs)
-    && certificate.supportedConsistencyProofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')) {
+    && (proofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')
+      || (certificate.acquisitionMode === 'CHANGE_FEED' && proofs.includes('MONOTONIC_VERSION_PIN')))) {
+    // Durable-anchor resume: immutable-token page resume, or the CHANGE_FEED
+    // watermark resume (scale-D0 §2 row 5's DURABLE_TOKEN(水位)).
     return 'PAGE_RESUME'
   }
   return 'WHOLE_ROUND_RESTART'
@@ -410,8 +437,10 @@ function validateCompletenessEvidence(profile, evidence) {
     fail('COMPLETENESS_EVIDENCE_INVALID', 'completeness evidence must be a plain object', {})
   }
   if (evidence.runOutcome !== 'successful') {
-    // Only successful runs assert completeness; any other outcome carries no claim.
-    return Object.freeze({ runOutcome: evidence.runOutcome, usedCompletenessProofs: Object.freeze([]) })
+    // Only successful runs assert completeness; any other outcome carries no claim —
+    // and is normalized to the COARSE token 'not_successful' (never echo an arbitrary
+    // caller string into the frozen evidence shape).
+    return Object.freeze({ runOutcome: 'not_successful', usedCompletenessProofs: Object.freeze([]) })
   }
   const used = normalizeClosedSet(
     evidence.usedCompletenessProofs,
