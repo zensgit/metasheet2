@@ -3,8 +3,8 @@
 **状态：COMPOSED AND LOCALLY VERIFIED / DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / NOT LANDED**
 
 记录基线：`origin/main@ee39a13eb9db27d01c89cb19f0644b546c711347`。组合根：#4540
-`26ef90692d183de95c4020238b24782a0ac83e3b`；最终数据栈头：#4539
-`34d1485cebb00ef5f55732753099e6c177739fdc`。
+`1d8fcdfa9a885671827fe83ac6454e460cd06c10`；最终数据栈头：#4539
+`e4d8b6a53f04d1f33e861c6afbe628e23fb7b8d7`。
 本台账记录实现和证据，不构成合并、UAT 或启用授权。
 
 ## 1. 已在 main 的底座
@@ -20,16 +20,16 @@
 | Lane | PR / exact head | 内容 | 组合处置 |
 |---|---|---|---|
 | Data root | #4510 `f6d05814a8` | 附件、FWB activation、画布基础和 CI | 被 #4540 吸收 |
-| Record-link | #4524 `8c4036536f` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
-| FWB update | #4531 `23035f9556` | 更新受约束已有记录 | 已叠到 #4524 |
-| FWB composition | #4539 `34d1485ceb` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
+| Record-link | #4524 `e03ab66fe7` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
+| FWB update | #4531 `b955fafec6` | 更新受约束已有记录 | 已叠到 #4524 |
+| FWB composition | #4539 `e4d8b6a53f` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
 | Canvas root | #4433 `fc5477d7e4` | 分支编排与纵向画布 | 被 #4540 吸收 |
 | Canvas all-path | #4532 `762dc0fd5` | 条件内并行路径全部汇合 | 被 #4540 吸收 |
 | Canvas inspector | #4533 `babc6d975` | 共享检查器、键盘和响应式 | 被 #4540 吸收 |
 | Version restore | #4536 `3bb327a93` | diff/restore 与当前校验 | 被 #4540 吸收 |
 | Navigation | #4537 `b2f69116b` | zoom/pan/minimap/overlay | 被 #4540 吸收 |
 | Reorder | #4538 `a3562083af` | 同区域语义重排 | 被 #4540 吸收 |
-| Integration | #4540 `26ef90692d` | 两条线的唯一联合解析与测试面 | Draft，owner review |
+| Integration | #4540 `1d8fcdfa9a` | 两条线的唯一联合解析与测试面 | Draft，owner review |
 
 ## 3. 组合审阅发现与修复
 
@@ -48,6 +48,9 @@
    submit + picker 负例，再只补 `multitable:base:read` 得到双正控，防止未来删门后 required 真库仍绿。
 10. 复核生产 FWB 路径确认所有 `targetType: 'number'` 映射当前均被
     `exact_number_mapping_unavailable` 拒绝；撤销“金额/数量已写回”的文档声明，保留 D0-D4 为独立能力线。
+11. Canvas publish preflight 曾把 parallel node key 和动态来源 fingerprint 直接放入可见文案，保存/发布 catch
+    还会回显任意后端 message；改为无标识符的业务文案及 machine-code allowlist，未知 API/本地错误统一使用
+    values-free fallback。附件 runtime 已确认在 flag 分支内 dynamic import，无需再改。
 
 ## 4. 多模型使用与最终责任
 
