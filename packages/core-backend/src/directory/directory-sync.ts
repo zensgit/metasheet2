@@ -3493,7 +3493,7 @@ async function claimDirectorySyncRun(
 }
 
 export async function syncDirectoryIntegration(
-  integrationId: string,
+  rawIntegrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler' = 'manual',
   /**
@@ -3508,8 +3508,18 @@ export async function syncDirectoryIntegration(
   autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[]
 }> {
   const governedUserIds = new Set<string>()
-  const integration = await getIntegrationRow(integrationId)
+  const integration = await getIntegrationRow(rawIntegrationId)
   if (!integration) throw new Error('Directory integration not found')
+  // T2 lock-correctness P1: the manual-sync route passes req.params.integrationId VERBATIM
+  // (admin-directory.ts). `directory_integrations.id` is a uuid column, so a case-variant
+  // (e.g. uppercase) id still resolves THIS row via uuid casting — but the shared source
+  // freeze advisory lock hashes the RAW TEXT key (`hashtext(sourceSyncFreezeLockKey(id))`),
+  // so an uppercase caller would hash a DIFFERENT lock key than the transfer side's
+  // DB-canonical `source.id` and silently lose sync↔freeze mutual exclusion (a freeze
+  // committing after the entry check could race this sync's local apply). Canonicalize to
+  // the DB-read-back id here, and use it for EVERYTHING downstream: entry freeze check,
+  // stale-run reclaim, run-lease claim, apply-txn lock, under-lock recheck, and every write.
+  const integrationId = integration.id
 
   const config = parseIntegrationConfig(integration)
   // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
@@ -3596,7 +3606,18 @@ export async function syncDirectoryIntegration(
     const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
 
     await transaction(async (client) => {
-      // T2 P1: shared source freeze lock is the FIRST operation of the local-apply transaction.
+      // T2 lock-correctness P2 (PB4-3 idiom — see local-directory-org.ts's reparent guard): the
+      // pool wrapper issues a bare BEGIN, so on a deployment where default_transaction_isolation
+      // is 'repeatable read' this transaction's snapshot would be taken by the
+      // pg_advisory_xact_lock SELECT itself — BEFORE the lock is granted — and the post-lock
+      // freeze recheck below would read a pre-freeze snapshot, missing a freeze that committed
+      // while we waited on the lock. Pin READ COMMITTED as the FIRST statement (SET TRANSACTION
+      // must precede the transaction's first query) so the recheck takes a fresh per-statement
+      // snapshot. Under the production RC default this is a no-op; its mechanism is proven in
+      // directory-source-freeze-lock-correctness.db.test.ts (RR-default pool harness).
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      // T2 P1: shared source freeze lock is the first REAL operation of the local-apply
+      // transaction (nothing but the isolation pin above may precede it).
       // Transfer create / freeze=true refreeze take the same key before writing freeze state.
       // Re-check under the lock before ANY directory upsert, absence sweep, membership rewrite,
       // identity/link write, local-user admission, group projection, deprovision, integration
