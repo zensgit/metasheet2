@@ -22,7 +22,12 @@ import {
   isDingTalkConfigured,
   validateState,
 } from '../auth/dingtalk-oauth'
-import { markInviteAccepted } from '../auth/invite-ledger'
+import {
+  applyInviteAcceptanceWrites,
+  INVITE_LEDGER_CONSUME_FAILED,
+  INVITE_TARGET_UPDATE_MISMATCH,
+  inviteAcceptWriteErrorCode,
+} from '../auth/invite-accept-writes'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
@@ -33,7 +38,7 @@ import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
-import { query, transaction } from '../db/pg'
+import { query } from '../db/pg'
 import { parseUserActivationStatus } from '../auth/user-activation'
 import { listUserPermissions } from '../rbac/service'
 import { secretManager } from '../security/SecretManager'
@@ -771,40 +776,13 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
     }
 
     const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
-    // Single transaction: consume invite ledger FIRST (status='pending' + RETURNING),
-    // then write user password. Zero-row on either step aborts and rolls back.
-    // Ledger-first prevents concurrent accepts from both rewriting password:
-    // only one can claim the pending row; the loser never reaches the user UPDATE.
-    await transaction(async (client) => {
-      const ledger = await markInviteAccepted(token, {
-        consumedBy: payload.userId,
-        client,
-      })
-      if (!ledger) {
-        // missing / revoked / already-consumed / schema-missing → null
-        throw Object.assign(new Error('Invite ledger could not be consumed'), {
-          code: 'INVITE_LEDGER_CONSUME_FAILED',
-        })
-      }
-
-      const updated = await client.query(
-        `UPDATE users
-         SET password_hash = $1,
-             must_change_password = FALSE,
-             local_password_set = TRUE,
-             is_active = true,
-             name = COALESCE(NULLIF($2, ''), name),
-             updated_at = NOW()
-         WHERE id = $3 AND email = $4
-           AND activation_status = 'activated'
-         RETURNING id`,
-        [passwordHash, requestedName, payload.userId, payload.email],
-      )
-      if (!updated.rows[0]) {
-        throw Object.assign(new Error('Invite target could not be updated'), {
-          code: 'INVITE_TARGET_UPDATE_MISMATCH',
-        })
-      }
+    // Ledger-first + user password in one transaction (see applyInviteAcceptanceWrites).
+    await applyInviteAcceptanceWrites({
+      inviteToken: token,
+      userId: payload.userId,
+      email: payload.email,
+      passwordHash,
+      requestedName,
     })
 
     // Best-effort post-commit; user+invite already durable together.
@@ -842,19 +820,19 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
-    const code = (error as { code?: string })?.code
-    if (code === 'INVITE_TARGET_UPDATE_MISMATCH') {
+    const code = inviteAcceptWriteErrorCode(error)
+    if (code === INVITE_TARGET_UPDATE_MISMATCH) {
       return res.status(409).json({
         success: false,
         error: 'Invite target could not be updated; token was not consumed',
-        code: 'INVITE_TARGET_UPDATE_MISMATCH',
+        code: INVITE_TARGET_UPDATE_MISMATCH,
       })
     }
-    if (code === 'INVITE_LEDGER_CONSUME_FAILED') {
+    if (code === INVITE_LEDGER_CONSUME_FAILED) {
       return res.status(409).json({
         success: false,
         error: 'Invite token is missing, revoked, or already consumed',
-        code: 'INVITE_LEDGER_CONSUME_FAILED',
+        code: INVITE_LEDGER_CONSUME_FAILED,
       })
     }
     logger.error('Invite acceptance error', error instanceof Error ? error : undefined)

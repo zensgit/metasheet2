@@ -209,6 +209,11 @@ export default defineConfig({
       // cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
       // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
       'tests/integration/directory-source-freeze-lock-correctness.db.test.ts',
+      // Invite accept ledger-first concurrency + rollback (real DB, PR #4559 P2): two real
+      // connections + row-lock barrier; user UPDATE zero-row leaves ledger pending.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green; whole-file wired
+      // into the approval real-DB step in plugin-tests.yml.
+      'tests/integration/invite-accept-concurrency-rollback.db.test.ts',
       // T2-Gate evidence (§3.4): the (provider, external_key) collision MECHANISM — unique-index
       // pin, bare-unionId derivation pin, and the end-to-end wholesale second-corp sync failure
       // signature the staging two-corp runbook greps for. Real sync + mocked DingTalk client.
