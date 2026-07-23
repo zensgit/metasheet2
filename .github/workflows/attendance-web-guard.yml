@@ -82,7 +82,17 @@
 # en legs), and the mounted AttendanceView §5.2 prefill contract: overwrite-confirm dialog before
 # any write, snapshot undo byte-identical restore incl. editing posture, R3 zero-write walk at
 # the mock network layer, R4 banned switch/trigger door negatives, OD-W4-7 beforeunload +
-# zero-template-storage assertions).
+# zero-template-storage assertions), and attendance-decision-trace.spec.ts +
+# AttendanceDecisionTrace.spec.ts + attendance-decision-trace-wiring.spec.ts (W5-1 — Wave 5
+# explainability design-lock 2026-07-22 RATIFIED §6/§9 W5-1: pure decision-trace mapping matrix
+# (six-category strict whitelist parse, posture/confidence/reasonCode closed sets, ⑤ lot
+# known/unknown union exact key set, copy doors「无法确定依据」/「当前规则（无历史版本）」+
+# 「可能不同于决策当时的规则」W5-8 gate, OD-W5-5 retention disclosure, R2 canonical query-form
+# deep links), the mounted display component render matrix (zh+en legs, zero write CTA), and the
+# AttendanceView dual-face wiring (admin section + self overview card + OD-W5-7/#4562 comp_time
+# leaveTypeCode channel via real UI triggers, R1 zero-write + R3 single-fetch negatives at the
+# mock network layer) — see
+# docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -134,6 +144,9 @@ on:
       - 'apps/web/tests/AttendanceSetupReadiness.spec.ts'
       - 'apps/web/tests/useAttendanceSetupReadiness.spec.ts'
       - 'apps/web/tests/attendance-setup-templates.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace.spec.ts'
+      - 'apps/web/tests/AttendanceDecisionTrace.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace-wiring.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -180,6 +193,9 @@ on:
       - 'apps/web/tests/AttendanceSetupReadiness.spec.ts'
       - 'apps/web/tests/useAttendanceSetupReadiness.spec.ts'
       - 'apps/web/tests/attendance-setup-templates.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace.spec.ts'
+      - 'apps/web/tests/AttendanceDecisionTrace.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace-wiring.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -222,4 +238,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring --reporter=dot

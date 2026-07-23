@@ -125,10 +125,12 @@ describe('Attendance admin anchor navigation', () => {
 
     expect(groupLabels).toEqual(['Workspace', 'Scheduling', 'Organization', 'Policies', 'Annual leave', 'Data & Payroll'])
     // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
-    expect(labels).toHaveLength(34)
+    // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
+    expect(labels).toHaveLength(35)
     expect(labels).toEqual(
       expect.arrayContaining([
         'Setup readiness',
+        'Decision trace',
         'Annual leave balance',
         'Annual leave policy',
         'Annual leave operations',
@@ -870,7 +872,8 @@ describe('Attendance admin anchor navigation', () => {
     const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
     expect(jumpSelect).toBeTruthy()
     // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(34)
+    // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
+    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(35)
 
     jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
     jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))

@@ -14727,7 +14727,10 @@ function loadAdminDecisionTrace(): void {
       requestId: adminTraceRequestId.value,
       instanceId: adminTraceInstanceId.value,
     },
-    { orgId: normalizedOrgId(), userId: adminTraceUserId.value },
+    // Blank org normalizes to the plugin default org — same resolution the W4-1 setup-readiness
+    // admin surface uses (`resolveAttendanceReadinessOrgId`), so the default-org admin path works
+    // without hand-typing an org id.
+    { orgId: resolveAttendanceReadinessOrgId(normalizedOrgId()), userId: adminTraceUserId.value },
   )
 }
 
