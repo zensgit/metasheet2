@@ -42,6 +42,9 @@ function isStrictPlainObject(value) {
 
 function isStrictDenseArray(value) {
   if (!Array.isArray(value)) return false
+  // exotic arrays are rejected (review P2): a replaced prototype can override map()
+  // and make clone/serialize silently emit [] for a non-empty array.
+  if (Object.getPrototypeOf(value) !== Array.prototype) return false
   if (Object.getOwnPropertySymbols(value).length > 0) return false
   const names = Object.getOwnPropertyNames(value)
   // EXACTLY the own contiguous indices + 'length' (review P2): an array with extra
@@ -84,7 +87,12 @@ function assertStrictValue(value) {
 function deepCloneFrozenCanonical(value) {
   assertStrictValue(value)
   const clone = (entry) => {
-    if (Array.isArray(entry)) return Object.freeze(entry.map((item) => clone(item)))
+    if (Array.isArray(entry)) {
+      // index loop, NEVER instance-method dispatch (review P2: entry.map is overridable)
+      const out = []
+      for (let index = 0; index < entry.length; index += 1) out.push(clone(entry[index]))
+      return Object.freeze(out)
+    }
     if (isStrictPlainObject(entry)) {
       const out = {}
       for (const key of Object.keys(entry)) {
@@ -111,7 +119,12 @@ function deepCloneFrozenCanonical(value) {
 function stableCanonicalStringify(value) {
   assertStrictValue(value)
   const serialize = (entry) => {
-    if (Array.isArray(entry)) return `[${entry.map((item) => serialize(item)).join(',')}]`
+    if (Array.isArray(entry)) {
+      // index loop, never entry.map (overridable via exotic prototypes)
+      const parts = []
+      for (let index = 0; index < entry.length; index += 1) parts.push(serialize(entry[index]))
+      return `[${parts.join(',')}]`
+    }
     if (isStrictPlainObject(entry)) {
       const keys = Object.keys(entry).sort()
       // own-property READ (a legal own '__proto__' data key shadows the accessor,

@@ -16,6 +16,7 @@ const {
   buildOrderingKeyNullProbeSql,
   buildOrderingKeyTotalOrderProbeSql,
   postgresTotalOrderProbeStrategy,
+  createProbeStrategyRegistry,
   probeBindingQualification,
   verifyBindingQualification,
   __internals,
@@ -45,8 +46,14 @@ async function rejectsWithAsync(fn, reason) {
   return caught
 }
 
-const ENVELOPE_KEY = Object.freeze({ keyId: 'k2026a', secret: 'server_held_secret_material_1' })
-const WRONG_KEY = Object.freeze({ keyId: 'k2026a', secret: 'attacker_guessed_secret' })
+// raw-bytes secrets, >=32 bytes (review P2: string secrets — even long ones — are
+// refused; short keys are offline-brute-forceable since message+MAC are public)
+const ENVELOPE_KEY = Object.freeze({ keyId: 'k2026a', secret: Buffer.alloc(32, 7) })
+const WRONG_KEY = Object.freeze({ keyId: 'k2026a', secret: Buffer.alloc(32, 9) })
+const REGISTRY = createProbeStrategyRegistry([{
+  actionProfileVersion: 'fixture.paged_read.v1',
+  ...postgresTotalOrderProbeStrategy,
+}])
 
 const BASE_INPUTS = Object.freeze({
   actionProfileVersion: 'fixture.paged_read.v1',
@@ -61,6 +68,7 @@ function frozenVocabulary() {
   assert.deepEqual([...QUALIFICATION_ERROR_REASONS], [
     'QUALIFICATION_INPUT_INVALID',
     'PROBE_SQL_NOT_READ_ONLY',
+    'PROBE_STRATEGY_UNBOUND',
     'PROBE_QUERY_FAILED',
     'ORDERING_KEY_DUPLICATE_FOUND',
     'ORDERING_KEY_NULL_FOUND',
@@ -137,7 +145,7 @@ async function probeBehaviour() {
   const qualification = await probeBindingQualification({
     ...BASE_INPUTS,
     envelopeKey: ENVELOPE_KEY,
-    probeStrategy: postgresTotalOrderProbeStrategy,
+    strategyRegistry: REGISTRY,
     query: okQuery,
     keyColumns: ['item_no', 'rev'],
     probedAt: '2026-07-23T00:00:00Z',
@@ -148,12 +156,14 @@ async function probeBehaviour() {
   assert.equal(qualification.evidence.duplicateGroupsFound, 0)
   assert.equal(qualification.evidence.nullKeyRowsFound, 0)
   assert.equal(qualification.evidence.checkedKeyColumnCount, 2)
+  assert.equal(qualification.evidence.probeStrategyId, 'gip.total_order_probe.postgres')
+  assert.equal(qualification.evidence.probeStrategyVersion, 'v1')
   assert.equal(qualification.evidence.probeDialect, 'postgres')
   assert.equal(qualification.evidence.snapshotSemantics, 'single_statement_mvcc')
   assert.equal(qualification.envelopeKeyId, 'k2026a')
   assert.ok(typeof qualification.envelopeMac === 'string' && qualification.envelopeMac.length === 64)
   // the secret never appears anywhere in the qualification
-  assert.ok(!JSON.stringify(qualification).includes(ENVELOPE_KEY.secret))
+  assert.ok(!JSON.stringify(qualification).includes(ENVELOPE_KEY.secret.toString('hex')))
   // EXACTLY ONE statement (review P1: a second read would reopen the torn-check hole)
   assert.equal(seenSql.length, 1)
   assert.match(seenSql[0], /duplicate_groups_sampled/)
@@ -163,7 +173,7 @@ async function probeBehaviour() {
   const SECRET = 'secret_item_A17'
   const dupQuery = async () => ({ rows: [{ duplicate_groups_sampled: 3, null_key_rows: 0, leak: SECRET }] })
   const caught = await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   assert.ok(!JSON.stringify({ m: caught.message, d: caught.details }).includes(SECRET),
     'duplicate-key failure must stay values-free')
@@ -171,45 +181,71 @@ async function probeBehaviour() {
   // NULL key components ⇒ fail closed (same single statement)
   const nullQuery = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 2 }] })
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_NULL_FOUND')
 
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
   // no envelope key ⇒ fail closed before any probing
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, probeStrategy: postgresTotalOrderProbeStrategy, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, strategyRegistry: REGISTRY, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
 
-  // NO probe strategy ⇒ fail closed (review P1: the platform never assumes a dialect
-  // or its snapshot semantics — they are the providing profile's certified claims)
+  // NO registry ⇒ fail closed (review P1: the platform never assumes a dialect or
+  // snapshot semantics — strategies are server-registered, bound per profile)
   await rejectsWithAsync(() => probeBindingQualification({
     ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
+  // runtime-supplied strategy ⇒ REJECTED OUTRIGHT (never honored, never merged)
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
+    probeStrategy: { dialect: 'evil', snapshotSemantics: 'marker_smuggle', buildTotalOrderProbeSql: () => 'SELECT 1' },
+    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
+  // profile with NO bound strategy ⇒ PROBE_STRATEGY_UNBOUND (named fail-closed)
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, actionProfileVersion: 'fixture.unbound_read.v1', envelopeKey: ENVELOPE_KEY,
+    strategyRegistry: REGISTRY, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'PROBE_STRATEGY_UNBOUND')
+  // strategy identity is a CLOSED evidence field sourced from the registry
+  // (the earlier fake-strategy marker path is gone by construction)
+  // weak keys are refused: string secrets (any length) and short buffers
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'x' }, strategyRegistry: REGISTRY,
+    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'server_held_secret_material_1_long_enough_but_text' }, strategyRegistry: REGISTRY,
+    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: Buffer.alloc(16, 1) }, strategyRegistry: REGISTRY,
+    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
 
   // REAL-DRIVER COUNT SHAPE (review P1): node-postgres returns int8 counts as
   // STRINGS — a '0'/'0' summary row must qualify, not PROBE_QUERY_FAILED.
   const pgShapeQuery = async () => ({ rows: [{ duplicate_groups_sampled: '0', null_key_rows: '0' }] })
   const pgShaped = await probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy,
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
     query: pgShapeQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   })
   assert.equal(pgShaped.status, 'candidate')
   // …string counts still trip the fail-closed branches
   const pgDupQuery = async () => ({ rows: [{ duplicate_groups_sampled: '2', null_key_rows: '0' }] })
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy,
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
     query: pgDupQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   // …and junk shapes stay rejected ('007', '1e3', negative, non-decimal)
   for (const bad of ['007', '1e3', '-1', 'abc']) {
     const junk = async () => ({ rows: [{ duplicate_groups_sampled: bad, null_key_rows: '0' }] })
     await rejectsWithAsync(() => probeBindingQualification({
-      ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy,
+      ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
       query: junk, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
     }), 'PROBE_QUERY_FAILED')
   }
@@ -219,7 +255,7 @@ async function probeBehaviour() {
 async function verifyBehaviour() {
   const query = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] })
   const qualification = await probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
 
   const ok = verifyBindingQualification({
@@ -294,7 +330,7 @@ async function verifyBehaviour() {
   }), 'QUALIFICATION_INPUT_INVALID')
   // probe-side pin: malformed probedAt fails closed at generation time
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
   }), 'QUALIFICATION_INPUT_INVALID')
 
   // digest material domain (shared codec): undefined / NaN / Date all fail closed

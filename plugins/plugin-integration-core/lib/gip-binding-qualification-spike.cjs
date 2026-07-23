@@ -29,6 +29,7 @@ const { CanonicalDomainError, stableCanonicalStringify } = require('./gip-canoni
 const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'QUALIFICATION_INPUT_INVALID',
   'PROBE_SQL_NOT_READ_ONLY',
+  'PROBE_STRATEGY_UNBOUND',
   'PROBE_QUERY_FAILED',
   'ORDERING_KEY_DUPLICATE_FOUND',
   'ORDERING_KEY_NULL_FOUND',
@@ -190,20 +191,46 @@ function buildOrderingKeyTotalOrderProbeSql({ objectName, keyColumns }) {
 // (e.g. SQL Server: no LIMIT, different isolation) must supply its own certified
 // strategy — the platform never silently assumes this one.
 const postgresTotalOrderProbeStrategy = Object.freeze({
+  strategyId: 'gip.total_order_probe.postgres',
+  strategyVersion: 'v1',
   dialect: 'postgres',
   snapshotSemantics: 'single_statement_mvcc',
   buildTotalOrderProbeSql: buildOrderingKeyTotalOrderProbeSql,
 })
 
-function normalizeProbeStrategy(strategy) {
-  if (!isPlainObject(strategy) || typeof strategy.buildTotalOrderProbeSql !== 'function') {
-    fail('QUALIFICATION_INPUT_INVALID', 'an explicit probe strategy (dialect + snapshot semantics + SQL builder) is required', { field: 'probeStrategy' })
+// STRATEGY BINDING (review P1): strategies are SERVER-REGISTERED implementations
+// uniquely bound to an actionProfileVersion — runtime input never supplies strategy
+// functions or claims. The registry is constructed server-side; probe resolves the
+// strategy from the caller's actionProfileVersion alone, and the strategy IDENTITY
+// (strategyId/strategyVersion + its registered dialect/snapshot claims) enters the
+// CLOSED evidence fields (and therefore the qualification digest).
+function createProbeStrategyRegistry(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    fail('QUALIFICATION_INPUT_INVALID', 'a probe-strategy registry needs at least one entry', { field: 'entries' })
   }
-  return {
-    dialect: requiredString(strategy.dialect, 'probeStrategy.dialect'),
-    snapshotSemantics: requiredString(strategy.snapshotSemantics, 'probeStrategy.snapshotSemantics'),
-    buildTotalOrderProbeSql: strategy.buildTotalOrderProbeSql,
+  const byProfile = new Map()
+  for (const entry of entries) {
+    if (!isPlainObject(entry) || typeof entry.buildTotalOrderProbeSql !== 'function') {
+      fail('QUALIFICATION_INPUT_INVALID', 'a registry entry needs a strategy implementation', { field: 'entries' })
+    }
+    const actionProfileVersion = requiredString(entry.actionProfileVersion, 'entry.actionProfileVersion')
+    if (byProfile.has(actionProfileVersion)) {
+      // UNIQUE binding — a second strategy for the same profile is a wiring bug.
+      fail('QUALIFICATION_INPUT_INVALID', 'an action profile is bound to two strategies', { field: 'entries' })
+    }
+    byProfile.set(actionProfileVersion, Object.freeze({
+      strategyId: requiredString(entry.strategyId, 'entry.strategyId'),
+      strategyVersion: requiredString(entry.strategyVersion, 'entry.strategyVersion'),
+      dialect: requiredString(entry.dialect, 'entry.dialect'),
+      snapshotSemantics: requiredString(entry.snapshotSemantics, 'entry.snapshotSemantics'),
+      buildTotalOrderProbeSql: entry.buildTotalOrderProbeSql,
+    }))
   }
+  return Object.freeze({
+    resolve(actionProfileVersion) {
+      return byProfile.get(actionProfileVersion) || null
+    },
+  })
 }
 
 // --- P1 (pg count shape): the real driver returns int8 counts as strings; after the
@@ -260,14 +287,24 @@ async function runReadOnlyProbe(query, sql) {
 // server side and never appears in qualifications, evidence or errors. Rotation /
 // revocation = keyring by keyId at the (gated) binding runtime; the spike freezes
 // the shape. The ratified 6-input qualificationDigest tuple stays untouched.
+// Key material contract (review P2: a trimmed 1-char string secret signs valid MACs
+// that are offline-brute-forceable since message+MAC are public): the secret is RAW
+// BYTES — a Buffer/Uint8Array of at least 32 bytes (explicit binary encoding, no
+// text trim, entropy is the key custodian's duty). Strings are refused outright.
+const ENVELOPE_SECRET_MIN_BYTES = 32
 function normalizeEnvelopeKey(envelopeKey) {
   if (!isPlainObject(envelopeKey)) {
     fail('QUALIFICATION_INPUT_INVALID', 'a server-held envelope key is required', { field: 'envelopeKey' })
   }
-  return {
-    keyId: requiredString(envelopeKey.keyId, 'envelopeKey.keyId'),
-    secret: requiredString(envelopeKey.secret, 'envelopeKey.secret'),
+  const keyId = requiredString(envelopeKey.keyId, 'envelopeKey.keyId')
+  const secret = envelopeKey.secret
+  const secretBytes = Buffer.isBuffer(secret)
+    ? secret
+    : (secret instanceof Uint8Array ? Buffer.from(secret.buffer, secret.byteOffset, secret.byteLength) : null)
+  if (secretBytes === null || secretBytes.length < ENVELOPE_SECRET_MIN_BYTES) {
+    fail('QUALIFICATION_INPUT_INVALID', 'envelope secret must be raw bytes (Buffer/Uint8Array) of at least 32 bytes', { field: 'envelopeKey.secret' })
   }
+  return { keyId, secret: secretBytes }
 }
 
 function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresAt }) {
@@ -284,8 +321,20 @@ async function probeBindingQualification(input) {
   if (!isPlainObject(input) || typeof input.query !== 'function') {
     fail('QUALIFICATION_INPUT_INVALID', 'probe needs a query function and a plain-object input', {})
   }
+  if (input.probeStrategy !== undefined) {
+    // review P1: strategies come from the server registry, never runtime input.
+    fail('QUALIFICATION_INPUT_INVALID', 'probe strategies are registry-bound; runtime input must not supply one', { field: 'probeStrategy' })
+  }
   const envelopeKey = normalizeEnvelopeKey(input.envelopeKey)
-  const strategy = normalizeProbeStrategy(input.probeStrategy)
+  const actionProfileVersion = requiredString(input.actionProfileVersion, 'actionProfileVersion')
+  if (!isPlainObject(input.strategyRegistry) || typeof input.strategyRegistry.resolve !== 'function') {
+    fail('QUALIFICATION_INPUT_INVALID', 'a server-side probe-strategy registry is required', { field: 'strategyRegistry' })
+  }
+  const strategy = input.strategyRegistry.resolve(actionProfileVersion)
+  if (!strategy || typeof strategy.buildTotalOrderProbeSql !== 'function') {
+    // fail closed by NAME: an unbound profile must never probe with a guessed dialect.
+    fail('PROBE_STRATEGY_UNBOUND', 'no certified probe strategy is bound to this action profile', {})
+  }
   const objectName = requiredString(input.objectKey, 'objectKey')
   const keyColumns = normalizeKeyColumns(input.keyColumns)
   // ONE statement per the injected strategy (whose snapshot claim is profile-certified).
@@ -311,6 +360,8 @@ async function probeBindingQualification(input) {
   }
   const evidence = Object.freeze({
     probeKind: 'ordering_key_total_order_negative',
+    probeStrategyId: strategy.strategyId,
+    probeStrategyVersion: strategy.strategyVersion,
     probeDialect: strategy.dialect,
     snapshotSemantics: strategy.snapshotSemantics,
     checkedKeyColumnCount: keyColumns.length,
@@ -319,7 +370,7 @@ async function probeBindingQualification(input) {
     probedAt: requiredUtcInstant(input.probedAt, 'probedAt'),
   })
   const qualificationDigest = computeQualificationDigest({
-    actionProfileVersion: input.actionProfileVersion,
+    actionProfileVersion,
     systemContentKey: input.systemContentKey,
     configContentKey: input.configContentKey,
     objectKey: objectName,
@@ -409,6 +460,7 @@ module.exports = {
   buildOrderingKeyNullProbeSql,
   buildOrderingKeyTotalOrderProbeSql,
   postgresTotalOrderProbeStrategy,
+  createProbeStrategyRegistry,
   probeBindingQualification,
   verifyBindingQualification,
   __internals: {

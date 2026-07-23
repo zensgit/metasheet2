@@ -105,6 +105,28 @@ function roundThreeReproductions() {
   // (d) inherited index is NOT a dense own element
   const fakeDense = Object.create([9, 9]); // inherits '0','1' — zero own indices
   rejects(() => assertStrictValue(fakeDense))
+
+  // (e) round-4: EXOTIC array (replaced prototype + overridden map) — previously
+  //     accepted yet serialized as [] and cloned to [] (digest collision with []).
+  const exotic = [1]
+  Object.setPrototypeOf(exotic, Object.create(Array.prototype, { map: { value: () => [] } }))
+  rejects(() => assertStrictValue(exotic))
+  rejects(() => stableCanonicalStringify(exotic))
+  rejects(() => deepCloneFrozenCanonical(exotic))
+
+  // (f) GLOBAL Array.prototype.map pollution must not affect clone/serialize —
+  //     index loops never dispatch instance methods (review P2). This discriminates
+  //     an entry.map() implementation even when the proto check holds.
+  const originalMap = Array.prototype.map
+  try {
+    // eslint-disable-next-line no-extend-native
+    Array.prototype.map = function polluted() { return [] }
+    assert.equal(stableCanonicalStringify([1, 'a']), '[1,"a"]')
+    assert.deepEqual([...deepCloneFrozenCanonical([1, 'a'])], [1, 'a'])
+  } finally {
+    // eslint-disable-next-line no-extend-native
+    Array.prototype.map = originalMap
+  }
 }
 
 function main() {
