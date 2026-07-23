@@ -2,9 +2,12 @@
  * Invite accept — real Postgres concurrency + rollback goldens (PR #4559 P2).
  *
  * Pins applyInviteAcceptanceWrites (the same path /invite/accept uses):
- *   1) Two real PoolClients / connections with a deterministic row-lock barrier:
- *      exactly one apply succeeds, one fails INVITE_LEDGER_CONSUME_FAILED;
- *      two distinct plaintext passwords → only the winner's hash is stored.
+ *   1) Two real backends + deterministic row-lock barrier:
+ *      - capture first waiter PID blocked (lock chain rooted at holder)
+ *      - start second apply, capture a *different* waiter PID also chain-rooted at holder
+ *        (second may wait behind the first waiter, not only directly on holder)
+ *      - release holder → exactly one apply succeeds, one fails INVITE_LEDGER_CONSUME_FAILED
+ *      - two distinct plaintext passwords → only the winner's hash is stored
  *   2) Ledger consume then user UPDATE zero-row → whole txn rolls back;
  *      ledger remains status='pending'.
  *
@@ -13,7 +16,9 @@
  *     applies can RETURNING-succeed → fulfilledCount !== 1 or both passwords match fails
  *   - split ledger consume and user UPDATE into separate transactions → zero-row user
  *     path leaves ledger accepted instead of pending
- *   - remove the FOR UPDATE barrier wait → waitUntilBlockedOnHolder times out (lock never engaged)
+ *   - remove the FOR UPDATE barrier wait → first waiter wait times out
+ *   - start the *second* apply only after holder ROLLBACK → second distinct-waiter wait
+ *     times out (no second backend ever queues on the held row lock) — required red
  *
  * DATABASE_URL-gated + excluded from the no-DB default vitest job (cannot skip-green);
  * whole-file wired into the approval real-DB step in plugin-tests.yml.
@@ -58,22 +63,59 @@ async function withHolder(fn: (holder: Client, holderPid: number) => Promise<voi
   }
 }
 
-/** Poll until a backend is blocked by holderPid (real lock wait, not a sleep race). */
-async function waitUntilBlockedOnHolder(holderPid: number, timeoutMs = 8000): Promise<void> {
+/**
+ * Wait until a backend is in Lock wait whose blocking chain eventually reaches holderPid.
+ * Returns that waiter's backend pid. `excludePids` skips already-observed waiters so a
+ * second call can require a *distinct* queued transaction (not re-detect the first).
+ *
+ * Second waiters may be blocked by the first waiter rather than directly by the holder;
+ * we walk pg_blocking_pids transitively until the chain roots at the holder (or cycles).
+ */
+async function waitForDistinctWaiterChainRootedAtHolder(
+  holderPid: number,
+  excludePids: number[] = [],
+  timeoutMs = 8000,
+): Promise<number> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const r = await query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE state = 'active'
-          AND wait_event_type = 'Lock'
-          AND $1 = ANY(pg_blocking_pids(pid))`,
-      [holderPid],
+    const r = await query<{ pid: number }>(
+      `WITH RECURSIVE lock_edges AS (
+         SELECT a.pid AS waiter,
+                b.blocker
+           FROM pg_stat_activity a
+           CROSS JOIN LATERAL unnest(pg_blocking_pids(a.pid)) AS b(blocker)
+          WHERE a.wait_event_type = 'Lock'
+            AND cardinality(pg_blocking_pids(a.pid)) > 0
+       ),
+       chains AS (
+         SELECT waiter,
+                blocker,
+                ARRAY[waiter, blocker]::int[] AS path
+           FROM lock_edges
+         UNION ALL
+         SELECT c.waiter,
+                e.blocker,
+                c.path || e.blocker
+           FROM chains c
+           JOIN lock_edges e ON e.waiter = c.blocker
+          WHERE NOT (e.blocker = ANY (c.path))
+       )
+       SELECT DISTINCT waiter AS pid
+         FROM chains
+        WHERE $1 = ANY (path)
+          AND NOT (waiter = ANY ($2::int[]))
+        ORDER BY pid
+        LIMIT 1`,
+      [holderPid, excludePids],
     )
-    if ((r.rows[0]?.n ?? 0) >= 1) return
+    const pid = r.rows[0]?.pid
+    if (typeof pid === 'number' && pid > 0) return pid
     await new Promise((res) => setTimeout(res, 20))
   }
   throw new Error(
-    `timed out waiting for a backend blocked by holder pid ${holderPid} (invite row lock never engaged)`,
+    `timed out waiting for a distinct Lock waiter (exclude=${excludePids.join(',') || 'none'}) ` +
+      `whose pg_blocking_pids chain roots at holder pid ${holderPid} ` +
+      `(second apply never queued while holder held the invite row — e.g. started after ROLLBACK)`,
   )
 }
 
@@ -201,19 +243,26 @@ describeIfDatabase('invite accept concurrency + rollback (real DB)', () => {
       expect(locked.rows).toHaveLength(1)
       expect(locked.rows[0].status).toBe('pending')
 
-      // Both applies park on the holder's row lock when they try the conditional ledger UPDATE.
+      // Start first apply; require a real Lock waiter whose chain roots at holder.
       const first = settled(
         applyInviteAcceptanceWrites({ ...baseInput, passwordHash: winHash }),
       )
-      await waitUntilBlockedOnHolder(holderPid)
+      const firstWaiterPid = await waitForDistinctWaiterChainRootedAtHolder(holderPid, [])
+      expect(firstWaiterPid).not.toBe(holderPid)
 
+      // Start second apply *while holder still holds the row*. Require a *different* waiter
+      // PID also chain-rooted at holder (may wait behind firstWaiterPid). A mutation that
+      // defers second until after holder ROLLBACK makes this wait time out → suite red.
       const second = settled(
         applyInviteAcceptanceWrites({ ...baseInput, passwordHash: loseHash }),
       )
-      // Second may already be queued behind the first; wait until at least one waiter is visible
-      // (first is still blocked until we release).
-      await waitUntilBlockedOnHolder(holderPid)
+      const secondWaiterPid = await waitForDistinctWaiterChainRootedAtHolder(holderPid, [
+        firstWaiterPid,
+      ])
+      expect(secondWaiterPid).not.toBe(holderPid)
+      expect(secondWaiterPid).not.toBe(firstWaiterPid)
 
+      // Both backends were observed queued before release.
       // Release the barrier — production path races on status='pending' claim.
       await holder.query('ROLLBACK')
 
