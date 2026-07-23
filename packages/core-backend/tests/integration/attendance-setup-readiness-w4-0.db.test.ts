@@ -47,8 +47,13 @@ import express from 'express'
 import request from 'supertest'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
+import {
+  snapshotAttendanceSettingsRow,
+  restoreAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
 
 const getSharedAttendanceSchedulerMock = vi.fn()
 vi.mock('../../src/services/AttendanceScheduler', () => ({
@@ -124,7 +129,7 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
   const pinned = usePinnedServer()
 
   const integrationIds: string[] = []
-  let originalSettingsRow: { value: string } | null | undefined
+  let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
 
   async function seedUser(userId: string, isActive = true): Promise<void> {
     await pool.query(
@@ -224,21 +229,16 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
     )
   }
 
+  // Snapshot/restore now delegate to the shared tests/utils/attendance-settings-row.ts helper:
+  // it snapshots `value::text` (a bare `value` on a 038-JSONB database is auto-parsed by node-pg
+  // into a JS object — the previous `{ value: string }` typing was a lie there, and only survived
+  // because node-pg re-stringifies plain objects on write), and restore covers the absent-row case
+  // with a DELETE.
   async function snapshotSettings(): Promise<void> {
-    const r = await pool.query<{ value: string }>(`SELECT value FROM system_configs WHERE key = $1`, [SETTINGS_KEY])
-    originalSettingsRow = r.rows[0] ? { value: r.rows[0].value } : null
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
   }
   async function restoreSettings(): Promise<void> {
-    if (originalSettingsRow === undefined) return
-    if (originalSettingsRow === null) {
-      await pool.query(`DELETE FROM system_configs WHERE key = $1`, [SETTINGS_KEY])
-    } else {
-      await pool.query(
-        `INSERT INTO system_configs (key, value) VALUES ($1, $2)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-        [SETTINGS_KEY, originalSettingsRow.value],
-      )
-    }
+    await restoreAttendanceSettingsRow(pool, settingsRowSnapshot)
   }
   async function writeSettingsRow(value: Record<string, unknown>): Promise<void> {
     await pool.query(
@@ -279,6 +279,14 @@ describeIfDatabase('W4-0 GET /api/attendance-admin/setup-readiness (real DB)', (
   beforeEach(() => {
     getSharedAttendanceSchedulerMock.mockReset()
     getSharedAttendanceSchedulerMock.mockReturnValue(null)
+  })
+
+  afterEach(async () => {
+    // Exact-restore after EVERY test, not only afterAll: the §9 G5 tests write real
+    // `system_configs` rows, and a mid-suite failure (or a future writer added between G5 and the
+    // end of this file) must not leave a customized/deleted row for the rest of this file or for
+    // the later suites sharing this Postgres (plugin-tests.yml runs them all against ONE DB).
+    await restoreSettings()
   })
 
   describe('§9 W4-0-G1: org-membership door (two-org forgery + platform-admin bypass)', () => {
