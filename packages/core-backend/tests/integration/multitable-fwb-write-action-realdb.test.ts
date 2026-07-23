@@ -50,7 +50,7 @@ const input = (over: Partial<FwbWriteActionInput> = {}): FwbWriteActionInput => 
   instanceId: `apr_${RUN}`,
   ruleId: `rule_${RUN}`,
   actionKey: `ak_${RUN}_1`,
-  gateSubject: { configurerUserId: 'u1', ruleId: `rule_${RUN}`, sourceTemplateId: 'tpl', targetSheetId: `sheet_${RUN}` },
+  gateSubject: { configurerUserId: 'u1', ruleId: `rule_${RUN}`, actionKey: `ak_${RUN}_1`, sourceTemplateId: 'tpl', targetSheetId: `sheet_${RUN}` },
   mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
   formValues: { f1: 'hello' },
   eventId: `evt_${RUN}_${randomUUID().slice(0, 8)}`,

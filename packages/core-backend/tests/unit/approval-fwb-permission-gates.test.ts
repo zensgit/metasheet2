@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { recheckFwbPermissionGates, type FwbGateChecks } from '../../src/multitable/approval-fwb-permission-gates'
 
-const S = { configurerUserId: 'u1', ruleId: 'r1', sourceTemplateId: 'tpl1', targetSheetId: 'sh1' }
+const S = { configurerUserId: 'u1', ruleId: 'r1', actionKey: 'ak1', sourceTemplateId: 'tpl1', targetSheetId: 'sh1' }
 const allTrue = (over: Partial<Record<keyof FwbGateChecks, boolean | 'throw'>> = {}): FwbGateChecks => {
   const mk = (k: keyof FwbGateChecks) => async () => {
     const v = over[k]

@@ -20,19 +20,107 @@
  * Gate binding (`buildProductionFwbGateChecks`) implements the §11 Q6 four-gate set with the checks the
  * lock names: G1 admin OR existing `canManageSheetAccess` on the target sheet, G2 source template
  * readable (both existing creator legs), G3 target sheet writable, G4 recorded confirmation — with the
- * per-sheet resolution going through `resolveSheetCapabilitiesForUser` as Q6 gate (4) explicitly demands
- * ("权限复核须显式调用目标 sheet 的 resolveSheetCapabilitiesForUser……不能只读一个全局 capability").
+ * per-sheet resolution going through the transaction-local counterpart of
+ * `resolveSheetCapabilitiesForUser` as Q6 gate (4) explicitly demands (never a cached/global read).
  */
 import { createHash } from 'node:crypto'
 
-import { canonicalizeConfig } from './automation-action-idempotency'
+import { canonicalizeConfig, deriveActionKey } from './automation-action-idempotency'
 import type { FwbFieldMapping } from './approval-form-value-mapping'
-import type { FwbGateChecks } from './approval-fwb-permission-gates'
+import type { FwbGateChecks, FwbWriteMode } from './approval-fwb-permission-gates'
+import { enumerateRuleActions } from './automation-rule-fingerprint'
 import { deriveFieldPermissions, isFieldWriteForbidden, type FieldLike } from './permission-derivation'
 import { loadFieldPermissionScopeMap } from './permission-service'
-import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
+import { resolveSheetCapabilitiesForUserOnQuery } from '../services/approval-record-link-txn-auth'
 
 export const FWB_ACTION_TYPE = 'write_approval_form_values'
+
+const V1_TARGET_TYPES = new Set(['text', 'number', 'date', 'select'])
+const NON_BLANK = /[!-~]/
+
+/** Parsed FWB write mode. Absent/`create` stay byte-compatible with FWB-1 configs. */
+export type FwbModeParseResult =
+  | { ok: true; mode: FwbWriteMode }
+  | { ok: false; issue: 'unknown_mode' }
+
+/**
+ * Parse `mode` from a raw action config. Absent / undefined / `'create'` → create; `'update'` → update;
+ * any other value is rejected (unknown modes must never silently fall through to create).
+ */
+export function parseFwbWriteMode(raw: unknown): FwbModeParseResult {
+  if (raw === undefined) return { ok: true, mode: 'create' }
+  if (raw === 'create') return { ok: true, mode: 'create' }
+  if (raw === 'update') return { ok: true, mode: 'update' }
+  return { ok: false, issue: 'unknown_mode' }
+}
+
+export type FwbUpdateConfigIssue =
+  | 'record_link_field_missing'
+  | 'record_link_field_blank'
+
+/**
+ * FWB-2 update config contract: one non-blank `recordLinkFieldId`. Does not look up the template
+ * schema (that needs query access — save/execute do it). Returns the trimmed id or the first issue.
+ */
+export function normalizeFwbUpdateRecordLinkFieldId(raw: unknown):
+  | { ok: true; recordLinkFieldId: string }
+  | { ok: false; issue: FwbUpdateConfigIssue } {
+  if (raw === undefined || raw === null) return { ok: false, issue: 'record_link_field_missing' }
+  if (typeof raw !== 'string') return { ok: false, issue: 'record_link_field_blank' }
+  const recordLinkFieldId = raw.trim()
+  if (!NON_BLANK.test(recordLinkFieldId)) return { ok: false, issue: 'record_link_field_blank' }
+  return { ok: true, recordLinkFieldId }
+}
+
+/**
+ * Extract the exact single `{ recordId: string }` shape from a form_snapshot value (D3: 0 or multi →
+ * reject). Values-free: returns null for any malformed shape (no existence oracle / no free-text id).
+ */
+export function extractExactLinkedRecordId(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const keys = Object.keys(value as Record<string, unknown>)
+  if (keys.length !== 1 || keys[0] !== 'recordId') return null
+  const recordId = (value as { recordId?: unknown }).recordId
+  if (typeof recordId !== 'string') return null
+  const trimmed = recordId.trim()
+  return NON_BLANK.test(trimmed) ? trimmed : null
+}
+
+/** Top-level record-link field props used to derive the FWB-2 write target (never client-supplied). */
+export interface FwbRecordLinkTarget {
+  fieldId: string
+  baseId: string
+  sheetId: string
+}
+
+/**
+ * Locate a top-level `record-link` field in a form schema and return its pinned baseId/sheetId props.
+ * Nested (detail) fields are ignored — v1 record-link is top-level only.
+ */
+export function resolveRecordLinkTargetFromSchema(
+  formSchema: unknown,
+  recordLinkFieldId: string,
+): FwbRecordLinkTarget | null {
+  if (!recordLinkFieldId || !NON_BLANK.test(recordLinkFieldId)) return null
+  const schema = formSchema && typeof formSchema === 'object' && !Array.isArray(formSchema)
+    ? formSchema as { fields?: unknown }
+    : null
+  const fields = Array.isArray(schema?.fields) ? schema.fields : []
+  for (const field of fields) {
+    if (!field || typeof field !== 'object' || Array.isArray(field)) continue
+    const f = field as { id?: unknown; type?: unknown; props?: unknown }
+    if (f.id !== recordLinkFieldId) continue
+    if (f.type !== 'record-link') return null
+    const props = f.props && typeof f.props === 'object' && !Array.isArray(f.props)
+      ? f.props as Record<string, unknown>
+      : null
+    const baseId = typeof props?.baseId === 'string' ? props.baseId.trim() : ''
+    const sheetId = typeof props?.sheetId === 'string' ? props.sheetId.trim() : ''
+    if (!NON_BLANK.test(baseId) || !NON_BLANK.test(sheetId)) return null
+    return { fieldId: recordLinkFieldId, baseId, sheetId }
+  }
+  return null
+}
 
 /**
  * Runtime flag, default OFF. Execution additionally requires the durable-delivery flag (D9/D10: claim +
@@ -43,9 +131,6 @@ export function isFwbWritebackEnabled(env: NodeJS.ProcessEnv = process.env): boo
   return String(env.APPROVAL_FWB_WRITEBACK_ENABLED ?? '').trim().toLowerCase() === 'true'
 }
 
-const V1_TARGET_TYPES = new Set(['text', 'number', 'date', 'select'])
-const NON_BLANK = /[!-~]/
-
 export type FwbConfigStructuralIssue =
   | 'empty_config'
   | 'invalid_mapping_entry'
@@ -53,6 +138,9 @@ export type FwbConfigStructuralIssue =
   | 'select_options_missing'
   | 'duplicate_target'
   | 'confirmation_hash_missing'
+  | 'unknown_mode'
+  | 'record_link_field_missing'
+  | 'record_link_field_blank'
 
 /**
  * Structural (schema-free) validation of a `write_approval_form_values` action config. Mirrors the FE
@@ -100,26 +188,44 @@ export interface FwbConfirmationSubject {
   templateId: string
   /** exact published form schema whose field meanings were explicitly confirmed. */
   sourceTemplateVersionId: string
-  /** FWB-1 target = the rule's OWN sheet (lock D2) — bound into the hash so a sheet move invalidates. */
+  /**
+   * Write target sheet. FWB-1 = the rule's OWN sheet (lock D2). FWB-2 = derived from the pinned
+   * record-link field's props (never client-supplied). Bound into the hash so a rehome/repin invalidates.
+   */
   targetSheetId: string
   /** base containing targetSheetId at confirmation time; a sheet rehome invalidates confirmation. */
   targetBaseId: string
   mappings: readonly FwbFieldMapping[]
+  /**
+   * FWB-2 only. When mode is `'update'`, both `mode` and `recordLinkFieldId` are part of the
+   * confirmation subject. Create-mode subjects OMIT these keys so existing create-mode hashes stay
+   * byte-identical.
+   */
+  mode?: FwbWriteMode
+  recordLinkFieldId?: string
 }
 
 /**
  * §11 Q6 gate-3 confirmation hash: sha256 over the canonicalized (deep key-sorted; array order kept —
  * it is meaning) subject. Deterministic across process restarts and property order.
+ *
+ * Create-mode subjects intentionally omit `mode`/`recordLinkFieldId` so pre-FWB-2 hashes remain
+ * byte-compatible. Update-mode subjects bind mode + recordLinkFieldId + derived target base/sheet.
  */
 export function deriveFwbConfirmationHash(subject: FwbConfirmationSubject): string {
+  const body: Record<string, unknown> = {
+    templateId: subject.templateId,
+    sourceTemplateVersionId: subject.sourceTemplateVersionId,
+    targetBaseId: subject.targetBaseId,
+    targetSheetId: subject.targetSheetId,
+    mappings: subject.mappings,
+  }
+  if (subject.mode === 'update') {
+    body.mode = 'update'
+    body.recordLinkFieldId = subject.recordLinkFieldId ?? ''
+  }
   return createHash('sha256')
-    .update(canonicalizeConfig({
-      templateId: subject.templateId,
-      sourceTemplateVersionId: subject.sourceTemplateVersionId,
-      targetBaseId: subject.targetBaseId,
-      targetSheetId: subject.targetSheetId,
-      mappings: subject.mappings,
-    }))
+    .update(canonicalizeConfig(body))
     .digest('hex')
 }
 
@@ -129,22 +235,55 @@ interface PersistedActionShape {
   config?: unknown
 }
 
-/** Collect every FWB action config on a persisted/incoming rule shape (top-level + actions array). */
+export interface PersistedFwbAction {
+  config: Record<string, unknown>
+  structuralPath: string
+  actionKey: string
+}
+
+/**
+ * Enumerate the effective runtime action set with the executor's exact identity rules. When `actions[]`
+ * is non-empty it wins; the legacy `action_type`/`action_config` pair is only the fallback. This mirrors
+ * `toExecutorRule` and prevents stale legacy columns from participating in save/execute authorization.
+ */
+export function collectPersistedFwbActions(
+  actionType: string | null | undefined,
+  actionConfig: unknown,
+  actions: readonly PersistedActionShape[] | null | undefined,
+): PersistedFwbAction[] {
+  const effectiveActions: Array<{ type: string; config?: unknown }> = []
+  if (Array.isArray(actions) && actions.length > 0) {
+    for (const action of actions) {
+      if (action && typeof action.type === 'string') {
+        effectiveActions.push({ type: action.type, config: action.config })
+      }
+    }
+  } else if (typeof actionType === 'string') {
+    effectiveActions.push({ type: actionType, config: actionConfig })
+  }
+
+  const out: PersistedFwbAction[] = []
+  for (const { action, structuralPath } of enumerateRuleActions(effectiveActions)) {
+    if (action.type !== FWB_ACTION_TYPE || !action.config || typeof action.config !== 'object' || Array.isArray(action.config)) {
+      continue
+    }
+    const config = action.config as Record<string, unknown>
+    out.push({
+      config,
+      structuralPath,
+      actionKey: deriveActionKey({ structuralPath, actionType: FWB_ACTION_TYPE, canonicalConfig: config }),
+    })
+  }
+  return out
+}
+
+/** Collect every effective FWB action config (including branch actions the executor can enumerate). */
 export function collectFwbActionConfigs(
   actionType: string | null | undefined,
   actionConfig: unknown,
   actions: readonly PersistedActionShape[] | null | undefined,
 ): Array<Record<string, unknown>> {
-  const out: Array<Record<string, unknown>> = []
-  if (actionType === FWB_ACTION_TYPE && actionConfig && typeof actionConfig === 'object' && !Array.isArray(actionConfig)) {
-    out.push(actionConfig as Record<string, unknown>)
-  }
-  for (const action of actions ?? []) {
-    if (action && action.type === FWB_ACTION_TYPE && action.config && typeof action.config === 'object' && !Array.isArray(action.config)) {
-      out.push(action.config as Record<string, unknown>)
-    }
-  }
-  return out
+  return collectPersistedFwbActions(actionType, actionConfig, actions).map(({ config }) => config)
 }
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
@@ -172,24 +311,33 @@ function parseFieldProperty(value: unknown): Record<string, unknown> {
   return {}
 }
 
-/** Canonical layer-2/layer-3 create-field gate for every FWB target field. */
+/**
+ * Canonical layer-2/layer-3 field-write gate for every FWB target field.
+ * - create (default): sheet canCreateRecord + create-field permissions (allowCreateOnly).
+ * - update: sheet canEditRecord + update-field permissions (must NOT require create).
+ */
 export async function canUserWriteFwbTargetFields(
   queryFn: QueryFn,
   userId: string,
   sheetId: string,
   targetFieldIds: readonly string[],
+  mode: FwbWriteMode = 'create',
 ): Promise<boolean> {
   if (!userId || targetFieldIds.length === 0) return false
   const uniqueIds = [...new Set(targetFieldIds)]
   const [resolved, fieldScopeMap, fieldResult] = await Promise.all([
-    resolveSheetCapabilitiesForUser(queryFn, sheetId, userId),
+    resolveSheetCapabilitiesForUserOnQuery(queryFn, sheetId, userId),
     loadFieldPermissionScopeMap(queryFn, sheetId, userId),
     queryFn(
       'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
       [sheetId, uniqueIds],
     ),
   ])
-  if (!resolved.capabilities.canCreateRecord) return false
+  if (mode === 'update') {
+    if (!resolved.capabilities.canEditRecord) return false
+  } else if (!resolved.capabilities.canCreateRecord) {
+    return false
+  }
   const fields: FieldLike[] = (fieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
     .filter((row): row is { id: string; type: string; property?: unknown } => (
       typeof row.id === 'string' && typeof row.type === 'string'
@@ -197,7 +345,7 @@ export async function canUserWriteFwbTargetFields(
     .map((row) => ({ id: row.id, type: row.type, property: parseFieldProperty(row.property) }))
   if (fields.length !== uniqueIds.length) return false
   const permissions = deriveFieldPermissions(fields, resolved.capabilities, {
-    allowCreateOnly: true,
+    allowCreateOnly: mode !== 'update',
     fieldScopeMap,
   })
   return uniqueIds.every((fieldId) => !isFieldWriteForbidden(permissions[fieldId]))
@@ -206,99 +354,142 @@ export async function canUserWriteFwbTargetFields(
 /**
  * The REAL §11 Q6 gate set bound at AutomationService construction. Every check is fail-closed at the
  * caller (`recheckFwbPermissionGates` counts a thrown check as failed), so none of these needs its own
- * try/catch. Per-sheet checks go through `resolveSheetCapabilitiesForUser` (Q6 gate 4 — never a global
- * capability read).
+ * try/catch. Per-sheet checks go through `resolveSheetCapabilitiesForUserOnQuery` (Q6 gate 4 — the
+ * caller supplies the current write transaction, never a global/cached capability read).
  */
 export function buildProductionFwbGateChecks(deps: ProductionFwbGateDeps): FwbGateChecks {
+  type ResolvedGateAction = {
+    mode: FwbWriteMode
+    targetSheetId: string
+    mappings: FwbFieldMapping[]
+    confirmationValid: boolean
+  }
+
+  const resolveGateAction = async (ruleId: string, actionKey: string): Promise<ResolvedGateAction | null> => {
+    if (!ruleId || !actionKey) return null
+    const res = await deps.queryFn(
+      `SELECT r.sheet_id, s.base_id, r.trigger_config, r.action_type, r.action_config, r.actions
+         FROM automation_rules r
+         JOIN meta_sheets s ON s.id = r.sheet_id
+        WHERE r.id = $1 AND r.enabled = TRUE`,
+      [ruleId],
+    )
+    const row = res.rows[0] as {
+      sheet_id?: unknown
+      base_id?: unknown
+      trigger_config?: unknown
+      action_type?: unknown
+      action_config?: unknown
+      actions?: unknown
+    } | undefined
+    if (!row || typeof row.sheet_id !== 'string' || typeof row.base_id !== 'string') return null
+
+    const matches = collectPersistedFwbActions(
+      typeof row.action_type === 'string' ? row.action_type : null,
+      parseJsonObject(row.action_config),
+      parseJsonArray(row.actions) as PersistedActionShape[] | null,
+    ).filter((candidate) => candidate.actionKey === actionKey)
+    if (matches.length !== 1) return null
+
+    const config = matches[0].config
+    const modeParsed = parseFwbWriteMode(config.mode)
+    const normalized = normalizeFwbMappings(config.mappings)
+    if (!modeParsed.ok || !normalized.ok) return null
+
+    const triggerConfig = parseJsonObject(row.trigger_config)
+    const templateId = typeof triggerConfig?.templateId === 'string' ? triggerConfig.templateId : ''
+    if (!templateId) return null
+    const templateResult = await deps.queryFn(
+      `SELECT t.active_version_id, v.form_schema
+         FROM approval_templates t
+         JOIN approval_template_versions v ON v.id = t.active_version_id
+        WHERE t.id = $1`,
+      [templateId],
+    )
+    const templateRow = templateResult.rows[0] as {
+      active_version_id?: unknown
+      form_schema?: unknown
+    } | undefined
+    const activeVersionId = templateRow?.active_version_id
+    if (typeof activeVersionId !== 'string' || !activeVersionId) return null
+    const formSchema = parseJsonObject(templateRow?.form_schema)
+      ?? (() => {
+        if (typeof templateRow?.form_schema === 'string') {
+          try {
+            const parsed = JSON.parse(templateRow.form_schema) as unknown
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+          } catch { /* fail closed */ }
+        }
+        return null
+      })()
+
+    let targetBaseId = row.base_id
+    let targetSheetId = row.sheet_id
+    let recordLinkFieldId: string | undefined
+    if (modeParsed.mode === 'update') {
+      const linkField = normalizeFwbUpdateRecordLinkFieldId(config.recordLinkFieldId)
+      if (!linkField.ok) return null
+      const derived = resolveRecordLinkTargetFromSchema(formSchema, linkField.recordLinkFieldId)
+      if (!derived) return null
+      const membership = await deps.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1', [derived.sheetId])
+      const liveBase = (membership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+      if (typeof liveBase !== 'string' || liveBase !== derived.baseId) return null
+      targetBaseId = derived.baseId
+      targetSheetId = derived.sheetId
+      recordLinkFieldId = linkField.recordLinkFieldId
+    }
+
+    const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+      ? config.sourceTemplateVersionId
+      : ''
+    const stored = typeof config.confirmationHash === 'string' ? config.confirmationHash : ''
+    const expected = deriveFwbConfirmationHash({
+      templateId,
+      sourceTemplateVersionId: confirmedVersionId,
+      targetBaseId,
+      targetSheetId,
+      mappings: normalized.mappings,
+      ...(modeParsed.mode === 'update'
+        ? { mode: 'update' as const, recordLinkFieldId }
+        : {}),
+    })
+
+    return {
+      mode: modeParsed.mode,
+      targetSheetId,
+      mappings: normalized.mappings,
+      confirmationValid: confirmedVersionId === activeVersionId && stored === expected,
+    }
+  }
+
   return {
     isAdmin: (userId) => deps.isAdminFn(userId),
     canManageSheetAccess: async (userId, sheetId) => {
-      const resolved = await resolveSheetCapabilitiesForUser(deps.queryFn, sheetId, userId)
+      const resolved = await resolveSheetCapabilitiesForUserOnQuery(deps.queryFn, sheetId, userId)
       return resolved.capabilities.canManageSheetAccess
     },
     canReadTemplate: (userId, templateId) => deps.canReadTemplateFn(userId, templateId),
-    canWriteSheet: async (userId, sheetId) => {
-      // FWB-1 writes = record CREATE on the target sheet (lock §4 mode:'create').
-      const resolved = await resolveSheetCapabilitiesForUser(deps.queryFn, sheetId, userId)
-      return resolved.capabilities.canCreateRecord
+    canWriteSheet: async (userId, sheetId, mode = 'create') => {
+      // FWB-1 = record CREATE (canCreateRecord). FWB-2 = record UPDATE (canEditRecord — not create).
+      const resolved = await resolveSheetCapabilitiesForUserOnQuery(deps.queryFn, sheetId, userId)
+      return mode === 'update'
+        ? resolved.capabilities.canEditRecord
+        : resolved.capabilities.canCreateRecord
     },
-    canWriteTargetFields: async (userId, ruleId, sheetId) => {
-      const res = await deps.queryFn(
-        'SELECT action_type, action_config, actions FROM automation_rules WHERE id = $1 AND sheet_id = $2',
-        [ruleId, sheetId],
+    canWriteTargetFields: async (userId, ruleId, actionKey, sheetId, mode = 'create') => {
+      const action = await resolveGateAction(ruleId, actionKey)
+      if (!action || action.mode !== mode || action.targetSheetId !== sheetId) return false
+      return canUserWriteFwbTargetFields(
+        deps.queryFn,
+        userId,
+        sheetId,
+        action.mappings.map((mapping) => mapping.targetFieldId),
+        mode,
       )
-      const row = res.rows[0] as {
-        action_type?: unknown
-        action_config?: unknown
-        actions?: unknown
-      } | undefined
-      if (!row) return false
-      const configs = collectFwbActionConfigs(
-        typeof row.action_type === 'string' ? row.action_type : null,
-        parseJsonObject(row.action_config),
-        parseJsonArray(row.actions) as PersistedActionShape[] | null,
-      )
-      const targetFieldIds: string[] = []
-      for (const config of configs) {
-        const normalized = normalizeFwbMappings(config.mappings)
-        if (!normalized.ok) return false
-        targetFieldIds.push(...normalized.mappings.map((mapping) => mapping.targetFieldId))
-      }
-      return canUserWriteFwbTargetFields(deps.queryFn, userId, sheetId, targetFieldIds)
     },
-    hasRecordedConfirmation: async (ruleId) => {
-      // G4 re-derivation against the CURRENT persisted rule: every FWB action's stored confirmationHash
-      // must equal the hash of its CURRENT normalized config + the rule's CURRENT sheet/template. A rule
-      // with no FWB action, a broken config, or ANY stale hash → false (fail-closed).
-      const res = await deps.queryFn(
-        `SELECT r.sheet_id, s.base_id, r.trigger_config, r.action_type, r.action_config, r.actions
-           FROM automation_rules r
-           JOIN meta_sheets s ON s.id = r.sheet_id
-          WHERE r.id = $1`,
-        [ruleId],
-      )
-      const row = res.rows[0] as {
-        sheet_id?: unknown
-        base_id?: unknown
-        trigger_config?: unknown
-        action_type?: unknown
-        action_config?: unknown
-        actions?: unknown
-      } | undefined
-      if (!row || typeof row.sheet_id !== 'string' || typeof row.base_id !== 'string') return false
-      const triggerConfig = parseJsonObject(row.trigger_config)
-      const templateId = typeof triggerConfig?.templateId === 'string' ? triggerConfig.templateId : ''
-      if (!templateId) return false
-      const templateResult = await deps.queryFn(
-        'SELECT active_version_id FROM approval_templates WHERE id = $1',
-        [templateId],
-      )
-      const activeVersionId = (templateResult.rows[0] as { active_version_id?: unknown } | undefined)?.active_version_id
-      if (typeof activeVersionId !== 'string' || !activeVersionId) return false
-      const configs = collectFwbActionConfigs(
-        typeof row.action_type === 'string' ? row.action_type : null,
-        parseJsonObject(row.action_config),
-        parseJsonArray(row.actions) as PersistedActionShape[] | null,
-      )
-      if (configs.length === 0) return false
-      for (const config of configs) {
-        const normalized = normalizeFwbMappings(config.mappings)
-        if (!normalized.ok) return false
-        const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
-          ? config.sourceTemplateVersionId
-          : ''
-        if (confirmedVersionId !== activeVersionId) return false
-        const stored = typeof config.confirmationHash === 'string' ? config.confirmationHash : ''
-        const expected = deriveFwbConfirmationHash({
-          templateId,
-          sourceTemplateVersionId: confirmedVersionId,
-          targetBaseId: row.base_id,
-          targetSheetId: row.sheet_id,
-          mappings: normalized.mappings,
-        })
-        if (stored !== expected) return false
-      }
-      return true
+    hasRecordedConfirmation: async (ruleId, actionKey) => {
+      const action = await resolveGateAction(ruleId, actionKey)
+      return action?.confirmationValid === true
     },
   }
 }

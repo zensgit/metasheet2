@@ -54,9 +54,14 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
 /**
  * Config shape for write_approval_form_values (FWB activation).
  *
- * Deliberately NO target sheet/base fields: FWB-1's target is the rule's own sheet (FWB0 lock D2; §11 Q3
- * rejected same-base explicit sheet targets — "显式表目标无表单锚点，会重开 W7 Q2 字面目标之争").
- * Form VALUES never appear here either — the executor reads the immutable `form_snapshot` server-side by
+ * FWB-1 (`mode` absent or `'create'`): target is the rule's own sheet (FWB0 lock D2; §11 Q3 rejected
+ * same-base explicit sheet targets). Deliberately NO client-supplied target sheet/base fields.
+ *
+ * FWB-2 (`mode: 'update'`): target base/sheet are derived server-side from the pinned active template
+ * version's top-level `record-link` field props (D3); `recordLinkFieldId` selects which form field
+ * anchors the existing record. Client-supplied target base/sheet ids are never trusted.
+ *
+ * Form VALUES never appear here — the executor reads the immutable `form_snapshot` server-side by
  * instanceId (lock D4: 表单值永不进事件载荷/动作配置).
  */
 export interface WriteApprovalFormValuesConfig {
@@ -72,10 +77,23 @@ export interface WriteApprovalFormValuesConfig {
   sourceTemplateVersionId: string
   /**
    * §11 Q6 gate-3 explicit confirmation, BOUND to the actual config: the server-derived sha256 of the
-   * canonicalized {templateId, sourceTemplateVersionId, targetSheetId, mappings}. Save rejects a mismatch; execute re-derives from
-   * the persisted row, so any config/target/template change invalidates the confirmation.
+   * canonicalized subject (create: {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId,
+   * mappings}; update additionally binds mode + recordLinkFieldId + derived target). Save rejects a
+   * mismatch; execute re-derives from the persisted row, so any config/target/template change
+   * invalidates the confirmation.
    */
   confirmationHash: string
+  /**
+   * Write mode. Absent or `'create'` = FWB-1 create on the rule sheet (byte-compatible with pre-FWB-2
+   * configs). `'update'` = FWB-2 update of the form-anchored existing record. Any other value is
+   * save-rejected.
+   */
+  mode?: 'create' | 'update'
+  /**
+   * FWB-2 only: id of the top-level `record-link` form field whose value addresses the bound record.
+   * Required (non-blank) when mode is `'update'`; ignored for create.
+   */
+  recordLinkFieldId?: string
 }
 
 /** Config shape for update_record */

@@ -320,6 +320,20 @@ describe('permission-service: row-actions and write-allowed', () => {
     expect(
       ensureRecordWriteAllowed(editorCaps, writeOwnScope, access, 'user_2', 'edit'),
     ).toBe(false)
+    expect(
+      ensureRecordWriteAllowed(editorCaps, writeOwnScope, access, 'user_2', 'edit', new Map(), 'rec_other'),
+    ).toBe(false)
+    expect(
+      ensureRecordWriteAllowed(
+        editorCaps,
+        writeOwnScope,
+        access,
+        'user_2',
+        'edit',
+        new Map([['some_other_record', { recordId: 'some_other_record', accessLevel: 'admin' as const }]]),
+        'rec_other',
+      ),
+    ).toBe(false)
   })
 })
 

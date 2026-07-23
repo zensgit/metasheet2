@@ -42,6 +42,9 @@ import {
   collectFwbActionConfigs,
   deriveFwbConfirmationHash,
   normalizeFwbMappings,
+  normalizeFwbUpdateRecordLinkFieldId,
+  parseFwbWriteMode,
+  resolveRecordLinkTargetFromSchema,
 } from './approval-fwb-activation'
 import { isAdmin as rbacIsAdmin } from '../rbac/service'
 import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
@@ -86,6 +89,10 @@ import {
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import type { ApprovalTaskCreatedEventV1 } from '../services/ApprovalTaskCreatedEvent'
 import { applyTemplateVisibilityFilter, type ApprovalTemplateVisibilityActor } from '../services/ApprovalProductService'
+import {
+  isAdminOnQuery,
+  loadApprovalTemplateVisibilityActorOnQuery,
+} from '../services/approval-record-link-txn-auth'
 import { metrics } from '../metrics/metrics'
 import {
   normalizeDingTalkAutomationActionInputs,
@@ -897,14 +904,25 @@ export class AutomationService {
       }),
       fetchFn,
       notificationService,
-      // FWB activation (§11 Q6): the REAL four-gate set, re-checked at execute time inside the write
-      // transaction. Test seams inject their own; production always binds these.
-      fwbGateChecks: buildProductionFwbGateChecks({
-        queryFn,
-        isAdminFn: (userId) => rbacIsAdmin(userId),
-        canReadTemplateFn: async (userId, templateId) =>
-          (await this.approvalCompletedCreatorAuthorized(userId)) &&
-          (await this.approvalTemplateVisibleToCreator(templateId, userId)),
+      // FWB activation (§11 Q6): construct the REAL four-gate set from the CURRENT write
+      // transaction. Pool/cached permission reads here would reopen a revoke-after-check race.
+      fwbGateChecksFactory: (transactionQuery) => buildProductionFwbGateChecks({
+        queryFn: transactionQuery,
+        isAdminFn: (userId) => isAdminOnQuery(transactionQuery, userId),
+        canReadTemplateFn: async (userId, templateId) => {
+          const actor = await loadApprovalTemplateVisibilityActorOnQuery(transactionQuery, userId)
+          if (!actor || !hasPermissionCode(actor.permissions, 'approvals:read')) return false
+          const conditions = ['id = $1']
+          const params: unknown[] = [templateId]
+          applyTemplateVisibilityFilter(conditions, params, 2, actor)
+          const visible = await transactionQuery(
+            `SELECT id FROM approval_templates
+              WHERE ${conditions.join(' AND ')}
+              LIMIT 1 FOR SHARE`,
+            params,
+          )
+          return visible.rows.length > 0
+        },
       }),
     }
     this.executor = new AutomationExecutor(deps)
@@ -1938,13 +1956,17 @@ export class AutomationService {
    *     the executor additionally hard-gates on the approved outcome, so a broader filter can never
    *     write back a rejection);
    *   - mapping structure via `normalizeFwbMappings` (empty/duplicate/unsupported/select-without-options);
-   *   - target-schema truth: every targetFieldId exists on the RULE's sheet, its meta_fields.type equals
-   *     the declared targetType, and select options are ⊆ the field's configured option values (D6
-   *     closed vocabulary — `select_option_not_on_field`);
+   *   - mode contract: absent/`create` (FWB-1) or `update` (FWB-2); unknown modes rejected;
+   *   - FWB-2: one non-blank `recordLinkFieldId`; target base/sheet DERIVED from the pinned active
+   *     template version's top-level record-link field props (never client-supplied target ids);
+   *   - target-schema truth: every targetFieldId exists on the resolved target sheet, its
+   *     meta_fields.type equals the declared targetType, and select options are ⊆ the field's
+   *     configured option values (D6 closed vocabulary — `select_option_not_on_field`);
    *   - source truth: every formFieldId exists in the currently active template version, and the
    *     action explicitly binds that version; a new publish therefore requires confirmation again;
-   *   - Q6 gate 3: the submitted confirmationHash equals the server-derived hash over
-   *     {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, normalized mappings} — any drift invalidates the confirmation;
+   *   - Q6 gate 3: the submitted confirmationHash equals the server-derived hash over the
+   *     mode-appropriate subject (create hashes omit mode/recordLinkFieldId for byte-compat;
+   *     update binds mode + recordLinkFieldId + derived target) — any drift invalidates;
    *   - Q6 gate 1 at save: the actual creator/modifier/enabler is a platform admin OR holds
    *     canManageSheetAccess on the target sheet; source/target data authority remains bound to the
    *     persisted rule creator and is re-checked at execute time.
@@ -2003,13 +2025,29 @@ export class AutomationService {
           : null)
         .filter((id): id is string => typeof id === 'string' && /[!-~]/.test(id)),
     )
-    const targetSheetResult = await this.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])
-    const targetBaseId = (targetSheetResult.rows[0] as { base_id?: unknown } | undefined)?.base_id
-    if (typeof targetBaseId !== 'string' || !targetBaseId) {
+    const ruleSheetResult = await this.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])
+    const ruleBaseId = (ruleSheetResult.rows[0] as { base_id?: unknown } | undefined)?.base_id
+    if (typeof ruleBaseId !== 'string' || !ruleBaseId) {
       return `${FWB_ACTION_TYPE} target sheet is unavailable`
     }
-    const allTargetFieldIds: string[] = []
+
+    // Per-config resolved targets (create → rule sheet; update → derived record-link sheet).
+    // Authority checks below run against every distinct target.
+    type ResolvedTarget = {
+      targetSheetId: string
+      targetBaseId: string
+      mode: 'create' | 'update'
+      targetFieldIds: string[]
+    }
+    const resolvedTargets: ResolvedTarget[] = []
+
     for (const config of configs) {
+      const modeParsed = parseFwbWriteMode(config.mode)
+      if (!modeParsed.ok) {
+        return `${FWB_ACTION_TYPE} mapping config invalid: unknown_mode`
+      }
+      const mode = modeParsed.mode
+
       const normalized = normalizeFwbMappings(config.mappings)
       if (!normalized.ok) {
         return `${FWB_ACTION_TYPE} mapping config invalid: ${(normalized as { issue: string }).issue}`
@@ -2025,12 +2063,38 @@ export class AutomationService {
       if (confirmedVersionId !== activeVersionId) {
         return `${FWB_ACTION_TYPE} sourceTemplateVersionId must match the active template version`
       }
-      // target-schema truth on the rule's OWN sheet (FWB-1 target, lock D2)
+
+      let targetSheetId = sheetId
+      let targetBaseId = ruleBaseId
+      let recordLinkFieldId: string | undefined
+      if (mode === 'update') {
+        const linkField = normalizeFwbUpdateRecordLinkFieldId(config.recordLinkFieldId)
+        if (linkField.ok === false) {
+          return `${FWB_ACTION_TYPE} mapping config invalid: ${linkField.issue}`
+        }
+        const derived = resolveRecordLinkTargetFromSchema(rawSchema, linkField.recordLinkFieldId)
+        if (!derived) {
+          return `${FWB_ACTION_TYPE} mapping invalid: unknown_record_link_field`
+        }
+        // Membership: pinned sheet must still live in the pinned base (no client-supplied override).
+        const membership = await this.queryFn(
+          'SELECT base_id FROM meta_sheets WHERE id = $1',
+          [derived.sheetId],
+        )
+        const liveBase = (membership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+        if (typeof liveBase !== 'string' || liveBase !== derived.baseId) {
+          return `${FWB_ACTION_TYPE} target sheet is unavailable`
+        }
+        targetSheetId = derived.sheetId
+        targetBaseId = derived.baseId
+        recordLinkFieldId = linkField.recordLinkFieldId
+      }
+
+      // target-schema truth on the resolved target sheet (FWB-1 = rule sheet; FWB-2 = record-link pin)
       const targetIds = normalized.mappings.map((m) => m.targetFieldId)
-      allTargetFieldIds.push(...targetIds)
       const fieldRes = await this.queryFn(
         'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
-        [sheetId, targetIds],
+        [targetSheetId, targetIds],
       )
       const byId = new Map<string, { type: string; property: unknown }>()
       for (const row of fieldRes.rows as Array<{ id: string; type: string; property: unknown }>) {
@@ -2057,46 +2121,60 @@ export class AutomationService {
           }
         }
       }
-      // Q6 gate 3: recorded confirmation = hash over the canonicalized subject
+
+      // Q6 gate 3: recorded confirmation = hash over the canonicalized subject (create omits mode keys)
       const stored = typeof config.confirmationHash === 'string' ? config.confirmationHash : ''
       const expected = deriveFwbConfirmationHash({
         templateId,
         sourceTemplateVersionId: confirmedVersionId,
         targetBaseId,
-        targetSheetId: sheetId,
+        targetSheetId,
         mappings: normalized.mappings,
+        ...(mode === 'update'
+          ? { mode: 'update' as const, recordLinkFieldId }
+          : {}),
       })
       if (stored !== expected) {
         return `${FWB_ACTION_TYPE} actionConfig.confirmationHash must match the server-derived confirmation hash (FWB0 §11 Q6 gate 3)`
       }
+
+      resolvedTargets.push({ targetSheetId, targetBaseId, mode, targetFieldIds: targetIds })
     }
+
     // Q6 gate 1 at save binds the authorization to the actor performing this create/modify/enable,
-    // while the data-plane identity remains the persisted rule creator.
+    // while the data-plane identity remains the persisted rule creator. Checked per resolved target.
     if (!authoringActorId) return `${FWB_ACTION_TYPE} rules require an authenticated authoring actor`
     const authoringAdmin = await rbacIsAdmin(authoringActorId).catch(() => false)
     if (!authoringAdmin) {
-      const resolved = await resolveSheetCapabilitiesForUser(this.queryFn, sheetId, authoringActorId).catch(() => null)
-      if (!resolved || !resolved.capabilities.canManageSheetAccess) {
-        return `${FWB_ACTION_TYPE} rules require the creator, modifier, or enabler to be a platform admin or hold canManageSheetAccess on the target sheet (FWB0 §11 Q6 gate 1)`
+      for (const target of resolvedTargets) {
+        const resolved = await resolveSheetCapabilitiesForUser(this.queryFn, target.targetSheetId, authoringActorId).catch(() => null)
+        if (!resolved || !resolved.capabilities.canManageSheetAccess) {
+          return `${FWB_ACTION_TYPE} rules require the creator, modifier, or enabler to be a platform admin or hold canManageSheetAccess on the target sheet (FWB0 §11 Q6 gate 1)`
+        }
       }
     }
 
-    // Q6 gate 2 and the canonical field-write spine: the persisted creator must still be able to
-    // create a record and write every mapped target field. Hidden, computed, schema-readonly, and
-    // per-subject read-only fields all fail closed through the same helpers used by REST/Yjs writes.
+    // Q6 gate 2 + field-write spine: creator authority is mode-aware (create vs edit) and per target.
     if (!createdBy) return `${FWB_ACTION_TYPE} rules require an authenticated creator`
-    const creatorResolved = await resolveSheetCapabilitiesForUser(this.queryFn, sheetId, createdBy).catch(() => null)
-    if (!creatorResolved?.capabilities.canCreateRecord) {
-      return `${FWB_ACTION_TYPE} rules require the creator to hold target-sheet create-record authority (FWB0 §11 Q6 gate 2)`
-    }
-    const targetFieldsWritable = await canUserWriteFwbTargetFields(
-      this.queryFn,
-      createdBy,
-      sheetId,
-      allTargetFieldIds,
-    ).catch(() => false)
-    if (!targetFieldsWritable) {
-      return `${FWB_ACTION_TYPE} mappings contain one or more target fields that are not writable by the rule creator`
+    for (const target of resolvedTargets) {
+      const creatorResolved = await resolveSheetCapabilitiesForUser(this.queryFn, target.targetSheetId, createdBy).catch(() => null)
+      if (target.mode === 'update') {
+        if (!creatorResolved?.capabilities.canEditRecord) {
+          return `${FWB_ACTION_TYPE} rules require the creator to hold target-sheet edit-record authority (FWB0 §11 Q6 gate 2)`
+        }
+      } else if (!creatorResolved?.capabilities.canCreateRecord) {
+        return `${FWB_ACTION_TYPE} rules require the creator to hold target-sheet create-record authority (FWB0 §11 Q6 gate 2)`
+      }
+      const targetFieldsWritable = await canUserWriteFwbTargetFields(
+        this.queryFn,
+        createdBy,
+        target.targetSheetId,
+        target.targetFieldIds,
+        target.mode,
+      ).catch(() => false)
+      if (!targetFieldsWritable) {
+        return `${FWB_ACTION_TYPE} mappings contain one or more target fields that are not writable by the rule creator`
+      }
     }
     return null
   }

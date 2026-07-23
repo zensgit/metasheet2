@@ -684,6 +684,7 @@ jobs:
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
             tests/integration/multitable-fwb-write-action-realdb.test.ts \
             tests/integration/multitable-fwb-activation-realdb.test.ts \
+            tests/integration/multitable-fwb-update-activation-realdb.test.ts \
             tests/integration/approval-attachment-gc-realdb.test.ts \
             tests/integration/approval-attachment-bind-reconcile-realdb.test.ts \
             tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts \
