@@ -298,7 +298,7 @@ export const ATTENDANCE_PUNCH_POLICY_CLOSED_SET_DEFAULT = {
   minPunchIntervalMinutes: 1,
 }
 
-/** §3.1 closed-set membership registry, IN + OUT = all 24 DEFAULT_SETTINGS top-level keys. §9
+/** §3.1 closed-set membership registry, IN + OUT = all DEFAULT_SETTINGS top-level keys. §9
  *  W4-0-G5's contract test parses the LIVE plugin source text (not a second hardcoded mirror of
  *  this list) and asserts IN ∪ OUT equals the live key set — a new settings key nobody classified
  *  reds that test instead of silently being swept into (or excluded from) the ④ comparison. */
@@ -330,6 +330,8 @@ export const ATTENDANCE_PUNCH_POLICY_CLOSED_SET_KEYS_OUT = [
   'attendanceResultEditPolicy',
   'autoShiftMatching',
   'reportSync',
+  // Work-date attribution affects accounting, not the org-inherited punch-method posture.
+  'workDateAttribution',
 ] as const
 
 function deepEqualJsonValue(a: unknown, b: unknown): boolean {

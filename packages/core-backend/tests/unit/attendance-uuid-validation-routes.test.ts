@@ -1481,6 +1481,8 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM attendance_holidays')) return []
       if (sql.includes('FROM attendance_shift_assignments')) return []
       if (sql.includes('FROM attendance_rotation_assignments')) return []
+      if (sql.includes('FROM attendance_records') && sql.includes('last_out_at IS NULL')) return []
+      if (sql.includes('FROM attendance_requests') && sql.includes("request_type = 'overtime'")) return []
       if (sql.includes('FROM attendance_records ar')) return []
       if (sql.includes('INSERT INTO attendance_records')) {
         return [{
@@ -1731,6 +1733,8 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM attendance_holidays')) return []
       if (sql.includes('FROM attendance_shift_assignments')) return []
       if (sql.includes('FROM attendance_rotation_assignments')) return []
+      if (sql.includes('FROM attendance_records') && sql.includes('last_out_at IS NULL')) return []
+      if (sql.includes('FROM attendance_requests') && sql.includes("request_type = 'overtime'")) return []
       if (sql.includes('FROM attendance_records ar')) return []
       if (sql.includes('FROM attendance_records WHERE user_id = $1')) return []
       if (sql.includes('INSERT INTO attendance_records')) {
