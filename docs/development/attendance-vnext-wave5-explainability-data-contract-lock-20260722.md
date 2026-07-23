@@ -1,7 +1,11 @@
 # 考勤 vNext Wave 5 · 结果解释（explainability）数据合同 design-lock — 2026-07-22
 
-> **Status: PROPOSED（未生效——owner ratify 为唯一生效凭据；ratify 前 W5-0 及一切 Wave 5 runtime
-> 不得开工）。**
+> **Status: RATIFIED（受托代行 ratify 2026-07-22——凭据 = PR #4546 comment-5053163506，其中逐字
+> 记录 owner 会话委托出处（「请帮我处理」）与 OD-W5-1..10 逐项裁决（受托保守原则）；owner 保留
+> 对任何一项的改判回收权，改判按本线 errata 形制执行。W5-0 自本 PR 合入后的 main 依 §9/§10-⑤
+> 开工。）**
+> （被取代的 PROPOSED 状态行保留为历史：）
+> ~~Status: PROPOSED（未生效——owner ratify 为唯一生效凭据；ratify 前 W5-0 及一切 Wave 5 runtime 不得开工）。~~
 > 本锁是章程 §15「Wave 5 explainability = DATA-CONTRACT-GATED」这道门的解锁提案：章程台账行逐字为
 > 「| Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |」（L554），
 > W4 锁 header 亦裁定「Wave 5（explainability）维持 DATA-CONTRACT-GATED，不与 Wave 4 并开」（W4 锁
@@ -450,7 +454,8 @@ SQL values-free 断言同型）。
   白名单投影**，是否需要独立 trace 端点承载（避免前端拿整包 DTO 自行挑字段的 R3 风险）在 W5-0
   设计内解决，倾向以服务端投影为准（R3 by construction）。
 
-## 8. OD 待裁项（全部呈 owner，本锁不自决；无 recommended 标记——W4 §8-附 P2-5b 教训）
+## 8. OD 待裁项（受托代行裁决 2026-07-22 已全部落定——1(a)/2(a)/3(a)/4(a)/5(a)/6(b)/7(b)/8(a)/9(b)/10(a)，
+凭据与逐项理由 = PR #4546 comment-5053163506；owner 可改判回收。原呈审表保留如下）
 
 | OD | 裁量点 | 选项与后果（中性陈述） |
 |---|---|---|
