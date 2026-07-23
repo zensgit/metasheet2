@@ -42827,8 +42827,13 @@ module.exports = {
          WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'`,
         [orgId, userId, leaveTypeCode]
       )
+      // W5-0 (OD-W5-9=(a), design-lock 2026-07-22 §2/§7): project `overtime_source` — the column has
+      // been on `attendance_leave_balances` since v1-1b (`zzzz20260624160000`), but this SELECT never
+      // read it, so per-source bank provenance was invisible even to admin. Purely additive: legacy
+      // NULLs pass through unchanged (no per-source lot is fabricated a value); every existing key
+      // above is untouched (compat regression: `attendance-plugin.test.ts` ④/年假 L5a cases).
       const activeLots = await db.query(
-        `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status, granted_at, expires_at
+        `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status, granted_at, expires_at, overtime_source
          FROM attendance_leave_balances
          WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'
          ORDER BY expires_at ASC NULLS LAST, granted_at ASC, id ASC`,
