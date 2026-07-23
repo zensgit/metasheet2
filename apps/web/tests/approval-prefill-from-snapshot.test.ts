@@ -55,6 +55,28 @@ describe('approvals/prefillFromSnapshot — UX B2-13 (再次提交)', () => {
     expect(prefillFromSnapshot(formSchema, snapshot)).toEqual({})
   })
 
+  it('always omits record-link on resubmit prefill (snapshots have no pin metadata)', () => {
+    // Discriminating: a shape-valid { recordId } still must NOT prefill, even when the current
+    // schema still has a record-link field (we cannot prove the prior instance targeted the
+    // same baseId+sheetId pin from form_snapshot alone).
+    const formSchema = schema([
+      { id: 'reason', type: 'text', label: '事由' },
+      {
+        id: 'linked',
+        type: 'record-link',
+        label: '关联记录',
+        props: { baseId: 'base-a', sheetId: 'sheet-a' },
+      },
+    ])
+    const snapshot = {
+      reason: '再次提交',
+      linked: { recordId: 'rec-from-prior-instance' },
+    }
+
+    expect(prefillFromSnapshot(formSchema, snapshot)).toEqual({ reason: '再次提交' })
+    expect(prefillFromSnapshot(formSchema, snapshot)).not.toHaveProperty('linked')
+  })
+
   it('prefills detail rows verbatim when the detail field still exists as type "detail"', () => {
     const formSchema = schema([
       {

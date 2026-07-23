@@ -977,7 +977,55 @@ export async function isRecordReadDeniedForUser(
 ): Promise<boolean> {
   if (!sheetId || !recordId) return true
   if (!(await loadRowLevelReadDenyEnabled(query, sheetId))) return false
-  return (await loadDeniedRecordIds(query, sheetId, userId)).has(recordId)
+  // Bound the deny evaluation to the single requested record (no full-sheet scan).
+  return (await loadDeniedRecordIds(query, sheetId, userId, [recordId])).has(recordId)
+}
+
+/**
+ * FWB-0 Layer 2 (record-link submit no-oracle): strict flag lookup that does NOT swallow
+ * unexpected DB errors into `false` (unlike `loadRowLevelReadDenyEnabled`, which is inert on any
+ * error for generic multitable surfaces). Only pre-feature absence (undefined table/column) is
+ * treated as flag-off; every other query failure rethrows so the submit path can fail closed.
+ */
+export async function loadRowLevelReadDenyEnabledStrict(
+  query: QueryFn,
+  sheetId: string,
+): Promise<boolean> {
+  if (!sheetId) return false
+  try {
+    const r = await query(
+      'SELECT row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = $1',
+      [sheetId],
+    )
+    const row = r.rows[0] as { enabled?: boolean; base_id?: string } | undefined
+    if (isApprovalProjectionBaseId(row?.base_id)) return true
+    return row?.enabled === true
+  } catch (err) {
+    if (
+      isUndefinedTableError(err, 'meta_sheets')
+      || isUndefinedColumnError(err, 'row_level_read_permissions_enabled')
+    ) {
+      return false
+    }
+    throw err
+  }
+}
+
+/**
+ * FWB-0 Layer 2 strict record-read deny for approval form submit. Flag lookup uses the strict
+ * resolver (DB errors propagate). Callers that need a boolean readable check should catch and
+ * treat any throw as "not readable" (no existence oracle).
+ */
+export async function isRecordReadDeniedForUserStrict(
+  query: QueryFn,
+  sheetId: string,
+  recordId: string,
+  userId: string,
+): Promise<boolean> {
+  if (!sheetId || !recordId) return true
+  if (!(await loadRowLevelReadDenyEnabledStrict(query, sheetId))) return false
+  // Bound the deny evaluation to the single requested record (no full-sheet scan).
+  return (await loadDeniedRecordIds(query, sheetId, userId, [recordId])).has(recordId)
 }
 
 /**
@@ -992,8 +1040,13 @@ export async function loadApprovalProjectionDeniedRecordIds(
   query: QueryFn,
   sheetId: string,
   userId: string,
+  recordIds?: readonly string[],
 ): Promise<{ isProjection: boolean; denied: Set<string> }> {
   if (!sheetId) return { isProjection: false, denied: new Set() }
+  const requested = Array.isArray(recordIds)
+    ? Array.from(new Set(recordIds.map((id) => id.trim()).filter(Boolean)))
+    : null
+  if (requested && requested.length === 0) return { isProjection: false, denied: new Set() }
   const projectionIds = await loadApprovalProjectionSheetIds(query, [sheetId])
   if (!projectionIds.has(sheetId)) return { isProjection: false, denied: new Set() }
   // COALESCE closes the SQL three-valued-logic hole: a row with a MISSING participant field
@@ -1003,15 +1056,25 @@ export async function loadApprovalProjectionDeniedRecordIds(
   // row for the same reason ('' is matched against COALESCE'd '' explicitly guarded out below).
   const normalizedUserId = typeof userId === 'string' ? userId.trim() : ''
   if (!normalizedUserId) {
-    const all = await query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])
+    const all = requested
+      ? await query('SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])', [sheetId, requested])
+      : await query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])
     return { isProjection: true, denied: new Set((all.rows as Array<{ id: string }>).map((row) => row.id)) }
   }
-  const result = await query(
-    `SELECT id FROM meta_records
-      WHERE sheet_id = $1
-        AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
-    [sheetId, normalizedUserId],
-  )
+  const result = requested
+    ? await query(
+      `SELECT id FROM meta_records
+        WHERE sheet_id = $1
+          AND id = ANY($3::text[])
+          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+      [sheetId, normalizedUserId, requested],
+    )
+    : await query(
+      `SELECT id FROM meta_records
+        WHERE sheet_id = $1
+          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+      [sheetId, normalizedUserId],
+    )
   return { isProjection: true, denied: new Set((result.rows as Array<{ id: string }>).map((row) => row.id)) }
 }
 
@@ -1093,7 +1156,7 @@ export async function loadRecordPermissionScopeMap(
     }
     // T36-1 (Plan A): on a projection sheet, non-participant rows get a synthetic 'none' scope
     // (DENY-WINS, same shape as rule-deny). Admins bypass at the call sites, unchanged.
-    const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId)
+    const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId, recordIds)
     if (projection.isProjection) {
       const requested = new Set(recordIds)
       for (const rid of projection.denied) {
@@ -1117,36 +1180,81 @@ export async function loadRecordPermissionScopeMap(
  * primitive for list/count read surfaces. Caller MUST first gate on `loadRowLevelReadDenyEnabled(sheetId)`
  * AND skip for admins (admins bypass record-level read, mirroring requireRecordReadable) — this returns
  * the raw denied set unconditionally.
+ *
+ * Optional `recordIds` bounds grant-deny SQL + conditional-rule evaluation + projection filtering to
+ * the requested ids only. Approval record-link batch projection MUST pass the linked record set so a
+ * one-item list page never scans an unrelated million-row sheet. Omit `recordIds` for full-sheet
+ * list/export surfaces that need the complete deny set.
  */
-export async function loadDeniedRecordIds(query: QueryFn, sheetId: string, userId: string): Promise<Set<string>> {
+export async function loadDeniedRecordIds(
+  query: QueryFn,
+  sheetId: string,
+  userId: string,
+  recordIds?: readonly string[],
+): Promise<Set<string>> {
   if (!userId || !sheetId) return new Set<string>()
+  const requested = Array.isArray(recordIds)
+    ? Array.from(new Set(
+      recordIds
+        .map((id) => (typeof id === 'string' ? id.trim() : ''))
+        .filter(Boolean),
+    ))
+    : null
+  if (requested && requested.length === 0) return new Set<string>()
+
   const denied = new Set<string>()
   // (a) grant-deny: explicit 'none' record_permissions via any of the actor's subjects.
   try {
-    const result = await query(
-      `SELECT DISTINCT rp.record_id
-       FROM record_permissions rp
-       WHERE rp.sheet_id = $2
-         AND rp.access_level = 'none'
-         AND (
-           (rp.subject_type = 'user' AND rp.subject_id = $1)
-           OR (
-             rp.subject_type = 'member-group'
-             AND EXISTS (
-               SELECT 1 FROM platform_member_group_members pgm
-               WHERE pgm.user_id = $1 AND pgm.group_id::text = rp.subject_id
+    const result = requested
+      ? await query(
+        `SELECT DISTINCT rp.record_id
+         FROM record_permissions rp
+         WHERE rp.sheet_id = $2
+           AND rp.record_id = ANY($3::text[])
+           AND rp.access_level = 'none'
+           AND (
+             (rp.subject_type = 'user' AND rp.subject_id = $1)
+             OR (
+               rp.subject_type = 'member-group'
+               AND EXISTS (
+                 SELECT 1 FROM platform_member_group_members pgm
+                 WHERE pgm.user_id = $1 AND pgm.group_id::text = rp.subject_id
+               )
              )
-           )
-           OR (
-             rp.subject_type = 'role'
-             AND EXISTS (
-               SELECT 1 FROM user_roles ur
-               WHERE ur.user_id = $1 AND ur.role_id = rp.subject_id
+             OR (
+               rp.subject_type = 'role'
+               AND EXISTS (
+                 SELECT 1 FROM user_roles ur
+                 WHERE ur.user_id = $1 AND ur.role_id = rp.subject_id
+               )
              )
-           )
-         )`,
-      [userId, sheetId],
-    )
+           )`,
+        [userId, sheetId, requested],
+      )
+      : await query(
+        `SELECT DISTINCT rp.record_id
+         FROM record_permissions rp
+         WHERE rp.sheet_id = $2
+           AND rp.access_level = 'none'
+           AND (
+             (rp.subject_type = 'user' AND rp.subject_id = $1)
+             OR (
+               rp.subject_type = 'member-group'
+               AND EXISTS (
+                 SELECT 1 FROM platform_member_group_members pgm
+                 WHERE pgm.user_id = $1 AND pgm.group_id::text = rp.subject_id
+               )
+             )
+             OR (
+               rp.subject_type = 'role'
+               AND EXISTS (
+                 SELECT 1 FROM user_roles ur
+                 WHERE ur.user_id = $1 AND ur.role_id = rp.subject_id
+               )
+             )
+           )`,
+        [userId, sheetId],
+      )
     for (const row of result.rows as Array<{ record_id?: unknown }>) {
       if (typeof row.record_id === 'string' && row.record_id) denied.add(row.record_id)
     }
@@ -1161,13 +1269,18 @@ export async function loadDeniedRecordIds(query: QueryFn, sheetId: string, userI
   // (b) rule-deny (2b): predicate rules evaluated against each LIVE record's data. Unioned in — a
   // rule-denied record is masked/excluded EXACTLY like a grant-denied one by every surface that
   // consumes this set (admin-bypass + no-cardinality-leak inherited from #18). DENY-WINS by union.
-  for (const id of await loadRuleDeniedRecordIds(query, sheetId)) denied.add(id)
+  // When `recordIds` is provided, evaluation is bounded to those rows (no full-sheet scan).
+  for (const id of await loadRuleDeniedRecordIds(query, sheetId, requested ?? undefined)) denied.add(id)
   // (c) T36-1 projection per-row (Plan A): on a projection sheet, every row where the actor is
   // neither requester nor terminal decider is denied — unioned in like (a)/(b), so all W1-2-locked
   // consumers (records:read routes, export, history) narrow participants to their own rows.
-  const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId)
+  const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId, requested ?? undefined)
   if (projection.isProjection) {
-    for (const id of projection.denied) denied.add(id)
+    const requestedSet = requested ? new Set(requested) : null
+    for (const id of projection.denied) {
+      if (requestedSet && !requestedSet.has(id)) continue
+      denied.add(id)
+    }
   }
   return denied
 }

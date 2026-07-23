@@ -124,16 +124,21 @@ export function approvalFormulaInsertOptions(formSchema: FormSchema): FormulaIns
   const options: FormulaInsertOption[] = []
   for (const field of formSchema.fields) {
     if (!field.id) continue
-    options.push({ token: `{${field.id}}`, label: field.label || field.id })
+    // record-link is not formula-eligible (server type-unsupported / v1 fail-closed).
+    if (field.type === 'record-link') continue
     if (field.type === 'detail') {
+      // Detail only contributes aggregate column tokens, not a bare top-level `{detailId}`.
       for (const column of field.columns ?? []) {
         if (!column.id) continue
+        if (column.type === 'record-link') continue
         options.push({
           token: `{${field.id}.${column.id}}`,
           label: `${field.label || field.id}.${column.label || column.id}`,
         })
       }
+      continue
     }
+    options.push({ token: `{${field.id}}`, label: field.label || field.id })
   }
   return options
 }
@@ -267,6 +272,10 @@ export function validateConditionEdits(
 ): string[] {
   const errors: string[] = []
   const fieldIds = new Set(formSchema.fields.map((field) => field.id))
+  // FWB-0 Layer 2 P1-2: record-link object values must not enter simple conditions/visibility (v1).
+  const recordLinkFieldIds = new Set(
+    formSchema.fields.filter((field) => field.type === 'record-link').map((field) => field.id),
+  )
   // Outgoing edge keys per node key (edges whose `source` is that node) — the legal targets for a
   // branch/default edge of that condition node.
   const outgoingByNode = new Map<string, Set<string>>()
@@ -284,6 +293,12 @@ export function validateConditionEdits(
           errors.push(`${formulaLabel} 需要填写`)
         }
         errors.push(...validateFormulaReferences(branch.formulaExpression, formSchema, formulaLabel))
+        for (const fieldId of recordLinkFieldIds) {
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(branch.formulaExpression)) {
+            errors.push(`${formulaLabel} 不能引用关联记录字段 ${fieldId}（v1）`)
+          }
+        }
         return
       }
       // A rules-mode branch with ZERO rules is never legitimate: the runtime evaluates
@@ -301,6 +316,8 @@ export function validateConditionEdits(
           errors.push(`${ruleLabel} 需要选择字段`)
         } else if (!fieldIds.has(fieldId)) {
           errors.push(`${ruleLabel} 引用的字段 ${fieldId} 不存在`)
+        } else if (recordLinkFieldIds.has(fieldId)) {
+          errors.push(`${ruleLabel} 不能引用关联记录字段（v1）`)
         }
         if (!isConditionRuleOperator(rule.operator)) {
           errors.push(`${ruleLabel} 的运算符无效`)

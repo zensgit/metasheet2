@@ -47,19 +47,22 @@ const detailField: FormField = {
 }
 
 describe('detailField — leaf-type guard', () => {
-  it('exposes exactly the 8 leaf types (no detail, no attachment)', () => {
+  it('exposes exactly the 8 leaf types (no detail, no attachment, no record-link)', () => {
     expect([...DETAIL_LEAF_FIELD_TYPES].sort()).toEqual(
       ['date', 'datetime', 'multi-select', 'number', 'select', 'text', 'textarea', 'user'].sort(),
     )
     expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('detail')
     expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('attachment')
+    // FWB-0 Layer 2: record-link is top-level only (mirrors backend DETAIL_LEAF exclusion).
+    expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('record-link')
   })
 
-  it('isDetailLeafFieldType rejects detail/attachment, accepts leaves', () => {
+  it('isDetailLeafFieldType rejects detail/attachment/record-link, accepts leaves', () => {
     expect(isDetailLeafFieldType('text')).toBe(true)
     expect(isDetailLeafFieldType('multi-select')).toBe(true)
     expect(isDetailLeafFieldType('detail')).toBe(false)
     expect(isDetailLeafFieldType('attachment')).toBe(false)
+    expect(isDetailLeafFieldType('record-link')).toBe(false)
   })
 
   it('isDetailField only true for type detail', () => {

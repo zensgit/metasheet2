@@ -258,7 +258,13 @@
               <el-input v-model="field.label" :disabled="readOnly" />
             </el-form-item>
             <el-form-item label="类型">
-              <el-select v-model="field.type" :disabled="readOnly" class="ms-w-100pct">
+              <el-select
+                v-model="field.type"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                data-testid="approval-field-type"
+                @change="invalidateStaleRecordLinkDependencies(field)"
+              >
                 <el-option label="文本" value="text" />
                 <el-option label="多行文本" value="textarea" />
                 <el-option label="数字" value="number" />
@@ -268,6 +274,7 @@
                 <el-option label="多选" value="multi-select" />
                 <el-option label="用户" value="user" />
                 <el-option label="明细（子表单）" value="detail" />
+                <el-option label="关联记录" value="record-link" />
               </el-select>
             </el-form-item>
             <el-form-item label="占位文本">
@@ -276,6 +283,76 @@
             <el-form-item label="是否必填">
               <el-checkbox v-model="field.required" :disabled="readOnly">必填</el-checkbox>
             </el-form-item>
+            <el-form-item
+              v-if="field.type === 'record-link'"
+              label="关联目标"
+              class="template-authoring__wide"
+              data-testid="approval-record-link-config"
+            >
+              <div
+                v-if="recordLinkCatalogError"
+                class="template-authoring__hint template-authoring__record-link-catalog-error"
+                data-testid="approval-record-link-catalog-error"
+              >
+                <span>{{ recordLinkCatalogError }}</span>
+                <el-button
+                  type="primary"
+                  link
+                  size="small"
+                  :loading="recordLinkCatalogLoading"
+                  data-testid="approval-record-link-catalog-retry"
+                  @click="retryRecordLinkCatalog"
+                >
+                  重试
+                </el-button>
+              </div>
+              <div class="template-authoring__grid">
+                <el-form-item label="目标空间">
+                  <el-select
+                    :model-value="field.recordLinkBaseId || undefined"
+                    :disabled="readOnly || recordLinkCatalogLoading"
+                    filterable
+                    clearable
+                    class="ms-w-100pct"
+                    placeholder="请选择目标空间"
+                    data-testid="approval-record-link-base-select"
+                    @update:model-value="(value: string | null | undefined) => onRecordLinkBaseChange(field, value)"
+                    @visible-change="(open: boolean) => { if (open && !recordLinkCatalogLoaded) retryRecordLinkCatalog() }"
+                  >
+                    <el-option
+                      v-for="opt in recordLinkBaseOptionsFor(field)"
+                      :key="opt.value"
+                      :label="opt.label"
+                      :value="opt.value"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="目标表">
+                  <el-select
+                    :model-value="field.recordLinkSheetId || undefined"
+                    :disabled="readOnly || recordLinkCatalogLoading || !field.recordLinkBaseId.trim()"
+                    filterable
+                    clearable
+                    class="ms-w-100pct"
+                    placeholder="请选择目标表"
+                    data-testid="approval-record-link-sheet-select"
+                    @update:model-value="(value: string | null | undefined) => onRecordLinkSheetChange(field, value)"
+                    @visible-change="(open: boolean) => { if (open && !recordLinkCatalogLoaded) retryRecordLinkCatalog() }"
+                  >
+                    <el-option
+                      v-for="opt in recordLinkSheetOptionsFor(field)"
+                      :key="opt.value"
+                      :label="opt.label"
+                      :value="opt.value"
+                    />
+                  </el-select>
+                </el-form-item>
+              </div>
+              <div class="template-authoring__hint">
+                仅可选择目标表中的一条记录。提交时会验证发起人是否可查看所选记录；不可用的历史目标需重新选择。
+              </div>
+            </el-form-item>
+
             <el-form-item
               v-if="field.type === 'select' || field.type === 'multi-select'"
               label="选项"
@@ -1380,6 +1457,12 @@ import type {
 } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 import { assigneeSourceSummary } from '../../approvals/assigneeSource'
+import {
+  buildRecordLinkBaseSelectOptions,
+  buildRecordLinkSheetSelectOptions,
+  type RecordLinkNamedOption,
+} from '../../approvals/recordLinkField'
+import { multitableClient } from '../../multitable/api/client'
 
 const route = useRoute()
 const router = useRouter()
@@ -1398,6 +1481,96 @@ const unsupportedReason = ref<string | null>(null)
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+
+// FWB-0 Layer 2: typed base/sheet catalog for record-link authoring (IDs persist on the draft,
+// never shown as ordinary free-text labels). Loaded via MultitableApiClient listBases/listSheets.
+const recordLinkBases = ref<RecordLinkNamedOption[]>([])
+const recordLinkSheets = ref<Array<RecordLinkNamedOption & { baseId?: string | null }>>([])
+const recordLinkCatalogLoading = ref(false)
+/** True only after a successful catalog fetch — failure must not sticky-block retry. */
+const recordLinkCatalogLoaded = ref(false)
+/** Values-free catalog failure message (empty when ok / idle). */
+const recordLinkCatalogError = ref('')
+
+async function ensureRecordLinkCatalog(force = false): Promise<void> {
+  if (!force && (recordLinkCatalogLoaded.value || recordLinkCatalogLoading.value)) return
+  if (force && recordLinkCatalogLoading.value) return
+  recordLinkCatalogLoading.value = true
+  recordLinkCatalogError.value = ''
+  try {
+    const [basesRes, sheetsRes] = await Promise.all([
+      multitableClient.listBases(),
+      multitableClient.listSheets(),
+    ])
+    recordLinkBases.value = (basesRes.bases ?? []).map((b) => ({
+      id: b.id,
+      name: b.name ?? '',
+    }))
+    recordLinkSheets.value = (sheetsRes.sheets ?? []).map((s) => ({
+      id: s.id,
+      name: s.name ?? '',
+      baseId: s.baseId ?? null,
+    }))
+    recordLinkCatalogLoaded.value = true
+    recordLinkCatalogError.value = ''
+  } catch {
+    // Do NOT set loaded=true — failure must remain retriable for the page lifetime.
+    recordLinkBases.value = []
+    recordLinkSheets.value = []
+    recordLinkCatalogLoaded.value = false
+    recordLinkCatalogError.value = '关联表目录加载失败，请重试'
+  } finally {
+    recordLinkCatalogLoading.value = false
+  }
+}
+
+function retryRecordLinkCatalog(): void {
+  void ensureRecordLinkCatalog(true)
+}
+
+const recordLinkCatalogValidation = computed(() => ({
+  loaded: recordLinkCatalogLoaded.value,
+  sheets: recordLinkSheets.value,
+}))
+
+function recordLinkBaseOptionsFor(field: FieldAuthoringDraft) {
+  return buildRecordLinkBaseSelectOptions(recordLinkBases.value, field.recordLinkBaseId)
+}
+
+function recordLinkSheetOptionsFor(field: FieldAuthoringDraft) {
+  return buildRecordLinkSheetSelectOptions(
+    recordLinkSheets.value,
+    field.recordLinkBaseId,
+    field.recordLinkSheetId,
+  )
+}
+
+function onRecordLinkBaseChange(field: FieldAuthoringDraft, value: string | null | undefined): void {
+  const next = typeof value === 'string' ? value.trim() : ''
+  field.recordLinkBaseId = next
+  // Changing base invalidates a sheet pin that no longer belongs to the new base.
+  if (field.recordLinkSheetId.trim()) {
+    const sheetStillValid = recordLinkSheets.value.some(
+      (s) => s.id === field.recordLinkSheetId.trim()
+        && (typeof s.baseId === 'string' ? s.baseId.trim() : '') === next,
+    )
+    if (!sheetStillValid) field.recordLinkSheetId = ''
+  }
+}
+
+function onRecordLinkSheetChange(field: FieldAuthoringDraft, value: string | null | undefined): void {
+  field.recordLinkSheetId = typeof value === 'string' ? value.trim() : ''
+}
+
+/** Load the multitable catalog whenever the draft contains a record-link field. */
+watch(
+  () => draft.value.fields.some((field) => field.type === 'record-link'),
+  (hasRecordLink) => {
+    if (hasRecordLink) void ensureRecordLinkCatalog()
+  },
+  { immediate: true },
+)
+
 type AuthoringSectionId = 'basic' | 'fields' | 'flow' | 'review'
 const authoringSections: Array<{
   id: AuthoringSectionId
@@ -1636,10 +1809,14 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
   return draft.value.conditionEdits?.[nodeKey]
 }
 
-// Field options for a rule's fieldId picker — the draft's authorable form fields (id + label).
+// Field options for a rule's fieldId picker — exclude record-link/detail (server v1 reject).
 const conditionFieldOptions = computed(() =>
   draft.value.fields
-    .filter((field) => field.id.trim())
+    .filter((field) => (
+      field.id.trim()
+      && field.type !== 'record-link'
+      && field.type !== 'detail'
+    ))
     .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
 const conditionFormulaInsertOptions = computed(() =>
@@ -2062,7 +2239,11 @@ interface PublishChecklistItem {
   ok: boolean
   detail?: string
 }
-const publishFormFieldIssues = computed<string[]>(() => validateTemplateFormFields(draft.value, unsupportedReason.value))
+const publishFormFieldIssues = computed<string[]>(() => validateTemplateFormFields(
+  draft.value,
+  unsupportedReason.value,
+  recordLinkCatalogValidation.value,
+))
 // "审批流程" bundles the step/graph-edit errors with the canvas topology preview (graphValidityIssues)
 // — two independent validators that both gate a successful publish server-side.
 const publishApprovalFlowIssues = computed<string[]>(() => [
@@ -2428,10 +2609,44 @@ function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
 }
 
 // Visibility-rule depends-on options: other fields that have an id (excludes self).
+// FWB-0 Layer 2 P1-2: record-link / detail cannot be visibility dependencies (server fail-closed).
 function visibilityFieldOptions(current: FieldAuthoringDraft) {
   return draft.value.fields
-    .filter((field) => field.localId !== current.localId && field.id.trim().length > 0)
+    .filter((field) => (
+      field.localId !== current.localId
+      && field.id.trim().length > 0
+      && field.type !== 'record-link'
+      && field.type !== 'detail'
+    ))
     .map((field) => ({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) }))
+}
+
+/**
+ * When a field is retyped to/from record-link (or detail), drop stale visibility deps and
+ * condition rules that referenced it — otherwise the UI would keep a now-illegal dependency
+ * that only fails at server save.
+ */
+function invalidateStaleRecordLinkDependencies(changedField: FieldAuthoringDraft) {
+  const changedId = changedField.id.trim()
+  if (!changedId) return
+  const banned = changedField.type === 'record-link' || changedField.type === 'detail'
+  if (!banned) return
+  for (const field of draft.value.fields) {
+    if (field.visibility.dependsOnFieldId.trim() === changedId) {
+      field.visibility = { dependsOnFieldId: '', operator: 'eq', valueText: '' }
+    }
+  }
+  if (draft.value.conditionEdits) {
+    for (const edit of Object.values(draft.value.conditionEdits)) {
+      for (const branch of edit.branches) {
+        for (const rule of branch.rules) {
+          if (rule.fieldId.trim() === changedId) {
+            rule.fieldId = ''
+          }
+        }
+      }
+    }
+  }
 }
 
 function addStep() {
@@ -2503,7 +2718,15 @@ function firstInvalidAuthoringSection(formErrors: string[]): AuthoringSectionId 
 }
 
 async function validate(): Promise<boolean> {
-  const formErrors = validateTemplateFormFields(draft.value, unsupportedReason.value)
+  // Ensure catalog is attempted before pin-membership checks when the draft uses record-link.
+  if (draft.value.fields.some((f) => f.type === 'record-link') && !recordLinkCatalogLoaded.value) {
+    await ensureRecordLinkCatalog(true)
+  }
+  const formErrors = validateTemplateFormFields(
+    draft.value,
+    unsupportedReason.value,
+    recordLinkCatalogValidation.value,
+  )
   const flowErrors = validateTemplateApprovalFlow(draft.value)
   validationErrors.value = [...formErrors, ...flowErrors]
   if (validationErrors.value.length > 0) {

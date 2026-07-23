@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -48,6 +48,9 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
   const createdUserIds = new Set<string>()
 
   async function authToken(userId: string, roles = 'admin', perms = '*:*'): Promise<string> {
+    if (perms.split(',').some((permission) => ['*:*', 'approvals:*', 'approvals:write'].includes(permission.trim()))) {
+      await grantApprovalWriteForIntegrationActor(userId)
+    }
     const response = await fetch(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=${encodeURIComponent(roles)}&perms=${encodeURIComponent(perms)}`,
     )

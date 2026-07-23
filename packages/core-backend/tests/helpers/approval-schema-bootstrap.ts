@@ -441,3 +441,42 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     client.release()
   }
 }
+
+/**
+ * Grants the database-backed approval-create authority expected by positive
+ * integration fixtures. Production deliberately ignores JWT-only wildcards at
+ * the final write boundary, so tests must seed durable authority explicitly.
+ */
+export async function grantApprovalWriteForIntegrationActor(userId: string): Promise<void> {
+  const pool = poolManager.get()
+  const hasNameColumn = (
+    await pool.query<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'permissions'
+           AND column_name = 'name'
+       ) AS present`,
+    )
+  ).rows[0]?.present === true
+  if (hasNameColumn) {
+    await pool.query(
+      `INSERT INTO permissions (code, name, description)
+       VALUES ('approvals:write', 'Approvals Write', 'Create approval instances')
+       ON CONFLICT (code) DO NOTHING`,
+    )
+  } else {
+    await pool.query(
+      `INSERT INTO permissions (code, description)
+       VALUES ('approvals:write', 'Create approval instances')
+       ON CONFLICT (code) DO NOTHING`,
+    )
+  }
+  await pool.query(
+    `INSERT INTO user_permissions (user_id, permission_code)
+     VALUES ($1, 'approvals:write')
+     ON CONFLICT DO NOTHING`,
+    [userId],
+  )
+}

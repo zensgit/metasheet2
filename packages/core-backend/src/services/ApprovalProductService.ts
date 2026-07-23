@@ -45,6 +45,7 @@ import {
   type ApprovalGraphAutoApprovalEvent,
   type ApprovalGraphResolution,
   type ParallelInstanceState,
+  canonicalizeRecordLinkFormData,
   pruneHiddenFormData,
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
@@ -97,6 +98,22 @@ import { isDurableDeliveryEnabled } from '../multitable/automation-durable-deliv
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
 import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
+import {
+  sortRecordLinkSubmitCandidates,
+  validateRecordLinkAtSubmit,
+} from '../multitable/approval-fwb-record-link'
+import {
+  probeRecordLinkReadableForUser,
+  projectRecordLinkFormSnapshotForViewer,
+} from './approval-record-link-read-projection'
+import {
+  loadApprovalTemplateVisibilityActorOnQuery,
+  lockRecordLinkActorAuthorityRowsOnQuery,
+  lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
+  lockRecordLinkMultiTargetCreatePathOnQuery,
+  resolveRecordLinkTargetAuthOnQuery,
+  userHasApprovalsWriteOnQuery,
+} from './approval-record-link-txn-auth'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -361,13 +378,16 @@ const FORM_FIELD_TYPES = new Set([
   'user',
   'attachment',
   'detail',
+  // FWB-0 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
+  'record-link',
 ])
 
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
-// contract for existing templates.
+// contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
+// nested link semantics are undefined — top-level only).
 const DETAIL_LEAF_FIELD_TYPES = new Set(
-  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
+  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail' && type !== 'record-link'),
 )
 
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
@@ -727,6 +747,34 @@ function normalizeFormField(
     failValidation(context, `formSchema.fields[${index}].props must be an object`)
   }
 
+  // FWB-0 Layer 2: record-link is top-level only; pin non-blank props.baseId + props.sheetId.
+  // OpenAPI RecordLinkFieldProps is additionalProperties:false — only baseId/sheetId allowed.
+  // Fail closed on any other key (do not silently drop author input). Creator read authorization
+  // against those pins is enforced at publish (async capability check).
+  let pinnedProps: Record<string, unknown> | undefined
+  if (value.type === 'record-link') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] record-link cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    if (props) {
+      const extraKeys = Object.keys(props).filter((key) => key !== 'baseId' && key !== 'sheetId')
+      if (extraKeys.length > 0) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] record-link props may only contain baseId and sheetId (unknown: ${extraKeys.join(', ')})`,
+        )
+      }
+    }
+    const baseId = props && typeof props.baseId === 'string' ? props.baseId.trim() : ''
+    const sheetId = props && typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
+    if (!baseId || !sheetId) {
+      failValidation(context, `formSchema.fields[${index}] record-link requires non-blank props.baseId and props.sheetId`)
+    }
+    // Canonicalize: only the two trimmed pins (never spread residual props).
+    pinnedProps = { baseId, sheetId }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -745,7 +793,11 @@ function normalizeFormField(
           })),
         }
       : {}),
-    ...(isRecord(value.props) ? { props: { ...value.props } } : {}),
+    ...(pinnedProps
+      ? { props: pinnedProps }
+      : isRecord(value.props)
+        ? { props: { ...value.props } }
+        : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -939,6 +991,15 @@ function validateFormFieldVisibilityRules(
       failValidation(
         context,
         `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
+      )
+    }
+    // FWB-0 Layer 2 P1-2: record-link values are objects (`{ recordId }`). Simple visibility
+    // operators compare against scalar strings and would silently fail-open / never match.
+    // v1 fail-closed: reject record-link as a visibility dependency (save/publish).
+    if (target.type === 'record-link') {
+      failValidation(
+        context,
+        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a record-link field (v1)`,
       )
     }
   })
@@ -1548,6 +1609,62 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: 
           'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
           { branchIndex },
         )
+      }
+    })
+  }
+}
+
+/**
+ * FWB-0 Layer 2 P1-2: simple condition rules compare form values to scalar strings with `===`.
+ * A record-link value is `{ recordId: string }` — comparisons would silently never match.
+ * v1 fail-closed: reject any condition rule (or formula field ref) that targets a record-link field
+ * at create/update/publish. Formula type-inference already marks record-link unsupported; this
+ * guard makes the simple-rules path equally fail-closed with an explicit message.
+ */
+function validateRecordLinkNotUsedInConditions(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const recordLinkFieldIds = new Set(
+    (formSchema.fields ?? [])
+      .filter((field) => field.type === 'record-link')
+      .map((field) => field.id),
+  )
+  if (recordLinkFieldIds.size === 0) return
+
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'condition') continue
+    const config = node.config as {
+      branches?: Array<{ rules?: Array<{ fieldId?: string }>; formula?: { expression?: string } }>
+    }
+    if (!Array.isArray(config.branches)) continue
+    config.branches.forEach((branch, branchIndex) => {
+      if (!branch || typeof branch !== 'object') return
+      const rules = Array.isArray(branch.rules) ? branch.rules : []
+      for (const rule of rules) {
+        const fieldId = typeof rule?.fieldId === 'string' ? rule.fieldId.trim() : ''
+        if (fieldId && recordLinkFieldIds.has(fieldId)) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} condition branch ${branchIndex + 1} cannot reference record-link field ${fieldId} (v1)`,
+          )
+        }
+      }
+      // Formula path: reject explicit `{fieldId}` references to record-link fields with a clear
+      // message (type inference would also fail; keep the error explicit for authors).
+      const expression = typeof branch.formula?.expression === 'string' ? branch.formula.expression : ''
+      if (expression) {
+        for (const fieldId of recordLinkFieldIds) {
+          // Token-aware enough for authoring: `{fieldId}` or `{ fieldId }` field refs.
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(expression)) {
+            failValidation(
+              context,
+              `approvalGraph node ${node.key} condition branch ${branchIndex + 1} formula cannot reference record-link field ${fieldId} (v1)`,
+            )
+          }
+        }
       }
     })
   }
@@ -3543,6 +3660,7 @@ export class ApprovalProductService {
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
@@ -3706,6 +3824,7 @@ export class ApprovalProductService {
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateRecordLinkNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
         validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
@@ -3813,6 +3932,13 @@ export class ApprovalProductService {
         REQUEST_VALIDATION_CONTEXT,
         { allowParallelDuplicateAssignees: policy.autoApproval?.mergeAdjacentApprover === true },
       )
+      // FWB-0 Layer 2: publisher must be able to READ every record-link target sheet (pinned props).
+      // Fail-closed before freezing the published definition.
+      await this.assertRecordLinkTargetsReadableByCreator(
+        formSchema,
+        typeof request.actorUserId === 'string' ? request.actorUserId : '',
+        client.query.bind(client),
+      )
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // RA-1b CURATED-VOCABULARY — THE HARD GATE. Only when the graph actually routes on requester.role do
@@ -3822,6 +3948,7 @@ export class ApprovalProductService {
         ? await fetchCuratedApprovalRoleIds(client.query.bind(client))
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
+      validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
@@ -4176,6 +4303,253 @@ export class ApprovalProductService {
   }
 
   /**
+   * FWB-0 Layer 2 publish-time: every record-link field's pinned baseId/sheetId must resolve to a
+   * real sheet in that base, and the publisher must have BOTH base-read AND sheet-read.
+   *
+   * Runs on the publish transaction client only (no global RBAC cache). Targets are processed in
+   * deterministic order (baseId, sheetId, fieldId). Each target: lock authority rows, then
+   * constant-shape dual base+sheet auth (same stages for missing/mismatch/unreadable). One
+   * values-free public message for all refuse outcomes.
+   */
+  private async assertRecordLinkTargetsReadableByCreator(
+    formSchema: FormSchema,
+    creatorUserId: string,
+    queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>,
+  ): Promise<void> {
+    const recordLinkFields = (formSchema.fields ?? []).filter((field) => field.type === 'record-link')
+    if (recordLinkFields.length === 0) return
+    if (!creatorUserId.trim()) {
+      throw new ServiceError(
+        'record-link publish requires publisher identity',
+        400,
+        'VALIDATION_ERROR',
+      )
+    }
+    const unavailable = 'record-link target is not readable'
+    // Collect pins first; lock ALL targets in global phases (bases → sheets → actor once →
+    // sheet grants) BEFORE any auth re-read. Shared authority locks let peer publishes proceed;
+    // global phases retain one canonical order across every caller.
+    const targets = recordLinkFields
+      .map((field, index) => ({
+        fieldId: field.id,
+        order: index,
+        baseId: typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : '',
+        sheetId: typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : '',
+      }))
+      .sort((a, b) => {
+        if (a.baseId !== b.baseId) return a.baseId < b.baseId ? -1 : 1
+        if (a.sheetId !== b.sheetId) return a.sheetId < b.sheetId ? -1 : 1
+        if (a.fieldId !== b.fieldId) return a.fieldId < b.fieldId ? -1 : 1
+        return a.order - b.order
+      })
+
+    for (const target of targets) {
+      if (!target.baseId || !target.sheetId) {
+        throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+      }
+    }
+
+    try {
+      await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(queryFn, {
+        userId: creatorUserId,
+        targets: targets.map((t) => ({ baseId: t.baseId, sheetId: t.sheetId })),
+      })
+      for (const target of targets) {
+        const auth = await resolveRecordLinkTargetAuthOnQuery(queryFn, {
+          userId: creatorUserId,
+          baseId: target.baseId,
+          sheetId: target.sheetId,
+        })
+        if (!auth.ok) {
+          throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+        }
+      }
+    } catch (err) {
+      if (err instanceof ServiceError) throw err
+      throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+    }
+  }
+
+  /**
+   * FWB-0 Layer 2 submit-time authz (confused-deputy close): filler must READ every linked record.
+   * Missing / base-mismatch / unreadable / row-denied share one values-free error (no existence oracle)
+   * and run a constant-shape helper pipeline (see probeRecordLinkReadableForUser).
+   *
+   * P1-3 multi-link: EVERY configured link with a submitted value runs the full fixed pipeline
+   * before a single public refusal is emitted (no early return on the first failure that would
+   * form a depth/count oracle between two candidate links).
+   *
+   * Final in-txn path (lockTargetRows / lockAuthorityRows):
+   *   1) Collect valid targets
+   *   2) Globally phased multi-target locks via lockRecordLinkMultiTargetCreatePathOnQuery
+   *      (all bases → all sheets → actor once → sheet grants → row-auth/records)
+   *   3) Re-read every authorization WITHOUT further lock acquisition
+   * Global phases keep one canonical lock order; shared authority locks avoid serializing peer
+   * creates. Pre-txn / preview skip locks.
+   *
+   * Shared by createApproval (pre-txn + final in-txn recheck) and route-preview.
+   *
+   * @param options.queryFn — DB handle; final create recheck MUST pass the transaction client.
+   * @param options.lockTargetRows — after phased locks, revalidate approvals:write (DB/admin only)
+   *   and treat the path as the final create recheck (row/record locks already taken in phase 5).
+   * @param options.lockAuthorityRows — enable multi-target authority phases. Independent of
+   *   lockTargetRows. When omitted, defaults to lockTargetRows.
+   * @param options.transcripts — optional per-link ordered helper transcripts for parity tests
+   *   (one transcript per candidate in canonical lock order, not formSchema order).
+   * @param options.sortCandidates — when false, skip canonical sort of re-read order
+   *   (MUTATION/test only). Production always sorts (default true).
+   * @param options.interleavedAuthorityLocks — MUTATION ONLY. Restores per-candidate
+   *   interleaving so phase-order tests can distinguish the production path.
+   *
+   * Note: authority-row FOR SHARE blocks concurrent UPDATE/DELETE on every DB source the final
+   * re-read consumes while allowing peer approval creates to read the same authority concurrently
+   * (see RECORD_LINK_AUTHORITY_LOCK_ORDER). Final write is DB/admin only.
+   */
+  private async assertRecordLinksReadableAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    fillerUserId: string,
+    options: {
+      queryFn?: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+      lockTargetRows?: boolean
+      /** Independent of lockTargetRows. Omit to default to lockTargetRows. */
+      lockAuthorityRows?: boolean
+      transcripts?: string[][]
+      /**
+       * Canonical multi-link re-read order. Default true. Set false only in mutation/tests.
+       */
+      sortCandidates?: boolean
+      /**
+       * MUTATION ONLY: restore interleaved per-candidate locking for phase-order tests.
+       * Never true on production create/preview paths.
+       */
+      interleavedAuthorityLocks?: boolean
+    } = {},
+  ): Promise<string | null> {
+    if (!pool && !options.queryFn) return 'Database not available'
+    const unavailable = 'linked record is not readable'
+
+    // Normalize ALL candidate links first (no per-link early return).
+    type LinkCandidate = {
+      fieldId: string
+      sheetId: string
+      recordId: string
+      baseId: string
+      shapeOk: boolean
+    }
+    const links: LinkCandidate[] = []
+    for (const field of formSchema.fields ?? []) {
+      if (field.type !== 'record-link') continue
+      const raw = formData[field.id]
+      if (raw === undefined || raw === null) continue
+      const sheetId = typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : ''
+      const baseId = typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : ''
+      let recordId = ''
+      let shapeOk = false
+      if (typeof raw === 'object' && !Array.isArray(raw) && raw !== null) {
+        const recordIdRaw = (raw as { recordId?: unknown }).recordId
+        recordId = typeof recordIdRaw === 'string' ? recordIdRaw.trim() : ''
+        const keys = Object.keys(raw as object)
+        shapeOk = keys.length === 1 && keys[0] === 'recordId' && recordId.length > 0
+          && sheetId.length > 0 && baseId.length > 0
+      }
+      links.push({
+        fieldId: field.id,
+        sheetId: sheetId || '_invalid_sheet',
+        recordId: recordId || '_invalid_record',
+        baseId: baseId || '_invalid_base',
+        shapeOk,
+      })
+    }
+    if (links.length === 0) return null
+
+    const orderedLinks = options.sortCandidates === false
+      ? links
+      : sortRecordLinkSubmitCandidates(links)
+
+    const queryFn = options.queryFn
+      ?? ((sqlText: string, params?: unknown[]) => pool!.query(sqlText, params))
+
+    const lockTargetRows = options.lockTargetRows === true
+    const lockAuthorityRows = options.lockAuthorityRows === undefined
+      ? lockTargetRows
+      : options.lockAuthorityRows === true
+    const interleaved = options.interleavedAuthorityLocks === true
+
+    // Global multi-target lock BEFORE any per-link auth re-read (create final path).
+    if (lockAuthorityRows || lockTargetRows) {
+      const shapeOkTargets = orderedLinks
+        .filter((l) => l.shapeOk)
+        .map((l) => ({ baseId: l.baseId, sheetId: l.sheetId, recordId: l.recordId }))
+      if (shapeOkTargets.length > 0) {
+        if (lockTargetRows) {
+          await lockRecordLinkMultiTargetCreatePathOnQuery(
+            queryFn,
+            { userId: fillerUserId, targets: shapeOkTargets },
+            { interleavedPerCandidate: interleaved },
+          )
+        } else {
+          await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(
+            queryFn,
+            {
+              userId: fillerUserId,
+              targets: shapeOkTargets.map((t) => ({ baseId: t.baseId, sheetId: t.sheetId })),
+            },
+            { interleavedPerCandidate: interleaved },
+          )
+        }
+      }
+    }
+
+    // Run the fixed pipeline for EVERY link (including shape-invalid — still full depth).
+    // Locks already held: probes re-read only (no further lock acquisition).
+    let anyFailed = false
+    for (const link of orderedLinks) {
+      const transcript = options.transcripts ? [] as string[] : undefined
+      let readable = false
+      if (link.shapeOk) {
+        // Locks (when requested) were acquired once for all targets above. Per-link probe
+        // re-reads only — never re-enters per-candidate lock acquisition.
+        readable = await probeRecordLinkReadableForUser(
+          queryFn,
+          {
+            userId: fillerUserId,
+            baseId: link.baseId,
+            sheetId: link.sheetId,
+            recordId: link.recordId,
+            lockTargetRow: false,
+            lockAuthorityRows: false,
+            requireApprovalsWrite: lockTargetRows,
+          },
+          transcript,
+        )
+      } else if (transcript) {
+        for (const step of [
+          'lock_authority',
+          'lock_row_auth',
+          'sheet_membership',
+          'record_exists',
+          'base_readable',
+          'sheet_capabilities',
+          'row_deny_strict',
+          ...(lockTargetRows ? (['approvals_write'] as const) : []),
+        ]) {
+          transcript.push(step)
+        }
+      }
+      if (transcript && options.transcripts) options.transcripts.push(transcript)
+      const result = await validateRecordLinkAtSubmit(
+        { fillerCanReadRecord: async () => readable },
+        fillerUserId,
+        link.sheetId,
+        link.recordId,
+      )
+      if (!result.ok) anyFailed = true
+    }
+    return anyFailed ? unavailable : null
+  }
+
+  /**
    * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
    * the read-only route preview. Everything from template-bundle load through executor
    * construction lives here so preview can NEVER drift from create (the same normalization,
@@ -4269,6 +4643,35 @@ export class ApprovalProductService {
         400,
         'VALIDATION_ERROR',
         { errors: validationErrors },
+      )
+    }
+
+    // FWB-0 Layer 2: freeze the canonical `{ recordId: trimmed }` shape after structural
+    // validation so graph execution + form_snapshot never persist padded ids that were
+    // authorized only after trim.
+    canonicalizeRecordLinkFormData(formSchema, normalizedFormData)
+
+    // FWB-0 Layer 2: submit-time record-link authz (confused-deputy close). Filler must READ every
+    // linked record; missing and unreadable share one values-free fail-closed shape (no existence
+    // oracle). Runs on the SAME assembleCreationContext substrate as create + route-preview so
+    // preview cannot drift from create.
+    //
+    // Dry-run identity contract (B3-06): when an admin previews AS a sample requester, the
+    // record-link read check uses the SAMPLE requester (requesterOverride), not the admin actor —
+    // otherwise the dry-run would authorize under the author's privileges and hide filler-denied
+    // links. Create/B3-05 have no override, so this is byte-identical to actor.userId there.
+    const recordLinkFillerUserId = options.requesterOverride?.userId?.trim() || actor.userId
+    const recordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+      formSchema,
+      normalizedFormData,
+      recordLinkFillerUserId,
+    )
+    if (recordLinkAuthzError) {
+      throw new ServiceError(
+        'Approval form data is invalid',
+        400,
+        'VALIDATION_ERROR',
+        { errors: [recordLinkAuthzError] },
       )
     }
 
@@ -4684,6 +5087,59 @@ export class ApprovalProductService {
       client = await pool.connect()
       await client.query('BEGIN')
 
+      // FWB-0 Layer 2 P1-4: final write-boundary revalidation on the TRANSACTION client
+      // immediately before insert. Locks every authority source the subsequent re-read
+      // consumes, the sheet+record row-auth advisory (record_permissions phantoms), and the
+      // target record FOR UPDATE, then re-reads multitable target auth and approvals:write
+      // through that same queryFn — DB/admin only (no actor.permissions / JWT as final write
+      // authority). Concurrent DELETE/INSERT on locked sources either blocks or is observed
+      // as empty — never authorize from the pre-txn precheck alone.
+      const finalRecordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+        formSchema,
+        normalizedFormData,
+        actor.userId,
+        {
+          queryFn: (sqlText, params) => client!.query(sqlText, params),
+          lockTargetRows: true,
+          // Explicit independent authority lock (mutation surface: set false → race goldens RED).
+          lockAuthorityRows: true,
+        },
+      )
+      if (finalRecordLinkAuthzError) {
+        throw new ServiceError(
+          'Approval form data is invalid',
+          400,
+          'VALIDATION_ERROR',
+          { errors: [finalRecordLinkAuthzError] },
+        )
+      }
+
+      const templateVisibleAtWrite = await this.templateVisibleAtCreateBoundary(
+        client,
+        bundle.template.id,
+        bundle.version.id,
+        actor.userId,
+      )
+      if (!templateVisibleAtWrite) {
+        throw new ServiceError(
+          'Approval template not found',
+          404,
+          'APPROVAL_TEMPLATE_NOT_FOUND',
+        )
+      }
+
+      // The record-link probe checks this for each linked record, but templates without a
+      // record-link field must receive the same DB-only final write check. Actor authority rows
+      // are already locked by templateVisibleAtCreateBoundary, so a concurrent revoke cannot land
+      // between this read and the instance insert.
+      const canWriteApprovalAtBoundary = await userHasApprovalsWriteOnQuery(
+        (sqlText, params) => client!.query(sqlText, params),
+        actor.userId,
+      )
+      if (!canWriteApprovalAtBoundary) {
+        throw new ServiceError('Forbidden', 403, 'FORBIDDEN')
+      }
+
       await client.query(
         `INSERT INTO approval_instances
          (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
@@ -4870,7 +5326,7 @@ export class ApprovalProductService {
       emitApprovalCompletionEvent(completionEvent)
     }
 
-    const approval = await this.getApproval(instanceId)
+    const approval = await this.getApproval(instanceId, actor.userId)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
     }
@@ -5119,7 +5575,7 @@ export class ApprovalProductService {
     if (jumpEvent) {
       eventBus.emit('approval.admin_jumped', jumpEvent)
     }
-    const approval = await this.getApproval(id)
+    const approval = await this.getApproval(id, actor.userId)
     if (!approval) {
       throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -5840,7 +6296,7 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'transfer') {
@@ -5872,7 +6328,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'add_sign') {
@@ -5932,7 +6388,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'reduce_sign') {
@@ -5999,7 +6455,7 @@ export class ApprovalProductService {
           targetUserId: targetAssignmentUserId,
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'revoke') {
@@ -6074,7 +6530,7 @@ export class ApprovalProductService {
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (instance.status !== 'pending') {
@@ -6178,7 +6634,7 @@ export class ApprovalProductService {
         if (resolution.currentNodeKey) {
           this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'reject') {
@@ -6227,7 +6683,7 @@ export class ApprovalProductService {
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'rejected')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       const approvalMode = executor.getApprovalMode(currentNodeKey)
@@ -6277,7 +6733,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id))!
+          return (await this.getApproval(id, actor.userId))!
         }
       } else if (approvalMode === 'any') {
         // Deactivate actor's own assignment first.
@@ -6423,7 +6879,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id))!
+          return (await this.getApproval(id, actor.userId))!
         }
         // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
         // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
@@ -6708,7 +7164,7 @@ export class ApprovalProductService {
       client?.release()
     }
 
-    const approval = await this.getApproval(id)
+    const approval = await this.getApproval(id, actor.userId)
     if (!approval) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -6785,7 +7241,7 @@ export class ApprovalProductService {
     })
   }
 
-  async getApproval(id: string): Promise<UnifiedApprovalDTO | null> {
+  async getApproval(id: string, viewerUserId?: string | null): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     const result = await pool.query<ApprovalInstanceRow>(
@@ -6811,7 +7267,7 @@ export class ApprovalProductService {
       if (versionResult.rows[0]) frozenFormSchema = asFormSchema(versionResult.rows[0].form_schema)
     }
 
-    return toUnifiedApprovalDTO(
+    const dto = toUnifiedApprovalDTO(
       row,
       assignmentsResult.rows.map((assignment) => ({
         id: assignment.id,
@@ -6824,6 +7280,20 @@ export class ApprovalProductService {
       })),
       frozenFormSchema,
     )
+
+    // FWB-0 Layer 2 P1-1: no viewer is a deny-all viewer. Every current HTTP path passes the
+    // authenticated actor explicitly; making omission fail closed prevents a future call site from
+    // exposing stored linked ids by accidentally using the one-argument form.
+    if (dto.formSnapshot) {
+      const queryFn = (sqlText: string, params?: unknown[]) => pool!.query(sqlText, params)
+      dto.formSnapshot = await projectRecordLinkFormSnapshotForViewer(
+        dto.formSnapshot,
+        frozenFormSchema,
+        viewerUserId ?? null,
+        queryFn,
+      )
+    }
+    return dto
   }
 
   async isTemplateRuntimeInstance(id: string): Promise<boolean> {
@@ -6911,6 +7381,35 @@ export class ApprovalProductService {
       version,
       publishedDefinition: publishedResult.rows[0] || null,
     }
+  }
+
+  /**
+   * Final create-boundary template visibility check. The actor and template row are both read on
+   * the approval transaction after actor authority locks, so a stale request manager grant or a
+   * concurrent visibility edit cannot authorize the instance insert.
+   */
+  private async templateVisibleAtCreateBoundary(
+    client: ApprovalDbClient,
+    templateId: string,
+    expectedActiveVersionId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const queryFn = (sqlText: string, params?: unknown[]) => client.query(sqlText, params)
+    await lockRecordLinkActorAuthorityRowsOnQuery(queryFn, userId)
+    const visibilityActor = await loadApprovalTemplateVisibilityActorOnQuery(queryFn, userId)
+    if (!visibilityActor) return false
+
+    const conditions = ["id = $1", "status = 'published'", 'active_version_id = $2']
+    const params: unknown[] = [templateId, expectedActiveVersionId]
+    applyTemplateVisibilityFilter(conditions, params, 3, visibilityActor)
+    const result = await client.query<{ id: string }>(
+      `SELECT id
+       FROM approval_templates
+       WHERE ${conditions.join(' AND ')}
+       FOR SHARE`,
+      params,
+    )
+    return Boolean(result.rows[0])
   }
 
   private async deactivateAllActiveAssignments(

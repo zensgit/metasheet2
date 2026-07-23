@@ -3267,7 +3267,9 @@ components:
           items: {}
           description: Candidate values for the in operator.
       required: [fieldId, operator]
-    FormField:
+    # Detail leaf columns: same field surface as FormField but WITHOUT record-link / nested detail
+    # (v1: record-link is top-level only; detail cannot nest).
+    FormFieldDetailLeaf:
       type: object
       properties:
         id:
@@ -3293,6 +3295,113 @@ components:
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
       required: [id, type, label]
+    # Server-pinned multitable target for type=record-link (both required, non-blank at publish).
+    # pattern rejects whitespace-only (backend trims then rejects empty); minLength alone is not enough.
+    RecordLinkFieldProps:
+      type: object
+      additionalProperties: false
+      properties:
+        baseId:
+          type: string
+          minLength: 1
+          # Must contain at least one non-whitespace char (OAS/JSON Schema ECMA-262 pattern).
+          pattern: '.*\S.*'
+          description: |
+            Pinned multitable base id (publish-time; filler cannot override).
+            Must be non-blank after trim — whitespace-only is invalid.
+        sheetId:
+          type: string
+          minLength: 1
+          pattern: '.*\S.*'
+          description: |
+            Pinned multitable sheet id (publish-time; filler cannot override).
+            Must be non-blank after trim — whitespace-only is invalid.
+      required: [baseId, sheetId]
+    # Non-record-link form fields: free-form props. type enum excludes record-link so it cannot
+    # overlap FormFieldRecordLink (invalid oneOf when both members accept the same payload).
+    FormFieldGeneric:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [text, textarea, number, date, datetime, select, multi-select, user, attachment, detail]
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          type: object
+          additionalProperties: true
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormFieldDetailLeaf'
+          description: Detail-group leaf columns (only when type=detail). Never contains record-link.
+      required: [id, type, label]
+    # record-link only: props MUST be strict RecordLinkFieldProps (baseId + sheetId required).
+    # additionalProperties:false — no columns/minRows/maxRows/unknown outer keys (top-level only;
+    # runtime rejects detail-only keys on non-detail fields).
+    FormFieldRecordLink:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [record-link]
+          description: |
+            FWB-0 Layer 2 record-link field. Pins multitable base/sheet via props and stores
+            exactly one `{ recordId }` value. Top-level only in v1 (never a detail leaf).
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          $ref: '#/components/schemas/RecordLinkFieldProps'
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
+      required: [id, type, label, props]
+    # Discriminated union: record-link requires RecordLinkFieldProps; other types use free-form props.
+    # Avoids invalid overlapping oneOf on a single FormField.props field.
+    FormField:
+      oneOf:
+        - $ref: '#/components/schemas/FormFieldRecordLink'
+        - $ref: '#/components/schemas/FormFieldGeneric'
+      discriminator:
+        propertyName: type
+        mapping:
+          record-link: '#/components/schemas/FormFieldRecordLink'
+          text: '#/components/schemas/FormFieldGeneric'
+          textarea: '#/components/schemas/FormFieldGeneric'
+          number: '#/components/schemas/FormFieldGeneric'
+          date: '#/components/schemas/FormFieldGeneric'
+          datetime: '#/components/schemas/FormFieldGeneric'
+          select: '#/components/schemas/FormFieldGeneric'
+          multi-select: '#/components/schemas/FormFieldGeneric'
+          user: '#/components/schemas/FormFieldGeneric'
+          attachment: '#/components/schemas/FormFieldGeneric'
+          detail: '#/components/schemas/FormFieldGeneric'
     FormSchema:
       type: object
       properties:

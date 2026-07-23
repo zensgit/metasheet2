@@ -31,6 +31,11 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
       return Array.isArray(value)
     case 'detail':
       return Array.isArray(value)
+    case 'record-link':
+      // FWB-0 Layer 2 fail-closed: resubmit snapshots carry only `{ recordId }` and no pin
+      // metadata. Without a proven identical baseId+sheetId on the prior instance we cannot
+      // know the value still targets the CURRENT field's pin — so never prefill record-link.
+      return false
     default:
       return false
   }
@@ -54,6 +59,11 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
  *
  * `attachment` fields are ALWAYS skipped — B2-28 disabled attachment authoring entirely, so there
  * is nothing legitimate to prefill there regardless of the stored value.
+ *
+ * `record-link` fields are ALWAYS skipped on resubmit prefill (FWB-0 Layer 2). Snapshots freeze
+ * only `{ recordId }` and never the field's baseId/sheetId pin; if the author repinned the field
+ * (or we simply cannot prove pin identity from existing snapshot data) reusing the old recordId
+ * would target the wrong sheet. Fail closed: omit and let the filler re-pick.
  *
  * `detail` (子表/明细) fields prefill their WHOLE row array verbatim when the field still exists as
  * `type: 'detail'` and the stored value is an array — per-row/per-column drift is already handled
