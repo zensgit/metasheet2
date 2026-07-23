@@ -24099,11 +24099,18 @@ const annualSelfBalanceLoading = ref(false)
 const annualSelfBalanceError = ref<string | null>(null)
 const annualSelfBalanceSummary = computed(() => annualSelfBalance.value?.summary ?? null)
 
-async function loadAnnualSelfBalance(): Promise<void> {
+// OD-W5-7 (docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md
+// §9 backlog table, decision (b)): leaveTypeCode is parameterized here — default 'annual' is
+// BYTE IDENTICAL to the prior hardcoded literal for every existing (arg-less) caller — so a
+// future caller (W5-1 comp_time UI) can request a non-annual leave-type balance through the SAME
+// read path. Zero backend change: /api/attendance/leave-balances/me already accepts an optional
+// free-form leaveTypeCode and defaults to 'annual' server-side too.
+async function loadAnnualSelfBalance(leaveTypeCode: string = 'annual'): Promise<void> {
   annualSelfBalanceLoading.value = true
   annualSelfBalanceError.value = null
   try {
-    const response = await apiFetch('/api/attendance/leave-balances/me?leaveTypeCode=annual')
+    const query = buildQuery({ leaveTypeCode })
+    const response = await apiFetch(`/api/attendance/leave-balances/me?${query.toString()}`)
     if (response.status === 401 || response.status === 403) {
       annualSelfBalance.value = null
       return
@@ -24141,7 +24148,9 @@ async function loadSelfAttendanceRules(): Promise<void> {
   }
 }
 
-async function loadAnnualLeaveBalance() {
+// OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
+// byte identical to the prior hardcoded literal for every existing (arg-less) caller.
+async function loadAnnualLeaveBalance(leaveTypeCode: string = 'annual') {
   // clear any prior result up front so an empty ID / failed / 403 / errored query never leaves a stale balance
   // from a previously-queried user on screen (the view renders solely on v-if="annualBalanceData").
   annualBalanceData.value = null
@@ -24152,7 +24161,7 @@ async function loadAnnualLeaveBalance() {
   }
   annualBalanceLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId(), userId: targetUser, leaveTypeCode: 'annual' })
+    const query = buildQuery({ orgId: normalizedOrgId(), userId: targetUser, leaveTypeCode })
     const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -24423,7 +24432,9 @@ const annualAdjustError = ref<string | null>(null)
 const annualAdjustPreview = ref<{ user: string; before: number; after: number } | null>(null)
 const annualAdjustIdemKey = ref('')
 
-async function previewAnnualAdjust(): Promise<void> {
+// OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
+// byte identical to the prior hardcoded literal for every existing (arg-less) caller.
+async function previewAnnualAdjust(leaveTypeCode: string = 'annual'): Promise<void> {
   const userId = annualAdjustForm.userId.trim()
   annualAdjustError.value = null
   annualAdjustPreview.value = null
@@ -24432,7 +24443,7 @@ async function previewAnnualAdjust(): Promise<void> {
     return
   }
   try {
-    const query = buildQuery({ orgId: normalizedOrgId(), userId, leaveTypeCode: 'annual' })
+    const query = buildQuery({ orgId: normalizedOrgId(), userId, leaveTypeCode })
     const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -28613,6 +28624,19 @@ const holidaySectionBindings = {
   saveHoliday,
   deleteHoliday,
 }
+
+// OD-W5-7 test seam ONLY (docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md
+// §9 backlog table): a <script setup> SFC cannot `export` a function for direct unit import, and there is
+// deliberately no UI to drive a non-'annual' leaveTypeCode yet (that wiring is W5-1's, out of scope here —
+// OD-W5-7=(b) independent ticket). defineExpose is the only seam that lets a spec invoke the three
+// parameterized balance functions with a non-default argument to prove the leaveTypeCode plumbing actually
+// forwards through to the outgoing query (not just that a default value exists). No template/user-facing
+// change — exposed for `apps/web/tests/attendance-admin-regressions.spec.ts` only.
+defineExpose({
+  loadAnnualSelfBalance,
+  loadAnnualLeaveBalance,
+  previewAnnualAdjust,
+})
 </script>
 
 <style scoped>
