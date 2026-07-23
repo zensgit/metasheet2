@@ -950,6 +950,7 @@ export interface ApprovalTemplateVersionsTable {
   status: 'draft' | 'published' | 'archived'
   form_schema: JsonObjectColumn
   approval_graph: JsonObjectColumn
+  restored_from_version_id: ColumnType<string | null, string | null | undefined, string | null>
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
