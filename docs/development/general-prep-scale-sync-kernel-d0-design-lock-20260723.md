@@ -29,6 +29,8 @@
 
 ## 2. 正交 capability 矩阵（P1-1 修正后冻结）
 
+> **A1 修订（2026-07-23，GIP-D0 联动）**：本矩阵**降为 CertifiedSourceProfile 的认证 schema**——运行时只可选择被认证的具名 profile（`bridge.bounded_read.v1` 等），**不得**自由组合维度；组合空间只在 profile 认证时使用（坐标声明 + §8 电池按 profile 实例化为合规套件）。见 `gip-d0-general-integration-platform-design-lock-20260723.md` §3。
+
 > 旧四类（BOUNDED_KEY_READ 等）混合了采集/一致性/续读/证明多维度（如 SNAPSHOT_KEYSET_READ 同时说分页与一致性、SEALED_EXPORT_MANIFEST 同时说传输与恢复）。**改为五个正交维度**，每维冻结枚举；组合合法性与恢复策略**由矩阵推导**，不另设自由表。
 
 ```
