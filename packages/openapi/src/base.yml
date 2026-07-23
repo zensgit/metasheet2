@@ -973,6 +973,18 @@ components:
         description:
           type: string
           nullable: true
+        attendanceType:
+          type: string
+          enum: [fixed_shift, scheduled_shift, free_time]
+        attendance_type:
+          type: string
+          enum: [fixed_shift, scheduled_shift, free_time]
+          deprecated: true
+        memberCount:
+          type: integer
+        member_count:
+          type: integer
+          deprecated: true
         createdAt:
           type: string
           format: date-time
@@ -1680,6 +1692,15 @@ components:
           type: string
         shift_id:
           type: string
+          deprecated: true
+        slotIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        slot_index:
+          type: integer
+          minimum: 0
+          maximum: 2
           deprecated: true
         startDate:
           type: string

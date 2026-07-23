@@ -148,6 +148,10 @@ if [[ "$CASE_ID" == "openapi" ]]; then
     packages/openapi/dist/openapi.json \
     packages/openapi/src/paths/attendance.yml >"${openapi_dir}/validate.log"
 
+  info "running openapi attendance #4556 parity contract"
+  node --test ./scripts/ops/attendance-openapi-parity-4556-contract.test.mjs \
+    >"${openapi_dir}/parity-4556.log"
+
   invalid_openapi="${openapi_dir}/openapi.invalid.json"
   jq 'del(.paths["/api/attendance/import/commit-async"])' \
     packages/openapi/dist/openapi.json >"${invalid_openapi}"
