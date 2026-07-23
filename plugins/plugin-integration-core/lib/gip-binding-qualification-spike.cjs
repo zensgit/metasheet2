@@ -24,6 +24,7 @@
 // future binding runtime — the spike freezes the shapes that make it checkable).
 
 const crypto = require('node:crypto')
+const { CanonicalDomainError, stableCanonicalStringify } = require('./gip-canonical-json.cjs')
 
 const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'QUALIFICATION_INPUT_INVALID',
@@ -90,29 +91,18 @@ function requiredUtcInstant(value, field) {
   return text
 }
 
-// Deterministic serialization: sorted keys, no whitespace variance — the SAME
-// stableStringify shape used by the large-bom sealed-artifact digest precedent.
+// Serialization = the ONE shared strict canonical codec (review P2: two partial
+// definitions drifted). Domain violations (Date/class instances/sparse arrays/
+// non-finite/undefined…) become QUALIFICATION_INPUT_INVALID, fail-closed.
 function stableStringify(value) {
-  if (value === undefined) {
-    // undefined has no JSON form: JSON.stringify would emit the bare token
-    // `undefined` (and silently DROP undefined array entries — ss([undefined]) ===
-    // ss([]) is a digest collision). Evidence is server-built; undefined anywhere is
-    // a programming error — fail loud, never collide (review NIT).
-    fail('QUALIFICATION_INPUT_INVALID', 'digest material must not contain undefined', {})
+  try {
+    return stableCanonicalStringify(value)
+  } catch (error) {
+    if (error instanceof CanonicalDomainError) {
+      fail('QUALIFICATION_INPUT_INVALID', 'digest material must stay in the strict canonical JSON domain', {})
+    }
+    throw error
   }
-  if (typeof value === 'number' && !Number.isFinite(value)) {
-    // JSON.stringify(NaN/Infinity) === 'null' — a digest collision with null
-    // (review P2). Evidence is server-built; non-finite anywhere is a bug.
-    fail('QUALIFICATION_INPUT_INVALID', 'digest material must not contain non-finite numbers', {})
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => stableStringify(entry)).join(',')}]`
-  }
-  if (isPlainObject(value)) {
-    const keys = Object.keys(value).sort()
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
-  }
-  return JSON.stringify(value)
 }
 
 // qualificationDigest (GIP-D0 §3, frozen shape) — the SINGLE authoritative
@@ -169,14 +159,24 @@ function buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns }) {
   return `SELECT ${cols}, COUNT(*) AS duplicate_count FROM ${object} GROUP BY ${cols} HAVING COUNT(*) > 1 LIMIT 1`
 }
 
-// A NULL in any ordering-key component breaks total order (NULL is incomparable; no
-// null-order/cursor contract is ratified) — any such row fails qualification closed.
 function buildOrderingKeyNullProbeSql({ objectName, keyColumns }) {
   const object = quoteIdentifier(objectName)
   const predicate = normalizeKeyColumns(keyColumns)
     .map((column) => `${quoteIdentifier(column)} IS NULL`)
     .join(' OR ')
   return `SELECT 1 AS null_key_row FROM ${object} WHERE ${predicate} LIMIT 1`
+}
+
+// The TOTAL-ORDER probe is ONE statement (review P1: two independent reads are a
+// torn check — read A and read B can each look clean while no single snapshot
+// satisfies both predicates). A single statement executes under one source snapshot
+// (statement-level consistency); this external-source read stays OUTSIDE and apart
+// from any internal Activate transaction.
+function buildOrderingKeyTotalOrderProbeSql({ objectName, keyColumns }) {
+  const columns = normalizeKeyColumns(keyColumns)
+  const dup = buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns: columns })
+  const nul = buildOrderingKeyNullProbeSql({ objectName, keyColumns: columns })
+  return `SELECT (SELECT COUNT(*) FROM (${dup}) AS gip_duplicate_probe) AS duplicate_groups_sampled, (SELECT COUNT(*) FROM (${nul}) AS gip_null_probe) AS null_key_rows`
 }
 
 // The probe refuses to execute anything but a single SELECT — read-only is a
@@ -214,11 +214,28 @@ async function runReadOnlyProbe(query, sql) {
   return rows
 }
 
-// Lifecycle fields are AUTHENTICATED (review P2): the ratified 6-input tuple stays
-// the qualificationDigest; status/expiresAt are bound by a second envelope digest —
-// copying a qualification with a later expiresAt breaks the envelope, fail-closed.
-function computeEnvelopeDigest({ qualificationDigest, status, expiresAt }) {
-  return crypto.createHash('sha256').update(stableStringify({
+// Lifecycle fields are AUTHENTICATED with a KEYED MAC (review P1: an unkeyed hash
+// over public values is an integrity checksum anyone can recompute after postponing
+// expiresAt — not authentication). The envelope key is SERVER-HELD material with an
+// explicit lifecycle: { keyId, secret } — keyId travels with the qualification
+// (public, selects the verifier's key at rotation), the secret never leaves the
+// server side and never appears in qualifications, evidence or errors. Rotation /
+// revocation = keyring by keyId at the (gated) binding runtime; the spike freezes
+// the shape. The ratified 6-input qualificationDigest tuple stays untouched.
+function normalizeEnvelopeKey(envelopeKey) {
+  if (!isPlainObject(envelopeKey)) {
+    fail('QUALIFICATION_INPUT_INVALID', 'a server-held envelope key is required', { field: 'envelopeKey' })
+  }
+  return {
+    keyId: requiredString(envelopeKey.keyId, 'envelopeKey.keyId'),
+    secret: requiredString(envelopeKey.secret, 'envelopeKey.secret'),
+  }
+}
+
+function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresAt }) {
+  const key = normalizeEnvelopeKey(envelopeKey)
+  return crypto.createHmac('sha256', key.secret).update(stableStringify({
+    keyId: key.keyId,
     qualificationDigest: requiredString(qualificationDigest, 'qualificationDigest'),
     status: requiredString(status, 'status'),
     expiresAt: expiresAt === undefined ? null : requiredString(expiresAt, 'expiresAt'),
@@ -229,23 +246,29 @@ async function probeBindingQualification(input) {
   if (!isPlainObject(input) || typeof input.query !== 'function') {
     fail('QUALIFICATION_INPUT_INVALID', 'probe needs a query function and a plain-object input', {})
   }
+  const envelopeKey = normalizeEnvelopeKey(input.envelopeKey)
   const objectName = requiredString(input.objectKey, 'objectKey')
   const keyColumns = normalizeKeyColumns(input.keyColumns)
-  const duplicateRows = await runReadOnlyProbe(
+  // ONE statement, one source snapshot (review P1: no torn two-read qualification).
+  const rows = await runReadOnlyProbe(
     input.query,
-    buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns }),
+    buildOrderingKeyTotalOrderProbeSql({ objectName, keyColumns }),
   )
-  if (duplicateRows.length > 0) {
+  const summary = rows.length === 1 ? rows[0] : null
+  const duplicateGroups = summary && Number.isInteger(summary.duplicate_groups_sampled)
+    ? summary.duplicate_groups_sampled : null
+  const nullRows = summary && Number.isInteger(summary.null_key_rows)
+    ? summary.null_key_rows : null
+  if (duplicateGroups === null || nullRows === null) {
+    fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable summary row', {})
+  }
+  if (duplicateGroups > 0) {
     // Fail closed — and do NOT echo the duplicated key values (values-free).
     fail('ORDERING_KEY_DUPLICATE_FOUND', 'ordering key is not a stable total order on this object', {
-      duplicateGroupsSampled: duplicateRows.length,
+      duplicateGroupsSampled: duplicateGroups,
     })
   }
-  const nullRows = await runReadOnlyProbe(
-    input.query,
-    buildOrderingKeyNullProbeSql({ objectName, keyColumns }),
-  )
-  if (nullRows.length > 0) {
+  if (nullRows > 0) {
     // NULL key components are incomparable — no total order (review P2). Values-free.
     fail('ORDERING_KEY_NULL_FOUND', 'ordering key has NULL components on this object', {})
   }
@@ -270,7 +293,8 @@ async function probeBindingQualification(input) {
   return Object.freeze({
     status: 'candidate',
     qualificationDigest,
-    envelopeDigest: computeEnvelopeDigest({ qualificationDigest, status: 'candidate', expiresAt }),
+    envelopeKeyId: envelopeKey.keyId,
+    envelopeMac: computeEnvelopeMac({ envelopeKey, qualificationDigest, status: 'candidate', expiresAt }),
     evidence,
     ...(expiresAt !== undefined ? { expiresAt } : {}),
   })
@@ -281,21 +305,30 @@ async function probeBindingQualification(input) {
 // binding, status and expiry. ZERO external I/O by construction. An expired
 // qualification fails closed (QUALIFICATION_EXPIRED) — Run-start proper never
 // probes; it requires a fresh Preflight instead.
-function verifyBindingQualification({ qualification, expectedInputs, now }) {
+function verifyBindingQualification({ qualification, expectedInputs, envelopeKey, now }) {
   if (!isPlainObject(qualification) || !isPlainObject(expectedInputs)) {
     fail('QUALIFICATION_NOT_OBJECT', 'qualification and expectedInputs must be plain objects', {})
   }
+  const key = normalizeEnvelopeKey(envelopeKey)
   if (!QUALIFICATION_STATUSES.includes(qualification.status) || qualification.status !== 'candidate') {
     fail('QUALIFICATION_STATUS_INVALID', 'only a candidate qualification is verifiable', {})
   }
-  // AUTHENTICATE lifecycle before trusting it (review P2): status/expiresAt are
-  // envelope-bound — a copy with a postponed expiresAt fails here, not fail-open.
-  const expectedEnvelope = computeEnvelopeDigest({
+  // AUTHENTICATE lifecycle before trusting it (review P1): the MAC is keyed with
+  // SERVER-HELD secret material — a caller postponing expiresAt cannot recompute a
+  // valid envelope from public values. keyId selects the key (rotation-ready).
+  if (qualification.envelopeKeyId !== key.keyId) {
+    fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
+  }
+  const expectedMac = computeEnvelopeMac({
+    envelopeKey: key,
     qualificationDigest: qualification.qualificationDigest,
     status: qualification.status,
     expiresAt: qualification.expiresAt,
   })
-  if (qualification.envelopeDigest !== expectedEnvelope) {
+  const provided = typeof qualification.envelopeMac === 'string' ? qualification.envelopeMac : ''
+  const expectedBuffer = Buffer.from(expectedMac, 'hex')
+  const providedBuffer = provided.length === expectedMac.length ? Buffer.from(provided, 'hex') : null
+  if (providedBuffer === null || !crypto.timingSafeEqual(expectedBuffer, providedBuffer)) {
     fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
   }
   if (qualification.expiresAt !== undefined) {
@@ -325,9 +358,10 @@ module.exports = {
   QUALIFICATION_STATUSES,
   GipQualificationError,
   computeQualificationDigest,
-  computeEnvelopeDigest,
+  computeEnvelopeMac,
   buildOrderingKeyDuplicateProbeSql,
   buildOrderingKeyNullProbeSql,
+  buildOrderingKeyTotalOrderProbeSql,
   probeBindingQualification,
   verifyBindingQualification,
   __internals: {

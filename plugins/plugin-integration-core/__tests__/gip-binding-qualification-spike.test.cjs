@@ -11,9 +11,10 @@ const {
   QUALIFICATION_ERROR_REASONS,
   GipQualificationError,
   computeQualificationDigest,
-  computeEnvelopeDigest,
+  computeEnvelopeMac,
   buildOrderingKeyDuplicateProbeSql,
   buildOrderingKeyNullProbeSql,
+  buildOrderingKeyTotalOrderProbeSql,
   probeBindingQualification,
   verifyBindingQualification,
   __internals,
@@ -42,6 +43,9 @@ async function rejectsWithAsync(fn, reason) {
   assert.equal(caught.reason, reason)
   return caught
 }
+
+const ENVELOPE_KEY = Object.freeze({ keyId: 'k2026a', secret: 'server_held_secret_material_1' })
+const WRONG_KEY = Object.freeze({ keyId: 'k2026a', secret: 'attacker_guessed_secret' })
 
 const BASE_INPUTS = Object.freeze({
   actionProfileVersion: 'fixture.paged_read.v1',
@@ -114,6 +118,11 @@ function probeSqlReadOnly() {
   const nullSql = buildOrderingKeyNullProbeSql({ objectName: 'fixture_view', keyColumns: ['item_no', 'rev'] })
   assert.match(nullSql, /^SELECT 1 AS null_key_row FROM "fixture_view" WHERE "item_no" IS NULL OR "rev" IS NULL LIMIT 1$/)
   assert.equal(__internals.assertReadOnlySql(nullSql), nullSql)
+  // COMBINED single-statement probe (review P1: one source snapshot, no torn read)
+  const combined = buildOrderingKeyTotalOrderProbeSql({ objectName: 'fixture_view', keyColumns: ['item_no'] })
+  assert.match(combined, /^SELECT \(SELECT COUNT\(\*\) FROM \(SELECT /)
+  assert.match(combined, /AS duplicate_groups_sampled, \(SELECT COUNT\(\*\) FROM \(SELECT 1 AS null_key_row /)
+  assert.equal(__internals.assertReadOnlySql(combined), combined)
   // duplicate keyColumns declaration is rejected, never silently deduped (review P2)
   rejectsWith(() => buildOrderingKeyDuplicateProbeSql({ objectName: 'v', keyColumns: ['k', 'k'] }), 'QUALIFICATION_INPUT_INVALID')
 }
@@ -121,9 +130,10 @@ function probeSqlReadOnly() {
 // ── 4. Probe: uniqueness pass / duplicate fail-closed (values-free) ──
 async function probeBehaviour() {
   const seenSql = []
-  const okQuery = async (sql) => { seenSql.push(sql); return { rows: [] } }
+  const okQuery = async (sql) => { seenSql.push(sql); return { rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] } }
   const qualification = await probeBindingQualification({
     ...BASE_INPUTS,
+    envelopeKey: ENVELOPE_KEY,
     query: okQuery,
     keyColumns: ['item_no', 'rev'],
     probedAt: '2026-07-23T00:00:00Z',
@@ -134,99 +144,123 @@ async function probeBehaviour() {
   assert.equal(qualification.evidence.duplicateGroupsFound, 0)
   assert.equal(qualification.evidence.nullKeyRowsFound, 0)
   assert.equal(qualification.evidence.checkedKeyColumnCount, 2)
-  assert.ok(typeof qualification.envelopeDigest === 'string' && qualification.envelopeDigest.length === 64)
-  // TWO read-only probes: duplicate-group + null-key (total order, review P2)
-  assert.equal(seenSql.length, 2)
-  assert.match(seenSql[0], /HAVING COUNT\(\*\) > 1/)
-  assert.match(seenSql[1], /IS NULL/)
+  assert.equal(qualification.envelopeKeyId, 'k2026a')
+  assert.ok(typeof qualification.envelopeMac === 'string' && qualification.envelopeMac.length === 64)
+  // the secret never appears anywhere in the qualification
+  assert.ok(!JSON.stringify(qualification).includes(ENVELOPE_KEY.secret))
+  // EXACTLY ONE statement (review P1: a second read would reopen the torn-check hole)
+  assert.equal(seenSql.length, 1)
+  assert.match(seenSql[0], /duplicate_groups_sampled/)
+  assert.match(seenSql[0], /null_key_rows/)
 
-  // duplicates ⇒ fail closed, and the thrown error must NOT echo key values
+  // duplicates ⇒ fail closed, values-free
   const SECRET = 'secret_item_A17'
-  const dupQuery = async () => ({ rows: [{ item_no: SECRET, rev: 'B', duplicate_count: 3 }] })
+  const dupQuery = async () => ({ rows: [{ duplicate_groups_sampled: 3, null_key_rows: 0, leak: SECRET }] })
   const caught = await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   assert.ok(!JSON.stringify({ m: caught.message, d: caught.details }).includes(SECRET),
     'duplicate-key failure must stay values-free')
 
-  // NULL key components ⇒ fail closed (second probe)
-  let call = 0
-  const nullQuery = async () => { call += 1; return call === 1 ? { rows: [] } : { rows: [{ null_key_row: 1 }] } }
+  // NULL key components ⇒ fail closed (same single statement)
+  const nullQuery = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 2 }] })
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_NULL_FOUND')
 
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: async () => ({}), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
+  // no envelope key ⇒ fail closed before any probing
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
 }
 
 // ── 5. Verify: pure-local, digest-bound, expiring, status-gated ──
 async function verifyBehaviour() {
-  const query = async () => ({ rows: [] })
+  const query = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] })
   const qualification = await probeBindingQualification({
-    ...BASE_INPUTS, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
 
   const ok = verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-23T12:00:00Z',
+    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   })
   assert.equal(ok.verified, true)
 
-  // cross-object reuse ⇒ digest mismatch (input binding is load-bearing)
+  // cross-object reuse ⇒ content digest mismatch (input binding is load-bearing)
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS, objectKey: 'another_view' }, now: '2026-07-23T12:00:00Z',
+    qualification, expectedInputs: { ...BASE_INPUTS, objectKey: 'another_view' }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_DIGEST_MISMATCH')
 
   // expiry ⇒ fail closed: Run-start proper never probes — fresh Preflight required
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-25T00:00:00Z',
+    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
   }), 'QUALIFICATION_EXPIRED')
 
-  // tampered evidence ⇒ digest mismatch
+  // tampered evidence ⇒ envelope holds (content digest unchanged in copy) then
+  // content digest mismatch
   const tampered = { ...qualification, evidence: { ...qualification.evidence, duplicateGroupsFound: 1 } }
   rejectsWith(() => verifyBindingQualification({
-    qualification: tampered, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-23T12:00:00Z',
+    qualification: tampered, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_DIGEST_MISMATCH')
 
   // status gate: only 'candidate' verifiable
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, status: 'revoked' }, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-23T12:00:00Z',
+    qualification: { ...qualification, status: 'revoked' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_STATUS_INVALID')
 
-  // TIMESTAMP PIN (review P3: lexicographic fail-open inversion) — a non-ISO `now`
-  // must fail CLOSED, never silently verify an expired qualification.
+  // ── LIFECYCLE AUTHENTICATION (review P1: keyed MAC, not a public checksum) ──
+  // (a) postponed copy WITHOUT recompute ⇒ envelope mismatch
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, now: '07/25/2026',
-  }), 'QUALIFICATION_INPUT_INVALID')
-  // a COPY with malformed expiresAt is a lifecycle tamper — the envelope catches it
-  // BEFORE format validation (authenticate-then-parse, review P2 ordering)
-  rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, expiresAt: 'tomorrow' }, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-23T12:00:00Z',
+    qualification: { ...qualification, expiresAt: '2027-01-01T00:00:00Z' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
-  // probe-side pin: malformed probedAt/expiresAt fail closed at generation time
+  // (b) THE ATTACK: postponed copy + envelope RECOMPUTED from public values with a
+  //     guessed secret — the server-held key defeats it (an unkeyed hash would not).
+  const forged = {
+    ...qualification,
+    expiresAt: '2027-01-01T00:00:00Z',
+    envelopeMac: computeEnvelopeMac({
+      envelopeKey: WRONG_KEY,
+      qualificationDigest: qualification.qualificationDigest,
+      status: qualification.status,
+      expiresAt: '2027-01-01T00:00:00Z',
+    }),
+  }
+  rejectsWith(() => verifyBindingQualification({
+    qualification: forged, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
+  // (c) keyId mismatch ⇒ fail closed (rotation selects keys; unknown key never verifies)
+  rejectsWith(() => verifyBindingQualification({
+    qualification: { ...qualification, envelopeKeyId: 'k2020x' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
+
+  // a COPY with malformed expiresAt is a lifecycle tamper — envelope catches it
+  rejectsWith(() => verifyBindingQualification({
+    qualification: { ...qualification, expiresAt: 'tomorrow' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
+
+  // TIMESTAMP PIN — non-ISO `now` fails CLOSED
+  rejectsWith(() => verifyBindingQualification({
+    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '07/25/2026',
+  }), 'QUALIFICATION_INPUT_INVALID')
+  // probe-side pin: malformed probedAt fails closed at generation time
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: 'not-a-time',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
   }), 'QUALIFICATION_INPUT_INVALID')
 
-  // digest material must not contain undefined (collision fail-closed, review NIT)
+  // digest material domain (shared codec): undefined / NaN / Date all fail closed
   rejectsWith(() => computeQualificationDigest({ ...BASE_INPUTS, evidence: { a: undefined } }), 'QUALIFICATION_INPUT_INVALID')
-  // …nor non-finite numbers (NaN collides with null under JSON semantics, review P2)
   rejectsWith(() => computeQualificationDigest({ ...BASE_INPUTS, evidence: { a: NaN } }), 'QUALIFICATION_INPUT_INVALID')
-
-  // LIFECYCLE AUTHENTICATION (review P2): copying the qualification with a LATER
-  // expiresAt must break the envelope — the postpone attack fails closed.
-  const postponed = { ...qualification, expiresAt: '2027-01-01T00:00:00Z' }
-  rejectsWith(() => verifyBindingQualification({
-    qualification: postponed, expectedInputs: { ...BASE_INPUTS }, now: '2026-07-25T00:00:00Z',
-  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
+  rejectsWith(() => computeQualificationDigest({ ...BASE_INPUTS, evidence: { a: new Date(0) } }), 'QUALIFICATION_INPUT_INVALID')
 
   // impossible calendar dates are rejected even though Date.parse normalizes them
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, now: '2026-02-30T00:00:00Z',
+    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-02-30T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
 
   // PURE-LOCAL invariant: verify takes no query fn — source-level pin
@@ -235,10 +269,7 @@ async function verifyBehaviour() {
   assert.ok(!/\bquery\b/.test(verifyBody) && !/\bawait\b/.test(verifyBody),
     'verifyBindingQualification must stay pure-local (no query fn, no await)')
 
-  // WIRING pin (review P3): the probe's ONLY execution path must run through
-  // assertReadOnlySql. Source-level by necessity (the builder is safe by
-  // construction, so no input can behaviorally expose an unwired guard) — the pin
-  // still REDs the "remove the guard call" mutation.
+  // WIRING pin: probe routes its ONLY query through runReadOnlyProbe/assertReadOnlySql
   const helperStart = src.indexOf('async function runReadOnlyProbe')
   const probeStart = src.indexOf('async function probeBindingQualification')
   const helperBody = src.slice(helperStart, probeStart)

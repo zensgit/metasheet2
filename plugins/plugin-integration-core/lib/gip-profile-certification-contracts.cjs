@@ -14,6 +14,9 @@
 // rollout, and is NOT reachable from any route or runtime. It only describes and
 // gates. Mirrors connector-action-contracts.cjs (DF-T1A latent-contract precedent).
 //
+// Serialization/domain discipline: the ONE shared strict canonical codec
+// (gip-canonical-json.cjs) — never a local partial definition.
+//
 // Discipline: every frozen vocabulary here carries the three-layer pin
 // (deepEqual exact test + runtime consumer in fail() + source-level invariant test)
 // — the carry-policy lesson transplanted verbatim.
@@ -21,6 +24,8 @@
 // ── Frozen vocabularies (scale-D0 §2 as amended A1-A3; GIP-D0 §5) ─────────────────
 
 // source certification schema — FOUR dimensions (applyMode is NOT a source dimension).
+const { CanonicalDomainError, deepCloneFrozenCanonical } = require('./gip-canonical-json.cjs')
+
 const GIP_ACQUISITION_MODES = Object.freeze([
   'BOUNDED_READ',
   'PAGED_READ',
@@ -138,30 +143,18 @@ function nonBlankString(value) {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
 }
 
-// Strict JSON domain for opaque certificate fields (review P2): only null, finite
-// numbers, booleans, strings, plain arrays/objects — no undefined, no functions, no
-// NaN/Infinity, no exotic prototypes. Returns an owned deep-frozen CLONE so a caller
-// mutating its input after normalization can never change the certified result.
+// Opaque certificate fields go through the SHARED strict canonical codec (review
+// P2: Date / class instances / sparse arrays previously slipped a local check and
+// collided digests). Domain violations fail closed with the field name only.
 function deepCloneFrozenJson(value, field) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) {
-      fail('CERTIFICATE_UNKNOWN_FIELD', 'certificate fields must stay in the strict JSON domain', { field })
+  try {
+    return deepCloneFrozenCanonical(value)
+  } catch (error) {
+    if (error instanceof CanonicalDomainError) {
+      fail('CERTIFICATE_UNKNOWN_FIELD', 'certificate fields must stay in the strict canonical JSON domain', { field })
     }
-    return value
+    throw error
   }
-  if (Array.isArray(value)) {
-    return Object.freeze(value.map((entry) => deepCloneFrozenJson(entry, field)))
-  }
-  if (isPlainObject(value)) {
-    const out = {}
-    for (const key of Object.keys(value)) {
-      out[key] = deepCloneFrozenJson(value[key], field)
-    }
-    return Object.freeze(out)
-  }
-  // undefined, functions, symbols, class instances, bigint …
-  fail('CERTIFICATE_UNKNOWN_FIELD', 'certificate fields must stay in the strict JSON domain', { field })
 }
 
 // Membership-checked, DUPLICATE-free set drawn from a closed vocabulary. Coarse
@@ -427,6 +420,14 @@ function deriveRecoveryStrategy(certificate) {
 function normalizeCertifiedApplyProfile(input) {
   if (!isPlainObject(input)) {
     fail('APPLY_PROFILE_NOT_OBJECT', 'certified apply profile must be a plain object', {})
+  }
+  // closed top-level shape (review P2): only the two declared fields.
+  for (const key of Object.keys(input)) {
+    if (!['applyProfileId', 'applyMode'].includes(key)) {
+      fail('APPLY_PROFILE_NOT_OBJECT', 'apply profile carries an undeclared top-level field', {
+        fieldCount: Object.keys(input).length,
+      })
+    }
   }
   const applyProfileId = nonBlankString(input.applyProfileId)
   if (!applyProfileId || !PROFILE_ID_PATTERN.test(applyProfileId)) {

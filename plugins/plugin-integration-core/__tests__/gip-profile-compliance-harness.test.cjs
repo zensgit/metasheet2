@@ -117,6 +117,27 @@ function summarizeFailClosed() {
   const summary = summarizeBatteryForEvidence(crafted)
   assert.deepEqual(summary, { passed: false, checkCount: 0, failedCheckIds: ['REPORT_INVALID'] })
   assert.ok(!JSON.stringify(summary).includes(MARKER))
+
+  // ROSTER INTEGRITY (review P2): membership alone is not enough —
+  // (a) short roster of a known id ⇒ invalid (unless the single legal C1-abort shape)
+  const short = { passed: true, checks: [{ checkId: 'C2_unknown_acquisition_rejected', ok: true, observed: 'x' }] }
+  assert.deepEqual(summarizeBatteryForEvidence(short).failedCheckIds, ['REPORT_INVALID'])
+  // (b) full-length roster of the SAME known id repeated ⇒ invalid
+  const dup = { passed: true, checks: BATTERY_CHECK_IDS.map(() => ({ checkId: 'C1_schema_valid', ok: true, observed: 'x' })) }
+  assert.deepEqual(summarizeBatteryForEvidence(dup).failedCheckIds, ['REPORT_INVALID'])
+  // (c) contradictory caller `passed` ⇒ invalid, never echoed
+  const real = runReadActionProfileComplianceBattery(fixtureProfile())
+  const contradictory = { passed: false, checks: real.checks }
+  assert.deepEqual(summarizeBatteryForEvidence(contradictory).failedCheckIds, ['REPORT_INVALID'])
+  // (d) flipped entry in an otherwise-real report ⇒ derived passed goes false and
+  //     caller passed=true is rejected as contradictory
+  const flipped = { passed: true, checks: real.checks.map((entry, index) => (index === 3 ? { ...entry, ok: false } : entry)) }
+  assert.deepEqual(summarizeBatteryForEvidence(flipped).failedCheckIds, ['REPORT_INVALID'])
+  // (e) the legal C1-abort shape still summarizes
+  const abort = runReadActionProfileComplianceBattery(fixtureProfile({ certificate: { supportedCompletenessProofs: [] } }))
+  assert.deepEqual(summarizeBatteryForEvidence(abort), { passed: false, checkCount: 1, failedCheckIds: ['C1_schema_valid'] })
+  // (f) generated entries are frozen — mutation throws
+  assert.throws(() => { real.checks[0].ok = false }, TypeError)
   // the roster itself is exact-pinned and exported
   assert.deepEqual([...BATTERY_CHECK_IDS], [
     'C1_schema_valid',

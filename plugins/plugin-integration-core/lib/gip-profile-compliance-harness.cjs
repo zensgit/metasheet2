@@ -61,16 +61,16 @@ function clone(value) {
 function expectRejection(checkId, expectedReasons, run) {
   try {
     run()
-    return { checkId, ok: false, observed: 'accepted_mutant' }
+    return Object.freeze({ checkId, ok: false, observed: 'accepted_mutant' })
   } catch (error) {
     if (error instanceof GipProfileContractError && expectedReasons.includes(error.reason)) {
-      return { checkId, ok: true, observed: error.reason }
+      return Object.freeze({ checkId, ok: true, observed: error.reason })
     }
-    return {
+    return Object.freeze({
       checkId,
       ok: false,
       observed: error instanceof GipProfileContractError ? error.reason : 'non_contract_error',
-    }
+    })
   }
 }
 
@@ -83,13 +83,13 @@ function runReadActionProfileComplianceBattery(candidate) {
   let normalized = null
   try {
     normalized = normalizeCertifiedReadActionProfile(candidate)
-    checks.push({ checkId: 'C1_schema_valid', ok: true, observed: 'normalized' })
+    checks.push(Object.freeze({ checkId: 'C1_schema_valid', ok: true, observed: 'normalized' }))
   } catch (error) {
-    checks.push({
+    checks.push(Object.freeze({
       checkId: 'C1_schema_valid',
       ok: false,
       observed: error instanceof GipProfileContractError ? error.reason : 'non_contract_error',
-    })
+    }))
     // Without a valid baseline no mutant probe is meaningful — report and stop.
     return Object.freeze({ passed: false, checks: Object.freeze(checks) })
   }
@@ -181,7 +181,7 @@ function runReadActionProfileComplianceBattery(candidate) {
     const first = deriveRecoveryStrategy(normalized.certificate)
     const second = deriveRecoveryStrategy(normalized.certificate)
     const ok = GIP_RECOVERY_STRATEGIES.includes(first) && first === second
-    checks.push({ checkId: 'C10_recovery_derived_stable', ok, observed: ok ? first : 'unstable_or_unknown' })
+    checks.push(Object.freeze({ checkId: 'C10_recovery_derived_stable', ok, observed: ok ? first : 'unstable_or_unknown' }))
   }
 
   // C11 — evidence-shape validators must be load-bearing against this certificate.
@@ -218,7 +218,7 @@ function runReadActionProfileComplianceBattery(candidate) {
         (combo) => [...combo].sort().join('+') === [...undeclaredCombo].sort().join('+'),
       )
       checks.push(declared
-        ? { checkId: 'C11d_unsupported_used_rejected', ok: true, observed: 'not_applicable_all_combos_declared' }
+        ? Object.freeze({ checkId: 'C11d_unsupported_used_rejected', ok: true, observed: 'not_applicable_all_combos_declared' })
         : expectRejection('C11d_unsupported_used_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
           () => validateCompletenessEvidence(normalized, {
             runOutcome: 'successful',
@@ -246,7 +246,7 @@ function runReadActionProfileComplianceBattery(candidate) {
     checks.push(undeclared === null
       // Every non-empty subset is declared: state that EXPLICITLY — no negative
       // probe ran, and none is possible for this candidate.
-      ? { checkId: 'C11e_undeclared_combination_rejected', ok: true, observed: 'not_applicable_all_combinations_declared' }
+      ? Object.freeze({ checkId: 'C11e_undeclared_combination_rejected', ok: true, observed: 'not_applicable_all_combinations_declared' })
       : expectRejection('C11e_undeclared_combination_rejected', ['COMPLETENESS_EVIDENCE_INVALID'],
         () => validateCompletenessEvidence(normalized, {
           runOutcome: 'successful',
@@ -259,19 +259,32 @@ function runReadActionProfileComplianceBattery(candidate) {
 }
 
 // Values-free projection helper for evidence surfaces: ids + booleans + reason codes.
+const REPORT_INVALID_SUMMARY = Object.freeze({ passed: false, checkCount: 0, failedCheckIds: Object.freeze(['REPORT_INVALID']) })
+
 function summarizeBatteryForEvidence(report) {
-  if (!isPlainObject(report) || !Array.isArray(report.checks)) {
-    return { passed: false, checkCount: 0, failedCheckIds: ['REPORT_INVALID'] }
-  }
-  // Emit ONLY roster ids (review P2): any entry outside the frozen roster makes the
-  // whole report untrusted — coarse REPORT_INVALID, never an echo of caller content.
+  if (!isPlainObject(report) || !Array.isArray(report.checks)) return REPORT_INVALID_SUMMARY
+  // Entry shapes are validated strictly; ids must be EXACTLY the frozen roster in
+  // roster order — no duplicates, no omissions (review P2: membership-only allowed
+  // short and repeated rosters through). The ONLY other legal shape is the schema
+  // abort: a single C1 failure.
   for (const entry of report.checks) {
-    if (!isPlainObject(entry) || !BATTERY_CHECK_ID_SET.has(entry.checkId)) {
-      return { passed: false, checkCount: 0, failedCheckIds: ['REPORT_INVALID'] }
+    if (!isPlainObject(entry) || typeof entry.checkId !== 'string'
+      || typeof entry.ok !== 'boolean' || typeof entry.observed !== 'string'
+      || !BATTERY_CHECK_ID_SET.has(entry.checkId)) {
+      return REPORT_INVALID_SUMMARY
     }
   }
+  const ids = report.checks.map((entry) => entry.checkId)
+  const fullRoster = ids.length === BATTERY_CHECK_IDS.length
+    && ids.every((id, index) => id === BATTERY_CHECK_IDS[index])
+  const abortShape = ids.length === 1 && ids[0] === 'C1_schema_valid' && report.checks[0].ok === false
+  if (!fullRoster && !abortShape) return REPORT_INVALID_SUMMARY
+  // `passed` is DERIVED from the validated checks — a caller-supplied contradictory
+  // flag invalidates the whole report rather than being echoed.
+  const derived = report.checks.every((entry) => entry.ok === true)
+  if (report.passed !== derived) return REPORT_INVALID_SUMMARY
   return {
-    passed: report.passed === true,
+    passed: derived,
     checkCount: report.checks.length,
     failedCheckIds: report.checks.filter((entry) => entry.ok !== true).map((entry) => entry.checkId),
   }

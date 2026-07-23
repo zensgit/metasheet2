@@ -198,9 +198,15 @@ function crossDimensionLegality() {
   assert.throws(() => { cloned.certificate.manifestShape.nested.rotation.push('x') }, TypeError)
   assert.throws(() => { cloned.certificate.manifestShape.keyId = 'x' }, TypeError)
 
-  // strict JSON domain: NaN / functions inside opaque fields fail closed
+  // strict canonical domain (shared codec): NaN / functions / Date / class
+  // instances / sparse arrays inside opaque fields fail closed — no digest-colliding
+  // shapes can enter a certificate (review P2).
   rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { manifestShape: { bad: NaN } } })), 'CERTIFICATE_UNKNOWN_FIELD')
   rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { tokenShape: { fn: () => 1 } } })), 'CERTIFICATE_UNKNOWN_FIELD')
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { manifestShape: { when: new Date(0) } } })), 'CERTIFICATE_UNKNOWN_FIELD')
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { cursorShape: new (class C { constructor() { this.a = 1 } })() } })), 'CERTIFICATE_UNKNOWN_FIELD')
+  // eslint-disable-next-line no-sparse-arrays
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { failureVocabulary: [, 'X'] } })), 'CERTIFICATE_UNKNOWN_FIELD')
 
   // strict TOP-LEVEL shape: unknown top-level input fields fail closed
   rejectsWith(() => normalizeCertifiedReadActionProfile({ ...fixtureProfile(), smuggledTop: 1 }), 'PROFILE_NOT_OBJECT')
@@ -238,6 +244,8 @@ function applyProfile() {
   assert.equal(apply.applyMode, 'STAGED_GENERATION')
   rejectsWith(() => normalizeCertifiedApplyProfile({ applyProfileId: 'internal.staged_generation.v1', applyMode: 'BULK_WRITE' }), 'APPLY_MODE_INVALID')
   rejectsWith(() => normalizeCertifiedApplyProfile(null), 'APPLY_PROFILE_NOT_OBJECT')
+  // closed top-level shape (review P2)
+  rejectsWith(() => normalizeCertifiedApplyProfile({ applyProfileId: 'internal.staged_generation.v1', applyMode: 'STAGED_GENERATION', smuggled: 1 }), 'APPLY_PROFILE_NOT_OBJECT')
 }
 
 // ── 7. Evidence shapes: both directions closed ──
