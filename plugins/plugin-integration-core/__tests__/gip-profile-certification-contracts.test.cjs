@@ -246,6 +246,25 @@ function recoveryDerivation() {
   rejectsWith(() => deriveRecoveryStrategy({ acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN'], supportedCompletenessProofs: ['SHORT_PAGE'] }), 'ILLEGAL_CAPABILITY_COMBINATION')
   rejectsWith(() => deriveRecoveryStrategy({ acquisitionMode: 'TELEPATHIC', continuationLifetime: 'SINGLE_REQUEST', supportedConsistencyProofs: [], supportedCompletenessProofs: ['SHORT_PAGE'] }), 'ACQUISITION_MODE_INVALID')
   rejectsWith(() => deriveRecoveryStrategy({}), 'ACQUISITION_MODE_INVALID')
+
+  // DIFFERENTIAL (review P2): NO certificate exists that normalize REJECTS but derive
+  // ACCEPTS — they share the single normalizer. Sweep the illegal shapes the reviewer
+  // reproduced plus a few more; each must throw the SAME way from both.
+  const illegalCerts = [
+    { acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: [] },
+    { acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: ['SHORT_PAGE'], completenessCombinationRules: [] },
+    { acquisitionMode: 'SEALED_EXPORT', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: ['SHORT_PAGE'] },
+    { acquisitionMode: 'BOUNDED_READ', continuationLifetime: 'CONNECTION_BOUND', supportedConsistencyProofs: [], supportedCompletenessProofs: ['SHORT_PAGE'] },
+    { acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN'], supportedCompletenessProofs: ['SHORT_PAGE'] },
+    { acquisitionMode: 'PAGED_READ', continuationLifetime: 'CONNECTION_BOUND', supportedConsistencyProofs: ['NONE'], supportedCompletenessProofs: ['SHORT_PAGE'] },
+  ]
+  for (const cert of illegalCerts) {
+    let normReason = null, deriveReason = null
+    try { normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: cert })) } catch (e) { normReason = e.reason }
+    try { deriveRecoveryStrategy(cert) } catch (e) { deriveReason = e.reason }
+    assert.ok(normReason, 'normalize must reject the illegal cert')
+    assert.equal(deriveReason, normReason, 'derive must reject with the SAME reason normalize uses')
+  }
 }
 
 // ── 6. Apply profile (independent axis) ──

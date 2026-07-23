@@ -230,6 +230,24 @@ function createProbeStrategyRegistry(entries) {
     resolve(actionProfileVersion) {
       return byProfile.get(actionProfileVersion) || null
     },
+    // brand: only a registry this module built is trusted by the prober factory.
+    __gipTrustedRegistry: true,
+  })
+}
+
+// SERVICE FACTORY (review P1): binds a TRUSTED registry once, server-side, and returns
+// a prober whose probe() takes RUN DATA ONLY. A caller can never inject a fake
+// duck-typed registry into the qualification chain — the registry is captured here,
+// not per call, and must be one this module built (brand check).
+function createBindingQualificationProber(strategyRegistry) {
+  if (!isPlainObject(strategyRegistry) || strategyRegistry.__gipTrustedRegistry !== true
+    || typeof strategyRegistry.resolve !== 'function') {
+    fail('QUALIFICATION_INPUT_INVALID', 'a trusted probe-strategy registry (from createProbeStrategyRegistry) is required', { field: 'strategyRegistry' })
+  }
+  return Object.freeze({
+    probe(input) {
+      return probeWithTrustedRegistry(strategyRegistry, input)
+    },
   })
 }
 
@@ -332,20 +350,22 @@ function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresA
   })).digest('hex')
 }
 
-async function probeBindingQualification(input) {
+// INTERNAL: probe against a strategy resolved from the TRUSTED registry the factory
+// (createBindingQualificationProber) captured server-side. `input` carries RUN DATA
+// ONLY — never a registry or a strategy (review P1: a per-call registry was a
+// duck-typed injection bypass — a fake registry could mint candidates and write
+// arbitrary marker text into evidence). Not exported.
+async function probeWithTrustedRegistry(trustedRegistry, input) {
   if (!isPlainObject(input) || typeof input.query !== 'function') {
     fail('QUALIFICATION_INPUT_INVALID', 'probe needs a query function and a plain-object input', {})
   }
-  if (input.probeStrategy !== undefined) {
-    // review P1: strategies come from the server registry, never runtime input.
-    fail('QUALIFICATION_INPUT_INVALID', 'probe strategies are registry-bound; runtime input must not supply one', { field: 'probeStrategy' })
+  if (input.probeStrategy !== undefined || input.strategyRegistry !== undefined) {
+    // run data may NOT carry a strategy or a registry — those are factory-bound.
+    fail('QUALIFICATION_INPUT_INVALID', 'run input must not supply a strategy or registry (they are server-bound)', {})
   }
   const envelopeKey = normalizeEnvelopeKey(input.envelopeKey)
   const actionProfileVersion = requiredString(input.actionProfileVersion, 'actionProfileVersion')
-  if (!isPlainObject(input.strategyRegistry) || typeof input.strategyRegistry.resolve !== 'function') {
-    fail('QUALIFICATION_INPUT_INVALID', 'a server-side probe-strategy registry is required', { field: 'strategyRegistry' })
-  }
-  const strategy = input.strategyRegistry.resolve(actionProfileVersion)
+  const strategy = trustedRegistry.resolve(actionProfileVersion)
   if (!strategy || typeof strategy.buildTotalOrderProbeSql !== 'function') {
     // fail closed by NAME: an unbound profile must never probe with a guessed dialect.
     fail('PROBE_STRATEGY_UNBOUND', 'no certified probe strategy is bound to this action profile', {})
@@ -476,7 +496,7 @@ module.exports = {
   buildOrderingKeyTotalOrderProbeSql,
   postgresTotalOrderProbeStrategy,
   createProbeStrategyRegistry,
-  probeBindingQualification,
+  createBindingQualificationProber,
   verifyBindingQualification,
   __internals: {
     fail,

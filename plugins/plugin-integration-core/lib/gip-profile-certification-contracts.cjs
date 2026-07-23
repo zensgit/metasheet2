@@ -395,29 +395,23 @@ function normalizeCertifiedReadActionProfile(input) {
 //   IMMUTABLE_SNAPSHOT_TOKEN + DURABLE_TOKEN      ⇒ PAGE_RESUME
 //   everything else (connection-bound snapshot …) ⇒ WHOLE_ROUND_RESTART
 function deriveRecoveryStrategy(certificate) {
-  if (!isPlainObject(certificate)) {
-    fail('CERTIFICATE_NOT_OBJECT', 'recovery derivation needs a certificate object', {})
-  }
-  // review P2: derivation is fail-CLOSED — a schema-illegal certificate never earns a
-  // resume-grade strategy. Validate the closed vocabularies + cross-dimension legality
-  // the same way normalization does before deriving anything.
-  if (!GIP_ACQUISITION_MODES.includes(certificate.acquisitionMode)) {
-    fail('ACQUISITION_MODE_INVALID', 'acquisitionMode is outside the frozen vocabulary', {})
-  }
-  if (!GIP_CONTINUATION_LIFETIMES.includes(certificate.continuationLifetime)) {
-    fail('CONTINUATION_LIFETIME_INVALID', 'continuationLifetime is outside the frozen vocabulary', {})
-  }
-  normalizeClosedSet(certificate.supportedConsistencyProofs, GIP_CONSISTENCY_PROOFS, 'supportedConsistencyProofs', 'CONSISTENCY_PROOFS_INVALID')
-  normalizeClosedSet(certificate.supportedCompletenessProofs, GIP_COMPLETENESS_PROOFS, 'supportedCompletenessProofs', 'COMPLETENESS_PROOFS_INVALID')
-  assertCertificateCrossDimensionLegal(certificate)
-  if (certificate.acquisitionMode === 'BOUNDED_READ') return 'WHOLE_RERUN'
-  if (certificate.acquisitionMode === 'SEALED_EXPORT') return 'CHUNK_RESUME'
-  const proofs = Array.isArray(certificate.supportedConsistencyProofs)
-    ? certificate.supportedConsistencyProofs
-    : []
-  if (certificate.continuationLifetime === 'DURABLE_TOKEN'
-    && (proofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')
-      || (certificate.acquisitionMode === 'CHANGE_FEED' && proofs.includes('MONOTONIC_VERSION_PIN')))) {
+  // review P2: derivation is fail-CLOSED via the SAME full certificate normalizer
+  // normalize() uses (delegated through a minimal synthetic profile shell) — every
+  // rule (empty supported set, empty/invalid combinationRules, illegal cross-dimension
+  // combo) applies identically, so NO certificate the normalizer rejects can earn a
+  // resume-grade strategy. No duplicated subset of the validation exists to drift.
+  const normalized = normalizeCertifiedReadActionProfile({
+    profileId: 'internal.recovery_derive.v1',
+    connectorKind: 'internal',
+    actionId: 'recovery_derive',
+    implementationVersion: 'derive',
+    certificate,
+  }).certificate
+  if (normalized.acquisitionMode === 'BOUNDED_READ') return 'WHOLE_RERUN'
+  if (normalized.acquisitionMode === 'SEALED_EXPORT') return 'CHUNK_RESUME'
+  if (normalized.continuationLifetime === 'DURABLE_TOKEN'
+    && (normalized.supportedConsistencyProofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')
+      || (normalized.acquisitionMode === 'CHANGE_FEED' && normalized.supportedConsistencyProofs.includes('MONOTONIC_VERSION_PIN')))) {
     // Durable-anchor resume: immutable-token page resume, or the CHANGE_FEED
     // watermark resume (scale-D0 §2 row 5's DURABLE_TOKEN(水位)).
     return 'PAGE_RESUME'

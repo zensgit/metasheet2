@@ -17,7 +17,7 @@ const {
   buildOrderingKeyTotalOrderProbeSql,
   postgresTotalOrderProbeStrategy,
   createProbeStrategyRegistry,
-  probeBindingQualification,
+  createBindingQualificationProber,
   verifyBindingQualification,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-binding-qualification-spike.cjs'))
@@ -54,6 +54,7 @@ const REGISTRY = createProbeStrategyRegistry([{
   actionProfileVersion: 'fixture.paged_read.v1',
   ...postgresTotalOrderProbeStrategy,
 }])
+const PROBER = createBindingQualificationProber(REGISTRY)
 
 const BASE_INPUTS = Object.freeze({
   actionProfileVersion: 'fixture.paged_read.v1',
@@ -142,10 +143,9 @@ function probeSqlReadOnly() {
 async function probeBehaviour() {
   const seenSql = []
   const okQuery = async (sql) => { seenSql.push(sql); return { rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] } }
-  const qualification = await probeBindingQualification({
+  const qualification = await PROBER.probe({
     ...BASE_INPUTS,
     envelopeKey: ENVELOPE_KEY,
-    strategyRegistry: REGISTRY,
     query: okQuery,
     keyColumns: ['item_no', 'rev'],
     probedAt: '2026-07-23T00:00:00Z',
@@ -172,75 +172,87 @@ async function probeBehaviour() {
   // duplicates ⇒ fail closed, values-free
   const SECRET = 'secret_item_A17'
   const dupQuery = async () => ({ rows: [{ duplicate_groups_sampled: 3, null_key_rows: 0, leak: SECRET }] })
-  const caught = await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
+  const caught = await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   assert.ok(!JSON.stringify({ m: caught.message, d: caught.details }).includes(SECRET),
     'duplicate-key failure must stay values-free')
 
   // NULL key components ⇒ fail closed (same single statement)
   const nullQuery = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 2 }] })
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_NULL_FOUND')
 
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
   // no envelope key ⇒ fail closed before any probing
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, strategyRegistry: REGISTRY, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
 
-  // NO registry ⇒ fail closed (review P1: the platform never assumes a dialect or
-  // snapshot semantics — strategies are server-registered, bound per profile)
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  // REGISTRY IS FACTORY-BOUND (review P1): run input must NOT carry a strategy or a
+  // registry — a fake duck-typed registry can never enter the qualification chain.
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
+    strategyRegistry: { resolve: () => ({ buildTotalOrderProbeSql: () => 'SELECT 1', strategyId: 'EVIL', strategyVersion: 'v', dialect: 'evil', snapshotSemantics: 'marker' }) },
+    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
-  // runtime-supplied strategy ⇒ REJECTED OUTRIGHT (never honored, never merged)
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
     probeStrategy: { dialect: 'evil', snapshotSemantics: 'marker_smuggle', buildTotalOrderProbeSql: () => 'SELECT 1' },
     query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
+  // the factory itself REFUSES a non-branded (fake) registry — the injection never
+  // even reaches a prober.
+  assert.throws(() => createBindingQualificationProber({ resolve: () => null }))
   // profile with NO bound strategy ⇒ PROBE_STRATEGY_UNBOUND (named fail-closed)
-  await rejectsWithAsync(() => probeBindingQualification({
+  await rejectsWithAsync(() => PROBER.probe({
     ...BASE_INPUTS, actionProfileVersion: 'fixture.unbound_read.v1', envelopeKey: ENVELOPE_KEY,
-    strategyRegistry: REGISTRY, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_STRATEGY_UNBOUND')
   // strategy identity is a CLOSED evidence field sourced from the registry
   // (the earlier fake-strategy marker path is gone by construction)
   // weak keys are refused: string secrets (any length) and short buffers
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'x' }, strategyRegistry: REGISTRY,
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'x' },
     query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'server_held_secret_material_1_long_enough_but_text' }, strategyRegistry: REGISTRY,
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'server_held_secret_material_1_long_enough_but_text' },
     query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: Buffer.alloc(16, 1) }, strategyRegistry: REGISTRY,
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: Buffer.alloc(16, 1) },
     query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
-  // Caller-buffer mutation after probe does not break the happy path (the MAC is
-  // computed synchronously inside probe; normalizeEnvelopeKey also takes a defensive
-  // copy as defense-in-depth). SMOKE assertion — not independently discriminable via
-  // the public API since no path holds the normalized key across a mutation (review
-  // NIT: the reviewer classified the copy the same way).
-  const mutableSecret = Buffer.alloc(32, 7)
-  const mutQual = await probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'kx', secret: mutableSecret }, strategyRegistry: REGISTRY,
-    query: okQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+  // DEFENSIVE KEY COPY is LOAD-BEARING (review P2): the caller mutates its own key
+  // Buffer INSIDE the query callback — i.e. during the await window BETWEEN the key
+  // copy and the MAC computation. Because probe took a defensive copy up front, the
+  // MAC binds the ORIGINAL bytes, so verify with the original key succeeds. Without
+  // the copy the MAC would bind the mutated bytes (this exact test REDs on removal).
+  const original = Buffer.alloc(32, 7)
+  const attackerControlled = Buffer.from(original) // the buffer probe receives
+  const windowQuery = async (sql) => {
+    attackerControlled.fill(9) // mutate DURING the await, after the copy was taken
+    return { rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }
+  }
+  const windowQual = await PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'kx', secret: attackerControlled },
+    query: windowQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
-  mutableSecret.fill(0) // caller scribbles its buffer afterwards
-  const stillOk = verifyBindingQualification({
-    qualification: mutQual, expectedInputs: { ...BASE_INPUTS }, envelopeKey: { keyId: 'kx', secret: Buffer.alloc(32, 7) }, now: '2026-07-23T12:00:00Z',
+  const verifiedOriginal = verifyBindingQualification({
+    qualification: windowQual, expectedInputs: { ...BASE_INPUTS }, envelopeKey: { keyId: 'kx', secret: original }, now: '2026-07-23T12:00:00Z',
   })
-  assert.equal(stillOk.verified, true)
+  assert.equal(verifiedOriginal.verified, true, 'MAC must bind the ORIGINAL key bytes (copy taken before await)')
+  // …and the mutated value must NOT verify (it never was the key)
+  rejectsWith(() => verifyBindingQualification({
+    qualification: windowQual, expectedInputs: { ...BASE_INPUTS }, envelopeKey: { keyId: 'kx', secret: Buffer.alloc(32, 9) }, now: '2026-07-23T12:00:00Z',
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
   // registry field hygiene: control chars / oversize identity strings fail loud
   assert.throws(() => createProbeStrategyRegistry([{ actionProfileVersion: 'x.y.v1', strategyId: 'a\nb', strategyVersion: 'v1', dialect: 'postgres', snapshotSemantics: 's', buildTotalOrderProbeSql: () => 'SELECT 1' }]))
   assert.throws(() => createProbeStrategyRegistry([{ actionProfileVersion: 'x.y.v1', strategyId: 'z'.repeat(200), strategyVersion: 'v1', dialect: 'postgres', snapshotSemantics: 's', buildTotalOrderProbeSql: () => 'SELECT 1' }]))
@@ -248,22 +260,22 @@ async function probeBehaviour() {
   // REAL-DRIVER COUNT SHAPE (review P1): node-postgres returns int8 counts as
   // STRINGS — a '0'/'0' summary row must qualify, not PROBE_QUERY_FAILED.
   const pgShapeQuery = async () => ({ rows: [{ duplicate_groups_sampled: '0', null_key_rows: '0' }] })
-  const pgShaped = await probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
+  const pgShaped = await PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
     query: pgShapeQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   })
   assert.equal(pgShaped.status, 'candidate')
   // …string counts still trip the fail-closed branches
   const pgDupQuery = async () => ({ rows: [{ duplicate_groups_sampled: '2', null_key_rows: '0' }] })
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
     query: pgDupQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   // …and junk shapes stay rejected ('007', '1e3', negative, non-decimal)
   for (const bad of ['007', '1e3', '-1', 'abc']) {
     const junk = async () => ({ rows: [{ duplicate_groups_sampled: bad, null_key_rows: '0' }] })
-    await rejectsWithAsync(() => probeBindingQualification({
-      ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY,
+    await rejectsWithAsync(() => PROBER.probe({
+      ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
       query: junk, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
     }), 'PROBE_QUERY_FAILED')
   }
@@ -272,8 +284,8 @@ async function probeBehaviour() {
 // ── 5. Verify: pure-local, digest-bound, expiring, status-gated ──
 async function verifyBehaviour() {
   const query = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] })
-  const qualification = await probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+  const qualification = await PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
 
   const ok = verifyBindingQualification({
@@ -347,8 +359,8 @@ async function verifyBehaviour() {
     qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '07/25/2026',
   }), 'QUALIFICATION_INPUT_INVALID')
   // probe-side pin: malformed probedAt fails closed at generation time
-  await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, strategyRegistry: REGISTRY, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
+  await rejectsWithAsync(() => PROBER.probe({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
   }), 'QUALIFICATION_INPUT_INVALID')
 
   // digest material domain (shared codec): undefined / NaN / Date all fail closed
@@ -369,7 +381,7 @@ async function verifyBehaviour() {
 
   // WIRING pin: probe routes its ONLY query through runReadOnlyProbe/assertReadOnlySql
   const helperStart = src.indexOf('async function runReadOnlyProbe')
-  const probeStart = src.indexOf('async function probeBindingQualification')
+  const probeStart = src.indexOf('async function probeWithTrustedRegistry')
   const helperBody = src.slice(helperStart, probeStart)
   const probeBody = src.slice(probeStart, src.indexOf('function verifyBindingQualification'))
   assert.ok(/assertReadOnlySql\(/.test(helperBody), 'runReadOnlyProbe must wire assertReadOnlySql')
