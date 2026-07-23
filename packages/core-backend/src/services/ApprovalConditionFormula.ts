@@ -586,7 +586,12 @@ function numericRange(ast: FormulaAst, schema: FormSchema): NumericRange | null 
   const field = findTopLevelField(schema, ast.path[0])
   // An optional/missing field makes evaluation fail closed, so it cannot be
   // proven true for every valid submission.
-  if (!field || field.type !== 'number' || field.required !== true) return null
+  if (
+    !field
+    || field.type !== 'number'
+    || field.required !== true
+    || field.visibilityRule !== undefined
+  ) return null
   const min = finiteFieldBound(field, 'min') ?? Number.NEGATIVE_INFINITY
   const max = finiteFieldBound(field, 'max') ?? Number.POSITIVE_INFINITY
   return min <= max ? { min, max } : null

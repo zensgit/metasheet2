@@ -109,6 +109,16 @@ describe('approval condition formula evaluator (FC-1)', () => {
     expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= -1', {
       fields: [{ id: 'amount', type: 'number', label: 'Amount', props: { min: 0 } }],
     })).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= -1', {
+      fields: [{
+        id: 'amount',
+        type: 'number',
+        label: 'Amount',
+        required: true,
+        props: { min: 0 },
+        visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'expense' },
+      }],
+    })).toBe(false)
   })
 })
 
