@@ -641,6 +641,50 @@ function formulaAstEquals(left: FormulaAst, right: FormulaAst): boolean {
   }
 }
 
+function formulaAstIsTotalForSchema(ast: FormulaAst, schema: FormSchema): boolean {
+  if (
+    ast.kind === 'number'
+    || ast.kind === 'string'
+    || ast.kind === 'boolean'
+    || ast.kind === 'null'
+  ) return true
+  if (ast.kind === 'field') {
+    if (ast.path.length !== 1) return false
+    const field = findTopLevelField(schema, ast.path[0])
+    return Boolean(field && field.required === true && field.visibilityRule === undefined)
+  }
+  if (ast.kind === 'unary') return formulaAstIsTotalForSchema(ast.expr, schema)
+  if (ast.kind === 'compare') {
+    return formulaAstIsTotalForSchema(ast.left, schema)
+      && formulaAstIsTotalForSchema(ast.right, schema)
+  }
+  if (ast.kind === 'binary' && (ast.op === 'AND' || ast.op === 'OR')) {
+    return formulaAstIsTotalForSchema(ast.left, schema)
+      && formulaAstIsTotalForSchema(ast.right, schema)
+  }
+  return false
+}
+
+function formulaAstIsAlgebraicallyZero(ast: FormulaAst): boolean {
+  if (ast.kind === 'number') return ast.value === 0
+  if (ast.kind === 'unary' && ast.op === 'NEG') {
+    return formulaAstIsAlgebraicallyZero(ast.expr)
+  }
+  if (ast.kind !== 'binary') return false
+  if (ast.op === '-' && formulaAstEquals(ast.left, ast.right)) return true
+  if (ast.op === '*') {
+    return formulaAstIsAlgebraicallyZero(ast.left) || formulaAstIsAlgebraicallyZero(ast.right)
+  }
+  if (ast.op === '+') {
+    return formulaAstIsAlgebraicallyZero(ast.left) && formulaAstIsAlgebraicallyZero(ast.right)
+  }
+  return ast.op === '-'
+    && formulaAstIsAlgebraicallyZero(ast.left)
+    && formulaAstIsAlgebraicallyZero(ast.right)
+}
+
+type FormulaTruthMode = 'semantic' | 'capture-policy'
+
 function compareRangeTruth(
   op: Extract<FormulaAst, { kind: 'compare' }>['op'],
   left: NumericRange,
@@ -669,24 +713,52 @@ function compareRangeTruth(
   return 'unknown'
 }
 
-function formulaTruth(ast: FormulaAst, schema: FormSchema): FormulaTruth {
+function formulaTruth(
+  ast: FormulaAst,
+  schema: FormSchema,
+  mode: FormulaTruthMode,
+): FormulaTruth {
   if (ast.kind === 'boolean') return ast.value ? 'always_true' : 'always_false'
   if (ast.kind === 'unary' && ast.op === 'NOT') {
-    const inner = formulaTruth(ast.expr, schema)
+    const inner = formulaTruth(ast.expr, schema, mode)
     return inner === 'always_true' ? 'always_false' : inner === 'always_false' ? 'always_true' : 'unknown'
   }
   if (ast.kind === 'binary' && (ast.op === 'AND' || ast.op === 'OR')) {
-    const left = formulaTruth(ast.left, schema)
-    const right = formulaTruth(ast.right, schema)
+    const left = formulaTruth(ast.left, schema, mode)
+    const right = formulaTruth(ast.right, schema, mode)
     if (ast.op === 'AND') {
-      if (left === 'always_false' || right === 'always_false') return 'always_false'
+      if (
+        left === 'always_false'
+        && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.right, schema))
+      ) return 'always_false'
+      if (
+        right === 'always_false'
+        && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.left, schema))
+      ) return 'always_false'
       return left === 'always_true' && right === 'always_true' ? 'always_true' : 'unknown'
     }
-    if (left === 'always_true' || right === 'always_true') return 'always_true'
+    if (
+      left === 'always_true'
+      && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.right, schema))
+    ) return 'always_true'
+    if (
+      right === 'always_true'
+      && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.left, schema))
+    ) return 'always_true'
     return left === 'always_false' && right === 'always_false' ? 'always_false' : 'unknown'
   }
   if (ast.kind === 'compare') {
-    if (formulaAstEquals(ast.left, ast.right)) {
+    const identityOperands = formulaAstEquals(ast.left, ast.right)
+      || (
+        formulaAstIsAlgebraicallyZero(ast.left)
+        && formulaAstIsAlgebraicallyZero(ast.right)
+      )
+    const identityIsTotal = mode === 'capture-policy'
+      || (
+        formulaAstIsTotalForSchema(ast.left, schema)
+        && formulaAstIsTotalForSchema(ast.right, schema)
+      )
+    if (identityOperands && identityIsTotal) {
       return ast.op === '==' || ast.op === '>=' || ast.op === '<='
         ? 'always_true'
         : 'always_false'
@@ -707,7 +779,18 @@ export function approvalConditionFormulaIsProvablyAlwaysTrue(
   expression: string,
   schema: FormSchema = { fields: [] },
 ): boolean {
-  return formulaTruth(parseFormula(expression), schema) === 'always_true'
+  return formulaTruth(parseFormula(expression), schema, 'semantic') === 'always_true'
+}
+
+/**
+ * Authoring/runtime policy for formulas that become match-all whenever their
+ * referenced values are present. This is deliberately separate from semantic
+ * truth: optional fields and requester attributes may fail closed at runtime,
+ * so their self-comparisons are not true for every valid request, but they are
+ * still unsafe first-match-wins routing rules.
+ */
+export function approvalConditionFormulaHasCaptureProneIdentity(expression: string): boolean {
+  return formulaTruth(parseFormula(expression), { fields: [] }, 'capture-policy') === 'always_true'
 }
 
 /**

@@ -58,6 +58,7 @@ import {
 } from './approval-attachment-reconciler'
 import {
   ApprovalConditionFormulaError,
+  approvalConditionFormulaHasCaptureProneIdentity,
   approvalConditionFormulaHasDynamicDependency,
   approvalConditionFormulaIsProvablyAlwaysTrue,
   assertApprovalConditionFormulaValidForSchema,
@@ -1521,6 +1522,18 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: 
           'Condition formula must depend on request data',
           400,
           'APPROVAL_CONDITION_FORMULA_STATIC',
+          { branchIndex },
+        )
+      }
+      if (
+        formulaExpression !== null
+        && hasDynamicFormula
+        && approvalConditionFormulaHasCaptureProneIdentity(formulaExpression)
+      ) {
+        throw new ServiceError(
+          'Condition formula uses a capture-prone identity',
+          400,
+          'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
           { branchIndex },
         )
       }

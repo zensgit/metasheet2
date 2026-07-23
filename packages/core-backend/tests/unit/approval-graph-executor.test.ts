@@ -178,7 +178,7 @@ describe('ApprovalGraphExecutor', () => {
     expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
   })
 
-  it('skips a LEGACY literal-only formula branch instead of routing every request through it', () => {
+  it('rejects a LEGACY literal-only formula instead of silently taking another route', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [
         { key: 'start', type: 'start', config: {} },
@@ -210,11 +210,12 @@ describe('ApprovalGraphExecutor', () => {
       policy: { allowRevoke: true },
     }
 
-    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState().currentNodeKey).toBe('high-review')
-    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState()).toThrowError(
+      expect.objectContaining({ code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE', statusCode: 409 }),
+    )
   })
 
-  it('skips a LEGACY identity-tautology formula branch instead of capturing every request', () => {
+  it('rejects a LEGACY identity formula instead of masking missing data with the default route', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [
         { key: 'start', type: 'start', config: {} },
@@ -246,8 +247,9 @@ describe('ApprovalGraphExecutor', () => {
       policy: { allowRevoke: true },
     }
 
-    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState().currentNodeKey).toBe('high-review')
-    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}).resolveInitialState()).toThrowError(
+      expect.objectContaining({ code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE', statusCode: 409 }),
+    )
   })
 
   it('routes a requester.department branch from threaded requesterContext, fail-closed on absent (RA-1a)', () => {

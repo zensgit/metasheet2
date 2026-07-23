@@ -15,8 +15,8 @@ import type {
 } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
 import {
+  approvalConditionFormulaHasCaptureProneIdentity,
   approvalConditionFormulaHasDynamicDependency,
-  approvalConditionFormulaIsProvablyAlwaysTrue,
   evaluateApprovalConditionFormula,
   type RequesterFormulaContext,
 } from './ApprovalConditionFormula'
@@ -1116,12 +1116,22 @@ export class ApprovalGraphExecutor {
       // unreachable; for a pre-existing stored graph the branch is skipped and routing falls
       // through to later branches / the default edge (the intended "else" mechanism).
       if (!branch.formula && branch.rules.length === 0) continue
-      // Legacy stored graphs may contain a literal-only or identity-tautology formula.
-      // Treat either like the empty-rules capture shape: skip it instead of routing every
-      // request through the first branch. Schema-independent proofs are available here;
-      // invalid formulas still throw below.
-      if (branch.formula && !approvalConditionFormulaHasDynamicDependency(branch.formula.expression)) continue
-      if (branch.formula && approvalConditionFormulaIsProvablyAlwaysTrue(branch.formula.expression)) continue
+      // Legacy stored formulas must not silently change a fail-closed evaluation into a
+      // default-route approval. New authoring rejects both shapes; old rows fail closed
+      // here so an absent optional field/requester context cannot be treated as no-match.
+      if (
+        branch.formula
+        && (
+          !approvalConditionFormulaHasDynamicDependency(branch.formula.expression)
+          || approvalConditionFormulaHasCaptureProneIdentity(branch.formula.expression)
+        )
+      ) {
+        throw new ServiceError(
+          'Stored condition formula is unsafe for routing',
+          409,
+          'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+        )
+      }
       const result = branch.formula
         ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData, this.options.requesterContext ?? null)
         : (() => {

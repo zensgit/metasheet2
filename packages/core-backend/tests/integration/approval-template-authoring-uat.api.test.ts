@@ -535,7 +535,15 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
         `uat-identity-tautology-create-${Date.now()}`,
         'requester.department == requester.department',
       ),
-    }), 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE')
+    }), 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE')
+
+    await expectFormulaRejection(await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: templateRequest(
+        `uat-arithmetic-capture-create-${Date.now()}`,
+        '{amount} - {amount} == 0',
+      ),
+    }), 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE')
 
     const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
       method: 'POST',

@@ -1545,7 +1545,33 @@ describe('ApprovalProductService', () => {
         },
       } as never)).rejects.toMatchObject({
         statusCode: 400,
-        code: 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
+        code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+        details: { branchIndex: 0 },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects an arithmetic identity formula before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-arithmetic-capture',
+        name: 'Formula Arithmetic Capture',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} - {amount} == 0' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
         details: { branchIndex: 0 },
       })
       expect(pgState.pool.connect).not.toHaveBeenCalled()

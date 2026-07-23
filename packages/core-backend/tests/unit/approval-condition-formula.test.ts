@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   APPROVAL_CONDITION_FORMULA_LIMITS,
+  approvalConditionFormulaHasCaptureProneIdentity,
   approvalConditionFormulaHasDynamicDependency,
   approvalConditionFormulaIsProvablyAlwaysTrue,
   assertApprovalConditionFormulaValidForSchema,
@@ -121,12 +122,32 @@ describe('approval condition formula evaluator (FC-1)', () => {
     })).toBe(false)
   })
 
-  it('proves identity comparisons without requiring schema metadata', () => {
-    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} == {amount}')).toBe(true)
-    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= {amount}')).toBe(true)
-    expect(approvalConditionFormulaIsProvablyAlwaysTrue('requester.department == requester.department')).toBe(true)
+  it('keeps semantic truth separate from capture-prone authoring policy', () => {
+    const required: FormSchema = {
+      fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true }],
+    }
+    const optional: FormSchema = {
+      fields: [{ id: 'note', type: 'text', label: 'Note' }],
+    }
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} == {amount}', required)).toBe(true)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{note} == {note}', optional)).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('requester.department == requester.department')).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue(
+      '{amount} == {amount} OR {note} == "ok"',
+      { fields: [...required.fields, ...optional.fields] },
+    )).toBe(false)
     expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} > {amount}')).toBe(false)
     expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} == {other}')).toBe(false)
+    expect(() => evaluateApprovalConditionFormula('{note} == {note}', {})).toThrow(/field note is missing/)
+  })
+
+  it('detects structural and conservative arithmetic capture identities', () => {
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{note} == {note}')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('requester.department >= requester.department')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} - {amount} == 0')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} * 0 == 0')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} == {other}')).toBe(false)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} >= -1')).toBe(false)
   })
 })
 
