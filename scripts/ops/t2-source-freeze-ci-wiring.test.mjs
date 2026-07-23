@@ -1,8 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import {
+  REAL_DB_STEP_IDS,
+  isSuiteWiredInRealDbStep,
+  realDbStepWholeFileArgs,
+} from './ci-realdb-step-contract.mjs'
 
 // T2 CI two-point wiring contract. The source-freeze suite proves an ACTIVE org transfer freezes
 // its source integration's sync (typed 409 before the lease claim, zero run rows, the destructive
@@ -22,14 +27,40 @@ const FILES = [
   'tests/integration/directory-source-freeze-lock-correctness.db.test.ts',
 ]
 
+// Located by the step's EXACT stable `id:` in plugin-tests.yml — never by its `- name:` title.
+// Title-prefix anchoring was bypassable: an earlier decoy step whose name merely CONTAINS the
+// same prefix would capture the guard while the real step was gutted. The shared helper also
+// pins EXECUTABILITY of the located step (if 20.x + env.DATABASE_URL + vitest.integration.config.ts),
+// so membership of the path in a step that can never run no longer passes.
+const STEP_ID = REAL_DB_STEP_IDS.approval
+
 for (const FILE of FILES) {
   test(`vitest.config.ts excludes ${FILE} from the no-DB job`, () => {
     const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
     assert.ok(cfg.includes(`'${FILE}'`), `vitest.config.ts must exclude ${FILE} (DATABASE_URL-gated whole file)`)
   })
 
-  test(`plugin-tests.yml runs ${FILE} as a whole file in a real-DB step`, () => {
+  test(`plugin-tests.yml runs ${FILE} as a whole file in the approval real-DB step`, () => {
     const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-    assert.match(wf, new RegExp(`\\n\\s*${FILE.replace(/[.]/g, '\\.')} \\\\`), `plugin-tests.yml must run ${FILE} in a real-DB step`)
+    assert.ok(
+      isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+      `plugin-tests.yml real-DB step id "${STEP_ID}" (if 20.x + env.DATABASE_URL + `
+        + `vitest.integration.config.ts) must run ${FILE} as a whole-file vitest arg`,
+    )
+    // Negative: must not be the sole (or any) placement under multitable real-DB.
+    assert.equal(
+      realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(FILE),
+      false,
+      `${FILE} must not be wired into the multitable real-DB step`,
+    )
+  })
+
+  test(`the wired suite ${FILE} exists on disk`, () => {
+    // Third point: both wiring texts can stay intact while the suite is renamed/deleted — vitest
+    // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
+    assert.ok(
+      existsSync(join(repoRoot, 'packages/core-backend', FILE)),
+      `wired suite packages/core-backend/${FILE} must exist on disk`,
+    )
   })
 }
