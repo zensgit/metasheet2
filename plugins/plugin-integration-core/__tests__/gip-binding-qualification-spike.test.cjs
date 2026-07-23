@@ -207,9 +207,28 @@ async function probeBehaviour() {
     probeStrategy: { dialect: 'evil', snapshotSemantics: 'marker_smuggle', buildTotalOrderProbeSql: () => 'SELECT 1' },
     query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
-  // the factory itself REFUSES a non-branded (fake) registry — the injection never
-  // even reaches a prober.
-  assert.throws(() => createBindingQualificationProber({ resolve: () => null }))
+  // NEGATIVE CONTROL — trust is OBJECT IDENTITY, not a forgeable public field (review
+  // P1 round-6). A FULLY duck-typed registry — carrying __gipTrustedRegistry:true AND a
+  // resolve() that returns a working, attacker-authored strategy with a smuggled
+  // snapshotSemantics marker — is STILL rejected by the factory, because it was never
+  // constructed by createProbeStrategyRegistry (not in the module-private WeakSet). The
+  // owner's probe {"accepted":true,"markerLeaked":true} is closed: no prober is ever
+  // minted from a forged registry, so the marker path is unreachable.
+  const forgedRegistry = {
+    __gipTrustedRegistry: true,
+    resolve: () => ({
+      buildTotalOrderProbeSql: () => 'SELECT 0 AS duplicate_groups_sampled, 0 AS null_key_rows',
+      strategyId: 'gip.total_order_probe.postgres', strategyVersion: 'v1',
+      dialect: 'postgres', snapshotSemantics: 'ATTACKER_SMUGGLED_MARKER',
+    }),
+  }
+  rejectsWith(() => createBindingQualificationProber(forgedRegistry), 'QUALIFICATION_INPUT_INVALID')
+  // primitives / null are rejected too (WeakSet.has returns false, never throws through)
+  rejectsWith(() => createBindingQualificationProber(null), 'QUALIFICATION_INPUT_INVALID')
+  rejectsWith(() => createBindingQualificationProber('nope'), 'QUALIFICATION_INPUT_INVALID')
+  rejectsWith(() => createBindingQualificationProber({ resolve: () => null }), 'QUALIFICATION_INPUT_INVALID')
+  // a REAL registry (WeakSet member) yields a working prober — identity, not property
+  assert.equal(typeof createBindingQualificationProber(REGISTRY).probe, 'function')
   // profile with NO bound strategy ⇒ PROBE_STRATEGY_UNBOUND (named fail-closed)
   await rejectsWithAsync(() => PROBER.probe({
     ...BASE_INPUTS, actionProfileVersion: 'fixture.unbound_read.v1', envelopeKey: ENVELOPE_KEY,

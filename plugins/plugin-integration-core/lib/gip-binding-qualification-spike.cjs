@@ -198,6 +198,14 @@ const postgresTotalOrderProbeStrategy = Object.freeze({
   buildTotalOrderProbeSql: buildOrderingKeyTotalOrderProbeSql,
 })
 
+// TRUST is OBJECT IDENTITY, never a public field (review P1, round-6): a boolean
+// brand `__gipTrustedRegistry: true` is trivially duck-typed — a plain object carrying
+// that field + a resolve() passed the prober factory and minted candidates with an
+// attacker-controlled snapshotSemantics marker written into evidence. Membership in
+// this module-private WeakSet is UNFORGEABLE: the ONLY way in is to be constructed by
+// createProbeStrategyRegistry below. No public property is ever consulted.
+const trustedProbeStrategyRegistries = new WeakSet()
+
 // STRATEGY BINDING (review P1): strategies are SERVER-REGISTERED implementations
 // uniquely bound to an actionProfileVersion — runtime input never supplies strategy
 // functions or claims. The registry is constructed server-side; probe resolves the
@@ -226,22 +234,26 @@ function createProbeStrategyRegistry(entries) {
       buildTotalOrderProbeSql: entry.buildTotalOrderProbeSql,
     }))
   }
-  return Object.freeze({
+  const registry = Object.freeze({
     resolve(actionProfileVersion) {
       return byProfile.get(actionProfileVersion) || null
     },
-    // brand: only a registry this module built is trusted by the prober factory.
-    __gipTrustedRegistry: true,
   })
+  // Authenticate by IDENTITY, not by a forgeable public marker (review P1, round-6).
+  trustedProbeStrategyRegistries.add(registry)
+  return registry
 }
 
 // SERVICE FACTORY (review P1): binds a TRUSTED registry once, server-side, and returns
 // a prober whose probe() takes RUN DATA ONLY. A caller can never inject a fake
 // duck-typed registry into the qualification chain — the registry is captured here,
-// not per call, and must be one this module built (brand check).
+// not per call, and must be an object this module ACTUALLY constructed. Trust is
+// WeakSet MEMBERSHIP (round-6): a duck-typed object — even one carrying
+// __gipTrustedRegistry:true and a working resolve() — is not in the private WeakSet
+// and is rejected.
 function createBindingQualificationProber(strategyRegistry) {
-  if (!isPlainObject(strategyRegistry) || strategyRegistry.__gipTrustedRegistry !== true
-    || typeof strategyRegistry.resolve !== 'function') {
+  if (!trustedProbeStrategyRegistries.has(strategyRegistry)) {
+    // WeakSet.has(primitive) returns false (never throws) — null/strings fail here too.
     fail('QUALIFICATION_INPUT_INVALID', 'a trusted probe-strategy registry (from createProbeStrategyRegistry) is required', { field: 'strategyRegistry' })
   }
   return Object.freeze({
@@ -322,10 +334,11 @@ function normalizeEnvelopeKey(envelopeKey) {
   if (secretBytes === null || secretBytes.length < ENVELOPE_SECRET_MIN_BYTES) {
     fail('QUALIFICATION_INPUT_INVALID', 'envelope secret must be raw bytes (Buffer/Uint8Array) of at least 32 bytes', { field: 'envelopeKey.secret' })
   }
-  // OWN the bytes (review NIT, defense-in-depth): a defensive copy so a caller mutating
-  // its Buffer cannot alias the key material. NB the MAC is already computed synchronously
-  // within each call, so this copy is belt-and-braces, not a correctness fix for the
-  // current synchronous flow.
+  // OWN the bytes — LOAD-BEARING (review P2 round-5, corrected round-6): the probe path
+  // has an `await runReadOnlyProbe(...)` window BETWEEN this copy and computeEnvelopeMac.
+  // Without the copy, a caller mutating its own Buffer inside the query callback (during
+  // that await) would change the bytes the MAC is computed under — the async-window test
+  // REDs on removal. This is a correctness fix, not belt-and-braces.
   return { keyId, secret: Buffer.from(secretBytes) }
 }
 
