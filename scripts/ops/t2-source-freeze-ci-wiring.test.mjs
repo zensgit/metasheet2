@@ -18,7 +18,14 @@ import {
 // disables the §12.2 freeze proof while CI stays green. Runs in the gating no-DB test job.
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
-const FILE = 'tests/integration/directory-org-transfer-source-freeze.db.test.ts'
+// Same two-point contract for every T2 freeze-linearization suite:
+// - the original §12.2 source-freeze suite;
+// - the lock-correctness suite (canonical UUID lock key + READ COMMITTED pin, proven on an
+//   RR-default pool), added by the T2 lock-correctness ticket.
+const FILES = [
+  'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
+  'tests/integration/directory-source-freeze-lock-correctness.db.test.ts',
+]
 
 // Located by the step's EXACT stable `id:` in plugin-tests.yml — never by its `- name:` title.
 // Title-prefix anchoring was bypassable: an earlier decoy step whose name merely CONTAINS the
@@ -27,31 +34,33 @@ const FILE = 'tests/integration/directory-org-transfer-source-freeze.db.test.ts'
 // so membership of the path in a step that can never run no longer passes.
 const STEP_ID = REAL_DB_STEP_IDS.approval
 
-test('vitest.config.ts excludes the T2 source-freeze suite from the no-DB job', () => {
-  const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
-  assert.ok(cfg.includes(`'${FILE}'`), `vitest.config.ts must exclude ${FILE} (DATABASE_URL-gated whole file)`)
-})
+for (const FILE of FILES) {
+  test(`vitest.config.ts excludes ${FILE} from the no-DB job`, () => {
+    const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
+    assert.ok(cfg.includes(`'${FILE}'`), `vitest.config.ts must exclude ${FILE} (DATABASE_URL-gated whole file)`)
+  })
 
-test('plugin-tests.yml runs the T2 source-freeze suite as a whole file in a real-DB step', () => {
-  const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-  assert.ok(
-    isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
-    `plugin-tests.yml real-DB step id "${STEP_ID}" (if 20.x + env.DATABASE_URL + `
-      + `vitest.integration.config.ts) must run ${FILE} as a whole-file vitest arg`,
-  )
-  // Negative: must not be the sole (or any) placement under multitable real-DB.
-  assert.equal(
-    realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(FILE),
-    false,
-    `${FILE} must not be wired into the multitable real-DB step`,
-  )
-})
+  test(`plugin-tests.yml runs ${FILE} as a whole file in the approval real-DB step`, () => {
+    const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+    assert.ok(
+      isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
+      `plugin-tests.yml real-DB step id "${STEP_ID}" (if 20.x + env.DATABASE_URL + `
+        + `vitest.integration.config.ts) must run ${FILE} as a whole-file vitest arg`,
+    )
+    // Negative: must not be the sole (or any) placement under multitable real-DB.
+    assert.equal(
+      realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(FILE),
+      false,
+      `${FILE} must not be wired into the multitable real-DB step`,
+    )
+  })
 
-test('the T2 source-freeze suite file exists on disk', () => {
-  // Third point: both wiring texts can stay intact while the suite is renamed/deleted — vitest
-  // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
-  assert.ok(
-    existsSync(join(repoRoot, 'packages/core-backend', FILE)),
-    `wired suite packages/core-backend/${FILE} must exist on disk`,
-  )
-})
+  test(`the wired suite ${FILE} exists on disk`, () => {
+    // Third point: both wiring texts can stay intact while the suite is renamed/deleted — vitest
+    // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
+    assert.ok(
+      existsSync(join(repoRoot, 'packages/core-backend', FILE)),
+      `wired suite packages/core-backend/${FILE} must exist on disk`,
+    )
+  })
+}

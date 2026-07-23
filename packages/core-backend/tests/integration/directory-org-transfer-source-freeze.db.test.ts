@@ -29,6 +29,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 //   - remove the apply-time assertDirectorySyncNotFrozenByTransfer recheck → freeze-wins
 //     races commit the absence sweep and deactivate the seeded live account
 //
+// B1 (audit follow-up, deliberate freeze ≠ integration failure) mutation proofs:
+//   - revert the discrimination in the sync catch (route DirectorySyncFrozenByTransferError
+//     back through markSyncFailure) → the create-wins race's abort assertions go red
+//   - suppress markSyncFailure for ALL errors → the genuine-failure positive control goes red
+//
 // DATABASE_URL-gated (describeIfDatabase): excluded from the no-DB vitest job so it cannot
 // skip-green, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml
 // (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
@@ -49,6 +54,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 }))
 
 import { query } from '../../src/db/pg'
+import { countConsecutiveFailedRuns } from '../../src/directory/directory-sync-alert-delivery'
 import {
   createDirectoryIntegration,
   DirectorySyncFrozenByTransferError,
@@ -212,6 +218,41 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
     const row = await query<{ n: string }>(`SELECT count(*)::text AS n FROM directory_sync_runs WHERE integration_id = $1`, [
       integrationId,
     ])
+    return Number(row.rows[0].n)
+  }
+
+  type AbortRunRow = {
+    id: string
+    status: string
+    finished_at: string | null
+    error_message: string | null
+    meta: { abortReason?: string; transferId?: string } | null
+  }
+
+  /** All run rows for ONE fixture integration (shared dev DB — never scan the table). */
+  async function runRows(integrationId: string): Promise<AbortRunRow[]> {
+    const rows = await query<AbortRunRow>(
+      `SELECT id, status, finished_at, error_message, meta
+         FROM directory_sync_runs WHERE integration_id = $1 ORDER BY started_at ASC`,
+      [integrationId],
+    )
+    return rows.rows
+  }
+
+  async function integrationLastError(integrationId: string): Promise<string | null> {
+    const row = await query<{ last_error: string | null }>(
+      `SELECT last_error FROM directory_integrations WHERE id = $1`,
+      [integrationId],
+    )
+    return row.rows[0]?.last_error ?? null
+  }
+
+  async function syncFailedAlertCount(integrationId: string): Promise<number> {
+    const row = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM directory_sync_alerts
+        WHERE integration_id = $1 AND code = 'sync_failed'`,
+      [integrationId],
+    )
     return Number(row.rows[0].n)
   }
 
@@ -481,14 +522,139 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
 
     // Local directory mutation must not commit after freeze linearized first.
     expect(await accountActive(source.accountId)).toBe(true)
-    // Late-race honesty: lease was claimed after the entry check, so a failed run row may exist.
-    const runs = await query<{ status: string; n: string }>(
-      `SELECT status, count(*)::text AS n FROM directory_sync_runs
-        WHERE integration_id = $1 GROUP BY status`,
+
+    // B1 (audit follow-up): the lease WAS claimed after the entry check, so this late race does
+    // leave a run row behind — but a deliberate freeze must not be recorded as an integration
+    // FAILURE. Before this ticket the unconditional catch called markSyncFailure and left
+    // status='failed' + integrations.last_error + an 'error'/'sync_failed' alert standing for the
+    // ENTIRE (multi-day) transfer, because last_error is only cleared by a SUCCESSFUL apply —
+    // which the freeze is precisely what prevents. Assert the deliberate-abort aftermath instead.
+    const runs = await runRows(source.integrationId)
+    expect(runs.find((r) => r.status === 'completed')).toBeUndefined()
+    expect(runs.find((r) => r.status === 'failed')).toBeUndefined()
+    expect(runs.filter((r) => r.status === 'aborted')).toHaveLength(1)
+    const aborted = runs.find((r) => r.status === 'aborted')!
+    // Terminal (lease free) and NOT styled as an error on the admin run panel.
+    expect(aborted.finished_at).not.toBeNull()
+    expect(aborted.error_message).toBeNull()
+    // Reason is still recorded — in meta, which no run-summary/toast surface reads.
+    expect(aborted.meta?.abortReason).toBe('frozen_by_org_transfer')
+    expect(aborted.meta?.transferId).toBe(transferId)
+    // The integration itself must not read "errored" for the duration of the transfer.
+    expect(await integrationLastError(source.integrationId)).toBeNull()
+    // No failure alert row → nothing for the (owner-pending) alert webhook to page on.
+    expect(await syncFailedAlertCount(source.integrationId)).toBe(0)
+
+    // Escalation exclusion, pinned directly: a deliberate abort is not a consecutive failure.
+    expect(await countConsecutiveFailedRuns(source.integrationId)).toBe(0)
+
+    // LEASE IS FREE, end-to-end: with the freeze lifted the very next sync claims and completes.
+    // (Also the destructive positive control — the empty tenant sweeps the seeded account.)
+    await query(`UPDATE provider_org_transfers SET freeze_source_sync = false WHERE id = $1`, [transferId])
+    const followUp = await syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)
+    expect(followUp.run.status).toBe('completed')
+    expect(await accountActive(source.accountId)).toBe(false)
+    expect(await integrationLastError(source.integrationId)).toBeNull()
+  })
+
+  it('B1 POSITIVE CONTROL: a GENUINE sync failure still marks failed + last_error + a sync_failed alert', async () => {
+    // Proves the catch was NARROWED, not gutted: same catch, non-freeze error, full failure path.
+    const source = await seedIntegrationWithLiveAccount('b1-genuine-fail')
+    clientMocks.listDingTalkDepartments.mockRejectedValueOnce(new Error('b1 provider pull exploded'))
+
+    await expect(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)).rejects.toThrow(
+      /b1 provider pull exploded/,
+    )
+
+    const runs = await runRows(source.integrationId)
+    expect(runs).toHaveLength(1)
+    expect(runs[0].status).toBe('failed')
+    expect(runs[0].error_message).toContain('b1 provider pull exploded')
+    expect(await integrationLastError(source.integrationId)).toContain('b1 provider pull exploded')
+    expect(await syncFailedAlertCount(source.integrationId)).toBe(1)
+    // …and THIS one does drive escalation.
+    expect(await countConsecutiveFailedRuns(source.integrationId)).toBe(1)
+  })
+
+  it('B1 escalation exclusion: an aborted run neither counts nor breaks a failure streak', async () => {
+    // Direct pin on the escalation input (`countConsecutiveFailedRuns` filters
+    // status IN ('completed','failed')): a genuine failure, then a deliberate abort, then
+    // another genuine failure = a streak of 2 — the abort is invisible to escalation, and it
+    // must not silently reset the streak either.
+    const source = await seedIntegrationWithLiveAccount('b1-escalation')
+
+    clientMocks.listDingTalkDepartments.mockRejectedValueOnce(new Error('b1 escalation failure one'))
+    await expect(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)).rejects.toThrow(/failure one/)
+    expect(await countConsecutiveFailedRuns(source.integrationId)).toBe(1)
+
+    // Insert the deliberate-abort row exactly as the abort path writes it, in between.
+    await query(
+      `INSERT INTO directory_sync_runs (integration_id, status, started_at, finished_at, stats, meta, triggered_by, trigger_source)
+       VALUES ($1, 'aborted', NOW(), NOW(), '{}'::jsonb,
+               jsonb_build_object('abortReason', 'frozen_by_org_transfer'), $2, 'manual')`,
+      [source.integrationId, `t2-admin-${TS}`],
+    )
+    expect(await countConsecutiveFailedRuns(source.integrationId)).toBe(1)
+
+    clientMocks.listDingTalkDepartments.mockRejectedValueOnce(new Error('b1 escalation failure two'))
+    await expect(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`)).rejects.toThrow(/failure two/)
+    expect(await countConsecutiveFailedRuns(source.integrationId)).toBe(2)
+  })
+
+  it('B1 abort never softens a RECLAIMED run: a reclaimer-written failed row survives the freeze abort', async () => {
+    // The abort UPDATE is guarded on `status = 'running'` for a reason the docblock states but
+    // nothing pinned: if the lease was reclaimed while this run was alive-but-silent, the row
+    // already carries the reclaimer's truthful `failed` record, and this run no longer owns it —
+    // softening that to 'aborted' would erase a real liveness incident. Dropping the guard used
+    // to leave the whole suite green.
+    const source = await seedIntegrationWithLiveAccount('b1-reclaimed-src')
+    const target = await seedIntegrationWithLiveAccount('b1-reclaimed-dst')
+
+    await withHolder(async (holder, holderPid) => {
+      // Freeze writer holds the shared source lock uncommitted, so the real sync parks in its
+      // apply transaction (entry check still saw no freeze) — a deterministic barrier.
+      await holder.query('BEGIN')
+      await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        sourceSyncFreezeLockKey(source.integrationId),
+      ])
+      const ins = await holder.query<{ id: string }>(
+        `INSERT INTO provider_org_transfers
+           (org_id, provider, source_integration_id, target_integration_id, status, freeze_source_sync)
+         SELECT org_id, provider, $1, $2, 'draft', true
+           FROM directory_integrations WHERE id = $1
+         RETURNING id`,
+        [source.integrationId, target.integrationId],
+      )
+      cleanupTransferIds.push(ins.rows[0].id)
+
+      const syncOutcome = settled(syncDirectoryIntegration(source.integrationId, `t2-admin-${TS}`))
+      await waitUntilBlockedOnHolder(holderPid)
+
+      // While the sync is provably parked, a stale-lease reclaimer takes its run row away and
+      // records the truthful liveness failure.
+      const reclaimed = await query<{ id: string }>(
+        `UPDATE directory_sync_runs
+            SET status = 'failed', error_message = 'reclaimed as stale', finished_at = NOW(), updated_at = NOW()
+          WHERE integration_id = $1 AND status = 'running'
+          RETURNING id`,
+        [source.integrationId],
+      )
+      expect(reclaimed.rows).toHaveLength(1)
+
+      await holder.query('COMMIT')
+      const outcome = await syncOutcome
+      expect(outcome).toBeInstanceOf(DirectorySyncFrozenByTransferError)
+    })
+
+    // The reclaimer's record stands: not softened to 'aborted', message intact.
+    const row = await query<{ status: string; error_message: string | null }>(
+      `SELECT status, error_message FROM directory_sync_runs
+        WHERE integration_id = $1 ORDER BY started_at DESC LIMIT 1`,
       [source.integrationId],
     )
-    const completed = runs.rows.find((r) => r.status === 'completed')
-    expect(completed).toBeUndefined()
+    expect(row.rows[0].status).toBe('failed')
+    expect(row.rows[0].error_message).toBe('reclaimed as stale')
   })
 
   it('RACE sync-wins vs create: apply stand-in holds source lock → real create parks → after release create freezes', async () => {

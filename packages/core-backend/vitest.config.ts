@@ -195,6 +195,16 @@ export default defineConfig({
       // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
       'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
+      // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
+      // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
+      // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
+      // repeatable-read-DEFAULT service pool (the file amends DATABASE_URL with
+      // `options=-c default_transaction_isolation=repeatable\ read` before the pool is built).
+      // Drives the REAL syncDirectoryIntegration / createOrgTransfer with a mocked DingTalk
+      // client against real Postgres. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
+      // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
+      'tests/integration/directory-source-freeze-lock-correctness.db.test.ts',
       // T2-Gate evidence (§3.4): the (provider, external_key) collision MECHANISM — unique-index
       // pin, bare-unionId derivation pin, and the end-to-end wholesale second-corp sync failure
       // signature the staging two-corp runbook greps for. Real sync + mocked DingTalk client.
@@ -404,6 +414,11 @@ export default defineConfig({
       // readiness-gate + DingTalk destination permission negatives (case ⑤). DATABASE_URL-gated
       // describeIfDatabase; excluded here so the no-DB job cannot skip-green them; wired
       // whole-file into the attendance real-DB step in plugin-tests.yml.
+      // W4-PRE-1d (owner candidate-set split, #4534): real-DB dual-integration departure matrix.
+      // DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring —
+      // this exclude line was the missing second point, caught by the W4 wave-MD pre-review).
+      'tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts',
       'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
