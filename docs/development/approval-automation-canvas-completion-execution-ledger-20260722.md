@@ -3,8 +3,8 @@
 **状态：COMPOSED AND LOCALLY VERIFIED / DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / NOT LANDED**
 
 记录基线：`origin/main@ee39a13eb9db27d01c89cb19f0644b546c711347`。组合根：#4540
-`1d8fcdfa9a885671827fe83ac6454e460cd06c10`；最终数据栈头：#4539
-`e4d8b6a53f04d1f33e861c6afbe628e23fb7b8d7`。
+`3d034c9508261a14187b4ef9ada7624c6b5b7db9`；最终数据栈头：#4539
+`5da02bf3edbcc60cbceb3f4cd63c6c0c4937b889`。
 本台账记录实现和证据，不构成合并、UAT 或启用授权。
 
 ## 1. 已在 main 的底座
@@ -20,16 +20,16 @@
 | Lane | PR / exact head | 内容 | 组合处置 |
 |---|---|---|---|
 | Data root | #4510 `f6d05814a8` | 附件、FWB activation、画布基础和 CI | 被 #4540 吸收 |
-| Record-link | #4524 `e03ab66fe7` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
-| FWB update | #4531 `b955fafec6` | 更新受约束已有记录 | 已叠到 #4524 |
-| FWB composition | #4539 `e4d8b6a53f` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
+| Record-link | #4524 `b4ede85a2d` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
+| FWB update | #4531 `29519209c2` | 更新受约束已有记录 | 已叠到 #4524 |
+| FWB composition | #4539 `5da02bf3ed` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
 | Canvas root | #4433 `fc5477d7e4` | 分支编排与纵向画布 | 被 #4540 吸收 |
 | Canvas all-path | #4532 `762dc0fd5` | 条件内并行路径全部汇合 | 被 #4540 吸收 |
 | Canvas inspector | #4533 `babc6d975` | 共享检查器、键盘和响应式 | 被 #4540 吸收 |
 | Version restore | #4536 `3bb327a93` | diff/restore 与当前校验 | 被 #4540 吸收 |
 | Navigation | #4537 `b2f69116b` | zoom/pan/minimap/overlay | 被 #4540 吸收 |
 | Reorder | #4538 `a3562083af` | 同区域语义重排 | 被 #4540 吸收 |
-| Integration | #4540 `1d8fcdfa9a` | 两条线的唯一联合解析与测试面 | Draft，owner review |
+| Integration | #4540 `3d034c9508` | 两条线的唯一联合解析与测试面 | Draft，owner review |
 
 ## 3. 组合审阅发现与修复
 
@@ -51,15 +51,18 @@
 11. Canvas publish preflight 曾把 parallel node key 和动态来源 fingerprint 直接放入可见文案，保存/发布 catch
     还会回显任意后端 message；改为无标识符的业务文案及 machine-code allowlist，未知 API/本地错误统一使用
     values-free fallback。附件 runtime 已确认在 flag 分支内 dynamic import，无需再改。
+12. 外部复核构造出 `{amount} == {amount}` 与 `requester.department == requester.department`：它们带动态引用，
+    却仍会恒真捕获分支。新增递归 AST 结构等价证明；创建/更新/发布/恢复拒绝，历史模板运行时跳过。并行编辑
+    的本地拒绝文案也改为通用业务提示，不再携带 corrupt draft 的 raw node key。
 
 ## 4. 多模型使用与最终责任
 
 | 模型/角色 | 本轮用途 | 结论边界 |
 |---|---|---|
 | Kimi K3 | 只读 UI 冲突审阅 | 找到共享 editor 的 raw-id 回退和合并重复；Codex 独立修复并复测 |
-| Grok | 只读后端冲突审阅 | 建议后端冲突保留 Canvas runtime-path 校验及数据线附件/FWB 非冲突内容 |
-| ReClaude | 本修复轮未调用 | 外部代码传输授权未满足，不记录 verdict |
-| Codex | 冲突解析、代码修复、真库与全量 gate、最终台账 | 对 #4540 的工程结论负责 |
+| Grok 4.5 | 组合 exact-head 只读复核 | 找到 identity-tautology 绕过；另提出 dry-run 诊断与 number mapper 疑虑，交由 Codex 按真实调用链裁决 |
+| ReClaude / Opus | 公式、record-link、FWB 定向复核 | 确认 identity-tautology；确认 base-read 和 number activation fail closed；认为 dry-run 仅返回作者输入/结构诊断，不构成服务端值泄露 |
+| Codex | 分歧裁决、代码修复、真库/单测/typecheck 与最终台账 | 接受恒等式和 raw node-key 修复；保留有用的 values-free dry-run 诊断及未来 D0-D4 使用的纯 number mapper |
 
 代理结论只绑定其读取的 exact head；不能跨 rebase 或替代测试、CI 和 owner 决策。
 

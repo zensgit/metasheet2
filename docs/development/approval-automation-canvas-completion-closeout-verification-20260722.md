@@ -2,8 +2,8 @@
 
 **结论：ENGINEERING STACK VERIFIED THROUGH DRAFT #4539; NOT MERGED, UAT'D OR ENABLED**
 
-本文对组合根 #4540 `1d8fcdfa9a885671827fe83ac6454e460cd06c10` 及其重排后的最终数据栈头
-#4539 `e4d8b6a53f04d1f33e861c6afbe628e23fb7b8d7` 的本地验证负责。
+本文对组合根 #4540 `3d034c9508261a14187b4ef9ada7624c6b5b7db9` 及其重排后的最终数据栈头
+#4539 `5da02bf3edbcc60cbceb3f4cd63c6c0c4937b889` 的本地验证负责。
 Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独立状态。
 
 ## 1. 为什么需要组合 PR
@@ -78,6 +78,26 @@ Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独�
 record-link 的 required 真库矩阵以
 base-read 为唯一变量，覆盖 submit 和 picker 的 fail-closed/positive-control 两面；未对生产授权代码执行削弱型
 源代码变异。
+
+### 2.4 Claude/Grok 外部复核后的 exact-head 复验
+
+用户明确授权将本轮相关代码发送给 Claude/Grok 后，两者在 composed head 上执行只读复核。Grok 构造出带动态
+引用的恒等式公式可绕过恒真门；ReClaude/Opus 独立确认该缺口，同时确认 record-link base-read 与 FWB number
+activation 均 fail closed。两者对 formula dry-run 的判断不一致：Codex 检查返回面后保留作者自己的公式/结构诊断，
+因为它不回显数据库错误、运行时值或隐藏字段值。
+
+修复重叠到最终 #4539 head 后的结果：
+
+| Gate | 结果 | 证明范围 |
+|---|---:|---|
+| formula + graph + product service unit | **3 files / 224 passed** | AST 恒等式、保存门、历史模板 runtime fallback |
+| combined real-DB | **6 files / 92 passed** | template authoring/restore 7、record-link 39、FWB create 18、update 15、write 4、S1-S8 9 |
+| authoring errors + parallel preflight + mounted inspector | **3 files / 44 passed** | 通用并行错误不含 raw key、authoring 错误与真实 SFC 接线 |
+| backend `tsc --noEmit` + frontend `vue-tsc --noEmit` | pass | 最终组合 head 类型面 |
+
+恒等式拒绝由纯函数、服务保存、历史运行时和真 API 四层正反例覆盖。本轮曾尝试临时中和新增守卫做源码变异，
+但执行环境因会短暂制造审批路由安全回归而拒绝；没有绕过限制，也不把该项写成 mutation-proven。既有动态依赖
+和区间恒真守卫的历史变异证据仍有效，但不替代本轮恒等式测试。
 
 ## 3. 数值写回的真实边界
 
