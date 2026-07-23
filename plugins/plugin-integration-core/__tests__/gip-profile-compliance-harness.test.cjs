@@ -138,6 +138,11 @@ function summarizeFailClosed() {
   assert.deepEqual(summarizeBatteryForEvidence(abort), { passed: false, checkCount: 1, failedCheckIds: ['C1_schema_valid'] })
   // (f) generated entries are frozen — mutation throws
   assert.throws(() => { real.checks[0].ok = false }, TypeError)
+  // (g) the SUCCESS summary projection is recursively frozen too (review P3)
+  const goodSummary = summarizeBatteryForEvidence(real)
+  assert.equal(goodSummary.passed, true)
+  assert.throws(() => { goodSummary.passed = false }, TypeError)
+  assert.throws(() => { goodSummary.failedCheckIds.push('x') }, TypeError)
   // the roster itself is exact-pinned and exported
   assert.deepEqual([...BATTERY_CHECK_IDS], [
     'C1_schema_valid',

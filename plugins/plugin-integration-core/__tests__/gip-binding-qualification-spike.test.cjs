@@ -15,6 +15,7 @@ const {
   buildOrderingKeyDuplicateProbeSql,
   buildOrderingKeyNullProbeSql,
   buildOrderingKeyTotalOrderProbeSql,
+  postgresTotalOrderProbeStrategy,
   probeBindingQualification,
   verifyBindingQualification,
   __internals,
@@ -121,7 +122,9 @@ function probeSqlReadOnly() {
   // COMBINED single-statement probe (review P1: one source snapshot, no torn read)
   const combined = buildOrderingKeyTotalOrderProbeSql({ objectName: 'fixture_view', keyColumns: ['item_no'] })
   assert.match(combined, /^SELECT \(SELECT COUNT\(\*\) FROM \(SELECT /)
-  assert.match(combined, /AS duplicate_groups_sampled, \(SELECT COUNT\(\*\) FROM \(SELECT 1 AS null_key_row /)
+  // ::int casts so the REAL pg driver returns numbers (int8 COUNT(*) arrives as string)
+  assert.match(combined, /\)::int AS duplicate_groups_sampled, \(SELECT COUNT\(\*\) FROM \(SELECT 1 AS null_key_row /)
+  assert.match(combined, /\)::int AS null_key_rows$/)
   assert.equal(__internals.assertReadOnlySql(combined), combined)
   // duplicate keyColumns declaration is rejected, never silently deduped (review P2)
   rejectsWith(() => buildOrderingKeyDuplicateProbeSql({ objectName: 'v', keyColumns: ['k', 'k'] }), 'QUALIFICATION_INPUT_INVALID')
@@ -134,6 +137,7 @@ async function probeBehaviour() {
   const qualification = await probeBindingQualification({
     ...BASE_INPUTS,
     envelopeKey: ENVELOPE_KEY,
+    probeStrategy: postgresTotalOrderProbeStrategy,
     query: okQuery,
     keyColumns: ['item_no', 'rev'],
     probedAt: '2026-07-23T00:00:00Z',
@@ -144,6 +148,8 @@ async function probeBehaviour() {
   assert.equal(qualification.evidence.duplicateGroupsFound, 0)
   assert.equal(qualification.evidence.nullKeyRowsFound, 0)
   assert.equal(qualification.evidence.checkedKeyColumnCount, 2)
+  assert.equal(qualification.evidence.probeDialect, 'postgres')
+  assert.equal(qualification.evidence.snapshotSemantics, 'single_statement_mvcc')
   assert.equal(qualification.envelopeKeyId, 'k2026a')
   assert.ok(typeof qualification.envelopeMac === 'string' && qualification.envelopeMac.length === 64)
   // the secret never appears anywhere in the qualification
@@ -157,7 +163,7 @@ async function probeBehaviour() {
   const SECRET = 'secret_item_A17'
   const dupQuery = async () => ({ rows: [{ duplicate_groups_sampled: 3, null_key_rows: 0, leak: SECRET }] })
   const caught = await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   assert.ok(!JSON.stringify({ m: caught.message, d: caught.details }).includes(SECRET),
     'duplicate-key failure must stay values-free')
@@ -165,26 +171,55 @@ async function probeBehaviour() {
   // NULL key components ⇒ fail closed (same single statement)
   const nullQuery = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 2 }] })
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_NULL_FOUND')
 
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'PROBE_QUERY_FAILED')
   // no envelope key ⇒ fail closed before any probing
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+    ...BASE_INPUTS, probeStrategy: postgresTotalOrderProbeStrategy, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
+
+  // NO probe strategy ⇒ fail closed (review P1: the platform never assumes a dialect
+  // or its snapshot semantics — they are the providing profile's certified claims)
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'QUALIFICATION_INPUT_INVALID')
+
+  // REAL-DRIVER COUNT SHAPE (review P1): node-postgres returns int8 counts as
+  // STRINGS — a '0'/'0' summary row must qualify, not PROBE_QUERY_FAILED.
+  const pgShapeQuery = async () => ({ rows: [{ duplicate_groups_sampled: '0', null_key_rows: '0' }] })
+  const pgShaped = await probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy,
+    query: pgShapeQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+  })
+  assert.equal(pgShaped.status, 'candidate')
+  // …string counts still trip the fail-closed branches
+  const pgDupQuery = async () => ({ rows: [{ duplicate_groups_sampled: '2', null_key_rows: '0' }] })
+  await rejectsWithAsync(() => probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy,
+    query: pgDupQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+  }), 'ORDERING_KEY_DUPLICATE_FOUND')
+  // …and junk shapes stay rejected ('007', '1e3', negative, non-decimal)
+  for (const bad of ['007', '1e3', '-1', 'abc']) {
+    const junk = async () => ({ rows: [{ duplicate_groups_sampled: bad, null_key_rows: '0' }] })
+    await rejectsWithAsync(() => probeBindingQualification({
+      ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy,
+      query: junk, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+    }), 'PROBE_QUERY_FAILED')
+  }
 }
 
 // ── 5. Verify: pure-local, digest-bound, expiring, status-gated ──
 async function verifyBehaviour() {
   const query = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] })
   const qualification = await probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
 
   const ok = verifyBindingQualification({
@@ -239,6 +274,15 @@ async function verifyBehaviour() {
     qualification: { ...qualification, envelopeKeyId: 'k2020x' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
 
+  // malformed MAC (64 chars but non-hex) stays INSIDE the frozen vocabulary —
+  // never ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH (review P2)
+  rejectsWith(() => verifyBindingQualification({
+    qualification: { ...qualification, envelopeMac: 'z'.repeat(64) }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
+  rejectsWith(() => verifyBindingQualification({
+    qualification: { ...qualification, envelopeMac: 'abc' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+  }), 'QUALIFICATION_ENVELOPE_MISMATCH')
+
   // a COPY with malformed expiresAt is a lifecycle tamper — envelope catches it
   rejectsWith(() => verifyBindingQualification({
     qualification: { ...qualification, expiresAt: 'tomorrow' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
@@ -250,7 +294,7 @@ async function verifyBehaviour() {
   }), 'QUALIFICATION_INPUT_INVALID')
   // probe-side pin: malformed probedAt fails closed at generation time
   await rejectsWithAsync(() => probeBindingQualification({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
+    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, probeStrategy: postgresTotalOrderProbeStrategy, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
   }), 'QUALIFICATION_INPUT_INVALID')
 
   // digest material domain (shared codec): undefined / NaN / Date all fail closed

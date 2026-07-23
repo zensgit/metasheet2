@@ -30,19 +30,31 @@ function isStrictPlainObject(value) {
   const proto = Object.getPrototypeOf(value)
   if (proto !== Object.prototype && proto !== null) return false
   if (Object.getOwnPropertySymbols(value).length > 0) return false
-  for (const key of Object.keys(value)) {
+  // FULL own-property-descriptor sweep (review P2): Object.keys alone missed
+  // non-enumerable own properties (collided with {}) — every own property must be
+  // an enumerable, accessor-free data property.
+  for (const key of Object.getOwnPropertyNames(value)) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    if (!descriptor || descriptor.get || descriptor.set) return false
+    if (!descriptor || descriptor.get || descriptor.set || !descriptor.enumerable) return false
   }
   return true
 }
 
-function assertDenseArray(value) {
+function isStrictDenseArray(value) {
+  if (!Array.isArray(value)) return false
+  if (Object.getOwnPropertySymbols(value).length > 0) return false
+  const names = Object.getOwnPropertyNames(value)
+  // EXACTLY the own contiguous indices + 'length' (review P2): an array with extra
+  // properties collided with a clean array; inherited indices must not count as
+  // dense own elements — own-property checks only, never the `in` operator.
+  if (names.length !== value.length + 1) return false
   for (let index = 0; index < value.length; index += 1) {
-    if (!(index in value)) {
-      throw new CanonicalDomainError('sparse arrays are outside the canonical domain')
-    }
+    if (!Object.prototype.hasOwnProperty.call(value, String(index))) return false
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || descriptor.get || descriptor.set || !descriptor.enumerable) return false
   }
+  if (!names.includes('length')) return false
+  return true
 }
 
 function assertStrictValue(value) {
@@ -54,8 +66,10 @@ function assertStrictValue(value) {
     return
   }
   if (Array.isArray(value)) {
-    assertDenseArray(value)
-    for (const entry of value) assertStrictValue(entry)
+    if (!isStrictDenseArray(value)) {
+      throw new CanonicalDomainError('arrays must be dense own-indexed arrays with no extra properties')
+    }
+    for (let index = 0; index < value.length; index += 1) assertStrictValue(value[index])
     return
   }
   if (isStrictPlainObject(value)) {
@@ -73,7 +87,17 @@ function deepCloneFrozenCanonical(value) {
     if (Array.isArray(entry)) return Object.freeze(entry.map((item) => clone(item)))
     if (isStrictPlainObject(entry)) {
       const out = {}
-      for (const key of Object.keys(entry)) out[key] = clone(entry[key])
+      for (const key of Object.keys(entry)) {
+        // defineProperty, NEVER assignment (review P2): `out[key] = …` with a legal
+        // JSON data key named __proto__ would SET THE PROTOTYPE of the clone and
+        // drop the key — prototype pollution + silent data loss.
+        Object.defineProperty(out, key, {
+          value: clone(entry[key]),
+          enumerable: true,
+          writable: false,
+          configurable: false,
+        })
+      }
       return Object.freeze(out)
     }
     return entry
@@ -90,7 +114,9 @@ function stableCanonicalStringify(value) {
     if (Array.isArray(entry)) return `[${entry.map((item) => serialize(item)).join(',')}]`
     if (isStrictPlainObject(entry)) {
       const keys = Object.keys(entry).sort()
-      return `{${keys.map((key) => `${JSON.stringify(key)}:${serialize(entry[key])}`).join(',')}}`
+      // own-property READ (a legal own '__proto__' data key shadows the accessor,
+      // and the domain guarantees enumerable data properties only)
+      return `{${keys.map((key) => `${JSON.stringify(key)}:${serialize(Object.getOwnPropertyDescriptor(entry, key).value)}`).join(',')}}`
     }
     return JSON.stringify(entry)
   }
@@ -100,6 +126,7 @@ function stableCanonicalStringify(value) {
 module.exports = {
   CanonicalDomainError,
   isStrictPlainObject,
+  isStrictDenseArray,
   assertStrictValue,
   deepCloneFrozenCanonical,
   stableCanonicalStringify,

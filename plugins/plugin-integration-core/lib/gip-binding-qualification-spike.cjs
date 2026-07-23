@@ -167,16 +167,54 @@ function buildOrderingKeyNullProbeSql({ objectName, keyColumns }) {
   return `SELECT 1 AS null_key_row FROM ${object} WHERE ${predicate} LIMIT 1`
 }
 
-// The TOTAL-ORDER probe is ONE statement (review P1: two independent reads are a
-// torn check — read A and read B can each look clean while no single snapshot
-// satisfies both predicates). A single statement executes under one source snapshot
-// (statement-level consistency); this external-source read stays OUTSIDE and apart
-// from any internal Activate transaction.
+// The TOTAL-ORDER probe is ONE statement so both predicates are evaluated against
+// ONE observed state (review P1: two independent reads are a torn check). Whether a
+// single statement actually implies one source snapshot is a DIALECT/ISOLATION
+// property — the PLATFORM does not assume it (review P1): the dialect, SQL shape and
+// snapshot semantics come from an injected probeStrategy whose claims are the
+// providing action profile's to certify at ITS gate. This module ships ONE reference
+// strategy (PostgreSQL) and refuses to probe without an explicit strategy. The
+// external-source read stays OUTSIDE and apart from any internal Activate transaction.
 function buildOrderingKeyTotalOrderProbeSql({ objectName, keyColumns }) {
   const columns = normalizeKeyColumns(keyColumns)
   const dup = buildOrderingKeyDuplicateProbeSql({ objectName, keyColumns: columns })
   const nul = buildOrderingKeyNullProbeSql({ objectName, keyColumns: columns })
-  return `SELECT (SELECT COUNT(*) FROM (${dup}) AS gip_duplicate_probe) AS duplicate_groups_sampled, (SELECT COUNT(*) FROM (${nul}) AS gip_null_probe) AS null_key_rows`
+  // ::int casts (review P1): node-postgres returns int8 COUNT(*) as a STRING; the
+  // sampled counts here are 0/1 by construction (LIMIT 1 subqueries), so int4 is
+  // exact and arrives as a JS number on the real driver.
+  return `SELECT (SELECT COUNT(*) FROM (${dup}) AS gip_duplicate_probe)::int AS duplicate_groups_sampled, (SELECT COUNT(*) FROM (${nul}) AS gip_null_probe)::int AS null_key_rows`
+}
+
+// Reference dialect strategy — PostgreSQL. `snapshotSemantics` is the STRATEGY'S
+// claim (single statement executes under one MVCC snapshot in PG); a non-PG profile
+// (e.g. SQL Server: no LIMIT, different isolation) must supply its own certified
+// strategy — the platform never silently assumes this one.
+const postgresTotalOrderProbeStrategy = Object.freeze({
+  dialect: 'postgres',
+  snapshotSemantics: 'single_statement_mvcc',
+  buildTotalOrderProbeSql: buildOrderingKeyTotalOrderProbeSql,
+})
+
+function normalizeProbeStrategy(strategy) {
+  if (!isPlainObject(strategy) || typeof strategy.buildTotalOrderProbeSql !== 'function') {
+    fail('QUALIFICATION_INPUT_INVALID', 'an explicit probe strategy (dialect + snapshot semantics + SQL builder) is required', { field: 'probeStrategy' })
+  }
+  return {
+    dialect: requiredString(strategy.dialect, 'probeStrategy.dialect'),
+    snapshotSemantics: requiredString(strategy.snapshotSemantics, 'probeStrategy.snapshotSemantics'),
+    buildTotalOrderProbeSql: strategy.buildTotalOrderProbeSql,
+  }
+}
+
+// --- P1 (pg count shape): the real driver returns int8 counts as strings; after the
+// ::int cast they arrive as numbers, but the acceptor is belt-and-braces — a safe
+// non-negative decimal (number OR canonical digit string) is accepted, anything else
+// fails closed.
+const SAFE_COUNT_STRING = /^(0|[1-9][0-9]{0,14})$/
+function normalizeProbeCount(value) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  if (typeof value === 'string' && SAFE_COUNT_STRING.test(value)) return Number(value)
+  return null
 }
 
 // The probe refuses to execute anything but a single SELECT — read-only is a
@@ -247,18 +285,17 @@ async function probeBindingQualification(input) {
     fail('QUALIFICATION_INPUT_INVALID', 'probe needs a query function and a plain-object input', {})
   }
   const envelopeKey = normalizeEnvelopeKey(input.envelopeKey)
+  const strategy = normalizeProbeStrategy(input.probeStrategy)
   const objectName = requiredString(input.objectKey, 'objectKey')
   const keyColumns = normalizeKeyColumns(input.keyColumns)
-  // ONE statement, one source snapshot (review P1: no torn two-read qualification).
+  // ONE statement per the injected strategy (whose snapshot claim is profile-certified).
   const rows = await runReadOnlyProbe(
     input.query,
-    buildOrderingKeyTotalOrderProbeSql({ objectName, keyColumns }),
+    strategy.buildTotalOrderProbeSql({ objectName, keyColumns }),
   )
-  const summary = rows.length === 1 ? rows[0] : null
-  const duplicateGroups = summary && Number.isInteger(summary.duplicate_groups_sampled)
-    ? summary.duplicate_groups_sampled : null
-  const nullRows = summary && Number.isInteger(summary.null_key_rows)
-    ? summary.null_key_rows : null
+  const summary = rows.length === 1 && isPlainObject(rows[0]) ? rows[0] : null
+  const duplicateGroups = summary ? normalizeProbeCount(summary.duplicate_groups_sampled) : null
+  const nullRows = summary ? normalizeProbeCount(summary.null_key_rows) : null
   if (duplicateGroups === null || nullRows === null) {
     fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable summary row', {})
   }
@@ -274,6 +311,8 @@ async function probeBindingQualification(input) {
   }
   const evidence = Object.freeze({
     probeKind: 'ordering_key_total_order_negative',
+    probeDialect: strategy.dialect,
+    snapshotSemantics: strategy.snapshotSemantics,
     checkedKeyColumnCount: keyColumns.length,
     duplicateGroupsFound: 0,
     nullKeyRowsFound: 0,
@@ -325,10 +364,17 @@ function verifyBindingQualification({ qualification, expectedInputs, envelopeKey
     status: qualification.status,
     expiresAt: qualification.expiresAt,
   })
+  // strict hex syntax + decoded length BEFORE timingSafeEqual (review P2: a 64-char
+  // non-hex MAC made Buffer.from decode short and timingSafeEqual throw
+  // ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH — escaping the frozen vocabulary).
   const provided = typeof qualification.envelopeMac === 'string' ? qualification.envelopeMac : ''
+  if (!/^[0-9a-f]{64}$/.test(provided)) {
+    fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
+  }
   const expectedBuffer = Buffer.from(expectedMac, 'hex')
-  const providedBuffer = provided.length === expectedMac.length ? Buffer.from(provided, 'hex') : null
-  if (providedBuffer === null || !crypto.timingSafeEqual(expectedBuffer, providedBuffer)) {
+  const providedBuffer = Buffer.from(provided, 'hex')
+  if (providedBuffer.length !== expectedBuffer.length
+    || !crypto.timingSafeEqual(expectedBuffer, providedBuffer)) {
     fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
   }
   if (qualification.expiresAt !== undefined) {
@@ -362,6 +408,7 @@ module.exports = {
   buildOrderingKeyDuplicateProbeSql,
   buildOrderingKeyNullProbeSql,
   buildOrderingKeyTotalOrderProbeSql,
+  postgresTotalOrderProbeStrategy,
   probeBindingQualification,
   verifyBindingQualification,
   __internals: {

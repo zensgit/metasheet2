@@ -283,11 +283,15 @@ function summarizeBatteryForEvidence(report) {
   // flag invalidates the whole report rather than being echoed.
   const derived = report.checks.every((entry) => entry.ok === true)
   if (report.passed !== derived) return REPORT_INVALID_SUMMARY
-  return {
+  // recursively frozen — consistent with REPORT_INVALID_SUMMARY (review P3: the
+  // success projection was mutable after the fact).
+  return Object.freeze({
     passed: derived,
     checkCount: report.checks.length,
-    failedCheckIds: report.checks.filter((entry) => entry.ok !== true).map((entry) => entry.checkId),
-  }
+    failedCheckIds: Object.freeze(
+      report.checks.filter((entry) => entry.ok !== true).map((entry) => entry.checkId),
+    ),
+  })
 }
 
 module.exports = {

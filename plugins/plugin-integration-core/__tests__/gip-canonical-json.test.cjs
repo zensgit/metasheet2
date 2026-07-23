@@ -79,8 +79,37 @@ function stringifyDeterminismAndNonCollision() {
   rejects(() => stableCanonicalStringify([, 1]))
 }
 
+// Review round-3 reproductions — all four structural holes stay closed.
+function roundThreeReproductions() {
+  // (a) legal JSON '__proto__' DATA key: preserved as an own key, clone prototype
+  //     stays Object.prototype — no pollution, no key loss.
+  const withProtoKey = JSON.parse('{"__proto__": {"polluted": 1}, "a": 1}')
+  assertStrictValue(withProtoKey)
+  const cloned = deepCloneFrozenCanonical(withProtoKey)
+  assert.equal(Object.getPrototypeOf(cloned), Object.prototype, 'clone prototype must not be replaced')
+  assert.equal(({}).polluted, undefined, 'no global prototype pollution')
+  assert.ok(Object.prototype.hasOwnProperty.call(cloned, '__proto__'), 'own __proto__ data key preserved')
+  assert.deepEqual(Object.getOwnPropertyDescriptor(cloned, '__proto__').value, { polluted: 1 })
+  // and it serializes distinctly from the empty object
+  assert.notEqual(stableCanonicalStringify(withProtoKey), stableCanonicalStringify({ a: 1 }))
+
+  // (b) array with extra own properties: rejected (previously collided with clean [])
+  const extra = [1]; extra.x = 'smuggled'
+  rejects(() => assertStrictValue(extra))
+  rejects(() => stableCanonicalStringify(extra))
+
+  // (c) object whose only own property is non-enumerable: rejected (collided with {})
+  const hidden = {}; Object.defineProperty(hidden, 'h', { value: 1, enumerable: false })
+  rejects(() => assertStrictValue(hidden))
+
+  // (d) inherited index is NOT a dense own element
+  const fakeDense = Object.create([9, 9]); // inherits '0','1' — zero own indices
+  rejects(() => assertStrictValue(fakeDense))
+}
+
 function main() {
   domainRejections()
+  roundThreeReproductions()
   domainAcceptance()
   cloneOwnership()
   stringifyDeterminismAndNonCollision()
