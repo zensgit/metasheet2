@@ -3222,6 +3222,145 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance-admin/calculation-group-memberships": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a user's effective calculation-group membership timeline */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    userId: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ordered, non-overlapping membership timeline */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                items: components["schemas"]["AttendanceCalculationGroupMembership"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Calculation-group timeline read failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance-admin/calculation-group-memberships/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transition a user to a calculation group on an inclusive effective date */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        orgId: string;
+                        userId: string;
+                        /** Format: uuid */
+                        targetGroupId: string;
+                        /** Format: date */
+                        effectiveOn: string;
+                        reason: string;
+                        correlationId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Transition applied or replayed idempotently */
+                200: {
+                    headers: {
+                        "X-Correlation-Id"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                correlationId: string;
+                                /** @enum {string} */
+                                outcome: "transitioned" | "unchanged";
+                                membership: components["schemas"]["AttendanceCalculationGroupMembership"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                /** @description Target user is not active in the requested organization */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Calculation-group transition failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/groups": {
         parameters: {
             query?: never;
@@ -14906,6 +15045,28 @@ export interface components {
             userId?: string;
             /** Format: date-time */
             createdAt?: string | null;
+        };
+        AttendanceCalculationGroupMembership: {
+            /** Format: uuid */
+            id: string;
+            orgId: string;
+            userId: string;
+            /** Format: uuid */
+            groupId: string;
+            /** Format: date */
+            effectiveFrom: string;
+            /** Format: date */
+            effectiveTo: string | null;
+            assignedBy: string;
+            assignedReason: string;
+            assignedCorrelationId: string;
+            closedBy: string | null;
+            closedReason: string | null;
+            closedCorrelationId: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
         };
         AttendancePayrollTemplate: {
             id?: string;

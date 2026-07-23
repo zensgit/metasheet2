@@ -39,8 +39,17 @@ import {
   type AttendanceDecisionTraceResponse,
   type AttendanceDecisionTraceSettingsGates,
 } from '../services/AttendanceDecisionTrace'
+import {
+  AttendanceCalculationGroupMembershipError,
+  listAttendanceCalculationGroupMemberships,
+  transitionAttendanceCalculationGroupMembership,
+} from '../services/AttendanceCalculationGroupMembership'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function readStrictString(value: unknown): string | null {
+  return typeof value === 'string' ? value.trim() : null
+}
 
 type AttendanceRoleTemplateId = 'employee' | 'approver' | 'importer' | 'admin'
 
@@ -530,6 +539,119 @@ export function attendanceAdminRouter(): Router {
     } catch (_error) {
       // Values-free seam: never leak raw DB / driver messages to the client.
       return jsonError(res, 500, 'DIRECTORY_READINESS_FAILED', 'Failed to load directory readiness')
+    }
+  })
+
+  r.get('/api/attendance-admin/calculation-group-memberships', async (req: Request, res: Response) => {
+    try {
+      const orgId = readStrictString(req.query.orgId)
+      const targetUserId = readStrictString(req.query.userId)
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      if (!targetUserId) {
+        return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      }
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, actorId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for calculation-group membership')
+      }
+      const items = await listAttendanceCalculationGroupMemberships(orgId, targetUserId)
+      return jsonOk(res, { items })
+    } catch (error) {
+      if (error instanceof AttendanceCalculationGroupMembershipError) {
+        return jsonError(res, error.status, error.code, error.message)
+      }
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation-group membership tables not ready')
+      }
+      return jsonError(
+        res,
+        500,
+        'CALCULATION_GROUP_MEMBERSHIP_LIST_FAILED',
+        'Failed to load calculation-group membership timeline',
+      )
+    }
+  })
+
+  r.post('/api/attendance-admin/calculation-group-memberships/transition', async (req: Request, res: Response) => {
+    try {
+      const body =
+        req.body && typeof req.body === 'object'
+          ? (req.body as Record<string, unknown>)
+          : {}
+      const orgId = readStrictString(body.orgId)
+      const targetUserId = readStrictString(body.userId)
+      const targetGroupId = readStrictString(body.targetGroupId)
+      const effectiveOn = readStrictString(body.effectiveOn)
+      const reason = readStrictString(body.reason)
+      const suppliedCorrelationId =
+        body.correlationId === undefined
+          ? undefined
+          : readStrictString(body.correlationId)
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      if (!targetUserId) {
+        return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      }
+      if (!targetGroupId) {
+        return jsonError(res, 400, 'TARGET_GROUP_ID_REQUIRED', 'targetGroupId is required')
+      }
+      if (!UUID_RE.test(targetGroupId)) {
+        return jsonError(res, 400, 'TARGET_GROUP_ID_INVALID', 'targetGroupId must be a UUID')
+      }
+      if (!effectiveOn) {
+        return jsonError(res, 400, 'EFFECTIVE_ON_REQUIRED', 'effectiveOn is required')
+      }
+      if (!reason) {
+        return jsonError(res, 400, 'REASON_REQUIRED', 'reason is required')
+      }
+      if (body.correlationId !== undefined && !suppliedCorrelationId) {
+        return jsonError(
+          res,
+          400,
+          'CORRELATION_ID_INVALID',
+          'correlationId must be a non-empty string when provided',
+        )
+      }
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, actorId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for calculation-group transition')
+      }
+
+      const result = await transitionAttendanceCalculationGroupMembership({
+        orgId,
+        userId: targetUserId,
+        targetGroupId,
+        effectiveOn,
+        actorId,
+        reason,
+        correlationId: suppliedCorrelationId || req.correlationId,
+      })
+      res.setHeader('X-Correlation-Id', result.correlationId)
+      return jsonOk(res, result)
+    } catch (error) {
+      if (error instanceof AttendanceCalculationGroupMembershipError) {
+        return jsonError(res, error.status, error.code, error.message)
+      }
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation-group membership tables not ready')
+      }
+      return jsonError(
+        res,
+        500,
+        'CALCULATION_GROUP_MEMBERSHIP_TRANSITION_FAILED',
+        'Failed to transition calculation-group membership',
+      )
     }
   })
 

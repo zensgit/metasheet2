@@ -317,6 +317,10 @@ jobs:
           name: install-log-${{ matrix.node-version }}
           path: install.log
 
+      - name: Run attendance calculation-group W1 contract
+        run: |
+          node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs
+
       - name: Run linting
         if: matrix.node-version == '20.x'
         run: |
@@ -879,6 +883,7 @@ jobs:
             tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts \
             tests/integration/attendance-setup-readiness-w4-0.db.test.ts \
             tests/integration/attendance-decision-trace-w5-0.db.test.ts \
+            tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
