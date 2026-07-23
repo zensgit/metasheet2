@@ -7945,7 +7945,7 @@
                         <td>{{ item.userId }}</td>
                         <td>
                           <strong>{{ scheduleDispatchGroupLabel(item.targetScheduleGroupId) }}</strong>
-                          <div class="attendance__field-hint">{{ scheduleDispatchShiftLabel(item.targetShiftId) }}</div>
+                          <div class="attendance__field-hint">{{ scheduleDispatchShiftLabel(item) }}</div>
                           <div v-if="item.targetDepartmentRef" class="attendance__field-hint">{{ item.targetDepartmentRef }}</div>
                         </td>
                         <td>{{ scheduleDispatchDateRangeLabel(item) }}</td>
@@ -10302,7 +10302,9 @@ interface AttendanceScheduleDispatchRequest {
   targetScheduleGroupId: string
   targetAttendanceGroupId?: string | null
   targetDepartmentRef?: string | null
-  targetShiftId: string
+  targetShiftId: string | null
+  targetShiftLabel?: string
+  targetShiftStatus?: 'available' | 'deleted'
   slotIndex: number
   startDate: string
   endDate: string
@@ -12174,8 +12176,12 @@ function scheduleDispatchGroupLabel(groupId: string): string {
     ?? groupId
 }
 
-function scheduleDispatchShiftLabel(shiftId: string): string {
-  return shifts.value.find(shift => shift.id === shiftId)?.name ?? shiftId
+function scheduleDispatchShiftLabel(item: AttendanceScheduleDispatchRequest): string {
+  if (item.targetShiftLabel) return item.targetShiftLabel
+  if (item.targetShiftId) {
+    return shifts.value.find(shift => shift.id === item.targetShiftId)?.name ?? item.targetShiftId
+  }
+  return tr('Deleted or unavailable shift', '班次已删除或不可用')
 }
 
 function scheduleDispatchDateRangeLabel(item: Pick<AttendanceScheduleDispatchRequest, 'startDate' | 'endDate'>): string {
@@ -21230,7 +21236,11 @@ function normalizeScheduleDispatchRequest(row: Record<string, any>): AttendanceS
     targetScheduleGroupId: String(row.targetScheduleGroupId ?? row.target_schedule_group_id ?? '').trim(),
     targetAttendanceGroupId: row.targetAttendanceGroupId ?? row.target_attendance_group_id ?? null,
     targetDepartmentRef: row.targetDepartmentRef ?? row.target_department_ref ?? null,
-    targetShiftId: String(row.targetShiftId ?? row.target_shift_id ?? '').trim(),
+    targetShiftId: String(row.targetShiftId ?? row.target_shift_id ?? '').trim() || null,
+    targetShiftLabel: String(row.targetShiftLabel ?? row.target_shift_label ?? '').trim() || undefined,
+    targetShiftStatus: row.targetShiftStatus === 'deleted' || row.target_shift_status === 'deleted'
+      ? 'deleted'
+      : (row.targetShiftStatus === 'available' || row.target_shift_status === 'available' ? 'available' : undefined),
     slotIndex: Number(row.slotIndex ?? row.slot_index ?? 0) || 0,
     startDate: String(row.startDate ?? row.start_date ?? '').slice(0, 10),
     endDate: String(row.endDate ?? row.end_date ?? row.startDate ?? row.start_date ?? '').slice(0, 10),
@@ -21266,7 +21276,11 @@ function employeeScheduleDispatchTargetGroup(item: AttendanceRequest): string {
 
 function employeeScheduleDispatchTargetShift(item: AttendanceRequest): string {
   const dispatch = scheduleDispatchMetadata(item)
-  return String(dispatch.targetShiftId ?? dispatch.target_shift_id ?? '--')
+  const label = String(dispatch.targetShiftLabel ?? dispatch.target_shift_label ?? '').trim()
+  if (label) return label
+  const shiftId = String(dispatch.targetShiftId ?? dispatch.target_shift_id ?? '').trim()
+  if (!shiftId) return tr('Deleted or unavailable shift', '班次已删除或不可用')
+  return shifts.value.find(shift => shift.id === shiftId)?.name ?? shiftId
 }
 
 function employeeScheduleDispatchSlot(item: AttendanceRequest): number {

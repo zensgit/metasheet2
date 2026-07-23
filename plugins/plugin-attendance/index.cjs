@@ -12,6 +12,7 @@ const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
 const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
+const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
@@ -8209,6 +8210,158 @@ function mapShiftRow(row) {
   }
 }
 
+// W3 (#4556): one canonical shift service for every shift create/update/read/delete
+// and for the reference-writer assignability guard. Lazy singleton: the factory deps
+// (HttpError, resolveShiftTiming, mapShiftRow, ...) are module-scope definitions that
+// must exist before first use; routes only call this at request time.
+let attendanceShiftService = null
+function getAttendanceShiftService() {
+  if (!attendanceShiftService) {
+    attendanceShiftService = attendanceShiftServiceLib.createAttendanceShiftService({
+      HttpError,
+      randomUUID,
+      resolveShiftTiming,
+      normalizeWorkingDays,
+      mapShiftRow,
+      DEFAULT_SHIFT,
+      DEFAULT_ORG_ID,
+      normalizeLegacyRotationRulesForShiftName,
+    })
+  }
+  return attendanceShiftService
+}
+
+function respondAttendanceShiftServiceError(res, error) {
+  if (!(error instanceof HttpError)) return false
+  res.status(error.status).json({
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+    },
+  })
+  return true
+}
+
+// W3 erratum: historical evidence rows (rejected swap snapshots, cancelled dispatch
+// snapshots) that can no longer resolve their shift must expose a neutral
+// deleted/unavailable label and never the raw UUID. Resolvable shifts keep their id
+// and gain a display label.
+const SHIFT_REFERENCE_DELETED_LABEL = attendanceShiftServiceLib.SHIFT_REFERENCE_DELETED_LABEL
+
+async function applyShiftReferenceLabelsToMappedRows(db, orgId, mappedRows, fieldSpecs) {
+  const rows = Array.isArray(mappedRows) ? mappedRows : []
+  const ids = []
+  for (const row of rows) {
+    for (const spec of fieldSpecs) {
+      const value = row?.[spec.idFields[0]]
+      if (value) ids.push(value)
+    }
+  }
+  const lookup = await getAttendanceShiftService().loadShiftNameLookup(db, orgId, ids)
+  const scrubNestedPath = (row, pathKeys) => {
+    if (!Array.isArray(pathKeys) || pathKeys.length === 0) return
+    let cursor = row
+    for (let index = 0; index < pathKeys.length - 1; index += 1) {
+      cursor = cursor?.[pathKeys[index]]
+      if (!cursor || typeof cursor !== 'object') return
+    }
+    if (cursor[pathKeys[pathKeys.length - 1]] !== undefined) {
+      cursor[pathKeys[pathKeys.length - 1]] = null
+    }
+  }
+  for (const row of rows) {
+    for (const spec of fieldSpecs) {
+      const value = row?.[spec.idFields[0]]
+      if (!value) {
+        // Dispatch targets are required at create; a null id therefore means the
+        // shift was deleted (the W3 FK is ON DELETE SET NULL — the evidence row is
+        // preserved, the unresolvable pointer is cleared).
+        if (spec.nullMeansDeleted) {
+          row[spec.labelField] = SHIFT_REFERENCE_DELETED_LABEL
+          row[spec.statusField] = 'deleted'
+          for (const metadataIdPath of spec.metadataIdPaths ?? []) {
+            scrubNestedPath(row, metadataIdPath)
+          }
+        }
+        continue
+      }
+      if (lookup.has(String(value))) {
+        row[spec.labelField] = lookup.get(String(value)) || SHIFT_REFERENCE_DELETED_LABEL
+        row[spec.statusField] = 'available'
+      } else {
+        for (const idField of spec.idFields) row[idField] = null
+        row[spec.labelField] = SHIFT_REFERENCE_DELETED_LABEL
+        row[spec.statusField] = 'deleted'
+        for (const metadataIdPath of spec.metadataIdPaths ?? []) {
+          scrubNestedPath(row, metadataIdPath)
+        }
+      }
+    }
+  }
+  return rows
+}
+
+const SHIFT_SWAP_SHIFT_LABEL_SPECS = Object.freeze([
+  Object.freeze({ idFields: ['requesterShiftId', 'requester_shift_id'], labelField: 'requesterShiftLabel', statusField: 'requesterShiftStatus' }),
+  Object.freeze({ idFields: ['counterpartyShiftId', 'counterparty_shift_id'], labelField: 'counterpartyShiftLabel', statusField: 'counterpartyShiftStatus' }),
+])
+const SCHEDULE_DISPATCH_SHIFT_LABEL_SPECS = Object.freeze([
+  Object.freeze({
+    idFields: ['targetShiftId'],
+    labelField: 'targetShiftLabel',
+    statusField: 'targetShiftStatus',
+    nullMeansDeleted: true,
+    metadataIdPaths: [
+      ['request', 'metadata', 'scheduleDispatch', 'targetShiftId'],
+      ['request', 'metadata', 'scheduleDispatch', 'target_shift_id'],
+    ],
+  }),
+])
+
+async function applyScheduleDispatchMetadataLabelsToRequests(db, orgId, mappedRows) {
+  const rows = Array.isArray(mappedRows) ? mappedRows : []
+  const requestIds = rows
+    .filter(row => row?.request_type === 'schedule_dispatch' && row?.id)
+    .map(row => row.id)
+  if (requestIds.length === 0) return rows
+
+  const detailRows = await db.query(
+    `SELECT request_id, target_shift_id
+       FROM attendance_schedule_dispatch_requests
+      WHERE org_id = $1
+        AND request_id = ANY($2::uuid[])`,
+    [orgId, requestIds]
+  )
+  const detailByRequestId = new Map(detailRows.map(row => [String(row.request_id), row]))
+  const targetIds = detailRows.map(row => row.target_shift_id).filter(Boolean)
+  const shiftLookup = await getAttendanceShiftService().loadShiftNameLookup(db, orgId, targetIds)
+
+  for (const row of rows) {
+    const detail = detailByRequestId.get(String(row?.id ?? ''))
+    const metadata = normalizeMetadata(row.metadata)
+    const dispatch = metadata.scheduleDispatch
+    if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch)) continue
+    // Fail closed for an orphaned schedule_dispatch request as well. The detail
+    // row is the org-scoped source of truth; trusting a metadata-only UUID when
+    // that row is missing would reintroduce the raw-id fallback this W3 read
+    // hardening is meant to eliminate.
+    const targetShiftId = detail?.target_shift_id ? String(detail.target_shift_id) : null
+    if (targetShiftId && shiftLookup.has(targetShiftId)) {
+      dispatch.targetShiftLabel = shiftLookup.get(targetShiftId) || SHIFT_REFERENCE_DELETED_LABEL
+      dispatch.targetShiftStatus = 'available'
+      continue
+    }
+    if (Object.prototype.hasOwnProperty.call(dispatch, 'targetShiftId')) dispatch.targetShiftId = null
+    if (Object.prototype.hasOwnProperty.call(dispatch, 'target_shift_id')) dispatch.target_shift_id = null
+    dispatch.targetShiftLabel = SHIFT_REFERENCE_DELETED_LABEL
+    dispatch.targetShiftStatus = 'deleted'
+    row.metadata = metadata
+  }
+  return rows
+}
+
 function mapAttendanceGroupRow(row) {
   const attendanceType = normalizeAttendanceGroupType(row.attendance_type)
   const memberCount = Number(row.member_count ?? 0) || 0
@@ -10434,6 +10587,13 @@ async function softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, 
 }
 
 async function applyAttendanceGroupFixedSchedule(db, input) {
+  // W3 erratum: typed 422 + zero writes when a multi-segment shift is applied while
+  // authoritative segment calculation is OFF for the org.
+  await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
+    orgId: input.orgId,
+    shiftId: input.shiftId,
+    producer: 'fixed_schedule_apply',
+  })
   const result = await buildAttendanceGroupFixedSchedulePlan(db, input, { lockTargets: true })
   if (!result.ok) return result
   const plan = result.data
@@ -10473,6 +10633,13 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
 }
 
 async function rebuildAttendanceGroupFixedSchedule(db, input) {
+  // W3 erratum: typed 422 + zero writes when a multi-segment shift is rebuilt while
+  // authoritative segment calculation is OFF for the org.
+  await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
+    orgId: input.orgId,
+    shiftId: input.shiftId,
+    producer: 'fixed_schedule_rebuild',
+  })
   const result = await buildAttendanceGroupFixedSchedulePlan(db, input, {
     lockTargets: true,
     lockManagedRowsForProducerKey: true,
@@ -15647,6 +15814,15 @@ async function applyAutoShiftMatchingItems(db, {
         skipped.push(mapAutoShiftApplySkipped(item, 'shift_not_found'))
         continue
       }
+      // W3 erratum: typed 422 + zero writes when the matched candidate is a
+      // multi-segment shift and authoritative segment calculation is OFF for the org.
+      // Throws (rolling back the whole apply) instead of skipping — the erratum
+      // requires automatic matching to fail closed, not to silently skip.
+      await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+        orgId,
+        shiftId: item.candidateShiftId,
+        producer: 'auto_shift_matching',
+      })
 
       const assignmentRows = await trx.query(
         `INSERT INTO attendance_shift_assignments
@@ -21963,6 +22139,10 @@ module.exports = {
   // exported nested one bag down, so the top-level optional call silently no-op'd
   // and the 60s settings cache leaked across tests in the shared attendance suite.
   resetAttendanceSettingsCacheForTests,
+  __attendanceShiftServiceForTests: {
+    lib: attendanceShiftServiceLib,
+    getService: getAttendanceShiftService,
+  },
   __attendanceLivePunchWorkDateForTests: {
     getPunchShiftWindow,
     isPunchWithinShiftWindow,
@@ -23455,12 +23635,21 @@ module.exports = {
       photoFileId: z.string().min(1).optional(),
     })
 
+    const shiftSegmentInputSchema = z.object({
+      segmentIndex: z.number().int().min(0).max(2).optional(),
+      startTime: z.string(),
+      endTime: z.string(),
+      startDayOffset: z.number().int().min(0).max(0).optional(),
+      endDayOffset: z.number().int().min(0).max(1).optional(),
+    }).strict()
+
     const shiftCreateSchema = z.object({
       name: z.string().trim().min(1).max(200),
       timezone: z.string().optional(),
       workStartTime: z.string().optional(),
       workEndTime: z.string().optional(),
       isOvernight: z.boolean().optional(),
+      segments: z.array(shiftSegmentInputSchema).min(1).max(3).optional(),
       lateGraceMinutes: z.number().int().min(0).optional(),
       earlyGraceMinutes: z.number().int().min(0).optional(),
       roundingMinutes: z.number().int().min(0).optional(),
@@ -28062,6 +28251,15 @@ module.exports = {
         throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap source shift no longer exists')
       }
 
+      // W3 erratum: final approval creates replacement assignments referencing both
+      // shifts — a multi-segment shift fails closed with a typed 422 and zero writes
+      // while segment calculation is OFF for the org.
+      await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(client, {
+        orgId,
+        shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
+        producer: 'shift_swap_final_approval',
+      })
+
       const settings = await getSettings(client)
       const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
       await client.query(
@@ -28412,6 +28610,15 @@ module.exports = {
       if (!targetShift) {
         throw new HttpError(409, 'SCHEDULE_DISPATCH_TARGET_UNAVAILABLE', 'Target shift is no longer available')
       }
+
+      // W3 erratum: final approval creates a published assignment referencing the
+      // target shift — a multi-segment target fails closed with a typed 422 and
+      // zero writes while segment calculation is OFF for the org.
+      await getAttendanceShiftService().assertShiftReferenceAllowed(client, {
+        orgId,
+        shiftId: detail.target_shift_id,
+        producer: 'schedule_dispatch_final_approval',
+      })
 
       await assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget({
         userId: detail.user_id,
@@ -29068,7 +29275,12 @@ module.exports = {
             params
           )
 
-          res.json({ ok: true, success: true, data: { items: rows.map(mapAttendanceRequestRow), total, page, pageSize } })
+          const items = await applyScheduleDispatchMetadataLabelsToRequests(
+            db,
+            orgId,
+            rows.map(mapAttendanceRequestRow)
+          )
+          res.json({ ok: true, success: true, data: { items, total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -29097,16 +29309,22 @@ module.exports = {
         }
 
         try {
+          const orgId = getOrgId(req)
           const rows = await db.query(
-            'SELECT * FROM attendance_requests WHERE id = $1',
-            [requestId]
+            'SELECT * FROM attendance_requests WHERE id = $1 AND org_id = $2',
+            [requestId, orgId]
           )
           if (rows.length === 0) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
             return
           }
           await ensureAttendanceRequestAccess(rows[0], requesterId, 'view request')
-          res.json({ ok: true, data: { request: mapAttendanceRequestRow(rows[0]) } })
+          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
+            db,
+            orgId,
+            [mapAttendanceRequestRow(rows[0])]
+          )
+          res.json({ ok: true, data: { request: requests[0] } })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -29171,6 +29389,13 @@ module.exports = {
             if (!shiftRows.length) {
               throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
             }
+            // W3 erratum: typed 422 + zero writes when the dispatch targets a
+            // multi-segment shift while segment calculation is OFF for the org.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: input.targetShiftId,
+              producer: 'schedule_dispatch_create',
+            })
             const settings = await getSettings(trx)
             const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
 
@@ -29392,7 +29617,13 @@ module.exports = {
               LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
             rowParams
           )
-          res.json({ ok: true, data: { items: rows.map(mapScheduleDispatchRequestRow), total: Number(countRows[0]?.total ?? 0), page, pageSize } })
+          const dispatchItems = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            rows.map(mapScheduleDispatchRequestRow),
+            SCHEDULE_DISPATCH_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { items: dispatchItems, total: Number(countRows[0]?.total ?? 0), page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
@@ -29423,7 +29654,13 @@ module.exports = {
             return
           }
           await assertScheduleDispatchScopeAllowed(db, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(detail))
-          res.json({ ok: true, data: { scheduleDispatch: mapScheduleDispatchRequestRow(detail) } })
+          const dispatchItem = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            [mapScheduleDispatchRequestRow(detail)],
+            SCHEDULE_DISPATCH_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { scheduleDispatch: dispatchItem[0] } })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -29600,6 +29837,15 @@ module.exports = {
             const counterpartyRow = lockedSourceRows.get(counterpartyAssignmentId)
             const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
             const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
+
+            // W3 erratum: the swap snapshots both shift ids — a multi-segment shift
+            // fails closed with a typed 422 and zero writes while segment
+            // calculation is OFF for the org.
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
+              producer: 'shift_swap_create',
+            })
 
             if (requesterSource.userId !== actorUserId) {
               const allowed = await canAccessOtherUsers(actorUserId)
@@ -29825,7 +30071,13 @@ module.exports = {
               LIMIT $3 OFFSET $4`,
             [orgId, targetUserId, pageSize, offset]
           )
-          res.json({ ok: true, data: { items: rows.map(mapShiftSwapRequestRow), total: Number(countRows[0]?.total ?? 0), page, pageSize } })
+          const swapItems = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            rows.map(mapShiftSwapRequestRow),
+            SHIFT_SWAP_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { items: swapItems, total: Number(countRows[0]?.total ?? 0), page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
@@ -29859,7 +30111,13 @@ module.exports = {
             return
           }
           await ensureShiftSwapAccess(detail, requesterId, 'view shift-swap request')
-          res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow(detail) } })
+          const swapItem = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            [mapShiftSwapRequestRow(detail)],
+            SHIFT_SWAP_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { shiftSwap: swapItem[0] } })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -32127,25 +32385,38 @@ module.exports = {
             isActive: parsed.data.isActive ?? true,
           }
 
-          const rows = await db.query(
-            `INSERT INTO attendance_rotation_rules
-             (id, org_id, name, timezone, shift_sequence, is_active)
-             VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-             RETURNING *`,
-            [
-              randomUUID(),
+          // W3 erratum: the guard and the reference-creating insert share one
+          // transaction and the canonical shift lock protocol (FOR SHARE on every
+          // sequenced shift), so a concurrent shift delete cannot slip between the
+          // check and the write. Multi-segment sequence members fail closed with a
+          // typed 422 and zero writes while segment calculation is OFF.
+          const rows = await db.transaction(async (trx) => {
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
-              payload.name,
-              payload.timezone,
-              JSON.stringify(payload.shiftSequence),
-              payload.isActive,
-            ]
-          )
+              shiftRefs: payload.shiftSequence,
+              producer: 'rotation_rule_create',
+            })
+            return trx.query(
+              `INSERT INTO attendance_rotation_rules
+               (id, org_id, name, timezone, shift_sequence, is_active)
+               VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.name,
+                payload.timezone,
+                JSON.stringify(payload.shiftSequence),
+                payload.isActive,
+              ]
+            )
+          })
 
           const rule = mapRotationRuleRow(rows[0])
           emitEvent('attendance.rotationRule.created', { orgId, rotationRuleId: rule.id })
           res.status(201).json({ ok: true, data: rule })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -32207,29 +32478,40 @@ module.exports = {
             isActive: parsed.data.isActive ?? existing.is_active,
           }
 
-          const rows = await db.query(
-            `UPDATE attendance_rotation_rules
-             SET name = $3,
-                 timezone = $4,
-                 shift_sequence = $5::jsonb,
-                 is_active = $6,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              ruleId,
+          // W3 erratum: guard + update share one transaction and the canonical
+          // shift lock protocol; multi-segment sequence members fail closed with a
+          // typed 422 and zero writes while segment calculation is OFF.
+          const rows = await db.transaction(async (trx) => {
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
-              payload.name,
-              payload.timezone,
-              JSON.stringify(payload.shiftSequence),
-              payload.isActive,
-            ]
-          )
+              shiftRefs: payload.shiftSequence,
+              producer: 'rotation_rule_update',
+            })
+            return trx.query(
+              `UPDATE attendance_rotation_rules
+               SET name = $3,
+                   timezone = $4,
+                   shift_sequence = $5::jsonb,
+                   is_active = $6,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                ruleId,
+                orgId,
+                payload.name,
+                payload.timezone,
+                JSON.stringify(payload.shiftSequence),
+                payload.isActive,
+              ]
+            )
+          })
 
           const rule = mapRotationRuleRow(rows[0])
           emitEvent('attendance.rotationRule.updated', { orgId, rotationRuleId: rule.id })
           res.json({ ok: true, data: rule })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -32447,6 +32729,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -32484,6 +32775,7 @@ module.exports = {
           const rotation = mapRotationRuleRow(ruleRows[0])
           res.status(201).json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -32581,6 +32873,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -32636,6 +32937,7 @@ module.exports = {
           const rotation = mapRotationRuleRow(ruleRows[0])
           res.json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -32762,6 +33064,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -32806,6 +33117,7 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.created', { orgId, rotationAssignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -32904,6 +33216,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -32968,6 +33289,7 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.updated', { orgId, rotationAssignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -39359,6 +39681,7 @@ module.exports = {
           }
           res.status(201).json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -39443,6 +39766,7 @@ module.exports = {
           }
           res.json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -40648,29 +40972,9 @@ module.exports = {
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
-          const countRows = await db.query(
-            'SELECT COUNT(*)::int AS total FROM attendance_shifts WHERE org_id = $1',
-            [orgId]
-          )
-          const total = Number(countRows[0]?.total ?? 0)
-
-          const rows = await db.query(
-            `SELECT * FROM attendance_shifts
-             WHERE org_id = $1
-             ORDER BY created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [orgId, pageSize, offset]
-          )
-
-          res.json({
-            ok: true,
-            data: {
-              items: rows.map(mapShiftRow),
-              total,
-              page,
-              pageSize,
-            },
-          })
+          // W3: parent-first pagination, then one batched segment hydration for the page.
+          const data = await getAttendanceShiftService().listShifts(db, { orgId, page, pageSize, offset })
+          res.json({ ok: true, data })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -40694,7 +40998,8 @@ module.exports = {
         }
 
         try {
-          const shift = await loadShiftById(db, orgId, shiftId)
+          // W3: dual-read — persisted segments when present, legacy envelope synthesis otherwise.
+          const shift = await getAttendanceShiftService().readShift(db, { orgId, shiftId })
           if (!shift) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
             return
@@ -40722,51 +41027,16 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const shiftTiming = resolveShiftTiming({
-          workStartTime: parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime,
-          workEndTime: parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime,
-          explicitOvernight: parsed.data.isOvernight,
-        })
-        if (shiftTiming.error) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
-          return
-        }
-        const payload = {
-          name: parsed.data.name ?? DEFAULT_SHIFT.name,
-          timezone: parsed.data.timezone ?? DEFAULT_SHIFT.timezone,
-          workStartTime: shiftTiming.workStartTime,
-          workEndTime: shiftTiming.workEndTime,
-          isOvernight: shiftTiming.isOvernight,
-          lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_SHIFT.lateGraceMinutes,
-          earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_SHIFT.earlyGraceMinutes,
-          roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_SHIFT.roundingMinutes,
-          workingDays: normalizeWorkingDays(parsed.data.workingDays ?? DEFAULT_SHIFT.workingDays),
-        }
 
         try {
-          const rows = await db.query(
-            `INSERT INTO attendance_shifts
-             (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-             RETURNING *`,
-            [
-              randomUUID(),
-              orgId,
-              payload.name,
-              payload.timezone,
-              payload.workStartTime,
-              payload.workEndTime,
-              payload.isOvernight,
-              payload.lateGraceMinutes,
-              payload.earlyGraceMinutes,
-              payload.roundingMinutes,
-              JSON.stringify(payload.workingDays),
-            ]
-          )
-          const shift = mapShiftRow(rows[0])
+          // W3: one canonical writer — segments (validated) or a synthesized segment 0
+          // from the legacy envelope are persisted together with the shift row in one
+          // transaction; the legacy envelope is always derived from the segments.
+          const shift = await getAttendanceShiftService().createShift(db, { orgId, input: parsed.data })
           emitEvent('attendance.shift.created', { orgId, shiftId: shift.id })
           res.status(201).json({ ok: true, data: shift })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40795,89 +41065,15 @@ module.exports = {
         }
 
         try {
-          const existingRows = await db.query(
-            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
-            [shiftId, orgId]
-          )
-          if (!existingRows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
-            return
-          }
-
-          const existing = existingRows[0]
-          const workingDays = parsed.data.workingDays
-            ? normalizeWorkingDays(parsed.data.workingDays)
-            : normalizeWorkingDays(existing.working_days)
-          const shiftTiming = resolveShiftTiming({
-            workStartTime: parsed.data.workStartTime ?? existing.work_start_time,
-            workEndTime: parsed.data.workEndTime ?? existing.work_end_time,
-            explicitOvernight: parsed.data.isOvernight,
-            fallbackOvernight: existing.is_overnight,
-          })
-          if (shiftTiming.error) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
-            return
-          }
-
-          const payload = {
-            name: parsed.data.name ?? existing.name,
-            timezone: parsed.data.timezone ?? existing.timezone,
-            workStartTime: shiftTiming.workStartTime,
-            workEndTime: shiftTiming.workEndTime,
-            isOvernight: shiftTiming.isOvernight,
-            lateGraceMinutes: parsed.data.lateGraceMinutes ?? existing.late_grace_minutes,
-            earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? existing.early_grace_minutes,
-            roundingMinutes: parsed.data.roundingMinutes ?? existing.rounding_minutes,
-            workingDays,
-          }
-
-          if (payload.name !== existing.name) {
-            const normalizationResult = await normalizeLegacyRotationRulesForShiftName(db, orgId, shiftId, existing.name)
-            if (normalizationResult.ambiguous) {
-              res.status(409).json({
-                ok: false,
-                error: {
-                  code: 'CONFLICT',
-                  message: 'Cannot rename shift while legacy rotation rules still reference a duplicate shift name',
-                },
-              })
-              return
-            }
-          }
-
-          const rows = await db.query(
-            `UPDATE attendance_shifts
-             SET name = $3,
-                 timezone = $4,
-                 work_start_time = $5,
-                 work_end_time = $6,
-                 is_overnight = $7,
-                 late_grace_minutes = $8,
-                 early_grace_minutes = $9,
-                 rounding_minutes = $10,
-                 working_days = $11::jsonb,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              shiftId,
-              orgId,
-              payload.name,
-              payload.timezone,
-              payload.workStartTime,
-              payload.workEndTime,
-              payload.isOvernight,
-              payload.lateGraceMinutes,
-              payload.earlyGraceMinutes,
-              payload.roundingMinutes,
-              JSON.stringify(payload.workingDays),
-            ]
-          )
-
-          const shift = mapShiftRow(rows[0])
+          // W3: one canonical writer. A segments array replaces all segments and
+          // re-derives the envelope; legacy start/end fields update the envelope and
+          // segment 0 together (rejected on multi-segment shifts); a metadata-only
+          // PUT preserves the persisted segments and envelope.
+          const shift = await getAttendanceShiftService().updateShift(db, { orgId, shiftId, patch: parsed.data })
           emitEvent('attendance.shift.updated', { orgId, shiftId: shift.id })
           res.json({ ok: true, data: shift })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40900,58 +41096,18 @@ module.exports = {
         }
 
         try {
-          const shiftRows = await db.query(
-            'SELECT id, name FROM attendance_shifts WHERE id = $1 AND org_id = $2',
-            [shiftId, orgId]
-          )
-          if (!shiftRows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
-            return
-          }
-
-          const shift = shiftRows[0]
-          const usageRows = await db.query(
-            `SELECT
-               EXISTS (
-                 SELECT 1
-                 FROM attendance_shift_assignments a
-                 WHERE a.org_id = $1
-                   AND a.shift_id = $2
-                   AND a.is_active = true
-                   AND (a.end_date IS NULL OR a.end_date >= CURRENT_DATE)
-               ) AS has_active_assignment,
-               EXISTS (
-                 SELECT 1
-                 FROM attendance_rotation_rules r
-                 WHERE r.org_id = $1
-                   AND EXISTS (
-                     SELECT 1
-                     FROM jsonb_array_elements_text(COALESCE(r.shift_sequence, '[]'::jsonb)) AS seq(shift_ref)
-                     WHERE seq.shift_ref = $2::text
-                        OR seq.shift_ref = $3::text
-                   )
-               ) AS has_rotation_rule_reference`,
-            [orgId, shiftId, shift.name]
-          )
-          const usage = usageRows[0] ?? {}
-          if (usage.has_active_assignment || usage.has_rotation_rule_reference) {
-            res.status(409).json({
-              ok: false,
-              error: {
-                code: 'CONFLICT',
-                message: 'Shift is still referenced by active assignments or rotation rules',
-              },
-            })
-            return
-          }
-
-          const rows = await db.query(
-            'DELETE FROM attendance_shifts WHERE id = $1 AND org_id = $2 RETURNING id',
-            [shiftId, orgId]
-          )
+          // W3 erratum: canonical transactional delete. Locks the shift row FOR UPDATE
+          // (reference writers lock it FOR SHARE), then returns a typed 409 with zero
+          // writes for every durable blocker — any assignment row (including
+          // ended/inactive history), rotation-rule references, pending swap snapshots,
+          // and pending/published dispatch targets. Historical evidence rows
+          // (rejected swaps, cancelled dispatches, auto-write candidates) never block
+          // and remain stored.
+          const result = await getAttendanceShiftService().deleteShift(db, { orgId, shiftId })
           emitEvent('attendance.shift.deleted', { orgId, shiftId })
-          res.json({ ok: true, data: { id: shiftId } })
+          res.json({ ok: true, data: result })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -41167,6 +41323,7 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance auto-shift apply tables missing' } })
@@ -41351,6 +41508,13 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes when a multi-segment shift is
+            // referenced while authoritative segment calculation is OFF for the org.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'draft_assignment_create',
+            })
             const replacementValidation = await validateTemporaryShiftReplacement(trx, { orgId, payload, temporary })
             if (!replacementValidation.ok) return { temporaryError: replacementValidation.error }
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
@@ -41409,6 +41573,7 @@ module.exports = {
           const shift = mapShiftRow(shiftRows[0])
           res.status(201).json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -41531,6 +41696,12 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'draft_assignment_update',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
               orgId,
@@ -41591,6 +41762,7 @@ module.exports = {
           const shift = mapShiftRow(shiftRows[0])
           res.json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -41731,6 +41903,12 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'assignment_create',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
               orgId,
@@ -41779,6 +41957,7 @@ module.exports = {
           emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -41902,6 +42081,12 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'assignment_update',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
               orgId,
@@ -41971,6 +42156,7 @@ module.exports = {
           emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -42288,6 +42474,40 @@ module.exports = {
               }
             }
 
+            // W3 erratum: publication turns preview drafts into active references.
+            // A draft created while its shift was single-segment must still fail
+            // closed here (typed 422, zero writes) if the shift became multi-segment
+            // before publication while segment calculation is OFF for the org.
+            const publicationShiftService = getAttendanceShiftService()
+            for (const row of lockedRows) {
+              if (row.kind === 'shift') {
+                await publicationShiftService.assertShiftReferenceAllowed(trx, {
+                  orgId,
+                  shiftId: row.shift_id,
+                  producer: 'schedule_publication',
+                })
+              }
+            }
+            const publicationRuleIds = Array.from(new Set(
+              lockedRows
+                .filter(row => row.kind === 'rotation')
+                .map(row => row.rotation_rule_id)
+                .filter(Boolean)
+            ))
+            if (publicationRuleIds.length) {
+              const publicationRuleRows = await trx.query(
+                'SELECT id, shift_sequence FROM attendance_rotation_rules WHERE org_id = $1 AND id = ANY($2::uuid[])',
+                [orgId, publicationRuleIds]
+              )
+              for (const ruleRow of publicationRuleRows) {
+                await publicationShiftService.assertShiftSequenceReferenceAllowed(trx, {
+                  orgId,
+                  shiftRefs: ruleRow.shift_sequence ?? [],
+                  producer: 'schedule_publication',
+                })
+              }
+            }
+
             for (const row of lockedRows) {
               await enforceAttendanceSchedulePublicationConflicts(trx, row, settings)
             }
@@ -42402,6 +42622,7 @@ module.exports = {
             res.json({ ok: true, data: error.result })
             return
           }
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondAttendanceSchedulePublishRouteError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {

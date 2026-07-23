@@ -1256,6 +1256,17 @@ paths:
                 end_time: { type: string, deprecated: true }
                 isOvernight: { type: boolean }
                 is_overnight: { type: boolean, deprecated: true }
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields. While authoritative
+                    segment calculation is disabled for the org, multi-segment shifts
+                    are authoring preview-only.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes: { type: integer }
                 late_grace_minutes: { type: integer, deprecated: true }
                 earlyGraceMinutes: { type: integer }
@@ -1284,6 +1295,11 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: >-
+            Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
+            (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
+            (segments combined with legacy start/end fields).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -1331,6 +1347,17 @@ paths:
                 workStartTime: { type: string }
                 workEndTime: { type: string }
                 isOvernight: { type: boolean }
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields in the same request.
+                    A start/end-only update on a multi-segment shift is rejected with
+                    a typed 422; a metadata-only update preserves the persisted segments.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes: { type: integer }
                 earlyGraceMinutes: { type: integer }
                 roundingMinutes: { type: integer }
@@ -1351,6 +1378,20 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Shift not found
+        '409':
+          description: >-
+            Typed conflict with zero writes: CONFLICT (legacy rotation-rule rename
+            ambiguity) or ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED (an active
+            assignment, rotation, pending swap, or pending/published dispatch blocks
+            converting one segment to multiple while segment calculation is disabled).
+        '422':
+          description: >-
+            Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID,
+            ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or
+            ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a
+            multi-segment shift).
     delete:
       summary: Delete attendance shift
       security: [ { bearerAuth: [] } ]
@@ -1372,9 +1413,16 @@ paths:
                     type: object
                     properties:
                       id: { type: string }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409':
+          description: >-
+            Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED —
+            the shift is still referenced by any assignment row (including
+            ended/inactive history), a rotation rule, a pending swap snapshot, or a
+            pending/published dispatch target. Historical evidence is preserved.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Shift not found
   /api/attendance/assignments:
     x-plugin: plugin-attendance
     get:

@@ -2812,7 +2812,7 @@ describe('admin-users routes', () => {
         return { rows: [{ id: groupId, name: '总装一组' }] }
       }
       if (statement.includes('FROM attendance_shifts')) {
-        return { rows: [{ id: shiftId, name: '早班' }] }
+        return { rows: [{ id: shiftId, name: '早班', segment_count: 1 }] }
       }
       if (statement.includes('INSERT INTO users (')) return { rows: [] }
       if (statement.includes('INSERT INTO attendance_group_members')) {
@@ -2889,6 +2889,13 @@ describe('admin-users routes', () => {
         }),
       }),
     }))
+    const statements = pgMocks.query.mock.calls.map(([sql]) => String(sql))
+    const lockedShiftIndex = statements.findIndex((statement) =>
+      statement.includes('FROM attendance_shifts s') && statement.includes('FOR SHARE'),
+    )
+    const userInsertIndex = statements.findIndex((statement) => statement.includes('INSERT INTO users ('))
+    expect(lockedShiftIndex).toBeGreaterThanOrEqual(0)
+    expect(userInsertIndex).toBeGreaterThan(lockedShiftIndex)
   })
 
   it('rejects attendance onboarding when the selected group does not exist', async () => {

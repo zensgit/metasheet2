@@ -2455,6 +2455,8 @@ export interface paths {
                         isOvernight?: boolean;
                         /** @deprecated */
                         is_overnight?: boolean;
+                        /** @description Canonical segments (W3). Mutually exclusive with the legacy workStartTime/workEndTime/isOvernight fields. While authoritative segment calculation is disabled for the org, multi-segment shifts are authoring preview-only. */
+                        segments?: components["schemas"]["AttendanceShiftSegmentInput"][];
                         lateGraceMinutes?: number;
                         /** @deprecated */
                         late_grace_minutes?: number;
@@ -2487,6 +2489,13 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2549,6 +2558,8 @@ export interface paths {
                         workStartTime?: string;
                         workEndTime?: string;
                         isOvernight?: boolean;
+                        /** @description Canonical segments (W3). Mutually exclusive with the legacy workStartTime/workEndTime/isOvernight fields in the same request. A start/end-only update on a multi-segment shift is rejected with a typed 422; a metadata-only update preserves the persisted segments. */
+                        segments?: components["schemas"]["AttendanceShiftSegmentInput"][];
                         lateGraceMinutes?: number;
                         earlyGraceMinutes?: number;
                         roundingMinutes?: number;
@@ -2573,6 +2584,27 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Shift not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed conflict with zero writes: CONFLICT (legacy rotation-rule rename ambiguity) or ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED (an active assignment, rotation, pending swap, or pending/published dispatch blocks converting one segment to multiple while segment calculation is disabled). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID, ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a multi-segment shift). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
@@ -2604,7 +2636,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
-                409: components["responses"]["Conflict"];
+                /** @description Shift not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED — the shift is still referenced by any assignment row (including ended/inactive history), a rotation rule, a pending swap snapshot, or a pending/published dispatch target. Historical evidence is preserved. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -14802,10 +14847,22 @@ export interface components {
             counterpartyWorkDate?: string;
             /** Format: date */
             counterparty_work_date?: string;
-            requesterShiftId?: string;
-            requester_shift_id?: string;
-            counterpartyShiftId?: string;
-            counterparty_shift_id?: string;
+            /** @description Null when historical evidence outlives its deleted requester shift. */
+            requesterShiftId?: string | null;
+            /** @deprecated */
+            requester_shift_id?: string | null;
+            /** @description Resolved requester shift name or a neutral deleted/unavailable label. */
+            requesterShiftLabel?: string;
+            /** @enum {string} */
+            requesterShiftStatus?: "available" | "deleted";
+            /** @description Null when historical evidence outlives its deleted counterparty shift. */
+            counterpartyShiftId?: string | null;
+            /** @deprecated */
+            counterparty_shift_id?: string | null;
+            /** @description Resolved counterparty shift name or a neutral deleted/unavailable label. */
+            counterpartyShiftLabel?: string;
+            /** @enum {string} */
+            counterpartyShiftStatus?: "available" | "deleted";
             requesterSlotIndex?: number;
             requester_slot_index?: number;
             counterpartySlotIndex?: number;
@@ -14839,7 +14896,12 @@ export interface components {
             targetScheduleGroupId?: string;
             targetAttendanceGroupId?: string | null;
             targetDepartmentRef?: string | null;
-            targetShiftId?: string;
+            /** @description Null only when a historical cancelled dispatch outlives its deleted target shift. */
+            targetShiftId?: string | null;
+            /** @description Resolved shift name or a neutral deleted/unavailable label. */
+            targetShiftLabel?: string;
+            /** @enum {string} */
+            targetShiftStatus?: "available" | "deleted";
             slotIndex?: number;
             /** Format: date */
             startDate?: string;
@@ -15391,6 +15453,60 @@ export interface components {
             workingDays?: number[];
             /** @deprecated */
             working_days?: number[];
+            /** @description Canonical shift segments (W3 / #4556). Persisted rows when present; a legacy shift without segment rows is synthesized as segment 0 from its envelope. The legacy workStartTime/workEndTime/isOvernight fields expose the OUTER envelope of these segments for compatibility only — for a multi-segment shift (calculationMode=segments) the envelope is not payable time. */
+            segments?: components["schemas"]["AttendanceShiftSegment"][];
+            /** @enum {string} */
+            calculationMode?: "envelope" | "segments";
+            /** @description Sum of per-segment planned minutes; breaks between segments are never counted. */
+            plannedMinutes?: number;
+            capabilities?: components["schemas"]["AttendanceShiftCapabilities"];
+        };
+        AttendanceShiftSegment: {
+            /** @description Persisted segment row id; null when synthesized from the legacy envelope. */
+            id?: string | null;
+            segmentIndex?: number;
+            /** @deprecated */
+            segment_index?: number;
+            /** @description Local wall-clock start time (HH:MM) in the parent shift timezone. */
+            startTime?: string;
+            /** @deprecated */
+            start_time?: string;
+            /**
+             * @description Fixed to 0 in v1.
+             * @enum {integer}
+             */
+            startDayOffset?: 0;
+            /** @deprecated */
+            start_day_offset?: number;
+            /** @description Local wall-clock end time (HH:MM) in the parent shift timezone. */
+            endTime?: string;
+            /** @deprecated */
+            end_time?: string;
+            endDayOffset?: number;
+            /** @deprecated */
+            end_day_offset?: number;
+        };
+        /** @description One shift segment for create/update. 1..3 segments, dense indexes from 0, positive duration, ordered non-overlapping after day offsets, total <= 24h, at most one midnight crossing. Unknown properties are rejected. */
+        AttendanceShiftSegmentInput: {
+            segmentIndex?: number;
+            startTime: string;
+            endTime: string;
+            /** @enum {integer} */
+            startDayOffset?: 0;
+            endDayOffset?: number;
+        };
+        /** @description Values-safe capability projection (state and labels only). Shows that authoritative segment calculation is disabled by default; while disabled, multi-segment authoring is preview-only. */
+        AttendanceShiftCapabilities: {
+            segmentCalculation?: {
+                enabled?: boolean;
+                /** @enum {boolean} */
+                defaultEnabled?: false;
+                authoritativeResults?: boolean;
+                /** @enum {string} */
+                multiSegmentAuthoring?: "preview_only" | "enabled";
+                /** @enum {string} */
+                flag?: "ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED";
+            };
         };
         AttendanceShiftAssignment: {
             id?: string;

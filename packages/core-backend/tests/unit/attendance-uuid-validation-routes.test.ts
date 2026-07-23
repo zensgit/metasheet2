@@ -459,6 +459,9 @@ function approvalInstanceRow(overrides: Record<string, unknown> = {}) {
 function fixedScheduleQueryResult(sql: string) {
   if (sql.includes('SELECT * FROM attendance_groups WHERE id = $1')) return { handled: true, rows: [attendanceGroupRow()] }
   if (sql.includes('SELECT * FROM attendance_shifts WHERE id = $1')) return { handled: true, rows: [shiftRow()] }
+  // W3 canonical assignability guard: shift FOR SHARE + persisted segment count.
+  if (sql.includes('FROM attendance_shifts') && sql.includes('FOR SHARE')) return { handled: true, rows: [shiftRow()] }
+  if (sql.includes('FROM attendance_shift_segments')) return { handled: true, rows: [{ total: 1 }] }
   if (sql.includes('SELECT DISTINCT user_id') && sql.includes('FROM attendance_group_members')) {
     return { handled: true, rows: [{ user_id: 'worker-1' }] }
   }
@@ -3103,6 +3106,9 @@ describe('attendance UUID route validation', () => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
       if (sql.includes('SELECT * FROM attendance_shifts')) return [shiftRow()]
+      // W3 canonical assignability guard: shift FOR SHARE + persisted segment count.
+      if (sql.includes('FROM attendance_shifts') && sql.includes('FOR SHARE')) return [shiftRow()]
+      if (sql.includes('FROM attendance_shift_segments')) return [{ total: 1 }]
       if (sql.includes('pg_advisory_xact_lock')) return []
       if (sql.includes('FROM attendance_shift_assignments')) return []
       if (sql.includes('FROM attendance_rotation_assignments')) return []
@@ -3132,6 +3138,9 @@ describe('attendance UUID route validation', () => {
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
       if (sql.includes('SELECT * FROM attendance_shifts')) return [shiftRow()]
+      // W3 canonical assignability guard: shift FOR SHARE + persisted segment count.
+      if (sql.includes('FROM attendance_shifts') && sql.includes('FOR SHARE')) return [shiftRow()]
+      if (sql.includes('FROM attendance_shift_segments')) return [{ total: 1 }]
       if (sql.includes('pg_advisory_xact_lock')) return []
       if (sql.includes('FROM attendance_shift_assignments')) return []
       if (sql.includes('FROM attendance_rotation_assignments')) return []

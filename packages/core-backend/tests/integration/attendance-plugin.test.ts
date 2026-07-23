@@ -2352,8 +2352,9 @@ attendanceIntegrationDescribe(
     })
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
-    expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
+    // W3 (#4556): typed delete blocker replaces the legacy generic CONFLICT.
+    expect(deleteBody?.error?.code).toBe('ATTENDANCE_SHIFT_DELETE_BLOCKED')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/referenced|preserved/i)
 
     const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
       headers: {
@@ -2435,8 +2436,9 @@ attendanceIntegrationDescribe(
     })
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
-    expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
+    // W3 (#4556): typed delete blocker replaces the legacy generic CONFLICT.
+    expect(deleteBody?.error?.code).toBe('ATTENDANCE_SHIFT_DELETE_BLOCKED')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/referenced|preserved/i)
 
     const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
       headers: {
@@ -8197,8 +8199,9 @@ attendanceIntegrationDescribe(
     })
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
-    expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
+    // W3 (#4556): typed delete blocker replaces the legacy generic CONFLICT.
+    expect(deleteBody?.error?.code).toBe('ATTENDANCE_SHIFT_DELETE_BLOCKED')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/referenced|preserved/i)
   })
 
   it('normalizes legacy name-based rotation rules when a referenced shift is renamed', async () => {

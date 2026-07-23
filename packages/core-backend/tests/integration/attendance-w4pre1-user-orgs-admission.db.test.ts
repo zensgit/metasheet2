@@ -57,6 +57,7 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
 
   const createdUserIds: string[] = []
   const createdGroupIds: string[] = []
+  const createdShiftIds: string[] = []
 
   async function seedGroup(org: string, tag: string): Promise<{ id: string; name: string }> {
     const id = crypto.randomUUID()
@@ -78,6 +79,31 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
     const json = await res.json().catch(() => null)
     if (json?.data?.user?.id) createdUserIds.push(json.data.user.id)
     return { status: res.status, json }
+  }
+
+  async function seedShift(
+    org: string,
+    tag: string,
+    segments: Array<{ startTime: string; endTime: string }>,
+  ): Promise<{ id: string; name: string }> {
+    const id = crypto.randomUUID()
+    const name = `${NS}-shift-${tag}`
+    await query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight)
+       VALUES ($1, $2, $3, 'UTC', $4::time, $5::time, false)`,
+      [id, org, name, segments[0]?.startTime ?? '09:00', segments.at(-1)?.endTime ?? '18:00'],
+    )
+    for (const [index, segment] of segments.entries()) {
+      await query(
+        `INSERT INTO attendance_shift_segments
+           (org_id, shift_id, segment_index, start_time, start_day_offset, end_time, end_day_offset)
+         VALUES ($1, $2, $3, $4::time, 0, $5::time, 0)`,
+        [org, id, index, segment.startTime, segment.endTime],
+      )
+    }
+    createdShiftIds.push(id)
+    return { id, name }
   }
 
   async function userOrgRow(userId: string, org: string): Promise<{ user_id: string; org_id: string; is_active: boolean } | null> {
@@ -137,6 +163,10 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
     if (createdGroupIds.length) {
       await query(`DELETE FROM attendance_groups WHERE id = ANY($1::uuid[])`, [createdGroupIds])
     }
+    if (createdShiftIds.length) {
+      await query(`DELETE FROM attendance_shift_segments WHERE shift_id = ANY($1::uuid[])`, [createdShiftIds])
+      await query(`DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])`, [createdShiftIds])
+    }
   })
 
   describe('fresh-DB', () => {
@@ -162,6 +192,43 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
 
       const row = await userOrgRow(userId, org)
       expect(row).toEqual({ user_id: userId, org_id: org, is_active: true })
+    })
+
+    it('fails closed before all admission writes when defaultShiftId is multi-segment preview-only', async () => {
+      const org = orgId('multisegment')
+      const shift = await seedShift(org, 'multisegment', [
+        { startTime: '09:00', endTime: '12:00' },
+        { startTime: '13:00', endTime: '18:00' },
+      ])
+      const testEmail = emailFor('multisegment')
+
+      const { status, json } = await createUserViaRoute({
+        name: 'W3 Multi Segment',
+        email: testEmail,
+        orgId: org,
+        defaultShiftId: shift.id,
+        defaultShiftStartDate: '2026-07-24',
+      })
+
+      expect(status).toBe(422)
+      expect(json).toMatchObject({
+        ok: false,
+        error: {
+          code: 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED',
+          details: [{
+            field: 'defaultShiftId',
+          }],
+        },
+      })
+      const users = await query<{ id: string }>('SELECT id FROM users WHERE email = $1', [testEmail])
+      expect(users.rows).toEqual([])
+      const memberships = await query<{ user_id: string }>('SELECT user_id FROM user_orgs WHERE org_id = $1', [org])
+      expect(memberships.rows).toEqual([])
+      const assignments = await query<{ id: string }>(
+        'SELECT id FROM attendance_shift_assignments WHERE org_id = $1 AND shift_id = $2',
+        [org, shift.id],
+      )
+      expect(assignments.rows).toEqual([])
     })
 
     it('atomicity: a user_orgs write failure rolls back the whole admission (no orphan users row)', async () => {
