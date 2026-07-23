@@ -55,11 +55,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     ALTER COLUMN local_password_set SET NOT NULL
   `.execute(db)
 
+  // Scope constraint lookup to the users relation — a same-named constraint on another
+  // table must not cause us to skip creating the CHECK on users (PR #4559 review P2).
   await sql`
     DO $$
     BEGIN
       IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'users_activation_status_check'
+        SELECT 1
+          FROM pg_constraint c
+          JOIN pg_class r ON r.oid = c.conrelid
+          JOIN pg_namespace n ON n.oid = r.relnamespace
+         WHERE c.conname = 'users_activation_status_check'
+           AND r.relname = 'users'
+           AND n.nspname = current_schema()
       ) THEN
         ALTER TABLE users
         ADD CONSTRAINT users_activation_status_check

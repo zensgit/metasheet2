@@ -607,19 +607,28 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
 }
 
 function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
-  // Lazy import avoided — keep oauth free of circular deps by inlining gate messages.
+  // Use shared gate so unknown activation_status fail-closes (PR #4559 review).
+  // Inline import-free duplicate kept only for oauth package-graph; messages match user-activation.ts.
   if (localUser.role === 'disabled' || localUser.is_active === false) {
     throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
       statusCode: 403,
       code: 'local_user_disabled',
     })
   }
-  const activation =
-    typeof localUser.activation_status === 'string' ? localUser.activation_status.trim() : 'activated'
-  if (activation === 'pending_activation') {
+  const raw =
+    localUser.activation_status === null || localUser.activation_status === undefined
+      ? 'activated'
+      : String(localUser.activation_status).trim()
+  if (raw === 'pending_activation') {
     throw createPolicyError('Account is pending activation and cannot sign in with DingTalk', {
       statusCode: 403,
       code: 'ACCOUNT_PENDING_ACTIVATION',
+    })
+  }
+  if (raw !== '' && raw !== 'activated') {
+    throw createPolicyError('Account activation status is invalid', {
+      statusCode: 403,
+      code: 'ACCOUNT_ACTIVATION_INVALID',
     })
   }
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  ACCOUNT_ACTIVATION_INVALID_CODE,
   ACCOUNT_INACTIVE_CODE,
   ACCOUNT_PASSWORD_LOGIN_DISABLED_CODE,
   ACCOUNT_PENDING_ACTIVATION_CODE,
@@ -7,7 +8,7 @@ import {
   evaluateUserAuthenticationGate,
   isDirectoryPendingActivationEnabled,
   isUserPendingActivation,
-  normalizeUserActivationStatus,
+  parseUserActivationStatus,
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../../src/auth/user-activation'
 
@@ -31,19 +32,32 @@ describe('user-activation helpers (T1)', () => {
     expect(isDirectoryPendingActivationEnabled()).toBe(false)
   })
 
-  it('normalizes unknown activation_status to activated (stock login safety)', () => {
-    expect(normalizeUserActivationStatus(null)).toBe('activated')
-    expect(normalizeUserActivationStatus('')).toBe('activated')
-    expect(normalizeUserActivationStatus('pending_activation')).toBe('pending_activation')
+  it('parses activation_status with fail-closed unknown values', () => {
+    expect(parseUserActivationStatus(null)).toEqual({ ok: true, status: 'activated' })
+    expect(parseUserActivationStatus('')).toEqual({ ok: true, status: 'activated' })
+    expect(parseUserActivationStatus('pending_activation')).toEqual({
+      ok: true,
+      status: 'pending_activation',
+    })
+    expect(parseUserActivationStatus('activated')).toEqual({ ok: true, status: 'activated' })
+    expect(parseUserActivationStatus('weird')).toEqual({ ok: false, status: 'invalid' })
+    expect(parseUserActivationStatus(42)).toEqual({ ok: false, status: 'invalid' })
   })
 
-  it('gates pending and inactive and password-less accounts', () => {
+  it('gates pending, invalid activation, inactive, and password-less accounts', () => {
     expect(
       evaluateUserAuthenticationGate({
         is_active: true,
         activation_status: 'pending_activation',
       })?.code,
     ).toBe(ACCOUNT_PENDING_ACTIVATION_CODE)
+
+    expect(
+      evaluateUserAuthenticationGate({
+        is_active: true,
+        activation_status: 'corrupted',
+      })?.code,
+    ).toBe(ACCOUNT_ACTIVATION_INVALID_CODE)
 
     expect(
       evaluateUserAuthenticationGate({
@@ -94,5 +108,6 @@ describe('user-activation helpers (T1)', () => {
   it('detects pending activation', () => {
     expect(isUserPendingActivation('pending_activation')).toBe(true)
     expect(isUserPendingActivation('activated')).toBe(false)
+    expect(isUserPendingActivation('weird')).toBe(false)
   })
 })

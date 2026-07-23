@@ -4,23 +4,19 @@ import { __directorySyncInternalsForTests } from '../../src/directory/directory-
 const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsForTests
 
 /**
- * T1b — when DIRECTORY_PENDING_ACTIVATION_ENABLED is unset/false, admission create must
- * stay byte-compatible with pre-T1: active user + active user_orgs path (via bind).
- * When true, creates pending_activation / is_active=false and skips user_orgs.
+ * T1b — assert INSERT params (not merely SQL text) so state mutations fail the suite.
+ * PR #4559 review: previous fake client discarded params → false-green.
  */
 function fakeClient() {
-  const queries: string[] = []
+  const queries: Array<{ sql: string; params?: unknown[] }> = []
   return {
     queries,
     query: async (sql: string, params?: unknown[]) => {
-      queries.push(sql)
+      queries.push({ sql, params })
       if (/SELECT org_id\s+FROM directory_integrations/.test(sql)) {
         return { rows: [{ org_id: 'orgA' }] as Array<Record<string, unknown>> }
       }
       if (/SAVEPOINT|ROLLBACK TO SAVEPOINT|RELEASE SAVEPOINT/i.test(sql)) {
-        return { rows: [] as Array<Record<string, unknown>> }
-      }
-      if (/INSERT INTO users\b/i.test(sql)) {
         return { rows: [] as Array<Record<string, unknown>> }
       }
       if (/FROM directory_account_links/i.test(sql) && /SELECT local_user_id/i.test(sql)) {
@@ -29,19 +25,6 @@ function fakeClient() {
       if (/FROM user_external_identities/i.test(sql)) {
         return { rows: [] as Array<Record<string, unknown>> }
       }
-      if (/INSERT INTO user_external_identities/i.test(sql)) {
-        return { rows: [] as Array<Record<string, unknown>> }
-      }
-      if (/INSERT INTO directory_account_links/i.test(sql)) {
-        return { rows: [] as Array<Record<string, unknown>> }
-      }
-      if (/INSERT INTO user_orgs/i.test(sql)) {
-        return { rows: [] as Array<Record<string, unknown>> }
-      }
-      if (/INSERT INTO user_external_auth_grants/i.test(sql)) {
-        return { rows: [] as Array<Record<string, unknown>> }
-      }
-      void params
       return { rows: [] as Array<Record<string, unknown>> }
     },
   }
@@ -73,6 +56,10 @@ const baseOptions = {
   account: ACCOUNT,
 }
 
+function findUsersInsert(client: ReturnType<typeof fakeClient>) {
+  return client.queries.find((q) => /INSERT INTO users\b/i.test(q.sql))
+}
+
 describe('T1 directory admit pending-activation flag (default off)', () => {
   const original = process.env.DIRECTORY_PENDING_ACTIVATION_ENABLED
 
@@ -81,18 +68,24 @@ describe('T1 directory admit pending-activation flag (default off)', () => {
     else process.env.DIRECTORY_PENDING_ACTIVATION_ENABLED = original
   })
 
-  it('default OFF: inserts activated/active user and writes user_orgs', async () => {
+  it('default OFF: INSERT params are activated + is_active true + local_password_set true', async () => {
     delete process.env.DIRECTORY_PENDING_ACTIVATION_ENABLED
     const client = fakeClient()
     await createDirectoryAdmittedUserInTransaction(client, baseOptions)
 
-    const userInsert = client.queries.find((sql) => /INSERT INTO users\b/i.test(sql))
-    expect(userInsert).toBeTruthy()
-    // activated path: is_active true param present; activation_status activated
-    expect(client.queries.some((sql) => /INSERT INTO user_orgs\b/i.test(sql))).toBe(true)
+    const insert = findUsersInsert(client)
+    expect(insert).toBeTruthy()
+    const params = insert!.params ?? []
+    // See createDirectoryAdmittedUserInTransaction param order:
+    // [userId, email, username, name, mobile, passwordHash, mustChangePassword, permissionsJson,
+    //  isActive, activationStatus, localPasswordSet]
+    expect(params[8]).toBe(true) // is_active
+    expect(params[9]).toBe('activated')
+    expect(params[10]).toBe(true) // local_password_set
+    expect(client.queries.some((q) => /INSERT INTO user_orgs\b/i.test(q.sql))).toBe(true)
   })
 
-  it('when ON: inserts pending user and does not write user_orgs', async () => {
+  it('when ON: INSERT params are pending + is_active false + local_password_set false; no user_orgs', async () => {
     process.env.DIRECTORY_PENDING_ACTIVATION_ENABLED = 'true'
     const client = fakeClient()
     await createDirectoryAdmittedUserInTransaction(client, {
@@ -100,9 +93,24 @@ describe('T1 directory admit pending-activation flag (default off)', () => {
       enableDingTalkGrant: true, // forced off in pending mode
     })
 
-    expect(client.queries.some((sql) => /INSERT INTO users\b/i.test(sql))).toBe(true)
-    expect(client.queries.some((sql) => /INSERT INTO user_orgs\b/i.test(sql))).toBe(false)
-    // grant should not be enabled on pending create even if requested
-    expect(client.queries.some((sql) => /INSERT INTO user_external_auth_grants\b/i.test(sql))).toBe(false)
+    const insert = findUsersInsert(client)
+    expect(insert).toBeTruthy()
+    const params = insert!.params ?? []
+    expect(params[8]).toBe(false) // is_active
+    expect(params[9]).toBe('pending_activation')
+    expect(params[10]).toBe(false) // local_password_set
+    expect(client.queries.some((q) => /INSERT INTO user_orgs\b/i.test(q.sql))).toBe(false)
+    expect(client.queries.some((q) => /INSERT INTO user_external_auth_grants\b/i.test(q.sql))).toBe(false)
+  })
+
+  it('mutation: inverted activation params would fail the ON assertion', async () => {
+    // Guard against false-green: if someone rewrites pending path to activated/true,
+    // this expected shape must fail. (Documents the load-bearing params.)
+    process.env.DIRECTORY_PENDING_ACTIVATION_ENABLED = 'true'
+    const client = fakeClient()
+    await createDirectoryAdmittedUserInTransaction(client, baseOptions)
+    const params = findUsersInsert(client)!.params ?? []
+    expect([params[8], params[9], params[10]]).not.toEqual([true, 'activated', true])
+    expect([params[8], params[9], params[10]]).toEqual([false, 'pending_activation', false])
   })
 })

@@ -191,8 +191,8 @@ export class AuthService {
         return null
       }
 
-      // 验证用户是否仍然活跃
-      if (user.role === 'disabled' || user.is_active === false) {
+      // T1: fail-closed on pending / invalid activation / inactive (shared gate).
+      if (evaluateUserAuthenticationGate(user)) {
         return null
       }
 

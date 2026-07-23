@@ -36,7 +36,10 @@ import {
 import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
-import { isDirectoryPendingActivationEnabled } from '../auth/user-activation'
+import {
+  buildUnusablePasswordHash,
+  isDirectoryPendingActivationEnabled,
+} from '../auth/user-activation'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
@@ -3948,8 +3951,17 @@ export async function syncDirectoryIntegration(
                       open_id: account.open_id,
                     })
                 const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
-                const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
-                const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                // T1 pending mode: unusable hash, no temp password, no invite/onboarding packet.
+                // Default-off path keeps temporary password + invite semantics for activated users.
+                const pendingMode = isDirectoryPendingActivationEnabled()
+                let generatedPassword: string | null = null
+                let passwordHash: string
+                if (pendingMode) {
+                  passwordHash = await buildUnusablePasswordHash()
+                } else {
+                  generatedPassword = generateDirectoryAdmissionTemporaryPassword()
+                  passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                }
                 // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
                 // condition instead of hardcoding grant=true. A corp-scoped account
                 // (corp_id set) without an openId cannot use DingTalk login and would
@@ -3958,7 +3970,9 @@ export async function syncDirectoryIntegration(
                 // an account is admitted with the grant OFF (directory binding still
                 // happens), and the assertion is enforced before INSERT (see
                 // createDirectoryAdmittedUserInTransaction) so no orphan can be created.
-                const canGrantDingTalkLogin = resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
+                const canGrantDingTalkLogin = pendingMode
+                  ? false
+                  : resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
                 const created = await createDirectoryAdmittedUserInTransaction(client, {
                   account: {
                     id: account.id,
@@ -3979,43 +3993,45 @@ export async function syncDirectoryIntegration(
                   username: generatedUsername,
                   mobile: cleanMobile,
                   passwordHash,
-                  mustChangePassword: true,
+                  mustChangePassword: !pendingMode,
                   enableDingTalkGrant: canGrantDingTalkLogin,
                 })
-                let inviteToken: string | null = null
-                if (cleanEmail) {
-                  inviteToken = issueInviteToken({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    presetId: null,
-                  })
-                  autoAdmissionInvites.push({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    inviteToken,
-                  })
-                } else {
-                  autoAdmittedNoEmailCount += 1
-                  autoAdmissionOnboardingPackets.push({
-                    userId: created.userId,
-                    name: cleanName,
-                    email: cleanEmail,
-                    username: generatedUsername,
-                    mobile: cleanMobile,
-                    temporaryPassword: generatedPassword,
-                    onboarding: buildOnboardingPacket({
+                if (!pendingMode) {
+                  let inviteToken: string | null = null
+                  if (cleanEmail) {
+                    inviteToken = issueInviteToken({
+                      userId: created.userId,
                       email: cleanEmail,
-                      accountLabel: resolveDirectoryAdmissionAccountLabel({
-                        email: cleanEmail,
-                        username: generatedUsername,
-                        mobile: cleanMobile,
-                        userId: created.userId,
-                      }),
-                      temporaryPassword: generatedPassword,
-                      preset: null,
+                      presetId: null,
+                    })
+                    autoAdmissionInvites.push({
+                      userId: created.userId,
+                      email: cleanEmail,
                       inviteToken,
-                    }),
-                  })
+                    })
+                  } else if (generatedPassword) {
+                    autoAdmittedNoEmailCount += 1
+                    autoAdmissionOnboardingPackets.push({
+                      userId: created.userId,
+                      name: cleanName,
+                      email: cleanEmail,
+                      username: generatedUsername,
+                      mobile: cleanMobile,
+                      temporaryPassword: generatedPassword,
+                      onboarding: buildOnboardingPacket({
+                        email: cleanEmail,
+                        accountLabel: resolveDirectoryAdmissionAccountLabel({
+                          email: cleanEmail,
+                          username: generatedUsername,
+                          mobile: cleanMobile,
+                          userId: created.userId,
+                        }),
+                        temporaryPassword: generatedPassword,
+                        preset: null,
+                        inviteToken,
+                      }),
+                    })
+                  }
                 }
                 localUserId = created.userId
                 linkStatus = 'linked'
@@ -6246,7 +6262,9 @@ export async function admitDirectoryAccountUser(
   const cleanUsername = sanitizeDirectoryAdmissionUsername(input.username)
   const cleanMobile = sanitizeDirectoryAdmissionMobile(input.mobile)
   const requestedPassword = normalizeText(input.password)
-  const enableDingTalkGrant = input.enableDingTalkGrant !== false
+  const pendingMode = isDirectoryPendingActivationEnabled()
+  // Pending create: never grant DingTalk login; credentials deferred to T3 activate.
+  const enableDingTalkGrant = pendingMode ? false : input.enableDingTalkGrant !== false
 
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
@@ -6258,11 +6276,20 @@ export async function admitDirectoryAccountUser(
   const usernameValidationError = validateDirectoryAdmissionUsername(cleanUsername)
   if (usernameValidationError) throw new Error(usernameValidationError)
 
-  const generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
-  const mustChangePassword = requestedPassword.length === 0
-  const passwordValidation = validatePassword(generatedPassword)
-  if (!passwordValidation.valid) {
-    throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+  // Pending: ignore any requested password — unusable hash only (no temp credentials).
+  let generatedPassword: string | null = null
+  let passwordHash: string
+  let mustChangePassword = false
+  if (pendingMode) {
+    passwordHash = await buildUnusablePasswordHash()
+  } else {
+    generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
+    mustChangePassword = requestedPassword.length === 0
+    const passwordValidation = validatePassword(generatedPassword)
+    if (!passwordValidation.valid) {
+      throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+    }
+    passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   }
 
   const [account, previousLinkedUser] = await Promise.all([
@@ -6276,7 +6303,6 @@ export async function admitDirectoryAccountUser(
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
-  const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   let userId = ''
 
   await transaction(async (client) => {
@@ -6294,15 +6320,14 @@ export async function admitDirectoryAccountUser(
     userId = created.userId
   })
 
-  const resolvedInviteToken = cleanEmail
-    ? issueInviteToken({
+  // Pending: never issue invite or temporary password (T3 owns activation credentials).
+  let resolvedInviteToken: string | null = null
+  if (!pendingMode && cleanEmail) {
+    resolvedInviteToken = issueInviteToken({
       userId,
       email: cleanEmail,
       presetId: null,
     })
-    : null
-
-  if (cleanEmail && resolvedInviteToken) {
     await recordInvite({
       userId,
       email: cleanEmail,
@@ -6318,6 +6343,11 @@ export async function admitDirectoryAccountUser(
   if (!summary) {
     throw new Error('Directory account bound but summary reload failed')
   }
+
+  const isActive = !pendingMode
+  const returnTempPassword = !pendingMode && requestedPassword.length === 0 && generatedPassword
+    ? generatedPassword
+    : undefined
 
   return {
     account: summary,
@@ -6335,9 +6365,9 @@ export async function admitDirectoryAccountUser(
       name: cleanName,
       mobile: cleanMobile,
       role: 'user',
-      is_active: true,
+      is_active: isActive,
     },
-    temporaryPassword: requestedPassword.length === 0 ? generatedPassword : undefined,
+    temporaryPassword: returnTempPassword,
     inviteToken: resolvedInviteToken,
     onboarding: buildOnboardingPacket({
       email: cleanEmail || null,
@@ -6347,7 +6377,7 @@ export async function admitDirectoryAccountUser(
         mobile: cleanMobile,
         userId,
       }),
-      temporaryPassword: requestedPassword.length === 0 ? generatedPassword : null,
+      temporaryPassword: returnTempPassword ?? null,
       preset: null,
       inviteToken: resolvedInviteToken,
     }),

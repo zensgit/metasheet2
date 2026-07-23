@@ -1,12 +1,11 @@
 /**
- * T1 — user activation axis helpers (design lock Rev 4.2).
+ * T1 — user activation axis helpers (design lock Rev 4.2 + PR #4559 review fixes).
  *
  * Dual axis:
- * - activation_status: pending_activation | activated
+ * - activation_status: pending_activation | activated (closed set; unknown is fail-closed)
  * - is_active: platform availability (security / offboarding)
  *
- * Pending-create runtime is env-gated and **defaults OFF** so shipping T1 does not
- * change production admission behavior until an explicit later GO enables the flag.
+ * Pending-create runtime is env-gated and **defaults OFF**.
  */
 
 import * as crypto from 'node:crypto'
@@ -19,12 +18,13 @@ export type UserActivationStatus = (typeof USER_ACTIVATION_STATUSES)[number]
 export const ACCOUNT_PENDING_ACTIVATION_CODE = 'ACCOUNT_PENDING_ACTIVATION'
 export const ACCOUNT_INACTIVE_CODE = 'ACCOUNT_INACTIVE'
 export const ACCOUNT_PASSWORD_LOGIN_DISABLED_CODE = 'ACCOUNT_PASSWORD_LOGIN_DISABLED'
+export const ACCOUNT_ACTIVATION_INVALID_CODE = 'ACCOUNT_ACTIVATION_INVALID'
 export const PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE = 'PENDING_ACTIVATE_BYPASS_FORBIDDEN'
 
 /**
  * When true, directory auto/manual admission creates pending_activation users
- * (is_active=false, no active user_orgs, grant off, unusable password).
- * Default false — existing admit path stays activated + active membership.
+ * (is_active=false, no active user_orgs, grant off, unusable password, no temp credentials).
+ * Default false.
  */
 export function isDirectoryPendingActivationEnabled(): boolean {
   return ['true', '1', 'yes'].includes(
@@ -32,15 +32,39 @@ export function isDirectoryPendingActivationEnabled(): boolean {
   )
 }
 
+/**
+ * Parse activation_status with **fail-closed** semantics for unknown values.
+ * - exact `pending_activation` / `activated` only
+ * - null/undefined/'' treated as `activated` solely for pre-migration row shapes
+ *   (column missing / not yet selected); after migration the column is NOT NULL
+ * - any other string is invalid (gate must deny)
+ */
+export function parseUserActivationStatus(
+  raw: unknown,
+): { ok: true; status: UserActivationStatus } | { ok: false; status: 'invalid' } {
+  if (raw === null || raw === undefined) {
+    return { ok: true, status: 'activated' }
+  }
+  if (typeof raw !== 'string') {
+    return { ok: false, status: 'invalid' }
+  }
+  const value = raw.trim()
+  if (value === '') return { ok: true, status: 'activated' }
+  if (value === 'pending_activation') return { ok: true, status: 'pending_activation' }
+  if (value === 'activated') return { ok: true, status: 'activated' }
+  return { ok: false, status: 'invalid' }
+}
+
+/** @deprecated prefer parseUserActivationStatus — kept for narrow call sites that only need pending check */
 export function normalizeUserActivationStatus(raw: unknown): UserActivationStatus {
-  const value = typeof raw === 'string' ? raw.trim() : ''
-  if (value === 'pending_activation') return 'pending_activation'
-  // Missing column / legacy rows / anything else → activated (fail open for stock logins)
-  return 'activated'
+  const parsed = parseUserActivationStatus(raw)
+  if (!parsed.ok) return 'activated' // callers that only check pending should use parse + gate
+  return parsed.status
 }
 
 export function isUserPendingActivation(raw: unknown): boolean {
-  return normalizeUserActivationStatus(raw) === 'pending_activation'
+  const parsed = parseUserActivationStatus(raw)
+  return parsed.ok && parsed.status === 'pending_activation'
 }
 
 export type UserAuthGateInput = {
@@ -56,8 +80,8 @@ export type UserAuthGateDenial = {
 }
 
 /**
- * Shared gate for password login, token refresh, and DingTalk SSO login.
- * Does not evaluate grants (caller-specific).
+ * Shared gate for password login, token refresh/verify, DingTalk SSO login, API tokens.
+ * Does not evaluate DingTalk grants (caller-specific).
  */
 export function evaluateUserAuthenticationGate(
   user: UserAuthGateInput,
@@ -69,12 +93,21 @@ export function evaluateUserAuthenticationGate(
       message: 'Account is inactive or disabled',
     }
   }
-  if (isUserPendingActivation(user.activation_status)) {
+
+  const parsed = parseUserActivationStatus(user.activation_status)
+  if (!parsed.ok) {
+    return {
+      code: ACCOUNT_ACTIVATION_INVALID_CODE,
+      message: 'Account activation status is invalid',
+    }
+  }
+  if (parsed.status === 'pending_activation') {
     return {
       code: ACCOUNT_PENDING_ACTIVATION_CODE,
       message: 'Account is pending activation and cannot sign in',
     }
   }
+
   if (options.requireLocalPassword && user.local_password_set === false) {
     return {
       code: ACCOUNT_PASSWORD_LOGIN_DISABLED_CODE,

@@ -472,8 +472,17 @@ async function issueAuthSessionToken(user: User, req: Request): Promise<string> 
 }
 
 async function getInviteTarget(userId: string, email: string) {
-  const result = await query<{ id: string; email: string; name: string | null; is_active: boolean; updated_at: string }>(
-    `SELECT id, email, name, is_active, updated_at
+  const result = await query<{
+    id: string
+    email: string
+    name: string | null
+    is_active: boolean
+    activation_status: string | null
+    updated_at: string
+  }>(
+    `SELECT id, email, name, is_active,
+            COALESCE(activation_status, 'activated') AS activation_status,
+            updated_at
      FROM users
      WHERE id = $1 AND email = $2`,
     [userId, email],
@@ -744,15 +753,35 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       })
     }
 
+    // T1 P1: pending users must not be activated via invite accept (T3 owns activation).
+    // Fail closed with zero writes so invite is not consumed and state cannot half-commit.
+    const activationStatus = String(target.activation_status ?? 'activated').trim()
+    if (activationStatus === 'pending_activation') {
+      return res.status(403).json({
+        success: false,
+        error: 'Account is pending activation; invite acceptance is not allowed',
+        code: 'ACCOUNT_PENDING_ACTIVATION',
+      })
+    }
+    if (activationStatus !== 'activated') {
+      return res.status(403).json({
+        success: false,
+        error: 'Account activation status is invalid',
+        code: 'ACCOUNT_ACTIVATION_INVALID',
+      })
+    }
+
     const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
     await query(
       `UPDATE users
        SET password_hash = $1,
            must_change_password = FALSE,
+           local_password_set = TRUE,
            is_active = true,
            name = COALESCE(NULLIF($2, ''), name),
            updated_at = NOW()
-       WHERE id = $3 AND email = $4`,
+       WHERE id = $3 AND email = $4
+         AND COALESCE(activation_status, 'activated') = 'activated'`,
       [passwordHash, requestedName, payload.userId, payload.email],
     )
 
