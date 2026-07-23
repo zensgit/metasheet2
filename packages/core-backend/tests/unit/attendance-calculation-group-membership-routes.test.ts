@@ -53,6 +53,7 @@ import {
   AttendanceCalculationGroupMembershipError,
 } from '../../src/services/AttendanceCalculationGroupMembership'
 import { attendanceAdminRouter } from '../../src/routes/attendance-admin'
+import { usePinnedServer } from '../utils/pinned-server'
 
 function makeApp(userId = 'delegated-admin') {
   const app = express()
@@ -70,6 +71,8 @@ function makeApp(userId = 'delegated-admin') {
   return app
 }
 
+const pinned = usePinnedServer()
+
 describe('attendance calculation-group membership admin routes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -81,12 +84,13 @@ describe('attendance calculation-group membership admin routes', () => {
       outcome: 'transitioned',
       membership: { id: 'membership-1' },
     })
+    pinned.setApp(makeApp())
   })
 
   it('authorizes the org before reading a target timeline', async () => {
     queryMock.mockResolvedValueOnce({ rows: [] })
 
-    const response = await request(makeApp()).get(
+    const response = await request(pinned.url()).get(
       '/api/attendance-admin/calculation-group-memberships?orgId=foreign-org&userId=target-user',
     )
 
@@ -103,7 +107,7 @@ describe('attendance calculation-group membership admin routes', () => {
   it('lists an authorized user timeline after the active org-membership gate', async () => {
     listMock.mockResolvedValueOnce([{ id: 'membership-1' }])
 
-    const response = await request(makeApp()).get(
+    const response = await request(pinned.url()).get(
       '/api/attendance-admin/calculation-group-memberships?orgId=org-a&userId=target-user',
     )
 
@@ -116,7 +120,8 @@ describe('attendance calculation-group membership admin routes', () => {
   })
 
   it('takes actor identity and fallback correlation from the authenticated request', async () => {
-    const response = await request(makeApp('real-actor'))
+    pinned.setApp(makeApp('real-actor'))
+    const response = await request(pinned.url())
       .post('/api/attendance-admin/calculation-group-memberships/transition')
       .send({
         orgId: 'org-a',
@@ -143,7 +148,7 @@ describe('attendance calculation-group membership admin routes', () => {
   it('rejects a foreign-org transition before invoking the write service', async () => {
     queryMock.mockResolvedValueOnce({ rows: [] })
 
-    const response = await request(makeApp())
+    const response = await request(pinned.url())
       .post('/api/attendance-admin/calculation-group-memberships/transition')
       .send({
         orgId: 'foreign-org',
@@ -160,7 +165,7 @@ describe('attendance calculation-group membership admin routes', () => {
   })
 
   it('rejects non-string request fields instead of coercing arrays into valid values', async () => {
-    const response = await request(makeApp())
+    const response = await request(pinned.url())
       .post('/api/attendance-admin/calculation-group-memberships/transition')
       .send({
         orgId: 'org-a',
@@ -176,7 +181,7 @@ describe('attendance calculation-group membership admin routes', () => {
   })
 
   it('rejects a blank supplied correlation id instead of silently replacing it', async () => {
-    const response = await request(makeApp())
+    const response = await request(pinned.url())
       .post('/api/attendance-admin/calculation-group-memberships/transition')
       .send({
         orgId: 'org-a',
@@ -201,7 +206,7 @@ describe('attendance calculation-group membership admin routes', () => {
       ),
     )
 
-    const response = await request(makeApp())
+    const response = await request(pinned.url())
       .post('/api/attendance-admin/calculation-group-memberships/transition')
       .send({
         orgId: 'org-a',
