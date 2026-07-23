@@ -2,8 +2,8 @@
 
 **结论：ENGINEERING STACK VERIFIED THROUGH DRAFT #4539; NOT MERGED, UAT'D OR ENABLED**
 
-本文对组合根 #4540 `3d034c9508261a14187b4ef9ada7624c6b5b7db9` 及其重排后的最终数据栈头
-#4539 `5da02bf3edbcc60cbceb3f4cd63c6c0c4937b889` 的本地验证负责。
+本文对组合根 #4540 `ca207f8e8930479bec27a4fb86a90a7a0fc41039` 及其重排后的最终数据栈头
+#4539 `60d42499547a0b01a7c1bdfb43aede0c6fc58c5a` 的本地验证负责。
 Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独立状态。
 
 ## 1. 为什么需要组合 PR
@@ -99,6 +99,40 @@ activation 均 fail closed。两者对 formula dry-run 的判断不一致：Code
 但执行环境因会短暂制造审批路由安全回归而拒绝；没有绕过限制，也不把该项写成 mutation-proven。既有动态依赖
 和区间恒真守卫的历史变异证据仍有效，但不替代本轮恒等式测试。
 
+### 2.5 2026-07-23 P2 修复与全栈重排
+
+后续审阅证明上一轮“恒等式检测 sound”和“#4540 已在当前 main”均不成立。本轮修复后：
+
+- semantic truth 与 authoring/runtime capture policy 分离。可选字段或缺失 requester context 的自比较不再被
+  `approvalConditionFormulaIsProvablyAlwaysTrue` 冒充为语义恒真；
+- authoring 明确拒绝结构恒等和保守算术恒等（至少 `x - x == 0`、`x * 0 == 0`），错误码为
+  `APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE`；
+- legacy 存量图命中静态/捕获公式时返回 values-free 409，不再静默 `continue` 到 default edge；
+- FWB mounted editor 的 18 项组件规格进入 required `web-tests`，同时进入 approval guard 的
+  pull-request/push path 与执行命令。
+
+exact-head 本地证据：
+
+| Gate | 结果 | 证明范围 |
+|---|---:|---|
+| formula + graph + product service unit | **3 files / 226 passed** | semantic totality、capture policy、legacy fail-closed、authoring choke |
+| capture guard mutations | **3/3 RED** | semantic totality、authoring capture、runtime capture 各自被对应规格击杀 |
+| FWB mapping required slice | **2 files / 21 passed** | model 3 + mounted editor 18，日志确认两文件均被收集 |
+| required web script | **359 files / 4312 passed** | 实跑 `run-required-web-tests.sh`，非单独 spec 假绿 |
+| fresh-DB migrate + authoring API | **7/7** | PostgreSQL 15 空库全迁移，真实 HTTP/DB 错误码与算术捕获 |
+| backend `tsc --noEmit` + frontend `vue-tsc --noEmit` | pass | 重排后最终组合类型面 |
+
+全栈从 `origin/main@1bcfc86b86f250c789d199660fc36da7b04e9a4d` 重排，依赖链和 heads 为：
+
+1. #4540 `ca207f8e8930479bec27a4fb86a90a7a0fc41039`
+2. #4524 `764e7c0f517ed94b582e3f6faabfa42c567ccdef`
+3. #4531 `da565853cce1a7d12b9543243645647bb191ce9f`
+4. #4539 `60d42499547a0b01a7c1bdfb43aede0c6fc58c5a`
+
+`range-diff` 证明 #4524 的 6 个、#4531 的 2 个、#4539 原有的 10 个独有提交均 patch-equivalent；
+#4539 只额外增加 required editor gate 提交。GitHub 一度只刷新 #4531 的 branch ref、未刷新 PR ref；对同一
+base 执行无语义变化的 PR 重算后，两者均指向 `da565853c`。
+
 ## 3. 数值写回的真实边界
 
 当前生产链可写回 `text`、`select`、`date` 与 `record-link`；创建新记录、更新受约束已有记录和审批节点确认值
@@ -119,9 +153,8 @@ flush 后读到行；本地 exact-head 单独复跑 15/15 后只重跑失败 job
 #4540 全部 required checks 为绿。#4524/#4531/#4539 新 heads 的实际 path-trigger checks 也已成功；串行 retarget 到 main
 后仍必须让完整 required set 在新基线上重新结算。
 
-2026-07-23 外部复核修复后的新 heads 已重新结算：#4540 `3d034c9508` 的 22 个成功 check 加 1 个预期 skipped、
-#4524/#4531/#4539 的实际 path-trigger checks 均无失败。#4535 在写入该结论前的 head `d1d1a3619` 也为
-11 个成功 check 加 1 个预期 skipped；本次纯文档追加仍以 GitHub 最新结算为准。
+2026-07-23 P2 修复后的四层 heads 已重新推送，远端 required checks 正在按新 SHA 重新结算。本地 exact-head 证据见
+§2.5；在 GitHub 对各 PR 的新 head 返回最终结果前，不称 CI 全绿。#4535 本次文档更新也以自己的新 head 结算为准。
 
 ## 5. 尚未完成
 
