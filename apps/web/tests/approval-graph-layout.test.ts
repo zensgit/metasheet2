@@ -37,14 +37,15 @@ const REJOIN: ApprovalGraph = {
   ],
 }
 
-describe('computeLayout (longest-path layered)', () => {
-  it('places a linear graph in increasing layers/x with stable coordinates', () => {
+describe('computeLayout (vertical longest-path layered)', () => {
+  it('places a linear graph in increasing layers/y on one centered column', () => {
     const layout = computeLayout(LINEAR)
     const byKey = new Map(layout.nodes.map((n) => [n.key, n]))
     expect(byKey.get('start')!.layer).toBe(0)
     expect(byKey.get('a1')!.layer).toBe(1)
     expect(byKey.get('end')!.layer).toBe(2)
-    expect(byKey.get('a1')!.x).toBeGreaterThan(byKey.get('start')!.x)
+    expect(byKey.get('a1')!.y).toBeGreaterThan(byKey.get('start')!.y)
+    expect(byKey.get('a1')!.x).toBe(byKey.get('start')!.x)
     expect(layout.nodes).toHaveLength(3)
   })
   it('puts a rejoin node AFTER both of its branches (longest-path, not shortest)', () => {
@@ -54,6 +55,9 @@ describe('computeLayout (longest-path layered)', () => {
     expect(byKey.get('join')!.layer).toBeGreaterThan(byKey.get('high')!.layer)
     expect(byKey.get('join')!.layer).toBeGreaterThan(byKey.get('low')!.layer)
     expect(byKey.get('end')!.layer).toBe(4)
+    expect(byKey.get('high')!.y).toBe(byKey.get('low')!.y)
+    expect(byKey.get('high')!.x).not.toBe(byKey.get('low')!.x)
+    expect(byKey.get('join')!.y).toBeGreaterThan(byKey.get('high')!.y)
   })
 })
 
@@ -64,7 +68,9 @@ describe('graphValidityIssues (D-5 preview)', () => {
   })
   it('flags a dangling edge (target not a node)', () => {
     const broken: ApprovalGraph = { nodes: LINEAR.nodes, edges: [...LINEAR.edges, { key: 'bad', source: 'a1', target: 'ghost' }] }
-    expect(graphValidityIssues(broken).some((i) => /不存在的节点/.test(i))).toBe(true)
+    const issues = graphValidityIssues(broken)
+    expect(issues.some((i) => /不存在节点/.test(i))).toBe(true)
+    expect(issues.join(' ')).not.toMatch(/bad|ghost/)
   })
   it('flags an unreachable node', () => {
     const orphan: ApprovalGraph = {
@@ -81,17 +87,45 @@ describe('graphValidityIssues (D-5 preview)', () => {
     expect(graphValidityIssues(stuck).some((i) => /没有后继连线/.test(i))).toBe(true)
   })
 
+  it('flags an empty parallel branch before save without exposing graph identifiers', () => {
+    const emptyBranch: ApprovalGraph = {
+      nodes: [
+        { key: 'start-secret', type: 'start', config: {} },
+        {
+          key: 'fork-secret',
+          type: 'parallel',
+          config: { branches: ['empty-secret', 'review-secret'], joinMode: 'any', joinNodeKey: 'end-secret' },
+        },
+        { key: 'reviewer-secret', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end-secret', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'start-fork-secret', source: 'start-secret', target: 'fork-secret' },
+        { key: 'empty-secret', source: 'fork-secret', target: 'end-secret' },
+        { key: 'review-secret', source: 'fork-secret', target: 'reviewer-secret' },
+        { key: 'review-end-secret', source: 'reviewer-secret', target: 'end-secret' },
+      ],
+    }
+    const issues = graphValidityIssues(emptyBranch)
+    expect(issues.some((issue) => /并行分支至少需要一个审批节点/.test(issue))).toBe(true)
+    expect(issues.join(' ')).not.toMatch(/fork-secret|empty-secret|end-secret/)
+  })
+
   it('D-5: flags duplicate node keys and duplicate edge keys (a canvas key collision)', () => {
     const dupNode: ApprovalGraph = {
       nodes: [...LINEAR.nodes, { key: 'a1', type: 'approval', config: {} }], // 'a1' duplicated
       edges: LINEAR.edges,
     }
-    expect(graphValidityIssues(dupNode).some((i) => /节点 key 重复：a1/.test(i))).toBe(true)
+    const nodeIssues = graphValidityIssues(dupNode)
+    expect(nodeIssues.some((i) => /重复的节点标识/.test(i))).toBe(true)
+    expect(nodeIssues.join(' ')).not.toContain('a1')
     const dupEdge: ApprovalGraph = {
       nodes: LINEAR.nodes,
       edges: [...LINEAR.edges, { key: 'e1', source: 'a1', target: 'end' }], // 'e1' duplicated
     }
-    expect(graphValidityIssues(dupEdge).some((i) => /连线 key 重复：e1/.test(i))).toBe(true)
+    const edgeIssues = graphValidityIssues(dupEdge)
+    expect(edgeIssues.some((i) => /重复的连线标识/.test(i))).toBe(true)
+    expect(edgeIssues.join(' ')).not.toContain('e1')
   })
 
   it('D-5: flags a cycle AND the nodes trapped in it (cannot reach end, but not "no-successor")', () => {

@@ -423,6 +423,45 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     expect(fields.some((f) => f.key === 'items')).toBe(false)
   })
 
+  it('flag OFF (default): renders legacy attachment string/object values inline without the refs pipeline', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'fld_reason', type: 'text', label: '事由' },
+        { id: 'files', type: 'attachment', label: '附件' },
+      ],
+    }
+    // string legacy value (B2-28 era notes frozen into the snapshot)
+    const asString = buildDisplayFields(schema, {
+      fld_reason: '出差',
+      files: 'legacy-file-reference',
+    })
+    expect(asString).toEqual([
+      { key: 'fld_reason', label: '事由', value: '出差' },
+      { key: 'files', label: '附件', value: 'legacy-file-reference' },
+    ])
+    // object legacy value with a fileName
+    const asObject = buildDisplayFields(schema, {
+      files: { fileName: 'scan.pdf', size: 12 },
+    })
+    expect(asObject.find((f) => f.key === 'files')?.value).toBe('scan.pdf')
+  })
+
+  it('flag ON: excludes attachment fields from scalar display (refs block owns them)', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'fld_reason', type: 'text', label: '事由' },
+        { id: 'files', type: 'attachment', label: '附件' },
+      ],
+    }
+    const fields = buildDisplayFields(
+      schema,
+      { fld_reason: 'x', files: ['att_1'] },
+      { attachmentPipelineEnabled: true },
+    )
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+    expect(fields.some((f) => f.key === 'files')).toBe(false)
+  })
+
   it('renders null/undefined/empty-string scalar values as \'-\' regardless of field type', () => {
     const fields = buildDisplayFields(displaySchema, { fld_reason: '', fld_amount: null, fld_date: undefined })
     expect(fields.map((f) => f.value)).toEqual(['-', '-', '-'])

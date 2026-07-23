@@ -1,6 +1,6 @@
 /* eslint-disable vue/one-component-per-file, vue/require-default-prop */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
 import type { ApprovalNodeConfig, ApprovalTemplateDetailDTO, AutoApprovalPolicy } from '../src/types/approval'
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
@@ -44,6 +44,13 @@ vi.mock('../src/approvals/permissions', () => ({
     canRead: ref(true),
     canWrite: ref(true),
     canAct: ref(true),
+  }),
+}))
+
+const approvalCanvasV2 = ref(false)
+vi.mock('../src/stores/featureFlags', () => ({
+  useFeatureFlags: () => ({
+    features: computed(() => ({ approvalCanvasV2: approvalCanvasV2.value })),
   }),
 }))
 
@@ -400,6 +407,34 @@ describe('approval template authoring helpers', () => {
     expect(reason).toContain('暂不支持编辑的字段类型')
   })
 
+  it('keeps raw field and node identifiers out of author-facing refusal and validation messages', () => {
+    const fieldReason = unsupportedTemplateAuthoringReason(buildTemplate({
+      formSchema: { fields: [{ id: 'secret_field_identifier', type: 'signature' as any, label: '' }] },
+    }))
+    expect(fieldReason).toContain('未命名字段')
+    expect(fieldReason).not.toContain('secret_field_identifier')
+
+    const nodeReason = unsupportedTemplateAuthoringReason(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'secret_node_identifier', type: 'unsupported' as any, name: '', config: {} },
+        ],
+        edges: [],
+      },
+    }))
+    expect(nodeReason).toContain('未命名节点')
+    expect(nodeReason).not.toContain('secret_node_identifier')
+
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'identifier-hygiene'
+    draft.name = '标识卫生'
+    draft.fields[0].id = 'secret_validation_identifier'
+    draft.fields[0].label = ''
+    const validationText = validateTemplateDraft(draft).join(' ')
+    expect(validationText).toContain('第 1 个字段的名称必填')
+    expect(validationText).not.toContain('secret_validation_identifier')
+  })
+
   it('validates duplicate field ids, select options, and form-field-user sources', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'bad'
@@ -641,6 +676,7 @@ describe('TemplateAuthoringView', () => {
   beforeEach(() => {
     routeParams = {}
     canManageTemplates.value = true
+    approvalCanvasV2.value = false
     createTemplateSpy.mockReset()
     updateTemplateSpy.mockReset()
     publishTemplateSpy.mockReset()
@@ -717,9 +753,10 @@ describe('TemplateAuthoringView', () => {
     ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
     await flushUi()
 
-    const fieldId = container!.querySelector('[data-testid="approval-template-field-row"] input') as HTMLInputElement
-    fieldId.value = ''
-    fieldId.dispatchEvent(new Event('input'))
+    // D1: field-id input is gone; the first field control is 字段名称 — clear it to surface validation.
+    const fieldName = container!.querySelector('[data-testid="approval-template-field-row"] input') as HTMLInputElement
+    fieldName.value = ''
+    fieldName.dispatchEvent(new Event('input'))
     ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
     await flushUi()
     scrollIntoViewSpy.mockClear()
@@ -732,7 +769,7 @@ describe('TemplateAuthoringView', () => {
     const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
     expect(createTemplateSpy).not.toHaveBeenCalled()
     expect(fieldsStep?.getAttribute('aria-current')).toBe('step')
-    expect(summary?.textContent).toContain('字段 id 必填')
+    expect(summary?.textContent).toContain('名称必填')
     expect(document.activeElement).toBe(summary)
     expect(scrolledElements.at(-1)).toBe(summary)
   })
@@ -935,25 +972,10 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
-  // G-B2-18: the complex-graph approval-node static_user/static_role editor gets the SAME directory
-  // typeahead as the linear step picker (approval-step-user-picker), instead of a bare-ID allow-create
-  // select. cc node forces the preserved-graph (complex) path so the structured editor renders.
+  // G-B2-18 + D1: complex-graph static_user/static_role uses typed directory pickers only
+  // (manual-ID ordinary path removed). cc forces the preserved-graph (complex) path.
   describe('G-B2-18: complex-node assignee picker', () => {
-    // Real per-character typing (reading the DOM value fresh before each keystroke, exactly like a
-    // browser) — NOT a one-shot `input.value = finalString; dispatchEvent(...)`. A one-shot set would
-    // pass even against a naive `ids.join(', ')`-derived display that fights the controlled <el-input>
-    // on every keystroke; only per-character typing can red-light that regression.
-    async function typeChars(input: HTMLInputElement, chars: string) {
-      for (const ch of chars) {
-        input.value = input.value + ch
-        input.dispatchEvent(new Event('input'))
-        await flushUi()
-        // eslint-disable-next-line no-console
-        console.log('DEBUG after char', JSON.stringify(ch), '-> dom value =', JSON.stringify(input.value))
-      }
-    }
-
-    it('renders the user picker (not the role picker) for static_user, hydrated to the stored id via the fallback join', async () => {
+    it('renders the user picker (not the role picker) for static_user; no ordinary manual-ID control', async () => {
       routeParams = { id: 'tpl_g5_static_user' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['legacy-user-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
@@ -963,10 +985,17 @@ describe('TemplateAuthoringView', () => {
 
       expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
       expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).toBeNull()
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('legacy-user-1')
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-step-ids-text"]')).toBeNull()
+      // Stored legacy id still round-trips on an untouched save (picker preserves selection).
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+      expect(approval1.config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['legacy-user-1'] }])
     })
 
-    it('renders the role picker for static_role', async () => {
+    it('renders the role picker for static_role; no ordinary manual-ID control', async () => {
       routeParams = { id: 'tpl_g5_static_role' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
@@ -976,53 +1005,49 @@ describe('TemplateAuthoringView', () => {
 
       expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
       expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).toBeNull()
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('mgr')
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+      expect(approval1.config.assigneeSources).toEqual([{ kind: 'static_role', roleIds: ['mgr'] }])
     })
 
-    // KEYSTONE regression for the controlled-<el-input> bug the manual fallback almost shipped with:
-    // deriving the box's displayed text from `ids.join(', ')` re-parsed on every keystroke fights
-    // Vue's DOM patch (it resets the input back to the re-derived text after each render), so a
-    // separator can never be typed and a second id can never be entered. Typed char-by-char, the FIX
-    // (a raw per-node text buffer, independent of the ids array until parsed) must let the full
-    // string through untouched.
-    it('keystone: typing a full multi-id string char-by-char into the manual fallback is never truncated', async () => {
-      routeParams = { id: 'tpl_g5_manual_typing' }
+    it('multi-id static_user selection preserved through save without a manual-ID control', async () => {
+      routeParams = { id: 'tpl_g5_multi_user' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
-        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: [] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1', 'u2'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
       await mountView()
       await flushUi()
 
-      const idsText = container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement
-      await typeChars(idsText, 'u1, u2')
-      expect(idsText.value).toBe('u1, u2') // NOT "u1u2" — separators survive every re-render.
-
+      expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
       ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
       await flushUi()
-
-      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
       const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
       const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
       expect(approval1.config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['u1', 'u2'] }])
     })
 
-    // The manual-text buffer is keyed only by nodeKey, not by (nodeKey, kind) — switching the SOURCE
-    // KIND away and back must not leak the OTHER kind's stale typed text into the box.
-    it('switching source kind clears the manual fallback text (no stale cross-kind leak)', async () => {
+    it('switching source kind swaps typed pickers (no manual-ID surface)', async () => {
       routeParams = { id: 'tpl_g5_kind_switch' }
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
       await mountView()
       await flushUi()
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('mgr')
+      expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
 
       const kindSelect = container!.querySelector('[data-testid="approval-node-source-kind"]') as HTMLSelectElement
       kindSelect.value = 'static_user'
       kindSelect.dispatchEvent(new Event('change'))
       await flushUi()
 
-      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('')
+      expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
     })
   })
 
@@ -1127,10 +1152,103 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-graph-node-row"]').length).toBe(rowsBefore + 1) // a new approval node appeared
 
+    // P1 fix (review #4433 F1): the added branch seeds an INCOMPLETE starter rule — saving as-is
+    // is BLOCKED (an empty/unconfigured branch must never publish and capture all traffic).
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+
+    // Configure the new branch's rule field, then save persists the new structure.
+    const ruleFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newRuleField = ruleFields[ruleFields.length - 1] as HTMLSelectElement
+    newRuleField.value = 'amount'
+    newRuleField.dispatchEvent(new Event('change'))
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
-    expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // the added branch is saved
+    const branches = payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches
+    expect(branches).toHaveLength(2) // the added branch is saved
+    expect(branches[1].rules[0].fieldId).toBe('amount') // …with its configured rule, never rules: []
+  })
+
+  it('promotes a blank linear template into graph authoring when a condition gateway is inserted', async () => {
+    approvalCanvasV2.value = true
+    await mountView()
+    const insert = container!.querySelector('[data-testid^="approval-step-insert-condition-after-"]') as HTMLButtonElement
+    insert.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).not.toBeNull()
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]')).toHaveLength(6)
+    expect(container!.querySelector('[data-node-type="condition"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const field = container!.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement
+    field.value = 'field_1'
+    field.dispatchEvent(new Event('change'))
+    setInput('approval-template-key', 'conditional')
+    setInput('approval-template-name', '条件审批')
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const graph = (createTemplateSpy.mock.calls[0]?.[0] as any).approvalGraph
+    const condition = graph.nodes.find((candidate: any) => candidate.type === 'condition')
+    expect(condition.config.branches[0].rules[0].fieldId).toBe('field_1')
+    expect(graph.edges.some((edge: any) => edge.key === condition.config.defaultEdgeKey)).toBe(true)
+  })
+
+  it('promotes a blank linear template into a two-branch parallel graph and edits its join mode', async () => {
+    approvalCanvasV2.value = true
+    await mountView()
+    const insert = container!.querySelector('[data-testid^="approval-step-insert-parallel-after-"]') as HTMLButtonElement
+    insert.click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]')).toHaveLength(6)
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const joinMode = container!.querySelector('[data-testid="approval-parallel-join-mode"]') as HTMLSelectElement
+    joinMode.value = 'any'
+    joinMode.dispatchEvent(new Event('change'))
+    setInput('approval-template-key', 'parallel')
+    setInput('approval-template-name', '并行审批')
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const graph = (createTemplateSpy.mock.calls[0]?.[0] as any).approvalGraph
+    const parallel = graph.nodes.find((candidate: any) => candidate.type === 'parallel')
+    expect(parallel.config.joinMode).toBe('any')
+    expect(parallel.config.branches).toHaveLength(2)
+    expect(graph.edges.filter((edge: any) => edge.source === parallel.key)).toHaveLength(2)
+  })
+
+  it('keeps approval mode, self-approval, and field permissions editable in graph authoring', async () => {
+    routeParams = { id: 'tpl_graph_policy' }
+    getTemplateSpy.mockResolvedValue(
+      buildTemplate({
+        approvalGraph: buildG5ComplexGraph({
+          assigneeSources: [{ kind: 'direct_manager' }],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'error',
+        }),
+      }),
+    )
+    await mountView()
+    await flushUi()
+    const mode = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    mode.value = 'all'
+    mode.dispatchEvent(new Event('change'))
+    const merge = container!.querySelector('[data-testid="approval-node-merge-with-requester"]') as HTMLInputElement
+    merge.checked = true
+    merge.dispatchEvent(new Event('change'))
+    const fieldAccess = container!.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
+    fieldAccess.value = 'hidden'
+    fieldAccess.dispatchEvent(new Event('change'))
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const graph = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
+    const approval = graph.nodes.find((candidate: any) => candidate.key === 'approval_1')
+    expect(approval.config.approvalMode).toBe('all')
+    expect(approval.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+    expect(approval.config.fieldPermissions).toEqual([{ fieldId: 'amount', access: 'hidden' }])
   })
 
   it('FC-2 wiring: switching a condition branch to formula writes formula to the save payload while topology stays byte-identical', async () => {
@@ -1179,7 +1297,7 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
-  it('FC-5 wiring: formula dry-run calls the dry-run endpoint and does not change the saved graph payload', async () => {
+  it('FC-5 wiring: formula dry-run calls the dry-run endpoint with typed 试运行 sample values and does not change the saved graph payload', async () => {
     routeParams = { id: 'tpl_formula_dry_run' }
     const graph = {
       nodes: [
@@ -1207,9 +1325,25 @@ describe('TemplateAuthoringView', () => {
     const expression = container!.querySelector('[data-testid="approval-condition-formula-expression"]') as HTMLInputElement
     expression.value = '{amount} >= 5000'
     expression.dispatchEvent(new Event('input'))
-    const sample = container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample"]') as HTMLInputElement
-    sample.value = '{"amount":6000}'
-    sample.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    // D1 values-first: no JSON sample textarea — typed 试运行 sampleFormData drives dry-run.
+    expect(container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample-hint"]')?.textContent).toContain('试运行样例值')
+    expect(container!.textContent || '').not.toMatch(/JSON/i)
+
+    // Fill the shared 试运行 sample amount via the review panel, then return to flow to dry-run.
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    const amountSample = container!.querySelector(
+      '[data-testid="approval-template-tryrun-panel"] input[type="number"]',
+    ) as HTMLInputElement
+    expect(amountSample).not.toBeNull()
+    amountSample.value = '6000'
+    amountSample.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
     await flushUi()
 
     ;(container!.querySelector('[data-testid="approval-condition-formula-dry-run-button"]') as HTMLButtonElement).click()
@@ -1255,7 +1389,19 @@ describe('TemplateAuthoringView', () => {
     }
   }
 
+  it('keeps the experimental Canvas V2 surface absent while its explicit feature flag is off', async () => {
+    routeParams = { id: 'tpl_canvas_off' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-graph-canvas"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
+  })
+
   it('D-1 canvas: toggling to 画布视图 renders the graph visually (nodes + SVG edges), no false validity warning', async () => {
+    approvalCanvasV2.value = true
     routeParams = { id: 'tpl_canvas' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
@@ -1268,6 +1414,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('D-1/D-3 canvas: adding a condition branch ON THE CANVAS grows it and saves the new structure', async () => {
+    approvalCanvasV2.value = true
     routeParams = { id: 'tpl_canvas2' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
@@ -1278,10 +1425,54 @@ describe('TemplateAuthoringView', () => {
     ;(container!.querySelector('[data-testid="approval-canvas-add-condition-cond_1"]') as HTMLButtonElement).click()
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(before + 1) // new node on canvas
+    // P1 fix (review #4433 F1): the canvas-added branch seeds an INCOMPLETE starter rule too —
+    // configure it in the list view before the save can go through (empty branch never saves clean).
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const ruleFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newRuleField = ruleFields[ruleFields.length - 1] as HTMLSelectElement
+    newRuleField.value = 'amount'
+    newRuleField.dispatchEvent(new Event('change'))
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // saved
+  })
+
+  it('F4: no +并行 affordance INSIDE a parallel branch (backend rejects nested parallel), while +条件 stays offered', async () => {
+    routeParams = { id: 'tpl_nested_guard' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'fork_1', type: 'parallel', name: '并行', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+          { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'app_b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['legal'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork_1' },
+          { key: 'e-fork-a', source: 'fork_1', target: 'app_a' },
+          { key: 'e-fork-b', source: 'fork_1', target: 'app_b' },
+          { key: 'e-a-join', source: 'app_a', target: 'join_1' },
+          { key: 'e-b-join', source: 'app_b', target: 'join_1' },
+          { key: 'e-join-end', source: 'join_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+    // In-region branch node: parallel insert HIDDEN, condition insert still offered.
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-app_a"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-topology-insert-condition-after-app_a"]')).not.toBeNull()
+    // Out-of-region single-out nodes (start / the join) keep the parallel insert.
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-start"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-join_1"]')).not.toBeNull()
   })
 
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
@@ -1638,4 +1829,280 @@ describe('TemplateAuthoringView', () => {
     expect(window.onbeforeunload).not.toBeNull()
     window.onbeforeunload = null
   })
-})
+
+  // ── Approval Canvas V2 D1: ordinary-user authoring hygiene ─────────────────
+  // Populated complex graph + multi-field form (incl. blank-label + legacy stored IDs).
+  // Negatives: no fixture raw IDs / 字段 ID / 子字段 ID / 手动输入 ID / any "JSON" in ordinary
+  // visible text (incl. formula dry-run). Positives: typed user, role, field, CC pickers + save.
+  function buildD1HygieneComplexGraph() {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'cond_1',
+          type: 'condition',
+          name: '金额判断',
+          config: {
+            branches: [{ edgeKey: 'edge-cond_1-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }], conjunction: 'and' }],
+            defaultEdgeKey: 'edge-cond_1-low',
+          },
+        },
+        {
+          key: 'approval_high',
+          type: 'approval',
+          name: '高额审批',
+          config: {
+            assigneeSources: [{ kind: 'static_user', userIds: ['legacy-user-1'] }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'parallel_1',
+          type: 'parallel',
+          name: '并行会签',
+          config: {
+            branches: ['edge-parallel_1-a', 'edge-parallel_1-b'],
+            joinMode: 'all',
+            joinNodeKey: 'join_1',
+          },
+        },
+        {
+          key: 'approval_a',
+          type: 'approval',
+          name: '财务审批',
+          config: {
+            assigneeSources: [{ kind: 'static_role', roleIds: ['legacy-role-finance'] }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'approval_b',
+          type: 'approval',
+          name: '法务审批',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'join_1',
+          type: 'approval',
+          name: '汇聚审批',
+          config: {
+            assigneeSources: [{ kind: 'direct_manager' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'cc_1',
+          type: 'cc',
+          name: '抄送归档',
+          config: { targetType: 'role', targetIds: ['finance-role-id'] },
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-cond', source: 'start', target: 'cond_1' },
+        { key: 'edge-cond_1-high', source: 'cond_1', target: 'approval_high' },
+        { key: 'edge-cond_1-low', source: 'cond_1', target: 'parallel_1' },
+        { key: 'edge-high-end', source: 'approval_high', target: 'end' },
+        { key: 'edge-parallel_1-a', source: 'parallel_1', target: 'approval_a' },
+        { key: 'edge-parallel_1-b', source: 'parallel_1', target: 'approval_b' },
+        { key: 'edge-a-join', source: 'approval_a', target: 'join_1' },
+        { key: 'edge-b-join', source: 'approval_b', target: 'join_1' },
+        { key: 'edge-join-cc', source: 'join_1', target: 'cc_1' },
+        { key: 'edge-cc-end', source: 'cc_1', target: 'end' },
+      ],
+    }
+  }
+
+  // Blank-label user field forces 未命名字段 in ordinary labels (negatives). Positives use a
+  // labeled variant so validateTemplateDraft allows save (name required for publish/save).
+  const d1HygieneFormSchemaBlank = {
+    fields: [
+      { id: 'amount', type: 'number', label: '报销金额', required: true },
+      { id: 'reviewer', type: 'user', label: '', required: false },
+      { id: 'reason', type: 'textarea', label: '事由', required: true },
+      {
+        id: 'expense_items',
+        type: 'detail',
+        label: '费用明细',
+        required: false,
+        columns: [
+          { id: 'line_amount', type: 'number', label: '', required: true },
+          { id: 'line_note', type: 'text', label: '备注', required: false },
+        ],
+      },
+    ],
+  }
+  const d1HygieneFormSchemaLabeled = {
+    fields: [
+      { id: 'amount', type: 'number', label: '报销金额', required: true },
+      { id: 'reviewer', type: 'user', label: '指定审批人', required: false },
+      { id: 'reason', type: 'textarea', label: '事由', required: true },
+      {
+        id: 'expense_items',
+        type: 'detail',
+        label: '费用明细',
+        required: false,
+        columns: [
+          { id: 'line_amount', type: 'number', label: '行金额', required: true },
+          { id: 'line_note', type: 'text', label: '备注', required: false },
+        ],
+      },
+    ],
+  }
+
+  const d1FixtureRawIds = [
+    'amount',
+    'reviewer',
+    'reason',
+    'expense_items',
+    'line_amount',
+    'line_note',
+    'legacy-user-1',
+    'legacy-role-finance',
+    'finance-role-id',
+    'edge-cond_1-high',
+    'edge-cond_1-low',
+    'edge-parallel_1-a',
+    'edge-parallel_1-b',
+    'join_1',
+    'cond_1',
+    'approval_high',
+    'approval_a',
+    'approval_b',
+    'cc_1',
+  ]
+
+  function ordinaryVisibleText(): string {
+    return container!.textContent || ''
+  }
+
+  it('D1 hygiene negatives: ordinary visible text has no fixture raw IDs, field-id editors, manual-ID, or JSON', async () => {
+    routeParams = { id: 'tpl_d1_hygiene' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: d1HygieneFormSchemaBlank as any,
+      approvalGraph: buildD1HygieneComplexGraph() as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
+    let visible = ordinaryVisibleText()
+    for (const raw of d1FixtureRawIds) {
+      expect(visible, `flow list must not show raw id ${raw}`).not.toContain(raw)
+    }
+    expect(visible).not.toContain('字段 ID')
+    expect(visible).not.toContain('子字段 ID')
+    expect(visible).not.toContain('手动输入 ID')
+    expect(visible).not.toMatch(/JSON/i)
+    expect(visible).toContain('报销金额')
+    expect(visible).toContain('未命名字段')
+    expect(visible).toContain('财务审批')
+    expect(visible).toContain('法务审批')
+
+    // Formula dry-run: no JSON textarea/wording; values-first hint only.
+    const formulaMode = container!.querySelector('[data-testid="approval-condition-predicate-mode"]') as HTMLSelectElement
+    expect(formulaMode).not.toBeNull()
+    formulaMode.value = 'formula'
+    formulaMode.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample"]')).toBeNull()
+    const dryRunHint = container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample-hint"]') as HTMLElement
+    expect(dryRunHint).not.toBeNull()
+    expect(dryRunHint.textContent || '').toContain('试运行样例值')
+    expect(dryRunHint.textContent || '').not.toMatch(/JSON/i)
+    const formulaPanel = container!.querySelector('[data-testid="approval-condition-formula"]') as HTMLElement
+    expect(formulaPanel).not.toBeNull()
+    // Ordinary dry-run surface itself must not mention JSON (expression tokens may use field paths).
+    expect((formulaPanel.querySelector('[data-testid="approval-condition-formula-dry-run-sample-hint"]')?.textContent || '')
+      + (formulaPanel.querySelector('.template-authoring__condition-formula-dryrun')?.textContent || '')).not.toMatch(/JSON/i)
+
+    // Return to rules so formula insert tokens do not pollute later full-DOM scans.
+    formulaMode.value = 'rules'
+    formulaMode.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    visible = ordinaryVisibleText()
+    expect(visible).not.toContain('字段 ID')
+    expect(visible).not.toContain('子字段 ID')
+    expect(visible).not.toMatch(/JSON/i)
+    for (const raw of ['amount', 'reviewer', 'reason', 'expense_items', 'line_amount', 'line_note']) {
+      expect(visible, `fields section must not show raw id ${raw}`).not.toContain(raw)
+    }
+    expect(container!.querySelector('[data-testid="approval-detail-config"]')).not.toBeNull()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-form-preview"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-template-graph-preview"]')).toBeNull()
+    visible = ordinaryVisibleText()
+    expect(visible).not.toMatch(/JSON/i)
+    expect(visible).not.toContain('手动输入 ID')
+    for (const raw of d1FixtureRawIds) {
+      expect(visible, `review must not show raw id ${raw}`).not.toContain(raw)
+    }
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-panel"]')).not.toBeNull()
+  })
+
+  it('D1 hygiene positives: typed user/role/field/CC pickers mounted; untouched save payload unchanged', async () => {
+    routeParams = { id: 'tpl_d1_hygiene_save' }
+    const graph = buildD1HygieneComplexGraph()
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: d1HygieneFormSchemaLabeled as any,
+      approvalGraph: graph as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-source-field"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-cc-editor"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-step-ids-text"]')).toBeNull()
+
+    const formFieldPicker = container!.querySelector('[data-testid="approval-node-source-field"]') as HTMLSelectElement
+    expect(formFieldPicker.value).toBe('reviewer')
+    const fieldLabels = Array.from(formFieldPicker.querySelectorAll('option')).map((opt) => opt.textContent || '')
+    expect(fieldLabels).toContain('指定审批人')
+    expect(fieldLabels.every((label) => !label.includes('reviewer'))).toBe(true)
+
+    const ccPicker = container!.querySelector('[data-testid="approval-cc-target-ids"]') as HTMLSelectElement
+    expect(ccPicker.tagName.toLowerCase()).toBe('select')
+    const ccOptionLabels = Array.from(ccPicker.querySelectorAll('option')).map((opt) => opt.textContent || '')
+    expect(ccOptionLabels.every((label) => !label.includes('finance-role-id'))).toBe(true)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.edges).toEqual(graph.edges)
+    expect(payload.approvalGraph.nodes).toEqual(graph.nodes)
+    expect(payload.formSchema.fields.map((f: any) => f.id)).toEqual([
+      'amount',
+      'reviewer',
+      'reason',
+      'expense_items',
+    ])
+    const detail = payload.formSchema.fields.find((f: any) => f.id === 'expense_items')
+    expect(detail.columns.map((c: any) => c.id)).toEqual(['line_amount', 'line_note'])
+    expect(detail.columns[0].label).toBe('行金额')
+    const high = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_high')
+    expect(high.config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['legacy-user-1'] }])
+    const finance = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_a')
+    expect(finance.config.assigneeSources).toEqual([{ kind: 'static_role', roleIds: ['legacy-role-finance'] }])
+    const legal = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_b')
+    expect(legal.config.assigneeSources).toEqual([{ kind: 'form_field_user', fieldId: 'reviewer' }])
+    const cc = payload.approvalGraph.nodes.find((n: any) => n.key === 'cc_1')
+    expect(cc.config).toEqual({ targetType: 'role', targetIds: ['finance-role-id'] })
+  })
+  })

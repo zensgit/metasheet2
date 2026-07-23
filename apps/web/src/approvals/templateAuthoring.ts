@@ -62,7 +62,7 @@ export type {
 export { CONDITION_RULE_OPERATORS } from './conditionEdit'
 export { approvalFormulaInsertOptions } from './conditionEdit'
 export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
-export { PARALLEL_JOIN_MODES } from './parallelEdit'
+export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
@@ -702,7 +702,7 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
   if (unsupportedField) {
-    return `包含暂不支持编辑的字段类型：${unsupportedField.label || unsupportedField.id} (${unsupportedField.type})`
+    return `包含暂不支持编辑的字段类型：${unsupportedField.label || '未命名字段'}`
   }
 
   // A node carrying extra keys, or an unrecognised node type, is genuinely un-authorable and
@@ -714,7 +714,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       || !RECOGNISED_GRAPH_NODE_TYPES.has(node.type)
   })
   if (unknownNode) {
-    return `包含暂不支持编辑的审批节点：${unknownNode.name || unknownNode.key} (${unknownNode.type})`
+    return `包含暂不支持编辑的审批节点：${unknownNode.name || '未命名节点'}`
   }
 
   // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim via
@@ -725,7 +725,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
   if (isComplexApprovalGraph(template.approvalGraph)) {
     const unsupportedNode = template.approvalGraph.nodes.find((node) => complexNodeConfigHasBackendDrop(node))
     if (unsupportedNode) {
-      return `节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedNode.name || unsupportedNode.key}（${unsupportedNode.type}）`
+      return `节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedNode.name || '未命名节点'}`
     }
     return null
   }
@@ -772,26 +772,21 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     return false
   })
   if (unsupportedApproval) {
-    return `审批节点含暂不支持的配置：${unsupportedApproval.name || unsupportedApproval.key}`
+    return `审批节点含暂不支持的配置：${unsupportedApproval.name || '未命名节点'}`
   }
 
   return null
 }
 
 /**
- * G-1 — reason the GRAPH (not the whole template) must render READ-ONLY: the graph is complex
- * (any cc/condition/parallel node, or non-linear) so the v1 linear `steps` editor can't author
- * it. Distinct from `unsupportedTemplateAuthoringReason`: a complex graph is NOT unsupported — the
- * form/metadata stay EDITABLE and SAVE stays enabled (it preserves the graph verbatim via
- * `draftFromTemplate`→`preservedGraph`→`buildApprovalGraph`). Returns `null` for a linear graph
- * (the steps editor is live) and for a truly-unsupported template (that path is fully read-only
- * via `unsupportedTemplateAuthoringReason`; the graph view never opens). The G-2+ editors will
- * narrow this to only genuinely-unrepresentable constructs.
+ * Legacy-named informational message for templates that use the graph editor instead of the
+ * linear steps editor. Complex graphs remain editable and save-preserved; only genuinely unknown
+ * node config is blocked by `unsupportedTemplateAuthoringReason`.
  */
 export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
   if (unsupportedTemplateAuthoringReason(template)) return null
   if (!isComplexApprovalGraph(template.approvalGraph)) return null
-  return '该审批流程包含复杂节点：条件分支可在下方编辑分支规则，并行 / 抄送节点以只读结构展示；未改动的节点与连线在保存时原样保留，不会被改写。'
+  return '该模板已启用分支流程编辑：可在画布调整流程结构，并在结构列表编辑各节点配置。'
 }
 
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
@@ -1017,9 +1012,25 @@ export function applyTopologyToComplexDraft(
   op: (graph: ApprovalGraph) => ApprovalGraph,
 ): TemplateAuthoringDraft {
   if (!draft.preservedGraph) return draft
-  const next = op(buildApprovalGraph(draft))
+  return draftFromEditedGraph(draft, op(buildApprovalGraph(draft)))
+}
+
+/**
+ * Apply a topology operation to any draft. Linear drafts are promoted to the graph authoring model
+ * first, preserving the graph produced by their current steps. From this point on there is a single
+ * structural source of truth (`preservedGraph`).
+ */
+export function applyTopologyToDraft(
+  draft: TemplateAuthoringDraft,
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+): TemplateAuthoringDraft {
+  return draftFromEditedGraph(draft, op(buildApprovalGraph(draft)))
+}
+
+function draftFromEditedGraph(draft: TemplateAuthoringDraft, next: ApprovalGraph): TemplateAuthoringDraft {
   return {
     ...draft,
+    steps: [],
     preservedGraph: next,
     conditionEdits: conditionEditsFromGraph(next),
     parallelEdits: parallelEditsFromGraph(next),
@@ -1074,13 +1085,14 @@ export function validateTemplateFormFields(
   const fields = draft.fields.map((field) => field.id.trim()).filter(Boolean)
   if (fields.length !== draft.fields.length) errors.push('字段 id 必填')
   if (new Set(fields).size !== fields.length) errors.push('字段 id 不能重复')
-  draft.fields.forEach((field) => {
-    if (!field.label.trim()) errors.push(`字段 ${field.id || '(未命名)'} 的名称必填`)
+  draft.fields.forEach((field, index) => {
+    const authorLabel = field.label.trim() || `第 ${index + 1} 个字段`
+    if (!field.label.trim()) errors.push(`第 ${index + 1} 个字段的名称必填`)
     if ((field.type === 'select' || field.type === 'multi-select')) {
       const options = parseOptionsText(field.optionsText)
-      if (options.length === 0) errors.push(`字段 ${field.label || field.id} 需要至少一个选项`)
+      if (options.length === 0) errors.push(`${authorLabel}需要至少一个选项`)
       if (options.some((option) => !option.label.trim() || !option.value.trim())) {
-        errors.push(`字段 ${field.label || field.id} 的选项 label/value 不能为空`)
+        errors.push(`${authorLabel}的选项名称和值不能为空`)
       }
     }
     // detail / sub-form: mirror the backend `normalizeDetailFieldParts` reject-set client-side
@@ -1088,7 +1100,7 @@ export function validateTemplateFormFields(
     if (field.type === 'detail') {
       errors.push(
         ...validateDetailColumnsDraft(
-          field.label.trim() || field.id.trim(),
+          field.label.trim() || `第 ${index + 1} 个明细字段`,
           field.detailColumns,
           field.minRowsText,
           field.maxRowsText,

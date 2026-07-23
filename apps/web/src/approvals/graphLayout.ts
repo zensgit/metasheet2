@@ -1,7 +1,8 @@
 import type { ApprovalGraph } from '../types/approval'
+import { hasEmptyParallelBranch } from './graphTopologyEdit'
 
 // D-1/D-5 canvas foundation — PURE, fully unit-testable (no .vue, no DOM): a longest-path layered
-// layout (node → {x,y,layer}) and a structural validity check (dangling edges / unreachable nodes /
+// vertical layout (node → {x,y,layer}) and a structural validity check (dangling edges / unreachable nodes /
 // no-path-to-end). Bespoke over a graph library on purpose: layout is data, so it's verifiable here,
 // and the canvas component just renders these coordinates + the FE preview reflects these issues
 // (the backend `normalizeApprovalGraph` remains the final arbiter on save).
@@ -20,16 +21,16 @@ export interface GraphLayout {
   height: number
 }
 
-const X_SPACING = 220
-const Y_SPACING = 110
+export const GRAPH_LAYOUT_NODE_WIDTH = 190
+export const GRAPH_LAYOUT_NODE_HEIGHT = 96
+const X_SPACING = 230
+const Y_SPACING = 150
 const X_MARGIN = 40
 const Y_MARGIN = 40
 
 /**
- * Longest-path layered layout: each node's LAYER = the longest path from `start` to it (so a node
- * that rejoins multiple branches sits after all of them), and its ORDER is its slot within the layer.
- * Deterministic (input order), DAG-assuming (approval graphs are DAGs); a node unreachable from start
- * is placed in a trailing layer rather than dropped, so nothing vanishes from the canvas.
+ * Vertical longest-path layout: each node's layer is the longest path from `start` to it, so a
+ * branch join sits below every branch. Same-layer nodes spread horizontally and each row is centered.
  */
 export function computeLayout(graph: ApprovalGraph): GraphLayout {
   const start = graph.nodes.find((n) => n.type === 'start')?.key ?? graph.nodes[0]?.key
@@ -56,18 +57,20 @@ export function computeLayout(graph: ApprovalGraph): GraphLayout {
   }
   const nodes: NodeLayout[] = []
   let maxLayer = 0
-  let maxOrder = 0
-  for (const [l, keys] of byLayer) {
+  const maxLayerSize = Math.max(1, ...Array.from(byLayer.values(), (keys) => keys.length))
+  const width = X_MARGIN * 2 + GRAPH_LAYOUT_NODE_WIDTH + (maxLayerSize - 1) * X_SPACING
+  for (const [l, keys] of [...byLayer.entries()].sort(([a], [b]) => a - b)) {
     maxLayer = Math.max(maxLayer, l)
+    const rowWidth = GRAPH_LAYOUT_NODE_WIDTH + (keys.length - 1) * X_SPACING
+    const rowStart = (width - rowWidth) / 2
     keys.forEach((key, order) => {
-      maxOrder = Math.max(maxOrder, order)
-      nodes.push({ key, layer: l, order, x: X_MARGIN + l * X_SPACING, y: Y_MARGIN + order * Y_SPACING })
+      nodes.push({ key, layer: l, order, x: rowStart + order * X_SPACING, y: Y_MARGIN + l * Y_SPACING })
     })
   }
   return {
     nodes,
-    width: X_MARGIN * 2 + maxLayer * X_SPACING + 160,
-    height: Y_MARGIN * 2 + maxOrder * Y_SPACING + 60,
+    width,
+    height: Y_MARGIN * 2 + maxLayer * Y_SPACING + GRAPH_LAYOUT_NODE_HEIGHT,
   }
 }
 
@@ -81,11 +84,15 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
   const issues: string[] = []
   const keys = new Set(graph.nodes.map((n) => n.key))
 
+  if (hasEmptyParallelBranch(graph)) {
+    issues.push('并行分支至少需要一个审批节点')
+  }
+
   // D-5: duplicate node / edge keys (a canvas add could collide a key; the backend rejects it on save).
   if (keys.size !== graph.nodes.length) {
     const seenKeys = new Set<string>()
     for (const node of graph.nodes) {
-      if (seenKeys.has(node.key)) issues.push(`节点 key 重复：${node.key}`)
+      if (seenKeys.has(node.key)) issues.push('存在重复的节点标识')
       seenKeys.add(node.key)
     }
   }
@@ -93,14 +100,14 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
   if (edgeKeySet.size !== graph.edges.length) {
     const seenEdge = new Set<string>()
     for (const edge of graph.edges) {
-      if (seenEdge.has(edge.key)) issues.push(`连线 key 重复：${edge.key}`)
+      if (seenEdge.has(edge.key)) issues.push('存在重复的连线标识')
       seenEdge.add(edge.key)
     }
   }
 
   for (const edge of graph.edges) {
     if (!keys.has(edge.source) || !keys.has(edge.target)) {
-      issues.push(`连线 ${edge.key} 指向不存在的节点（${edge.source} → ${edge.target}）`)
+      issues.push('存在指向不存在节点的连线')
     }
   }
   const start = graph.nodes.find((n) => n.type === 'start')?.key
@@ -119,13 +126,13 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
       for (const next of adj.get(cur) ?? []) if (!seen.has(next)) { seen.add(next); queue.push(next) }
     }
     for (const node of graph.nodes) {
-      if (!seen.has(node.key)) issues.push(`节点「${node.name || node.key}」无法从发起节点到达`)
+      if (!seen.has(node.key)) issues.push(`节点「${node.name || '未命名节点'}」无法从发起节点到达`)
     }
     // every non-end node must have an outgoing edge
     const hasOut = new Set(graph.edges.map((e) => e.source))
     for (const node of graph.nodes) {
       if (node.type !== 'end' && !hasOut.has(node.key)) {
-        issues.push(`节点「${node.name || node.key}」没有后继连线（流程会卡住）`)
+        issues.push(`节点「${node.name || '未命名节点'}」没有后继连线（流程会卡住）`)
       }
     }
     // D-5: every reachable node must be able to REACH an end node (backward reachability). A node that
@@ -146,7 +153,7 @@ export function graphValidityIssues(graph: ApprovalGraph): string[] {
       }
       for (const node of graph.nodes) {
         if (node.type !== 'end' && seen.has(node.key) && !canReachEnd.has(node.key)) {
-          issues.push(`节点「${node.name || node.key}」无法到达结束节点（流程不会结束）`)
+          issues.push(`节点「${node.name || '未命名节点'}」无法到达结束节点（流程不会结束）`)
         }
       }
     }

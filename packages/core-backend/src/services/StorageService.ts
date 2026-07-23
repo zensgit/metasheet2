@@ -51,9 +51,23 @@ export function resolveWithinBase(basePath: string, key: string): string {
 
 /**
  * 存储提供者接口
+ *
+ * EXPORTED (B3-07 #4195 §0-bis): the approval-attachment pipeline's production storage prerequisite is
+ * "an object-store provider behind THIS interface" — which was impossible while the interface was
+ * module-private. Exporting it is the named prerequisite, not a new capability: no implementation
+ * changes, and the only in-repo implementation remains `LocalStorageProvider` below.
  */
-interface StorageProvider {
+export interface StorageProvider {
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
+  /** B3-07 §7: write a physical object AT a caller-chosen deterministic storage key — the symmetric
+   * write-side counterpart to `downloadByKey`/`deleteByKey`, completing the by-key triple. Unlike
+   * `upload` (which server-generates `<uuid>/<safeBasename>` and lets the client's display filename
+   * survive as the last path segment), the caller owns the whole key, so a caller that derives its key
+   * from validated server-side data alone — as the approval pipeline's `deriveStorageKey` does — can
+   * guarantee no client string ever reaches the physical path, and can pin every object under its own
+   * scope prefix. Containment is re-asserted by the implementation. Exclusive-create: writing an
+   * already-existing key MUST reject rather than silently overwrite. */
+  uploadByKey(storageKey: string, content: Buffer, contentType?: string): Promise<void>
   download(fileId: string): Promise<Buffer>
   /** F3 design-lock G3: read a physical object by its deterministic storage key, bypassing the
    * in-memory disk-scan index entirely (no warmup window, no id-drift). */
@@ -221,6 +235,21 @@ class LocalStorageProvider implements StorageProvider {
       return storageFile
     } catch (error) {
       this.logger.error(`Failed to upload file ${displayName}`, error as Error)
+      throw error
+    }
+  }
+
+  // B3-07 §7: key-addressed write. Containment (G2) is asserted exactly as `downloadByKey`/`deleteByKey`
+  // do, and the write is exclusive-create (`wx`) so a key collision is a hard error, never a silent
+  // overwrite of another object. No index bookkeeping: by-key objects are located by their DB-recorded
+  // key on every read/delete, which is the only cross-process-reliable addressing (see the interface note).
+  async uploadByKey(storageKey: string, content: Buffer, _contentType?: string): Promise<void> {
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    try {
+      await fs.mkdir(path.dirname(fullPath), { recursive: true })
+      await fs.writeFile(fullPath, content, { flag: 'wx' })
+    } catch (error) {
+      this.logger.error(`Failed to upload file by key ${storageKey}`, error as Error)
       throw error
     }
   }
@@ -496,6 +525,22 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     } catch (error) {
       this.logger.error(`Failed to download file: ${fileId}`, error as Error)
       this.emit('file:error', { operation: 'download', fileId, error })
+      throw error
+    }
+  }
+
+  // B3-07 §7: key-addressed write (the write-side counterpart of `downloadByKey`). Size-limited like
+  // `upload`, so a by-key caller cannot bypass the service's upload cap.
+  async uploadByKey(storageKey: string, content: Buffer, contentType?: string): Promise<void> {
+    if (content.length > this.uploadLimit) {
+      throw new Error(`File size exceeds limit of ${this.uploadLimit} bytes`)
+    }
+    try {
+      await this.provider.uploadByKey(storageKey, content, contentType)
+      this.emit('file:uploaded', { fileId: storageKey, size: content.length })
+    } catch (error) {
+      this.logger.error(`Failed to upload file by key: ${storageKey}`, error as Error)
+      this.emit('file:error', { operation: 'upload', fileId: storageKey, error })
       throw error
     }
   }

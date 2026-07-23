@@ -17472,6 +17472,8 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
       const automationService = getAutomationServiceInstance()
@@ -17495,7 +17497,7 @@ export function univerMetaRouter(): Router {
       }
       await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
 
-      const updated = await automationService.updateRule(ruleId, sheetId, input)
+      const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)
       if (!updated) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }

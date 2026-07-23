@@ -14,7 +14,12 @@ import type {
   RuntimeGraph,
 } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
-import { evaluateApprovalConditionFormula, type RequesterFormulaContext } from './ApprovalConditionFormula'
+import {
+  approvalConditionFormulaHasCaptureProneIdentity,
+  approvalConditionFormulaHasDynamicDependency,
+  evaluateApprovalConditionFormula,
+  type RequesterFormulaContext,
+} from './ApprovalConditionFormula'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
@@ -325,7 +330,19 @@ function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): b
   }
 }
 
-function validateFieldType(field: FormField, value: unknown): string | null {
+export interface ApprovalFormValidationOptions {
+  /**
+   * The attachment runtime is default-OFF. Keep the pre-feature string/object contract while it is
+   * disabled; only the enabled production path accepts the staged attachment-id array.
+   */
+  attachmentValueMode?: 'legacy' | 'ids'
+}
+
+function validateFieldType(
+  field: FormField,
+  value: unknown,
+  options: ApprovalFormValidationOptions,
+): string | null {
   if (value === undefined || value === null) {
     return null
   }
@@ -334,10 +351,24 @@ function validateFieldType(field: FormField, value: unknown): string | null {
     case 'text':
     case 'textarea':
     case 'user':
-    case 'attachment':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'attachment':
+      if (options.attachmentValueMode !== 'ids') {
+        return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+      }
+      // #4195 §4.4/§8: an attachment field's submitted value IS the ordered array of staged
+      // approval_attachments.id strings (frozen verbatim into form_snapshot at create; the create
+      // txn then binds exactly these ids or fails whole). Anything else is rejected fail-closed —
+      // the legacy string/record acceptance predated the ratified array-of-ids contract and could
+      // freeze an uninterpretable value into the immutable snapshot.
+      return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
+        ? null
+        : `${field.id} must be an array of attachment ids`
     case 'number':
-      return typeof value === 'number' && Number.isFinite(value) ? null : `${field.id} must be a number`
+      if (typeof value !== 'number' || !Number.isFinite(value)) return `${field.id} must be a number`
+      return Number.isInteger(value) && !Number.isSafeInteger(value)
+        ? `${field.id} must be a lossless number`
+        : null
     case 'date':
     case 'datetime':
       if (typeof value === 'string') {
@@ -454,7 +485,15 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
 // fields; per-row `visibilityRule` decides which cells are required; messages are row-addressed
 // (`items[1].qty is required`). Unknown cells are dropped by pruneHiddenFormData before this
 // runs, matching the top-level prune-then-validate behavior.
-function validateDetailFieldValue(field: FormField, value: unknown): string[] {
+//
+// Attachment top-level-only (flag-ON / attachmentValueMode:'ids'): an attachment-typed leaf inside
+// a detail group is rejected. Flag-OFF / legacy mode keeps detail-leaf attachment values
+// legacy-valid (string/record) for byte compatibility with pre-feature snapshots.
+function validateDetailFieldValue(
+  field: FormField,
+  value: unknown,
+  options: ApprovalFormValidationOptions,
+): string[] {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) return [`${field.id} must be a list`]
   const errors: string[] = []
@@ -465,6 +504,15 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
     errors.push(`${field.id} allows at most ${field.maxRows} row(s)`)
   }
   const columns = field.columns ?? []
+  // Control 2 of "both controls" when attachments are ON: attachment leaves are top-level only.
+  if (options.attachmentValueMode === 'ids') {
+    for (const column of columns) {
+      if (column.type === 'attachment') {
+        errors.push(`${field.id}.${column.id} attachment fields are not allowed inside detail rows`)
+      }
+    }
+    if (errors.length > 0) return errors
+  }
   const subSchema: FormSchema = { fields: columns }
   value.forEach((row, rowIndex) => {
     const prefix = `${field.id}[${rowIndex}]`
@@ -480,7 +528,7 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
         errors.push(`${prefix}.${column.id} is required`)
         continue
       }
-      const typeError = validateFieldType(column, cell)
+      const typeError = validateFieldType(column, cell, options)
       if (typeError) {
         errors.push(`${prefix}.${typeError}`)
         continue
@@ -491,7 +539,11 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
   return errors
 }
 
-export function validateApprovalFormData(formSchema: FormSchema, formData: Record<string, unknown>): string[] {
+export function validateApprovalFormData(
+  formSchema: FormSchema,
+  formData: Record<string, unknown>,
+  options: ApprovalFormValidationOptions = {},
+): string[] {
   const errors: string[] = []
   const visibleFieldIds = getVisibleFormFieldIds(formSchema, formData)
 
@@ -505,10 +557,10 @@ export function validateApprovalFormData(formSchema: FormSchema, formData: Recor
       continue
     }
     if (field.type === 'detail') {
-      errors.push(...validateDetailFieldValue(field, value))
+      errors.push(...validateDetailFieldValue(field, value, options))
       continue
     }
-    const typeError = validateFieldType(field, value)
+    const typeError = validateFieldType(field, value, options)
     if (typeError) {
       errors.push(typeError)
       continue
@@ -1057,6 +1109,29 @@ export class ApprovalGraphExecutor {
       : []
 
     for (const branch of branches) {
+      // Defense-in-depth for LEGACY stored graphs: a rules-mode branch with ZERO rules must NOT
+      // match — `[].every(...)` is vacuously true, which would make the branch capture ALL traffic
+      // (first-match-wins) and dead-code the default edge. Authoring + create/update/publish now
+      // reject this shape (`validateConditionBranchRules`), so from valid graphs this is
+      // unreachable; for a pre-existing stored graph the branch is skipped and routing falls
+      // through to later branches / the default edge (the intended "else" mechanism).
+      if (!branch.formula && branch.rules.length === 0) continue
+      // Legacy stored formulas must not silently change a fail-closed evaluation into a
+      // default-route approval. New authoring rejects both shapes; old rows fail closed
+      // here so an absent optional field/requester context cannot be treated as no-match.
+      if (
+        branch.formula
+        && (
+          !approvalConditionFormulaHasDynamicDependency(branch.formula.expression)
+          || approvalConditionFormulaHasCaptureProneIdentity(branch.formula.expression)
+        )
+      ) {
+        throw new ServiceError(
+          'Stored condition formula is unsafe for routing',
+          409,
+          'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+        )
+      }
       const result = branch.formula
         ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData, this.options.requesterContext ?? null)
         : (() => {

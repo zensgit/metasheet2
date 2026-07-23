@@ -166,7 +166,10 @@ function resolveApprovalTenantId(req: Request): string | undefined {
   return normalized.length > 0 ? normalized : undefined
 }
 
-function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
+// Exported for the approval-attachment upload route (§4.1 template-access gate): the attachment
+// runtime evaluates the SAME request-derived visibility actor this router feeds into
+// applyTemplateVisibilityFilter — one actor derivation, no drift between create and upload.
+export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
   const userId = resolveApprovalActorId(req)
   if (!userId) return undefined
   const roles = resolveApprovalActorRoles(req)
@@ -742,6 +745,27 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_TEMPLATE_VERSION_FETCH_FAILED',
         'Failed to fetch approval template version',
+      )
+    }
+  })
+
+  // Restoring never mutates a historical row or switches the active published definition. It
+  // copies the selected snapshot into a new draft and uses expectedLatestVersionId to reject a
+  // stale history view instead of silently overwriting a newer authoring change.
+  r.post('/api/approval-templates/:id/versions/:versionId/restore', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const version = await productService.restoreTemplateVersion(
+        req.params.id,
+        req.params.versionId,
+        { expectedLatestVersionId: req.body?.expectedLatestVersionId },
+      )
+      res.status(201).json(version)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_VERSION_RESTORE_FAILED',
+        'Failed to restore approval template version',
       )
     }
   })

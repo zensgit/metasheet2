@@ -15,6 +15,7 @@ const allTrue = (over: Partial<Record<keyof FwbGateChecks, boolean | 'throw'>> =
     canManageSheetAccess: mk('canManageSheetAccess'),
     canReadTemplate: mk('canReadTemplate'),
     canWriteSheet: mk('canWriteSheet'),
+    canWriteTargetFields: mk('canWriteTargetFields'),
     hasRecordedConfirmation: mk('hasRecordedConfirmation'),
   }
 }
@@ -33,11 +34,11 @@ describe('FWB-1 §11 Q6 permission gates (execute-time recheck)', () => {
 
   test('each remaining gate fails independently and ALL failures are collected', async () => {
     const r = await recheckFwbPermissionGates(
-      allTrue({ isAdmin: false, canManageSheetAccess: false, canReadTemplate: false, canWriteSheet: false, hasRecordedConfirmation: false }),
+      allTrue({ isAdmin: false, canManageSheetAccess: false, canReadTemplate: false, canWriteSheet: false, canWriteTargetFields: false, hasRecordedConfirmation: false }),
       S,
     )
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.failed).toEqual(['configurer_authority', 'source_readable', 'target_writable', 'confirmation_recorded'])
+    if (!r.ok) expect(r.failed).toEqual(['configurer_authority', 'source_readable', 'target_writable', 'target_fields_writable', 'confirmation_recorded'])
   })
 
   test('fail-closed on error: a THROWING check counts as failed, never as a pass', async () => {

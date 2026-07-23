@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   APPROVAL_CONDITION_FORMULA_LIMITS,
+  approvalConditionFormulaHasCaptureProneIdentity,
+  approvalConditionFormulaHasDynamicDependency,
+  approvalConditionFormulaIsProvablyAlwaysTrue,
   assertApprovalConditionFormulaValidForSchema,
   evaluateApprovalConditionFormula,
   extractRequesterRoleLiterals,
@@ -86,6 +89,65 @@ describe('approval condition formula evaluator (FC-1)', () => {
     } finally {
       limits.maxFieldReferences = original
     }
+  })
+
+  it('classifies request-data dependencies from the parsed AST', () => {
+    expect(approvalConditionFormulaHasDynamicDependency('1 == 1')).toBe(false)
+    expect(approvalConditionFormulaHasDynamicDependency('TRUE AND NOT FALSE')).toBe(false)
+    expect(approvalConditionFormulaHasDynamicDependency('{amount} >= -1')).toBe(true)
+    expect(approvalConditionFormulaHasDynamicDependency('SUM({items.amount}) >= 1')).toBe(true)
+    expect(approvalConditionFormulaHasDynamicDependency('requester.department == "finance"')).toBe(true)
+    expect(approvalConditionFormulaHasDynamicDependency('requester.role in ["approver"]')).toBe(true)
+  })
+
+  it('proves only bound-derived tautologies and keeps unknown formulas eligible', () => {
+    const bounded: FormSchema = {
+      fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true, props: { min: 0 } }],
+    }
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= -1', bounded)).toBe(true)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} < -1', bounded)).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= 100', bounded)).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= -1', {
+      fields: [{ id: 'amount', type: 'number', label: 'Amount', props: { min: 0 } }],
+    })).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= -1', {
+      fields: [{
+        id: 'amount',
+        type: 'number',
+        label: 'Amount',
+        required: true,
+        props: { min: 0 },
+        visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'expense' },
+      }],
+    })).toBe(false)
+  })
+
+  it('keeps semantic truth separate from capture-prone authoring policy', () => {
+    const required: FormSchema = {
+      fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true }],
+    }
+    const optional: FormSchema = {
+      fields: [{ id: 'note', type: 'text', label: 'Note' }],
+    }
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} == {amount}', required)).toBe(true)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{note} == {note}', optional)).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('requester.department == requester.department')).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue(
+      '{amount} == {amount} OR {note} == "ok"',
+      { fields: [...required.fields, ...optional.fields] },
+    )).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} > {amount}')).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} == {other}')).toBe(false)
+    expect(() => evaluateApprovalConditionFormula('{note} == {note}', {})).toThrow(/field note is missing/)
+  })
+
+  it('detects structural and conservative arithmetic capture identities', () => {
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{note} == {note}')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('requester.department >= requester.department')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} - {amount} == 0')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} * 0 == 0')).toBe(true)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} == {other}')).toBe(false)
+    expect(approvalConditionFormulaHasCaptureProneIdentity('{amount} >= -1')).toBe(false)
   })
 })
 

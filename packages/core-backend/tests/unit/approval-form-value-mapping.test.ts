@@ -52,11 +52,37 @@ describe('FWB-1 form-value mapping (pure, fail-closed)', () => {
     }
   })
 
+  test('rejects calendar-invalid ISO dates instead of persisting invented dates', () => {
+    for (const value of ['2026-02-29', '2026-02-31', '2026-04-31', '2026-13-01', '2026-00-10']) {
+      const r = mapApprovalFormValues([M({ targetType: 'date' })], { f1: value })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.errors[0].code).toBe('not_a_date')
+    }
+
+    expect(mapApprovalFormValues([M({ targetType: 'date' })], { f1: '2024-02-29' })).toEqual({
+      ok: true,
+      values: { t1: '2024-02-29' },
+    })
+  })
+
   test('missing/blank form values are errors (never silently skipped)', () => {
     for (const v of [undefined, null, '   ']) {
       const r = mapApprovalFormValues([M({})], { f1: v })
       expect(r.ok).toBe(false)
       if (!r.ok) expect(r.errors[0].code).toBe('missing_required_value')
     }
+  })
+
+  test('numbers fail closed on unsafe integer precision and target decimal scale', () => {
+    const unsafe = mapApprovalFormValues([M({ targetType: 'number' })], { f1: 9007199254740993 })
+    expect(unsafe.ok).toBe(false)
+    if (!unsafe.ok) expect(unsafe.errors[0].code).toBe('number_not_lossless')
+
+    const tooPrecise = mapApprovalFormValues([M({ targetType: 'number', numberPrecision: 2 })], { f1: '12.345' })
+    expect(tooPrecise.ok).toBe(false)
+    if (!tooPrecise.ok) expect(tooPrecise.errors[0].code).toBe('number_precision_exceeded')
+
+    expect(mapApprovalFormValues([M({ targetType: 'number', numberPrecision: 2 })], { f1: '12.340' }))
+      .toEqual({ ok: true, values: { t1: 12.34 } })
   })
 })

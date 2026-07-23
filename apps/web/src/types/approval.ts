@@ -337,6 +337,7 @@ export interface ApprovalTemplateVersionDetailDTO {
   publishedDefinitionId: string | null
   /** B3-09 — optional note captured at publish time; null for drafts, note-less publishes, and pre-column versions. */
   publishNote: string | null
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -353,6 +354,7 @@ export interface ApprovalTemplateVersionSummaryDTO {
   status: ApprovalTemplateStatus
   publishNote: string | null
   publishedDefinitionId: string | null
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -387,6 +389,10 @@ export interface PublishApprovalTemplateRequest {
    * PublishApprovalTemplateRequest.note. Never required.
    */
   note?: string | null
+}
+
+export interface RestoreApprovalTemplateVersionRequest {
+  expectedLatestVersionId: string
 }
 
 /**
