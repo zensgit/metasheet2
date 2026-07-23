@@ -18,7 +18,17 @@
 > 删除墓碑，「deleted」无权威真源可判别，§3.1/§5.1/G2 联动）、P2-c ⑤ lot `reasonCode` 独立冻结
 > 枚举 + `source_type`→reasonCode 服务端映射（source_type 非闭集不得当稳定码，硬规则 5⑤ + G4）、
 > P2-d self 多组织 org 选择四腿冻结（§4.1 + G7）、P3 W5-5 修复与 W5-1 留存警告时序护栏
-> （§9 W5-1 行改写）。两轮全部 findings 已修订入本版——**待 owner 对新 exact head 留 RATIFY**
+> （§9 W5-1 行改写）。
+> **2026-07-23 owner 三轮终审（exact head `f52f75154`）= CHANGES REQUESTED，0 P1 / 2 P2 + 授权时序
+> HOLD**：P2-1 self 门横向授权——每条 self 目标读取必须在权威查询里 **subject-constrained**
+> （`org_id = selectedOrg` **且** 归属/主体关系 = token subject，§4.1）+ G7 two-user/same-org
+> 负例矩阵（六类各一腿 + 去 subject 谓词 mutation）；P2-2 ⑤ lot item known/unknown
+> **discriminated union 显式判别子**（`sourceResolution` 闭集 `'mapped'|'unknown_source'`，
+> unknown 分支 `reasonCode` 键缺席——硬规则 5⑤/§3.3⑤/G4 三处对齐）；HOLD = 严格执行 §10 步序：
+> 修订后 rebase + fresh checks 全绿即以 **PROPOSED 合入**（步①，owner 逐字「merge the PR as
+> `PROPOSED`, and then request owner RATIFY against the merged exact SHA」）——本轮不发 RATIFY
+> 触发、不启动任何 W5 runtime。
+> 三轮全部 findings 已修订入本版——**待 owner 对合入后 exact SHA 留 RATIFY**
 > （§10-③ 仍为唯一生效凭据）。
 > 本锁是章程 §15「Wave 5 explainability = DATA-CONTRACT-GATED」这道门的解锁提案：章程台账行逐字为
 > 「| Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |」（L554），
@@ -34,11 +44,13 @@
 > （全文 grep `解释|explain|可解释` 零命中，实证）——章程 §7-Wave5 是本波的唯一上游授权，本锁不
 > 凭记忆补写对手行为细节（章程 §1.2 L47-48「未核实能力不得写成已对标/已超越」禁止，沿 W4 锁 §1-7
 > 同款边界）。
-> **锚点基线 = `bbcb8caf3`**（§11.1；本锁分支基（2026-07-23 二轮终审后 rebase，owner 指出
-> BEHIND 5）= `ca625f14a`，累计漂移账 `bbcb8caf3..ca625f14a` = docs/chore(test)/directory 线/
-> ops CI-wiring 测试/考勤共库 integration tests 隔离硬化（#4544/#4545/#4498/#4547/#4496/#4500/
-> #4548/#4549，逐段账见 §11.1-1），**考勤 runtime/路由/权限/迁移/前端文件零漂移** ⇒
-> 全部锚点在分支基上继续有效，两轮终审新增锚点亦对该现势实证（§11.1-1））。
+> **锚点基线 = `bbcb8caf3`**（§11.1；本锁分支基（2026-07-23 三轮终审后 rebase，owner 指出
+> BEHIND）= `e32f2d533`，累计漂移账 `bbcb8caf3..e32f2d533` = docs/chore(test)/directory 线/
+> ops CI-wiring 测试/考勤共库 integration tests 隔离硬化/stock-prep general-prep 线
+> （#4544/#4545/#4498/#4547/#4496/#4500/#4548/#4549/#4551，逐段账见 §11.1-1），**考勤 runtime/
+> 路由/权限/迁移/前端文件零漂移**（唯 `packages/core-backend/src/index.ts` 因 #4551 +84 行使
+> 本锁三处引用行号漂移，已按新现势重开，§11.1-1）⇒ 全部锚点在分支基上继续有效，三轮终审新增
+> 锚点亦对该现势实证（§11.1-1））。
 > 引用纪律：`plugins/plugin-attendance/index.cjs`（~43k 行）与 `AttendanceView.vue`（~28k 行）为高频
 > 改动文件，行号在后续 merge 后必然漂移——W5-0 实现开工时必须按当时 HEAD 重验锚点（W4 锁 §11.1-附
 > 的勘误纪律同样适用于本锁）。
@@ -83,7 +95,7 @@ owner 复审在收回代行时列出「设计锁至少要冻结」的七项，�
 
 | # | 冻结锚点（合同条款） | 复审吸收修订 |
 |---|---|---|
-| ① | R2（禁前端猜规则原因、禁 LLM 式/模板式补全）+ §3.1 `reasonCode` **discriminated union** 与硬规则 5（①②③ 响应级单码；④ 段级码 + 响应级 `coverageNote`；⑤ item 级码；⑥ step 级 `sourceKind`+`reasonCode`——稳定机器码、码源逐类点名**存量闭集**、前端只译码不推导）+ confidence 三档纯派生（§3.1） | **新增**：§3.1 shape `reasonCode` 一等公民字段 + 硬规则 5 + W5-0-G4 扩展（码闭集穷尽、未知 code fail-closed、闭集扩展 = 合同修订）。**2026-07-23 终审 P2-2 再修**：禁 scalar-or-array，改按 category 判别的 discriminated union（逐类 exact key set，§3.1 硬规则 5） |
+| ① | R2（禁前端猜规则原因、禁 LLM 式/模板式补全）+ §3.1 `reasonCode` **discriminated union** 与硬规则 5（①②③ 响应级单码；④ 段级码 + 响应级 `coverageNote`；⑤ item 级码；⑥ step 级 `sourceKind`+`reasonCode`——稳定机器码、码源逐类点名**存量闭集**、前端只译码不推导）+ confidence 三档纯派生（§3.1） | **新增**：§3.1 shape `reasonCode` 一等公民字段 + 硬规则 5 + W5-0-G4 扩展（码闭集穷尽、未知 code fail-closed、闭集扩展 = 合同修订）。**2026-07-23 终审 P2-2 再修**：禁 scalar-or-array，改按 category 判别的 discriminated union（逐类 exact key set，§3.1 硬规则 5）；**三轮 P2-2 再修**：⑤ lot item 显式 known/unknown discriminated union（判别子 `sourceResolution` 闭集 `'mapped'|'unknown_source'`，unknown 分支 `reasonCode` 键缺席——硬规则 5⑤/§3.3⑤/G4 三处对齐） |
 | ② | 五源 provenance 全覆盖——**规则（版本）**：各类 E2 规则环（有快照则 `snapshot_frozen`：④`metadata.overtimeRule`、⑥flow steps 快照；活体恒 `current_live_no_history`，R4/§3.2 末；版本化 schema = OD-W5-3）；**班次**：①②E2（`resolveWorkContext` source 判别 `'rotation'|'shift'|'rule'` `:14347-14394` + 班次起止/宽限参数投影 §5.1 允许行；record 不落 shift id（§1-1）⇒ 恒 `current_live_no_history`，OD-W5-8）；**申请**：②③E4 补救环（MP-2/MP-3 快照 `snapshot_frozen @ requestEvaluatedAt`）+ ④E1/E3（请求 metadata 快照 + 审批 resolution）+ ⑤E2（`source_id` 反链请求，§5.1 遮罩）+ ⑥全链（审批实例）；**修正**：①②E3 更正环（`attendance_record_result_edits` 只读历史读面，§2 IN / W5-0 新增）；**人工覆盖**：同更正环（AE-1 审计：不可变 before/after + actor + reason、无 FK 删除免疫）+ `meta.manual_result_edit` 指纹（①E1 auditRef）+ ⑥`delegatedFrom` 委托改道布尔（§5.1） | 无条款变更（既有分散锚点在本表显式收拢为**五源覆盖义务**——任一源在对应类缺环即为合同缺陷） |
 | ③ | 迟到 = §3.3②；缺卡 = §3.3③；**应出勤** = ①E1 `is_workday`（写入时冻结结果）+ ①E2（显式承载应出勤决策链）+ ③E2 应出勤环（同一口径） | **修订**：①E2 显式命名「应出勤」链（此前仅 ③E2 显式、① 摊在规则环散文内） |
 | ④ | §5.1 可见性冻结：admin / self 双受众档 + **org = 强制可见性边界维度**（OD-W5-11 已裁 (a)，owner 逐字「org 是强制可见性边界维度，不是虚构的第三用户角色」）+ org-scope 底线无条件冻结 + §4.1 双宿主门 + OD-W5-10 已裁 (b)（主管面独立后续票，不与 org 边界维度混同） | **新增**：§5.1 三档升格 + org 档语义两读法呈 **OD-W5-11** + W5-0-G2 org 底线断言。**2026-07-23 终审裁决落定**：OD-W5-11=(a) ⇒ §5.1 收敛为 admin/self 双受众 + org 强制边界维度（第三受众读法 (B) 被否定） |
@@ -192,7 +204,7 @@ owner 复审在收回代行时列出「设计锁至少要冻结」的七项，�
    `ATTENDANCE_APPROVAL_DYNAMIC_ASSIGNEE_SOURCES_ENABLED`（`index.cjs:119`，默认 OFF）、三 kind 闭集
    `direct_manager/dept_head/manager_at_level`（`:124`）、`assertApprovalStepsContract`（`:157`，五段
    422）、运行时 fail-closed（`:247`）。(2) 解析——host 端口 `buildApprovalAssigneeResolverPort`
-   （`packages/core-backend/src/index.ts:973-978`，仅注入 plugin-attendance `:1925-1926`）；目录读取
+   （`packages/core-backend/src/index.ts:1057-1062`，仅注入 plugin-attendance `:2009-2010`）；目录读取
    `resolveApprovalRequesterOrgRelations`（`ApprovalDirectoryOrg.ts:201`，READ-ONLY）。(3) 冻结+指派
    ——创建时 freeze（`index.cjs:20745/:20806/:20823/:20841`，调用点 `:20928-20930`）落
    `approval_instances.requester_snapshot`（组装 `:21065`，冻结字段 `:21093-21130`，INSERT
@@ -201,7 +213,7 @@ owner 复审在收回代行时列出「设计锁至少要冻结」的七项，�
    `:20968-20975/:20993-20998/:21027-21031`，写库 `:21211-21240`）。wire 面：审批详情
    `UnifiedApprovalDTO` 已携 `assignments[].metadata`（`types/approval-product.ts:371-379`）与完整
    requester（`ApprovalProductService.ts:1708/:1733/:1749`）。**缺口**：①解析失败原因不可追溯——
-   host 端口算出的 unresolved reason（no_manager_linked/self_manager/… `index.ts:~1012-1070`）在
+   host 端口算出的 unresolved reason（no_manager_linked/self_manager/… `index.ts:~1096-1154`）在
    plugin 冻结封装（`index.cjs:20745-20800`）被丢弃，创建被阻断 = 零持久化；②冻结 id 无目录证据链
    （裸 user id，不记来源关系与目录同步时间）；③`attendance_approval_flows` 无版本列
    （`zzzz20260120113000:12-23`），flow steps 快照进 request `metadata.approvalFlow`
@@ -272,7 +284,10 @@ response body**（断言只落 code/enum/count/键集合，body 不进 CI artifa
                                   //   · ①②③ ⇒ 响应级**单个** `reasonCode`（必在场）；
                                   //   · ④ ⇒ 响应级**不设**此键——每个 segment 自带 `reasonCode`，
                                   //     响应级只保留另行具名的 `coverageNote`（§3.3④）；
-                                  //   · ⑤ ⇒ 响应级**不设**此键——lot/event 各自在 item 上携码；
+                                  //   · ⑤ ⇒ 响应级**不设**此键——event item 恒携事件型闭集码；
+                                  //     lot item = `sourceResolution` 判别的 known/unknown
+                                  //     discriminated union，仅 `'mapped'` 分支携码
+                                  //     （硬规则 5⑤，三轮 P2-2）；
                                   //   · ⑥ ⇒ 响应级**不设**此键——每 step 携 `sourceKind`+`reasonCode`。
                                   //   逐类 exact key set / 码源闭集见硬规则 5（全部存量闭集，
                                   //   不新造词表）；前端只译码（code→中文白名单映射），禁由
@@ -347,14 +362,21 @@ response body**（断言只落 code/enum/count/键集合，body 不进 CI artifa
    - **④ ⇒ 每个 segment 自带 `reasonCode`**（码源 = day-type `effectiveSource` 闭集，快照自携
      `:10612-10635`）；响应级只保留**另行具名**的 `coverageNote` 判别值
      （`'full'|'partial_legacy'`，§3.3④）——响应级**不设** `reasonCode` 键。
-   - **⑤ ⇒ lot/event 各自在 item 上携码**：lot item 码源 = **独立冻结的 lot `reasonCode` 枚举 +
-     `source_type`→reasonCode 服务端映射（owner 二轮终审 P2-c）**——lot 列 `source_type` 是无 CHECK 的
-     自由 TEXT（`zzzz20260603120000:34`——lot 开放性主证）；旁证：同名 **events 列**（`:66` 同样无
-     CHECK）经通用扣减函数 `deductLeaveBalance` 接受调用方任意字符串原样落库（`:17530-17573`，写
-     `attendance_leave_balance_events`）——两列同型开放，**非闭集，不得当稳定码直接透传**；冻结枚举按存量写入点字面值
+   - **⑤ ⇒ lot/event 各自在 item 上携码；lot item = `sourceResolution` 判别的 known/unknown
+     discriminated union（owner 三轮终审 P2-2——「每个 lot item 携码」仅对 known 分支成立，
+     unknown 分支以判别子承载 item 级 undeterminable，不设码键）**：lot item 码源 = **独立冻结的
+     lot `reasonCode` 枚举 + `source_type`→reasonCode 服务端映射（owner 二轮终审 P2-c）**——lot 列
+     `source_type` 是无 CHECK 的自由 TEXT（`zzzz20260603120000:34`——lot 开放性主证）；旁证：同名
+     **events 列**（`:66` 同样无 CHECK）经通用扣减函数 `deductLeaveBalance` 接受调用方任意字符串
+     原样落库（`:17530-17573`，写 `attendance_leave_balance_events`）——两列同型开放，**非闭集，
+     不得当稳定码直接透传**；冻结枚举按存量写入点字面值
      穷尽 = `'annual_accrual'`（登记簿计提 `:17922`）`|'annual_manual_adjust'`（年假手工调整
      `:18162`）`|'overtime_conversion'`（OT 终审计提，dormant `:29788` + bank `:29863`）；
-     映射外的未知原值**不得透传**，该 lot item 进 `undeterminable`（原值零回显）；event item
+     判别规则：映射命中 ⇒ **`'mapped'` 分支**（携映射后 `reasonCode`）；映射外的未知原值
+     **不得透传** ⇒ **`'unknown_source'` 分支**——`reasonCode` **键整体缺席**（缺席，非 null/
+     非占位码），且分支上不存在任何承载原 `source_type` 值的键（原值零回显）；判别子
+     `sourceResolution` 为两分支必在场的闭集 `'mapped'|'unknown_source'`（三处单一对齐：本条定
+     承载规则、§3.3⑤ 定逐分支 exact key set、G4 锁断言与 mutation）；event item
      码源 = `balance_events` 事件型闭集（**DB CHECK 承载** `'grant'|'deduct'|'expire'|'revoke'|
      'reverse'`，`zzzz20260603120000:72` + `zzzz20260622150000:16`——与 lot `source_type` 不同，
      此列有真闭集可直引）——响应级不设 `reasonCode` 键。
@@ -451,12 +473,18 @@ response body**（断言只落 code/enum/count/键集合，body 不进 CI artifa
   并排出现时，响应必须携 `coverageNote` 判别值（`'full'|'partial_legacy'`），UI 据此显式声明口径差，
   **禁**静默对齐（§5.2④）。
 **⑤ 调休余额（comp_time_balance）**
-- 结论：L5a 既有形状（summary + active lots + recent events，`:42722-42768`）的 comp_time 投影 +
-  lot 级 `{grantedAt, expiresAt, reasonCode, overtimeSource?}`（`reasonCode` = `source_type` 经
-  硬规则 5⑤ 服务端映射后的独立冻结枚举，**非裸 `source_type` 透传**（二轮 P2-c）；
-  `overtime_source` 纳入读投影 = OD-W5-9 已裁 (a)，存量 NULL 行如实缺席）；**item 级码**：
-  lot item 携映射后 `reasonCode`（未知原值 ⇒ 该 item `undeterminable`，原值零回显）、event item
-  携事件型闭集码（DB CHECK 真闭集）；响应级**无** `reasonCode` 键（硬规则 5⑤）。
+- 结论：L5a 既有形状（summary + active lots + recent events，`:42722-42768`）的 comp_time 投影；
+  **lot item = `sourceResolution` 判别的 known/unknown discriminated union（硬规则 5⑤，三轮
+  P2-2）——逐分支 exact key set 冻结**：
+  `{sourceResolution:'mapped', reasonCode, grantedAt, expiresAt, overtimeSource?}` |
+  `{sourceResolution:'unknown_source', grantedAt, expiresAt, overtimeSource?}`
+  （判别子 `sourceResolution` 两分支必在场，闭集 `'mapped'|'unknown_source'`；`reasonCode` =
+  `source_type` 经硬规则 5⑤ 服务端映射后的独立冻结枚举，**仅 `'mapped'` 分支设键、非裸
+  `source_type` 透传**（二轮 P2-c）；`'unknown_source'` 分支即 item 级 fail-closed 判别——UI 把
+  该判别子译为此 item 的「无法确定依据」态——`reasonCode` 键整体缺席、分支上无任何承载原值的键
+  （原值零回显）；`overtimeSource` 纳入读投影 = OD-W5-9 已裁 (a)，存量 NULL 行如实缺席，
+  **两分支同规**）；event item 携事件型闭集码（DB CHECK 真闭集）；响应级**无** `reasonCode` 键
+  （硬规则 5⑤）。
 - 依据链：E1 台账环（lot 行 = `snapshot_frozen @ granted_at`，expires_at 为物化事实——文案只说
   「授予时定为 X 到期」，**禁**反推 validityDays 指认配置版本）；E2 流水环（balance_events：
   what+when 权威；who **无 actor 列** ⇒ who 子环 `undeterminable` 或经 source_id 反链 request/登记簿
@@ -518,14 +546,35 @@ response body**（断言只落 code/enum/count/键集合，body 不进 CI artifa
      `attendance-admin.ts:502` 同码；**禁**依 `user_orgs` 行序/插入序静默挑选）；
   4. 传入 `orgId` ⇒ 只作为**待校验选择**，必须命中该 subject 的 active `user_orgs` 行，
      否则 **403**——绝不作为信任输入。
+  **self 目标读取 subject-constrained（owner 三轮终审 P2-1，横向授权边界）**：拒绝/忽略 `userId`
+  参数只挡身份冒充，挡不住横向越权——若目标读取仅按 `org_id` 单谓词定位，传入同 org 另一员工的
+  `recordId`/`requestId`/`instanceId`/lot 引用即可取回同事 trace。因此冻结：self 宿主的**每一条
+  目标读取权威查询**必须同时钉死 `org_id = selectedOrg` **且** 归属/主体关系 = token subject。
+  逐类归属谓词（全部存量归属列）：①②③ `attendance_records.user_id = subject`
+  （`zzzz20260114090000:57`）、更正环 `attendance_record_result_edits.user_id = subject`
+  （`zzzz20260627120000:38`——record 主体列，区别于操作者列 `actor_user_id` `:46`）、补救环
+  `attendance_requests.user_id = subject`；④ `attendance_requests.user_id = subject`
+  （`zzzz20260114090000:83`）；⑤ `attendance_leave_balances.user_id = subject`
+  （`zzzz20260603120000:30`；event 经 lot 归属）；⑥ 实例归属经 subject 本人请求行反链——
+  `attendance_requests.user_id = subject AND approval_instance_id = 目标`
+  （`zzzz20260114090000:83/:90`；`approval_instances` 无标量 requester 列（建表
+  `20250924105000` + bridge 扩展 `zzzz20260404100000` 均无），`requester_snapshot` JSONB 值比对
+  不得作为唯一归属判定——快照是展示冻结件，不是授权真源）。**同 org 他人目标的响应语义**：
+  引用式目标（`requestId`/`instanceId`/lot 引用）⇒ **404**——subject-constrained 查询下
+  「他人的行」≡「不存在的行」（§4.4 行不在档），且与真不存在引用的 404 响应形状恒等
+  （防存在性 oracle）；日期式目标（①②③ `workDate`）⇒ 他人行对 subject-constrained 查询不可见，
+  按 §3.3 断环条款如实 200 + 整类 `undeterminable`，绝不回落 org 单谓词命中他人行；两种形态
+  响应均**零其他用户数据**。
   **授权（权限门 + org 成员校验）必须完成于任何 trace SQL 之前**（W4-0-G1 case 2 同款：
-  拒绝 = 零 trace SQL、零事务）；响应走 §5.1 员工档遮罩。
+  拒绝 = 零 trace SQL、零事务；two-user 横向腿的 subject 谓词在权威查询内承载，见 G7 注记）；
+  响应走 §5.1 员工档遮罩。
 - **平台 admin 跨成员关系查看 = 既有 override（显式沿用）**：`canReadAttendanceDirectoryReadiness
   :389`（`hasLegacyAdminClaim || isRbacAdmin` 直通，不要求目标 org 的 `user_orgs` 行）——
   §5.1 底线「非本 org 成员 403」**以此为已注明的唯一例外**；override 之下所有查询仍**钉死目标
   org**（org 谓词贯穿每条 trace SQL），响应零混入其他 org 数据。
-- **完成门 = §9 W5-0-G7**：admin/self 双路径 × 本 org/外 org × spoofed userId/orgId 全矩阵，
-  断言拒绝发生在任何 trace SQL 之前。
+- **完成门 = §9 W5-0-G7**：admin/self 双路径 × 本 org/外 org × spoofed userId/orgId ×
+  **同 org 跨用户目标（two-user 矩阵，三轮 P2-1）**全矩阵；身份/org 门腿断言拒绝发生在任何
+  trace SQL 之前，two-user 横向腿断言 subject 谓词在权威查询内（去谓词 mutation ⇒ 红）。
 - **主管面 = OD-W5-10 已裁 (b)：立主管面独立后续票**：章程 §3.2 把「查看规则依据」逐字列为主管
   persona 核心任务（L132-133），同时要求「不得暴露超出其组织/assignment/scheduler scope 的数据或
   管理动作」——主管面解释需要独立的授权推导（assignment/scheduler scope）与遮罩档扩展，owner
@@ -690,13 +739,19 @@ admin/self，manager 由 W5-10 管」）——据此收敛为 **admin/self 双�
     穷尽断言 + 请求侧非法 category 4xx 负例 + 响应侧未知 posture/未知 code 不可构造（类型 + 测试
     双锁；未知 code fail-closed 走「无法确定依据」态）；静默 fallback ⇒ 红；**码位判别断言
     （owner 终审 P2-2）**：①②③ 响应级单 `reasonCode` 在场（标量）且 ④⑤⑥ 响应级零 `reasonCode`
-    键、④ 段级/⑤ item 级/⑥ step 级码在场——逐类 exact key set 恒等；**⑤ 未知原值负例
+    键、④ 段级/⑥ step 级码在场、⑤ event item 码恒在场 + **lot item 按 `sourceResolution` 分支
+    断言（三轮 P2-2）**：`'mapped'` 分支码在场、`'unknown_source'` 分支 `reasonCode` 键恒缺席
+    （判别子承载，硬规则 5⑤/§3.3⑤ 逐分支 exact key set）——逐类 exact key set 恒等；
+    **⑤ 未知原值负例
     （owner 二轮终审 P2-c）**：真库 fixture **直接向 lot 表 `attendance_leave_balances` INSERT 一条
     映射外 `source_type` 任意字符串行**（L34 无 CHECK 允许——注意勿经 `deductLeaveBalance` 造数：
-    该函数写的是 events 列，lot 断言会因 fixture 落错表而空过）⇒ 该 lot item `reasonCode` 缺席 +
-    item `undeterminable` + 响应全文零出现该原值字符串（透传 = 红）；mutation：把 ④ 段级码上提为
+    该函数写的是 events 列，lot 断言会因 fixture 落错表而空过）⇒ 该 lot item **精确等于
+    `'unknown_source'` 分支 exact key set（deepEqual：`sourceResolution='unknown_source'` 在场、
+    `reasonCode` 键缺席、无任何承载原值的键，§3.3⑤）** + 响应全文零出现该原值字符串（透传 = 红）；
+    mutation：把 ④ 段级码上提为
     响应级单码 / 把 ① 响应级码改为数组 ⇒ 各自精确红（scalar-or-array 双读 = 红）；把 ⑤ 映射改为
-    裸 `source_type` 透传 ⇒ 未知原值负例精确红。
+    裸 `source_type` 透传 ⇒ 未知原值负例精确红；把 ⑤ `'unknown_source'` 分支改为携兜底/占位
+    `reasonCode` 或去掉 `sourceResolution` 判别子 ⇒ 分支 exact-key-set 断言各自精确红。
   - **W5-0-G5 `not_in_effect` ≠ `undeterminable`**：dormant org（引擎 OFF）⇒ `not_in_effect` 正控；
     快照缺失 org ⇒ `undeterminable` 正控；mutation：把二者判别合并 ⇒ 两腿各自红。
   - **W5-0-G6 快照优先 + 禁反推**：正控——改动活体 `attendance_overtime_rules` 行后，已终审请求的
@@ -711,8 +766,22 @@ admin/self，manager 由 W5-10 管」）——据此收敛为 **admin/self 双�
     403；恰 1 个 ⇒ 自动选择正控；>1 个且未传 orgId ⇒ 400 `ORG_ID_REQUIRED`；传入 orgId 命中
     active membership ⇒ 正控、未命中 ⇒ 403——**且顺序无关**：>1 成员的 fixture 以乱序/不同
     插入序各跑一遍，`ORG_ID_REQUIRED` 稳定复现（自动挑选任一行 = 红——腿 3「禁依行序静默
-    挑选」的可测试化）；**全部拒绝断言发生在任何 trace SQL 之前**（拒绝路径 trace SQL 计数 =
-    0、零事务，W4-0-G1 case 2 同型）。
+    挑选」的可测试化）；**身份/org 门腿的拒绝断言全部发生在任何 trace SQL 之前**（拒绝路径
+    trace SQL 计数 = 0、零事务，W4-0-G1 case 2 同型）。
+    **同 org 跨用户（two-user/same-org）负例矩阵（owner 三轮终审 P2-1，§4.1
+    subject-constrained 条款的可测试化）**：同一 org 真库造两名员工 A（token subject）与 B，
+    六类各一腿以 B 的目标调 A 的 self 面——
+    ① B 有 record 的 `workDate`（A 该日无行）⇒ 200 + 整类 `undeterminable`（§3.3① 断环条款，
+    A 视角无行）；② 同型（B 有迟到行）⇒ 同断言；③ 同型（B 有 partial/absent 行）⇒ 同断言；
+    ④ B 的加班 `requestId` ⇒ **404**；⑥ B 的请求反链 `instanceId` ⇒ **404**（④⑥ 的 404 响应
+    与真不存在引用的 404 **形状恒等**——防存在性 oracle）；⑤「B 有 lot、A 无 lot」fixture ⇒
+    A 的余额 trace 200 + 空 lot/event 投影（W5-0 wire 形若含 lot/目标引用参数，B 的引用 ⇒ 404
+    同规）。**每腿断言响应体零出现 B 的任何数据**（workDate/分钟数/status/lot 字段/step 字段/
+    displayLabel 按腿逐项零出现；错误体 values-free）。这些腿的授权语义由**权威查询内的
+    subject 谓词**承载（非前置门）——「拒绝 = 零 trace SQL」断言不适用于横向腿，仍限
+    身份/org 门腿；mutation（owner 三轮 P2-1 逐字「去掉 subject 谓词 ⇒ 新腿必须红」）：
+    **去掉任一类 self 权威查询的 subject 谓词（仅剩 org 谓词）⇒ 该类 two-user 腿精确红**
+    （六类各自独立可判红，不共享一次 mutation 的绿）。
   - 真库用例进既有 attendance integration gate 所在文件；fixture ID 文件级命名空间（共库并跑纪律）。
 - **W5-1 AttendanceDecisionTrace.vue 展示**：纯模块 + 组件 + AttendanceView 接线（单热文件串行）+
   guard 接线（run-list + 双 path filter + 收集证明 + 同命令 mutation）。**切片间依赖注记
@@ -747,13 +816,18 @@ admin/self，manager 由 W5-10 管」）——据此收敛为 **admin/self 双�
 （解释面把「关闭」如实呈现为 `not_in_effect`，不以任何形式促发开启）。
 
 **Ratify 流程（严格顺序）**：
-① 本锁 PR 合入（docs-only，PROPOSED 入仓——合入**不等于**生效）
+① 本锁 PR 合入（docs-only，PROPOSED 入仓——合入**不等于**生效；owner 三轮终审明示本步执行
+时序：两 P2 修订后 rebase 至当时 main + fresh checks 全绿即以 PROPOSED 合入，**RATIFY 将对
+合入后的 exact SHA 请求**——合入不触发任何 runtime，模型不发 RATIFY 触发）
 → ② owner 审阅：核对 §0 红线转写、§0.1 七项冻结映射、§3 合同、§5 可见性与遮罩清单——
-**本步已两轮执行**：2026-07-23 一轮终审 CHANGES REQUESTED（0P1/3P2）+ OD-W5-1..11 一次性全裁
+**本步已三轮执行**：2026-07-23 一轮终审 CHANGES REQUESTED（0P1/3P2）+ OD-W5-1..11 一次性全裁
 （§8 裁决列），三 P2 与裁决联动已修订；同日**二轮终审 CHANGES REQUESTED（0P1/4P2/1P3）**
 （P2-a 面分级/P2-b 身份 wire 承载与姿态闭集/P2-c ⑤ lot reasonCode 映射/P2-d self 多组织四腿/
-P3 留存警告时序护栏，header 逐项索引），五项已修订入本版；W4 收口态势 owner 已确认（一轮终审
-附注逐字「#4545 已合入 `ee39a13eb`，Wave 4 无 W5-0 前置余项」）——重呈后 owner 复核两轮处置
+P3 留存警告时序护栏，header 逐项索引），五项已修订入本版；**三轮终审 CHANGES REQUESTED
+（0P1/2P2 + 授权时序 HOLD）**（P2-1 self 横向授权 subject-constrained + G7 two-user 矩阵/
+P2-2 ⑤ lot item discriminated union 显式判别子，header 逐项索引），两项已修订入本版；
+W4 收口态势 owner 已确认（一轮终审
+附注逐字「#4545 已合入 `ee39a13eb`，Wave 4 无 W5-0 前置余项」）——合入后 owner 复核三轮处置
 与裁决联动一致性
 → ③ owner 终裁 comment = PROPOSED → RATIFIED 的唯一生效凭据（模型不得代翻——章程 §10-Owner 条款）
 → ④ 章程 §15 Wave 5 行同步（DATA-CONTRACT-GATED → 设计已 ratify / runtime 未开始；随 ratify 批次
@@ -802,6 +876,25 @@ P3 留存警告时序护栏，header 逐项索引），五项已修订入本版�
    （`overtime_conversion`）（P2-c）、event_type DB CHECK = `zzzz20260603120000:72` +
    `zzzz20260622150000:16`（含 `reverse`）、`ORG_ID_REQUIRED` 既有错误码 =
    `attendance-admin.ts:502`（P2-d）。
+   **2026-07-23 三轮终审修订 rebase**：owner 指出 BEHIND（base `ca625f14a`，`origin/main` =
+   `e32f2d533`），分支重基至 `e32f2d533`（`git rebase origin/main` 干净无冲突）；增量漂移账
+   `ca625f14a..e32f2d533` = 仅 1 commit（#4551 stock-prep general-prep 线：stock-prep/multitable
+   docs + `packages/core-backend/src/index.ts` +84 行（multitable substrate 区段，两 hunk 插于
+   ~L50/~L525）+ 新增 `src/multitable/` 模块、`types/plugin.ts` 扩展、stock-prep 测试与
+   plugin-integration-core stock-prep 库 + `plugin-tests.yml` run-list +3 stock-prep 行）——
+   `git diff --stat` 实证**考勤 runtime/路由/权限/迁移/前端零触碰**（`index.cjs`/
+   `attendance-admin.ts`/`AttendanceView.vue`/`AuthService.ts`/migrations/考勤测试文件均不在
+   diff 中）⇒ 除 `index.ts` 行号漂移外全部锚点继续有效；本锁引用的 `index.ts` 三处锚点已按
+   新现势重开验证（`buildApprovalAssigneeResolverPort` `:973-978`→`:1057-1062`、注入
+   `:1925-1926`→`:2009-2010`、unresolved reason 区段 `~1012-1070`→`~1096-1154`，均 +84）；
+   三轮修订新增承重锚点对该现势逐条实证：`attendance_records.user_id` =
+   `zzzz20260114090000:57`、`attendance_requests.user_id`/`approval_instance_id` =
+   `zzzz20260114090000:83/:90`、`attendance_leave_balances.user_id` = `zzzz20260603120000:30`、
+   `attendance_record_result_edits.user_id`（record 主体列，区别于 `actor_user_id` `:46`）=
+   `zzzz20260627120000:38`、`approval_instances` 无标量 requester 列 =
+   `20250924105000_create_approval_tables.ts`（建表列仅 id/status/version/created_at/updated_at）
+   + `zzzz20260404100000_extend_approval_tables_for_bridge.ts`（bridge 列清单无 requester_id，
+   仅 `requester_snapshot` JSONB `:36`）。
 2. **查重**（对 `bbcb8caf3` 实跑）：
    - 全树 grep `AttendanceDecisionTrace` ⇒ 唯一命中 = 章程 L265 组件表行（代码/测试/route 0 命中）；
    - 全树 grep 「无法确定依据」⇒ 代码 0 命中（仅章程 L368）；
@@ -820,6 +913,7 @@ P3 留存警告时序护栏，header 逐项索引），五项已修订入本版�
    prefix/guard 外独立 path——`rbacGuard('attendance','read')` + token subject
    （`getAttendanceAdminRequestUserId :333` 同型）+ active `user_orgs` org 解析/校验（plugin `/me`
    先例只承继 subject-locked 语义，其 `getOrgId(req)` 客户端 org 回退**不承继**——owner 终审
-   P2-1）。
+   P2-1）+ **每条目标读取权威查询 subject-constrained**（org 谓词**且**逐类归属谓词齐钉，
+   §4.1——owner 三轮终审 P2-1 横向授权边界）。
 6. **完成门与 mutation 目标**：§9 各片列出（W5-0-G1..G7 + W5-1/W5-2 专项门）；每片 Opus 对抗审
    0 P1/P2 必过；guard 接线含收集证明与同命令 mutation。
