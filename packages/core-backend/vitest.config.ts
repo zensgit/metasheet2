@@ -404,6 +404,11 @@ export default defineConfig({
       // readiness-gate + DingTalk destination permission negatives (case ⑤). DATABASE_URL-gated
       // describeIfDatabase; excluded here so the no-DB job cannot skip-green them; wired
       // whole-file into the attendance real-DB step in plugin-tests.yml.
+      // W4-PRE-1d (owner candidate-set split, #4534): real-DB dual-integration departure matrix.
+      // DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring —
+      // this exclude line was the missing second point, caught by the W4 wave-MD pre-review).
+      'tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts',
       'tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts',
       'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
