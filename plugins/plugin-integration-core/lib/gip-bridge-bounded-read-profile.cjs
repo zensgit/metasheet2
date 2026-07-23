@@ -43,10 +43,7 @@ const BRIDGE_BOUNDED_READ_ERROR_REASONS = Object.freeze([
   'BOUNDED_READ_CLAMP_UNREPORTED',
   'BOUNDED_READ_CLAMP_EXCEEDS_SUPPORTED_BOUND',
   'BOUNDED_READ_RESULT_EXCEEDS_CLAMP',
-  // a declared total is authoritative in BOTH directions (feeder assertKnownSource*):
-  'BOUNDED_READ_DECLARED_TOTAL_EXCEEDED', // received > declared (feeder INCONSISTENT)
-  'BOUNDED_READ_DECLARED_TOTAL_SHORTFALL', // short page, received < declared (feeder INCOMPLETE)
-  'BOUNDED_READ_COMPLETENESS_UNPROVABLE', // full page, no matching total
+  'BOUNDED_READ_COMPLETENESS_UNPROVABLE', // full page ⇒ no completeness proof available
 ])
 const BRIDGE_BOUNDED_READ_ERROR_REASON_SET = new Set(BRIDGE_BOUNDED_READ_ERROR_REASONS)
 
@@ -86,30 +83,43 @@ function requireNonNegInt(value, field) {
 // so this literal can never diverge unnoticed.
 const BRIDGE_BOUNDED_READ_MAX_ROWS = 500
 
-// The runtime kind string this profile certifies (drift-guarded against the feeder's
-// SOURCE_KIND_CAPABILITIES keys by the test).
-const BRIDGE_BOUNDED_READ_IMPLEMENTATION = 'bridge:legacy-sql-readonly'
+// The registered runtime CONNECTOR KIND this profile certifies (review P2: the kind is
+// the full runtime kind — it must NOT be borrowed by implementationVersion). Drift-
+// guarded against the feeder's SOURCE_KIND_CAPABILITIES keys by the test.
+const BRIDGE_BOUNDED_READ_CONNECTOR_KIND = 'bridge:legacy-sql-readonly'
+
+// The adapter IMPLEMENTATION VERSION — a SEPARATE, incrementable identity (review P2).
+// Drift-guarded against the adapter's exported BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_
+// VERSION by the test; a bump there forces re-certification here.
+const BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION = 'bridge-readonly-adapter.v1'
 
 // ── The certified profile — built (and frozen) through the shared schema normalizer,
 //    so it is schema-valid BY CONSTRUCTION (a malformed literal would throw at load). ─
 const BRIDGE_BOUNDED_READ_PROFILE = normalizeCertifiedReadActionProfile({
   profileId: 'bridge.bounded_read.v1',
-  connectorKind: 'bridge',
+  connectorKind: BRIDGE_BOUNDED_READ_CONNECTOR_KIND,
   actionId: 'bounded_read',
-  implementationVersion: BRIDGE_BOUNDED_READ_IMPLEMENTATION,
+  implementationVersion: BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION,
   certificate: {
     acquisitionMode: 'BOUNDED_READ',
     // single standalone SELECT, no txn/snapshot ⇒ honest EMPTY consistency set.
     supportedConsistencyProofs: [],
     continuationLifetime: 'SINGLE_REQUEST',
-    // the feeder's two real completeness proofs; each provable ALONE.
-    supportedCompletenessProofs: ['SHORT_PAGE', 'DECLARED_TOTAL'],
-    completenessCombinationRules: [['SHORT_PAGE'], ['DECLARED_TOTAL']],
+    // SHORT_PAGE ONLY (review P1): the concrete bridge adapter reports its applied limit
+    // (metadata.limit ⇒ effectiveLimit) so short_page is REACHABLE, but it NEVER
+    // propagates a source total (no sourceTotalCount / dataRowCount), so the feeder's
+    // declared_total proof is UNREACHABLE for this adapter. Certifying DECLARED_TOTAL
+    // would overstate the adapter's real capability — a trusted total needs an agent
+    // protocol + adapter propagation + same-read binding, i.e. a separate runtime /
+    // profile-v2 gate.
+    supportedCompletenessProofs: ['SHORT_PAGE'],
+    completenessCombinationRules: [['SHORT_PAGE']],
     maxScale: { maxRowsPerBoundedRead: BRIDGE_BOUNDED_READ_MAX_ROWS },
-    // manifest/token/cursor shapes + orderingKeyRequirement + failureVocabulary are
-    // intentionally OMITTED: a single BOUNDED_READ page has no cursor/token/manifest,
-    // and fail-closed behaviour is proven by adjudicateBoundedReadCompleteness + its
-    // test, not by a certificate field. Minimal honest certificate.
+    // failureVocabulary binds the profile's EXACT error semantics to its version (review
+    // P2: RATIFIED GIP-D0's complete contract carries it) — sourced from the ONE frozen
+    // BRIDGE_BOUNDED_READ_ERROR_REASONS list, exact-pinned by the test. manifest/token/
+    // cursor/orderingKey shapes stay OMITTED (a single BOUNDED_READ page has none).
+    failureVocabulary: [...BRIDGE_BOUNDED_READ_ERROR_REASONS],
   },
 })
 
@@ -117,10 +127,13 @@ const BRIDGE_BOUNDED_READ_PROFILE = normalizeCertifiedReadActionProfile({
 // but DELIBERATELY never consulted (the feeder distrusts an adapter's done:true as a
 // completeness proof) — carrying it in the shape makes "done is never read" a testable
 // negative control (a mutation that reads it flips a fail-closed case to accepted).
+// v1 accepts COUNTS ONLY. A `sourceDeclaredTotal` is DELIBERATELY not an accepted field
+// (review P1): this profile certifies SHORT_PAGE only, so a declared total is refused
+// fail-closed as an unknown field rather than silently ignored — trusted totals are a
+// profile-v2 capability. `adapterDone` is accepted but never consulted.
 const BOUNDED_READ_RESULT_FIELDS = Object.freeze([
   'pageRowCount',
   'reportedClamp',
-  'sourceDeclaredTotal',
   'adapterDone',
 ])
 
@@ -129,13 +142,13 @@ function completenessEvidence(proof) {
 }
 
 // Adjudicate a SINGLE bounded read's completeness from COUNTS ONLY (values-free) —
-// never row content. Returns certificate-legal completeness evidence, or fails closed.
+// never row content. SHORT_PAGE is this profile's only completeness proof (review P1).
 //
-//   short page (rows < reported clamp)            ⇒ SHORT_PAGE
-//   full page (rows == clamp) + exact trusted total ⇒ DECLARED_TOTAL
-//   full page, no/□≠ trusted total, no cursor     ⇒ FAIL-CLOSED (UNPROVABLE)
-//   clamp not reported                            ⇒ FAIL-CLOSED (feeder L437-446)
-//   adapterDone                                   ⇒ NEVER consulted
+//   short page (rows < reported clamp)   ⇒ SHORT_PAGE (proof)
+//   full page  (rows == reported clamp)  ⇒ FAIL-CLOSED (UNPROVABLE — no proof available)
+//   clamp not reported                   ⇒ FAIL-CLOSED (feeder L437-446)
+//   rows > clamp                         ⇒ FAIL-CLOSED (outside conforming contract)
+//   adapterDone                          ⇒ NEVER consulted
 function adjudicateBoundedReadCompleteness(runResult) {
   if (!isPlainObject(runResult)) {
     fail('BOUNDED_READ_RESULT_INVALID', 'a bounded-read result projection must be a plain object', {})
@@ -164,54 +177,27 @@ function adjudicateBoundedReadCompleteness(runResult) {
     fail('BOUNDED_READ_CLAMP_EXCEEDS_SUPPORTED_BOUND', 'reported clamp exceeds the certified bounded-read maximum', {})
   }
   if (pageRowCount > clamp) {
-    // DELIBERATELY STRICTER THAN THE FEEDER, and producer-unreachable: a conforming
-    // single-SELECT adapter cannot return more rows than the LIMIT it reports it applied
-    // (reportedClamp), so pageRowCount > clamp only happens if the adapter MISREPORTS its
-    // clamp. In that non-conforming region the feeder would still try to vouch the page
-    // via a declared-total match (its PROOF 1 fires regardless of page fullness); this
-    // spec fails closed instead — the SAFE direction (a false-fail, never a false-
-    // complete). NB this is NOT the feeder's own overflow guard: SOURCE_RUN_RESULT_TOO_
-    // LARGE fires on rows > BRIDGE_SOURCE_PAGE_SIZE (500), a different bound. (PR note:
-    // owner may prefer an exact mirror here — see the certification PR.)
-    fail('BOUNDED_READ_RESULT_EXCEEDS_CLAMP', 'page row count exceeds the clamp the source reported it applied (non-conforming producer)', {})
+    // DELIBERATELY STRICTER THAN THE FEEDER (review P3, owner chose keep-strict): the
+    // feeder treats rows >= appliedPageSize as a "full page" and would still try to vouch
+    // it (e.g. via a declared-total match); this spec fails closed. This region is OUTSIDE
+    // THE CONFORMING CONTRACT BUT RUNTIME-REACHABLE — the bridge adapter does NOT trim the
+    // records an agent returns, so an anomalous agent can genuinely return more rows than
+    // the clamp it reported. Failing closed is the SAFE direction (a false-fail, never a
+    // false-complete). NB this is NOT the feeder's own overflow guard: SOURCE_RUN_RESULT_
+    // TOO_LARGE fires on rows > BRIDGE_SOURCE_PAGE_SIZE (500), a different bound.
+    fail('BOUNDED_READ_RESULT_EXCEEDS_CLAMP', 'page row count exceeds the clamp the source reported it applied', {})
   }
 
-  // A declared total (when the source supplies one) is authoritative in BOTH directions
-  // and applies to a SHORT page as much as a full one — mirroring the feeder, which
-  // validates the declared total (assertKnownSourceNotExceeded / assertKnownSourceComplete)
-  // BEFORE it will accept a short_page proof. adapterDone is NEVER consulted.
-  const hasTotal = runResult.sourceDeclaredTotal !== null && runResult.sourceDeclaredTotal !== undefined
-  let declaredTotal = null
-  if (hasTotal) {
-    declaredTotal = requireNonNegInt(runResult.sourceDeclaredTotal, 'sourceDeclaredTotal')
-    if (pageRowCount > declaredTotal) {
-      // more rows than the source declared ⇒ inconsistent (feeder SOURCE_RUN_PAGINATION_INCONSISTENT).
-      fail('BOUNDED_READ_DECLARED_TOTAL_EXCEEDED', 'received more rows than the declared total', {})
-    }
-  }
-
-  // PROOF — an exact declared-total match proves completeness on a SHORT or a FULL page
-  // (feeder PROOF 1, fired regardless of pageIsFull).
-  if (hasTotal && pageRowCount === declaredTotal) {
-    return completenessEvidence('DECLARED_TOTAL')
-  }
-
-  // SHORT page: fewer rows than the applied clamp.
+  // adapterDone is NEVER consulted (feeder: an adapter's done:true is never a proof).
+  // SHORT page: fewer rows than the applied clamp — the source had no more to give.
   if (pageRowCount < clamp) {
-    if (hasTotal && pageRowCount < declaredTotal) {
-      // a short page that falls short of a KNOWN total is INCOMPLETE — a short page is
-      // NOT self-sufficient proof when the source declared how many rows exist (feeder
-      // PROOF 2 runs assertKnownSourceComplete before returning short_page).
-      fail('BOUNDED_READ_DECLARED_TOTAL_SHORTFALL', 'short page ended before the declared total', {})
-    }
-    // short page with NO declared total (the exact-match case returned above) ⇒ complete.
     return completenessEvidence('SHORT_PAGE')
   }
 
-  // FULL page (pageRowCount === clamp) with no matching declared total, and no cursor
-  // (BOUNDED_READ is single-request) ⇒ completeness is unprovable — fail closed (the
-  // #4437 posture, by design).
-  fail('BOUNDED_READ_COMPLETENESS_UNPROVABLE', 'a full bounded page without a matching trusted total cannot prove completeness', {})
+  // FULL page (pageRowCount === clamp): this profile has NO other completeness proof
+  // (declared_total is unreachable for this adapter — review P1), and BOUNDED_READ has no
+  // cursor, so completeness is unprovable — fail closed (the #4437 posture, by design).
+  fail('BOUNDED_READ_COMPLETENESS_UNPROVABLE', 'a full bounded page has no available completeness proof for this profile', {})
 }
 
 // Convenience: the DERIVED recovery strategy for this profile (BOUNDED_READ ⇒
@@ -230,7 +216,8 @@ function assertCompletenessEvidenceCertified(evidence) {
 module.exports = {
   BRIDGE_BOUNDED_READ_PROFILE,
   BRIDGE_BOUNDED_READ_MAX_ROWS,
-  BRIDGE_BOUNDED_READ_IMPLEMENTATION,
+  BRIDGE_BOUNDED_READ_CONNECTOR_KIND,
+  BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION,
   BRIDGE_BOUNDED_READ_ERROR_REASONS,
   BridgeBoundedReadError,
   adjudicateBoundedReadCompleteness,

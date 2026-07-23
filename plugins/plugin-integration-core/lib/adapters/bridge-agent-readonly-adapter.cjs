@@ -457,6 +457,11 @@ function createBridgeAgentReadonlyAdapterFactory(defaults = {}) {
   return (input = {}) => createBridgeAgentReadonlyAdapter({ ...defaults, ...input })
 }
 
+// Incrementable implementation version of THIS adapter. Bump on any behavioural change
+// to the read/limit/completeness surface; the GIP bridge.bounded_read profile drift-guard
+// pins its implementationVersion to this constant, so a bump forces re-certification.
+const BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_VERSION = 'bridge-readonly-adapter.v1'
+
 const BRIDGE_READONLY_ADAPTER_METADATA = {
   label: 'Readonly Bridge Agent',
   roles: ['source'],
@@ -482,6 +487,7 @@ const BRIDGE_READONLY_ADAPTER_METADATA = {
 
 module.exports = {
   BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES,
+  BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_VERSION,
   BRIDGE_READONLY_ADAPTER_METADATA,
   BridgeAgentReadonlyAdapterError,
   createBridgeAgentReadonlyAdapter,
