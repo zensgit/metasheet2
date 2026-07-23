@@ -297,9 +297,10 @@ values-free by construction，§5.1 遮罩清单约束一切文本字段）：
    不得实现内静默加值。
 6. **快照排他（owner 冻结⑤）**：凡存在计算时快照（`snapshot_frozen` 环可用）的历史结果，其对应
    依据环**禁止**用当前配置渲染（禁以 `rule_live`/`current_live_no_history` 替位呈现）；
-   `current_live_no_history` **仅限确无快照处**使用，且必须显式标注为非计算时依据（「可能不同于
-   决策当时的规则」声明，§3.2 末段）——W5-0-G6 的 byte-stable 正控与重算 mutation 即本条的
-   可执行化。
+   `current_live_no_history` 不得作为有快照历史结果的**依据环替位**（作为与快照环**并列且显式
+   区分**的现行参考环呈现不在禁列——§3.3④ E2 的并列语义即此例）；作依据环使用**仅限确无快照处**，
+   且必须显式标注为非计算时依据（「可能不同于决策当时的规则」声明，§3.2 末段）——W5-0-G6 的
+   byte-stable 正控与重算 mutation 即本条的可执行化。
 
 ### 3.2 「版本/生效日」逐类锚点（snapshot_frozen 的 `asOf` 规定，不得任选）
 
