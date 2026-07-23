@@ -61,6 +61,10 @@ const ATTENDANCE_OVERVIEW_SECTION_IDS = new Set([
   'attendance-overview-anomalies',
   'attendance-overview-request-report',
   'attendance-overview-records',
+  // W5-1 (Wave 5 explainability design-lock §6/§9 W5-1): the self face of the read-only
+  // decision-trace surface — canonical `?section=attendance-overview-decision-trace` query deep
+  // link (R2: query form, never hash).
+  'attendance-overview-decision-trace',
 ])
 
 const route = useRoute()

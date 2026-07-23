@@ -14,6 +14,12 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   // seven-step setup-readiness wizard shell — registering here grants the
   // `?section=attendance-admin-setup` query deep link, rail entry, and quick-jump for free.
   setup: 'attendance-admin-setup',
+  // W5-1 (Wave 5 explainability design-lock §6/§9 W5-1): admin face of the read-only
+  // decision-trace surface — registering here grants the canonical
+  // `?tab=admin&section=attendance-admin-decision-trace` query deep link (R2: query form, never
+  // hash), rail entry, and quick-jump for free. The id literal is shared with
+  // `attendanceDecisionTrace.ts` (ATTENDANCE_ADMIN_DECISION_TRACE_SECTION_ID).
+  decisionTrace: 'attendance-admin-decision-trace',
   settings: 'attendance-admin-settings',
   userAccess: 'attendance-admin-user-access',
   batchProvisioning: 'attendance-admin-batch-provisioning',
@@ -181,6 +187,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.setup, label: tr('Setup readiness', '启用准备') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning, label: tr('Batch Provisioning', '批量授权') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs, label: tr('Audit Logs', '审计日志') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace, label: tr('Decision trace', '决策轨迹') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries, label: tr('Notification deliveries', '通知投递') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy, label: tr('Report digest subscription', '统计通知订阅') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy, label: tr('Makeup punch policy', '补卡策略') },
@@ -222,6 +229,7 @@ export function useAttendanceAdminRail({
         ATTENDANCE_ADMIN_SECTION_IDS.setup,
         ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning,
         ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
+        ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace,
         ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries,
         ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy,
         ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy,
