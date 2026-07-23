@@ -219,10 +219,10 @@ function createProbeStrategyRegistry(entries) {
       fail('QUALIFICATION_INPUT_INVALID', 'an action profile is bound to two strategies', { field: 'entries' })
     }
     byProfile.set(actionProfileVersion, Object.freeze({
-      strategyId: requiredString(entry.strategyId, 'entry.strategyId'),
-      strategyVersion: requiredString(entry.strategyVersion, 'entry.strategyVersion'),
-      dialect: requiredString(entry.dialect, 'entry.dialect'),
-      snapshotSemantics: requiredString(entry.snapshotSemantics, 'entry.snapshotSemantics'),
+      strategyId: requiredIdentityToken(entry.strategyId, 'entry.strategyId'),
+      strategyVersion: requiredIdentityToken(entry.strategyVersion, 'entry.strategyVersion'),
+      dialect: requiredIdentityToken(entry.dialect, 'entry.dialect'),
+      snapshotSemantics: requiredIdentityToken(entry.snapshotSemantics, 'entry.snapshotSemantics'),
       buildTotalOrderProbeSql: entry.buildTotalOrderProbeSql,
     }))
   }
@@ -304,7 +304,22 @@ function normalizeEnvelopeKey(envelopeKey) {
   if (secretBytes === null || secretBytes.length < ENVELOPE_SECRET_MIN_BYTES) {
     fail('QUALIFICATION_INPUT_INVALID', 'envelope secret must be raw bytes (Buffer/Uint8Array) of at least 32 bytes', { field: 'envelopeKey.secret' })
   }
-  return { keyId, secret: secretBytes }
+  // OWN the bytes (review NIT, defense-in-depth): a defensive copy so a caller mutating
+  // its Buffer cannot alias the key material. NB the MAC is already computed synchronously
+  // within each call, so this copy is belt-and-braces, not a correctness fix for the
+  // current synchronous flow.
+  return { keyId, secret: Buffer.from(secretBytes) }
+}
+
+// Registry identity strings are SERVER-authored constants, but a malformed
+// registration should fail loud, not silently ship control chars / megabyte ids into
+// evidence (review NIT: shape hygiene, not a data leak).
+function requiredIdentityToken(value, field) {
+  const text = requiredString(value, field)
+  if (text.length > 128 || /[\u0000-\u001f\u007f]/.test(text)) {
+    fail('QUALIFICATION_INPUT_INVALID', 'identity token must be <=128 printable chars', { field })
+  }
+  return text
 }
 
 function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresAt }) {

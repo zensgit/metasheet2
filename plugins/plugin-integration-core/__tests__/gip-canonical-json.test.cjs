@@ -127,6 +127,26 @@ function roundThreeReproductions() {
     // eslint-disable-next-line no-extend-native
     Array.prototype.map = originalMap
   }
+
+  // (g) round-5: a PROXY whose [[Get]] and descriptor paths disagree must be rejected
+  //     — validate saw one value, serialize/clone saw another (digest divergence).
+  const proxy = new Proxy({ x: 1 }, {
+    ownKeys: () => ['x'],
+    get: (target, key) => target[key],
+    getOwnPropertyDescriptor: () => ({ value: new Date('2020-01-01T00:00:00Z'), enumerable: true, writable: true, configurable: true }),
+  })
+  assert.equal(isStrictPlainObject(proxy), false)
+  rejects(() => assertStrictValue(proxy))
+  rejects(() => stableCanonicalStringify(proxy))
+  rejects(() => deepCloneFrozenCanonical(proxy))
+  const proxyArray = new Proxy([1], { get: (t, k) => t[k] })
+  rejects(() => assertStrictValue(proxyArray))
+
+  // (h) round-5: -0 and +0 are ONE canonical JSON number — same serialization, clone
+  //     stores +0 (no -0/0 digest ambiguity).
+  assert.equal(stableCanonicalStringify(-0), '0')
+  assert.equal(stableCanonicalStringify({ a: -0 }), stableCanonicalStringify({ a: 0 }))
+  assert.ok(Object.is(deepCloneFrozenCanonical({ a: -0 }).a, 0))
 }
 
 function main() {

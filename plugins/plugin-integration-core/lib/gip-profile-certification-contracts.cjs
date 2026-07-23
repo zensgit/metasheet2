@@ -212,6 +212,34 @@ const READ_CERTIFICATE_FIELDS = Object.freeze([
 // (= profileId); the action/queryPreset version is pinned INSIDE this definition and
 // is never an independent digest input (review P2: two implementations must not each
 // compute their own digest).
+// Frozen cross-dimension legality (scale-D0 §2) — shared so deriveRecoveryStrategy
+// re-checks it too (review P2: derivation must never grant a resume strategy to a
+// schema-ILLEGAL certificate). Reads only membership of already-frozen closed sets.
+function assertCertificateCrossDimensionLegal({ acquisitionMode, continuationLifetime, supportedConsistencyProofs, supportedCompletenessProofs }) {
+  const consistency = Array.isArray(supportedConsistencyProofs) ? supportedConsistencyProofs : []
+  const completeness = Array.isArray(supportedCompletenessProofs) ? supportedCompletenessProofs : []
+  // 1. BOUNDED_READ is a single page: SINGLE_REQUEST only.
+  if (acquisitionMode === 'BOUNDED_READ' && continuationLifetime !== 'SINGLE_REQUEST') {
+    fail('ILLEGAL_CAPABILITY_COMBINATION', 'BOUNDED_READ is single-request by definition', { rule: 'BOUNDED_READ_SINGLE_REQUEST' })
+  }
+  // 2. SEALED_EXPORT must include SIGNED_MANIFEST.
+  if (acquisitionMode === 'SEALED_EXPORT' && !completeness.includes('SIGNED_MANIFEST')) {
+    fail('ILLEGAL_CAPABILITY_COMBINATION', 'SEALED_EXPORT requires SIGNED_MANIFEST completeness', { rule: 'SEALED_EXPORT_REQUIRES_SIGNED_MANIFEST' })
+  }
+  // 3. CHANGE_FEED requires the monotonic version pin.
+  if (acquisitionMode === 'CHANGE_FEED' && !consistency.includes('MONOTONIC_VERSION_PIN')) {
+    fail('ILLEGAL_CAPABILITY_COMBINATION', 'CHANGE_FEED requires MONOTONIC_VERSION_PIN consistency', { rule: 'CHANGE_FEED_REQUIRES_VERSION_PIN' })
+  }
+  // 4. DURABLE_TOKEN needs a durable anchor (immutable token, or CHANGE_FEED watermark).
+  if (continuationLifetime === 'DURABLE_TOKEN') {
+    const immutableAnchor = consistency.includes('IMMUTABLE_SNAPSHOT_TOKEN')
+    const watermarkAnchor = acquisitionMode === 'CHANGE_FEED' && consistency.includes('MONOTONIC_VERSION_PIN')
+    if (!immutableAnchor && !watermarkAnchor) {
+      fail('ILLEGAL_CAPABILITY_COMBINATION', 'DURABLE_TOKEN continuation requires a durable consistency anchor', { rule: 'DURABLE_TOKEN_REQUIRES_DURABLE_ANCHOR' })
+    }
+  }
+}
+
 function normalizeCertifiedReadActionProfile(input) {
   if (!isPlainObject(input)) {
     fail('PROFILE_NOT_OBJECT', 'certified read-action profile must be a plain object', {})
@@ -226,8 +254,8 @@ function normalizeCertifiedReadActionProfile(input) {
     }
   }
   const profileId = nonBlankString(input.profileId)
-  if (!profileId || !PROFILE_ID_PATTERN.test(profileId)) {
-    fail('PROFILE_ID_INVALID', 'profileId must match <connectorKind>.<action>.v<N>', {})
+  if (!profileId || profileId.length > 128 || !PROFILE_ID_PATTERN.test(profileId)) {
+    fail('PROFILE_ID_INVALID', 'profileId must match <connectorKind>.<action>.v<N> (<=128 chars)', {})
   }
   const connectorKind = nonBlankString(input.connectorKind)
   if (!connectorKind) fail('CONNECTOR_KIND_REQUIRED', 'connectorKind is required', {})
@@ -327,40 +355,9 @@ function normalizeCertifiedReadActionProfile(input) {
     combinations.sort((a, b) => (a.length - b.length) || (a.join('+') < b.join('+') ? -1 : 1))
   }
 
-  // ── Frozen cross-dimension legality (only the rules the ratified lock states) ──
-  // 1. BOUNDED_READ is a single page: SINGLE_REQUEST only (whole rerun on failure).
-  if (acquisitionMode === 'BOUNDED_READ' && continuationLifetime !== 'SINGLE_REQUEST') {
-    fail('ILLEGAL_CAPABILITY_COMBINATION', 'BOUNDED_READ is single-request by definition', {
-      rule: 'BOUNDED_READ_SINGLE_REQUEST',
-    })
-  }
-  // 2. SEALED_EXPORT must include SIGNED_MANIFEST (the manifest IS its completeness).
-  if (acquisitionMode === 'SEALED_EXPORT' && !supportedCompletenessProofs.includes('SIGNED_MANIFEST')) {
-    fail('ILLEGAL_CAPABILITY_COMBINATION', 'SEALED_EXPORT requires SIGNED_MANIFEST completeness', {
-      rule: 'SEALED_EXPORT_REQUIRES_SIGNED_MANIFEST',
-    })
-  }
-  // 3. CHANGE_FEED requires the monotonic version pin (watermark) consistency proof.
-  if (acquisitionMode === 'CHANGE_FEED' && !supportedConsistencyProofs.includes('MONOTONIC_VERSION_PIN')) {
-    fail('ILLEGAL_CAPABILITY_COMBINATION', 'CHANGE_FEED requires MONOTONIC_VERSION_PIN consistency', {
-      rule: 'CHANGE_FEED_REQUIRES_VERSION_PIN',
-    })
-  }
-  // 4. DURABLE_TOKEN continuation needs a DURABLE consistency anchor: an immutable
-  //    snapshot token, or — for CHANGE_FEED — the monotonic version pin (the CT/CDC
-  //    watermark IS its durable token; scale-D0 §2 legal-combination table row 5:
-  //    CHANGE_FEED × MONOTONIC_VERSION_PIN × DURABLE_TOKEN(水位) is LEGAL). A
-  //    connection-bound snapshot alone cannot anchor resume (cross-snapshot stitching).
-  if (continuationLifetime === 'DURABLE_TOKEN') {
-    const immutableAnchor = supportedConsistencyProofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')
-    const watermarkAnchor = acquisitionMode === 'CHANGE_FEED'
-      && supportedConsistencyProofs.includes('MONOTONIC_VERSION_PIN')
-    if (!immutableAnchor && !watermarkAnchor) {
-      fail('ILLEGAL_CAPABILITY_COMBINATION', 'DURABLE_TOKEN continuation requires a durable consistency anchor', {
-        rule: 'DURABLE_TOKEN_REQUIRES_DURABLE_ANCHOR',
-      })
-    }
-  }
+  assertCertificateCrossDimensionLegal({
+    acquisitionMode, continuationLifetime, supportedConsistencyProofs, supportedCompletenessProofs,
+  })
 
   return Object.freeze({
     profileId,
@@ -401,6 +398,18 @@ function deriveRecoveryStrategy(certificate) {
   if (!isPlainObject(certificate)) {
     fail('CERTIFICATE_NOT_OBJECT', 'recovery derivation needs a certificate object', {})
   }
+  // review P2: derivation is fail-CLOSED — a schema-illegal certificate never earns a
+  // resume-grade strategy. Validate the closed vocabularies + cross-dimension legality
+  // the same way normalization does before deriving anything.
+  if (!GIP_ACQUISITION_MODES.includes(certificate.acquisitionMode)) {
+    fail('ACQUISITION_MODE_INVALID', 'acquisitionMode is outside the frozen vocabulary', {})
+  }
+  if (!GIP_CONTINUATION_LIFETIMES.includes(certificate.continuationLifetime)) {
+    fail('CONTINUATION_LIFETIME_INVALID', 'continuationLifetime is outside the frozen vocabulary', {})
+  }
+  normalizeClosedSet(certificate.supportedConsistencyProofs, GIP_CONSISTENCY_PROOFS, 'supportedConsistencyProofs', 'CONSISTENCY_PROOFS_INVALID')
+  normalizeClosedSet(certificate.supportedCompletenessProofs, GIP_COMPLETENESS_PROOFS, 'supportedCompletenessProofs', 'COMPLETENESS_PROOFS_INVALID')
+  assertCertificateCrossDimensionLegal(certificate)
   if (certificate.acquisitionMode === 'BOUNDED_READ') return 'WHOLE_RERUN'
   if (certificate.acquisitionMode === 'SEALED_EXPORT') return 'CHUNK_RESUME'
   const proofs = Array.isArray(certificate.supportedConsistencyProofs)
@@ -430,8 +439,8 @@ function normalizeCertifiedApplyProfile(input) {
     }
   }
   const applyProfileId = nonBlankString(input.applyProfileId)
-  if (!applyProfileId || !PROFILE_ID_PATTERN.test(applyProfileId)) {
-    fail('APPLY_PROFILE_ID_INVALID', 'applyProfileId must match <family>.<name>.v<N>', {})
+  if (!applyProfileId || applyProfileId.length > 128 || !PROFILE_ID_PATTERN.test(applyProfileId)) {
+    fail('APPLY_PROFILE_ID_INVALID', 'applyProfileId must match <family>.<name>.v<N> (<=128 chars)', {})
   }
   if (!GIP_APPLY_MODES.includes(input.applyMode)) {
     fail('APPLY_MODE_INVALID', 'applyMode is outside the frozen vocabulary', {})
@@ -448,6 +457,11 @@ function normalizeCertifiedApplyProfile(input) {
 function validateConsistencyEvidence(profile, evidence) {
   if (!isPlainObject(evidence)) {
     fail('CONSISTENCY_EVIDENCE_INVALID', 'consistency evidence must be a plain object', {})
+  }
+  for (const key of Object.keys(evidence)) {
+    if (!['consistencyRequirementStatus', 'proofClasses'].includes(key)) {
+      fail('CONSISTENCY_EVIDENCE_INVALID', 'consistency evidence carries an undeclared field', {})
+    }
   }
   const status = evidence.consistencyRequirementStatus
   if (!GIP_CONSISTENCY_REQUIREMENT_STATUSES.includes(status)) {
@@ -483,6 +497,11 @@ function validateConsistencyEvidence(profile, evidence) {
 function validateCompletenessEvidence(profile, evidence) {
   if (!isPlainObject(evidence)) {
     fail('COMPLETENESS_EVIDENCE_INVALID', 'completeness evidence must be a plain object', {})
+  }
+  for (const key of Object.keys(evidence)) {
+    if (!['runOutcome', 'usedCompletenessProofs'].includes(key)) {
+      fail('COMPLETENESS_EVIDENCE_INVALID', 'completeness evidence carries an undeclared field', {})
+    }
   }
   if (evidence.runOutcome !== 'successful') {
     // Only successful runs assert completeness; any other outcome carries no claim —
@@ -549,6 +568,7 @@ module.exports = {
   __internals: {
     fail,
     normalizeClosedSet,
+    assertCertificateCrossDimensionLegal,
     PROFILE_ID_PATTERN,
     READ_CERTIFICATE_FIELDS,
   },

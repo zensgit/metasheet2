@@ -134,6 +134,8 @@ function readProfileHappyPath() {
 function readProfileFailClosed() {
   rejectsWith(() => normalizeCertifiedReadActionProfile(null), 'PROFILE_NOT_OBJECT')
   rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ profileId: 'BadName' })), 'PROFILE_ID_INVALID')
+  // length cap (review NIT): a multi-KB matching id is refused before it reaches digests
+  rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ profileId: 'a.' + ('b'.repeat(200)) + '.v1' })), 'PROFILE_ID_INVALID')
   rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { acquisitionMode: 'TELEPATHIC_READ' } })), 'ACQUISITION_MODE_INVALID')
   rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { supportedConsistencyProofs: ['NONE'] } })), 'CONSISTENCY_PROOFS_INVALID')
   rejectsWith(() => normalizeCertifiedReadActionProfile(fixtureProfile({ certificate: { supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN', 'SOURCE_SNAPSHOT_TXN'] } })), 'CONSISTENCY_PROOFS_INVALID')
@@ -225,17 +227,25 @@ function crossDimensionLegality() {
 
 // ── 5. Recovery derivation matrix (derived, never declared) ──
 function recoveryDerivation() {
+  // deriveRecoveryStrategy validates the FULL certificate (review P2 fail-closed), so
+  // these are complete legal certs.
   const cases = [
-    [{ acquisitionMode: 'BOUNDED_READ', continuationLifetime: 'SINGLE_REQUEST', supportedConsistencyProofs: [] }, 'WHOLE_RERUN'],
-    [{ acquisitionMode: 'SEALED_EXPORT', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'] }, 'CHUNK_RESUME'],
-    [{ acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'] }, 'PAGE_RESUME'],
-    [{ acquisitionMode: 'PAGED_READ', continuationLifetime: 'CONNECTION_BOUND', supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN'] }, 'WHOLE_ROUND_RESTART'],
+    [{ acquisitionMode: 'BOUNDED_READ', continuationLifetime: 'SINGLE_REQUEST', supportedConsistencyProofs: [], supportedCompletenessProofs: ['SHORT_PAGE'] }, 'WHOLE_RERUN'],
+    [{ acquisitionMode: 'SEALED_EXPORT', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: ['SIGNED_MANIFEST'] }, 'CHUNK_RESUME'],
+    [{ acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: ['SHORT_PAGE'] }, 'PAGE_RESUME'],
+    [{ acquisitionMode: 'PAGED_READ', continuationLifetime: 'CONNECTION_BOUND', supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN'], supportedCompletenessProofs: ['SHORT_PAGE'] }, 'WHOLE_ROUND_RESTART'],
     // enterprise watermark resume (scale-D0 §2 row 5's DURABLE_TOKEN(水位))
-    [{ acquisitionMode: 'CHANGE_FEED', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'] }, 'PAGE_RESUME'],
+    [{ acquisitionMode: 'CHANGE_FEED', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'], supportedCompletenessProofs: ['DECLARED_TOTAL'] }, 'PAGE_RESUME'],
   ]
   for (const [certificate, expected] of cases) {
     assert.equal(deriveRecoveryStrategy(certificate), expected)
   }
+  // review P2: derivation is FAIL-CLOSED on schema-illegal certificates — no
+  // resume-grade strategy for a cert normalize() would reject.
+  rejectsWith(() => deriveRecoveryStrategy({ acquisitionMode: 'SEALED_EXPORT', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['IMMUTABLE_SNAPSHOT_TOKEN'], supportedCompletenessProofs: ['SHORT_PAGE'] }), 'ILLEGAL_CAPABILITY_COMBINATION')
+  rejectsWith(() => deriveRecoveryStrategy({ acquisitionMode: 'PAGED_READ', continuationLifetime: 'DURABLE_TOKEN', supportedConsistencyProofs: ['SOURCE_SNAPSHOT_TXN'], supportedCompletenessProofs: ['SHORT_PAGE'] }), 'ILLEGAL_CAPABILITY_COMBINATION')
+  rejectsWith(() => deriveRecoveryStrategy({ acquisitionMode: 'TELEPATHIC', continuationLifetime: 'SINGLE_REQUEST', supportedConsistencyProofs: [], supportedCompletenessProofs: ['SHORT_PAGE'] }), 'ACQUISITION_MODE_INVALID')
+  rejectsWith(() => deriveRecoveryStrategy({}), 'ACQUISITION_MODE_INVALID')
 }
 
 // ── 6. Apply profile (independent axis) ──
@@ -259,6 +269,9 @@ function evidenceShapes() {
   rejectsWith(() => validateConsistencyEvidence(profile, { consistencyRequirementStatus: 'NOT_REQUIRED', proofClasses: ['SOURCE_SNAPSHOT_TXN'] }), 'CONSISTENCY_EVIDENCE_INVALID')
   rejectsWith(() => validateConsistencyEvidence(profile, { consistencyRequirementStatus: 'REQUIRED', proofClasses: ['IMMUTABLE_SNAPSHOT_TOKEN'] }), 'CONSISTENCY_EVIDENCE_INVALID')
   rejectsWith(() => validateConsistencyEvidence(profile, { consistencyRequirementStatus: 'NONE', proofClasses: [] }), 'CONSISTENCY_STATUS_INVALID')
+  // closed evidence shape (review NIT): an undeclared extra field is rejected
+  rejectsWith(() => validateConsistencyEvidence(profile, { consistencyRequirementStatus: 'NOT_REQUIRED', proofClasses: [], smuggled: 'X' }), 'CONSISTENCY_EVIDENCE_INVALID')
+  rejectsWith(() => validateCompletenessEvidence(profile, { runOutcome: 'successful', usedCompletenessProofs: ['SHORT_PAGE'], smuggled: 'X' }), 'COMPLETENESS_EVIDENCE_INVALID')
 
   const okUsed = validateCompletenessEvidence(profile, { runOutcome: 'successful', usedCompletenessProofs: ['SHORT_PAGE'] })
   assert.deepEqual([...okUsed.usedCompletenessProofs], ['SHORT_PAGE'])

@@ -18,6 +18,8 @@
 // The codec is mechanism-only: callers wrap CanonicalDomainError into their own
 // frozen error vocabularies.
 
+const util = require('node:util')
+
 class CanonicalDomainError extends Error {
   constructor(message) {
     super(message)
@@ -27,6 +29,9 @@ class CanonicalDomainError extends Error {
 
 function isStrictPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  // Proxies make the [[Get]] path and the descriptor path disagree (review P2:
+  // validate saw one value, serialize/clone saw another) — reject outright.
+  if (util.types.isProxy(value)) return false
   const proto = Object.getPrototypeOf(value)
   if (proto !== Object.prototype && proto !== null) return false
   if (Object.getOwnPropertySymbols(value).length > 0) return false
@@ -42,6 +47,7 @@ function isStrictPlainObject(value) {
 
 function isStrictDenseArray(value) {
   if (!Array.isArray(value)) return false
+  if (util.types.isProxy(value)) return false
   // exotic arrays are rejected (review P2): a replaced prototype can override map()
   // and make clone/serialize silently emit [] for a non-empty array.
   if (Object.getPrototypeOf(value) !== Array.prototype) return false
@@ -66,7 +72,7 @@ function assertStrictValue(value) {
     if (!Number.isFinite(value)) {
       throw new CanonicalDomainError('non-finite numbers are outside the canonical domain')
     }
-    return
+    return // -0 is accepted; canonicalized to +0 on clone/serialize (JSON has no -0)
   }
   if (Array.isArray(value)) {
     if (!isStrictDenseArray(value)) {
@@ -108,7 +114,8 @@ function deepCloneFrozenCanonical(value) {
       }
       return Object.freeze(out)
     }
-    return entry
+    // canonicalize negative zero to positive zero (review P3: -0/0 are one JSON number)
+    return Object.is(entry, -0) ? 0 : entry
   }
   return clone(value)
 }

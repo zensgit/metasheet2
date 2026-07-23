@@ -226,6 +226,24 @@ async function probeBehaviour() {
     ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: Buffer.alloc(16, 1) }, strategyRegistry: REGISTRY,
     query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
+  // Caller-buffer mutation after probe does not break the happy path (the MAC is
+  // computed synchronously inside probe; normalizeEnvelopeKey also takes a defensive
+  // copy as defense-in-depth). SMOKE assertion — not independently discriminable via
+  // the public API since no path holds the normalized key across a mutation (review
+  // NIT: the reviewer classified the copy the same way).
+  const mutableSecret = Buffer.alloc(32, 7)
+  const mutQual = await probeBindingQualification({
+    ...BASE_INPUTS, envelopeKey: { keyId: 'kx', secret: mutableSecret }, strategyRegistry: REGISTRY,
+    query: okQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+  })
+  mutableSecret.fill(0) // caller scribbles its buffer afterwards
+  const stillOk = verifyBindingQualification({
+    qualification: mutQual, expectedInputs: { ...BASE_INPUTS }, envelopeKey: { keyId: 'kx', secret: Buffer.alloc(32, 7) }, now: '2026-07-23T12:00:00Z',
+  })
+  assert.equal(stillOk.verified, true)
+  // registry field hygiene: control chars / oversize identity strings fail loud
+  assert.throws(() => createProbeStrategyRegistry([{ actionProfileVersion: 'x.y.v1', strategyId: 'a\nb', strategyVersion: 'v1', dialect: 'postgres', snapshotSemantics: 's', buildTotalOrderProbeSql: () => 'SELECT 1' }]))
+  assert.throws(() => createProbeStrategyRegistry([{ actionProfileVersion: 'x.y.v1', strategyId: 'z'.repeat(200), strategyVersion: 'v1', dialect: 'postgres', snapshotSemantics: 's', buildTotalOrderProbeSql: () => 'SELECT 1' }]))
 
   // REAL-DRIVER COUNT SHAPE (review P1): node-postgres returns int8 counts as
   // STRINGS — a '0'/'0' summary row must qualify, not PROBE_QUERY_FAILED.

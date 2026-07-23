@@ -24,6 +24,22 @@ const {
   GIP_RECOVERY_STRATEGIES,
 } = require('./gip-profile-certification-contracts.cjs')
 
+// Independent recovery oracle (review P3: C10 only checked membership+stability, so a
+// wrong-but-stable derivation drifted past the battery). This re-derives from the
+// certificate coordinates by the frozen scale-D0 §2 matrix; C10 asserts the shipped
+// deriveRecoveryStrategy AGREES — a mutation of the shipped derivation now REDs C10.
+function oracleRecoveryStrategy(certificate) {
+  if (certificate.acquisitionMode === 'BOUNDED_READ') return 'WHOLE_RERUN'
+  if (certificate.acquisitionMode === 'SEALED_EXPORT') return 'CHUNK_RESUME'
+  const proofs = certificate.supportedConsistencyProofs || []
+  if (certificate.continuationLifetime === 'DURABLE_TOKEN'
+    && (proofs.includes('IMMUTABLE_SNAPSHOT_TOKEN')
+      || (certificate.acquisitionMode === 'CHANGE_FEED' && proofs.includes('MONOTONIC_VERSION_PIN')))) {
+    return 'PAGE_RESUME'
+  }
+  return 'WHOLE_ROUND_RESTART'
+}
+
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
@@ -180,8 +196,9 @@ function runReadActionProfileComplianceBattery(candidate) {
   {
     const first = deriveRecoveryStrategy(normalized.certificate)
     const second = deriveRecoveryStrategy(normalized.certificate)
-    const ok = GIP_RECOVERY_STRATEGIES.includes(first) && first === second
-    checks.push(Object.freeze({ checkId: 'C10_recovery_derived_stable', ok, observed: ok ? first : 'unstable_or_unknown' }))
+    const expected = oracleRecoveryStrategy(normalized.certificate)
+    const ok = GIP_RECOVERY_STRATEGIES.includes(first) && first === second && first === expected
+    checks.push(Object.freeze({ checkId: 'C10_recovery_derived_stable', ok, observed: ok ? first : 'derivation_drift_or_unstable' }))
   }
 
   // C11 — evidence-shape validators must be load-bearing against this certificate.

@@ -58,6 +58,10 @@ function cleanCandidatePasses() {
   // for the default fixture (2 supported proofs, singleton combos) C11e must be a REAL probe
   const c11e = report.checks.find((entry) => entry.checkId === 'C11e_undeclared_combination_rejected')
   assert.equal(c11e.observed, 'COMPLETENESS_EVIDENCE_INVALID')
+  // C10 now carries the DERIVED strategy (oracle-checked) — not a bare boolean
+  const c10 = report.checks.find((entry) => entry.checkId === 'C10_recovery_derived_stable')
+  assert.equal(c10.ok, true)
+  assert.ok(['WHOLE_RERUN', 'WHOLE_ROUND_RESTART', 'PAGE_RESUME', 'CHUNK_RESUME'].includes(c10.observed))
 }
 
 // The harness's own accepted-mutant branch is LOAD-BEARING (review P2): a fixture
