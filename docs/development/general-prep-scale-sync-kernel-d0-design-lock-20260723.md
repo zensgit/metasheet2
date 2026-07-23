@@ -31,7 +31,7 @@
 
 > **A1 修订（2026-07-23，GIP-D0 联动）**：本矩阵**降为 CertifiedReadActionProfile 的认证 schema**（其中 `applyMode` 维度拆出，独立为 CertifiedApplyProfile——read-action 认证书只含 acquisition/consistency/continuation/completeness 四维）——运行时只可选择被认证的具名 action-profile（`bridge.bounded_read.v1` 等），**不得**自由组合维度；组合空间只在认证时使用（坐标声明 + §8 电池按 profile 实例化为合规套件）。见 `gip-d0-general-integration-platform-design-lock-20260723.md` §3。
 
-> 旧四类（BOUNDED_KEY_READ 等）混合了采集/一致性/续读/证明多维度（如 SNAPSHOT_KEYSET_READ 同时说分页与一致性、SEALED_EXPORT_MANIFEST 同时说传输与恢复）。**改为五个正交维度**，每维冻结枚举；组合合法性与恢复策略**由矩阵推导**，不另设自由表。
+> 旧四类（BOUNDED_KEY_READ 等）混合了采集/一致性/续读/证明多维度（如 SNAPSHOT_KEYSET_READ 同时说分页与一致性、SEALED_EXPORT_MANIFEST 同时说传输与恢复）。**改为正交维度模型**：source 认证 schema **四维**（其中一致性维与完整性维为**集合声明**）+ apply **独立轴**（CertifiedApplyProfile）；组合合法性与恢复策略**由矩阵推导**，不另设自由表。
 
 ```
 ── source 认证 schema（CertifiedReadActionProfile，四维）──
@@ -39,11 +39,13 @@ acquisitionMode:            BOUNDED_READ | PAGED_READ | SEALED_EXPORT | CHANGE_F
 supportedConsistencyProofs: ⊆ { SOURCE_SNAPSHOT_TXN, IMMUTABLE_SNAPSHOT_TOKEN,
                                 MONOTONIC_VERSION_PIN }   （集合；可空=诚实"无快照证明"）
 continuationLifetime:       SINGLE_REQUEST | CONNECTION_BOUND | DURABLE_TOKEN
-completenessProof:          SHORT_PAGE | DECLARED_TOTAL | SIGNED_MANIFEST
+supportedCompletenessProofs: ⊆ { SHORT_PAGE, DECLARED_TOTAL, SIGNED_MANIFEST }（闭集合）
 
-── 独立第五轴（CertifiedApplyProfile，非 source 维度）──
+── 独立轴（CertifiedApplyProfile，非 source 维度）──
 applyMode:                  SYNCHRONOUS_UOW | STAGED_GENERATION
 ```
+
+**A3 修正（owner P2）**：完整性维同为**集合**声明 `supportedCompletenessProofs`；每次 run 的 evidence 另钉 **`usedCompletenessProofs`**（本次实际采用的证明集合）；`SIGNED_MANIFEST` 的**组合规则在 profile 认证书内冻结**（如 SEALED_EXPORT 必含 SIGNED_MANIFEST、可否与 DECLARED_TOTAL 并用由认证书宣告）——run 不得采用认证书未宣告的证明。
 
 **A2 修正（owner P2）**：profile 认证书对一致性维声明**集合** `supportedConsistencyProofs: [] | [...]`——三值闭集**不扩**；**空集 = 诚实声明"无快照证明"**（不是第四种证明，"有界"不得伪装成一致性）。空集可否被接受由**场景角色政策**决定：stock-prep 的 bom_source 可按场景策略接受（基础模式单页读），material-reconciliation 的角色**必须拒绝**。
 
@@ -57,11 +59,11 @@ applyMode:                  SYNCHRONOUS_UOW | STAGED_GENERATION
 
 | 组合 | 模式 |
 |---|---|
-| `BOUNDED_READ × supportedConsistencyProofs:[]（无快照证明，场景政策定可否接受） × SINGLE_REQUEST × SHORT_PAGE × SYNCHRONOUS_UOW` | 基础（#4437 出口②形态的候选 grounding） |
-| `PAGED_READ × SOURCE_SNAPSHOT_TXN × CONNECTION_BOUND × SHORT_PAGE/DECLARED_TOTAL × STAGED_GENERATION` | 高级（live 快照读，断线整轮） |
-| `PAGED_READ × IMMUTABLE_SNAPSHOT_TOKEN × DURABLE_TOKEN × SHORT_PAGE/DECLARED_TOTAL × STAGED_GENERATION` | 高级（可续页） |
-| `SEALED_EXPORT × IMMUTABLE_SNAPSHOT_TOKEN(导出即冻结) × DURABLE_TOKEN(chunk 续传) × SIGNED_MANIFEST × STAGED_GENERATION` | 高级（导出） |
-| `CHANGE_FEED × MONOTONIC_VERSION_PIN × DURABLE_TOKEN(水位) × DECLARED_TOTAL(变更集) × STAGED_GENERATION` | 企业 |
+| `BOUNDED_READ × supportedConsistencyProofs:[]（无快照证明，场景政策定可否接受） × SINGLE_REQUEST × supportedCompletenessProofs:{SHORT_PAGE} × SYNCHRONOUS_UOW` | 基础（#4437 出口②形态的候选 grounding） |
+| `PAGED_READ × SOURCE_SNAPSHOT_TXN × CONNECTION_BOUND × supportedCompletenessProofs:{SHORT_PAGE,DECLARED_TOTAL} × STAGED_GENERATION` | 高级（live 快照读，断线整轮） |
+| `PAGED_READ × IMMUTABLE_SNAPSHOT_TOKEN × DURABLE_TOKEN × supportedCompletenessProofs:{SHORT_PAGE,DECLARED_TOTAL} × STAGED_GENERATION` | 高级（可续页） |
+| `SEALED_EXPORT × IMMUTABLE_SNAPSHOT_TOKEN(导出即冻结) × DURABLE_TOKEN(chunk 续传) × supportedCompletenessProofs:{SIGNED_MANIFEST} × STAGED_GENERATION` | 高级（导出） |
+| `CHANGE_FEED × MONOTONIC_VERSION_PIN × DURABLE_TOKEN(水位) × supportedCompletenessProofs:{DECLARED_TOTAL}(变更集) × STAGED_GENERATION` | 企业 |
 
 **兼容兜底**（确定性分片、离线导入）：**不天然标弱**——若具备一致性 snapshot + 完整 coverage manifest + 签名，可记为强证明；evidence 必须记录**具体 proof class**，不得冒充上述组合。
 
@@ -70,7 +72,14 @@ applyMode:                  SYNCHRONOUS_UOW | STAGED_GENERATION
 ## 3. 执行内核管线（按 applyMode 显式分叉——P1 修正：基础不强行过 staging/generation）
 
 **共同前段**：`approved config -> capability preflight（判定；双向不静默；入 evidence）`。
-**一致性证明步骤按场景 requirement 执行**：场景接受空 proof 集时，evidence 记录 **"场景未要求"**——**不得伪造 proof class**。
+**一致性证明步骤按场景 requirement 执行**，evidence 用**机器形状**记录（不止散文）：
+
+```
+consistencyRequirementStatus: REQUIRED | NOT_REQUIRED
+proofClasses:                 NOT_REQUIRED ⇒ []（空数组）
+```
+
+**`NONE` 永不进入 proof-class 枚举**——"未要求"由 status 字段承载，不得伪造 proof class。
 
 ```
 SYNCHRONOUS_UOW（基础）:
@@ -198,7 +207,7 @@ PERSIST_MAX_PLAN_LINES = 500 × 50 − 1   （H-3 守卫，:566-569）
 2. **本 D0 冻结**（capability 矩阵 / consistency proof / job / artifact / budget / 失败词表）→ **ratify 门**；
 3. 异步 job + sealed staging + generation schema（**unarmed**）；
 4. 并行：SQL snapshot/keyset 与 Bridge export/manifest——**Bridge 侧先做 feasibility spike**：SEALED_EXPORT 虽省交互分页，但新增加密上传、私有存储、签名轮换、清理与重放防护；**先比较真实改动面（vs 交互分页协议改造），spike 结论决定首选，不预断**；
-5. multiset SQL diff + checkpointed apply（解除写入墙；先钉 24,999 provenance）；
+5. multiset SQL diff + checkpointed apply + **generation replay-proof replacement**（§4：H-3 = exact-replay 完整性可证上限而**非**写入墙——新 generation 的可证完整分页读取 / sealed digest replay 替代证明 **mutation-green 后**，才可移除旧 H-3 守卫）；
 6. 高级模式 UI；
 7. 企业模式（CHANGE_FEED + 墓碑 + 周期全量校验）。
 

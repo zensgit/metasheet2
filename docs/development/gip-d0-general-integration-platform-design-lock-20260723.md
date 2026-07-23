@@ -81,7 +81,9 @@ BindingQualification
     （唯一排序键实证、快照能力实证、范围有界实证、映射解析实证……逐前置逐条）
 
 qualificationDigest =
-  H(profileVersion + action/queryPresetVersion
+  H(actionProfileVersion            # 唯一权威版本字段（与 roleBindings 血缘同名同值；
+                                    #  action/queryPreset 的版本被 pin 在该 profile 定义内部，
+                                    #  不作为独立 digest 输入——两实现不得各算各的）
     + systemContentKey + configContentKey
     + objectKey + canonicalObjectVersion
     + normalized qualification evidence)
@@ -89,7 +91,7 @@ qualificationDigest =
 qualifyBinding(...) = server-generated, values-free, input-bound, optionally expiring
 ```
 
-**权威形状冻结（P2 修正）**：资格由**服务端生成**、values-free、**输入绑定**（digest 绑定上列全部输入——防跨对象/跨配置复用）、可设有效期。**Preflight 产生候选资格；Activate 与 run-start 必须重新执行同一资格函数**——客户不能提交或复用 qualification。
+**权威形状冻结（P2 修正）**：资格由**服务端生成**、values-free、**输入绑定**（digest 绑定上列全部输入——防跨对象/跨配置复用）、可设有效期。**客户不能提交或复用 qualification**；probe/verify 的分工与 Activate/run-start 的重验时序见 §5（探测事务外、核验事务内）。
 
 **v1 read-action profile 清单**（首批实现，架构按通用建；**GIP-D0 ratify 不一次性解锁本清单——每个 profile 仍独立过自己的认证门**）：
 
@@ -137,14 +139,29 @@ EXTERNAL_WRITE_TARGET     外部写回目标（v1 禁用；独立认证/审批/�
 **模式可用性（两轮修正吸收——能力非线性等级，禁止 min() 归约；认证 ≠ 实例资格）**：
 
 ```
-modeAvailable(mode) =
-  profile certificate（该角色 action-profile 的认证书满足 mode 谓词）
-  ∧ current BindingQualification（客户所选 object/key/scope/mapping 的实例级资格证明当前有效）
-  ∧ fresh preflight（本次判定的新鲜预检——不信旧 preflight）
-  对每个必选角色成立，且所有可选角色符合场景规定的缺席/降级规则
+modeAvailable(mode) = ∀ 必选角色 r，按 r.roleType 分流：
+  EXTERNAL_READ_SOURCE  ⇒ read-action certificate(mode 谓词)
+                          ∧ current BindingQualification
+                          ∧ fresh preflight（不信旧 preflight）
+  INTERNAL_APPLY_TARGET ⇒ apply certificate(mode 谓词)
+                          ∧ target readiness/qualification
+                            （目标已 provision、schema 兼容、目标侧资格有效）
+  EXTERNAL_WRITE_TARGET ⇒ 恒 false（v1 恒拒绝）
+  ∧ 所有可选角色符合场景规定的缺席/降级规则
 ```
 
-**Activate 与 run-start 仍须重验动态资格**（对齐 MR charter §4.5 四层重验："信当下，不信 preflight 的旧结论"）。
+**判定按角色类型分流（P1 修正）**：内部落库目标**不**套 read profile/BindingQualification——未 provision 或 schema 不兼容的内部目标必须让模式显示不可用，由 apply 侧 readiness 判定承担。
+
+**Activate/run-start 的资格重验（P1 修正：探测与事务分离，对齐 ratified charter"外部网络探测只在 Preflight，绝不进入数据库事务"）**：
+
+```
+probeBindingQualification()   事务外访问外部源，生成候选资格证据（唯一键/快照能力/范围/映射实证）
+verifyBindingQualification()  纯本地、事务安全：重读并核验 digest、输入绑定、有效期与状态——零外部 I/O
+```
+
+- **Preflight** = probe（事务外）→ 产生候选资格；
+- **Activate** = 短事务内仅 `verify`（核验 digest/输入/有效期/状态，**不做外部探测**）；
+- **Run-start** = 先做**新鲜 probe（事务外）**，再用**短事务** `verify` 本地输入并 pin。
 
 UI 展示**逐角色缺口**（"demand_source 的连接器无法证明完整性 → 出口：换 profile / 收窄范围"——#4437 三叉决策树的产品化），**不得**计算抽象 min(profileMode)。**双向不静默**（不降级不升级），判定入 run evidence。
 
