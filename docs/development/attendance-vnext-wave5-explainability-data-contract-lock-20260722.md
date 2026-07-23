@@ -1,7 +1,12 @@
 # 考勤 vNext Wave 5 · 结果解释（explainability）数据合同 design-lock — 2026-07-22
 
-> **Status: PROPOSED（未生效——owner ratify 为唯一生效凭据；ratify 前 W5-0 及一切 Wave 5 runtime
-> 不得开工）。**
+> **Status: RATIFIED（owner 终裁 2026-07-23，凭据 = PR #4546 comment「RATIFY — Wave 5 数据合同
+> 设计锁」@2026-07-23T07:30Z，终裁对象 = merged exact SHA `15a256fe2`，APPROVE 0 P1/0 P2/0 P3——
+> owner 独立复验合并树后裁定 PROPOSED → RATIFIED。授权边界照该 comment 五点：§10-④ 同步 → W5-0
+> （届时 main + 锚点重验 + 查重）→ W5-7 前置票 → W5-1 → W5-2 → 验证 MD/终账；每片独立门；
+> 不含 operator flag/S7/W5-5 runtime/W5-10 runtime/生产部署。）**
+> （被取代的 PROPOSED 状态行保留为历史：）
+> ~~Status: PROPOSED（未生效——owner ratify 为唯一生效凭据；ratify 前 W5-0 及一切 Wave 5 runtime 不得开工）。~~
 > **历史注记（记录保真）**：2026-07-22 曾依会话委托执行受托代行 ratify（comment-5053163506），
 > 随后 owner 复审明示「Wave 5 目前只授权到 DATA-CONTRACT 设计锁……呈审 → owner RATIFY → 再切
 > runtime」并列出七项冻结要求（原文逐字与逐项合同映射 = §0.1，复审修订已吸收入锁）——
