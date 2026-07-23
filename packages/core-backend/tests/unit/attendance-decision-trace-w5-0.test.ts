@@ -784,3 +784,119 @@ describe('⑥ approver_source', () => {
     expect(JSON.stringify(trace)).not.toContain('somethingElse')
   })
 })
+
+describe('SQL values-free (S7-5 same-type — every builder\'s SQL text is parameterized, never string-concatenated)', () => {
+  // §9 W5-0-G2 "SQL 无标识列断言（S7-5 同型）": capture EVERY SQL string issued by EVERY builder and
+  // assert none of the caller-supplied identifiers ever appear literally in the query TEXT (only as
+  // bind-parameter array entries) — the same technique as
+  // `attendance-admin-directory-readiness-s7-5.test.ts:82-189`. A future edit that string-interpolates
+  // any of these values into a query would turn this red.
+  const ORG = 'ORGVALUE_f3a1'
+  const USER = 'USERVALUE_9c2b'
+  const WORK_DATE = '2026-07-01'
+  const REQUEST_ID = 'REQVALUE_77dd'
+  const INSTANCE_ID = 'INSTVALUE_88ee'
+
+  // Unlike `makeMockQuery`, this ALSO records every SQL string issued (in call order) so a
+  // "record found, keep walking the basis chain" fixture can exercise every downstream query a
+  // builder issues — a bare empty-rows stub would short-circuit most builders after their first
+  // (not-found) query and leave the deeper queries unchecked.
+  function makeCapturingQuery(handlers: Handler[] = []): { calls: string[]; query: AttendanceDecisionTraceQueryFn } {
+    const calls: string[] = []
+    const query = (async (sql: string) => {
+      calls.push(sql)
+      for (const h of handlers) {
+        if (h.match.test(sql)) return { rows: h.rows, rowCount: h.rows.length } as never
+      }
+      return { rows: [], rowCount: 0 } as never
+    }) as AttendanceDecisionTraceQueryFn
+    return { calls, query }
+  }
+
+  function assertValuesFree(calls: string[]) {
+    expect(calls.length).toBeGreaterThan(0)
+    for (const sql of calls) {
+      expect(sql, `SQL text must not embed the org id literally: ${sql}`).not.toContain(ORG)
+      expect(sql, `SQL text must not embed the user id literally: ${sql}`).not.toContain(USER)
+      expect(sql, `SQL text must not embed the work date literally: ${sql}`).not.toContain(WORK_DATE)
+      expect(sql, `SQL text must not embed the request id literally: ${sql}`).not.toContain(REQUEST_ID)
+      expect(sql, `SQL text must not embed the instance id literally: ${sql}`).not.toContain(INSTANCE_ID)
+      // Every query in this module is org-scoped and parameterized — a bare `$1` placeholder must
+      // be present (mirrors S7-5's `sql).toMatch(/\$1/)` positive control).
+      expect(sql, `SQL text must be parameterized: ${sql}`).toMatch(/\$1/)
+    }
+  }
+
+  const RECORD_ROW = {
+    id: 'r1', status: 'late', is_workday: true, work_minutes: 400, late_minutes: 15, early_leave_minutes: 0,
+    meta: { severe_late_count: 0, severe_late_minutes: 0, absence_late_count: 0 }, source_batch_id: 'batch1',
+    created_at: '2026-07-01T09:00:00Z', updated_at: '2026-07-01T09:20:00Z', first_in_at: '2026-07-01T09:00:00Z', last_out_at: '2026-07-01T18:00:00Z',
+  }
+  const RECORD_FOUND_HANDLERS: Handler[] = [
+    { match: /FROM attendance_records/, rows: [RECORD_ROW] },
+    { match: /attendance_shift_assignments/, rows: [] },
+    { match: /FROM attendance_rules WHERE org_id = \$1/, rows: [{ late_grace_minutes: 10, early_grace_minutes: 10, severe_late_threshold_minutes: 30, absence_late_threshold_minutes: 60 }] },
+    { match: /attendance_record_result_edits/, rows: [{ created_at: '2026-07-01T09:30:00Z', actor_user_id: 'actor1' }] },
+    { match: /FROM users WHERE id/, rows: [{ id: 'actor1', name: 'Actor One', email: null, is_active: true }] },
+    { match: /FROM attendance_requests/, rows: [{ id: 'req1', created_at: '2026-07-01T09:00:00Z', metadata: { makeupPunchPolicySnapshot: { version: 1, requestEvaluatedAt: '2026-07-01T09:00:00Z' } } }] },
+    { match: /FROM attendance_events/, rows: [{ occurred_at: '2026-07-01T10:00:00Z' }] },
+  ]
+
+  it('buildTodayStatusTrace — all queries parameterized (record-found path, incl. correction env)', async () => {
+    const { calls, query } = makeCapturingQuery(RECORD_FOUND_HANDLERS)
+    await buildTodayStatusTrace(ORG, USER, WORK_DATE, query)
+    assertValuesFree(calls)
+    expect(calls.length).toBeGreaterThan(1)
+  })
+  it('buildLateEarlyTrace — all queries parameterized (record-found path, incl. remediation env)', async () => {
+    const { calls, query } = makeCapturingQuery(RECORD_FOUND_HANDLERS)
+    await buildLateEarlyTrace(ORG, USER, WORK_DATE, query)
+    assertValuesFree(calls)
+    expect(calls.length).toBeGreaterThan(1)
+  })
+  it('buildMissingPunchTrace — all queries parameterized (record-found path, incl. ③E4 adjustment event)', async () => {
+    const { calls, query } = makeCapturingQuery(RECORD_FOUND_HANDLERS)
+    await buildMissingPunchTrace(ORG, USER, WORK_DATE, query)
+    assertValuesFree(calls)
+    expect(calls.length).toBeGreaterThan(1)
+    expect(calls.some((sql) => /FROM attendance_events/.test(sql))).toBe(true)
+  })
+  it('buildOvertimeSegmentationTrace — all queries parameterized (snapshot-found path)', async () => {
+    const { calls, query } = makeCapturingQuery([
+      {
+        match: /FROM attendance_requests/,
+        rows: [{
+          id: 'req1',
+          metadata: {
+            overtimeSegmentation: { version: 1, engine: 'attendance_overtime_segmentation_v1', dayType: 'workday', calendar: { effectiveSource: 'calendar_default' }, segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60 },
+            overtimeRule: { minMinutes: 30 },
+            approvalFlow: { steps: [] },
+          },
+          resolved_at: '2026-07-02T10:00:00Z', updated_at: 'y',
+        }],
+      },
+      { match: /FROM attendance_overtime_rules/, rows: [{ id: 'rule1' }] },
+    ])
+    await buildOvertimeSegmentationTrace(ORG, USER, REQUEST_ID, query, false)
+    assertValuesFree(calls)
+    expect(calls.length).toBeGreaterThan(1)
+  })
+  it('buildCompTimeBalanceTrace — all queries parameterized (incl. the newly-wired settlement read)', async () => {
+    const { calls, query } = makeCapturingQuery()
+    await buildCompTimeBalanceTrace(ORG, USER, query, { compTimeFromOvertime: false, overtimeBankPolicy: false })
+    assertValuesFree(calls)
+    expect(calls.some((sql) => /attendance_payroll_cycle_settlements/.test(sql))).toBe(true)
+  })
+  it('buildApproverSourceTrace — all queries parameterized (assignment-found path)', async () => {
+    const { calls, query } = makeCapturingQuery([
+      { match: /FROM attendance_requests WHERE org_id/, rows: [{ id: 'req1' }] },
+      { match: /FROM approval_instances/, rows: [{ id: 'inst1', created_at: 'x', requester_snapshot: {}, metadata: { approvalFlow: { steps: [] } } }] },
+      { match: /FROM approval_assignments/, rows: [{ assignment_type: 'user', assignee_id: 'mgr1', source_step: 0, metadata: { resolvedFrom: { kind: 'direct_manager' } }, updated_at: 'y' }] },
+      { match: /FROM approval_records/, rows: [{ occurred_at: 'z' }] },
+      { match: /FROM users WHERE id/, rows: [{ id: 'mgr1', name: 'Manager One', email: null, is_active: true }] },
+    ])
+    await buildApproverSourceTrace(ORG, USER, INSTANCE_ID, query, false)
+    assertValuesFree(calls)
+    expect(calls.length).toBeGreaterThan(1)
+  })
+})
