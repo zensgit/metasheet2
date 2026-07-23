@@ -2,8 +2,8 @@
 
 **结论：ENGINEERING STACK VERIFIED THROUGH DRAFT #4539; NOT MERGED, UAT'D OR ENABLED**
 
-本文对组合根 #4540 `0bfcd6ebd04fa991ab13bae0ec45ecdf1bf28e40` 及其重排后的最终数据栈头
-#4539 `4dbdb3b2d862e22c2451cf6d7af2ad3eeba8b714` 的本地验证负责。
+本文对组合根 #4540 `26ef90692d183de95c4020238b24782a0ac83e3b` 及其重排后的最终数据栈头
+#4539 `34d1485cebb00ef5f55732753099e6c177739fdc` 的本地验证负责。
 Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独立状态。
 
 ## 1. 为什么需要组合 PR
@@ -72,7 +72,8 @@ Draft、远端 CI、合入 main、真实租户 UAT 和生产启用是五个独�
 | backend `tsc --noEmit` | pass | 最终组合 head 类型面 |
 
 动态依赖守卫的“始终允许”变异使 AST、运行时和保存三条指定规格同时变红；区间恒真守卫的“始终否”变异
-使区间证明与保存拒绝两条指定规格变红。record-link 的 required 真库矩阵以
+使区间证明与保存拒绝两条指定规格变红；条件可见字段正控防止把可能隐藏的 required 字段误判为恒真。
+record-link 的 required 真库矩阵以
 base-read 为唯一变量，覆盖 submit 和 picker 的 fail-closed/positive-control 两面；未对生产授权代码执行削弱型
 源代码变异。
 

@@ -3,8 +3,8 @@
 **状态：COMPOSED AND LOCALLY VERIFIED / DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / NOT LANDED**
 
 记录基线：`origin/main@ee39a13eb9db27d01c89cb19f0644b546c711347`。组合根：#4540
-`0bfcd6ebd04fa991ab13bae0ec45ecdf1bf28e40`；最终数据栈头：#4539
-`4dbdb3b2d862e22c2451cf6d7af2ad3eeba8b714`。
+`26ef90692d183de95c4020238b24782a0ac83e3b`；最终数据栈头：#4539
+`34d1485cebb00ef5f55732753099e6c177739fdc`。
 本台账记录实现和证据，不构成合并、UAT 或启用授权。
 
 ## 1. 已在 main 的底座
@@ -20,16 +20,16 @@
 | Lane | PR / exact head | 内容 | 组合处置 |
 |---|---|---|---|
 | Data root | #4510 `f6d05814a8` | 附件、FWB activation、画布基础和 CI | 被 #4540 吸收 |
-| Record-link | #4524 `2e529e0f52` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
-| FWB update | #4531 `6276f763ad` | 更新受约束已有记录 | 已叠到 #4524 |
-| FWB composition | #4539 `4dbdb3b2d8` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
+| Record-link | #4524 `8c4036536f` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
+| FWB update | #4531 `23035f9556` | 更新受约束已有记录 | 已叠到 #4524 |
+| FWB composition | #4539 `34d1485ceb` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
 | Canvas root | #4433 `fc5477d7e4` | 分支编排与纵向画布 | 被 #4540 吸收 |
 | Canvas all-path | #4532 `762dc0fd5` | 条件内并行路径全部汇合 | 被 #4540 吸收 |
 | Canvas inspector | #4533 `babc6d975` | 共享检查器、键盘和响应式 | 被 #4540 吸收 |
 | Version restore | #4536 `3bb327a93` | diff/restore 与当前校验 | 被 #4540 吸收 |
 | Navigation | #4537 `b2f69116b` | zoom/pan/minimap/overlay | 被 #4540 吸收 |
 | Reorder | #4538 `a3562083af` | 同区域语义重排 | 被 #4540 吸收 |
-| Integration | #4540 `0bfcd6ebdf` | 两条线的唯一联合解析与测试面 | Draft，owner review |
+| Integration | #4540 `26ef90692d` | 两条线的唯一联合解析与测试面 | Draft，owner review |
 
 ## 3. 组合审阅发现与修复
 
