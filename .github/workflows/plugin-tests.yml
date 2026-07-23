@@ -660,6 +660,8 @@ jobs:
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
             tests/integration/multitable-fwb-write-action-realdb.test.ts \
+            tests/integration/approval-attachment-gc-realdb.test.ts \
+            tests/integration/approval-attachment-bind-reconcile-realdb.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
@@ -715,6 +717,7 @@ jobs:
             tests/integration/approval-amount-total-check.api.test.ts \
             tests/integration/approval-wp1-parallel-gateway.api.test.ts \
             tests/integration/approval-bridge-redaction-regression.test.ts \
+            tests/integration/approval-attachment-pipeline-realdb.test.ts \
             tests/integration/approval-metrics-people-teams.test.ts \
             tests/integration/approval-node-sla-remind.test.ts \
             tests/integration/approval-node-timeout-effects.test.ts \

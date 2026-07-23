@@ -1,0 +1,185 @@
+/**
+ * Approval attachments — slice ④: storage provider (server-side keys, containment-first) + auth-proxied
+ * download gate (#4195: object storage provider, 上传/鉴权代理下载; mirrors the F3-hardened
+ * LocalStorageProvider doctrine: server-generated keys, path containment, no client-supplied paths).
+ *
+ *   - Keys are SERVER-GENERATED (`approval/<yyyy-mm>/<uuid>.<ext>`) — a client filename NEVER becomes a
+ *     storage path (its extension is re-derived from the ALREADY-VALIDATED mime, not the client string).
+ *   - `LocalFsApprovalAttachmentStore` resolves every key against its root and REFUSES any resolution that
+ *     escapes it (fail-closed containment — defense in depth even though keys are server-made).
+ *   - Download is AUTH-PROXIED: `authorizeAttachmentDownload` recomputes the viewer's right on EVERY
+ *     download (uploader while unbound; instance participant once bound; deleted → gone), fail-closed on
+ *     error. The route slice streams the blob only after this returns ok — no signed public URLs in v1.
+ *
+ * WIRED (approval-attachment-runtime.ts): the flag-gated routes consume the store + download gate;
+ * production resolves NO local store (O3 fail-close 503) — local-FS is dev/test only.
+ */
+import { randomUUID } from 'node:crypto'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import * as path from 'node:path'
+
+const MIME_EXT: Readonly<Record<string, string>> = Object.freeze({
+  'application/pdf': 'pdf',
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'text/plain': 'txt',
+  'text/csv': 'csv',
+})
+
+/** Server-side key derivation — validated mime decides the extension; the client filename is IGNORED. */
+export function deriveStorageKey(validatedMime: string, now: () => Date = () => new Date()): string {
+  const ext = MIME_EXT[validatedMime]
+  if (!ext) throw new RangeError(`deriveStorageKey: mime "${validatedMime}" is not in the v1 allowlist`)
+  const d = now()
+  const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
+  return `approval/${ym}/${randomUUID()}.${ext}`
+}
+
+export interface ApprovalAttachmentStore {
+  put(storageKey: string, content: Buffer): Promise<void>
+  get(storageKey: string): Promise<Buffer>
+  /** idempotent: deleting a missing blob returns false, never throws. */
+  delete(storageKey: string): Promise<boolean>
+}
+
+/** Local-FS store with fail-closed containment. S3-compatible impl lands with ops config (same interface). */
+export class LocalFsApprovalAttachmentStore implements ApprovalAttachmentStore {
+  constructor(private readonly rootDir: string) {
+    if (typeof rootDir !== 'string' || rootDir.trim() === '') throw new RangeError('rootDir required')
+  }
+
+  /** Resolve a key inside the root; ANY escape (.., absolute, drive, weird encodings) throws. */
+  private contain(storageKey: string): string {
+    if (typeof storageKey !== 'string' || storageKey.trim() === '' || storageKey.includes('\0')) {
+      throw new RangeError('invalid storage key')
+    }
+    const root = path.resolve(this.rootDir)
+    const resolved = path.resolve(root, storageKey)
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+      throw new RangeError('storage key escapes the attachment root — refused')
+    }
+    return resolved
+  }
+
+  async put(storageKey: string, content: Buffer): Promise<void> {
+    const p = this.contain(storageKey)
+    await mkdir(path.dirname(p), { recursive: true })
+    await writeFile(p, content, { flag: 'wx' }) // never overwrite an existing blob (keys are unique by construction)
+  }
+
+  async get(storageKey: string): Promise<Buffer> {
+    return readFile(this.contain(storageKey))
+  }
+
+  async delete(storageKey: string): Promise<boolean> {
+    try {
+      await rm(this.contain(storageKey))
+      return true
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw err
+    }
+  }
+
+  /**
+   * Enumerate every blob under the root WITH its age (mtime-based) — the reconciler's `listBlobs` seam
+   * (§7/G15). Scope containment is structural: the walk starts at (and can never leave) this store's
+   * root, which the boot wiring dedicates to approval attachments — the reconciler therefore can never
+   * see (let alone enqueue) another product's blobs. A missing root lists as empty (nothing uploaded yet).
+   */
+  async list(now: () => number = () => Date.now()): Promise<Array<{ key: string; ageMs: number }>> {
+    const root = path.resolve(this.rootDir)
+    const out: Array<{ key: string; ageMs: number }> = []
+    const walk = async (dir: string): Promise<void> => {
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw err
+      }
+      for (const entry of entries) {
+        const p = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          await walk(p)
+        } else if (entry.isFile()) {
+          const s = await stat(p)
+          out.push({ key: path.relative(root, p).split(path.sep).join('/'), ageMs: Math.max(0, now() - s.mtimeMs) })
+        }
+      }
+    }
+    await walk(root)
+    return out
+  }
+}
+
+export interface AttachmentRowForAuth {
+  status: 'unbound' | 'bound' | 'deleted'
+  uploaderId: string
+  instanceId: string | null
+  /** the attachment field's id in the template form schema — the key the hidden-redaction gate reads (G7). */
+  fieldId: string
+}
+
+export interface DownloadAuthChecks {
+  /** is the viewer a participant (initiator/approver/cc) of the instance? */
+  isInstanceParticipant(viewerId: string, instanceId: string): Promise<boolean>
+  /**
+   * Does the instance's ACTIVE node(s) mark `fieldId` as `access:'hidden'`? (§4.2 gate 2 / G7.)
+   * The production wiring MUST back this with the SAME `collectHiddenFieldIds(...)` the snapshot
+   * redaction uses (`approval-form-redaction.ts`), keyed on the instance's active node(s) — never a
+   * re-derived hidden decision — so the byte path and the echoed snapshot cannot drift on "hidden".
+   */
+  isFieldHiddenAtActiveNode(instanceId: string, fieldId: string): Promise<boolean>
+}
+
+export type DownloadAuthResult =
+  | { ok: true }
+  | { ok: false; code: 'gone' | 'not_uploader' | 'not_participant' | 'hidden' }
+
+/**
+ * Recomputed on EVERY download; fail-closed on error. Two gates in order (§4.2):
+ *   1. instance-visibility (uploader while unbound; instance participant once bound);
+ *   2. hidden-field redaction — a field the snapshot would hide serves NO bytes to ANYONE (G7).
+ * The `deleted → gone` lifecycle signal is emitted LAST, so an unauthorized outsider always gets the
+ * same authorization denial and never a 404→410 existence/lifecycle oracle (P2 #3 moves it here / G6).
+ */
+export async function authorizeAttachmentDownload(
+  row: AttachmentRowForAuth,
+  viewerId: string,
+  checks: DownloadAuthChecks,
+): Promise<DownloadAuthResult> {
+  // Gate 1: instance-visibility. Evaluated BEFORE any deleted/gone signal so an unauthorized outsider
+  // always gets the same authorization denial (→ 404) and never a 404→410 existence/lifecycle oracle
+  // (G6). Unbound (no instance) is uploader-only; bound/cascade-deleted uses the participant predicate.
+  let authorized: boolean
+  let denyCode: 'not_uploader' | 'not_participant'
+  if (!row.instanceId) {
+    authorized = row.uploaderId === viewerId // pre-submit: only the uploader
+    denyCode = 'not_uploader'
+  } else {
+    denyCode = 'not_participant'
+    try {
+      authorized = await checks.isInstanceParticipant(viewerId, row.instanceId)
+    } catch {
+      authorized = false // fail-closed
+    }
+  }
+  if (!authorized) return { ok: false, code: denyCode }
+  // Gate 2 (G7): even an authorized participant gets NO bytes for a field hidden at the active node —
+  // the byte path inherits the snapshot's redaction. Bound rows only (unbound has no active node).
+  // Fail-closed: if we cannot confirm not-hidden, refuse.
+  if (row.instanceId) {
+    let hidden = true
+    try {
+      hidden = await checks.isFieldHiddenAtActiveNode(row.instanceId, row.fieldId)
+    } catch {
+      hidden = true // fail-closed: an ACL/graph-load failure must never leak a byte a hidden field would strip
+    }
+    if (hidden) return { ok: false, code: 'hidden' }
+  }
+  // Gate 3: lifecycle. Only an AUTHORIZED viewer reaches this — they see the deleted tombstone (410);
+  // an outsider was already denied at gate 1, so the deleted state is never an oracle for them (G6).
+  if (row.status === 'deleted') return { ok: false, code: 'gone' }
+  return { ok: true }
+}

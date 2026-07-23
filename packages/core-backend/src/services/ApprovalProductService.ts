@@ -49,6 +49,8 @@ import {
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
+import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
+import { bindAttachmentsOnSubmit, collectAttachmentIdsByField } from './approval-attachment-reconciler'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -3973,7 +3975,7 @@ export class ApprovalProductService {
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
     // RP-1: prefix extracted verbatim into assembleCreationContext (shared with previewApprovalRoute).
-    const { bundle, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
+    const { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
       await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
@@ -4027,6 +4029,31 @@ export class ApprovalProductService {
           initial.currentNodeKey,
         ],
       )
+
+      // B3-07 §4.4 form-freeze bind (flag-gated, #4195): bind the submitter's staged (unbound)
+      // attachment uploads to this instance INSIDE the create transaction — the same txn that froze
+      // the id arrays into form_snapshot above, so a half-bound state is impossible. Any unbindable
+      // id (missing / foreign / already bound / GC-claimed) throws → the WHOLE create rolls back
+      // (fail-closed, G4). Flag OFF ⇒ zero behavior: no attachment values reach normalizedFormData
+      // (B2-28 strips them client-side and no upload endpoint exists to mint ids), and this block
+      // does not run.
+      if (isApprovalAttachmentsEnabled()) {
+        const attachmentIdsByField = (() => {
+          try {
+            return collectAttachmentIdsByField(formSchema, normalizedFormData)
+          } catch {
+            throw new ServiceError('Approval attachment references are invalid', 400, 'APPROVAL_ATTACHMENT_BIND_FAILED')
+          }
+        })()
+        if (Object.keys(attachmentIdsByField).length > 0) {
+          try {
+            await bindAttachmentsOnSubmit(client, actor.userId, instanceId, attachmentIdsByField)
+          } catch {
+            // values-free: the reject reason (which id, whose row) is never echoed to the caller.
+            throw new ServiceError('Approval attachments could not be bound', 400, 'APPROVAL_ATTACHMENT_BIND_FAILED')
+          }
+        }
+      }
 
       // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
       // same-transaction auto-approval cascade at this node carries that same epoch (§7).

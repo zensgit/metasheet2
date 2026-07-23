@@ -285,6 +285,7 @@ export class MetaSheetServer {
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
+  private stopApprovalAttachmentWorkers?: () => void
   private automationService?: AutomationService
   // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
   // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
@@ -2190,6 +2191,14 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.stopApprovalAttachmentWorkers?.()
+        this.stopApprovalAttachmentWorkers = undefined
+      } catch (err) {
+        this.logger.warn(`Approval attachment workers stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
         if (this.yjsCleanupTimer) {
           clearInterval(this.yjsCleanupTimer)
           this.yjsCleanupTimer = undefined
@@ -2715,6 +2724,29 @@ export class MetaSheetServer {
         throw e
       }
       this.logger.error('Durable delivery dispatch loop initialization failed (flag OFF — nothing suppressed, legacy path delivers); continuing', e as Error)
+    }
+
+    // B3-07 approval attachment pipeline (#4195 §7/§9) — flag-gated boot: route mount + GC sweep +
+    // purge drain + bucket reconciler. APPROVAL_ATTACHMENTS_ENABLED OFF ⇒ bootApprovalAttachmentRuntime
+    // returns null: nothing mounts, nothing ticks, byte-identical startup (D5/G1). Flag ON ⇒ the boot
+    // resolves storage per the ratified O3 decision (production requires an S3-compatible provider —
+    // none exists yet, so prod mounts with uploads/downloads fail-closed 503; dev/test probe a local-FS
+    // root) and a FAILED probe/boot ABORTS startup — the same fail-closed doctrine as
+    // durableBootFailureDisposition (flag ON means a storage-less boot is an outage, not a degrade).
+    try {
+      const { bootApprovalAttachmentRuntime } = await import('./services/approval-attachment-runtime')
+      const attachmentRuntime = await bootApprovalAttachmentRuntime({ db: poolManager.get(), logger: this.logger })
+      if (attachmentRuntime) {
+        this.app.use(attachmentRuntime.router)
+        if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+          this.stopApprovalAttachmentWorkers = attachmentRuntime.startWorkers()
+        }
+        this.logger.info('Approval attachment pipeline initialized (APPROVAL_ATTACHMENTS_ENABLED)')
+      }
+    } catch (e) {
+      // Only reachable flag-ON (flag-OFF returns null before anything fallible) ⇒ always fail-closed.
+      this.logger.error('Approval attachment runtime boot FAILED with APPROVAL_ATTACHMENTS_ENABLED=true — aborting startup (fail-closed: an unusable blob store must not boot a live upload surface)', e as Error)
+      throw e
     }
 
     // AI usage ledger retention sweep (ladder #9): a periodic bounded DELETE of
