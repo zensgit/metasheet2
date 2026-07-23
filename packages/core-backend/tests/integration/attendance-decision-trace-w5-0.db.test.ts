@@ -518,12 +518,14 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
         expect(resOther.body).toEqual(resGhost.body)
       })
 
-      it('⑤ comp_time_balance — OTHER-owned lot never appears in subject-locked response (no lot-id targeting exists, so no 404 leg applies)', async () => {
+      it('⑤ comp_time_balance — OTHER-owned lot/events never appear in subject-locked response (no lot-id targeting exists, so no 404 leg applies)', async () => {
         await seedLot(ORG_TU, USER_OTHER, 'annual_accrual', 'tu-other-lot')
         selfApp(USER_SUBJECT)
         const res = await request(pinned.url()).get(`/api/attendance/decision-trace?orgId=${ORG_TU}&category=comp_time_balance`)
         expect(res.status).toBe(200)
+        // §9 W5-0-G7 "200 + 空 lot/event 投影" — both projections, not just lots.
         expect(res.body.data.conclusion.lots).toEqual([])
+        expect(res.body.data.conclusion.events).toEqual([])
       })
 
       it('⑥ approver_source — OTHER-owned instanceId ⇒ 404, byte-identical shape to a truly-nonexistent id', async () => {
@@ -982,6 +984,11 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
       // separately-labeled) rule_live environment's presence may legitimately change.
       expect(after.body.data.conclusion).toEqual(before.body.data.conclusion)
       expect(after.body.data.coverageNote).toEqual(before.body.data.coverageNote)
+      // Every OTHER basis environment (snapshot/audit/policy_gate) must also be byte-stable — only
+      // `rule_live` is licensed to change (§3.1 hard rule 6 "快照排他").
+      const beforeNonRuleLive = before.body.data.basis.filter((b: { source: { kind: string } }) => b.source.kind !== 'rule_live')
+      const afterNonRuleLive = after.body.data.basis.filter((b: { source: { kind: string } }) => b.source.kind !== 'rule_live')
+      expect(afterNonRuleLive).toEqual(beforeNonRuleLive)
     })
   })
 })
