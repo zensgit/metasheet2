@@ -61,7 +61,7 @@ async function jsonRequest(
 function authoringFormSchema() {
   return {
     fields: [
-      { id: 'amount', type: 'number', label: 'Amount', required: true },
+      { id: 'amount', type: 'number', label: 'Amount', required: true, props: { min: 0 } },
       { id: 'reviewer', type: 'user', label: 'Reviewer', required: true },
     ],
   }
@@ -481,7 +481,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     expect(pointerAfterAccept.rows[0].latest_version_id).toBe(accepted.id)
   })
 
-  it('rejects dependency-free condition formulas at create, update, publish, and restore while accepting a field-dependent formula', async () => {
+  it('rejects dependency-free and bound-proven always-true formulas across authoring paths', async () => {
     const conditionGraph = (expression: string) => ({
       nodes: [
         { key: 'start', type: 'start', config: {} },
@@ -512,54 +512,59 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
       formSchema: authoringFormSchema(),
       approvalGraph: conditionGraph(expression),
     })
-    const expectStaticRejection = async (response: Response) => {
+    const expectFormulaRejection = async (response: Response, code: string) => {
       expect(response.status).toBe(400)
       const payload = await response.json() as { error: { code: string; details?: Record<string, unknown> } }
-      expect(payload.error.code).toBe('APPROVAL_CONDITION_FORMULA_STATIC')
+      expect(payload.error.code).toBe(code)
       expect(payload.error.details).toEqual({ branchIndex: 0 })
     }
 
-    await expectStaticRejection(await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+    await expectFormulaRejection(await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
       method: 'POST',
       body: templateRequest(`uat-static-create-${Date.now()}`, '1 == 1'),
-    }))
+    }), 'APPROVAL_CONDITION_FORMULA_STATIC')
+
+    await expectFormulaRejection(await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: templateRequest(`uat-tautology-create-${Date.now()}`, '{amount} >= -1'),
+    }), 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE')
 
     const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
       method: 'POST',
-      body: templateRequest(`uat-dynamic-create-${Date.now()}`, '{amount} >= -1'),
+      body: templateRequest(`uat-dynamic-create-${Date.now()}`, '{amount} >= 100'),
     })
     expect(createResp.status).toBe(201)
     const created = await createResp.json() as { id: string; latestVersionId: string }
     createdTemplateIds.add(created.id)
 
-    await expectStaticRejection(await jsonRequest(baseUrl, `/api/approval-templates/${created.id}`, adminToken, {
+    await expectFormulaRejection(await jsonRequest(baseUrl, `/api/approval-templates/${created.id}`, adminToken, {
       method: 'PATCH',
-      body: { approvalGraph: conditionGraph('1 == 1') },
-    }))
+      body: { approvalGraph: conditionGraph('{amount} >= -1') },
+    }), 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE')
 
     const pool = poolManager.get()
     const inserted = await pool.query<{ id: string }>(
       `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
        VALUES ($1, 2, 'draft', $2, $3)
        RETURNING id`,
-      [created.id, JSON.stringify(authoringFormSchema()), JSON.stringify(conditionGraph('1 == 1'))],
+      [created.id, JSON.stringify(authoringFormSchema()), JSON.stringify(conditionGraph('{amount} >= -1'))],
     )
     const staticVersionId = inserted.rows[0].id
 
-    await expectStaticRejection(await jsonRequest(
+    await expectFormulaRejection(await jsonRequest(
       baseUrl,
       `/api/approval-templates/${created.id}/versions/${staticVersionId}/restore`,
       adminToken,
       { method: 'POST', body: { expectedLatestVersionId: created.latestVersionId } },
-    ))
+    ), 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE')
 
     await pool.query('UPDATE approval_templates SET latest_version_id = $1 WHERE id = $2', [staticVersionId, created.id])
-    await expectStaticRejection(await jsonRequest(
+    await expectFormulaRejection(await jsonRequest(
       baseUrl,
       `/api/approval-templates/${created.id}/publish`,
       adminToken,
       { method: 'POST', body: { policy: { allowRevoke: true } } },
-    ))
+    ), 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE')
   })
 
   // P3-2 (review 20260717c): the belongs-to-template (IDOR) guard was only discriminated in the

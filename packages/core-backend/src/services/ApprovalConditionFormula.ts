@@ -563,6 +563,99 @@ export function approvalConditionFormulaHasDynamicDependency(expression: string)
   return astHasDynamicDependency(parseFormula(expression))
 }
 
+type FormulaTruth = 'always_true' | 'always_false' | 'unknown'
+type NumericRange = { min: number; max: number }
+
+function finiteFieldBound(field: FormField, key: 'min' | 'max'): number | null {
+  const raw = field.props?.[key]
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+  if (typeof raw === 'string' && raw.trim()) {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function numericRange(ast: FormulaAst, schema: FormSchema): NumericRange | null {
+  if (ast.kind === 'number') return { min: ast.value, max: ast.value }
+  if (ast.kind === 'unary' && ast.op === 'NEG') {
+    const inner = numericRange(ast.expr, schema)
+    return inner ? { min: -inner.max, max: -inner.min } : null
+  }
+  if (ast.kind !== 'field' || ast.path.length !== 1) return null
+  const field = findTopLevelField(schema, ast.path[0])
+  // An optional/missing field makes evaluation fail closed, so it cannot be
+  // proven true for every valid submission.
+  if (!field || field.type !== 'number' || field.required !== true) return null
+  const min = finiteFieldBound(field, 'min') ?? Number.NEGATIVE_INFINITY
+  const max = finiteFieldBound(field, 'max') ?? Number.POSITIVE_INFINITY
+  return min <= max ? { min, max } : null
+}
+
+function compareRangeTruth(
+  op: Extract<FormulaAst, { kind: 'compare' }>['op'],
+  left: NumericRange,
+  right: NumericRange,
+): FormulaTruth {
+  if (op === '>') {
+    if (left.min > right.max) return 'always_true'
+    if (left.max <= right.min) return 'always_false'
+  } else if (op === '>=') {
+    if (left.min >= right.max) return 'always_true'
+    if (left.max < right.min) return 'always_false'
+  } else if (op === '<') {
+    if (left.max < right.min) return 'always_true'
+    if (left.min >= right.max) return 'always_false'
+  } else if (op === '<=') {
+    if (left.max <= right.min) return 'always_true'
+    if (left.min > right.max) return 'always_false'
+  } else if (op === '==') {
+    if (left.min === left.max && right.min === right.max && left.min === right.min) return 'always_true'
+    if (left.max < right.min || right.max < left.min) return 'always_false'
+  } else if (left.max < right.min || right.max < left.min) {
+    return 'always_true'
+  } else if (left.min === left.max && right.min === right.max && left.min === right.min) {
+    return 'always_false'
+  }
+  return 'unknown'
+}
+
+function formulaTruth(ast: FormulaAst, schema: FormSchema): FormulaTruth {
+  if (ast.kind === 'boolean') return ast.value ? 'always_true' : 'always_false'
+  if (ast.kind === 'unary' && ast.op === 'NOT') {
+    const inner = formulaTruth(ast.expr, schema)
+    return inner === 'always_true' ? 'always_false' : inner === 'always_false' ? 'always_true' : 'unknown'
+  }
+  if (ast.kind === 'binary' && (ast.op === 'AND' || ast.op === 'OR')) {
+    const left = formulaTruth(ast.left, schema)
+    const right = formulaTruth(ast.right, schema)
+    if (ast.op === 'AND') {
+      if (left === 'always_false' || right === 'always_false') return 'always_false'
+      return left === 'always_true' && right === 'always_true' ? 'always_true' : 'unknown'
+    }
+    if (left === 'always_true' || right === 'always_true') return 'always_true'
+    return left === 'always_false' && right === 'always_false' ? 'always_false' : 'unknown'
+  }
+  if (ast.kind === 'compare') {
+    const left = numericRange(ast.left, schema)
+    const right = numericRange(ast.right, schema)
+    return left && right ? compareRangeTruth(ast.op, left, right) : 'unknown'
+  }
+  return 'unknown'
+}
+
+/**
+ * Conservative authoring guard for formulas that still mention a field but
+ * are guaranteed true by that required numeric field's configured bounds.
+ * Unknown is always allowed; this never guesses from sampled values.
+ */
+export function approvalConditionFormulaIsProvablyAlwaysTrue(
+  expression: string,
+  schema: FormSchema,
+): boolean {
+  return formulaTruth(parseFormula(expression), schema) === 'always_true'
+}
+
 /**
  * Token-aware: does the formula reference `requester.<attr>` as an actual reserved requester TOKEN —
  * not a string literal like "requester.department" or a field name that merely contains the text?

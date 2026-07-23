@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   APPROVAL_CONDITION_FORMULA_LIMITS,
   approvalConditionFormulaHasDynamicDependency,
+  approvalConditionFormulaIsProvablyAlwaysTrue,
   assertApprovalConditionFormulaValidForSchema,
   evaluateApprovalConditionFormula,
   extractRequesterRoleLiterals,
@@ -96,6 +97,18 @@ describe('approval condition formula evaluator (FC-1)', () => {
     expect(approvalConditionFormulaHasDynamicDependency('SUM({items.amount}) >= 1')).toBe(true)
     expect(approvalConditionFormulaHasDynamicDependency('requester.department == "finance"')).toBe(true)
     expect(approvalConditionFormulaHasDynamicDependency('requester.role in ["approver"]')).toBe(true)
+  })
+
+  it('proves only bound-derived tautologies and keeps unknown formulas eligible', () => {
+    const bounded: FormSchema = {
+      fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true, props: { min: 0 } }],
+    }
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= -1', bounded)).toBe(true)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} < -1', bounded)).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= 100', bounded)).toBe(false)
+    expect(approvalConditionFormulaIsProvablyAlwaysTrue('{amount} >= -1', {
+      fields: [{ id: 'amount', type: 'number', label: 'Amount', props: { min: 0 } }],
+    })).toBe(false)
   })
 })
 

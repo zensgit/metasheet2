@@ -59,6 +59,7 @@ import {
 import {
   ApprovalConditionFormulaError,
   approvalConditionFormulaHasDynamicDependency,
+  approvalConditionFormulaIsProvablyAlwaysTrue,
   assertApprovalConditionFormulaValidForSchema,
   extractRequesterRoleLiterals,
   formulaReferencesRequesterAttribute,
@@ -1493,7 +1494,7 @@ function runtimeSuccessorTargets(
  * stay unaffected (the runtime additionally fails closed on legacy graphs: an empty rules-mode
  * branch never matches).
  */
-function validateConditionBranchRules(approvalGraph: ApprovalGraph): void {
+function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: FormSchema): void {
   for (const node of approvalGraph.nodes) {
     if (node.type !== 'condition') continue
     const config = node.config as { branches?: unknown }
@@ -1520,6 +1521,18 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph): void {
           'Condition formula must depend on request data',
           400,
           'APPROVAL_CONDITION_FORMULA_STATIC',
+          { branchIndex },
+        )
+      }
+      if (
+        formulaExpression !== null
+        && hasDynamicFormula
+        && approvalConditionFormulaIsProvablyAlwaysTrue(formulaExpression, formSchema)
+      ) {
+        throw new ServiceError(
+          'Condition formula must not capture every valid request',
+          400,
+          'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
           { branchIndex },
         )
       }
@@ -3453,7 +3466,7 @@ export class ApprovalProductService {
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
-      validateConditionBranchRules(approvalGraph)
+      validateConditionBranchRules(approvalGraph, formSchema)
 
       const maxVersionResult = await client.query<{ max_version: string }>(
         `SELECT COALESCE(MAX(version), 0)::text AS max_version
@@ -3518,7 +3531,7 @@ export class ApprovalProductService {
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
-    validateConditionBranchRules(approvalGraph)
+    validateConditionBranchRules(approvalGraph, formSchema)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -3681,7 +3694,7 @@ export class ApprovalProductService {
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
-        validateConditionBranchRules(nextApprovalGraph)
+        validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -3797,7 +3810,7 @@ export class ApprovalProductService {
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
       validateNodeTimeoutConfigs(approvalGraph)
-      validateConditionBranchRules(approvalGraph)
+      validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
@@ -4069,7 +4082,7 @@ export class ApprovalProductService {
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
-    validateConditionBranchRules(approvalGraph)
+    validateConditionBranchRules(approvalGraph, formSchema)
 
     const newName = `${source.template.name} (副本)`
 

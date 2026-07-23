@@ -1496,6 +1496,34 @@ describe('ApprovalProductService', () => {
       })
       expect(pgState.pool.connect).not.toHaveBeenCalled()
     })
+
+    it('rejects a field-dependent formula proven true by the field bounds', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-bound-tautology',
+        name: 'Formula Bound Tautology',
+        formSchema: {
+          fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true, props: { min: 0 } }],
+        },
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} >= -1' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
+        details: { branchIndex: 0 },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
   })
 
   it('accepts authoring-MVP form-field-user assignee sources when creating a template', async () => {
