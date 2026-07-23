@@ -119,12 +119,16 @@ flush 后读到行；本地 exact-head 单独复跑 15/15 后只重跑失败 job
 #4540 全部 required checks 为绿。#4524/#4531/#4539 新 heads 的实际 path-trigger checks 也已成功；串行 retarget 到 main
 后仍必须让完整 required set 在新基线上重新结算。
 
+2026-07-23 外部复核修复后的新 heads 已重新结算：#4540 `3d034c9508` 的 22 个成功 check 加 1 个预期 skipped、
+#4524/#4531/#4539 的实际 path-trigger checks 均无失败。#4535 在写入该结论前的 head `d1d1a3619` 也为
+11 个成功 check 加 1 个预期 skipped；本次纯文档追加仍以 GitHub 最新结算为准。
+
 ## 5. 尚未完成
 
 ### 工程/落地
 
-1. #4540 -> #4524 -> #4531 -> #4539 均为 Draft/未合入；本轮重排 heads 推送后须重新结算远端 CI。
-2. 子栈已完成重排与本地 exact-head 复验，但仍须按依赖顺序串行审合并逐层 retarget 到 main。
+1. #4540 -> #4524 -> #4531 -> #4539 均为 Draft/未合入；外部复核修复 heads 已远端过绿。
+2. 子栈已完成重排、本地 exact-head 复验与当前 stacked-base CI，但仍须按依赖顺序串行审合并逐层 retarget 到 main。
 3. merged-main 上的 8 场景、附件、版本恢复与 required web 仍需正式复跑。
 
 ### Owner-only
