@@ -32,6 +32,9 @@
 4. 画布节点显示业务名称或业务类型；审批人、角色、表单字段和抄送只用 typed picker，不显示原始 id。
 5. 鼠标、Enter、Space 和受约束的语义重排必须等价；不提供运行时无法接受的跨区域拖排。
 6. 桌面检查器保持窄栏；窄屏改为全宽且自动揭示，不产生页面级横向滚动。
+7. 公式条件必须至少依赖表单字段、聚合值、发起人属性或成员关系；纯字面量/无动态依赖公式在创建、更新、
+   发布和历史恢复时 fail closed，历史遗留静态公式在运行时不得捕获全部流量。对必填数值字段，authoring
+   还须依据已配置的 `min/max` 保守拒绝可证明恒真的比较；无法证明的一律保留，不用采样值猜测语义。
 
 ### 3.2 模板版本
 
@@ -46,9 +49,12 @@
 3. 保存时验证配置者权限与确认哈希，执行时重查目标记录、锁、目标 schema 和字段写权限。
 4. 缺失、越权、锁定和不可写统一为 values-free 的 `linked_record_unavailable`，不得形成存在性 oracle。
 5. 映射是 all-or-nothing。隐藏、未映射、未知选项、非法日期或失配字段不得进入记录、日志或错误正文。
-6. v1 数值支持限定在 JS 可无损表示的范围：安全整数，或不超过 15 位有效数字且符合目标字段 `decimals`。
-   不安全整数、超精度值和任意精度十进制必须 fail closed；不得把近似值写成业务事实。
-7. claim、record mutation、revision 与 chained outbox 同事务；重复事件和重复 action identity 不得二次写入。
+6. v1 不开放 number 映射。保存确认、执行新建和执行更新均以 values-free 的
+   `exact_number_mapping_unavailable` fail closed；不得把金额、数量或近似数值写成业务事实。数值 envelope
+   校验器的存在不等于生产 number 路径可达，D0-D4 仍是独立设计、实现与验收线。
+7. record-link 的 submit 与 picker 都必须同时重查 base-read、sheet-read、字段可见性及审批权限；不得因调用
+   picker、持有通用 multitable read 或猜中记录 id 而绕过目标 Base 的读取边界。
+8. claim、record mutation、revision 与 chained outbox 同事务；重复事件和重复 action identity 不得二次写入。
 
 ### 3.4 附件
 
@@ -75,7 +81,7 @@ Draft #4540 是 Canvas 与数据根唯一经过组合冲突解析的根；#4524 
 - 任意边自由重连、跨条件/并行区域拖排、大图虚拟化；
 - 逐节点版本 cherry-pick、三方版本合并；
 - 原生移动端 bottom-sheet 编排；
-- 任意精度 decimal；当前只承诺第 3.3.6 节的无损数值范围；
+- 所有 number/decimal 写回；当前生产链仅承诺 text、select、date 与 record-link，数值能力须由 D0-D4 独立解锁；
 - 真实企业 UAT、生产 flag 开启和运行指标达标。
 
 这些项目需要独立设计锁，不能由本组合 MD 宣称完成。

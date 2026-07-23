@@ -2,8 +2,9 @@
 
 **状态：COMPOSED AND LOCALLY VERIFIED / DRAFT STACK #4540 -> #4524 -> #4531 -> #4539 / NOT LANDED**
 
-记录基线：`origin/main@7a64424d109a`。组合根：#4540 `7b54908c9e7194991403cdb8962186c17e0415ed`；
-最终数据栈头：#4539 `c2e5d134f84cb5d131a0c1f855e81e187860f7ee`。
+记录基线：`origin/main@ee39a13eb9db27d01c89cb19f0644b546c711347`。组合根：#4540
+`0bfcd6ebd04fa991ab13bae0ec45ecdf1bf28e40`；最终数据栈头：#4539
+`4dbdb3b2d862e22c2451cf6d7af2ad3eeba8b714`。
 本台账记录实现和证据，不构成合并、UAT 或启用授权。
 
 ## 1. 已在 main 的底座
@@ -19,16 +20,16 @@
 | Lane | PR / exact head | 内容 | 组合处置 |
 |---|---|---|---|
 | Data root | #4510 `f6d05814a8` | 附件、FWB activation、画布基础和 CI | 被 #4540 吸收 |
-| Record-link | #4524 `72ecbbb35b` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
-| FWB update | #4531 `510738c9e` | 更新受约束已有记录 | 已叠到 #4524 |
-| FWB composition | #4539 `c2e5d134f` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
+| Record-link | #4524 `2e529e0f52` | 安全 record-link 字段、选择器与 DB 权限正控 | 已叠到 #4540 |
+| FWB update | #4531 `6276f763ad` | 更新受约束已有记录 | 已叠到 #4524 |
+| FWB composition | #4539 `4dbdb3b2d8` | 新建/更新 authoring 与生产组合 | 已叠到 #4531；最终审阅头 |
 | Canvas root | #4433 `fc5477d7e4` | 分支编排与纵向画布 | 被 #4540 吸收 |
 | Canvas all-path | #4532 `762dc0fd5` | 条件内并行路径全部汇合 | 被 #4540 吸收 |
 | Canvas inspector | #4533 `babc6d975` | 共享检查器、键盘和响应式 | 被 #4540 吸收 |
 | Version restore | #4536 `3bb327a93` | diff/restore 与当前校验 | 被 #4540 吸收 |
 | Navigation | #4537 `b2f69116b` | zoom/pan/minimap/overlay | 被 #4540 吸收 |
 | Reorder | #4538 `a3562083af` | 同区域语义重排 | 被 #4540 吸收 |
-| Integration | #4540 `7b54908c9e` | 两条线的唯一联合解析与测试面 | Draft，owner review |
+| Integration | #4540 `0bfcd6ebdf` | 两条线的唯一联合解析与测试面 | Draft，owner review |
 
 ## 3. 组合审阅发现与修复
 
@@ -40,6 +41,13 @@
 6. 5 个 Canvas 源码和 3 个规格不触发 `approval-web-guard`；补齐 pull_request/push 两套路径，required 常驻门不变。
 7. record-link 的事务内 DB 权限复查使旧 authoring UAT 只凭 JWT wildcard 的正控返回 403；不降级产品门，改为在
    fixture 中建立并清理真实 `approvals:write` DB 授权，最终 record-link + authoring UAT 45/45。
+8. 条件分支允许无规则但带公式时，纯字面量或受字段边界保证的恒真公式可捕获全部流量；新增 AST 动态依赖
+   判定和基于必填数值字段 `min/max` 的保守区间证明。创建/更新/发布/恢复拒绝无动态依赖及可证明恒真公式；
+   历史静态公式在运行时跳过并继续 fallback。无法证明恒真的动态公式保留。
+9. record-link 的 base-read 产品门正确但测试没有把它设为唯一变量；新增同一 actor/template/sheet/record 的
+   submit + picker 负例，再只补 `multitable:base:read` 得到双正控，防止未来删门后 required 真库仍绿。
+10. 复核生产 FWB 路径确认所有 `targetType: 'number'` 映射当前均被
+    `exact_number_mapping_unavailable` 拒绝；撤销“金额/数量已写回”的文档声明，保留 D0-D4 为独立能力线。
 
 ## 4. 多模型使用与最终责任
 
@@ -47,7 +55,7 @@
 |---|---|---|
 | Kimi K3 | 只读 UI 冲突审阅 | 找到共享 editor 的 raw-id 回退和合并重复；Codex 独立修复并复测 |
 | Grok | 只读后端冲突审阅 | 建议后端冲突保留 Canvas runtime-path 校验及数据线附件/FWB 非冲突内容 |
-| ReClaude | 尝试关键审阅 | 多次返回 `Execution error`，不记录 verdict |
+| ReClaude | 本修复轮未调用 | 外部代码传输授权未满足，不记录 verdict |
 | Codex | 冲突解析、代码修复、真库与全量 gate、最终台账 | 对 #4540 的工程结论负责 |
 
 代理结论只绑定其读取的 exact head；不能跨 rebase 或替代测试、CI 和 owner 决策。
@@ -66,4 +74,4 @@
 - 来源 PR 的 supersede/关闭处置，避免重复落地；
 - 真实企业、真实模板、真实附件和真实多维表 UAT；
 - 分级 flag 与观察窗口；
-- 任意精度 decimal、自由重连、大图虚拟化、移动 bottom sheet 等下一轮 opt-in。
+- number/decimal 写回、自由重连、大图虚拟化、移动 bottom sheet 等下一轮 opt-in。
