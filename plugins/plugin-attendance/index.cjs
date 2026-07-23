@@ -10,6 +10,26 @@ const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
 const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
+const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
+const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
+const {
+  DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+  MAX_ATTRIBUTION_TAIL_MINUTES,
+  OVERTIME_ATTRIBUTION_KEY,
+  FROZEN_ATTRIBUTION_KEY,
+  REASON: WORK_DATE_REASON,
+  clampAttributionTailMinutes,
+  normalizeWorkDateAttributionSetting,
+  parseOvertimeAttributionV1,
+  buildOvertimeAttributionV1,
+  parseFrozenWorkDateAttribution,
+  buildFrozenWorkDateAttribution,
+  createAttendanceWorkDateResolver,
+} = attendanceWorkDateResolverLib
+const {
+  OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+  createAllWorkDateAdapters,
+} = attendanceWorkDateAdaptersLib
 
 const DEFAULT_ORG_ID = 'default'
 const DEFAULT_RULE = {
@@ -509,6 +529,11 @@ const DEFAULT_SETTINGS = {
       maxUsersPerRun: 100,
     },
   },
+  // W2 / #4556: post-shift work-date attribution tail. Separate from late/early grace and from
+  // auto-shift maxToleranceMinutes (R5 / OD-4556-6). Default 120 minutes.
+  workDateAttribution: {
+    postShiftTailMinutes: DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -718,19 +743,20 @@ function resolveImportMultiPunchSourceValue(valueFor, aliases) {
   return undefined
 }
 
-function normalizeImportMultiPunchDateTime(value, workDate, timezone) {
-  const parsed = parseImportedDateTime(value, workDate, timezone)
+function normalizeImportMultiPunchDateTime(value, workDate, rule) {
+  const parsed = parseImportedPunchDateTime(value, workDate, rule)
   if (parsed instanceof Date && !Number.isNaN(parsed.getTime())) return parsed.toISOString()
   return typeof value === 'string' ? value.trim() : value
 }
 
 function buildAttendanceImportMultiPunchMeta(options = {}) {
-  const { valueFor, workDate, timezone, clearMissing = true } = options
+  const { valueFor, workDate, rule, timezone, clearMissing = true } = options
+  const punchRule = rule ?? { timezone }
   const meta = {}
   for (const source of ATTENDANCE_MULTI_PUNCH_TIME_SOURCES) {
     const value = resolveImportMultiPunchSourceValue(valueFor, source.aliases)
     if (value !== undefined) {
-      meta[source.metaKey] = normalizeImportMultiPunchDateTime(value, workDate, timezone)
+      meta[source.metaKey] = normalizeImportMultiPunchDateTime(value, workDate, punchRule)
     } else if (clearMissing) {
       meta[source.metaKey] = null
     }
@@ -6578,6 +6604,39 @@ function parseImportedDateTime(value, workDate, timeZone) {
     return buildZonedDate(workDate, timeMatch[0], timeZone)
   }
   return parseDateInput(text)
+}
+
+function parseImportedPunchDateTime(value, workDate, rule) {
+  const timezone = rule?.timezone
+  const workStartTime = normalizeTimeString(rule?.workStartTime ?? rule?.work_start_time)
+  const workEndTime = normalizeTimeString(rule?.workEndTime ?? rule?.work_end_time)
+  const isOvernight = Boolean(
+    workStartTime
+    && workEndTime
+    && resolveOvernightFlag(
+      rule?.isOvernight ?? rule?.is_overnight,
+      workStartTime,
+      workEndTime,
+    ),
+  )
+
+  const parsed = parseImportedDateTime(value, workDate, timezone)
+  if (!parsed || !isOvernight || !workStartTime || !workDate) return parsed
+  if (value instanceof Date) return parsed
+  const text = String(value ?? '').trim()
+  if (!text || /\d{4}-\d{2}-\d{2}/.test(text)) return parsed
+  const timeMatch = text.match(/\d{1,2}:\d{2}(?::\d{2})?/)
+  const clockTime = normalizeTimeString(timeMatch?.[0])
+  if (!clockTime || clockTime >= workStartTime) return parsed
+  const nextDate = addDaysToDateKey(workDate, 1)
+  return nextDate ? buildZonedDate(nextDate, timeMatch[0], timezone) : parsed
+}
+
+function parseImportedPunchDateTimes({ firstInValue, lastOutValue, workDate, rule }) {
+  return {
+    firstInAt: parseImportedPunchDateTime(firstInValue, workDate, rule),
+    lastOutAt: parseImportedPunchDateTime(lastOutValue, workDate, rule),
+  }
 }
 
 function normalizeTimeString(value) {
@@ -12669,6 +12728,9 @@ function normalizeSettings(raw) {
     attendanceResultEditPolicy: normalizeAttendanceResultEditPolicySetting(raw.attendanceResultEditPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
     reportSync: normalizeAttendanceReportSyncSetting(raw.reportSync),
+    workDateAttribution: normalizeWorkDateAttributionSetting(
+      raw.workDateAttribution ?? raw.work_date_attribution,
+    ),
   }
 }
 
@@ -13709,6 +13771,11 @@ function mergeSettings(base, update) {
         ...(update?.reportSync?.scheduledTrigger || {}),
       },
     },
+    // W2 / #4556: attribution tail is independent of grace/tolerance; partial merge preserves default.
+    workDateAttribution: {
+      ...(base?.workDateAttribution || {}),
+      ...(update?.workDateAttribution || {}),
+    },
   })
 }
 
@@ -14055,7 +14122,7 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
               s.working_days AS shift_working_days
        FROM attendance_shift_assignments a
-       JOIN attendance_shifts s ON s.id = a.shift_id
+       JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
        WHERE a.org_id = $1
          AND a.user_id = $2
          AND a.is_active = true
@@ -14310,7 +14377,7 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
               r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
               r.is_active AS rotation_is_active
        FROM attendance_rotation_assignments a
-       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id AND r.org_id = a.org_id
        WHERE a.org_id = $1
          AND a.user_id = $2
          AND a.is_active = true
@@ -14416,6 +14483,370 @@ function isPunchWithinShiftWindow(occurredAt, context, workDate, fallbackTimezon
   return occurredAtMs >= window.startAt.getTime() && occurredAtMs <= window.endAt.getTime()
 }
 
+/**
+ * Org-scoped published shift + rotation candidates for the shared work-date resolver.
+ * Returns ALL published slots for the requested work dates (no LIMIT 1 / row-order winner).
+ * Each row is an atomic (workDate, shiftId, segmentIndex=null, absolute window inputs).
+ */
+async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const dates = Array.isArray(workDates)
+    ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
+    : []
+  if (!userId || dates.length === 0) return []
+
+  const candidates = []
+
+  // Direct / temporary published assignments — all slots, org-scoped join on shifts.
+  try {
+    const assignmentRows = await db.query(
+      `SELECT a.id AS assignment_id, a.org_id, a.user_id, a.shift_id, a.slot_index,
+              a.start_date, a.end_date, a.assignment_kind,
+              s.name AS shift_name, s.timezone AS shift_timezone,
+              s.work_start_time AS shift_work_start_time, s.work_end_time AS shift_work_end_time,
+              s.is_overnight AS shift_is_overnight
+       FROM attendance_shift_assignments a
+       JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
+       WHERE a.org_id = $1
+         AND a.user_id = $2
+         AND a.is_active = true
+         AND COALESCE(a.publish_status, 'published') = 'published'
+         AND a.start_date <= $3::date
+         AND (a.end_date IS NULL OR a.end_date >= $4::date)
+       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC`,
+      [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
+    )
+    for (const row of assignmentRows || []) {
+      for (const workDate of dates) {
+        const start = normalizeDateOnly(row.start_date)
+        const end = row.end_date == null ? null : normalizeDateOnly(row.end_date)
+        if (start && start > workDate) continue
+        if (end && end < workDate) continue
+        if (!row.shift_id) continue
+        if (explicitShiftId && String(row.shift_id) !== String(explicitShiftId)) continue
+        candidates.push({
+          orgId: row.org_id,
+          userId: row.user_id,
+          workDate,
+          shiftId: String(row.shift_id),
+          segmentIndex: null,
+          assignmentId: String(row.assignment_id),
+          source: 'shift',
+          timezone: row.shift_timezone,
+          workStartTime: row.shift_work_start_time,
+          workEndTime: row.shift_work_end_time,
+          isOvernight: row.shift_is_overnight,
+        })
+      }
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+
+  // Published rotation assignments — resolve the sequence slot per workDate (org-scoped).
+  try {
+    const rotationRows = await db.query(
+      `SELECT a.id AS assignment_id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date,
+              r.name AS rotation_name, r.timezone AS rotation_timezone,
+              r.shift_sequence AS rotation_shift_sequence, r.is_active AS rotation_is_active
+       FROM attendance_rotation_assignments a
+       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id AND r.org_id = a.org_id
+       WHERE a.org_id = $1
+         AND a.user_id = $2
+         AND a.is_active = true
+         AND COALESCE(a.publish_status, 'published') = 'published'
+         AND r.is_active = true
+         AND a.start_date <= $3::date
+         AND (a.end_date IS NULL OR a.end_date >= $4::date)
+       ORDER BY a.start_date DESC, a.created_at DESC`,
+      [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
+    )
+    for (const row of rotationRows || []) {
+      const rotation = mapRotationRuleFromAssignmentRow(row)
+      if (!rotation?.shiftSequence?.length) continue
+      for (const workDate of dates) {
+        const start = normalizeDateOnly(row.start_date)
+        const end = row.end_date == null ? null : normalizeDateOnly(row.end_date)
+        if (start && start > workDate) continue
+        if (end && end < workDate) continue
+        const offset = diffDays(row.start_date, workDate)
+        if (offset < 0) continue
+        const index = offset % rotation.shiftSequence.length
+        const shiftRef = rotation.shiftSequence[index]
+        if (!shiftRef) {
+          throw new Error('ATTENDANCE_ROTATION_SHIFT_REFERENCE_INVALID')
+        }
+        const shift = await loadShiftByReference(db, targetOrg, shiftRef)
+        if (!shift?.id) {
+          throw new Error('ATTENDANCE_ROTATION_SHIFT_REFERENCE_INVALID')
+        }
+        if (explicitShiftId && String(shift.id) !== String(explicitShiftId)) continue
+        // Cross-org shift reference must fail closed at resolver layer; tag org from assignment.
+        candidates.push({
+          orgId: row.org_id,
+          userId: row.user_id,
+          workDate,
+          shiftId: String(shift.id),
+          segmentIndex: null,
+          assignmentId: String(row.assignment_id),
+          source: 'rotation',
+          timezone: shift.timezone ?? rotation.timezone,
+          workStartTime: shift.workStartTime ?? shift.work_start_time,
+          workEndTime: shift.workEndTime ?? shift.work_end_time,
+          isOvernight: shift.isOvernight ?? shift.is_overnight,
+        })
+      }
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+
+  return candidates
+}
+
+async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const dates = Array.isArray(workDates)
+    ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
+    : []
+  if (!userId || dates.length === 0) return []
+  try {
+    const rows = await db.query(
+      `SELECT user_id, org_id, work_date, first_in_at, last_out_at, status
+       FROM attendance_records
+       WHERE org_id = $1
+         AND user_id = $2
+         AND work_date = ANY($3::date[])
+         AND first_in_at IS NOT NULL
+         AND last_out_at IS NULL`,
+      [targetOrg, userId, dates]
+    )
+    return (rows || []).map((row) => ({
+      orgId: row.org_id,
+      userId: row.user_id,
+      workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
+      firstInAt: row.first_in_at,
+      lastOutAt: row.last_out_at,
+      status: row.status,
+    }))
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
+async function loadApprovedOvertimeWindowsForWorkDateResolver(db, { orgId, userId, workDates }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const dates = Array.isArray(workDates)
+    ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
+    : []
+  if (!userId || dates.length === 0) return []
+  try {
+    const rows = await db.query(
+      `SELECT id, org_id, user_id, work_date, requested_in_at, requested_out_at, metadata, status
+       FROM attendance_requests
+       WHERE org_id = $1
+         AND user_id = $2
+         AND work_date = ANY($3::date[])
+         AND request_type = 'overtime'
+         AND status = 'approved'`,
+      [targetOrg, userId, dates]
+    )
+    return (rows || []).map((row) => {
+      const metadata = normalizeMetadata(row.metadata)
+      const anchor = parseOvertimeAttributionV1(
+        metadata?.[OVERTIME_ATTRIBUTION_KEY] ?? metadata?.overtimeAttributionV1,
+      )
+      return {
+        requestId: row.id,
+        orgId: row.org_id,
+        userId: row.user_id,
+        workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
+        shiftId: anchor?.shiftId || null,
+        approvedStartAt: row.requested_in_at ? new Date(row.requested_in_at) : null,
+        approvedEndAt: row.requested_out_at ? new Date(row.requested_out_at) : null,
+        // Legacy approved without anchor never extends (OD-4556-7 / R6).
+        anchor,
+      }
+    })
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
+async function loadWorkDateAttributionTailMinutes(db) {
+  try {
+    const rows = await db.query(
+      'SELECT value FROM system_configs WHERE key = $1',
+      [SETTINGS_KEY],
+    )
+    if (!rows.length) return DEFAULT_ATTRIBUTION_TAIL_MINUTES
+    const stored = rows[0]?.value
+    const raw = typeof stored === 'string' ? JSON.parse(stored) : stored
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('ATTENDANCE_SETTINGS_SOURCE_INVALID')
+    }
+    const normalized = normalizeWorkDateAttributionSetting(
+      raw.workDateAttribution ?? raw.work_date_attribution,
+    )
+    return clampAttributionTailMinutes(
+      normalized.postShiftTailMinutes,
+      DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+    )
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return DEFAULT_ATTRIBUTION_TAIL_MINUTES
+    throw error
+  }
+}
+
+function createPluginAttendanceWorkDateResolver(db) {
+  const resolver = createAttendanceWorkDateResolver({
+    toWorkDate,
+    buildZonedDate,
+    addDaysToDateKey,
+    normalizeTimeString,
+    resolveOvernightFlag,
+    async loadPublishedCandidates(args) {
+      return loadPublishedCandidatesForWorkDateResolver(db, args)
+    },
+    async loadOpenRecords(args) {
+      return loadOpenRecordsForWorkDateResolver(db, args)
+    },
+    async loadApprovedOvertimeWindows(args) {
+      return loadApprovedOvertimeWindowsForWorkDateResolver(db, args)
+    },
+    async getAttributionTailMinutes() {
+      return loadWorkDateAttributionTailMinutes(db)
+    },
+  })
+  const adapters = createAllWorkDateAdapters(resolver)
+  return { resolver, adapters }
+}
+
+const IMPORT_LEGACY_UNRESOLVED_WORK_DATE_REASONS = new Set([
+  WORK_DATE_REASON.NO_MATCHING_SHIFT,
+  WORK_DATE_REASON.FREE_TIME_NO_SHIFT,
+  WORK_DATE_REASON.UNSCHEDULED_NO_SHIFT,
+  WORK_DATE_REASON.EXPLICIT_IMPORT_REQUIRES_SHIFT,
+  WORK_DATE_REASON.NO_PUBLISHED_CANDIDATE,
+])
+
+const LIVE_CALENDAR_FALLBACK_WORK_DATE_REASONS = new Set([
+  WORK_DATE_REASON.NO_MATCHING_SHIFT,
+  WORK_DATE_REASON.FREE_TIME_NO_SHIFT,
+  WORK_DATE_REASON.UNSCHEDULED_NO_SHIFT,
+  WORK_DATE_REASON.NO_PUBLISHED_CANDIDATE,
+])
+
+async function resolveImportRowWorkDateAttribution(options) {
+  const {
+    db,
+    orgId,
+    userId,
+    workDate,
+    firstInAt,
+    lastOutAt,
+    timezone,
+    explicitShiftId,
+  } = options
+  if (!userId || !workDate || (!firstInAt && !lastOutAt)) {
+    return { resolution: null, frozenAttribution: null }
+  }
+  const { adapters } = createPluginAttendanceWorkDateResolver(db)
+  const resolution = await adapters.import.resolveImportWorkDate({
+    orgId,
+    userId,
+    occurredAt: firstInAt || lastOutAt,
+    timezone,
+    calendarWorkDate: workDate,
+    explicitWorkDate: workDate,
+    explicitShiftId: explicitShiftId || null,
+  })
+  if (resolution.kind === 'ambiguous') {
+    throw new HttpError(
+      422,
+      'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+      'Multiple shift windows match this import row; no record was written',
+    )
+  }
+  if (resolution.kind === 'resolved') {
+    if (String(resolution.workDate) !== String(workDate)) {
+      throw new HttpError(
+        422,
+        'WORK_DATE_ATTRIBUTION_MISMATCH',
+        `Resolved workDate ${resolution.workDate} does not match imported workDate ${workDate}`,
+      )
+    }
+    const frozenAttribution = buildFrozenWorkDateAttribution(resolution, { orgId, userId })
+    if (!frozenAttribution) {
+      throw new Error('WORK_DATE_ATTRIBUTION_SNAPSHOT_INVALID')
+    }
+    return { resolution, frozenAttribution }
+  }
+  if (!IMPORT_LEGACY_UNRESOLVED_WORK_DATE_REASONS.has(resolution.reasonCode)) {
+    const code = resolution.reasonCode === WORK_DATE_REASON.EXPLICIT_SHIFT_MISMATCH
+      ? 'WORK_DATE_ATTRIBUTION_EXPLICIT_SHIFT_MISMATCH'
+      : 'WORK_DATE_ATTRIBUTION_UNRESOLVED'
+    throw new HttpError(
+      422,
+      code,
+      `Unable to resolve import work date: ${resolution.reasonCode}`,
+    )
+  }
+  return { resolution, frozenAttribution: null }
+}
+
+function assertResolvedWorkDateMatches({
+  resolution,
+  expectedWorkDate,
+  ambiguousCode = 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+  mismatchCode = 'WORK_DATE_ATTRIBUTION_MISMATCH',
+}) {
+  if (resolution?.kind === 'ambiguous') {
+    throw new HttpError(422, ambiguousCode, 'Multiple shift windows match; no attendance result was written')
+  }
+  if (
+    resolution?.kind === 'resolved'
+    && String(resolution.workDate) !== String(expectedWorkDate)
+  ) {
+    throw new HttpError(
+      422,
+      mismatchCode,
+      `Resolved workDate ${resolution.workDate} does not match ${expectedWorkDate}`,
+    )
+  }
+}
+
+async function rehydrateResolvedWorkDateContext({
+  db,
+  orgId,
+  userId,
+  resolution,
+  defaultRule,
+}) {
+  const baseContext = await resolveWorkContext({
+    db,
+    orgId,
+    userId,
+    workDate: resolution.workDate,
+    defaultRule,
+  })
+  const resolvedShift = await loadShiftById(db, orgId, resolution.shiftId)
+  if (!resolvedShift) {
+    throw new Error('WORK_DATE_RESOLVED_SHIFT_NOT_FOUND')
+  }
+  return {
+    ...baseContext,
+    rule: resolvedShift,
+    source: resolution.evidenceSnapshot?.winner?.source || baseContext.source,
+  }
+}
+
+/**
+ * Live-punch bridge: shared resolver (#4556 W2) folding #4558 overnight re-anchor.
+ * Returns the legacy { workDate, context, timezone } shape plus optional resolution.
+ */
 async function resolvePunchWorkDateByShiftWindow(options) {
   const {
     db,
@@ -14428,41 +14859,81 @@ async function resolvePunchWorkDateByShiftWindow(options) {
     timezone,
   } = options
 
-  // A punch shortly after local midnight may still belong to the previous day's
-  // overnight shift. Evaluate both date candidates against their actual shift
-  // windows instead of letting the calendar date alone decide the attendance row.
   if (!userId || !workDate || !(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) {
-    return { workDate, context, timezone }
+    return { workDate, context, timezone, resolution: null }
   }
 
-  // Prefer the calendar day's own matching shift when windows overlap (or when
-  // the punch is simply a normal same-day punch). Skip the previous-day lookup.
-  if (isPunchWithinShiftWindow(occurredAt, context, workDate, timezone)) {
-    return { workDate, context, timezone }
-  }
-
-  const previousWorkDate = addDaysToDateKey(workDate, -1)
-  if (!previousWorkDate) return { workDate, context, timezone }
-
-  const previousContext = await resolveWorkContext({
-    db,
+  const { resolver, adapters } = createPluginAttendanceWorkDateResolver(db)
+  const resolution = await adapters.live.resolvePunchWorkDate({
     orgId,
     userId,
-    workDate: previousWorkDate,
-    defaultRule,
+    occurredAt,
+    timezone,
+    calendarWorkDate: workDate,
+    groupAttendanceType: options.groupAttendanceType || null,
   })
-  const previousWindow = getPunchShiftWindow(previousContext, previousWorkDate, timezone)
-  // Only a genuine overnight previous shift may claim a post-midnight punch.
-  if (!previousWindow?.isOvernight) return { workDate, context, timezone }
-  if (!isPunchWithinShiftWindow(occurredAt, previousContext, previousWorkDate, timezone)) {
-    return { workDate, context, timezone }
+
+  if (resolution.kind === 'resolved') {
+    const nextContext = await rehydrateResolvedWorkDateContext({
+      db,
+      orgId,
+      userId,
+      resolution,
+      defaultRule,
+    })
+    const nextTimezone = typeof nextContext?.rule?.timezone === 'string'
+      && nextContext.rule.timezone.trim()
+      ? nextContext.rule.timezone.trim()
+      : timezone
+    return {
+      workDate: resolution.workDate,
+      context: nextContext,
+      timezone: nextTimezone,
+      resolution,
+      shiftId: resolution.shiftId,
+      reasonCode: resolution.reasonCode,
+    }
   }
 
-  return {
-    workDate: previousWorkDate,
-    context: previousContext,
-    timezone: previousWindow.timezone ?? timezone,
+  // Ambiguous / unresolved: do not silently fall back to inventing a winner.
+  // Live punch keeps the calendar workDate only when the current context already contains
+  // the punch in its strict window (same-day match); otherwise keep calendar date without
+  // previous-day steal (fail-closed relative to overnight re-anchor).
+  if (resolution.kind === 'ambiguous') {
+    return {
+      workDate,
+      context,
+      timezone,
+      resolution,
+      ambiguous: true,
+    }
   }
+
+  if (!LIVE_CALENDAR_FALLBACK_WORK_DATE_REASONS.has(resolution.reasonCode)) {
+    throw new HttpError(
+      422,
+      'WORK_DATE_ATTRIBUTION_UNRESOLVED',
+      `Unable to resolve punch work date: ${resolution.reasonCode}`,
+    )
+  }
+
+  // Unresolved (no matching published shift / free_time / unscheduled): calendar date stays.
+  // Callers that require shiftId must inspect resolution.reasonCode.
+  return {
+    workDate,
+    context,
+    timezone,
+    resolution,
+  }
+}
+
+// Keep pure helpers reachable for unit tests without a live DB.
+function getSharedWorkDateResolverForTests(deps) {
+  return createAttendanceWorkDateResolver(deps)
+}
+
+function getSharedWorkDateAdaptersForTests(resolver) {
+  return createAllWorkDateAdapters(resolver)
 }
 
 async function loadHolidayMapByDates(db, orgId, workDates) {
@@ -19333,6 +19804,38 @@ async function applyAttendanceResultEdit(trx, options) {
 
   // (6) Apply §3.5a normalization and re-write the record through the consistency helper (statusOverride +
   // overrideMetrics fully shadow computeMetrics; meta tiers are recomputed from the FINAL lateMinutes).
+  // W2 recompute adapter: preserve frozen work-date attribution (never re-resolve against current schedule).
+  const recordMetaForRecompute = normalizeMetadata(record?.meta)
+  const rawFrozenForRecompute = recordMetaForRecompute?.[FROZEN_ATTRIBUTION_KEY]
+    ?? recordMetaForRecompute?.workDateAttributionV1
+    ?? null
+  const frozenForRecompute = parseFrozenWorkDateAttribution(rawFrozenForRecompute)
+  const { adapters: recomputeAdapters } = createPluginAttendanceWorkDateResolver(trx)
+  const recomputeResolution = await recomputeAdapters.recompute.resolveRecomputeWorkDate({
+    orgId,
+    userId: record.user_id,
+    occurredAt: record.first_in_at
+      ? new Date(record.first_in_at)
+      : (record.last_out_at ? new Date(record.last_out_at) : null),
+    timezone,
+    calendarWorkDate: workDate,
+    frozenAttribution: rawFrozenForRecompute,
+    recordMeta: recordMetaForRecompute,
+  })
+  assertResolvedWorkDateMatches({
+    resolution: recomputeResolution,
+    expectedWorkDate: workDate,
+    ambiguousCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_AMBIGUOUS',
+    mismatchCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_MISMATCH',
+  })
+  const recomputeMeta = recomputeResolution.kind === 'resolved'
+    ? {
+        [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+          recomputeResolution,
+          { orgId, userId: record.user_id },
+        ),
+      }
+    : (frozenForRecompute ? { [FROZEN_ATTRIBUTION_KEY]: frozenForRecompute } : undefined)
   const metrics = applyResultEditMetricNormalization(targetStatus, record, overrideMetrics)
   const updated = await upsertAttendanceRecord({
     userId: record.user_id,
@@ -19352,6 +19855,7 @@ async function applyAttendanceResultEdit(trx, options) {
     isWorkday: record.is_workday !== false,
     leaveMinutes: 0,
     overtimeMinutes: 0,
+    meta: recomputeMeta,
     existingRow: record,
     client: trx,
   })
@@ -20466,7 +20970,9 @@ async function runAutoAbsenceForOrgDate(db, options) {
        AND u.is_active = true`,
     [orgId]
   )
+  const { adapters: scheduledAdapters } = createPluginAttendanceWorkDateResolver(db)
   const targetUsers = []
+  const reviewRequired = []
   for (const row of userRows) {
     const context = await resolveWorkContext({
       db,
@@ -20478,7 +20984,45 @@ async function runAutoAbsenceForOrgDate(db, options) {
       calendarOverrides,
     })
     if (!context.isWorkingDay) continue
-    targetUsers.push(row.user_id)
+    const scheduledRule = context.rule || rule
+    const scheduledTimezone = scheduledRule.timezone || rule.timezone || 'UTC'
+    const scheduledResolution = await scheduledAdapters.scheduled.resolveScheduledWorkDate({
+      orgId,
+      userId: row.user_id,
+      timezone: scheduledTimezone,
+      calendarWorkDate: workDate,
+    })
+    if (scheduledResolution.kind === 'resolved') {
+      if (String(scheduledResolution.workDate) === String(workDate)) {
+        targetUsers.push(row.user_id)
+      } else {
+        reviewRequired.push({
+          userId: row.user_id,
+          reasonCode: 'WORK_DATE_ATTRIBUTION_MISMATCH',
+        })
+      }
+      continue
+    }
+    if (scheduledResolution.kind === 'ambiguous') {
+      reviewRequired.push({
+        userId: row.user_id,
+        reasonCode: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+      })
+      continue
+    }
+    // Legacy rule-only schedules remain calendar-derived. Assigned/group schedules fail closed
+    // when the shared resolver cannot establish one exact work date.
+    if (
+      context.source === 'rule'
+      && scheduledResolution.reasonCode === WORK_DATE_REASON.UNSCHEDULED_NO_SHIFT
+    ) {
+      targetUsers.push(row.user_id)
+    } else {
+      reviewRequired.push({
+        userId: row.user_id,
+        reasonCode: scheduledResolution.reasonCode || 'WORK_DATE_ATTRIBUTION_UNRESOLVED',
+      })
+    }
   }
   const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
   if (!skipDedup) lastAutoAbsenceKey = key
@@ -20488,11 +21032,25 @@ async function runAutoAbsenceForOrgDate(db, options) {
       workDate,
       total: rows.length,
     })
+    if (reviewRequired.length > 0) {
+      emit('attendance.work_date.review_required', {
+        orgId,
+        workDate,
+        total: reviewRequired.length,
+        reasons: reviewRequired,
+      })
+    }
   }
   if (logger && rows.length > 0) {
     logger.info(`Auto absence generated for ${workDate}`, { orgId, total: rows.length })
   }
-  return { skipped: false, total: rows.length, targetUsers: targetUsers.length, generated: rows.length }
+  return {
+    skipped: false,
+    total: rows.length,
+    targetUsers: targetUsers.length,
+    generated: rows.length,
+    reviewRequired,
+  }
 }
 
 function scheduleAutoAbsence({ db, logger, emit }) {
@@ -21408,7 +21966,30 @@ module.exports = {
   __attendanceLivePunchWorkDateForTests: {
     getPunchShiftWindow,
     isPunchWithinShiftWindow,
+    parseImportedPunchDateTimes,
     resolvePunchWorkDateByShiftWindow,
+  },
+  __attendanceWorkDateResolverForTests: {
+    createPluginAttendanceWorkDateResolver,
+    createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
+    createAllWorkDateAdapters: getSharedWorkDateAdaptersForTests,
+    loadPublishedCandidatesForWorkDateResolver,
+    loadOpenRecordsForWorkDateResolver,
+    loadApprovedOvertimeWindowsForWorkDateResolver,
+    DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+    OVERTIME_ATTRIBUTION_KEY,
+    FROZEN_ATTRIBUTION_KEY,
+    OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+    WORK_DATE_REASON,
+    parseOvertimeAttributionV1,
+    buildOvertimeAttributionV1,
+    parseFrozenWorkDateAttribution,
+    buildFrozenWorkDateAttribution,
+    normalizeWorkDateAttributionSetting,
+    clampAttributionTailMinutes,
+    runAutoAbsenceForOrgDate,
+    lib: attendanceWorkDateResolverLib,
+    adaptersLib: attendanceWorkDateAdaptersLib,
   },
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
@@ -22828,6 +23409,10 @@ module.exports = {
           // per-page ceiling the runner's pageSize is clamped to — see normalizer comment.
           maxUsersPerRun: z.number().int().min(1).max(100).optional(),
         }).optional(),
+      }).optional(),
+      // W2 / #4556: bounded post-shift attribution tail (default 120). Separate from grace.
+      workDateAttribution: z.object({
+        postShiftTailMinutes: z.number().int().min(0).max(MAX_ATTRIBUTION_TAIL_MINUTES).optional(),
       }).optional(),
     })
 
@@ -24995,8 +25580,22 @@ module.exports = {
 	            ? baseRuleForMetrics
 	            : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-	          const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-	          const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+	          const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+	            firstInValue: valueFor('firstInAt'),
+	            lastOutValue: valueFor('lastOutAt'),
+	            workDate,
+	            rule: ruleForMetrics,
+	          })
+	          const importAttribution = await resolveImportRowWorkDateAttribution({
+	            db: trx,
+	            orgId,
+	            userId: rowUserId,
+	            workDate,
+	            firstInAt,
+	            lastOutAt,
+		            timezone: ruleForMetrics.timezone,
+	            explicitShiftId: valueFor('shiftId') || valueFor('shift_id') || null,
+	          })
 	          const statusRaw = valueFor('status')
 	          const statusOverride = statusRaw != null ? resolveStatusOverride(statusRaw, statusMap) : null
 
@@ -25136,7 +25735,7 @@ module.exports = {
 	          meta = attachAttendanceImportMultiPunchMeta(meta, {
 	            valueFor,
 	            workDate,
-	            timezone: ruleForMetrics.timezone,
+	            rule: ruleForMetrics,
 	            clearMissing: (payload.mode ?? 'override') === 'override',
 	          })
 	          if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
@@ -25148,6 +25747,10 @@ module.exports = {
 	              overrides: engineAdjustment.meta?.overrides ?? null,
 	              base: engineAdjustment.meta?.base ?? null,
 	            }
+	          }
+	          if (importAttribution.frozenAttribution) {
+	            meta = meta ?? {}
+	            meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
 	          }
 
 	          const snapshot = {
@@ -25499,9 +26102,23 @@ module.exports = {
             defaultRule: baseRule,
             timezone,
           })
+          // Actionable ambiguity: never silently pick calendar date or row order (R5 / OD-4556-8).
+          if (punchWorkDate.resolution?.kind === 'ambiguous') {
+            res.status(422).json({
+              ok: false,
+              error: {
+                code: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+                message: 'Multiple shift windows match this punch; refuse silent work-date choice',
+                reasonCode: punchWorkDate.resolution.reasonCode,
+                candidates: punchWorkDate.resolution.candidates,
+              },
+            })
+            return
+          }
           workDate = punchWorkDate.workDate
           context = punchWorkDate.context
           timezone = punchWorkDate.timezone
+          const punchWorkDateResolution = punchWorkDate.resolution || null
 
           // Punch-policy S1 (#2203): block a punch on a day with no schedule when the org opted into
           // unscheduled.mode='block'. workDate is the FINAL (tz-recalculated) date. Default 'allow' and
@@ -25712,6 +26329,23 @@ module.exports = {
             )
 
             const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
+            // Freeze work-date attribution on first resolved write; later corrections/recomputes
+            // preserve this snapshot rather than re-resolving against current schedule.
+            const existingMeta = normalizeMetadata(protectedRecord?.meta)
+            const alreadyFrozen = parseFrozenWorkDateAttribution(
+              existingMeta?.[FROZEN_ATTRIBUTION_KEY] ?? existingMeta?.workDateAttributionV1,
+            )
+            let recordMeta
+            if (alreadyFrozen) {
+              recordMeta = { [FROZEN_ATTRIBUTION_KEY]: alreadyFrozen }
+            } else if (punchWorkDateResolution?.kind === 'resolved') {
+              recordMeta = {
+                [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+                  punchWorkDateResolution,
+                  { orgId, userId },
+                ),
+              }
+            }
             let record = await upsertAttendanceRecord({
               userId,
               orgId,
@@ -25724,6 +26358,7 @@ module.exports = {
               isWorkday: context.isWorkingDay,
               leaveMinutes: 0,
               overtimeMinutes: 0,
+              meta: recordMeta,
               existingRow: protectedRecord,
               client: trx,
             })
@@ -25740,7 +26375,7 @@ module.exports = {
               protectedRecord,
             })
 
-            return { event: event[0], record }
+            return { event: event[0], record, workDateResolution: punchWorkDateResolution }
           })
 
           emitEvent('attendance.punched', {
@@ -28142,6 +28777,63 @@ module.exports = {
           requestedOutAt: requestedOutSource,
         })
         if (overtimeSegmentation) metadata.overtimeSegmentation = overtimeSegmentation
+
+        // W2 / #4556: freeze overtimeAttributionV1 from exactly one org-scoped published candidate.
+        // Pending updates preserve the existing anchor; legacy pending without anchor fails closed
+        // before any side effects (OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED).
+        // Create calls this with a shell `{ org_id, user_id }` (no id/status); updates pass a real row.
+        const existingAnchor = parseOvertimeAttributionV1(
+          existingMetadata?.[OVERTIME_ATTRIBUTION_KEY] ?? existingMetadata?.overtimeAttributionV1,
+        )
+        const isExistingPersistedRequest = Boolean(existingRequest?.id)
+        if (existingAnchor) {
+          // Preserve frozen anchor on pending updates and non-pending reads.
+          metadata[OVERTIME_ATTRIBUTION_KEY] = existingAnchor
+        } else if (isExistingPersistedRequest) {
+          // Legacy pending (or any persisted row) without anchor: refuse before side effects.
+          throw new HttpError(
+            422,
+            OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+            'Legacy overtime request is missing overtimeAttributionV1; refuse mutation before side effects',
+            singleValidationDetail(
+              'metadata.overtimeAttributionV1',
+              'Required frozen attribution snapshot is missing on this pending overtime request',
+            ),
+          )
+        } else {
+          const createUserId = existingRequest?.user_id
+            || (typeof parsedData.userId === 'string' ? parsedData.userId : null)
+          if (!createUserId) {
+            throw new HttpError(
+              422,
+              OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+              'Cannot freeze overtime attribution without a subject userId',
+            )
+          }
+          const { adapters } = createPluginAttendanceWorkDateResolver(db)
+          const freeze = await adapters.overtime.freezeRequestCreationAnchor({
+            orgId,
+            userId: createUserId,
+            workDate,
+          })
+          if (!freeze.ok || !freeze.anchor) {
+            const code = freeze.result?.kind === 'ambiguous'
+              ? 'OVERTIME_ATTRIBUTION_AMBIGUOUS'
+              : OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED
+            throw new HttpError(
+              422,
+              code,
+              freeze.result?.kind === 'ambiguous'
+                ? 'Multiple published shift candidates for overtime attribution; refuse row-order inference'
+                : 'No single org-scoped published shift candidate to freeze for overtime attribution',
+              singleValidationDetail(
+                'workDate',
+                freeze.result?.reasonCode || WORK_DATE_REASON.NO_PUBLISHED_CANDIDATE,
+              ),
+            )
+          }
+          metadata[OVERTIME_ATTRIBUTION_KEY] = freeze.anchor
+        }
       }
 
       return {
@@ -29694,6 +30386,36 @@ module.exports = {
             : 'rejected'
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
+          let finalOvertimeAnchor = null
+
+          // W2: final overtime approval must validate its creation-frozen anchor before any
+          // approval/request/accounting write. Throwing here leaves the whole transaction untouched.
+          if (action === 'approve' && isFinalApproval && requestType === 'overtime') {
+            finalOvertimeAnchor = parseOvertimeAttributionV1(
+              requestMetadata?.[OVERTIME_ATTRIBUTION_KEY]
+              ?? requestMetadata?.overtimeAttributionV1,
+            )
+            if (!finalOvertimeAnchor) {
+              throw new HttpError(
+                422,
+                OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+                'Overtime approval is missing a valid frozen work-date attribution snapshot',
+              )
+            }
+            const requestWorkDate = normalizeDateOnly(requestRow.work_date)
+              ?? String(requestRow.work_date ?? '').slice(0, 10)
+            if (
+              String(finalOvertimeAnchor.orgId) !== String(orgId)
+              || String(finalOvertimeAnchor.userId) !== String(requestRow.user_id)
+              || String(finalOvertimeAnchor.workDate) !== String(requestWorkDate)
+            ) {
+              throw new HttpError(
+                422,
+                'OVERTIME_ATTRIBUTION_SNAPSHOT_MISMATCH',
+                'Overtime attribution snapshot does not match the request subject and work date',
+              )
+            }
+          }
 
           const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           // S7-1 §4.1 runtime fail-closed — step-advance: if the step about to become active is dynamic
@@ -29761,6 +30483,9 @@ module.exports = {
           )
 
           const nextMetadata = { ...requestMetadata }
+          if (finalOvertimeAnchor) {
+            nextMetadata[OVERTIME_ATTRIBUTION_KEY] = finalOvertimeAnchor
+          }
           let scheduleDispatchFinalization = null
           if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
             scheduleDispatchFinalization = await finalizeScheduleDispatchRequest(trx, {
@@ -30053,6 +30778,42 @@ module.exports = {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
               const updateFirstInAt = requestRow.requested_in_at ? new Date(requestRow.requested_in_at) : null
               const updateLastOutAt = requestRow.requested_out_at ? new Date(requestRow.requested_out_at) : null
+              // W2: correction preserves frozen work-date attribution (does not re-resolve against current schedule).
+              const existingCorrectionRow = await loadAttendanceRecordForUpdate(trx, {
+                userId: requestRow.user_id,
+                orgId,
+                workDate: requestRow.work_date,
+              })
+              const existingCorrectionMeta = normalizeMetadata(existingCorrectionRow?.meta)
+              const rawFrozenAttribution = existingCorrectionMeta?.[FROZEN_ATTRIBUTION_KEY]
+                ?? existingCorrectionMeta?.workDateAttributionV1
+                ?? null
+              const frozenAttribution = parseFrozenWorkDateAttribution(rawFrozenAttribution)
+              const { adapters: correctionAdapters } = createPluginAttendanceWorkDateResolver(trx)
+              const correctionResolution = await correctionAdapters.correction.resolveCorrectionWorkDate({
+                orgId,
+                userId: requestRow.user_id,
+                occurredAt: updateFirstInAt || updateLastOutAt || null,
+                timezone,
+                calendarWorkDate: requestRow.work_date,
+                frozenAttribution: rawFrozenAttribution,
+                recordMeta: existingCorrectionMeta,
+              })
+              assertResolvedWorkDateMatches({
+                resolution: correctionResolution,
+                expectedWorkDate: normalizeDateOnly(requestRow.work_date)
+                  ?? String(requestRow.work_date ?? '').slice(0, 10),
+                ambiguousCode: 'ATTENDANCE_CORRECTION_WORK_DATE_AMBIGUOUS',
+                mismatchCode: 'ATTENDANCE_CORRECTION_WORK_DATE_MISMATCH',
+              })
+              const correctionMeta = correctionResolution.kind === 'resolved'
+                ? {
+                    [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+                      correctionResolution,
+                      { orgId, userId: requestRow.user_id },
+                    ),
+                  }
+                : (frozenAttribution ? { [FROZEN_ATTRIBUTION_KEY]: frozenAttribution } : undefined)
               record = await upsertAttendanceRecord({
                 userId: requestRow.user_id,
                 orgId,
@@ -30066,10 +30827,33 @@ module.exports = {
                 isWorkday: context.isWorkingDay,
                 leaveMinutes: approvedMinutes.leaveMinutes,
                 overtimeMinutes: approvedMinutes.overtimeMinutes,
+                meta: correctionMeta,
+                existingRow: existingCorrectionRow,
                 client: trx,
               })
             } else if (requestType === 'leave' || requestType === 'overtime') {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
+              const overtimeRecordMeta = requestType === 'overtime' && finalOvertimeAnchor
+                ? {
+                    [OVERTIME_ATTRIBUTION_KEY]: finalOvertimeAnchor,
+                    [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+                      {
+                        kind: 'resolved',
+                        orgId,
+                        userId: requestRow.user_id,
+                        workDate: finalOvertimeAnchor.workDate,
+                        shiftId: finalOvertimeAnchor.shiftId,
+                        segmentIndex: null,
+                        reasonCode: WORK_DATE_REASON.OVERTIME_EXTENDED_WINDOW,
+                        evidenceSnapshot: {
+                          overtimeAttributionV1: finalOvertimeAnchor,
+                          requestId,
+                        },
+                      },
+                      { orgId, userId: requestRow.user_id },
+                    ),
+                  }
+                : undefined
               record = await upsertAttendanceRecord({
                 userId: requestRow.user_id,
                 orgId,
@@ -30083,6 +30867,7 @@ module.exports = {
                 isWorkday: context.isWorkingDay,
                 leaveMinutes: approvedMinutes.leaveMinutes,
                 overtimeMinutes: approvedMinutes.overtimeMinutes,
+                meta: overtimeRecordMeta,
                 client: trx,
               })
             } else if (requestType === 'outdoor_punch') {
@@ -30482,7 +31267,7 @@ module.exports = {
               page,
               pageSize,
             },
-          })
+		          })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -33611,8 +34396,12 @@ module.exports = {
               ? baseRuleForMetrics
               : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-            const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-            const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+            const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+              firstInValue: valueFor('firstInAt'),
+              lastOutValue: valueFor('lastOutAt'),
+              workDate,
+              rule: ruleForMetrics,
+            })
             const statusRaw = valueFor('status')
             const statusOverride = statusRaw != null
               ? resolveStatusOverride(statusRaw, statusMap)
@@ -34501,8 +35290,22 @@ module.exports = {
                 ? baseRuleForMetrics
                 : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+              const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+                firstInValue: valueFor('firstInAt'),
+                lastOutValue: valueFor('lastOutAt'),
+                workDate,
+                rule: ruleForMetrics,
+              })
+              const importAttribution = await resolveImportRowWorkDateAttribution({
+                db: trx,
+                orgId,
+                userId: rowUserId,
+                workDate,
+                firstInAt,
+                lastOutAt,
+	              timezone: ruleForMetrics.timezone,
+                explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
+              })
               const statusRaw = valueFor('status')
               const statusOverride = statusRaw != null
                 ? resolveStatusOverride(statusRaw, statusMap)
@@ -34654,10 +35457,14 @@ module.exports = {
               meta = attachAttendanceImportMultiPunchMeta(meta, {
                 valueFor,
                 workDate,
-                timezone: ruleForMetrics.timezone,
+                rule: ruleForMetrics,
                 clearMissing: (parsed.data.mode ?? 'override') === 'override',
               })
-	              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
+              if (importAttribution.frozenAttribution) {
+                meta = meta ?? {}
+                meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
+              }
+		              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
 	                meta = meta ?? {}
 	                meta.engine = {
 	                  appliedRules: engineResult.appliedRules,
@@ -35502,8 +36309,22 @@ module.exports = {
                 ? baseRuleForMetrics
                 : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+              const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+                firstInValue: valueFor('firstInAt'),
+                lastOutValue: valueFor('lastOutAt'),
+                workDate,
+                rule: ruleForMetrics,
+              })
+              const importAttribution = await resolveImportRowWorkDateAttribution({
+                db: trx,
+                orgId,
+                userId: rowUserId,
+                workDate,
+                firstInAt,
+                lastOutAt,
+                timezone: ruleForMetrics.timezone,
+                explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
+              })
               const statusRaw = valueFor('status')
               const statusOverride = statusRaw != null
                 ? resolveStatusOverride(statusRaw, statusMap)
@@ -35655,9 +36476,13 @@ module.exports = {
               meta = attachAttendanceImportMultiPunchMeta(meta, {
                 valueFor,
                 workDate,
-                timezone: ruleForMetrics.timezone,
+                rule: ruleForMetrics,
                 clearMissing: (parsed.data.mode ?? 'override') === 'override',
               })
+              if (importAttribution.frozenAttribution) {
+                meta = meta ?? {}
+                meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
+              }
               if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
                 meta = meta ?? {}
                 meta.engine = {
@@ -35747,12 +36572,16 @@ module.exports = {
 	              meta: responseMeta,
 	            },
 	          })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance import failed', error)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance import failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
         }
       }
@@ -36263,8 +37092,22 @@ module.exports = {
                       ? baseRuleForMetrics
                       : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-                    const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-                    const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+                    const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+                      firstInValue: valueFor('firstInAt'),
+                      lastOutValue: valueFor('lastOutAt'),
+                      workDate,
+                      rule: ruleForMetrics,
+                    })
+                    const importAttribution = await resolveImportRowWorkDateAttribution({
+                      db: trx,
+                      orgId,
+                      userId: rowUserId,
+                      workDate,
+                      firstInAt,
+                      lastOutAt,
+                      timezone: ruleForMetrics.timezone,
+                      explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
+                    })
                     const statusRaw = valueFor('status')
                     const statusOverride = statusRaw != null
                       ? resolveStatusOverride(statusRaw, statusMap)
@@ -36372,9 +37215,13 @@ module.exports = {
                     meta = attachAttendanceImportMultiPunchMeta(meta, {
                       valueFor,
                       workDate,
-                      timezone: ruleForMetrics.timezone,
+                      rule: ruleForMetrics,
                       clearMissing: (parsedImport.data.mode ?? 'override') === 'override',
                     })
+                    if (importAttribution.frozenAttribution) {
+                      meta = meta ?? {}
+                      meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
+                    }
 
                     const record = await upsertAttendanceRecord({
                       userId: rowUserId,
@@ -36480,7 +37327,7 @@ module.exports = {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
           }
-          if (run?.id) {
+	          if (run?.id) {
             try {
               await db.query(
                 'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
@@ -36501,10 +37348,14 @@ module.exports = {
                 finishedAt: new Date().toISOString(),
               })
             } catch (runError) {
-              logger.warn('Attendance integration failure recording failed', runError)
-            }
-          }
-          logger.error('Attendance integration sync failed', error)
+	              logger.warn('Attendance integration failure recording failed', runError)
+	            }
+	          }
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance integration sync failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: (error?.message || 'Integration sync failed') } })
         }
       })

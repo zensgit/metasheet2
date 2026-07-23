@@ -74,6 +74,7 @@ const describeDb = dbUrl ? describe : describe.skip
 const RUN = Date.now().toString(36)
 const ORG = `ae1-${RUN}`          // dedicated org → isolates seeded payroll cycles + records
 const ORG_OTHER = `ae1-other-${RUN}`
+const ADMIN_USER_ID = `ae1-admin-${RUN}`
 
 function ymd(daysAgo: number): string {
   return new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10)
@@ -282,7 +283,21 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
-    adminToken = await mintToken(`ae1-admin-${RUN}`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'AE-1 Admin', 'x', 'admin', '[]'::jsonb, true, true, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [ADMIN_USER_ID, `${ADMIN_USER_ID}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [ADMIN_USER_ID, ORG],
+    )
+    adminToken = await mintToken(ADMIN_USER_ID, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
 
     // This is a LIVE feature, not a dormant table: when a DB is present the AE-1 migration MUST have run.
     // A missing table here means the migration regressed — fail LOUD (RED), never a silent skip / false green.
@@ -633,6 +648,679 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(rec.first_in_at?.toISOString()).toBe(`${workDate}T01:25:00.000Z`)
     expect(rec.meta?.manual_result_edit).toBeUndefined()
     expect(await auditRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  it('W2 overtime final approval rejects a missing frozen anchor before every state/accounting write', async () => {
+    const requestId = randomUUID()
+    const approvalId = randomUUID()
+    const workDate = workdayYmd(5)
+    const overtimeUserId = `w2-ot-${RUN}`
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'W2 OT', 'x', 'user', '[]'::jsonb, true, false, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [overtimeUserId, `${overtimeUserId}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [overtimeUserId, ORG],
+    )
+    await pool.query(
+      `INSERT INTO approval_instances
+         (id, status, version, source_system, workflow_key, business_key, title,
+          requester_snapshot, current_step, total_steps, current_node_key)
+       VALUES ($1, 'pending', 0, 'platform', 'attendance_request_approval', $2, 'W2 OT guard',
+               $3::jsonb, 0, 0, 'attendance_request_step_0')`,
+      [
+        approvalId,
+        `attendance-request:${requestId}`,
+        JSON.stringify({ id: overtimeUserId, name: overtimeUserId }),
+      ],
+    )
+    await pool.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
+       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, $6::jsonb)`,
+      [requestId, overtimeUserId, workDate, ORG, approvalId, JSON.stringify({ minutes: 60 })],
+    )
+
+    try {
+      const approve = await approveRequest(requestId)
+      expect(approve.status, approve.raw).toBe(422)
+      expect(codeOf(approve)).toBe('OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED')
+
+      const request = (await pool.query(
+        `SELECT status, resolved_at FROM attendance_requests WHERE id = $1`,
+        [requestId],
+      )).rows[0]
+      expect(request).toMatchObject({ status: 'pending', resolved_at: null })
+      const approval = (await pool.query(
+        `SELECT status, version FROM approval_instances WHERE id = $1`,
+        [approvalId],
+      )).rows[0]
+      expect(approval.status).toBe('pending')
+      expect(Number(approval.version)).toBe(0)
+      expect((await pool.query(
+        `SELECT 1 FROM approval_records WHERE instance_id = $1`,
+        [approvalId],
+      )).rows).toHaveLength(0)
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, overtimeUserId, workDate],
+      )).rows).toHaveLength(0)
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_leave_balance_events WHERE source_id = $1`,
+        [requestId],
+      )).rows).toHaveLength(0)
+    } finally {
+      await pool.query(`DELETE FROM approval_records WHERE instance_id = $1`, [approvalId]).catch(() => undefined)
+      await pool.query(`DELETE FROM approval_assignments WHERE instance_id = $1`, [approvalId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_requests WHERE id = $1`, [requestId]).catch(() => undefined)
+      await pool.query(`DELETE FROM approval_instances WHERE id = $1`, [approvalId]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2`, [overtimeUserId, ORG]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = $1`, [overtimeUserId]).catch(() => undefined)
+    }
+  })
+
+  it('W2 overtime final approval copies the creation-frozen anchor into the result record', async () => {
+    const requestId = randomUUID()
+    const approvalId = randomUUID()
+    const shiftId = randomUUID()
+    const assignmentId = randomUUID()
+    const workDate = workdayYmd(5)
+    const overtimeUserId = `w2-ot-ok-${RUN}`
+    const anchor = {
+      version: 1,
+      orgId: ORG,
+      userId: overtimeUserId,
+      workDate,
+      shiftId,
+      source: 'shift',
+      assignmentId,
+    }
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'W2 OT accepted', 'x', 'user', '[]'::jsonb, true, false, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [overtimeUserId, `${overtimeUserId}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [overtimeUserId, ORG],
+    )
+    await pool.query(
+      `INSERT INTO approval_instances
+         (id, status, version, source_system, workflow_key, business_key, title,
+          requester_snapshot, current_step, total_steps, current_node_key)
+       VALUES ($1, 'pending', 0, 'platform', 'attendance_request_approval', $2, 'W2 OT accepted',
+               $3::jsonb, 0, 0, 'attendance_request_step_0')`,
+      [
+        approvalId,
+        `attendance-request:${requestId}`,
+        JSON.stringify({ id: overtimeUserId, name: overtimeUserId }),
+      ],
+    )
+    await pool.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
+       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, $6::jsonb)`,
+      [
+        requestId,
+        overtimeUserId,
+        workDate,
+        ORG,
+        approvalId,
+        JSON.stringify({ minutes: 60, overtimeAttributionV1: anchor }),
+      ],
+    )
+
+    try {
+      const approve = await approveRequest(requestId)
+      expect(approve.status, approve.raw).toBe(200)
+      const record = (await pool.query(
+        `SELECT meta FROM attendance_records
+         WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, overtimeUserId, workDate],
+      )).rows[0]
+      expect(record?.meta?.overtimeAttributionV1).toEqual(anchor)
+      expect(record?.meta?.workDateAttributionV1).toMatchObject({
+        version: 1,
+        orgId: ORG,
+        userId: overtimeUserId,
+        workDate,
+        shiftId,
+      })
+    } finally {
+      await pool.query(
+        `DELETE FROM attendance_leave_balance_events WHERE source_id = $1`,
+        [requestId],
+      ).catch(() => undefined)
+      await pool.query(
+        `DELETE FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, overtimeUserId, workDate],
+      ).catch(() => undefined)
+      await pool.query(`DELETE FROM approval_records WHERE instance_id = $1`, [approvalId]).catch(() => undefined)
+      await pool.query(`DELETE FROM approval_assignments WHERE instance_id = $1`, [approvalId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_requests WHERE id = $1`, [requestId]).catch(() => undefined)
+      await pool.query(`DELETE FROM approval_instances WHERE id = $1`, [approvalId]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2`, [overtimeUserId, ORG]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = $1`, [overtimeUserId]).catch(() => undefined)
+    }
+  })
+
+  it('W2 correction and legacy import reject overlapping shift ambiguity with zero record writes', async () => {
+    const workDate = workdayYmd(4)
+    const ambiguityUserId = `w2-amb-${RUN}`
+    const shiftA = randomUUID()
+    const shiftB = randomUUID()
+    const assignmentA = randomUUID()
+    const assignmentB = randomUUID()
+    const requestIds: string[] = []
+    const approvalIds: string[] = []
+    const importJobIds: string[] = []
+    const importBatchIds: string[] = []
+    const integrationIds: string[] = []
+    let dingTalkMock: ReturnType<typeof http.createServer> | null = null
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'W2 Ambiguous', 'x', 'user', '[]'::jsonb, true, false, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [ambiguityUserId, `${ambiguityUserId}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [ambiguityUserId, ORG],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days)
+       VALUES
+         ($1, $3, 'W2 overlap A', 'UTC', '00:00', '12:00', false, '[0,1,2,3,4,5,6]'::jsonb),
+         ($2, $3, 'W2 overlap B', 'UTC', '01:00', '11:00', false, '[0,1,2,3,4,5,6]'::jsonb)`,
+      [shiftA, shiftB, ORG],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+       VALUES
+         ($1, $3, $4, $5, $7, $7, true, 'published', 0),
+         ($2, $3, $4, $6, $7, $7, true, 'published', 1)`,
+      [assignmentA, assignmentB, ORG, ambiguityUserId, shiftA, shiftB, workDate],
+    )
+
+    try {
+      const requestId = randomUUID()
+      const approvalId = randomUUID()
+      requestIds.push(requestId)
+      approvalIds.push(approvalId)
+      await pool.query(
+        `INSERT INTO approval_instances
+           (id, status, version, source_system, workflow_key, business_key, title,
+            requester_snapshot, current_step, total_steps, current_node_key)
+         VALUES ($1, 'pending', 0, 'platform', 'attendance_request_approval', $2,
+                 'W2 correction guard', $3::jsonb, 0, 0, 'attendance_request_step_0')`,
+        [
+          approvalId,
+          `attendance-request:${requestId}`,
+          JSON.stringify({ id: ambiguityUserId, name: ambiguityUserId }),
+        ],
+      )
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+            requested_in_at, requested_out_at, reason, metadata)
+         VALUES ($1, $2, $3, 'time_correction', 'pending', $4, $5, $6, $7, $8, '{}'::jsonb)`,
+        [
+          requestId,
+          ambiguityUserId,
+          workDate,
+          ORG,
+          approvalId,
+          `${workDate}T02:00:00.000Z`,
+          `${workDate}T10:00:00.000Z`,
+          'W2 overlapping shift guard',
+        ],
+      )
+
+      const approve = await approveRequest(requestId)
+      expect(approve.status, approve.raw).toBe(422)
+      expect(codeOf(approve)).toBe('ATTENDANCE_CORRECTION_WORK_DATE_AMBIGUOUS')
+      expect((await pool.query(
+        `SELECT status FROM attendance_requests WHERE id = $1`,
+        [requestId],
+      )).rows[0]?.status).toBe('pending')
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, ambiguityUserId, workDate],
+      )).rows).toHaveLength(0)
+
+      const importResponse = await postImport({
+        orgId: ORG,
+        userId: ambiguityUserId,
+        rows: [{
+          userId: ambiguityUserId,
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T02:00:00.000Z`,
+            lastOutAt: `${workDate}T10:00:00.000Z`,
+          },
+        }],
+        mode: 'override',
+      })
+      expect(importResponse.status, importResponse.raw).toBe(422)
+      expect(codeOf(importResponse)).toBe('WORK_DATE_ATTRIBUTION_AMBIGUOUS')
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, ambiguityUserId, workDate],
+      )).rows).toHaveLength(0)
+
+      const explicitShiftMismatch = await postImport({
+        orgId: ORG,
+        userId: ambiguityUserId,
+        rows: [{
+          userId: ambiguityUserId,
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T02:00:00.000Z`,
+            lastOutAt: `${workDate}T10:00:00.000Z`,
+            shiftId: randomUUID(),
+          },
+        }],
+        mode: 'override',
+      })
+      expect(explicitShiftMismatch.status, explicitShiftMismatch.raw).toBe(422)
+      expect(codeOf(explicitShiftMismatch)).toBe('WORK_DATE_ATTRIBUTION_EXPLICIT_SHIFT_MISMATCH')
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, ambiguityUserId, workDate],
+      )).rows).toHaveLength(0)
+
+      const ambiguousRowsPayload = {
+        orgId: ORG,
+        userId: ambiguityUserId,
+        rows: [{
+          userId: ambiguityUserId,
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T02:00:00.000Z`,
+            lastOutAt: `${workDate}T10:00:00.000Z`,
+          },
+        }],
+        mode: 'override',
+      }
+      const prepareCommit = async () => {
+        const prepared = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+          method: 'POST',
+          headers: authHeaders(adminToken),
+          body: JSON.stringify({ orgId: ORG }),
+        })
+        expect(prepared.status, prepared.raw).toBe(200)
+        const token = dataOf(prepared)?.commitToken
+        expect(token).toBeTruthy()
+        return String(token)
+      }
+      const importPersistenceSnapshot = async () => {
+        const batches = await pool.query(
+          `SELECT id
+             FROM attendance_import_batches
+            WHERE org_id = $1
+            ORDER BY id`,
+          [ORG],
+        )
+        const items = await pool.query(
+          `SELECT i.id
+             FROM attendance_import_items i
+             JOIN attendance_import_batches b ON b.id = i.batch_id
+            WHERE b.org_id = $1
+            ORDER BY i.id`,
+          [ORG],
+        )
+        return {
+          batchIds: batches.rows.map((row) => String(row.id)),
+          itemIds: items.rows.map((row) => String(row.id)),
+        }
+      }
+
+      const beforeCommitFailure = await importPersistenceSnapshot()
+      const commitResponse = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST',
+        headers: authHeaders(adminToken),
+        body: JSON.stringify({
+          ...ambiguousRowsPayload,
+          commitToken: await prepareCommit(),
+          idempotencyKey: `w2-commit-${RUN}`,
+        }),
+      })
+      expect(commitResponse.status, commitResponse.raw).toBe(422)
+      expect(codeOf(commitResponse)).toBe('WORK_DATE_ATTRIBUTION_AMBIGUOUS')
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, ambiguityUserId, workDate],
+      )).rows).toHaveLength(0)
+      expect(await importPersistenceSnapshot()).toEqual(beforeCommitFailure)
+
+      const beforeAsyncFailure = await importPersistenceSnapshot()
+      const asyncResponse = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST',
+        headers: authHeaders(adminToken),
+        body: JSON.stringify({
+          ...ambiguousRowsPayload,
+          commitToken: await prepareCommit(),
+          idempotencyKey: `w2-commit-async-${RUN}`,
+        }),
+      })
+      expect(asyncResponse.status, asyncResponse.raw).toBe(200)
+      const asyncJob = dataOf(asyncResponse)?.job
+      const asyncJobId = String(asyncJob?.id ?? '')
+      const asyncBatchId = String(asyncJob?.batchId ?? '')
+      expect(asyncJobId).toBeTruthy()
+      expect(asyncBatchId).toBeTruthy()
+      importJobIds.push(asyncJobId)
+      importBatchIds.push(asyncBatchId)
+      let failedAsyncJob: any = null
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const jobResponse = await requestJson(
+          `${baseUrl}/api/attendance/import/jobs/${encodeURIComponent(asyncJobId)}?orgId=${encodeURIComponent(ORG)}`,
+          { headers: authHeaders(adminToken) },
+        )
+        expect(jobResponse.status, jobResponse.raw).toBe(200)
+        const job = dataOf(jobResponse)
+        if (job?.status === 'failed') {
+          failedAsyncJob = job
+          break
+        }
+        if (job?.status === 'completed') {
+          throw new Error(`W2 ambiguous async import completed unexpectedly: ${jobResponse.raw}`)
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(failedAsyncJob).toBeTruthy()
+      expect(String(failedAsyncJob?.error ?? '')).toContain('Multiple shift windows match')
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, ambiguityUserId, workDate],
+      )).rows).toHaveLength(0)
+      expect(await importPersistenceSnapshot()).toEqual(beforeAsyncFailure)
+      expect((await pool.query(
+        `SELECT status FROM attendance_import_jobs WHERE id = $1`,
+        [asyncJobId],
+      )).rows).toEqual([{ status: 'failed' }])
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_import_batches WHERE id = $1`,
+        [asyncBatchId],
+      )).rows).toHaveLength(0)
+
+      let mockFirstInAt: string = `${workDate}T02:00:00.000Z`
+      let mockLastOutAt: string = `${workDate}T10:00:00.000Z`
+      dingTalkMock = http.createServer((req, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        if (req.url?.startsWith('/gettoken')) {
+          res.end(JSON.stringify({ access_token: `w2-token-${RUN}`, expires_in: 7200 }))
+          return
+        }
+        if (req.url?.startsWith('/topapi/attendance/getcolumnval')) {
+          res.end(JSON.stringify({
+            result: {
+              column_vals: [
+                {
+                  column_vo: { id: 'first-in' },
+                  column_vals: [{ date: workDate, value: mockFirstInAt }],
+                },
+                {
+                  column_vo: { id: 'last-out' },
+                  column_vals: [{ date: workDate, value: mockLastOutAt }],
+                },
+                {
+                  column_vo: { id: 'clock-in-2' },
+                  column_vals: [{ date: workDate, value: '23:00' }],
+                },
+                {
+                  column_vo: { id: 'clock-out-2' },
+                  column_vals: [{ date: workDate, value: '05:30' }],
+                },
+              ],
+            },
+          }))
+          return
+        }
+        res.statusCode = 404
+        res.end(JSON.stringify({ errmsg: 'not found' }))
+      })
+      await new Promise<void>((resolve, reject) => {
+        dingTalkMock?.once('error', reject)
+        dingTalkMock?.listen(0, '127.0.0.1', () => resolve())
+      })
+      const mockAddress = dingTalkMock.address()
+      if (!mockAddress || typeof mockAddress === 'string') {
+        throw new Error('W2 DingTalk mock did not expose a TCP address')
+      }
+      const integrationCreate = await requestJson(`${baseUrl}/api/attendance/integrations`, {
+        method: 'POST',
+        headers: authHeaders(adminToken),
+        body: JSON.stringify({
+          orgId: ORG,
+          name: `W2 overlap ${RUN}`,
+          type: 'dingtalk',
+          config: {
+            appKey: `w2-key-${RUN}`,
+            appSecret: `w2-secret-${RUN}`,
+            baseUrl: `http://127.0.0.1:${mockAddress.port}`,
+            userIds: [ambiguityUserId],
+            columnIds: ['first-in', 'last-out', 'clock-in-2', 'clock-out-2'],
+            columns: [
+              { id: 'first-in', alias: 'firstInAt' },
+              { id: 'last-out', alias: 'lastOutAt' },
+              { id: 'clock-in-2', alias: 'clockIn2' },
+              { id: 'clock-out-2', alias: 'clockOut2' },
+            ],
+            mappingProfileId: 'dingtalk_api_columns',
+            userMapKeyField: 'userId',
+            userMap: { [ambiguityUserId]: ambiguityUserId },
+          },
+        }),
+      })
+      expect(integrationCreate.status, integrationCreate.raw).toBe(200)
+      const integrationId = String(dataOf(integrationCreate)?.id ?? '')
+      expect(integrationId).toBeTruthy()
+      integrationIds.push(integrationId)
+
+      const beforeIntegrationFailure = await importPersistenceSnapshot()
+      const integrationSync = await requestJson(
+        `${baseUrl}/api/attendance/integrations/${encodeURIComponent(integrationId)}/sync`,
+        {
+          method: 'POST',
+          headers: authHeaders(adminToken),
+          body: JSON.stringify({ orgId: ORG, from: workDate, to: workDate }),
+        },
+      )
+      expect(integrationSync.status, integrationSync.raw).toBe(422)
+      expect(codeOf(integrationSync)).toBe('WORK_DATE_ATTRIBUTION_AMBIGUOUS')
+      expect((await pool.query(
+        `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+        [ORG, ambiguityUserId, workDate],
+      )).rows).toHaveLength(0)
+      expect(await importPersistenceSnapshot()).toEqual(beforeIntegrationFailure)
+      expect((await pool.query(
+        `SELECT status
+           FROM attendance_integration_runs
+          WHERE integration_id = $1
+          ORDER BY started_at DESC
+          LIMIT 1`,
+        [integrationId],
+      )).rows).toEqual([{ status: 'failed' }])
+
+      await pool.query(
+        `UPDATE attendance_shift_assignments SET is_active = false WHERE id = $1`,
+        [assignmentB],
+      )
+      await pool.query(
+        `UPDATE attendance_shifts
+         SET work_start_time = '22:00', work_end_time = '06:00', is_overnight = true
+         WHERE id = $1`,
+        [shiftA],
+      )
+      const overnightRowsPayload = {
+        orgId: ORG,
+        userId: ambiguityUserId,
+        rows: [{
+          userId: ambiguityUserId,
+          workDate,
+          fields: {
+            firstInAt: '22:00',
+            lastOutAt: '06:00',
+            clockIn2: '23:00',
+            clockOut2: '05:30',
+          },
+        }],
+        mode: 'override',
+      }
+      const nextWorkDate = new Date(
+        new Date(`${workDate}T00:00:00.000Z`).getTime() + 86400000,
+      ).toISOString().slice(0, 10)
+      const assertOvernightRecord = async () => {
+        const record = (await pool.query(
+          `SELECT first_in_at, last_out_at, meta, source_batch_id FROM attendance_records
+           WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+          [ORG, ambiguityUserId, workDate],
+        )).rows[0]
+        expect(new Date(record?.first_in_at).toISOString()).toBe(`${workDate}T22:00:00.000Z`)
+        expect(new Date(record?.last_out_at).toISOString()).toBe(`${nextWorkDate}T06:00:00.000Z`)
+        expect(record?.meta).toMatchObject({
+          clockIn2: `${workDate}T23:00:00.000Z`,
+          clockOut2: `${nextWorkDate}T05:30:00.000Z`,
+          workDateAttributionV1: {
+            version: 1,
+            orgId: ORG,
+            userId: ambiguityUserId,
+            workDate,
+            shiftId: shiftA,
+          },
+        })
+        return record?.source_batch_id ? String(record.source_batch_id) : null
+      }
+      const clearOvernightRecord = async () => {
+        await pool.query(
+          `DELETE FROM attendance_records
+            WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
+          [ORG, ambiguityUserId, workDate],
+        )
+      }
+      const acceptedImport = await postImport(overnightRowsPayload)
+      expect(acceptedImport.status, acceptedImport.raw).toBe(200)
+      expect(await assertOvernightRecord()).toBeNull()
+      await clearOvernightRecord()
+
+      const acceptedCommit = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST',
+        headers: authHeaders(adminToken),
+        body: JSON.stringify({
+          ...overnightRowsPayload,
+          commitToken: await prepareCommit(),
+          idempotencyKey: `w2-overnight-commit-${RUN}`,
+        }),
+      })
+      expect(acceptedCommit.status, acceptedCommit.raw).toBe(200)
+      expect(dataOf(acceptedCommit)?.imported, acceptedCommit.raw).toBe(1)
+      const acceptedCommitBatchId = await assertOvernightRecord()
+      expect(acceptedCommitBatchId).toBeTruthy()
+      importBatchIds.push(String(acceptedCommitBatchId))
+      await clearOvernightRecord()
+
+      const acceptedAsync = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST',
+        headers: authHeaders(adminToken),
+        body: JSON.stringify({
+          ...overnightRowsPayload,
+          commitToken: await prepareCommit(),
+          idempotencyKey: `w2-overnight-async-${RUN}`,
+        }),
+      })
+      expect(acceptedAsync.status, acceptedAsync.raw).toBe(200)
+      const acceptedAsyncJob = dataOf(acceptedAsync)?.job
+      const acceptedAsyncJobId = String(acceptedAsyncJob?.id ?? '')
+      const acceptedAsyncBatchId = String(acceptedAsyncJob?.batchId ?? '')
+      expect(acceptedAsyncJobId).toBeTruthy()
+      expect(acceptedAsyncBatchId).toBeTruthy()
+      importJobIds.push(acceptedAsyncJobId)
+      importBatchIds.push(acceptedAsyncBatchId)
+      let completedAsyncJob: any = null
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const jobResponse = await requestJson(
+          `${baseUrl}/api/attendance/import/jobs/${encodeURIComponent(acceptedAsyncJobId)}?orgId=${encodeURIComponent(ORG)}`,
+          { headers: authHeaders(adminToken) },
+        )
+        expect(jobResponse.status, jobResponse.raw).toBe(200)
+        const job = dataOf(jobResponse)
+        if (job?.status === 'completed') {
+          completedAsyncJob = job
+          break
+        }
+        if (job?.status === 'failed') {
+          throw new Error(`W2 overnight async import failed unexpectedly: ${jobResponse.raw}`)
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(completedAsyncJob).toBeTruthy()
+      expect(await assertOvernightRecord()).toBe(acceptedAsyncBatchId)
+      await clearOvernightRecord()
+
+      mockFirstInAt = '22:00'
+      mockLastOutAt = '06:00'
+      const acceptedIntegrationSync = await requestJson(
+        `${baseUrl}/api/attendance/integrations/${encodeURIComponent(integrationId)}/sync`,
+        {
+          method: 'POST',
+          headers: authHeaders(adminToken),
+          body: JSON.stringify({ orgId: ORG, from: workDate, to: workDate }),
+        },
+      )
+      expect(acceptedIntegrationSync.status, acceptedIntegrationSync.raw).toBe(200)
+      const acceptedIntegrationBatchId = await assertOvernightRecord()
+      expect(acceptedIntegrationBatchId).toBeTruthy()
+      importBatchIds.push(String(acceptedIntegrationBatchId))
+    } finally {
+      for (const approvalId of approvalIds) {
+        await pool.query(`DELETE FROM approval_records WHERE instance_id = $1`, [approvalId]).catch(() => undefined)
+        await pool.query(`DELETE FROM approval_assignments WHERE instance_id = $1`, [approvalId]).catch(() => undefined)
+      }
+      for (const requestId of requestIds) {
+        await pool.query(`DELETE FROM attendance_requests WHERE id = $1`, [requestId]).catch(() => undefined)
+      }
+      for (const approvalId of approvalIds) {
+        await pool.query(`DELETE FROM approval_instances WHERE id = $1`, [approvalId]).catch(() => undefined)
+      }
+      if (dingTalkMock) {
+        await new Promise<void>((resolve) => dingTalkMock?.close(() => resolve()))
+      }
+      for (const integrationId of integrationIds) {
+        await pool.query(`DELETE FROM attendance_integration_runs WHERE integration_id = $1`, [integrationId]).catch(() => undefined)
+        await pool.query(`DELETE FROM attendance_integrations WHERE id = $1`, [integrationId]).catch(() => undefined)
+      }
+      for (const jobId of importJobIds) {
+        await pool.query(`DELETE FROM attendance_import_jobs WHERE id = $1`, [jobId]).catch(() => undefined)
+      }
+      for (const batchId of importBatchIds) {
+        await pool.query(`DELETE FROM attendance_import_items WHERE batch_id = $1`, [batchId]).catch(() => undefined)
+        await pool.query(`DELETE FROM attendance_import_batches WHERE id = $1`, [batchId]).catch(() => undefined)
+      }
+      await pool.query(`DELETE FROM attendance_records WHERE org_id = $1 AND work_date = $2`, [ORG, workDate]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_shift_assignments WHERE id = ANY($1::uuid[])`, [[assignmentA, assignmentB]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])`, [[shiftA, shiftB]]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2`, [ambiguityUserId, ORG]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = $1`, [ambiguityUserId]).catch(() => undefined)
+    }
   })
 
   it('AE-1b durability: unmarked records keep route-derived behavior and never gain a manual marker', async () => {

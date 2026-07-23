@@ -321,6 +321,16 @@ jobs:
         run: |
           node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs
 
+      # #4556 W2: shared work-date resolver unit matrix (overlap precedence, attribution tail,
+      # free_time/unscheduled/explicit-import hard stop, overtimeAttributionV1 freeze/legacy,
+      # six-adapter parity). Explicit whole-file gate so it cannot drift out of the default suite.
+      - name: Run attendance work-date resolver W2 unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-work-date-resolver-w2.test.ts \
+            tests/unit/attendance-live-punch-work-date.test.ts \
+            --reporter=dot
+
       - name: Run linting
         if: matrix.node-version == '20.x'
         run: |
@@ -884,6 +894,7 @@ jobs:
             tests/integration/attendance-setup-readiness-w4-0.db.test.ts \
             tests/integration/attendance-decision-trace-w5-0.db.test.ts \
             tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
+            tests/integration/attendance-work-date-resolver-w2.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
