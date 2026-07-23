@@ -4,7 +4,8 @@
 > 不得开工）。**
 > **历史注记（记录保真）**：2026-07-22 曾依会话委托执行受托代行 ratify（comment-5053163506），
 > 随后 owner 复审明示「Wave 5 目前只授权到 DATA-CONTRACT 设计锁……呈审 → owner RATIFY → 再切
-> runtime」并列出七项冻结要求——**代行已收回，状态回滚 PROPOSED**；comment-5053163506 中的
+> runtime」并列出七项冻结要求（原文逐字与逐项合同映射 = §0.1，复审修订已吸收入锁）——
+> **代行已收回，状态回滚 PROPOSED**；comment-5053163506 中的
 > OD 十项选择降级为受托预填参考（非裁决），owner 逐项终裁于 ratify comment。
 > 本锁是章程 §15「Wave 5 explainability = DATA-CONTRACT-GATED」这道门的解锁提案：章程台账行逐字为
 > 「| Wave 5 explainability | 本总纲仅定义范围 | 未开始 | 未开始 | DATA-CONTRACT-GATED |」（L554），
@@ -39,15 +40,40 @@
 
 | # | 红线 | 本锁的落地形态 |
 |---|---|---|
-| R1 | **解释面只读（零写）** | 六类 trace 全部是纯读端点；只读用 Postgres `READ ONLY` 事务做**结构约束**（先例 `runAttendanceSetupReadinessReadOnly`，`attendance-admin.ts:457`；W4-0-G2 三条必拒测试同型复用，§9 W5-0-G3）。解释面不修复、不重算、不回写任何 status/balance/assignment |
+| R1 | **解释面只读（零写）** | 六类 trace 全部是纯读端点；只读用 Postgres `READ ONLY` 事务做**结构约束**（先例 `runAttendanceSetupReadinessReadOnly`，`attendance-admin.ts:457`；W4-0-G2 三条必拒测试同型复用，§9 W5-0-G3）。解释面不修复、不重算、不回写任何 status/balance/assignment，**也不修改任何配置**（settings 单键 / 规则表 / flag——解释面对 `saveSettings`、规则写端点、result-edit 写端点零触达；「查看依据」永不携带写动作，owner 冻结⑦） |
 | R2 | **依据必须指向真实存储记录** | 依据链每环 = 真实表行/冻结快照/审计行的引用（§3 逐类点名真源）；**禁前端猜规则原因、禁任何 LLM 式/模板式补全**——前端纯模块只做后端 discriminated 形状的白名单映射（先例 `useAttendanceSetupReadiness.ts:55,93-100` 严格解析、未知形状 fail-closed 为 null） |
 | R3 | **脱敏 by construction（响应层白名单）** | 后端在响应组装层白名单投影（遮罩清单 §5.1 显式列举：managerChainIds / ip_address / user_agent / 裸内部 id / env 名等），**不是**前端挑字段（memory 教训「客户端 values-free 要边界解析」）；契约测试锁响应键集合恒等 + 禁字段零出现 |
-| R4 | **版本缺口如实暴露** | 无版本化的规则显示**「当前规则（无历史版本）」**（§3.1 posture=`current_live_no_history`），绝不虚构版本号、绝不由 `expires_at−granted_at` 之类反推「当时配置」并指认为版本（memory 教训「审计面禁止编造值」）；依据链任一环缺失 ⇒ 该环 `undeterminable`，显示「无法确定依据」（章程 L368 逐字） |
+| R4 | **版本缺口如实暴露** | 无版本化的规则显示**「当前规则（无历史版本）」**（§3.1 posture=`current_live_no_history`），绝不虚构版本号、绝不由 `expires_at−granted_at` 之类反推「当时配置」并指认为版本（memory 教训「审计面禁止编造值」）；依据链任一环缺失 ⇒ 该环 `undeterminable`，显示「无法确定依据」（章程 L368 逐字）——**「版本缺失」显式在列**：快照自述 version/engine 缺失或不匹配 ⇒ 既有 null fail-closed 路径 ⇒ `undeterminable`（§3.3④，owner 冻结⑥） |
 
 章程同源条款：§5-4「未知状态 fail-closed：不得把未知/加载失败/缺配置显示为成功、正常或 all-clear」
 （L232）；§4.4「审计信息以“发生了什么、谁操作、依据什么、如何恢复”组织，不按内部 event code 直接堆给
 业务用户」（L196）；§9 指标「解释完整性 | 已覆盖状态全部来自权威字段/审计，不由前端猜测」（L427）；
 §3.2 主管边界「不得暴露超出其组织/assignment/scheduler scope 的数据或管理动作」（L132）。
+
+## 0.1 Owner 七项冻结要求（2026-07-22 复审，原文逐字）与合同映射
+
+owner 复审在收回代行时列出「设计锁至少要冻结」的七项，原文逐字（一字不改）：
+
+> 1. 「异常/结果的稳定 reasonCode，禁止前端猜测原因。」
+> 2. 「规则版本、班次、申请、修正和人工覆盖的 provenance。」
+> 3. 「『为什么是迟到/缺卡/应出勤』的可追溯决策链。」
+> 4. 「org、员工与管理员三种可见性及隐私脱敏。」
+> 5. 「历史结果按计算时快照解释，不能被当前配置改写。」
+> 6. 「unknown、数据不全和版本缺失必须 fail-closed。」
+> 7. 「解释只读，禁止借解释面修改考勤结果或配置。」
+
+七项全部为合同一等公民，与 §0 红线同级覆盖本锁一切条款；逐项冻结锚点（含 2026-07-22 复审
+吸收修订）如下：
+
+| # | 冻结锚点（合同条款） | 复审吸收修订 |
+|---|---|---|
+| ① | R2（禁前端猜规则原因、禁 LLM 式/模板式补全）+ §3.1 `reasonCode` 字段与硬规则 5（稳定机器码、码源逐类点名**存量闭集**、前端只译码不推导）+ confidence 三档纯派生（§3.1） | **新增**：§3.1 shape `reasonCode` 一等公民字段 + 硬规则 5 + W5-0-G4 扩展（码闭集穷尽、未知 code fail-closed、闭集扩展 = 合同修订） |
+| ② | 五源 provenance 全覆盖——**规则（版本）**：各类 E2 规则环（有快照则 `snapshot_frozen`：④`metadata.overtimeRule`、⑥flow steps 快照；活体恒 `current_live_no_history`，R4/§3.2 末；版本化 schema = OD-W5-3）；**班次**：①②E2（`resolveWorkContext` source 判别 `'rotation'|'shift'|'rule'` `:14347-14394` + 班次起止/宽限参数投影 §5.1 允许行；record 不落 shift id（§1-1）⇒ 恒 `current_live_no_history`，OD-W5-8）；**申请**：②③E4 补救环（MP-2/MP-3 快照 `snapshot_frozen @ requestEvaluatedAt`）+ ④E1/E3（请求 metadata 快照 + 审批 resolution）+ ⑤E2（`source_id` 反链请求，§5.1 遮罩）+ ⑥全链（审批实例）；**修正**：①②E3 更正环（`attendance_record_result_edits` 只读历史读面，§2 IN / W5-0 新增）；**人工覆盖**：同更正环（AE-1 审计：不可变 before/after + actor + reason、无 FK 删除免疫）+ `meta.manual_result_edit` 指纹（①E1 auditRef）+ ⑥`delegatedFrom` 委托改道布尔（§5.1） | 无条款变更（既有分散锚点在本表显式收拢为**五源覆盖义务**——任一源在对应类缺环即为合同缺陷） |
+| ③ | 迟到 = §3.3②；缺卡 = §3.3③；**应出勤** = ①E1 `is_workday`（写入时冻结结果）+ ①E2（显式承载应出勤决策链）+ ③E2 应出勤环（同一口径） | **修订**：①E2 显式命名「应出勤」链（此前仅 ③E2 显式、① 摊在规则环散文内） |
+| ④ | §5.1 可见性三档一等公民（org / 员工 / 管理员）+ org-scope 底线无条件冻结 + §4.1 门 + OD-W5-10（主管面为另族问题，不与 org 档混同） | **新增**：§5.1 三档升格 + org 档语义两读法呈 **OD-W5-11**（本锁不自决）+ W5-0-G2 org 底线断言 |
+| ⑤ | R4 + §3.2 末段（禁把当前规则呈现为「当时依据」）+ §5.2①③ + W5-0-G6（mutation：改按现行规则重算 ⇒ 红） | **新增**：§3.1 硬规则 6「快照排他」——凡有计算时快照的历史结果，禁用当前配置渲染其依据；`current_live_no_history` 仅限确无快照处且必须显式标注非计算时依据 |
+| ⑥ | R4（「版本缺失」显式在列）+ §3.1 硬规则 1/3 + §3.3④ 断环（快照 version/engine 缺失或不匹配 ⇒ 既有 null 路径 ⇒ `undeterminable`）+ §1-7/§6 未知形状 fail-closed 为 null + W5-0-G1/G4 + W5-1 文案门 | **修订**：R4 行内把「快照自述 version/engine 缺失/不匹配」显式点名（原仅经 §3.3④ 承载）——unknown / 数据不全 / 版本缺失三者各有独立锚点 |
+| ⑦ | R1（含「配置」零触达，本次显式）+ §2 OUT（任何写路径）+ §4.2 `READ ONLY` 结构约束 + W5-0-G3 + §10（不促发开启） | **修订**：R1 显式加「不修改任何配置」；**新增** W5-1 mock 层零写 + 零配置调用负向断言、W5-2 深链只指读面 |
 
 ## 1. Grounded problem statement（六类 + 横切，全部对 `bbcb8caf3` 实证）
 
@@ -209,6 +235,11 @@ values-free by construction，§5.1 遮罩清单约束一切文本字段）：
 {
   category,                       // 六类闭集：'today_status'|'late_early'|'missing_punch'|
                                   //   'overtime_segmentation'|'comp_time_balance'|'approver_source'
+  reasonCode,                     // 该类结论的稳定机器码（owner 冻结①，一等公民）：①②③ 响应级
+                                  //   单码；④⑤⑥ 以段/事件/步级码组承载（硬规则 5 逐类点名码源
+                                  //   ——全部存量闭集，不新造词表）；前端只译码（code→中文白名单
+                                  //   映射），禁由分钟数/时间戳/金额等推导原因；未知 code
+                                  //   fail-closed 走「无法确定依据」态；闭集扩展 = 合同修订
   conclusion: { ... },            // 该类的 values-free 结论（§3.3 逐类定义；全部来自存量权威字段）
   basis: [                        // 依据链（有序；§3.3 逐类点名每环真源）
     {
@@ -248,10 +279,27 @@ values-free by construction，§5.1 遮罩清单约束一切文本字段）：
 2. **`not_in_effect` 与 `undeterminable` 是两个判别值、两套文案**（§5.2 语义细节②）：dormant org 的
    零调休余额，其解释是「调休计提策略未启用」（策略事实，`compTimeFromOvertime.enabled=false`
    `:377-380`），不是「无法确定依据」——混同二者会给 dormant org 生成貌似合理的假解释或假故障。
-3. **枚举 enum-strict**：`category/posture/confidence/source.kind/auditRef.kind` 全部闭集；请求侧
-   category 非法值 ⇒ 4xx 拒绝（静默 fallback 到默认值 = 契约 bug）；响应侧由契约测试锁值域穷尽。
+3. **枚举 enum-strict**：`category/reasonCode/posture/confidence/source.kind/auditRef.kind` 全部
+   闭集；请求侧 category 非法值 ⇒ 4xx 拒绝（静默 fallback 到默认值 = 契约 bug）；响应侧由契约测试
+   锁值域穷尽。
 4. 结论与依据链**只准引用存量权威字段**——本合同不发明新计算；六类的结论字段逐一对应 §1 点名的
    存量列/快照键（R2）。
+5. **reasonCode 码源逐类点名（owner 冻结①；全部存量闭集，遵守硬规则 4「不新造词表」）**：
+   ① `status` 8 值闭集（`attendance_records` CHECK 存量列）；② 同一 `status` 8 值闭集
+   （判级子集 `'late'|'early_leave'|'late_early'` 由 `computeMetrics` 判级 `:11125-11128` 存量产出，
+   无迟到/早退时按闭集如实呈现；tier 语义经 `severeLateCount` 等**计数字段**呈现，不另造码）；
+   ③ `owedPunchReason` 闭集
+   （`classifyOwedPunchRecord :25932-25956` 既有归因码）；④ 段级 = day-type `effectiveSource` 闭集
+   （快照自携，`:10612-10635`）+ 响应级 `coverageNote` 判别值（§3.3④）；⑤ 事件级 =
+   `balance_events` 事件型闭集（含 `reverse`，§1-5 migration CHECK）+ lot 级 `sourceType`；
+   ⑥ 步级 = `sourceKind` 闭集（§3.3⑥）。前端纯模块只做 code→文案白名单映射（未知 code ⇒
+   「无法确定依据」态，§6 default 分支纪律）；**新增/变更任一闭集值 = 合同修订**（§10-② 流程），
+   不得实现内静默加值。
+6. **快照排他（owner 冻结⑤）**：凡存在计算时快照（`snapshot_frozen` 环可用）的历史结果，其对应
+   依据环**禁止**用当前配置渲染（禁以 `rule_live`/`current_live_no_history` 替位呈现）；
+   `current_live_no_history` **仅限确无快照处**使用，且必须显式标注为非计算时依据（「可能不同于
+   决策当时的规则」声明，§3.2 末段）——W5-0-G6 的 byte-stable 正控与重算 mutation 即本条的
+   可执行化。
 
 ### 3.2 「版本/生效日」逐类锚点（snapshot_frozen 的 `asOf` 规定，不得任选）
 
@@ -278,7 +326,11 @@ values-free by construction，§5.1 遮罩清单约束一切文本字段）：
 - 依据链：E1 记录环（record 行；auditRef：`source_batch_id` 导入批次存在性 + `meta.manual_result_edit`
   标记存在性——只透出「被人工更正过」布尔与时刻，不透出编辑内容，详情走 E3）；E2 规则环
   （`current_live_no_history`：当前 `resolveWorkContext` 的 source 判别 `'rotation'|'shift'|'rule'` +
-  该来源的 values-free 参数投影，§5.1）；E3 更正环（`attendance_record_result_edits` 只读历史，
+  该来源的 values-free 参数投影，§5.1。**本环同时显式承载「应出勤」决策链**（owner 冻结③）：
+  「为什么这天应出勤/休息」的排班依据 = rotation > shift assignment > default rule 优先级 +
+  holiday 翻转 isWorkingDay + `calendarPolicy.overrides` 叠加（§1-1 点名的推演链）；其写入时冻结
+  **结果** = E1 的 `is_workday` 存量列——与 ③E2 应出勤环同一口径：结果冻结在行、推演依据恒
+  `current_live_no_history`）；E3 更正环（`attendance_record_result_edits` 只读历史，
   W5-0 新增读面）；E4 生成来源环（absent 行：恒 `undeterminable`——§1-3 无 run 标记）。
 - 断环 ⇒ fail-closed：record 行不存在 ⇒ 整类 `undeterminable`（**禁**由 `attendance_events` 前端
   自行推导状态）；`off`/非工作日按 status 如实呈现，不算断环。
@@ -384,9 +436,26 @@ SQL values-free 断言同型）。
 
 ## 5. 脱敏与诚实口径（R3/R4 执行面）
 
-### 5.1 遮罩清单（响应层白名单的显式负清单；两档受众）
+### 5.1 可见性三档与遮罩清单（owner 冻结④一等公民；响应层白名单的显式负清单）
 
-| 字段/信息 | admin 面 | 员工 self 面 | 依据 |
+可见性按 **org / 员工 / 管理员** 三档冻结为合同一等公民（owner 冻结④原文「org、员工与管理员三种
+可见性及隐私脱敏」）：
+
+- **管理员档** = 下表「admin 面」列（挂载 `attendance-admin` router：rbacGuard `:492` +
+  org-membership 门，§4.1）；
+- **员工档** = 下表「员工 self 面」列（token-subject-locked，§4.1）；
+- **org 档**：owner 原文未定义该档语义，对代码现势存在两种读法——本锁不自决，呈 **OD-W5-11**
+  终裁：**(A)** org = **可见性边界维度**（横切 scope 约束，非第三受众列）：一切受众的可见范围以
+  `user_orgs` org-membership 为界（`canReadAttendanceDirectoryReadiness :383-407`，双 is_active；
+  平台 admin 直通 `:389` 属既有先例）；**(B)** org = **第三受众档**（组织级受限管理角色——库中
+  已有 `delegated_role_admin_scopes` 分管注册表先例，`zzzz20260409113000`：admin_user_id ×
+  namespace × directory_department_id），需第三列遮罩清单 + 独立授权推导（与 OD-W5-10 主管面
+  同族问题，但非同一档：主管 persona 是章程 §3.2 角色，org 档语义待 owner 定义）。
+- **两读法共同底线，无条件先冻结**：任何 trace 响应的可见范围不得越 org 边界（非本 org 成员
+  403），响应内跨 org 数据零出现——进 W5-0-G2 断言；若 OD-W5-11 = (B)，第三列遮罩清单按
+  §10-② 修订入锁后方可实现，v1 表列先冻结管理员/员工两受众档。
+
+| 字段/信息 | admin 面（管理员档） | 员工 self 面（员工档） | 依据 |
 |---|---|---|---|
 | `requester_snapshot.managerChainIds`（完整管理链） | **禁**（只显示被选中者） | **禁** | wire 已过曝（`ApprovalProductService.ts:1733`），trace 不得放大 |
 | `approval_records.ip_address` / `user_agent` | 不入 trace（留在既有审批详情面） | **禁** | 员工面无正当用途 |
@@ -416,7 +485,8 @@ SQL values-free 断言同型）。
    合理的假解释。
 3. **有快照引快照；无快照走既有 null fail-closed 路径**：策略活体单键无版本（§1 总括），因此解释
    永远「本次决策当时快照如此」；**禁**前端按当前策略反推，**禁**把「当前规则（无历史版本）」呈现
-   为历史依据（R4）。
+   为历史依据（R4；§3.1 硬规则 6 将本条一等公民化——`current_live_no_history` 仅限确无快照处，
+   owner 冻结⑤）。
 4. **口径差显式声明**：`summary.overtime_minutes`（正则求和 `:12351-12362`）与 Σ分段（仅有快照行）
    并排展示必须声明口径差（§3.3④ `coverageNote`），**禁**静默对齐或互相「修正」。
 
@@ -455,7 +525,8 @@ SQL values-free 断言同型）。
   设计内解决，倾向以服务端投影为准（R3 by construction）。
 
 ## 8. OD 待裁项（全部呈 owner，本锁不自决；无 recommended 标记——W4 §8-附 P2-5b 教训。
-受托预填参考（已随代行收回降级,非裁决）：1(a)/2(a)/3(a)/4(a)/5(a)/6(b)/7(b)/8(a)/9(b)/10(a)——owner 终裁不受其约束）
+受托预填参考（已随代行收回降级,非裁决）：1(a)/2(a)/3(a)/4(a)/5(a)/6(b)/7(b)/8(a)/9(b)/10(a)——owner 终裁不受其约束；
+OD-W5-11 为 2026-07-22 七项冻结复审吸收新增，晚于 comment-5053163506，**无受托预填**）
 
 | OD | 裁量点 | 选项与后果（中性陈述） |
 |---|---|---|
@@ -469,6 +540,7 @@ SQL values-free 断言同型）。
 | OD-W5-8 | **状态类规则快照缺失** | record 不落规则 provenance（§1-1）。(a) v1 接受 `current_live_no_history` 口径（本合同现拟）；(b) 立前置票给 `upsertAttendanceRecord` 冻结规则快照（写路径变更 + 存量行永远无快照的双轨现实）。(b) 不入 W5 切片 |
 | OD-W5-9 | **lot 读投影补 `overtime_source`** | 列在库（`zzzz20260624160000:13`）不在读投影（`:42739-42744`）。(a) W5-0 内把该列纳入 trace/L5a 读投影（只读 SELECT 加列 + 响应键集合变更 + 脱敏审查）；(b) 保持现状，per-source 环恒 `undeterminable`。(a) 是既有端点响应形状变更，需兼容性回归（章程红线 5） |
 | OD-W5-10 | **主管面（章程 §3.2 persona）解释开面** | 章程 §3.2 L132-133 逐字把「查看规则依据」列为主管核心任务，同时约束「不得暴露超出其组织/assignment/scheduler scope 的数据或管理动作」——主管面需要独立的 assignment/scheduler scope 授权推导与第三档遮罩清单。(a) v1 显式 OUT（本合同现拟，§4.1——防 scope 放大，主管排障暂由 admin 面（若 OD-W5-1 裁入）承担）；(b) 立独立后续票（授权推导 + §5.1 扩展主管档，独立设计门后再开）。二者均不改 v1 六类合同形状（§3.1） |
+| OD-W5-11 | **「org 档」可见性语义（owner 冻结④第三档）** | owner 复审原文「org、员工与管理员三种可见性及隐私脱敏」中 org 档语义未定义，两种读法（§5.1，中性并列）：(a) org = **可见性边界维度**——横切 org-scope 约束一等公民化（`user_orgs` org-membership 门，`canReadAttendanceDirectoryReadiness :383-407` 先例；§5.1 表维持管理员/员工两受众列 + org-scope 底线行）；(b) org = **第三受众档**——组织级受限管理角色（库内先例 `delegated_role_admin_scopes` 分管注册表，`zzzz20260409113000`），需第三列遮罩清单 + 独立授权推导（与 OD-W5-10 同族问题、非同一档）。两读法共同底线（响应不越 org 边界、跨 org 数据零出现，W5-0-G2）已无条件冻结，不随本裁决变化。本 OD 无受托预填（复审吸收新增） |
 
 > 注：表中「本合同现拟」是合同正文必须先落一个可执行姿态时的描述性 cross-ref，**不构成
 > recommended 标记**——owner 对每条 OD 的选择不受「现拟」约束，任一选项（含 (b)/(c)）均可裁；
@@ -484,12 +556,14 @@ SQL values-free 断言同型）。
     ②legacy 无 tier keys / ③absent 无来源 / ⑤per-source 缺投影（若 OD-W5-9=(b)）/ ⑥失败历史）；
     断言精确形状（deepEqual 整链），**绝不**存在性糊弄。
   - **W5-0-G2 values-free/脱敏**：响应键集合恒等锁定 + §5.1 禁字段零出现（managerChainIds/
-    ip_address/user_agent/env 名/裸链条 id）+ SQL 无标识列断言（S7-5 同型）。mutation 目标：把 ⑥类
-    改为透传 requester 整包 ⇒ 契约测试精确红。
+    ip_address/user_agent/env 名/裸链条 id）+ SQL 无标识列断言（S7-5 同型）+ **org 可见性底线**
+    （§5.1，owner 冻结④）：非本 org 成员 403 负例 + 响应内跨 org 数据零出现（S7-5 状态码矩阵
+    同型）。mutation 目标：把 ⑥类改为透传 requester 整包 ⇒ 契约测试精确红。
   - **W5-0-G3 只读结构约束**：`READ ONLY` 事务 + writable CTE 必拒 + 多语句串必拒（W4-0-G2 三条
     同型）；负向元断言：禁首词/正则式只读校验。
-  - **W5-0-G4 enum-strict**：category/posture/confidence 闭集穷尽断言 + 请求侧非法 category 4xx
-    负例 + 响应侧未知 posture 不可构造（类型 + 测试双锁）；静默 fallback ⇒ 红。
+  - **W5-0-G4 enum-strict**：category/posture/confidence/**reasonCode（硬规则 5 逐类码源）**闭集
+    穷尽断言 + 请求侧非法 category 4xx 负例 + 响应侧未知 posture/未知 code 不可构造（类型 + 测试
+    双锁；未知 code fail-closed 走「无法确定依据」态）；静默 fallback ⇒ 红。
   - **W5-0-G5 `not_in_effect` ≠ `undeterminable`**：dormant org（引擎 OFF）⇒ `not_in_effect` 正控；
     快照缺失 org ⇒ `undeterminable` 正控；mutation：把二者判别合并 ⇒ 两腿各自红。
   - **W5-0-G6 快照优先 + 禁反推**：正控——改动活体 `attendance_overtime_rules` 行后，已终审请求的
@@ -498,13 +572,17 @@ SQL values-free 断言同型）。
   - 真库用例进既有 attendance integration gate 所在文件；fixture ID 文件级命名空间（共库并跑纪律）。
 - **W5-1 AttendanceDecisionTrace.vue 展示**：纯模块 + 组件 + AttendanceView 接线（单热文件串行）+
   guard 接线（run-list + 双 path filter + 收集证明 + 同命令 mutation）。专项门：判别矩阵全行单测；
+  **解释面零写负向断言（R1/owner 冻结⑦）**：纯模块与组件在 mock 层零写调用——对考勤结果写端点
+  （如 `POST /api/attendance/anomaly-result-edits`）、配置/规则/settings 写端点全部零触达，且
+  trace 不渲染任何写 CTA（查看更正历史 ≠ 发起更正）；mutation：组件内加一次写调用 ⇒ 断言红；
   文案负向断言——未知 kind/posture **零 `JSON.stringify`** 输出、`undeterminable` 显示含
   「无法确定依据」逐字、`not_in_effect` 文案不含「无法确定」、`current_live_no_history` 显示含
   「当前规则（无历史版本）」逐字且不得出现在「当时依据」位置；时间线以 approval_records 为源的
   负向断言（mutation：改从 assignments 读时间线 ⇒ 红）；三视口证据（1440/1024/390）。
 - **W5-2 上下文帮助**：§4.6 四类页内帮助 + 「查看计算依据/审计记录」深链至 trace。专项门：帮助
   内容 values-free 断言（L225 清单逐项零出现）；不复制手册（无长文粘贴，仅任务上下文条目）；
-  深链 query 形（禁 hash，W4-R2 同款）；三视口。
+  深链 query 形（禁 hash，W4-R2 同款）且**只指向读面**（trace/审计读），零配置写入口
+  （owner 冻结⑦）；三视口。
 
 ## 10. 完成定义与 ratify 流程
 
@@ -515,8 +593,9 @@ SQL values-free 断言同型）。
 
 **Ratify 流程（严格顺序）**：
 ① 本锁 PR 合入（docs-only，PROPOSED 入仓——合入**不等于**生效）
-→ ② owner 审阅：核对 §0 红线转写、§3 合同、§5 遮罩清单，并逐项裁决 OD-W5-1..10（记录于 ratify
-comment 或修订入锁）；同时确认 W4 收口态势（§ header）是否构成 W5-0 前置余项
+→ ② owner 审阅：核对 §0 红线转写、§0.1 七项冻结映射、§3 合同、§5 可见性三档与遮罩清单，并逐项
+裁决 OD-W5-1..11（记录于 ratify comment 或修订入锁）；同时确认 W4 收口态势（§ header）是否构成
+W5-0 前置余项
 → ③ owner 终裁 comment = PROPOSED → RATIFIED 的唯一生效凭据（模型不得代翻——章程 §10-Owner 条款）
 → ④ 章程 §15 Wave 5 行同步（DATA-CONTRACT-GATED → 设计已 ratify / runtime 未开始；随 ratify 批次
 或 W5-0 PR 同批）
@@ -529,6 +608,10 @@ comment 或修订入锁）；同时确认 W4 收口态势（§ header）是否�
    `bbcb8caf3..f55d99e12` = 仅 +1 docs 文件（`git diff --stat` 实证），考勤 runtime 零漂移 ⇒ 锚点
    在分支基上全数有效。锚点作业方式：账务两类与审批/横切的锚点由三车道只读调研产出并经本锁作者
    抽样复开核验；状态三类（今日状态/迟到早退/缺卡）锚点由本锁作者对 `bbcb8caf3` 直接逐条开出。
+   **2026-07-22 七项冻结复审吸收时对 `origin/main` 现势 = `ee39a13eb` 复核**：漂移账
+   `f55d99e12..ee39a13eb` = 仅 +1 chore(test)（`packages/core-backend/vitest.config.ts` exclude
+   5 行，#4545），考勤 runtime/路由/迁移零漂移 ⇒ 全部锚点继续有效；本次新增锚点
+   （`delegated_role_admin_scopes` = `zzzz20260409113000`、org 门 `:383-407`）亦对该现势实证。
 2. **查重**（对 `bbcb8caf3` 实跑）：
    - 全树 grep `AttendanceDecisionTrace` ⇒ 唯一命中 = 章程 L265 组件表行（代码/测试/route 0 命中）；
    - 全树 grep 「无法确定依据」⇒ 代码 0 命中（仅章程 L368）；
