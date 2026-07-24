@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- W5-2 evidence harness page (copied to apps/web/w52-context-help-harness.html at capture time
+     by capture-context-help.mjs — not part of the app build; vite only builds index.html). Mounts
+     the REAL AttendanceContextHelp.vue with the REAL tokens.css. Zero user data (lock P2-a same
+     discipline as W5-1 — this component takes no runtime input to synthesize in the first place). -->
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>W5-2 context-help evidence harness</title>
+    <style>
+      body { margin: 0; background: var(--ms-bg-page, #f5f6f7); padding: 24px 16px; }
+      #app { max-width: 900px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 16px; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/dev-harness/w52ContextHelpHarness.ts"></script>
+  </body>
+</html>
