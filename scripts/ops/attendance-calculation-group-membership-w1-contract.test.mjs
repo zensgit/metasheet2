@@ -16,6 +16,10 @@ const dbTestPath = path.join(
   rootDir,
   'packages/core-backend/tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
 )
+const timelineIntegrityUnitTestPath = path.join(
+  rootDir,
+  'packages/core-backend/tests/unit/attendance-calculation-group-membership-timeline-integrity.test.ts',
+)
 
 function read(filePath) {
   assert.ok(fs.existsSync(filePath), `missing contract file: ${filePath}`)
@@ -76,6 +80,16 @@ test('real-DB W1 suite has both skip-green exclusion and explicit CI execution p
   assert.match(source, /toUpperCase\(\)/)
   assert.match(source, /listAttendanceCalculationGroupMemberships\(orgA, uuidUserId\)/)
   assert.match(source, /uses one lock order for a direct semantic update racing a service transition/)
+})
+
+test('runtime timeline-integrity guard has explicit required CI execution', () => {
+  const fileName =
+    'attendance-calculation-group-membership-timeline-integrity.test.ts'
+  assert.match(read(workflowPath), new RegExp(fileName.replaceAll('.', '\\.')))
+  const source = read(timelineIntegrityUnitTestPath)
+  assert.match(source, /ATTENDANCE_CALCULATION_GROUP_TIMELINE_CORRUPT/)
+  assert.match(source, /transitionAttendanceCalculationGroupMembership/)
+  assert.match(source, /expect\(writes\)\.toEqual\(\[\]\)/)
 })
 
 test('OpenAPI exposes list and transition only, with no delete or replace-all path', () => {

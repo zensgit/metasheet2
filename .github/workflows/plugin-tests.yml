@@ -321,6 +321,15 @@ jobs:
         run: |
           node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs
 
+      # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
+      # EXCLUDE constraint on purpose and proves the runtime integrity guard is
+      # independently load-bearing. Keep whole-file execution explicit.
+      - name: Run attendance calculation-group W1 timeline-integrity unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-calculation-group-membership-timeline-integrity.test.ts \
+            --reporter=dot
+
       # #4556 W2: shared work-date resolver unit matrix (overlap precedence, attribution tail,
       # free_time/unscheduled/explicit-import hard stop, overtimeAttributionV1 freeze/legacy,
       # six-adapter parity). Explicit whole-file gate so it cannot drift out of the default suite.
