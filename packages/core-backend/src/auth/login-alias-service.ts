@@ -196,39 +196,27 @@ async function recordCollision(c: AliasCollision): Promise<void> {
 }
 
 /**
- * T2b gate: at least one active platform admin with a usable password and an alias.
+ * T2b gate: at least one **platform** admin with a usable local password AND a login alias.
+ *
+ * Mirrors `rbac/service.isAdmin`: only `user_roles.role_id = 'admin'` counts.
+ * Does NOT treat attendance_admin / crm_admin / name LIKE '%admin%' as platform admin
+ * (those would false-green cutover while real platform admins still lack aliases).
+ * Usable password: local_password_set, non-empty password_hash, activated + is_active.
  */
 export async function hasActiveAdminWithPasswordAlias(): Promise<boolean> {
   const result = await query<{ n: number }>(
     `SELECT count(*)::int AS n
        FROM users u
        JOIN user_login_aliases a ON a.user_id = u.id
+       JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = 'admin'
       WHERE u.is_active = TRUE
-        AND COALESCE(u.role, '') IN ('admin', 'platform_admin')
         AND COALESCE(u.local_password_set, TRUE) = TRUE
         AND COALESCE(u.activation_status, 'activated') = 'activated'
         AND u.password_hash IS NOT NULL
-        AND length(u.password_hash) > 0`,
+        AND length(trim(u.password_hash)) > 0
+        AND u.password_hash NOT LIKE 'unusable:%'`,
   )
-  // Also accept RBAC admin via user_roles if role column not admin
-  if ((result.rows[0]?.n ?? 0) > 0) return true
-
-  const rbac = await query<{ n: number }>(
-    `SELECT count(*)::int AS n
-       FROM users u
-       JOIN user_login_aliases a ON a.user_id = u.id
-       JOIN user_roles ur ON ur.user_id = u.id
-       JOIN roles r ON r.id = ur.role_id
-      WHERE u.is_active = TRUE
-        AND COALESCE(u.local_password_set, TRUE) = TRUE
-        AND COALESCE(u.activation_status, 'activated') = 'activated'
-        AND (
-          lower(r.name) LIKE '%admin%'
-          OR lower(r.id) LIKE '%admin%'
-        )`,
-  ).catch(() => ({ rows: [{ n: 0 }] }))
-
-  return (rbac.rows[0]?.n ?? 0) > 0
+  return (result.rows[0]?.n ?? 0) > 0
 }
 
 /**

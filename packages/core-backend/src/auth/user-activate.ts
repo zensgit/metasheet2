@@ -23,7 +23,6 @@ export type ActivateUserInput = {
   enableDingTalkGrant?: boolean
   /** SSO: directory account that must be active + linked to this user. */
   directoryAccountId?: string | null
-  claimAliases?: boolean
 }
 
 export type ActivateUserResult = {
@@ -155,31 +154,37 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       )
     }
 
-    // Alias claims MUST succeed inside the same transaction as activation when requested.
-    // Post-commit best-effort left "activated + temp password issued but cannot log in" under
-    // AUTH_LOGIN_USE_ALIASES (alias-only). Fail closed so the whole activate rolls back.
-    if (input.claimAliases !== false) {
-      const fields: Array<{ raw: string | null; kind: 'email' | 'username' | 'mobile' }> = [
-        { raw: user.email, kind: 'email' },
-        { raw: user.username, kind: 'username' },
-        { raw: user.mobile, kind: 'mobile' },
-      ]
-      for (const field of fields) {
-        if (!field.raw || !String(field.raw).trim()) continue
-        const claimed = await claimLoginAlias({
-          userId,
-          rawValue: field.raw,
-          kind: field.kind,
-          source: 't3_activate',
-          client,
-        })
-        if (claimed.ok === false) {
-          throwCoded(
-            `Login alias claim failed (${field.kind}): ${claimed.message}`,
-            claimed.code === 'ALIAS_CONFLICT' ? 'ACTIVATE_ALIAS_CONFLICT' : 'ACTIVATE_ALIAS_FAILED',
-          )
-        }
+    // Alias claims are MANDATORY inside the same transaction as activation.
+    // No client opt-out: post-commit / optional claim left "activated + password issued
+    // but cannot log in" under AUTH_LOGIN_USE_ALIASES. Fail closed → full activate rollback.
+    const fields: Array<{ raw: string | null; kind: 'email' | 'username' | 'mobile' }> = [
+      { raw: user.email, kind: 'email' },
+      { raw: user.username, kind: 'username' },
+      { raw: user.mobile, kind: 'mobile' },
+    ]
+    let claimedAny = false
+    for (const field of fields) {
+      if (!field.raw || !String(field.raw).trim()) continue
+      const claimed = await claimLoginAlias({
+        userId,
+        rawValue: field.raw,
+        kind: field.kind,
+        source: 't3_activate',
+        client,
+      })
+      if (claimed.ok === false) {
+        throwCoded(
+          `Login alias claim failed (${field.kind}): ${claimed.message}`,
+          claimed.code === 'ALIAS_CONFLICT' ? 'ACTIVATE_ALIAS_CONFLICT' : 'ACTIVATE_ALIAS_FAILED',
+        )
       }
+      claimedAny = true
+    }
+    if (!claimedAny) {
+      throwCoded(
+        'Activation requires at least one claimable login identifier (email, username, or mobile)',
+        'ACTIVATE_ALIAS_REQUIRED',
+      )
     }
   })
 

@@ -1,6 +1,6 @@
 # DingTalk lifecycle line closeout (T1–T3 · D1–D7) — honest status
 
-**Updated:** 2026-07-24 (post-merge findings + owner fork A)  
+**Updated:** 2026-07-24 (post-merge findings + owner fork A)
 **All lifecycle env switches remain OFF.** Deprovision canary is **hard NO-GO** until D4 ledger wiring lands.
 
 ## Merge SHAs (durable)
@@ -10,7 +10,7 @@
 | **T1** dual-axis + gates | [#4559](https://github.com/zensgit/metasheet2/pull/4559) | `27178ef4423dcc06446aef0d7d206687ff8ff55d` | **Landed** — invite ledger-first + dual-waiter real-DB goldens hold |
 | **T2a schema + helpers** / **T3 service skeleton** / **D1–D6 helpers** / **D7 UI shell** | [#4574](https://github.com/zensgit/metasheet2/pull/4574) | `014fc23acb58feb1863f79a1c4151b0313fb654b` | **Partial** — see gaps below |
 | **D7 UI mount + alias env contract** | [#4575](https://github.com/zensgit/metasheet2/pull/4575) | `71405cdb40659f31ddd0b98948c9eba646327d2d` | **Landed** env contract; D7 UI present (default collapsed) |
-| Closeout SHA fill | [#4577](https://github.com/zensgit/metasheet2/pull/4577) | `8aad0ef…` | Merged (this doc supersedes over-claims) |
+| Closeout SHA fill | [#4577](https://github.com/zensgit/metasheet2/pull/4577) | `8aad0ef8f7e3c66d70fbc45f4d08905f0fee5a2e` | Merged (this doc supersedes over-claims) |
 | Ghost-column table fix + honesty fixes | *(this PR / follow-up)* | pending | Fixes T3/D7 writes to real tables; alias gate; fail-honest evidence |
 
 ## What is **NOT** complete (do not treat as full line)
@@ -50,12 +50,12 @@
 
 ## Suggested implementation order (unchanged)
 
-1. Keep all lifecycle switches OFF.  
-2. Land table-fix + #4578 P2s (membership rowcount, `granted_by` on restore) + alias Auth gate + in-txn alias claim + fail-honest evidence lists.  
-3. Alias full-writer coverage (register/admin create/identifier change).  
-4. Split #4579: D3 migration (replay-safe) → D4 ledger write → D5 mutex/generation → D6 restore → D7 Apply≈Plan / fail-honest.  
-5. T3 batch + SSO `intent=activate` **or** keep T3 marked partial.  
+1. Keep all lifecycle switches OFF.
+2. Land table-fix + #4578 P2s (membership rowcount, `granted_by` on restore) + alias Auth gate + in-txn alias claim + fail-honest evidence lists.
+3. Alias full-writer coverage (register/admin create/identifier change).
+4. Split #4579: D3 migration (replay-safe) → D4 ledger write → D5 mutex/generation → D6 restore → D7 Apply≈Plan / fail-honest.
+5. T3 batch + SSO `intent=activate` **or** keep T3 marked partial.
 6. Only then canary: alias-only → pending admission → deprovision.
 
-See also: `docs/development/dingtalk-lifecycle-canary-separate-go-20260724.md`,  
+See also: `docs/development/dingtalk-lifecycle-canary-separate-go-20260724.md`,
 `docs/development/dingtalk-lifecycle-postmerge-findings-20260724.md` (D4 branch findings).

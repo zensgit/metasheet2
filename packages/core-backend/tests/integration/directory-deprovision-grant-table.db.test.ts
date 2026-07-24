@@ -25,19 +25,20 @@ const ORG = 'org-grant-fix-test'
 const USER = 'u-grant-fix-test'
 
 async function cleanup() {
-  await query(`DELETE FROM directory_deprovision_effects WHERE local_user_id = $1`, [USER])
+  await query(`DELETE FROM directory_deprovision_effects WHERE local_user_id = $1`, [USER]).catch(() => {})
   await query(
-    `DELETE FROM directory_deprovision_events WHERE local_user_id = $1`, [USER])
+    `DELETE FROM directory_deprovision_events WHERE local_user_id = $1`, [USER]).catch(() => {})
   await query(
-    `DELETE FROM directory_account_links WHERE local_user_id = $1`, [USER])
+    `DELETE FROM directory_account_links WHERE local_user_id = $1`, [USER]).catch(() => {})
   await query(`DELETE FROM directory_sync_runs WHERE integration_id IN
-                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG])
+                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG]).catch(() => {})
   await query(`DELETE FROM directory_accounts WHERE integration_id IN
-                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG])
-  await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [ORG])
-  await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [USER])
-  await query(`DELETE FROM user_orgs WHERE user_id = $1`, [USER])
-  await query(`DELETE FROM users WHERE id = $1`, [USER])
+                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG]).catch(() => {})
+  await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [ORG]).catch(() => {})
+  await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [USER]).catch(() => {})
+  await query(`DELETE FROM user_login_aliases WHERE user_id = $1`, [USER]).catch(() => {})
+  await query(`DELETE FROM user_orgs WHERE user_id = $1`, [USER]).catch(() => {})
+  await query(`DELETE FROM users WHERE id = $1`, [USER]).catch(() => {})
 }
 
 async function seedDirectory(opts: { sourceActive: boolean }) {
@@ -93,18 +94,21 @@ async function seedEvent(
   return ev.rows[0].id
 }
 
-const grantEnabled = async (): Promise<boolean | undefined> => (
-  await query<{ enabled: boolean }>(
-    `SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1 AND provider = 'dingtalk'`,
+const grantRow = async (): Promise<{ enabled: boolean; granted_by: string | null } | undefined> => (
+  await query<{ enabled: boolean; granted_by: string | null }>(
+    `SELECT enabled, granted_by FROM user_external_auth_grants
+      WHERE local_user_id = $1 AND provider = 'dingtalk'`,
     [USER],
   )
-).rows[0]?.enabled
+).rows[0]
+
+const grantEnabled = async (): Promise<boolean | undefined> => (await grantRow())?.enabled
 
 describeIfDatabase('DingTalk grant/membership writes target the real tables (real DB)', () => {
   beforeEach(cleanup)
   afterAll(cleanup)
 
-  it('T3 activate with enableDingTalkGrant actually grants DingTalk login', async () => {
+  it('T3 activate with enableDingTalkGrant actually grants DingTalk login and claims alias', async () => {
     await query(
       `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, local_password_set)
        VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', FALSE, 'pending_activation', FALSE)`,
@@ -114,19 +118,24 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     // Positive control: nothing has granted anything yet.
     expect(await grantEnabled()).toBeUndefined()
 
+    // Production path: no claimAliases opt-out — must claim email inside the same txn.
     await activatePendingUser({
       userId: USER,
       mode: 'admin_no_password',
       adminUserId: 'admin-test',
       orgId: ORG,
       enableDingTalkGrant: true,
-      claimAliases: false,
     })
 
     // The observable claim: the person can now be admitted by the OAuth path, which reads
     // `user_external_auth_grants`. Before the fix this was `undefined` — activation reported
     // success and granted nothing.
     expect(await grantEnabled()).toBe(true)
+    const aliases = await query<{ normalized_value: string }>(
+      `SELECT normalized_value FROM user_login_aliases WHERE user_id = $1`,
+      [USER],
+    )
+    expect(aliases.rows.map((r) => r.normalized_value)).toContain('grant-fix@example.com')
   })
 
   it('restoring a membership effect actually re-activates the membership', async () => {
@@ -172,6 +181,27 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     await restoreDeprovisionEvent({ eventId, mode: 'rehire', adminUserId: 'admin-test' })
 
     expect(await grantEnabled()).toBe(true)
+    // P2 pin: provenance must be restore:<admin>, not the old deprovision actor
+    expect((await grantRow())?.granted_by).toBe('restore:admin-test')
+  })
+
+  it('membership row missing fails restore with DRIFT_CONFLICT (not false success)', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    // Deliberately NO user_orgs row — effect says membership was cleared, but the row is gone.
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(seeded, [{ type: 'clear_user_orgs', orgId: ORG }], 3)
+
+    await expect(
+      restoreDeprovisionEvent({ eventId, mode: 'rehire', adminUserId: 'admin-test' }),
+    ).rejects.toMatchObject({ code: 'DRIFT_CONFLICT' })
+
+    const effects = await query<{ status: string }>(
+      `SELECT status FROM directory_deprovision_effects WHERE local_user_id = $1`, [USER])
+    expect(effects.rows.map((r) => r.status)).toEqual(['applied'])
   })
 
   it('a grant that is still enabled is real drift, and the gate refuses the restore', async () => {

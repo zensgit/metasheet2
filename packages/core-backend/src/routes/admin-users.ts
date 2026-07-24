@@ -4601,6 +4601,8 @@ export function adminUsersRouter(): Router {
       const modeRaw = String(req.body?.mode || 'temp_password').trim()
       const mode =
         modeRaw === 'sso' || modeRaw === 'admin_no_password' ? modeRaw : 'temp_password'
+      // claimAliases is NOT client-controllable: production activate always claims
+      // email/username/mobile aliases inside the activation transaction.
       const result = await activatePendingUser({
         userId: String(req.params.id || ''),
         mode,
@@ -4613,7 +4615,6 @@ export function adminUsersRouter(): Router {
           ? req.body.directoryAccountId
           : null,
         enableDingTalkGrant: req.body?.enableDingTalkGrant === true,
-        claimAliases: req.body?.claimAliases !== false,
       })
       await auditLog({
         actorId: adminUserId,
@@ -4634,7 +4635,12 @@ export function adminUsersRouter(): Router {
       const code = (error as { code?: string })?.code || 'ACTIVATE_FAILED'
       const status =
         code === 'ACTIVATE_USER_NOT_FOUND' ? 404
-          : code === 'ACTIVATE_NOT_PENDING' || code.startsWith('ACTIVATE_SOURCE') || code === 'ACTIVATE_LINK_MISMATCH'
+          : code === 'ACTIVATE_NOT_PENDING'
+            || code.startsWith('ACTIVATE_SOURCE')
+            || code === 'ACTIVATE_LINK_MISMATCH'
+            || code === 'ACTIVATE_ALIAS_CONFLICT'
+            || code === 'ACTIVATE_ALIAS_REQUIRED'
+            || code === 'ACTIVATE_ALIAS_FAILED'
             ? 409
             : code === 'ACTIVATE_USER_REQUIRED' ? 400 : 500
       return jsonError(res, status, code, (error as Error)?.message || 'Activation failed')
