@@ -1434,13 +1434,15 @@ posture, reason code, closed timestamp, and audit correlation ID; it is never
 updated or deleted.
 
 Legacy rollback, rollback-window close, and every rollout transition use one
-`SERIALIZABLE` protocol. They first acquire the same org rollout advisory/row
-lock, then lock affected batch rows in stable ID order, then read the closure
-witness and reversible/preimage state, and finally recheck those predicates
-before commit. The advisory component is the section 9 posture lock:
+`SERIALIZABLE` protocol. They use section 9's complete order: acquire the org
+rollout advisory lock; lock the rollout state row when present for a transaction
+that changes it; lock every relevant operation key in stable order; then lock
+batch/items and affected target rows in their stable orders before reading the
+closure witness and reversible/preimage state and finally rechecking those
+predicates before commit. The advisory component is the section 9 posture lock:
 rollback takes it shared, while close and transition take it exclusive. The
-rollout row is then locked where present; the advisory lock also covers
-missing-state legacy orgs. The close action inserts the witness only when no rollback is
+advisory lock covers a missing-state legacy org where no rollout row exists.
+The close action inserts the witness only when no rollback is
 in progress and the locked legacy batch has zero frozen target preimages and
 zero W4 operation, calculation, or pointer references. If any such durable
 reversal evidence or reference exists, closure returns 409 and writes neither
@@ -1766,7 +1768,8 @@ timestamp, optimistic lock version, prior state, and
 Pre-W4 import rollback-window closure is not inferred from time and is not a
 mutable field on this state row. It is the append-only per-batch witness defined
 in section 7.9. Rollback, closure, and every transition share that section's
-org-rollout then batch lock order and final in-transaction recheck.
+complete org-rollout, relevant-operation, batch/item, then target lock order
+and final in-transaction recheck.
 
 W4C-0 exports exactly one key builder and one acquisition helper:
 
@@ -1792,9 +1795,10 @@ concurrency but cannot weaken correctness.
 That stable org rollout advisory key has shared/exclusive transaction modes.
 Every new source/result transaction, including null-ID legacy work, acquires it
 shared before locking operation/source rows or resolving posture and holds it
-through commit. Rollback also
-takes it shared before batch locks. Transition and rollback-window closure take
-it exclusive before reading/updating rollout or batch state. Completed
+through commit. Rollback also takes it shared before operation/batch/target
+locks. Transition and rollback-window closure take it exclusive before locking
+the rollout state row where present, operation keys, batch/items, or targets.
+Completed
 congruent replay may return from an authorization-gated non-locking read before
 this lock because it performs zero source/result DML. Any non-returning read is
 discarded and repeated under the shared lock; no row lock survives across that
@@ -2244,9 +2248,10 @@ Gates:
   other-importer, wrong-group, inactive membership, and cross-org attempts
   produce the closed not-found/forbidden shape with zero reversal DML;
 - legacy rollback, append-only rollback-window closure, and rollout transition
-  acquire the common org-rollout then batch lock order in one `SERIALIZABLE`
-  transaction and recheck at commit. For a legacy batch closed without
-  preimage, dual-connection tests prove both race orders:
+  acquire section 9's complete org-rollout, relevant-operation, batch/item,
+  then target lock order in one `SERIALIZABLE` transaction and recheck at
+  commit. For a legacy batch closed without preimage, dual-connection tests
+  prove both race orders:
   closure/transition first makes rollback return 409 with zero
   delete/reversal DML; rollback first makes closure/transition wait and then
   re-evaluate. A separate frozen-preimage leg proves that transition does not
@@ -2505,7 +2510,7 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-36 import operational state | (a) classify token/job/prefs/upload/temp state separately and deny calculation authority; (b) treat every operational row as business evidence | (a) |
 | OD-W4C-37 attendance assignment mutation | (a) central reassign and any reachable generic assignment mutation use the locked request-org actor/target matrix plus approval-version serialization; unsupported generic actions prove zero attendance DML; (b) retain global `approvals:admin` plus globally active target behavior | (a), changing who may approve is an org-bound security decision |
 | OD-W4C-38 operation lifecycle by posture | (a) completed congruent replay is read first; null-ID legacy writes no operation/outbox, stable-ID legacy claims/seals a compatibility operation with no outbox, and shadow/eligible/authoritative require claim/seal plus required outbox; (b) require operation IDs from every legacy caller | (a), preserves the existing optional-ID API while closing cross-posture response-loss replay |
-| OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with the common org-rollout then batch lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
+| OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with section 9's complete org-rollout, relevant-operation, batch/item, then target lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
 | OD-W4C-40 rollout/source serialization | (a) completed congruent replay may non-locking-read and return with zero DML; every continuing source and rollback uses the one fail-closed canonical helper to take the shared org rollout advisory lock before the common operation/source/batch/target row order, while transition and closure use its exclusive mode first; (b) rely on operation-row scans and transaction isolation alone | (a), the shared mode preserves ordinary write concurrency, covers null-ID legacy work, serializes same-batch source/rollback through their row locks, and gives one rollout-first lock order |
 
 ## 14. RATIFY and execution sequence
