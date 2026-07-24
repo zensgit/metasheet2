@@ -1,6 +1,6 @@
 'use strict'
 
-// GIP-D0 — bridge.bounded_read.v1 certification battery. Plain node test, hermetic.
+// GIP-D0 — bridge.bounded_read.v2 certification battery. Plain node test, hermetic.
 // Proves: the profile is schema-valid + passes the C1–C11e compliance harness, its
 // recovery derives to WHOLE_RERUN, its completeness adjudicator certifies SHORT_PAGE
 // only (the concrete adapter's real capability) and fails closed elsewhere, its frozen
@@ -133,8 +133,10 @@ function frozenVocabulary() {
 function profileIdentity() {
   const p = BRIDGE_BOUNDED_READ_PROFILE
   assert.ok(Object.isFrozen(p) && Object.isFrozen(p.certificate))
-  assert.equal(p.profileId, 'bridge.bounded_read.v1')
-  assert.equal(p.actionProfileVersion, 'bridge.bounded_read.v1')
+  // v2 (owner review P1): the profile VERSION advanced with the adapter hardening so old
+  // qualifications are invalidated — profileId is the sole digest version identity.
+  assert.equal(p.profileId, 'bridge.bounded_read.v2')
+  assert.equal(p.actionProfileVersion, 'bridge.bounded_read.v2')
   // connector kind is the FULL runtime kind; implementation version is a SEPARATE identity
   assert.equal(p.connectorKind, 'bridge:legacy-sql-readonly')
   assert.equal(p.actionId, 'bounded_read')
@@ -478,11 +480,42 @@ function qualificationDigestBinding() {
   assert.equal(verified.verified, true)
   assert.equal(verified.qualificationDigest, qualificationDigest)
 
-  // input binding: a DIFFERENT profile version cannot reuse this qualification
+  // ── LINEAGE INVALIDATION (owner review P1) ──────────────────────────────────────────────
+  // The adapter hardening (v1→v2) changed what a completeness qualification MEANS, so a
+  // qualification minted against the OLD, fail-open implementation must NOT carry over. The
+  // ONLY version identity in the digest is actionProfileVersion (= profileId), so bumping the
+  // PROFILE version is what invalidates the old lineage — bumping implementationVersion alone
+  // would NOT (it is not a digest input; the digest would be identical). Construct a genuine,
+  // fully-AUTHENTICATED old-v1 qualification (valid MAC over its own v1 digest) and prove the
+  // CURRENT v2 profile rejects it at the digest-binding step, not merely by relabelling inputs.
+  const OLD_V1 = 'bridge.bounded_read.v1'
+  assert.notEqual(BRIDGE_BOUNDED_READ_PROFILE.actionProfileVersion, OLD_V1,
+    'the profile version must have advanced past the fail-open v1 lineage')
+  const oldEvidence = { profileVersion: OLD_V1, usedCompletenessProofs: ['SHORT_PAGE'] }
+  const oldDigest = computeQualificationDigest({ ...inputs, actionProfileVersion: OLD_V1, evidence: oldEvidence })
+  assert.notEqual(oldDigest, qualificationDigest, 'the v1 and v2 lineages must hash to different digests')
+  const oldQualification = {
+    status: 'candidate',
+    qualificationDigest: oldDigest,
+    envelopeKeyId: envelopeKey.keyId,
+    // a REAL old envelope: MAC is valid over the v1 digest, so this passes authentication and
+    // fails specifically on version lineage (not on a forged/using-invalid MAC shortcut).
+    envelopeMac: computeEnvelopeMac({ envelopeKey, qualificationDigest: oldDigest, status: 'candidate', expiresAt }),
+    evidence: oldEvidence,
+    expiresAt,
+  }
+  let oldCaught = null
+  try {
+    verifyBindingQualification({ qualification: oldQualification, expectedInputs: inputs, envelopeKey, now: '2026-07-23T00:00:00Z' })
+  } catch (error) { oldCaught = error }
+  assert.ok(oldCaught instanceof GipQualificationError && oldCaught.reason === 'QUALIFICATION_DIGEST_MISMATCH',
+    'an old v1 qualification must NOT verify against the current v2 profile — the fail-open lineage is invalidated')
+
+  // input binding still holds generally: any OTHER version (a hypothetical future v3) also fails.
   let caught = null
   try {
     verifyBindingQualification({
-      qualification, expectedInputs: { ...inputs, actionProfileVersion: 'bridge.bounded_read.v2' },
+      qualification, expectedInputs: { ...inputs, actionProfileVersion: 'bridge.bounded_read.v3' },
       envelopeKey, now: '2026-07-23T00:00:00Z',
     })
   } catch (error) { caught = error }

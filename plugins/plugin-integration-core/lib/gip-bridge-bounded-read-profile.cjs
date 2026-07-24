@@ -1,6 +1,8 @@
 'use strict'
 
-// GIP-D0 — FIRST concrete Read Action Profile: bridge.bounded_read.v1 (LATENT).
+// GIP-D0 — FIRST concrete Read Action Profile: bridge.bounded_read.v2 (LATENT).
+// (v2 supersedes the never-merged v1 lineage — see the profileId note below: the adapter
+//  applied-limit hardening invalidates old v1 qualifications, owner review P1.)
 //
 // GATE (owner 2026-07-23): the individual certification door for a concrete profile,
 // authorized narrowly — "首个具体 Read Action Profile 认证 … 仍保持 latent、零 runtime
@@ -24,7 +26,7 @@
 //   • no transaction / snapshot          a single standalone facade SELECT ⇒ the
 //     honest consistency-proof set is EMPTY (not a fabricated SOURCE_SNAPSHOT_TXN).
 //
-// The profileId literal `bridge.bounded_read.v1` decomposes (per PROFILE_ID_PATTERN,
+// The profileId literal `bridge.bounded_read.v2` decomposes (per PROFILE_ID_PATTERN,
 // which cannot hold a colon) to connectorKind `bridge` + action `bounded_read`. The full
 // runtime kind (`bridge:legacy-sql-readonly`, which contains a colon) is carried in the
 // certified `connectorKind` field, drift-guarded against the feeder's SOURCE_KIND_
@@ -94,14 +96,22 @@ const BRIDGE_BOUNDED_READ_CONNECTOR_KIND = 'bridge:legacy-sql-readonly'
 // Drift-guarded against the adapter's exported BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_
 // VERSION by the test; a bump there forces re-certification here.
 // v2: the adapter now verifies the agent-echoed applied limit (see the adapter constant).
-// The certified CAPABILITY is unchanged (bounded_read, SHORT_PAGE only) — only the backing
-// implementation hardened — so profileId stays `bridge.bounded_read.v1`.
+// This tracks the ADAPTER implementation and is NOT a qualification-digest input; the profile
+// VERSION (profileId, above) is bumped separately so old qualifications are invalidated.
 const BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION = 'bridge-readonly-adapter.v2'
 
 // ── The certified profile — built (and frozen) through the shared schema normalizer,
 //    so it is schema-valid BY CONSTRUCTION (a malformed literal would throw at load). ─
 const BRIDGE_BOUNDED_READ_PROFILE = normalizeCertifiedReadActionProfile({
-  profileId: 'bridge.bounded_read.v1',
+  // v2 (owner review P1 — lineage): the adapter hardening changed what a completeness
+  // qualification MEANS (a full page at the agent's own cap no longer passes as SHORT), so a
+  // qualification minted against the OLD fail-open implementation MUST NOT carry over. The ONLY
+  // version identity in the qualification digest is actionProfileVersion (= profileId); it is
+  // NOT implementationVersion (which is not a digest input). So closing the fail-open requires
+  // bumping the PROFILE version here — bumping only implementationVersion would leave old v1
+  // qualifications verifying against the hardened implementation (digestSame). The test proves
+  // an old v1 qualification now recomputes to QUALIFICATION_DIGEST_MISMATCH.
+  profileId: 'bridge.bounded_read.v2',
   connectorKind: BRIDGE_BOUNDED_READ_CONNECTOR_KIND,
   actionId: 'bounded_read',
   implementationVersion: BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION,
