@@ -202,6 +202,7 @@ against W1 group-membership tables is a scope violation.
 | W4C-R40 | Operation lifecycle follows rollout posture and supplied identity without an implicit retry hole. | A new legacy request with no supplied stable operation ID creates no operation/outbox row; legacy with a supplied ID claims/seals a compatibility operation but still creates no outbox; every new `shadow|eligible|authoritative` request requires, claims, and seals its operation plus required outbox. Independent mutations that create a legacy operation without an ID, omit the legacy-with-ID compatibility operation, or skip claim/seal outside legacy fail. |
 | W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work, through one fail-closed advisory-key helper, a rollout-only `00` bigint key class, and one rollout-first lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues acquires the org rollout shared transaction advisory lock through the single canonical helper before locking operation/source rows and holds it through commit; transition/closure use that helper's matching exclusive mode before their rows. Removing either lock, changing one caller's namespace/key or two-bit key class, swallowing acquisition failure, or restoring operation-row-first locking fails an independent dual-connection leg. |
 | W4C-R42 | Concurrent first claim of one batch or operation identity serializes before any unique-row insert through an operation-only `10` bigint key class; target locks use disjoint class `11`, and `01` is forbidden. | When the first holder commits within the closed lock budget, two connections presenting the same all-new identity both complete with the one stored response and exactly one source/result effect. When it exceeds that budget, the waiter returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` with zero DML and a later retry returns the stored response. Neither case exposes raw `23505` or `55P03`. Removing the canonical identity advisory lock, changing one caller's key derivation, crossing a rollout/operation/target class, sorting by tuple instead of final signed key, or acquiring identity/target locks in a different final-key order fails independently. |
+| W4C-R43 | A paused durable queued operation has one closed resume owner and never becomes a second claim. | Only the existing dispatcher/retry owner may resume an exact, fully congruent, source-free operation whose frozen `accepted_posture=authoritative`, and only after `suspended->authoritative` has committed. It locks the existing row through the section 8.2 order, performs no INSERT and no `paused->claimed` transition, then completes `paused->completed` atomically with the one source/result effect. A synchronous caller, different posture/identity, source-bearing row, duplicate resume, or implementation that inserts/reclaims the operation fails independently. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1107,6 +1108,18 @@ preview/meta.
 - states are closed to `claimed|paused|completed|canceled`; only
   `claimed->paused|completed|canceled` and `paused->completed|canceled` are
   legal, and cancel is allowed only before source DML;
+- `claimed->paused` is restricted to the rollout transition's treatment of an
+  already durable queued source with complete identity, frozen
+  `accepted_posture=authoritative`, and zero source DML. After a successful
+  `suspended->authoritative` commit, the existing dispatcher/retry owner
+  re-enters the exact operation. It does not create or reclaim an operation row
+  and does not use a synthetic `paused->claimed` transition: after
+  authorization, exact congruence, and the section 8.2 locks, it proceeds from
+  the frozen durable source and seals `paused->completed` in the same
+  transaction as the one source/result effect. Synchronous callers cannot
+  adopt a paused row. A different accepted posture, incomplete identity,
+  source-bearing paused row, or second concurrent resume is blocked for the
+  section 9 cancellation/remediation path;
 - state changes occur in the same transaction as request/event/calculation
   effects; an already durable queued source may remain `paused`;
 - operation and batch rows reject DELETE/TRUNCATE. After `completed`, command,
@@ -1683,7 +1696,13 @@ alternate result algorithm.
    operation rows in stable order and resolve rollout posture. If suspended,
    stop before operation/source DML;
    for `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
-   reject mixed or non-congruent state. For `legacy_projection_only`, reject
+   reject mixed or non-congruent state. An exact congruent `paused` row is
+   resumable only under W4C-R43: current and accepted posture are both
+   `authoritative`, its durable source identity is complete and source-free,
+   and the caller is the existing dispatcher/retry owner. Keep that row
+   `paused` through execution; do not insert, reclaim, or transition it to
+   `claimed`, and seal the direct `paused->completed` transition with the
+   result. For `legacy_projection_only`, reject
    any conflicting/incomplete existing operation state; claim a compatibility
    operation only for each command carrying a supplied stable ID, and create no
    operation for a null-ID command;
@@ -2115,8 +2134,13 @@ conflicting keys are not replay and remain blocked.
 Promotion drains or cancels every incomplete org operation before changing
 posture. `authoritative->suspended` may pause a durable queued operation only
 when its accepted posture is already authoritative and its source identity is
-complete. `suspended->authoritative` admits only that same-posture paused set
-after the offline replay; any shadow/eligible/unknown accepted posture blocks
+complete and no source DML exists. The exclusive transition changes those
+eligible `claimed` rows to `paused`; it never pauses synchronous or
+source-bearing work. `suspended->authoritative` admits only that same-posture
+paused set after the offline replay, but does not execute or change those rows
+inside the transition. After the transition commits, only their existing
+dispatcher/retry owner may perform W4C-R43's direct `paused->completed` path;
+any shadow/eligible/unknown accepted posture blocks
 resume and must be canceled before source; if source already exists, resume
 fails for explicit operator remediation under a separately reviewed protocol.
 No transition mutates `accepted_posture`.
@@ -2258,6 +2282,13 @@ Gates:
 - immutable-table UPDATE/DELETE/TRUNCATE refusal; operation/batch
   DELETE/TRUNCATE/cascade refusal, illegal state-transition refusal, and
   completed-response/fingerprint immutability;
+- a durable authoritative queued operation pauses only before source DML;
+  after an accepted resume transition, two concurrent dispatcher/retry
+  attempts lock the same existing row, produce exactly one source/result
+  effect and one direct `paused->completed` transition, and the waiter returns
+  the stored response. Re-inserting/reclaiming the operation, adding
+  `paused->claimed`, admitting a synchronous caller, accepting another frozen
+  posture, or pausing a source-bearing row fails its own leg;
 - no source disables triggers after data exists;
 - cross-org pointer and cross-record/org lineage refusal;
 - same-org shadow/review pointer and pointer/state mismatch refusal;
@@ -2774,12 +2805,13 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with section 9's complete org-rollout, rollout-state-if-written, operation-identity-advisory, operation-row, batch/item, then target lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
 | OD-W4C-40 rollout/source serialization | (a) completed congruent replay may non-locking-read and return with zero DML; every continuing source and rollback uses one fail-closed helper for class-`00` shared org rollout before class-`10` operation identities, rows/batches, and class-`11` targets, while transition and closure use rollout exclusive first; class `01` is reserved; (b) rely on operation-row scans and transaction isolation alone | (a), disjoint two-bit classes forbid cross-purpose lock upgrade, the shared rollout mode preserves ordinary write concurrency, covers null-ID legacy work, serializes same-batch source/rollback through their lower-order locks, and gives one complete order |
 | OD-W4C-41 concurrent first claim | (a) one canonical exclusive transaction-advisory helper strict-parses canonical UUID identities, derives class-`10` keys, de-duplicates and numerically sorts final signed keys, then serializes every supplied batch/item identity after class-`00` rollout and before row read/insert; the canonical target helper later does the same for class `11`; contention within 5 seconds replays the stored response, longer contention returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` and a later retry replays; (b) catch and retry unique-constraint `23505`; (c) rely on the unique constraint and surface one caller's failure | (a), the closed timeout is honest, raw `23505|55P03` never escapes, unrelated constraint failures stay fail-closed, cross-class upgrades are impossible, and unrelated operations remain concurrent except for harmless within-class hash collision |
+| OD-W4C-42 paused durable operation | (a) only the existing dispatcher/retry owner resumes an exact authoritative, source-free paused row after resume commits, preserving `paused` until one atomic `paused->completed`; (b) reclaim or reinsert it; (c) let synchronous callers adopt it | (a), closes the lifecycle without a second claim, duplicate source effect, or invented state transition |
 
 ## 14. RATIFY and execution sequence
 
 1. Rebase docs PR to current main.
 2. Re-verify anchors and regenerate writer inventory.
-3. Owner decides OD-W4C-1..41.
+3. Owner decides OD-W4C-1..42.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
 6. Owner RATIFYs exact merged SHA.
