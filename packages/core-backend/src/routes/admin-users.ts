@@ -29,6 +29,12 @@ import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../auth/user-activation'
+import { activatePendingUser } from '../auth/user-activate'
+import {
+  assertAliasCutoverAllowed,
+  backfillUserLoginAliases,
+  isAuthLoginAliasCutoverEnabled,
+} from '../auth/login-alias-service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
@@ -4584,6 +4590,99 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'SESSION_REVOCATION_LIST_FAILED', (error as Error)?.message || 'Failed to load session revocations')
+    }
+  })
+
+  // T3 — promote pending_activation → activated (temp password / SSO-shaped source check).
+  r.post('/api/admin/users/:id/activate', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const modeRaw = String(req.body?.mode || 'temp_password').trim()
+      const mode =
+        modeRaw === 'sso' || modeRaw === 'admin_no_password' ? modeRaw : 'temp_password'
+      const result = await activatePendingUser({
+        userId: String(req.params.id || ''),
+        mode,
+        adminUserId,
+        temporaryPassword: typeof req.body?.temporaryPassword === 'string'
+          ? req.body.temporaryPassword
+          : undefined,
+        orgId: typeof req.body?.orgId === 'string' ? req.body.orgId : null,
+        directoryAccountId: typeof req.body?.directoryAccountId === 'string'
+          ? req.body.directoryAccountId
+          : null,
+        enableDingTalkGrant: req.body?.enableDingTalkGrant === true,
+        claimAliases: req.body?.claimAliases !== false,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user',
+        resourceId: result.userId,
+        meta: {
+          source: 'admin_activate',
+          mode,
+          localPasswordSet: result.localPasswordSet,
+          // never audit plaintext password
+          temporaryPasswordIssued: Boolean(result.temporaryPassword),
+        },
+      })
+      return jsonOk(res, result)
+    } catch (error) {
+      const code = (error as { code?: string })?.code || 'ACTIVATE_FAILED'
+      const status =
+        code === 'ACTIVATE_USER_NOT_FOUND' ? 404
+          : code === 'ACTIVATE_NOT_PENDING' || code.startsWith('ACTIVATE_SOURCE') || code === 'ACTIVATE_LINK_MISMATCH'
+            ? 409
+            : code === 'ACTIVATE_USER_REQUIRED' ? 400 : 500
+      return jsonError(res, status, code, (error as Error)?.message || 'Activation failed')
+    }
+  })
+
+  // T2a — backfill aliases + collision report (does not switch Auth read path).
+  r.post('/api/admin/login-aliases/backfill', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const result = await backfillUserLoginAliases()
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user_login_aliases',
+        resourceId: 'backfill',
+        meta: { ...result, cutoverEnabled: isAuthLoginAliasCutoverEnabled() },
+      })
+      return jsonOk(res, {
+        ...result,
+        cutoverEnabled: isAuthLoginAliasCutoverEnabled(),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ALIAS_BACKFILL_FAILED', (error as Error)?.message || 'Backfill failed')
+    }
+  })
+
+  // T2b readiness probe (does not flip the env flag).
+  r.get('/api/admin/login-aliases/cutover-status', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const enabled = isAuthLoginAliasCutoverEnabled()
+      if (enabled) await assertAliasCutoverAllowed()
+      return jsonOk(res, { enabled, ready: true })
+    } catch (error) {
+      const code = (error as { code?: string })?.code
+      if (code === 'ALIAS_CUTOVER_BLOCKED') {
+        return jsonOk(res, {
+          enabled: isAuthLoginAliasCutoverEnabled(),
+          ready: false,
+          code,
+          message: (error as Error).message,
+        })
+      }
+      return jsonError(res, 500, 'ALIAS_CUTOVER_STATUS_FAILED', (error as Error)?.message || 'Status failed')
     }
   })
 
