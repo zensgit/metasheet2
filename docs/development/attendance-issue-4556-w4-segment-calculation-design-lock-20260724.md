@@ -339,11 +339,11 @@ matrix:
 | `live_punch` | client UUID | event type, occurred-at, timezone, source, normalized location/meta, owned photo-file ref |
 | `request_create` | client UUID | exact normalized request-write allowlist plus request type; no caller/source UUID |
 | `request_pending_edit` | client UUID | request ID, expected snapshot version/hash, exact normalized patch allowlist |
-| `request_decision` | web UUID or verified channel action identity | request/approval ID, expected approval version/node, `approve|reject`, normalized comment/meta |
+| `request_decision` | web UUID or verified delivery-ledger UUID | request/approval ID, expected approval version/node, `approve|reject`, normalized comment/meta |
 | `request_cancel` | client UUID | request/approval ID, expected request snapshot/version, normalized cancellation reason/meta |
-| `import_batch` | durable batch command ID plus per-item IDs | transport kind, batch fingerprint, ordered exact normalized items |
-| `integration_batch` | durable sync-run command ID plus per-item IDs | integration/run identity, source fingerprint, ordered exact normalized items |
-| `scheduled` | durable run/user/work-date ID | expected run version and scheduled-absence source |
+| `import_batch` | canonical batch UUID plus UUIDv5 item IDs | transport kind, batch fingerprint, ordered exact normalized items |
+| `integration_batch` | canonical sync-run UUID plus UUIDv5 item IDs | integration/run identity, source fingerprint, ordered exact normalized items |
+| `scheduled` | UUIDv5 run/user/work-date ID | expected run version and scheduled-absence source |
 | `manual_edit` | client UUID | record ID, expected current calculation/version, closed set/unset operations, reason/evidence |
 | `recompute` | client UUID | record ID, expected current calculation/version, `frozen_prior|current_policy` |
 | `import_rollback` | client UUID | batch ID, expected batch state/fingerprint |
