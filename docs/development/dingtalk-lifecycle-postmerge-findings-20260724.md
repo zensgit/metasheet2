@@ -138,7 +138,48 @@ not a reviewer's.
 
 ---
 
-## 3. Grant writes target a column that does not exist (P1) — fork-independent
+## 3. Writes target columns that do not exist (P1) — fork-independent, **now fixed**
+
+Fixed on `claude/dingtalk-t3-grant-table-fix-20260724` (`6c1a093ef`), with a real-DB suite:
+4/4 green with the fix, **4/4 red with `src` reverted to `main`**. Added to the plugin-tests
+run-list (that list is explicit — a new `.db.test.ts` is not auto-collected) and its collection
+proven by running it next to `directory-deprovision-selection.db.test.ts` (10/10 still green).
+Typecheck clean. The slice touches no deprovision writer and no `effect_type`, so it is
+independent of the schema fork in §2.
+
+Two phantom columns, four statements, every one behind a `.catch`:
+
+| Phantom write | Where |
+|---|---|
+| `user_external_identities.grant_enabled` | T3 activate (#4574); D7 preview and D7 restore (#4575) |
+| `user_orgs.updated_at` | T3 activate (#4574); D7 restore (#4575) |
+
+`user_orgs` is `(user_id, org_id, is_active, created_at)`, PK `(user_id, org_id)`. The grant lives
+in `user_external_auth_grants`, which is what `dingtalk-oauth.ts` reads at login.
+
+The `.catch` is what makes this severe rather than cosmetic. Inside a transaction a failed
+statement poisons the connection, so swallowing the rejection does not contain the failure — it
+relocates it, as `25P02`, onto whatever innocent statement runs next. Measured consequences on
+`main`:
+
+- **T3 activate with an `orgId` could not succeed at all** — the membership INSERT aborted the
+  transaction and it died at COMMIT. The "schema variance" fallback written underneath it is
+  structurally unreachable: a poisoned transaction rejects the fallback too.
+- With `enableDingTalkGrant: true`, activation **reported success and granted nothing**.
+- The D7 preview could **never** show a grant effect (§0.1 B).
+- Restoring any event carrying a membership **or** grant effect aborted — i.e. **every real
+  deprovision event**, since every candidate carries a membership effect (§0.1 C).
+- The grant drift gate was satisfied **by its own query failing**: the error became "no grant",
+  which reads as "matches `after_active=false`", so `DRIFT_CONFLICT` could never fire on that leg
+  (§0.1 C subject vs control 2).
+
+Why unit tests did not catch any of it: a stub client answers whatever SQL it is handed, so a
+statement naming a column that does not exist looks identical to one that does. Only real
+Postgres can tell them apart — which is the argument for §2 fork (A) restated in miniature.
+
+### Original detail
+
+
 
 `user_external_identities.grant_enabled` appears in **no migration**. Control: three migrations
 reference that table, and `grep -rn "grant_enabled" src/db/migrations/` returns zero rows. The
