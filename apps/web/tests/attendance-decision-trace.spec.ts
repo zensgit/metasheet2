@@ -333,6 +333,18 @@ describe('parseAttendanceDecisionTraceResponse — strict whitelist matrix', () 
     const badResolution = compTimeFixture()
     ;((badResolution.conclusion as Record<string, any>).lots as Array<Record<string, unknown>>)[0].sourceResolution = 'raw_passthrough'
     expect(parseAttendanceDecisionTraceResponse(badResolution)).toBeNull()
+
+    // Discriminator-isolating leg: lots[0] is the `mapped` lot, so it carries a `reasonCode` key —
+    // an out-of-domain resolution there is ALSO caught by the unknown-branch exact-key-set door
+    // (`hasOwnProperty('reasonCode')`), i.e. that leg passes even with the closed-set door removed.
+    // lots[1] is the `unknown_source` lot (reasonCode key entirely absent), so only the closed-set
+    // door itself can reject it — removing the door renders an out-of-domain lot as `unknown_source`
+    // instead of failing the whole packet closed (锁 §3.1 硬规则 3). `source_type` is free TEXT with
+    // no CHECK constraint backend-side, so a future third discriminant value is a live risk.
+    const badResolutionOnUnknownLot = compTimeFixture()
+    ;((badResolutionOnUnknownLot.conclusion as Record<string, any>).lots as Array<Record<string, unknown>>)[1].sourceResolution =
+      'raw_passthrough'
+    expect(parseAttendanceDecisionTraceResponse(badResolutionOnUnknownLot)).toBeNull()
   })
 
   it('③ enum-strict conclusion fields: out-of-domain missingSide / suggestedRequestType fail closed', () => {
