@@ -200,8 +200,8 @@ against W1 group-membership tables is a scope violation.
 | W4C-R38 | Attendance approval assignment authority is org-bound, action-complete, and version-serialized. | A generated matrix from the actual generic action union and assignment-DML call graph covers bulk reassign, non-terminal `approve` advancement, `return`, `revoke`, jump, transfer, add/reduce-sign, timeout, and future assignment mutations. Each action proves the attendance instance unreachable or locks its request org/version and satisfies the closed actor/target matrix before instance/assignment DML; tests include both a normal attendance instance and an adversarial one carrying `published_definition_id`, and a mutation-versus-decision race cannot authorize the wrong actor. |
 | W4C-R39 | Closing a pre-W4 import rollback window is immutable, and rollback is serialized with closure, rollout transition, and writes to the same import batch. | Removing the append-only close witness, common rollout/operation-identity-advisory/operation-row/batch/target lock order, or final in-transaction eligibility recheck fails dual-connection races. For a legacy batch closed without preimage, close/transition first makes rollback return 409 with zero delete/reversal DML; rollback first makes transition wait and then re-evaluate. For source versus rollback on one batch, exactly one commits first and the waiter rechecks committed batch state before zero conflicting source/reversal DML. A batch with a valid frozen preimage retains its specified W4 reversal path. |
 | W4C-R40 | Operation lifecycle follows rollout posture and supplied identity without an implicit retry hole. | A new legacy request with no supplied stable operation ID creates no operation/outbox row; legacy with a supplied ID claims/seals a compatibility operation but still creates no outbox; every new `shadow|eligible|authoritative` request requires, claims, and seals its operation plus required outbox. Independent mutations that create a legacy operation without an ID, omit the legacy-with-ID compatibility operation, or skip claim/seal outside legacy fail. |
-| W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work, through one fail-closed advisory-key helper and one rollout-first lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues acquires the org rollout shared transaction advisory lock through the single canonical helper before locking operation/source rows and holds it through commit; transition/closure use that helper's matching exclusive mode before their rows. Removing either lock, changing one caller's namespace/key, swallowing acquisition failure, or restoring operation-row-first locking fails an independent dual-connection leg. |
-| W4C-R42 | Concurrent first claim of one batch or operation identity serializes before any unique-row insert. | Two connections presenting the same all-new identity both complete with the one stored response, exactly one source/result effect, and no raw `23505`. Removing the canonical identity advisory lock, changing one caller's key derivation, or acquiring identity locks in a different order fails independently. |
+| W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work, through one fail-closed advisory-key helper, a rollout-only non-negative bigint key family, and one rollout-first lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues acquires the org rollout shared transaction advisory lock through the single canonical helper before locking operation/source rows and holds it through commit; transition/closure use that helper's matching exclusive mode before their rows. Removing either lock, changing one caller's namespace/key or key-family sign partition, swallowing acquisition failure, or restoring operation-row-first locking fails an independent dual-connection leg. |
+| W4C-R42 | Concurrent first claim of one batch or operation identity serializes before any unique-row insert through an operation-only negative bigint key family. | When the first holder commits within the closed lock budget, two connections presenting the same all-new identity both complete with the one stored response and exactly one source/result effect. When it exceeds that budget, the waiter returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` with zero DML and a later retry returns the stored response. Neither case exposes raw `23505` or `55P03`. Removing the canonical identity advisory lock, changing one caller's key derivation, crossing the rollout/operation sign partition, sorting by tuple instead of final signed key, or acquiring identity locks in a different final-key order fails independently. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -349,6 +349,59 @@ matrix:
 | `import_rollback` | client UUID | batch ID, expected batch state/fingerprint |
 | `ops_retirement` | operator command UUID | record ID, expected current calculation/version, reason/ticket |
 
+Every value entering the `operationId` or `batchCommandId` position is one
+canonical UUID string. The parser accepts exactly the RFC 4122
+`8-4-4-4-12` hexadecimal form, rejects leading/trailing whitespace, braces,
+URN prefixes, non-ASCII lookalikes, NUL, and every non-string value, validates
+the UUID variant/version where the source contract fixes one, and emits
+lowercase ASCII. The emitted 36 bytes are the only identity bytes stored,
+fingerprinted, compared, or passed to the advisory-key builder. Callers cannot
+pass a pre-normalized-looking `string` around this parser.
+
+`orgId` uses a separate `CanonicalAttendanceOrgKeyV1` parser. It emits a
+canonical lowercase UUID for every W4-enabled posture. It may emit the exact
+ASCII sentinel `default` only for an existing `legacy_projection_only`
+compatibility command, because historical attendance rows used that sentinel;
+no whitespace/case alias is accepted, and `shadow|eligible|authoritative`
+reject it before source DML. Both advisory helpers consume only this branded
+parser output, so strict W4 tenancy and byte-compatible legacy operation
+locking do not conflict.
+
+Derived identities use UUIDv5 over the exact UTF-8 bytes below and then pass
+through the same parser. W4C-0 exports the three literal namespace UUIDs as its
+only identity-derivation source:
+
+```text
+ATTENDANCE_IMPORT_ITEM_NAMESPACE_V1 =
+  6f67fdaa-e2aa-48b3-b76c-c4aab9723173
+ATTENDANCE_INTEGRATION_ITEM_NAMESPACE_V1 =
+  46501375-c273-459f-a5af-f926859f6411
+ATTENDANCE_SCHEDULED_OPERATION_NAMESPACE_V1 =
+  e4363171-f53f-47d7-a074-607ef3fad391
+
+import item name =
+  canonicalBatchUuid + NUL + canonicalUnsignedOrdinal + NUL +
+  lowercaseSha256SemanticFingerprint
+integration item name =
+  canonicalSyncRunUuid + NUL + canonicalUnsignedOrdinal + NUL +
+  lowercaseSha256SemanticFingerprint
+scheduled name =
+  canonicalRunUuid + NUL + canonicalUserUuid + NUL + canonicalYYYYMMDD
+```
+
+The unsigned ordinal is base-10 ASCII with no sign or leading zero except
+`0`; the semantic fingerprint is exactly 64 lowercase hexadecimal bytes; the
+date is exactly `YYYY-MM-DD` and calendar-valid. Existing import batch IDs and
+directory sync-run IDs are UUIDs and become the corresponding canonical batch
+command IDs. A verified DingTalk/card decision uses the canonical UUID
+`dingtalk_approval_card_deliveries.id` (`outTrackId`) as its action operation
+ID; provider prose, task ID, action label, operator ID, and callback payload
+never become identity bytes. Its requested action remains in the command
+fingerprint, so reusing one delivery ID for a different action conflicts.
+Case, whitespace, Unicode normalization, overlength, NUL, ordinal, date, and
+tuple-boundary mutations must either canonicalize to the same UUID or fail
+before source DML exactly as specified here.
+
 Every variant also carries schema version, org, subject, correlation ID, and
 its closed entrypoint/capability discriminants. External aliases such as
 `occurred_at` or `request_type` are normalized once before fingerprinting; the
@@ -425,9 +478,10 @@ not caller prose. Stable identities are:
 
 - client-generated UUID reused for a live punch, web approval decision,
   manual edit, recompute, rollback, or operator command;
-- a verified immutable DingTalk/card action identity for a channel decision;
-- durable import batch/item identity; and
-- durable scheduled-run/user/date identity.
+- the verified delivery-ledger UUID for a DingTalk/card action;
+- an existing canonical UUID batch/run command plus the namespace-derived
+  UUIDv5 item identities above; and
+- the namespace-derived scheduled-run/user/date UUIDv5 above.
 
 An approval decision never uses `approval_records.id` as its operation ID:
 that `BIGSERIAL` value does not exist until after the terminal insert. The
@@ -1097,6 +1151,7 @@ W4_MAX_BATCH_ITEMS = 5000
 W4_MAX_DISTINCT_TARGETS = 5000
 W4_TRANSACTION_STATEMENT_TIMEOUT_MS = 180000
 W4_TRANSACTION_LOCK_TIMEOUT_MS = 5000
+W4_OPERATION_IDENTITY_LOCK_WAIT_MS = 5000
 W4_TRANSACTION_MAX_RETRIES = 2
 ```
 
@@ -1110,6 +1165,18 @@ out of W4 and records an explicit values-free
 `w4_batch_limit_shadow_bypass` rollout event; such a batch contributes no
 promotion evidence. Benchmarks must prove the exact maxima and timeout/retry
 posture before promotion. Changing a constant requires a contract amendment.
+
+The operation-identity helper applies
+`W4_OPERATION_IDENTITY_LOCK_WAIT_MS` only to its own advisory acquisition.
+If that query raises SQLSTATE `55P03`, the transaction is rolled back and the
+outer operation boundary maps that helper-origin typed failure to values-free
+HTTP `409 ATTENDANCE_OPERATION_IN_PROGRESS`; it is not retried and raw SQL
+state/message is never returned. A later retry performs normal authorization
+and replay. A timeout from any other statement is not relabeled as operation
+contention. The rollout helper likewise maps a `55P03` raised by its own
+acquisition to values-free `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` after the
+whole transaction rolls back. Neither timeout permits compatibility fallback
+or partial DML.
 
 After private adapters resolve targets, a batch groups all items with the same
 `(org,user,workDate)` into one ordered evidence fold and produces exactly one
@@ -1667,12 +1734,18 @@ exclusive assertion fail.
 A separate two-connection first-claim test starts with no batch/item operation
 row, submits the same authenticated payload and identities concurrently, and
 holds the first transaction after identity-lock acquisition. The second waits,
-then re-reads and returns the first transaction's stored response. Both callers
+then re-reads and returns the first transaction's stored response when the
+first holder commits within `W4_OPERATION_IDENTITY_LOCK_WAIT_MS`. Both callers
 succeed with exactly one operation/batch/item set, one source/result effect,
-and no surfaced `23505`. Removing the identity advisory acquisition, changing
-one key namespace/tuple, locking only batch or only items, or moving the
-identity lock after INSERT makes this leg fail exclusively; broad retry of
-unrelated `23505` is forbidden.
+and no surfaced `23505`. A second leg deliberately holds the first transaction
+beyond that budget: the waiter receives values-free
+`409 ATTENDANCE_OPERATION_IN_PROGRESS`, all source/result/operation row counts
+and hashes remain those of the first transaction alone, no `55P03` escapes,
+and a later retry returns the stored response. Removing the identity advisory
+acquisition, changing one key namespace/tuple, locking only batch or only
+items, moving the identity lock after INSERT, or relabeling an unrelated
+`55P03` makes an exclusive leg fail; broad retry of unrelated `23505` is
+forbidden.
 
 A separate lock-order mutation restores operation-row locking before the
 rollout shared advisory lock. A two-connection test with an incomplete stable-ID
@@ -1799,23 +1872,29 @@ recheck.
 W4C-0 exports exactly one key builder and one acquisition helper:
 
 ```ts
-buildAttendanceCalculationRolloutAdvisoryKey(orgId): bigint
+buildAttendanceCalculationRolloutAdvisoryKey(
+  orgId: CanonicalAttendanceOrgKeyV1,
+): bigint
 acquireAttendanceCalculationRolloutLock(
   trx,
-  orgId,
+  orgId: CanonicalAttendanceOrgKeyV1,
   mode: 'shared' | 'exclusive',
 ): Promise<void>
 ```
 
-The builder strict-parses `orgId` as UUID, formats its canonical lowercase UUID,
-then derives a signed int64 from the first eight bytes of
-`SHA-256("metasheet2:attendance:segment-rollout:v1\0" + canonicalOrgId)` using
-big-endian two's-complement conversion. The acquisition helper is the only
-place allowed to select `pg_advisory_xact_lock_shared($1::bigint)` versus
+The builder parses `orgId` through `CanonicalAttendanceOrgKeyV1`, then reads
+the first eight bytes of
+`SHA-256("metasheet2:attendance:segment-rollout:v1\0" + canonicalOrgId)` as
+unsigned big-endian `u64`, clears the high bit with
+`u64 & 0x7fffffffffffffff`, and uses that non-negative signed bigint as the
+rollout key. The acquisition helper is the only place allowed to select
+`pg_advisory_xact_lock_shared($1::bigint)` versus
 `pg_advisory_xact_lock($1::bigint)`. Source, rollback, transition, and closure
 all import it; there is no copied namespace, local hash, try-lock, swallowed
 error, timeout-to-continue, or row-lock fallback. Collision may reduce
-concurrency but cannot weaken correctness.
+concurrency but cannot weaken correctness. This non-negative family is
+disjoint from the negative operation-identity family below, so a source never
+attempts an exclusive upgrade of the rollout key it already holds shared.
 
 W4C-0 also exports the only operation-identity key builder and acquisition
 helper:
@@ -1823,9 +1902,9 @@ helper:
 ```ts
 type AttendanceResultOperationIdentityV1 = Readonly<{
   kind: 'batch' | 'item'
-  orgId: string
+  orgId: CanonicalAttendanceOrgKeyV1
   entrypoint: AttendanceSourceEntrypointV1
-  id: string
+  id: CanonicalAttendanceOperationIdV1
 }>
 
 buildAttendanceResultOperationAdvisoryKey(
@@ -1838,21 +1917,35 @@ acquireAttendanceResultOperationLocks(
 ): Promise<void>
 ```
 
-The builder strict-parses `orgId` as UUID, validates `entrypoint` against the
-closed command union, and accepts `id` only from that variant's already parsed
-and canonically serialized identity schema: UUID variants use lowercase UUID;
-verified-channel and durable run/batch variants use their closed, bounded,
-NUL-free canonical identity. It hashes the unambiguous NUL-separated tuple
+The builder parses `orgId` through `CanonicalAttendanceOrgKeyV1` and `id`
+through the canonical UUID parser in section 4, validates `entrypoint` against
+the closed command union, and rejects an ID whose entrypoint requires a
+different UUID source/derivation contract.
+It hashes the unambiguous NUL-separated tuple
 `"metasheet2:attendance:result-operation:v1\0" + kind + "\0" + orgId +
-"\0" + entrypoint + "\0" + id` with SHA-256. It converts the first eight bytes
-to signed big-endian int64 exactly as the rollout helper does. The acquisition
-helper canonicalizes and de-duplicates identities, sorts by
-`(kind,orgId,entrypoint,id)`, and obtains an exclusive
-`pg_advisory_xact_lock($1::bigint)` for every resulting key. A hash collision
-only serializes unrelated identities. Invalid identity, key derivation, or SQL
-failure aborts the whole transaction; there is no copied namespace, local
-sort, try-lock, swallowed error, timeout-to-continue, row-lock fallback, or
-generic `23505` retry.
+"\0" + entrypoint + "\0" + id` with SHA-256. It reads the first eight bytes as
+unsigned big-endian `u64`, sets the high bit with
+`u64 | 0x8000000000000000`, and interprets the result as signed two's-complement
+bigint; every operation key is therefore negative. The acquisition helper
+canonicalizes identities, derives their final signed keys, de-duplicates by
+final key, sorts those signed bigint keys numerically, and obtains an exclusive
+`pg_advisory_xact_lock($1::bigint)` in that order. It never sorts merely by the
+pre-hash tuple. A collision serializes unrelated identities but cannot reverse
+lock order; two identities colliding to one final key require one acquisition.
+Invalid identity, key derivation, or SQL failure aborts the whole transaction;
+there is no copied namespace, local sort, try-lock, swallowed error,
+timeout-to-continue, row-lock fallback, or generic `23505` retry.
+
+A module-private digest seam exists only in the real-DB test build. It forces
+two distinct identities onto crossed raw digest outputs and proves both
+transactions still acquire final signed keys in the same numeric order; it
+forces two identities onto one final key and proves one acquisition; and it
+forces equal raw eight-byte digests for rollout and operation builders and
+proves the high-bit partition keeps their PostgreSQL keys distinct. Production
+construction cannot inject or replace the SHA-256 implementation. Mutating
+either sign partition, sorting before derivation, omitting final-key
+de-duplication, or exposing the test seam to production makes an exact gate
+fail.
 
 That stable org rollout advisory key has shared/exclusive transaction modes.
 Every new source/result transaction, including null-ID legacy work, acquires it
@@ -1883,8 +1976,8 @@ performs zero DML.
 
 For an import source and rollback of the same batch, the complete common order
 after the shared rollout lock is: all current/original batch and item operation
-identities through the canonical exclusive identity advisory helper in stable
-`(kind,org,entrypoint,id)` order; their operation rows in stable
+identities through the canonical exclusive identity advisory helper in final
+signed-bigint numeric order; their operation rows in stable
 `(entrypoint,operation_id,item_key)` order; the import batch and item rows in
 stable ID order; then affected `(org,user,workDate)` target advisory/parent rows
 in the section 8.2 order. The source must recheck that the batch remains writable
@@ -2124,11 +2217,15 @@ Gates:
   state, missing item, reordered input, or one batch ID reused as multiple
   calculation operation IDs fails;
 - two concurrent first claims of the same single operation and of the same
-  all-new batch both return the one stored response with exactly one source/
-  result effect and no surfaced `23505`; removing the canonical
-  operation-identity advisory lock, locking only the batch or only its items,
-  changing one identity tuple, or moving acquisition after INSERT fails an
-  exclusive two-connection leg;
+  all-new batch return the one stored response with exactly one source/result
+  effect when the first holder commits within the lock budget; a holder beyond
+  that budget makes the waiter return values-free
+  `409 ATTENDANCE_OPERATION_IN_PROGRESS` with zero extra DML, and its later
+  retry returns the stored response. Neither path surfaces `23505|55P03`;
+  removing the canonical operation-identity advisory lock, locking only the
+  batch or only its items, changing one identity tuple, moving acquisition
+  after INSERT, or broadly relabeling another `55P03` fails an exclusive
+  two-connection leg;
 - item/target limit, lock/statement timeout, and retry constants are one
   exported contract; above-limit W4 commands fail before source DML, and
   authoritative mode cannot fall back to chunked/partial legacy commits;
@@ -2152,8 +2249,18 @@ Gates:
   cross-connection leg before source/rollback/transition/closure DML;
 - every first-claiming command imports
   `acquireAttendanceResultOperationLocks`; mutation of identity normalization,
-  namespace, de-duplication, canonical sort, SQL error propagation, or any
-  batch/item caller fails before unique-row/source/result DML;
+  namespace, rollout/operation sign partition, final-key de-duplication,
+  signed-bigint numeric sort, SQL error propagation, or any batch/item caller
+  fails before unique-row/source/result DML. A test-only digest seam forces
+  crossed final-key order, same-key collisions, and equal rollout/operation
+  raw digests; production construction cannot inject it;
+- direct, verified-channel, import, integration, and scheduled identity tests
+  pin the section 4 UUID parser, three namespace constants, UUIDv5 name bytes,
+  and exact lowercase output. Whitespace, braces, URN, case, Unicode
+  lookalikes, NUL, overlength, malformed ordinal/date/fingerprint, and
+  tuple-boundary mutations fail before operation/source DML. An exact
+  `default` org key succeeds only for a legacy compatibility command and fails
+  for every W4-enabled posture; changing either leg fails independently;
 - an incomplete stable-ID operation versus rollout transition proves the common
   rollout-then-operation-identity-advisory-then-operation-row lock order
   completes without deadlock or bounded-retry exhaustion; moving either
@@ -2599,8 +2706,8 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-37 attendance assignment mutation | (a) central reassign and any reachable generic assignment mutation use the locked request-org actor/target matrix plus approval-version serialization; unsupported generic actions prove zero attendance DML; (b) retain global `approvals:admin` plus globally active target behavior | (a), changing who may approve is an org-bound security decision |
 | OD-W4C-38 operation lifecycle by posture | (a) completed congruent replay is read first; null-ID legacy writes no operation/outbox, stable-ID legacy claims/seals a compatibility operation with no outbox, and shadow/eligible/authoritative require claim/seal plus required outbox; (b) require operation IDs from every legacy caller | (a), preserves the existing optional-ID API while closing cross-posture response-loss replay |
 | OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with section 9's complete org-rollout, rollout-state-if-written, operation-identity-advisory, operation-row, batch/item, then target lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
-| OD-W4C-40 rollout/source serialization | (a) completed congruent replay may non-locking-read and return with zero DML; every continuing source and rollback uses the one fail-closed canonical helper to take the shared org rollout advisory lock before the common operation-identity-advisory/operation-row/source/batch/target order, while transition and closure use its exclusive mode first; (b) rely on operation-row scans and transaction isolation alone | (a), the shared mode preserves ordinary write concurrency, covers null-ID legacy work, serializes same-batch source/rollback through their lower-order locks, and gives one rollout-first lock order |
-| OD-W4C-41 concurrent first claim | (a) one canonical exclusive transaction-advisory helper serializes every supplied batch/item operation identity after the org rollout lock and before row read/insert; (b) catch and retry unique-constraint `23505`; (c) rely on the unique constraint and surface one caller's failure | (a), both concurrent callers receive the one stored response, unrelated constraint failures stay fail-closed, and unrelated operations remain concurrent |
+| OD-W4C-40 rollout/source serialization | (a) completed congruent replay may non-locking-read and return with zero DML; every continuing source and rollback uses the one fail-closed canonical helper to take the shared non-negative-family org rollout advisory lock before the common negative-family operation-identity-advisory/operation-row/source/batch/target order, while transition and closure use its exclusive mode first; (b) rely on operation-row scans and transaction isolation alone | (a), the disjoint sign families forbid shared-to-exclusive key upgrade, the shared mode preserves ordinary write concurrency, covers null-ID legacy work, serializes same-batch source/rollback through their lower-order locks, and gives one rollout-first lock order |
+| OD-W4C-41 concurrent first claim | (a) one canonical exclusive transaction-advisory helper strict-parses canonical UUID identities, derives negative-family keys, de-duplicates and numerically sorts final signed keys, then serializes every supplied batch/item identity after the org rollout lock and before row read/insert; contention within 5 seconds replays the stored response, longer contention returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` and a later retry replays; (b) catch and retry unique-constraint `23505`; (c) rely on the unique constraint and surface one caller's failure | (a), the closed timeout is honest, raw `23505|55P03` never escapes, unrelated constraint failures stay fail-closed, cross-family upgrades are impossible, and unrelated operations remain concurrent except for harmless hash collision |
 
 ## 14. RATIFY and execution sequence
 
