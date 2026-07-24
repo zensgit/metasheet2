@@ -315,11 +315,11 @@ describe('assertShiftReferenceAllowed (canonical assignability guard)', () => {
   const SHIFT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 
   function fakeTrx({ shiftRows, segmentCount }: { shiftRows: Array<Record<string, unknown>>; segmentCount: number }) {
-    const calls: string[] = []
+    const calls: Array<{ sql: string; params: unknown[] }> = []
     return {
       calls,
-      async query(sql: string) {
-        calls.push(sql)
+      async query(sql: string, params: unknown[]) {
+        calls.push({ sql, params })
         if (sql.includes('FROM attendance_shifts')) return shiftRows
         if (sql.includes('FROM attendance_shift_segments')) return [{ total: segmentCount }]
         throw new Error(`unexpected query: ${sql}`)
@@ -336,13 +336,34 @@ describe('assertShiftReferenceAllowed (canonical assignability guard)', () => {
   it('locks the shift row FOR SHARE (shared delete/reference lock protocol)', async () => {
     const trx = fakeTrx({ shiftRows: [{ id: SHIFT_ID }], segmentCount: 1 })
     await service.assertShiftReferenceAllowed(trx, { orgId: 'org-a', shiftId: SHIFT_ID, producer: 'assignment_create' })
-    expect(trx.calls[0]).toContain('FOR SHARE')
+    expect(trx.calls[0]!.sql).toContain('FOR SHARE')
+  })
+
+  it('keeps the segment-count read org-scoped', async () => {
+    const trx = fakeTrx({ shiftRows: [{ id: SHIFT_ID }], segmentCount: 1 })
+    await service.assertShiftReferenceAllowed(trx, { orgId: 'org-a', shiftId: SHIFT_ID, producer: 'assignment_create' })
+    const segmentRead = trx.calls.find((call) => call.sql.includes('FROM attendance_shift_segments'))
+    expect(segmentRead?.sql).toContain('org_id = $1')
+    expect(segmentRead?.sql).toContain('shift_id = $2')
+    expect(segmentRead?.params).toEqual(['org-a', SHIFT_ID])
   })
 
   it('fails closed with a typed 422 for a multi-segment shift while the flag is OFF', async () => {
     const trx = fakeTrx({ shiftRows: [{ id: SHIFT_ID }], segmentCount: 2 })
     await expect(service.assertShiftReferenceAllowed(trx, { orgId: 'org-a', shiftId: SHIFT_ID, producer: 'assignment_create' }))
       .rejects.toMatchObject({ status: 422, code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED })
+  })
+
+  it('fails closed when a calculation caller cannot prove the persisted segment count', () => {
+    expect(() => service.assertSegmentCalculationAllowed({
+      orgId: 'org-a',
+      shiftId: SHIFT_ID,
+      segmentCount: null,
+      producer: 'attendance calculation',
+    })).toThrow(expect.objectContaining({
+      status: 422,
+      code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED,
+    }))
   })
 
   it('keeps multi-segment references blocked when W3 is misconfigured with the future flag', async () => {
