@@ -1140,6 +1140,19 @@ queue processor can load the row and call the canonical worker adapter. No
 request body, private boolean, process identity, or lease token can confer that
 authority.
 
+The job schema rolls out without inventing history. W4C-0 adds nullable
+`w4_contract_version`, frozen identity/posture fields, and
+`execution_reason_code` under one shape constraint: either
+`w4_contract_version IS NULL` and every W4 field is null, or
+`w4_contract_version=1` and every required frozen field is present. It does not
+backfill accepted posture or command identity from mutable legacy payload.
+W4C-3a makes every new enqueue write the complete V1 shape under the shared
+rollout lock. A pre-cutover nonterminal null-version job may finish only through
+the byte-compatible legacy worker while effective posture is
+`legacy_projection_only`; it blocks transition into W4 and cannot be
+reconstructed by P08 as a W4 job. A terminal null-version job remains legacy
+history and cannot supply W4 replay, promotion, or calculation evidence.
+
 The worker's pre-lock job read may derive candidate identities but confers no
 authority. It enters the canonical transaction, acquires the org rollout shared
 lock, and resolves posture. The branches are disjoint:
@@ -2155,7 +2168,9 @@ Effective state requires:
    other than `resolved_v2`, whose snapshot payload fingerprint differs from
    the locked current request allowlist, or whose terminal/reversal linkage is
    incomplete. Merely having an `unsupported` snapshot never clears the gate;
-6. transition to `eligible` or `authoritative` has zero active/reversible
+6. transition into `shadow`, `eligible`, or `authoritative` has zero
+   nonterminal null-version legacy asynchronous job. Transition to `eligible`
+   or `authoritative` also has zero active/reversible
    legacy request fact referenced by the synthetic source set and zero
    incomplete operation/batch. Every rollout transition also has zero retryable
    asynchronous job whose frozen accepted posture differs from the transition's
@@ -2362,6 +2377,11 @@ Gates:
   posture conflict only with failed, and completed pairs with null. Unknown
   code, wrong status pairing, or accepted-posture UPDATE fails at the DB
   boundary;
+- upgrade fixtures with legacy queued/running/completed jobs preserve every
+  original payload/status byte and set the entire W4 job shape null. Fresh V1
+  inserts require the complete shape; partial null/V1 combinations fail. A
+  mutation that backfills posture/identity from legacy payload or lets a
+  null-version job satisfy W4 replay/promotion fails;
 - no source disables triggers after data exists;
 - cross-org pointer and cross-record/org lineage refusal;
 - same-org shadow/review pointer and pointer/state mismatch refusal;
@@ -2667,7 +2687,11 @@ Gates:
   async operation replay is proven across process restart; deleting any one
   execution-body adapter or routing recovery around it fails its own leg;
 - P07 enqueue freezes an immutable job/batch identity, actor/source identity,
-  command fingerprint, and accepted posture but creates no operation row.
+  command fingerprint, accepted posture, and `w4_contract_version=1` but creates
+  no operation row. An upgrade fixture proves a null-version pre-cutover
+  queued/running job uses only the byte-compatible legacy worker in
+  `legacy_projection_only`, blocks W4 transition until terminal, and is never
+  inferred into V1 by startup recovery.
   While suspended, worker and restart recovery both emit the closed values-free
   retry posture, create zero operation/batch/item/source/result rows, and leave
   the job retryable rather than failed. After authoritative resume, two
