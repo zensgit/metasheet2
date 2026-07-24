@@ -1,6 +1,6 @@
 // W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED §3/§7/§9): full seven-step discriminator
 // matrix for `apps/web/src/views/attendance/attendanceSetupReadiness.ts` — zero DOM, zero fetch.
-// Wired into .github/workflows/attendance-web-guard.yml (run-list + both path filters).
+// Wired into .github/workflows/attendance-web-guard.yml (run-list + relevant-change classifier).
 //
 // Coverage goal ("判别矩阵全值域×七步"): every value the seven-value status domain can reach at
 // each step, given today's implementation — this is not literally 7×7=49 combinations (most are

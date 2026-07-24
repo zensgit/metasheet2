@@ -11,7 +11,7 @@
 //   - §3.2 / charter L232: unknown renders fail-closed (「未知，去核查」), never as complete.
 //   - §3⑦: the manual activation checklist always lists ④ + ⑥'s three signals and never claims
 //     anything is already enabled.
-// Wired into .github/workflows/attendance-web-guard.yml (run-list + both path filters).
+// Wired into .github/workflows/attendance-web-guard.yml (run-list + relevant-change classifier).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
