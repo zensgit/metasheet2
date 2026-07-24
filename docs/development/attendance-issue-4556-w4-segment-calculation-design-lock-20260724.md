@@ -2,7 +2,7 @@
 
 > Status: **PROPOSED**
 >
-> Pinned baseline: `origin/main@014fc23acb58feb1863f79a1c4151b0313fb654b`
+> Pinned baseline: `origin/main@e0defbe26d7f2e1747e74aa908ca710422812bf7`
 >
 > Date: 2026-07-24
 >
@@ -68,28 +68,37 @@ listed so a rebase must re-find the code instead of carrying stale line numbers.
 | Cleanup bypass | Generated cleanup SQL and staging helpers include direct record/event DML. | `scripts/attendance/generate-cleanup-sql.cjs`; `scripts/ops/staging-attendance-*.mjs` |
 | XLSX | The browser converts the first non-empty supported sheet to CSV and enters the existing CSV pipeline. | `AttendanceView.vue`; `importXlsxConvert.ts` |
 
-### 1.1 Current writer inventory is a completion artifact
+### 1.1 Current execution-path inventory is a completion artifact
 
 The exact-head W4 implementation must regenerate this inventory and map every
-production path:
+initiator to its first source/effect/result DML. A shared helper is not a
+substitute for naming each execution body. In particular, a route, queue
+worker, startup recovery, cron callback, and administrator-triggered run are
+separate debt entries even when they later call the same function.
 
-| Current path | W4 disposition |
-| --- | --- |
-| Common single-row upsert | Keep one orchestration wrapper; replace result semantics with canonical prepare/apply. |
-| Manual result meta marker | Move marker/override into immutable prepared evidence; remove post-write patch. |
-| Import `values` | Transport only; persist canonical prepared plans. |
-| Import `unnest` | Transport only; persist the same canonical plans. |
-| Import staging/COPY | Transport only; staging may not calculate. |
-| Scheduled absence | Remove direct insert; use canonical writer and frozen scheduled evidence. |
-| Live punch | Persist event and canonical result under one transaction contract. |
-| Outdoor request/approval | Freeze attribution/context at request creation; approval consumes that exact snapshot. |
-| Approved leave/overtime/correction | Freeze closed facts; fresh-row creation is not a bypass. |
-| Approval cancellation | Append a new calculation or explicit review posture; never edit prior evidence. |
-| Legacy import | Normalize and use canonical prepare/apply. |
-| Integration sync | Normalize and use the same import kernel. |
-| Recompute | Use prior frozen policy by default; explicit current-policy recompute is a new labeled result. |
-| Import rollback | Remove hard delete; append same-record reversals. |
-| Operator cleanup | Use canonical retirement for W4-backed rows; no privileged destructive shortcut. |
+| Debt ID | Current initiator and first effect | W4 owner and disposition |
+| --- | --- | --- |
+| P01 | Live `POST /api/attendance/punch`: event insert, then `upsertAttendanceRecord`. | W4C-2: persist event and canonical result under one transaction contract. |
+| P02 | `applyAttendanceInOutMergePolicy`: second-pass record mutation after the first upsert, used by live/outdoor flows. | W4C-2: consume the prepared projection inside the same canonical transaction; no post-write recomputation. |
+| P03 | Scheduled cron callback: `runAutoAbsenceForOrgDate` -> `generateAbsenceRecords` direct record insert. | W4C-2: remove direct insert and use frozen scheduled evidence. |
+| P04 | Administrator `POST /api/attendance/auto-absence/run`: the same direct absence writer through a separate initiator. | W4C-2: prove the same canonical boundary and authorization/call order independently. |
+| P05 | `POST /api/attendance/anomaly-result-edits`: upsert followed by `attachManualResultEditMarkerToRecord` UPDATE. | W4C-3c: freeze the override in prepared evidence and remove the post-write patch. |
+| P06 | Modern synchronous `/import/commit`: `values`, `unnest`, or staging `INSERT ... SELECT` bulk upsert. | W4C-3a: transports only; all persist identical canonical prepared plans. |
+| P07 | Async import queue worker `processAsyncImportCommitJob` -> `commitAttendanceImportPayload`. | W4C-3a: durable operation/item identity and the same atomic import/reversal contract. |
+| P08 | Async import startup recovery that re-enqueues P07 after restart. | W4C-3a: restart replay is an explicit execution-path gate, not inferred from the HTTP route. |
+| P09 | Legacy `POST /api/attendance/import`: private per-row mapping/calculation/upsert loop. | W4C-3a: normalize and use canonical prepare/apply. |
+| P10 | `/api/attendance/integrations/:id/sync`: separate per-row calculation/upsert loop. | W4C-3a: normalize and use the same import kernel. |
+| P11 | `/import/rollback/:id`: hard delete of records carrying `source_batch_id`. | W4C-3a: remove delete and append same-record reversals. |
+| P12 | Approval request creation/edit: no attendance row yet and no complete immutable calculation snapshot today. | W4C-3b: append and bind immutable request snapshots before terminal processing. |
+| P13 | Approval terminal handling: correction/leave/overtime record upsert and outdoor/generic event insert. | W4C-3b: freeze closed facts; fresh-row creation is not a bypass. |
+| P14 | Approved-request cancellation: balance/leave-ledger reversal only; it does **not** reverse an attendance result today. | W4C-3b: add an atomic calculation or explicit review/no-parent outcome; this is new capability, not a migration of an existing result reversal. |
+| P15 | `scripts/attendance/generate-cleanup-sql.cjs`: privileged generated record/event deletes. | W4C-3c: canonical retirement for W4-backed rows; no privileged destructive shortcut. |
+| P16 | Test-user cleanup and staging helpers: dynamic/direct synthetic deletes and inserts. | W4C-3c/W4C-5: classify tooling separately, retire W4-backed data canonically, and prove named-org residue cleanup. |
+
+There is no general production recompute writer today. W4C-3c introduces
+prior-policy/default recompute and explicitly labeled current-policy recompute;
+it must not describe either as a migrated existing path. Manual result editing
+is an override projection path, not that recompute capability.
 
 XLSX is not another backend writer. Equivalent normalized CSV must produce the
 same semantic input while XLSX/CSV origin remains separate provenance.
@@ -153,6 +162,11 @@ against W1 group-membership tables is a scope violation.
 | W4C-R21 | One attendance workflow uses one PostgreSQL transaction for source, shared effects, result, and operation seal. | A split transaction or nested commit fails injected-effect rollback and `txid_current()` equality tests. |
 | W4C-R22 | Completed operation/batch history is durable retry evidence. | Completed-row UPDATE/DELETE/TRUNCATE/cascade mutations fail at the DB boundary. |
 | W4C-R23 | The W4C-0 DML debt baseline is pinned before W4 runtime code. | Adding, renaming, or reclassifying a bypass in W4C-0 without removing a pinned debt ID fails CI. |
+| W4C-R24 | Payable minutes are the intersection of actual and planned segment intervals, extended only by bounded frozen overtime. | Restoring raw actual-span arithmetic counts a planned break and fails. |
+| W4C-R25 | Imported explicit metrics/policy results are never dropped or silently made authoritative. | Removing snapshot presence or congruence checks fails a metric-conflict fixture. |
+| W4C-R26 | W4 atomic batches stay within one closed, tested bound. | 5001 items/targets fail before source DML; chunking or partial commit mutations fail. |
+| W4C-R27 | A completed operation cannot lose its required lifecycle event between DB commit and process emit. | Removing the transactional outbox reproduces commit-before-emit loss. |
+| W4C-R28 | Frozen per-segment grace is derived only from the selected shift/rule profile until a new schema is ratified. | Segment-specific injection or current-policy reread fails fingerprint/context tests. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -242,6 +256,11 @@ type AttendanceEvidenceInputV1 =
       direction: 'check_in' | 'check_out'
       occurredAt: string
     }
+  | {
+      kind: 'import_metric_snapshot_ref'
+      operationItemId: string
+      snapshotVersion: 1
+    }
   | { kind: 'scheduled_absence_ref'; scheduledRunId: string }
   | { kind: 'approved_request_ref'; requestId: string }
 
@@ -255,6 +274,26 @@ interface ApprovedAttendanceFactRefV1 {
     | 'reversal'
 }
 ```
+
+An import metric snapshot is a closed immutable server snapshot, not a trusted
+adapter object. It records:
+
+- the exact presence/value of imported `status`, `workMinutes`,
+  `lateMinutes`, `earlyLeaveMinutes`, `leaveMinutes`, and `overtimeMinutes`;
+- the legacy holiday/rule-set/rule-engine output that would have produced the
+  compatibility projection, including the closed engine/rule versions and
+  source fingerprint; and
+- which fields were absent, so absence cannot become an implicit zero.
+
+The segment calculator remains the sole authoritative source of physical
+minutes and status. A W4 import can become authoritative only when every
+explicit imported metric and the frozen legacy policy result are congruent
+with the canonical segment result. Any mismatch is
+`review_required/import_metric_conflict`, preserves the imported compatibility
+projection in shadow, and blocks promotion. It is forbidden to discard the
+explicit values, silently recalculate them, or let them override segment
+evidence. An import with metrics but insufficient boundary evidence is likewise
+review-required.
 
 The public source-command union is not an open callback or `unknown` payload.
 W4C-0 defines strict schemas with unknown-key rejection and this exact variant
@@ -436,7 +475,14 @@ interface FrozenAttendanceContextV1 {
 }
 ```
 
-The three policy values are normalized and validated together with the frozen
+W4 has no per-segment grace authoring source. The selected work-context
+profile's shift/rule-level `lateGraceMinutes` and
+`earlyLeaveGraceMinutes` are therefore validated once and copied identically
+into every frozen segment. A segment row cannot override either value, and the
+calculator never re-reads current policy. Introducing true per-segment grace
+requires a later schema/authoring contract amendment.
+
+The policy values are normalized and validated together with the frozen
 context. `roundingMinutes` is a positive integer. A zero severe/absence
 threshold disables that tier; otherwise the existing nesting rule is frozen:
 `absenceLateThresholdMinutes >= severeLateThresholdMinutes >=
@@ -697,7 +743,9 @@ non-null keys fail closed.
 
 W4 preserves physical-time truth:
 
-- segment worked minutes come only from matched in/out evidence;
+- segment worked minutes come only from matched in/out evidence intersected
+  with that planned segment, plus only its exact bounded approved-overtime
+  extension;
 - leave or overtime approval alone never fabricates worked minutes;
 - bounded approved overtime may extend W2 attribution under OD-4556-7, but
   unmatched overtime contributes zero physical work;
@@ -768,8 +816,18 @@ clipped to frozen W2 `attributionWindow`.
   equality or reversal is review-required `invalid_evidence_order`;
 - completed actual intervals must remain ordered and non-overlapping:
   `actualOut_i <= actualIn_(i+1)`. Any overlap is review-required
-  `overlapping_actual_intervals`; no minute is clipped, reassigned, or counted
-  twice;
+  `overlapping_actual_intervals`; no evidence is reassigned or counted twice;
+- raw actual boundaries remain the source for late/early and evidence
+  explanation, but payable physical time is
+  `intersection([actualIn_i,actualOut_i),[S_i,E_i))`. Early arrival, late
+  departure, or an interval extending toward the next segment cannot count a
+  planned break. Only a validated bounded overtime fact frozen in the
+  calculation may extend the right and/or left payable boundary, and its
+  extension remains clipped to that exact approved interval;
+- an actual interval that crosses a planned inter-segment break is retained for
+  explanation but produces only the in-segment intersection. Tests cover
+  early-in, late-out, cross-break, approved bounded extension, and an
+  unapproved extension mutation;
 - review rows never become the current W4 pointer; authoritative review
   preserves the current projection, while shadow review still applies its
   separately prepared legacy compatibility projection.
@@ -844,6 +902,7 @@ context_mismatch
 input_schema_invalid
 approved_fact_conflict
 manual_override_invalid
+import_metric_conflict
 import_rollback_reversal
 operator_retirement
 ```
@@ -897,7 +956,12 @@ subject/source kind/source ref, authenticated actor ID, token subject, exact
 pre-source command fingerprint, accepted rollout posture, state, resolved
 record/calculation/request refs, sealed semantic and provenance fingerprints
 when a result exists, response snapshot, created/updated timestamps, and
-optimistic version.
+optimistic version. Import/integration item operations additionally persist an
+immutable closed `normalized_business_input_snapshot` containing boundary
+presence and the section 4.1 metric/policy snapshot; it excludes uploaded file
+bytes, arbitrary row columns, secrets, and unrecognized keys. Calculation
+evidence copies the exact snapshot rather than re-reading mutable import
+preview/meta.
 
 - primary/unique key: `(org_id,entrypoint,operation_id)`;
 - lock this row before attribution or parent creation;
@@ -960,6 +1024,27 @@ Identical retry input therefore regenerates the exact ordered sequence;
 reordering changes `item_sequence_fingerprint`, while adding, removing, or
 changing a row also changes the set/count and conflicts before DML.
 
+W4's whole-batch atomicity is deliberately bounded:
+
+```text
+W4_MAX_BATCH_ITEMS = 5000
+W4_MAX_DISTINCT_TARGETS = 5000
+W4_TRANSACTION_STATEMENT_TIMEOUT_MS = 180000
+W4_TRANSACTION_LOCK_TIMEOUT_MS = 5000
+W4_TRANSACTION_MAX_RETRIES = 2
+```
+
+These are one exported contract, not environment-tunable hidden behavior.
+The limits are validated before batch/source DML. A W4-enabled request above
+either item or target limit fails closed as `W4_BATCH_LIMIT_EXCEEDED`; an
+authoritative org never falls back to partial commits or the legacy writer.
+Legacy projection-only behavior remains byte-identical. Shadow/eligible may
+preserve the legacy compatibility response only when the entire batch is kept
+out of W4 and records an explicit values-free
+`w4_batch_limit_shadow_bypass` rollout event; such a batch contributes no
+promotion evidence. Benchmarks must prove the exact maxima and timeout/retry
+posture before promotion. Changing a constant requires a contract amendment.
+
 After private adapters resolve targets, a batch groups all items with the same
 `(org,user,workDate)` into one ordered evidence fold and produces exactly one
 prepared calculation for that target. Its calculation operation ID is
@@ -972,6 +1057,35 @@ compatibility fingerprint in that calculation's
 `parent_preimage_snapshot`. Batch rollback restores this target-level preimage,
 never the immediately preceding calculation when that calculation was
 produced by another item in the same batch.
+
+### 7.1a Transactional event outbox
+
+Create durable `attendance_result_event_outbox`. Each W4-covered source
+operation in section 8.3 that currently reaches `emitEvent` stores one closed
+event row in the same transaction as its operation seal and source/effect/
+result writes. W4C-0 generates the exact reachable event-kind/payload inventory;
+unrelated configuration/report events remain outside this lock. The unique identity is
+`(org_id,entrypoint,operation_id,event_kind)`; payload schema/version,
+business-key fingerprint, guarded `pending|delivered` state, attempts,
+next-attempt time, and created/delivered timestamps are explicit. Identity and
+payload are immutable; only closed retry/delivery transitions may update
+delivery fields. Event kinds and payload keys are a closed allowlist that
+preserves the existing public event contract without serializing arbitrary
+request/calculation snapshots.
+
+A retryable dispatcher claims rows with `FOR UPDATE SKIP LOCKED`, emits the
+existing in-process event, and marks delivery. Process restart or a crash after
+DB commit but before emit leaves the row pending; exact operation replay never
+re-executes business DML but may wake the pending dispatcher. Concurrent
+dispatchers, emit failure, and response-loss retries produce one durable outbox
+row. Down migration refuses while any outbox row exists.
+
+W4C-0 delivers the schema, immutable payload/identity constraints, state
+machine, and transaction-bound enqueue interface without caller cutover.
+W4C-2 delivers the dispatcher and live/scheduled event cutover; W4C-3b adds the
+closed approval/cancellation kinds. A lifecycle event may remain best-effort
+only if a separate contract amendment names that exact event and proves there
+is no correctness/reliability consumer.
 
 ### 7.2 `attendance_request_calculation_snapshots`
 
@@ -1212,7 +1326,11 @@ Authoritative or mixed-batch rollback is one transaction:
    A retired preimage stays retired; an active preimage becomes active;
 6. import created the first parent: no restore target,
    `projection_effect=set_retired`, point parent to reversal, set
-   `visibility_reason=import_rollback`, and hide ordinary reads;
+   `visibility_reason=import_rollback`, and hide ordinary reads. The reversal's
+   non-null projected daily fields are the exact frozen imported after-image
+   being retired, while `parent_preimage_snapshot={ posture:'absent' }` proves
+   there was no restore value. The writer cannot synthesize zero/null defaults.
+   Historical detail labels this row `retired/effective=false`;
 7. batch becomes rolled back only after all rows succeed;
 8. repeat returns existing reversal IDs.
 
@@ -1302,6 +1420,9 @@ branch that currently enters a generic service first is inverted: it enters
 function with the same `trx`. Non-attendance product callers retain their
 existing public generic transaction path. A callback that commits W4 and then
 lets a caller-owned approval/ledger transaction commit or fail is forbidden.
+Every attendance lifecycle notification required by the existing event
+contract is enqueued in the section 7.1a outbox before the operation is sealed;
+direct post-commit emit without a durable row is forbidden.
 
 `writeAttendanceCalculationsBatch`, prepare, and apply are private to that
 transaction. The batch function validates every minted intent against its
@@ -1352,9 +1473,10 @@ alternate result algorithm.
 11. allocate next version;
 12. insert calculation and required segment children;
 13. execute the prepared projection directive and pointer change;
-14. seal operation result/fingerprints/response and existing audit/batch/request
+14. append the closed outbox event rows required by this source operation;
+15. seal operation result/fingerprints/response and existing audit/batch/request
     state;
-15. commit.
+16. commit.
 
 Any failure rolls back all steps. Unique record/version is the concurrency
 backstop; operation uniqueness is the retry backstop. No table lock is allowed.
@@ -1364,8 +1486,8 @@ collisions may reduce concurrency but cannot weaken correctness. Only SQLSTATE
 
 Real-DB tests inject a failure after each approval, assignment, request,
 event/import source, leave/comp-time/overtime ledger, calculation, segment,
-parent projection, and operation-seal write. Every case leaves all participating
-tables unchanged. A test-only witness records `txid_current()` plus backend PID
+parent projection, outbox, and operation-seal write. Every case leaves all
+participating tables unchanged. A test-only witness records `txid_current()` plus backend PID
 at each source/effect/result stage and requires one transaction/connection for
 the whole attendance workflow; splitting or nesting the transaction fails.
 
@@ -1395,7 +1517,7 @@ also discovers additional attendance-owned source/effect tables from the call
 graph; an unclassified table or new write symbol fails CI.
 
 The initial debt manifest is generated from pinned pre-W4 baseline
-`014fc23acb58feb1863f79a1c4151b0313fb654b`, reviewed and committed as a
+`e0defbe26d7f2e1747e74aa908ca710422812bf7`, reviewed and committed as a
 docs/data-only first commit before any W4C-0 runtime change. Each entry has an
 immutable debt ID, command kind, route/worker, table/verb, first-DML symbol,
 shared-hook classification, and owning W4C slice; the artifact records its
@@ -1419,10 +1541,11 @@ approval/ledger positive control; non-attendance approval behavior remains a
 separate positive control.
 
 The CI guard parses/scans every runtime root, generated SQL, migrations, and
-operator scripts for INSERT/UPDATE/DELETE/TRUNCATE/MERGE, including templates,
-strings, VALUES, UNNEST, staging INSERT-SELECT, CTE DML, renamed wrappers, and
-cleanup SQL. Paths come from workspace/package manifests, not a handwritten
-plugin directory. Production DML is allowlisted only inside:
+operator scripts for INSERT/UPDATE/DELETE/TRUNCATE/MERGE, `COPY FROM|TO`,
+raw-client copy streams, and staging-table CREATE/DROP/ALTER, including
+templates, strings, VALUES, UNNEST, staging INSERT-SELECT, CTE DML, renamed
+wrappers, and cleanup SQL. Paths come from workspace/package manifests, not a
+handwritten plugin directory. Production DML is allowlisted only inside:
 
 - the canonical operation boundary's private source/effect/result adapters;
 - named shared generic functions with the mandatory attendance hook;
@@ -1435,7 +1558,9 @@ DML. Moving request create/edit/decision/cancel, outdoor event, import,
 integration, scheduled, manual, rollback, or operator source/effect DML ahead
 of either witness fails. Each syntax/table class has a positive-control fixture,
 including deliberate plugin, `packages/core-backend/src`, shared-approval, and
-operator-script bypasses.
+operator-script bypasses. Dedicated positive controls move each current
+attendance import `COPY FROM STDIN` before operation/suspension preflight and
+attempt a raw COPY into a W4 authoritative table; both must fail the guard.
 
 ## 9. Rollout state machine
 
@@ -1614,14 +1739,14 @@ never presented as the decision that produced the legacy current row.
 ## 11. Migration, retention, and performance
 
 Forward migration creates operation-batch/item/request-snapshot/calculation/
-segment/rollout tables, current-record view, triggers, deferred constraints,
-pointer/owner/visibility/reason fields, indexes, and FKs. It does not fabricate
-historical segments or baselines. Existing rows remain legacy-untracked.
-Fresh/upgrade/replay must pass.
+segment/outbox/rollout tables, current-record view, triggers, deferred
+constraints, pointer/owner/visibility/reason fields, indexes, and FKs. It does
+not fabricate historical segments or baselines. Existing rows remain
+legacy-untracked. Fresh/upgrade/replay must pass.
 
 Down first proves zero operation batches/items, request snapshots,
-calculations, segments, rollout events, and pointers. Any row aborts before
-DDL. It does not clear history to make down pass.
+calculations, segments, outbox rows, rollout events, and pointers. Any row
+aborts before DDL. It does not clear history to make down pass.
 
 W4 adds no purge. History lives at least as long as parent/payroll/audit
 retention; parent deletion is blocked by RESTRICT. Future retention must honor
@@ -1640,12 +1765,12 @@ Every cut-over slice proves its newly covered entrypoints in
 `legacy_projection_only` retain flag-OFF response/projection bytes, use the
 canonical boundary, and insert no W4 calculation.
 
-### 12.1 W4C-0: contract and append-only storage
+### 12.1 W4C-0: contracts and durable storage
 
 Deliver durable batch/item operation registries, immutable request snapshots,
-calculation/baseline/segment tables, types, validators, triggers,
+calculation/baseline/segment/outbox tables, types, validators, triggers,
 pointer/owner/visibility/reason constraints, rollout state, and canonical
-authorization/write interfaces with no caller cutover.
+authorization/write/enqueue interfaces with no caller cutover.
 
 Gates:
 
@@ -1664,6 +1789,11 @@ Gates:
   with a changed ordered item-sequence hash, item-set hash/count, mixed item
   state, missing item, reordered input, or one batch ID reused as multiple
   calculation operation IDs fails;
+- item/target limit, lock/statement timeout, and retry constants are one
+  exported contract; above-limit W4 commands fail before source DML, and
+  authoritative mode cannot fall back to chunked/partial legacy commits;
+- outbox identity/payload is immutable; invalid event kind/key set, duplicate
+  operation event, illegal delivery transition, and down-with-row all fail;
 - replay under a different actor/token subject or after authorization revocation
   cannot read the stored response;
 - approval decision operation identity is claimed before terminal state/record
@@ -1681,9 +1811,11 @@ Gates:
 - strict source-command validators cover every table in section 4.1; request
   create/edit operation-ID fields are accepted but no route is cut over;
 - the collector generates an exact-head source/effect/result debt inventory
-  naming every current command route, first DML, shared-table hook, and planned
-  canonical adapter. Its immutable debt IDs/content hash are generated from
-  pinned baseline `014fc23ac...` before runtime changes. W4C-0 proves
+  naming every current command route, worker/recovery body, cron/admin
+  initiator, first DML, shared-table hook, privileged/tooling path, and planned
+  canonical adapter. The initial set contains P01-P16 from section 1.1; its
+  immutable debt IDs/content hash are generated from pinned baseline
+  `e0defbe26...` before runtime changes. W4C-0 proves
   collection/positive controls and fails new, renamed, or unclassified DML;
   existing debt entries are removed only by their owning later slices;
 - legacy baseline is restore-only and never inferred from first/last;
@@ -1703,10 +1835,12 @@ out-of-window/unmatched/duplicate/ambiguous/reversed evidence, cross-segment
 actual-interval overlap, DST including the shared-fold-boundary review,
 full/partial leave, overtime with/without punch, current merge-policy branches,
 CSV/XLSX fingerprint split, and mutations
-for envelope arithmetic, duplicate collapse, midpoint side, UTC fallback, fold
-choice, out-of-window ignore, non-positive or cross-segment-overlapping actual
-span, per-segment/double rounding, omitted late-tier thresholds, unknown enum,
-approved-fact omission, business-time omission, and current-context reread.
+for envelope arithmetic, payable-interval intersection removal, cross-break
+counting, unapproved early/late extension, duplicate collapse, midpoint side,
+UTC fallback, fold choice, out-of-window ignore, non-positive or
+cross-segment-overlapping actual span, per-segment/double rounding, omitted
+late-tier thresholds, unknown enum, approved-fact omission, business-time
+omission, and current-context reread.
 Changing only `occurredAt` on an otherwise identical evidence ref must change
 the semantic hash.
 
@@ -1734,9 +1868,14 @@ Gates:
   approval/fact/result; a response-only approval-record ID mutation fails;
 - durable scheduled-run replay survives process restart and `skipDedup` cannot
   bypass it;
-- live/scheduled route-to-first-DML inventory entries are removed; claim and
-  suspension witnesses precede their first source DML under call-order
-  mutation;
+- live/scheduled outbox rows are inserted before operation seal; crash after
+  commit/before emit, dispatcher restart, concurrent dispatcher, and emit
+  failure eventually deliver without repeating source/result DML;
+- P01 live, P02 merge second-pass, P03 cron absence, and P04 administrator-run
+  absence inventory entries are removed independently; claim and suspension
+  witnesses precede each first source DML under call-order mutation;
+- mutating either absence initiator to bypass the canonical writer, or restoring
+  the P02 post-upsert mutation, fails its own positive-control leg;
 - scheduled direct-insert mutation fails DML guard;
 - calculation-group read mutation fails;
 - wildcard/missing/legacy/suspended posture cannot enable capability,
@@ -1769,7 +1908,19 @@ Gates:
   pre-batch parent tuple, not a batch-internal predecessor;
 - native CSV/equivalent XLSX semantic same, provenance distinct;
 - integration/legacy import same semantic row result;
+- exact-presence imported metrics and frozen legacy policy/rule-engine output
+  are snapshotted. Congruent values may proceed; mismatch or insufficient
+  boundary evidence yields `import_metric_conflict` review and blocks
+  promotion. Dropping, zero-filling, or letting an imported metric override the
+  canonical segment result fails;
+- exactly 5000 items/targets is accepted under the transaction benchmark;
+  5001 fails before batch/item/staging COPY DML. Authoritative mode never
+  chunks or partially commits an over-limit batch, and shadow's explicit
+  limit-bypass evidence never counts toward promotion;
 - first-import rollback retires; update import restores;
+- first-import reversal stores the exact imported after-image as its non-null
+  historical projection, carries an explicit absent preimage, is
+  `retired/effective=false`, and cannot synthesize zero/null defaults;
 - rollback of a reactivated import tombstone or review placeholder restores its
   exact retired owner/pointer/visibility/reason tuple and never forces active;
 - shadow first/update rollback applies frozen absent/existing compatibility
@@ -1783,9 +1934,13 @@ Gates:
 - source/import item/result/operation seal share one transaction ID; injected
   failure at any stage leaves zero batch effect;
 - legacy import has durable batch/item identities before shadow;
-- modern/legacy/integration route-to-first-DML inventory entries are removed;
-  batch/item claims and suspension witnesses precede import job/batch/item and
-  integration source/effect DML;
+- P06 synchronous modern transport, P07 async worker, P08 restart recovery, P09
+  legacy import, P10 integration sync, and P11 rollback inventory entries are
+  removed independently; batch/item claims and suspension witnesses precede
+  import job/batch/item and integration source/effect DML;
+- sync/worker/recovery parity is proven against the same prepared batch and the
+  async operation replay is proven across process restart; deleting any one
+  execution-body adapter or routing recovery around it fails its own leg;
 - records, payroll/summary, report sync/digest, reminder, comprehensive-hours,
   integration, and export all hide retired rows while history detail shows
   them;
@@ -1817,7 +1972,13 @@ Gates:
   injected-failure leg rolls all of them back;
 - bounded and minutes-only facts are both representable; minutes-only remains
   review and cannot excuse/extend;
-- cancellation is atomic with calculation or explicit review/no-parent posture;
+- cancellation's current balance-only reversal is treated as an uncovered
+  source path until the new calculation or explicit review/no-parent outcome is
+  atomic with that financial reversal; no test may imply an existing attendance
+  result reversal;
+- approval/resolution/cancellation lifecycle events use closed outbox kinds;
+  commit-before-emit crash and replay cannot lose or duplicate the durable
+  event row;
 - full/partial leave and overtime follow section 4.4;
 - cross-org/user or mutated frozen request fails;
 - terminal approval version/record ID and request-snapshot fingerprint are
@@ -1826,9 +1987,10 @@ Gates:
 
 ### 12.6 W4C-3c: manual, recompute, operator, final inventory
 
-Deliver immutable manual override, prior-policy/default recompute,
-explicit-current-policy recompute, remove meta patch, canonical retirement, and
-final regenerated DML inventory.
+Deliver immutable manual override, introduce prior-policy/default recompute and
+explicit-current-policy recompute as new capabilities, remove the meta patch,
+canonicalize privileged operator retirement, and regenerate the final DML
+inventory.
 
 Gates:
 
@@ -1836,6 +1998,9 @@ Gates:
 - set/unset/closed status validators;
 - prior/current-policy recompute is distinct and explainable;
 - retirement writes `operator_retirement` and never deletes;
+- P15 generated operator cleanup and every W4-backed P16 test/staging cleanup
+  path use retirement; tooling-only fixture setup/teardown stays separately
+  named and cannot be mistaken for a production bypass;
 - ordinary punch/import/approval/recompute cannot reactivate an
   operator-retired parent and fails with zero writes;
 - predecessor-null/wrong-branch, legacy-preimage restore, import-then-live
@@ -1878,6 +2043,8 @@ Gates:
 - exact image SHA, pending migrations zero, health;
 - no wildcard/customer data/external notifications;
 - every entrypoint represented;
+- P16 staging execution bodies and cleanup are inventoried explicitly; dynamic
+  SQL or direct DML against W4-backed rows fails the tooling debt guard;
 - zero pending or still-reversible calculation-affecting request whose latest
   snapshot is missing, unsupported, payload-stale, or reversal-incomplete
   before authority;
@@ -1929,12 +2096,17 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-20 actual overlap | (a) cross-segment actual intervals must not overlap; overlap is review-required; (b) separately define a non-double-counting allocation rule | (a), no clipping or hidden reassignment |
 | OD-W4C-21 same-target batch rows | (a) fold ordered rows for one org/user/workDate into one calculation and one pre-batch restore witness; (b) reject duplicate resolved targets before source DML | (a), preserves import capability and rollback truth |
 | OD-W4C-22 rounding/tiering | (a) floor each physical interval to minutes, sum, round down once at daily level, then tier daily late total from frozen thresholds; (b) explicit alternative | (a), preserves the legacy daily-rounding boundary |
+| OD-W4C-23 import metrics | (a) snapshot exact presence plus frozen legacy policy result; require congruence with segment truth or review/block promotion; (b) define an authoritative override model | (a), never discard or silently override |
+| OD-W4C-24 atomic batch bound | (a) 5000 items/targets, 180s statement, 5s lock, two retries; above limit fails authoritative and cannot count as shadow promotion evidence; (b) separately benchmark another closed bound | (a), matches the current chunk ceiling without claiming 500k-row atomicity |
+| OD-W4C-25 lifecycle delivery | (a) transactional closed outbox for existing attendance lifecycle events; (b) enumerate each best-effort event and prove no correctness consumer | (a) |
+| OD-W4C-26 grace source | (a) copy the selected shift/rule profile's two grace values identically into every frozen segment; (b) reopen W3 for true per-segment authoring | (a), no invented per-segment source |
+| OD-W4C-27 first-import reversal | (a) retired reversal carries the exact imported after-image plus explicit absent preimage; (b) separately define another non-null historical projection | (a), no zero/null fabrication |
 
 ## 14. RATIFY and execution sequence
 
 1. Rebase docs PR to current main.
 2. Re-verify anchors and regenerate writer inventory.
-3. Owner decides OD-W4C-1..22.
+3. Owner decides OD-W4C-1..27.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
 6. Owner RATIFYs exact merged SHA.
@@ -1953,6 +2125,9 @@ W4 is complete only when:
   canonicalized;
 - immutable constraints are proven on real PostgreSQL;
 - all three import transports use reversal rollback;
+- explicit import metrics/policy output are snapshotted and either congruent or
+  promotion-blocking; bounded batch limits are proven;
+- W4-covered post-commit events have transactional outbox/restart evidence;
 - status/reason/DST/matching contracts agree across DB/service/OpenAPI/tests;
 - named-org rollout and suspension drills pass;
 - detail authorization passes cross-user/cross-org matrices;
