@@ -85,7 +85,7 @@ undeterminable fail-closed 展示，均截图 + DOM 断言）。**证据面 valu
 | 1 | 三切片全合 | ✅（本波实为**四**片交付——W5-0/W5-7/W5-1/W5-2，W5-7 为 OD-W5-7=(b) 裁定的前置小票，锁 §9 亦已单独立项） | W5-0 `beef6c134` / W5-7 `ebe798d47` / W5-1 `9d6ab3e1c` / W5-2 `e10816380`，均在 `origin/main` first-parent 链上（`git log e10816380 --oneline` 实证依赖顺序） |
 | 2 | 每片验证 MD 在 main | ⚠️ **本文即该交付物，本文合入后满足** | 本文 §1 四片映射即「每片」章的载体（Wave 4 单份覆盖三片同形制，owner APPROVE 先例） |
 | 3 | 红线四条各有存活的负向断言 | ✅ | 见 §5——R1-R4 逐条断言锚点 + mutation 证据（四片各自门禁记录汇编 + 本文新跑的 12 格矩阵 mutation） |
-| 4 | §9 指标：六类各一条 grounded + 一条 undeterminable，截图+DOM 断言 | ✅（含**诚实澄清**：见 §3 posture 上限说明——「grounded」按锁 §1/§3.2 逐类现状解读为「该类结构性可达的最佳正向格」，非全部字面 `confidence==='grounded'`；仅 ⑥ 类字面可达 `grounded`，①-⑤ 诚实上限为 `partial`，理由见 §3 表首段） | 见 §3——12 格 fixture + `apps/web/tests/attendance-decision-trace-metric.spec.ts`（14 tests）+ 12 张 PNG |
+| 4 | §9 指标：六类各一条 grounded + 一条 undeterminable，截图+DOM 断言 | ⚠️ **PENDING-OWNER**：证据侧已全部产出，但**本条能否判成立取决于 owner 对锁的一次释义**——锁 §10 字面要求的 `confidence==='grounded'` 在 ①-⑤ **结构上不可达**（§3.0 已证：锁 §3.2/§3.3④E2/§3.3⑤E3 强制这些依据环为非冻结，而 `deriveAttendanceDecisionTraceConfidence` 要求**每环** `snapshot_frozen` 才判 grounded）⇒ **锁内部条款冲突**。本文按「该类结构性可达的最佳正向格」解读产出证据，但**该解读属合同释义，不在本片权限内自裁**（见 §7-8，收官前置）。⑥ 类字面可达 grounded，①-⑤ 诚实上限为 `partial` | 见 §3——12 格 fixture + `apps/web/tests/attendance-decision-trace-metric.spec.ts`（14 tests）+ 12 张 PNG |
 
 **P2-a 证据面 values-free 义务**：本文与 §3 截图均为合成数据（synthetic fixtures，工作日期/分钟数/
 displayLabel 全部虚构值，`identityPosture` 覆盖 resolved/inactive 两档但均为演示标签「演示审批人」
@@ -175,7 +175,10 @@ guard 接线：`attendance-decision-trace-metric.spec.ts` 已进 `.github/workfl
 `throw`）——满足章程 §8.1.4「新增或重命名的 spec 必须同时加入实际 Vitest run-list」义务。
 
 **CI 真收集证据（非仅本地跑/非仅接线在场——「触发≠验证」纪律）**：PR #4582 的
-`attendance-web-guard` workflow 已在 CI 实跑（run `30084615126`），日志逐行核验
+`attendance-web-guard` workflow 已在 CI 实跑。**head-scoped 证据**（判定绑 SHA 纪律）：run
+`30093726205`（`headSha=9d89b511e` = 本文现 head）同样 **41 files / 852 tests 全绿**、四个
+`attendance-decision-trace*` 文件各自独立收集 46/14/9/12；下述逐行日志核验取自初稿 commit
+`cace01030` 上的 run `30084615126`，日志逐行核验
 （`gh run view 30084615126 --log`）：`tests/attendance-decision-trace-metric.spec.ts (14 tests)`
 作为**独立文件**被收集并全部通过——同一日志中 `attendance-decision-trace.spec.ts`（46
 tests）、`attendance-decision-trace-wiring.spec.ts`（9 tests）、`AttendanceDecisionTrace.spec.ts`
@@ -234,8 +237,8 @@ mutation，仅汇编一手来源 + 本文新增的 §4 部分）：
 |---|---|
 | **已完成** | 四片交付全部合入 main 且门禁 APPROVE（或 KILLED-CONFIRMED）；本文（每片验证 MD 载体）；12 格指标矩阵 fixture + 受 guard 收集的 `attendance-decision-trace-metric.spec.ts`（14 tests，guard 双 path filter + run-list 已接线）；12 张合成截图 + 拍前在场断言 + 逐张人工目检；11 刀 mutation 全部本地亲跑、精确排他、还原复绿
 （12 格逐格均有独立承重证据）；CI 真收集证据（PR #4582 run `30084615126` 日志逐行核验）；`vue-tsc`/`build` 双绿；posture-ceiling 交叉断言（本文对 R2 的新增可执行化） |
-| **已验证但有边界** | ⑥-undeterminable 格代表「零 active 指派/零审计行」而非锁最强调的「resolver 决策失败零持久化」（后者结构上不产生 trace body，见 §3.1 表后说明，属诚实边界非缺陷）；W5-1 的留存披露时序护栏本文重验仍有效（FK 未修复）但本文未独立重跑 W5-0/W5-1/W5-2 各自的历史 mutation，仅转录其一手门禁记录 |
-| **未做且为何** | 无——12 格矩阵已按诚实上限（§3.0）全部产出，没有因诚实上限而放弃某一格；本文不覆盖真实租户视觉验收/flag 开启/生产部署（均为 operator 项，锁 §10 明文本锁不改变） |
+| **已验证但有边界** | **⑥-grounded 格的代表性边界（本轮门审补充自曝）**：该格之所以能达字面 `grounded`，是因为其步骤**全为 static/legacy_fallback**（门环 `hasDynamicStep` 未触发）——即**根本没有发生 resolver 决策**；凡含动态 kind 步骤者必 push 规则门环 ⇒ **真正由 resolver 决策产生的审批人来源永不可能字面 grounded**。故本波唯一的字面 grounded 格，恰恰是解释负担最轻的那一类；⑥-undeterminable 格代表「零 active 指派/零审计行」而非锁最强调的「resolver 决策失败零持久化」（后者结构上不产生 trace body，见 §3.1 表后说明，属诚实边界非缺陷）；W5-1 的留存披露时序护栏本文重验仍有效（FK 未修复）但本文未独立重跑 W5-0/W5-1/W5-2 各自的历史 mutation，仅转录其一手门禁记录 |
+| **未做且为何** | ①**§10 第 4 项未判成立**——证据已全产出，但该条依赖一次 owner 释义（锁内部条款冲突，见上表第 4 行与 §7-8），**本片不自裁**，故本文不宣称 Wave 5 完成定义四项全部满足；②字面 `confidence==='grounded'` 的 ①-⑤ 格**未产出**（结构不可达，非取舍——若 owner 裁定字面口径，需新 runtime 设计而非补 fixture）；③本文未独立重跑 W5-0/W5-1/W5-2 各自的历史 mutation，仅转录其一手门禁记录；④真实租户视觉验收 / flag 开启 / 生产部署未覆盖（均 operator 项，锁 §10 明文本锁不改变）。12 格矩阵本身按诚实上限（§3.0）全部产出，没有因诚实上限而放弃某一格 |
 | **转呈 owner 裁量** | 见 §7（汇总四片既有转呈项 + 本文 posture-ceiling 诚实解读是否需要 owner 额外确认） |
 
 ## 7. 转呈 owner 清单（汇总，四片 + 本文）
@@ -266,7 +269,8 @@ mutation，仅汇编一手来源 + 本文新增的 §4 部分）：
    可达正向格」解读满足该条款；若 owner 认为该条款字面要求六类都必须能展示 `'grounded'` 徽标，
    则需要新的 runtime 设计（例如允许 ①-⑤ 的规则/策略环在特定条件下省略，类比 ⑥ 的
    `hasDynamicStep` 门）——**这将是一次锁条款修订/新 OD 裁决，不在本片权限内自行决定**，本文只
-   如实呈现现状并等待裁定。
+   如实呈现现状并等待裁定。**本项为收官前置**：§10 完成定义第 4 项在 owner 就此释义（或修订）
+   之前维持 ⚠️ PENDING-OWNER，本文不宣称 Wave 5 完成定义四项全部满足。
 
 ## 8. 跨车道注记
 
