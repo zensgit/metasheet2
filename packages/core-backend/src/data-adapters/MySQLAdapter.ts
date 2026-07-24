@@ -330,6 +330,10 @@ export class MySQLAdapter extends BaseDataAdapter {
     if (options.offset) {
       const offset = parseInt(String(options.offset), 10)
       if (!isNaN(offset) && offset >= 0) {
+        // Ordering boundary: an OFFSET page without a deterministic ORDER BY silently
+        // duplicates/skips. Validated against the PARSED offset so a non-numeric value that never
+        // reaches the SQL cannot trip the guard.
+        this.assertDeterministicOffsetOrdering(offset, options.orderBy)
         sql += ` OFFSET ${offset}`
       }
     }

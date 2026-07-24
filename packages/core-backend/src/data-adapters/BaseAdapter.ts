@@ -305,6 +305,43 @@ export abstract class BaseDataAdapter extends EventEmitter {
     return limit
   }
 
+  /**
+   * Ordering-boundary policy — the A5 sibling for the OTHER half of a paginated read.
+   *
+   * A5 above bounds each page and tells callers to "paginate with limit+offset instead". But an
+   * OFFSET is only meaningful against a DETERMINISTIC total order: SQL gives no row-order guarantee
+   * without ORDER BY, so `LIMIT n OFFSET k` over an unordered relation may return rows in a
+   * different order on each call. The pages then SILENTLY overlap and skip — the caller reads N
+   * rows, believes it read the table, and has both duplicates and holes with no error anywhere.
+   * That is a data-integrity failure, not a performance wart, and it is invisible at every layer
+   * above this one.
+   *
+   * So an offset read MUST carry an explicit orderBy, and we fail closed when it does not. We do
+   * NOT auto-order by a discovered primary key: that would silently paper over the caller's missing
+   * ordering contract and keep the defect un-diagnosed. The caller has to state the order it is
+   * paginating by, because only the caller knows which order its cursor arithmetic assumes.
+   *
+   * Enforced at the ADAPTER layer for the same reason A5 is — it is the chokepoint every structured
+   * read passes through, INCLUDING direct internal callers that bypass the route.
+   *
+   * Scope: `offset > 0` only. A limit-only first page (no offset) has no cross-page contract to
+   * violate, so it stays legal and unchanged.
+   */
+  protected assertDeterministicOffsetOrdering(
+    offset: number | null | undefined,
+    orderBy: QueryOptions['orderBy'] | undefined
+  ): void {
+    const usesOffset = offset !== null && offset !== undefined && Number(offset) > 0
+    if (!usesOffset) return
+    if (!Array.isArray(orderBy) || orderBy.length === 0) {
+      throw new Error(
+        'OFFSET pagination requires an explicit orderBy: without a deterministic total order the ' +
+          'database may return rows in any order, so successive pages can silently duplicate and ' +
+          'skip rows. Pass orderBy (e.g. the primary key) alongside offset.'
+      )
+    }
+  }
+
   protected buildWhereClause(where: WhereClause): { sql: string; params: DbValue[] } {
     const result = this.buildWhereConditions(where, 1)
     return {

@@ -303,6 +303,8 @@ export class MSSQLAdapter extends BaseDataAdapter {
     // internal caller cannot issue an unbounded read.
     const limit = this.resolveEffectiveLimit(options.limit)
     const offset = options.offset != null ? Math.floor(Number(options.offset)) : null
+    // Ordering boundary: an OFFSET page without a deterministic ORDER BY silently duplicates/skips.
+    this.assertDeterministicOffsetOrdering(offset, options.orderBy)
     // limit-without-offset uses TOP (no ORDER BY required); offset uses OFFSET/FETCH.
     const useTop = offset == null || offset === 0
 
@@ -327,8 +329,11 @@ export class MSSQLAdapter extends BaseDataAdapter {
       : null
 
     if (offset != null && offset > 0) {
-      // OFFSET requires an ORDER BY; fall back to a stable no-op ordering.
-      sql += ` ORDER BY ${orderBy ?? '(SELECT NULL)'} OFFSET ${offset} ROWS`
+      // An offset read must carry a deterministic order (see assertDeterministicOffsetOrdering,
+      // called above) — `orderBy` is therefore guaranteed present here. The former
+      // `ORDER BY (SELECT NULL)` fallback satisfied SQL Server's syntactic requirement while
+      // providing NO ordering guarantee, so paged reads could silently duplicate and skip rows.
+      sql += ` ORDER BY ${orderBy} OFFSET ${offset} ROWS`
       sql += ` FETCH NEXT ${limit} ROWS ONLY`
     } else if (orderBy) {
       sql += ` ORDER BY ${orderBy}`
