@@ -174,11 +174,23 @@ guard 接线：`attendance-decision-trace-metric.spec.ts` 已进 `.github/workfl
 的 `pull_request`/`push` 双 path filter + 真 `vitest run` run-list（不只是 harness 的 in-page
 `throw`）——满足章程 §8.1.4「新增或重命名的 spec 必须同时加入实际 Vitest run-list」义务。
 
-### 4.2 Mutation（8 刀，全部本地亲跑、逐刀精确路径还原，未使用 `git checkout -- .`）
+**CI 真收集证据（非仅本地跑/非仅接线在场——「触发≠验证」纪律）**：PR #4582 的
+`attendance-web-guard` workflow 已在 CI 实跑（run `30084615126`），日志逐行核验
+（`gh run view 30084615126 --log`）：`tests/attendance-decision-trace-metric.spec.ts (14 tests)`
+作为**独立文件**被收集并全部通过——同一日志中 `attendance-decision-trace.spec.ts`（46
+tests）、`attendance-decision-trace-wiring.spec.ts`（9 tests）、`AttendanceDecisionTrace.spec.ts`
+（12 tests）均各自单独出现，证明 run-list 的四个 `attendance-decision-trace*` 子串未互相吞没
+（无一个文件的用例数被错误并入另一文件）；CI 终态 = **41 files / 852 tests 全绿**，与本地实跑
+数字逐字节一致。
 
-纪律：先 `git commit` 建立检查点（`6ee5d998e`），每刀 Edit 精确路径 mutate → 跑
+### 4.2 Mutation（11 刀，全部本地亲跑、逐刀精确路径还原，未使用 `git checkout -- .`）
+
+纪律：先 `git commit` 建立检查点，每刀 Edit 精确路径 mutate → 跑
 `attendance-decision-trace-metric` → 记录 pass/fail → Edit 精确路径还原 → `git diff --stat` 归零
-确认。全部 8 刀跑毕后 `git diff` 对该检查点 = 空（已核验）。
+确认。全部 11 刀跑毕后 `git diff` 对检查点 = 空（已核验）。前 8 刀验证类判别逻辑与共享基础设施
+的排他性；独立复核（对抗自身此前的判定）时发现 ②正向/⑤undeterminable/⑥undeterminable 三格
+此前仅被 M8（共享徽标绑定）连带杀死、未证明各自 class-specific 断言本身承重——补 M9/M10/M11
+三刀逐一补齐。
 
 | # | Mutation | 目标产文件:行 | 结果（对 14 个 test 的精确 pass/fail） | 排他性 |
 |---|---|---|---|---|
@@ -190,12 +202,19 @@ guard 接线：`attendance-decision-trace-metric.spec.ts` 已进 `.github/workfl
 | M6 | ⑥ 时间线引用改从 `approval_assignments`（非 append-only）读 | 同文件 approver_source 分支 `timelineEnv.find` | **1 failed / 13 passed** | 仅杀⑥grounded 格（唯一断言该引用的测试）——直接对应锁 §3.3⑥E2 点名的 mutation |
 | M7 | 共享 `postureDisplay('undeterminable')` 分支移除 `undeterminableNote` | 同文件 `postureDisplay` 函数 | **2 failed / 12 passed**（①undeterminable + ③undeterminable，唯二显式断言该 env 级门文案的测试） | 共享基础设施，footprint 精确等于依赖它的测试集合（另在 W5-1 三个既有 spec 上复核：4 个 spec 合计 **5 failed / 76 passed**，无意外命中） |
 | M8 | 组件 `data-trace-confidence-value` 绑定硬编码为 `'grounded'` | `AttendanceDecisionTrace.vue` 徽标绑定 | **12 failed / 2 passed**（唯二存活 = 两个已经预期 `'grounded'` 的 ⑥grounded 断言） | 证明该绑定是整个 ceiling guard 的承重路径——精确符合预期（非全绿也非全红） |
+| M9 | ⑤ 空批次提示文案改字（`AttendanceDecisionTrace.vue` 空 lots 分支 `'无有效批次。'`→改字） | `AttendanceDecisionTrace.vue` `decision-trace__empty`（lots 分支） | **1 failed / 13 passed** | 仅杀⑤undeterminable 格——首次独立证明该格 class-specific 断言（非仅靠 M8 徽标连带） |
+| M10 | ⑥ 空步骤提示文案改字（同文件空 steps 分支 `'无指派步骤记录。'`→改字） | `AttendanceDecisionTrace.vue` `decision-trace__empty`（steps 分支） | **1 failed / 13 passed** | 仅杀⑥undeterminable 格——首次独立证明该格 class-specific 断言（非仅靠 M8 徽标连带） |
+| M11 | ② `severeLateMinutes` 结论行渲染改为硬编码 `minutesLabel(0, tr)`（丢弃 `c.severeLateMinutes` 真值与 null-guard 双重逻辑） | `attendanceDecisionTrace.ts` late_early 分支 `severeLateMinutes` 结论行 | **1 failed / 13 passed** | 仅杀②正向格——首次独立证明该格 class-specific 断言（非仅靠 M8 徽标连带） |
 
 每刀均满足「杀 A 不杀 B」排他性要求（M3/M4 例外说明：两者的判别逻辑天然被同类的正向/undeterminable
 两格共用，mutation 精确杀死这两格、不外溢到其它类，仍是正确的排他性）。M7/M8 为跨格共享门的
-mutation，各自的失败集合与代码依赖关系精确吻合，非「多道门互相掩护」的假阳性绿——这正是任务书
-第 3 条纪律（「多道 fail-closed 门会互相掩护」）要求的「分别 neuter、各自排他性失败」在共享代码
-上的对应验证形式。
+mutation，各自的失败集合与代码依赖关系精确吻合，非「多道门互相掩护」的假阳性绿；M9/M10/M11
+补齐了 M8 未单独证明的三格（②正向、⑤/⑥ undeterminable）各自的 class-specific 判别腿——这正是
+任务书第 3 条纪律（「多道 fail-closed 门会互相掩护」「每格的判别腿要分别 neuter、各自排他性
+失败」）要求的完整应用形式：**12 格中每一格现在都至少有一刀独立证明其 class-specific 断言承重**
+（①正向 M1、①undeterminable M7、②正向 M11、②undeterminable M2、③两格 M3、④两格 M4、⑤正向
+M5、⑤undeterminable M9、⑥grounded M6、⑥undeterminable M10——逐格映射穷尽，无遗漏）；此清单
+本身是对本文自身初稿的一次对抗性复核结果，而非交付时一次写对。
 
 ## 5. 红线四条（R1-R4）——存活的负向断言汇总（四片汇编）
 
@@ -213,7 +232,8 @@ mutation，仅汇编一手来源 + 本文新增的 §4 部分）：
 
 | 类别 | 内容 |
 |---|---|
-| **已完成** | 四片交付全部合入 main 且门禁 APPROVE（或 KILLED-CONFIRMED）；本文（每片验证 MD 载体）；12 格指标矩阵 fixture + 受 guard 收集的 `attendance-decision-trace-metric.spec.ts`（14 tests，guard 双 path filter + run-list 已接线）；12 张合成截图 + 拍前在场断言 + 逐张人工目检；8 刀 mutation 全部本地亲跑、精确排他、还原复绿；`vue-tsc`/`build` 双绿；posture-ceiling 交叉断言（本文对 R2 的新增可执行化） |
+| **已完成** | 四片交付全部合入 main 且门禁 APPROVE（或 KILLED-CONFIRMED）；本文（每片验证 MD 载体）；12 格指标矩阵 fixture + 受 guard 收集的 `attendance-decision-trace-metric.spec.ts`（14 tests，guard 双 path filter + run-list 已接线）；12 张合成截图 + 拍前在场断言 + 逐张人工目检；11 刀 mutation 全部本地亲跑、精确排他、还原复绿
+（12 格逐格均有独立承重证据）；CI 真收集证据（PR #4582 run `30084615126` 日志逐行核验）；`vue-tsc`/`build` 双绿；posture-ceiling 交叉断言（本文对 R2 的新增可执行化） |
 | **已验证但有边界** | ⑥-undeterminable 格代表「零 active 指派/零审计行」而非锁最强调的「resolver 决策失败零持久化」（后者结构上不产生 trace body，见 §3.1 表后说明，属诚实边界非缺陷）；W5-1 的留存披露时序护栏本文重验仍有效（FK 未修复）但本文未独立重跑 W5-0/W5-1/W5-2 各自的历史 mutation，仅转录其一手门禁记录 |
 | **未做且为何** | 无——12 格矩阵已按诚实上限（§3.0）全部产出，没有因诚实上限而放弃某一格；本文不覆盖真实租户视觉验收/flag 开启/生产部署（均为 operator 项，锁 §10 明文本锁不改变） |
 | **转呈 owner 裁量** | 见 §7（汇总四片既有转呈项 + 本文 posture-ceiling 诚实解读是否需要 owner 额外确认） |
