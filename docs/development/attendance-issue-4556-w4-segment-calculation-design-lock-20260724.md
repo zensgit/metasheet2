@@ -110,6 +110,7 @@ separate debt entries even when they later call the same function.
 | P23 | `/import/rollback/:id` accepts a broader authorization posture than import commit and can roll back another actor's org-local batch. | W4C-3a: bind rollback to the frozen batch owner/scope and re-run the commit-equivalent delegated authorization before claim/source DML. |
 | P24 | Integration sync has a distinct semantic pipeline, and `dryRun` still writes the run plus `last_sync_at`. | W4C-3a: freeze current compatibility semantics explicitly, use one W4 calculator, and make dry-run append audit-only state without result/batch/watermark mutation. |
 | P25 | Import token, preview/job, template-preference, upload-lifecycle, and temporary-staging writes are operational DML with different correctness contracts. | W4C-0: classify each explicitly; only business source/effect/result state enters the atomic result operation, while operational state gets its own allowlist and no authority over calculation truth. |
+| P26 | Central `POST /api/approvals/admin/reassign` selects pending `source_system='platform'` instances without an attendance discriminator, deactivates/creates `approval_assignments`, and increments `approval_instances.version`; its target check is global-active only. It can therefore change who may decide an attendance request outside the locked request-org authority contract. | W4C-3b: classify attendance instances before assignment DML, lock their request org and instance version, apply the closed actor/target membership matrix, and serialize reassignment against terminal decision. Central admin jump/generic non-terminal actions either prove attendance unreachable or enter the same contract. |
 
 There is no general production recompute writer today. W4C-3c introduces
 prior-policy/default recompute and explicitly labeled current-policy recompute;
@@ -196,6 +197,7 @@ against W1 group-membership tables is a scope violation.
 | W4C-R35 | Import rollback cannot exceed the original batch's authorization scope. | Another importer, delegated scope, group, and cross-org probes fail before operation claim or reversal DML unless the closed owner/admin matrix authorizes them. |
 | W4C-R36 | Integration dry-run cannot advance business state. | A dry-run may append its audit attempt but writes no attendance result/import batch/current pointer/`last_sync_at`; moving any forbidden write into that branch fails. |
 | W4C-R37 | Operational import state never becomes calculation authority. | Token, preview/job, template-preference, upload cleanup, and temporary-stage mutations cannot satisfy operation identity, evidence, promotion, or rollback truth. |
+| W4C-R38 | Attendance approval assignment authority is org-bound and version-serialized. | Generic bulk reassign, jump, transfer, add/reduce-sign, timeout, or future assignment mutations either prove the attendance instance unreachable or lock its request org/version and satisfy the closed actor/target matrix before assignment DML; a reassignment-versus-decision race cannot authorize the wrong actor. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1926,7 +1928,7 @@ Gates:
 - the collector generates an exact-head source/effect/result debt inventory
   naming every current command route, worker/recovery body, cron/admin
   initiator, first DML, shared-table hook, privileged/tooling path, and planned
-  canonical adapter. The initial set contains P01-P25 from section 1.1; its
+  canonical adapter. The initial set contains P01-P26 from section 1.1; its
   immutable debt IDs/content hash are generated from pinned baseline
   `e0defbe26...` before runtime changes. W4C-0 proves
   collection/positive controls and fails new, renamed, or unclassified DML;
@@ -2121,6 +2123,28 @@ Gates:
 - request create/edit/decision/cancel/outdoor route inventory entries are
   removed; operation claim/suspension precede first request, event, approval,
   assignment, and attendance-ledger DML;
+- P26 central bulk reassignment identifies an attendance instance from the
+  exact workflow key plus locked request join before assignment DML. For an
+  attendance instance, the actor is either the verified platform-admin
+  override or an active member of the locked request org holding both
+  `approvals:admin` and the closed attendance-admin posture; the target is
+  active, activated, and an active member of that same org. Caller org,
+  requester/subject JSON alone, and global target activity cannot authorize
+  the mutation. Unauthorized explicit IDs use the same not-found shape, while
+  discovery excludes unauthorized attendance rows;
+- attendance reassignment locks the approval instance, request, current-node
+  source assignments, and target membership; it validates pending/current-node
+  state, preserves the source assignment epoch, increments
+  `approval_instances.version`, and appends the existing reassign audit in one
+  transaction. A decision with the old version and a reassign racing a locked
+  decision cannot both succeed. Independent legs cover same-org success,
+  inactive/deprovisioned/non-member target, org-local actor missing either
+  permission, platform-admin override, same-ID not-found, and two-org spoof;
+- central admin jump, transfer, add/reduce-sign, timeout transfer/jump, and
+  future generic assignment mutation each have a named reachability test:
+  current unsupported attendance instances fail before assignment/instance
+  DML; making one reachable without routing it through the P26 org/version
+  contract fails the generated debt guard;
 - P17/P22 central legacy approve/reject, generic bridge, verified card action,
   and plugin decision converge before terminal DML or fail closed; a
   central-first/plugin-second and plugin-first/central-second matrix proves one
@@ -2291,12 +2315,13 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-34 rollback authorization | (a) batch owner/delegated scope is frozen and rollback uses commit-equivalent authorization plus org binding; (b) any org-local importer may roll back any batch | (a) |
 | OD-W4C-35 integration dry-run | (a) audit attempt only, with no batch/result/pointer/`last_sync_at` write; (b) retain current watermark side effect | (a) |
 | OD-W4C-36 import operational state | (a) classify token/job/prefs/upload/temp state separately and deny calculation authority; (b) treat every operational row as business evidence | (a) |
+| OD-W4C-37 attendance assignment mutation | (a) central reassign and any reachable generic assignment mutation use the locked request-org actor/target matrix plus approval-version serialization; unsupported generic actions prove zero attendance DML; (b) retain global `approvals:admin` plus globally active target behavior | (a), changing who may approve is an org-bound security decision |
 
 ## 14. RATIFY and execution sequence
 
 1. Rebase docs PR to current main.
 2. Re-verify anchors and regenerate writer inventory.
-3. Owner decides OD-W4C-1..36.
+3. Owner decides OD-W4C-1..37.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
 6. Owner RATIFYs exact merged SHA.
