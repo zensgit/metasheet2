@@ -308,6 +308,34 @@ describe('ResetConfirmDialog — T8-2 / W2 exact-anchor Reset UI', () => {
     expect(resetExecute).toHaveBeenCalledTimes(1)
   })
 
+  it('(h3a) REOPEN DURING EXECUTE: the entry cannot invalidate the in-flight epoch and strand submitting', async () => {
+    let resolveExecute!: (value: ResetResult) => void
+    const resetPreview = vi.fn(async () => previewOf({
+      summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 },
+      deleteRecordIds: [],
+      previewIdentity: 'in-flight-token',
+    }))
+    const resetExecute = vi.fn(() => new Promise<ResetResult>((resolve) => { resolveExecute = resolve }))
+    mount({ resetPreview, resetExecute })
+    await nextTick()
+    const entry = q('[data-test="reset-entry"]') as HTMLButtonElement
+    entry.click()
+    await waitUntil(() => !!q('[data-test="reset-confirm-btn"]'))
+    ;(q('[data-test="reset-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="reset-confirm-submitting"]'))
+
+    // The teleported overlay visually covers the entry, but it can still be re-triggered by retained
+    // keyboard focus or a programmatic click. Reopening here must not advance dialogEpoch.
+    entry.click()
+    await flush()
+    expect(resetPreview).toHaveBeenCalledTimes(1)
+
+    resolveExecute(resultOf())
+    await waitUntil(() => !!q('[data-test="reset-confirm-result"]'))
+    expect(q('[data-test="reset-confirm-submitting"]')).toBeFalsy()
+    expect(resetExecute).toHaveBeenCalledTimes(1)
+  })
+
   it('(h3b) POST-COMMIT refresh failure cannot rewrite a successful recovery as an execute failure', async () => {
     const onDone = vi.fn(async () => { throw new Error('refresh failed') })
     mount({

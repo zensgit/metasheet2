@@ -209,7 +209,7 @@ const asErr = (e: unknown): { status?: number; code?: string } => ({
 })
 
 function openDialog(): void {
-  if (!props.anchor) return // no valid exact anchor selected — never open on nothing
+  if (!props.anchor || open.value || submitting.value) return
   const epoch = ++dialogEpoch
   openedAnchor.value = { ...props.anchor } as ExactAnchorRequest
   openedLabel.value = props.asOf
