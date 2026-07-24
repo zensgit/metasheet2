@@ -1,0 +1,46 @@
+name: Data Source Exposure Inventory
+
+# B1c exposure-inventory contract test. Hermetic, no database — the script's
+# tests inject a fake query executor (see scripts/ops/data-source-exposure-inventory.test.mjs).
+# Follows the same shape as the `contract` job in
+# multitable-permission-lists-postdeploy-smoke.yml: checkout + setup-node only,
+# no pnpm install, `node --test` directly against the .mjs test file.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/data-source-exposure-inventory.yml'
+      - 'scripts/ops/data-source-exposure-inventory.mjs'
+      - 'scripts/ops/data-source-exposure-inventory.test.mjs'
+      # This script's static-call-site enumerator asserts these files still
+      # match its DEFAULT_ANCHORS patterns (see the "drift guard" test in the
+      # .test.mjs above). Listed here so the PR that actually drifts one of
+      # them re-runs this check, instead of a later, unrelated PR going red.
+      - 'packages/core-backend/src/routes/data-sources.ts'
+      - 'packages/core-backend/src/data-adapters/DataSourceManager.ts'
+      - 'plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/data-source-exposure-inventory.yml'
+      - 'scripts/ops/data-source-exposure-inventory.mjs'
+      - 'scripts/ops/data-source-exposure-inventory.test.mjs'
+      - 'packages/core-backend/src/routes/data-sources.ts'
+      - 'packages/core-backend/src/data-adapters/DataSourceManager.ts'
+      - 'plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: exposure-inventory contract (values-free, schema-probe-first)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic exposure-inventory tests (fake executor, no DB)
+        run: node --test scripts/ops/data-source-exposure-inventory.test.mjs
