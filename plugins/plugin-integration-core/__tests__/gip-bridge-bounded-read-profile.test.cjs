@@ -21,6 +21,7 @@ const {
   adjudicateBoundedReadCompleteness,
   bridgeBoundedReadRecoveryStrategy,
   assertCompletenessEvidenceCertified,
+  __internals: profileInternals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-bridge-bounded-read-profile.cjs'))
 
 const {
@@ -32,6 +33,8 @@ const {
 const {
   deriveRecoveryStrategy,
   validateCompletenessEvidence,
+  GIP_RECOVERY_STRATEGIES,
+  GipProfileContractError,
 } = require(path.join(__dirname, '..', 'lib', 'gip-profile-certification-contracts.cjs'))
 
 const {
@@ -46,6 +49,17 @@ const {
 const feeder = require(path.join(__dirname, '..', 'lib', 'stock-preparation-readonly-source-run.cjs'))
 const bridgeAdapter = require(path.join(__dirname, '..', 'lib', 'adapters', 'bridge-agent-readonly-adapter.cjs'))
 
+// The profile module's own source with line comments stripped — used by the two
+// SOURCE-LEVEL invariants below (fail() vocabulary discipline, recovery delegation).
+// Source-level, NOT behavioural: it pins how the module is written, which is exactly
+// what those two invariants claim. Behavioural guards live in the sections above.
+const PROFILE_SOURCE_PATH = path.join(__dirname, '..', 'lib', 'gip-bridge-bounded-read-profile.cjs')
+function profileSourceWithoutComments() {
+  const src = fs.readFileSync(PROFILE_SOURCE_PATH, 'utf8')
+  assert.ok(src.length > 1000, 'profile source must actually be readable (empty read is not absence)')
+  return src.replace(/\/\/.*$/gm, '')
+}
+
 function rejectsWith(fn, reason) {
   let caught = null
   try { fn() } catch (error) { caught = error }
@@ -54,21 +68,12 @@ function rejectsWith(fn, reason) {
   return caught
 }
 
-const CANDIDATE = {
-  profileId: 'bridge.bounded_read.v1',
-  connectorKind: BRIDGE_BOUNDED_READ_CONNECTOR_KIND,
-  actionId: 'bounded_read',
-  implementationVersion: BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION,
-  certificate: {
-    acquisitionMode: 'BOUNDED_READ',
-    supportedConsistencyProofs: [],
-    continuationLifetime: 'SINGLE_REQUEST',
-    supportedCompletenessProofs: ['SHORT_PAGE'],
-    completenessCombinationRules: [['SHORT_PAGE']],
-    maxScale: { maxRowsPerBoundedRead: BRIDGE_BOUNDED_READ_MAX_ROWS },
-    failureVocabulary: [...BRIDGE_BOUNDED_READ_ERROR_REASONS],
-  },
-}
+// The compliance battery runs against the REAL exported profile, not a re-typed copy — a
+// hand-maintained duplicate can silently diverge, leaving the battery to certify a fiction.
+// `actionProfileVersion` is stripped because the normalizer EMITS it but REJECTS it as
+// input (round-tripping its own output fails `PROFILE_NOT_OBJECT: undeclared top-level
+// field`); if the normalizer ever emits another output-only field, this reds — correctly.
+const { actionProfileVersion: _emittedVersion, ...CANDIDATE } = BRIDGE_BOUNDED_READ_PROFILE
 
 // ── 1. Frozen error vocabulary + source-level fail() invariant ──
 function frozenVocabulary() {
@@ -80,9 +85,7 @@ function frozenVocabulary() {
     'BOUNDED_READ_COMPLETENESS_UNPROVABLE',
   ])
   assert.ok(Object.isFrozen(BRIDGE_BOUNDED_READ_ERROR_REASONS))
-  const src = fs
-    .readFileSync(path.join(__dirname, '..', 'lib', 'gip-bridge-bounded-read-profile.cjs'), 'utf8')
-    .replace(/\/\/.*$/gm, '')
+  const src = profileSourceWithoutComments()
   const declared = new Set(BRIDGE_BOUNDED_READ_ERROR_REASONS)
   const re = /\bfail\(\s*['"]([A-Z_]+)['"]/g
   const undeclared = []
@@ -94,6 +97,27 @@ function frozenVocabulary() {
   }
   assert.ok(count >= 5, `expected to locate fail() call sites (found ${count})`)
   assert.deepEqual(undeclared, [], 'every fail() reason must be declared')
+
+  // LAYER 3 of the module's stated three-layer pin — the RUNTIME consumer. The source
+  // scan above only sees LITERAL fail('X') call sites; this covers a dynamic reason and
+  // is the only thing that keeps `fail()`'s own vocabulary check load-bearing (neutering
+  // it to `if (false)` was previously green, and `__internals.fail` had no caller at all).
+  const undeclaredReason = 'BOUNDED_READ_NOT_A_DECLARED_REASON'
+  let coarse = null
+  try { profileInternals.fail(undeclaredReason, 'probe', {}) } catch (error) { coarse = error }
+  assert.ok(coarse instanceof Error && !(coarse instanceof BridgeBoundedReadError),
+    'an undeclared reason must throw a plain internal Error, never a typed BridgeBoundedReadError')
+  assert.match(coarse.message, /undeclared error reason/)
+  assert.ok(!coarse.message.includes(undeclaredReason),
+    'the internal token is COARSE — it must never echo the rejected reason value')
+  // POSITIVE CONTROL: a fail() that threw for everything would satisfy the check above.
+  // Every DECLARED reason must still come through as the typed, reason-carrying error.
+  for (const reason of BRIDGE_BOUNDED_READ_ERROR_REASONS) {
+    let typed = null
+    try { profileInternals.fail(reason, 'probe', { field: 'probe' }) } catch (error) { typed = error }
+    assert.ok(typed instanceof BridgeBoundedReadError && typed.reason === reason,
+      `declared reason ${reason} must still fail() as a typed BridgeBoundedReadError`)
+  }
 }
 
 // ── 2. Profile identity: frozen, exactly the certified shape ──
@@ -141,6 +165,23 @@ function complianceHarness() {
 function recovery() {
   assert.equal(bridgeBoundedReadRecoveryStrategy(), 'WHOLE_RERUN')
   assert.equal(deriveRecoveryStrategy(BRIDGE_BOUNDED_READ_PROFILE.certificate), 'WHOLE_RERUN')
+
+  // SOURCE-LEVEL invariant (honestly labelled: this pins how the wrapper is WRITTEN, not
+  // what it returns). The module comments "delegates to the shared derivation — never
+  // declared here", and GIP contracts REFUSE a declared recovery strategy outright
+  // (`RECOVERY_DECLARATION_FORBIDDEN`). Both values agree today, so no behavioural probe
+  // can separate "derives" from "hardcodes 'WHOLE_RERUN'" — the claim itself is textual,
+  // so the evidence is textual, matching the fail()-scan pattern above.
+  const body = profileSourceWithoutComments()
+    .split('function bridgeBoundedReadRecoveryStrategy()')[1]
+  assert.ok(body, 'bridgeBoundedReadRecoveryStrategy must exist in the source')
+  const wrapper = body.slice(0, body.indexOf('\n}') + 2)
+  assert.ok(wrapper.includes('deriveRecoveryStrategy('),
+    'the recovery wrapper must DELEGATE to the shared derivation')
+  for (const strategy of GIP_RECOVERY_STRATEGIES) {
+    assert.ok(!wrapper.includes(strategy),
+      `the recovery wrapper must not DECLARE a strategy literal (${strategy}) — recovery is derived`)
+  }
 }
 
 // ── 5. Completeness adjudication — SHORT_PAGE only; everything else fails closed ──
@@ -151,6 +192,21 @@ function adjudication() {
     { runOutcome: 'successful', used: ['SHORT_PAGE'] })
   assert.equal(assertCompletenessEvidenceCertified(shortEv).runOutcome, 'successful')
   validateCompletenessEvidence(BRIDGE_BOUNDED_READ_PROFILE, shortEv)
+  // …and it must actually VALIDATE against THIS certificate, not pass evidence through.
+  // This is the module's whole contribution here: wiring the shared validator to the
+  // frozen profile. An uncertified proof (DECLARED_TOTAL — a v2 capability this adapter
+  // cannot produce) must be REFUSED. Reading `.runOutcome` off the result alone is
+  // satisfied by any passthrough, so the negative case is what makes the wiring testable.
+  for (const uncertified of [
+    { runOutcome: 'successful', usedCompletenessProofs: ['DECLARED_TOTAL'] },
+    { runOutcome: 'successful', usedCompletenessProofs: ['SHORT_PAGE', 'DECLARED_TOTAL'] },
+    { runOutcome: 'successful', usedCompletenessProofs: [] },
+  ]) {
+    let caught = null
+    try { assertCompletenessEvidenceCertified(uncertified) } catch (error) { caught = error }
+    assert.ok(caught instanceof GipProfileContractError && caught.reason === 'COMPLETENESS_EVIDENCE_INVALID',
+      `evidence ${JSON.stringify(uncertified.usedCompletenessProofs)} is not certified by this profile and must be refused`)
+  }
 
   // FULL PAGE (rows == clamp) ⇒ FAIL-CLOSED (no proof available for this profile — #4437)
   rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 500, reportedClamp: 500 }),
@@ -198,16 +254,31 @@ function adjudication() {
     'BOUNDED_READ_RESULT_EXCEEDS_CLAMP')
 
   // shape hygiene: unknown field / non-object / bad ints ⇒ INPUT invalid
-  rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 10, reportedClamp: 500, rows: [{ secret: 'x' }] }),
+  const SECRET = 'SECRET_ROW_A17'
+  // VALUES-FREE, THE LOAD-BEARING CASE: the undeclared-field rejection is the ONLY branch
+  // that can ever see arbitrary caller-supplied data, so it is the only place a leak can
+  // originate. It must report a COUNT and nothing else. (Without this assertion, adding
+  // operator-friendly diagnostics — `{ field: key, value: runResult[key] }` — ships row
+  // content onto an audit surface with the whole suite still green.)
+  const leakyField = rejectsWith(
+    () => adjudicateBoundedReadCompleteness({ pageRowCount: 10, reportedClamp: 500, rows: [{ secret: SECRET }] }),
     'BOUNDED_READ_RESULT_INVALID')
+  assert.ok(!JSON.stringify({ m: leakyField.message, d: leakyField.details }).includes(SECRET),
+    'the undeclared-field rejection must stay values-free — it must never echo row content')
+  // …and it must not echo the undeclared FIELD NAME either (a name can itself be data).
+  const leakyKey = rejectsWith(
+    () => adjudicateBoundedReadCompleteness({ pageRowCount: 10, reportedClamp: 500, [SECRET]: 1 }),
+    'BOUNDED_READ_RESULT_INVALID')
+  assert.ok(!JSON.stringify({ m: leakyKey.message, d: leakyKey.details }).includes(SECRET),
+    'the undeclared-field rejection must not echo the undeclared key name')
+  assert.deepEqual(leakyKey.details, { fieldCount: 3 }, 'details are COUNTS ONLY')
   rejectsWith(() => adjudicateBoundedReadCompleteness(null), 'BOUNDED_READ_RESULT_INVALID')
   rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: -1, reportedClamp: 500 }), 'BOUNDED_READ_RESULT_INVALID')
   rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 1.5, reportedClamp: 500 }), 'BOUNDED_READ_RESULT_INVALID')
   rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 10, reportedClamp: 0 }), 'BOUNDED_READ_RESULT_INVALID')
 
-  // VALUES-FREE: no adjudication path echoes row content into the error (only counts/
-  // field names appear in details).
-  const SECRET = 'SECRET_ROW_A17'
+  // VALUES-FREE (declared-field route): a DECLARED field carrying junk routes to the
+  // UNPROVABLE branch, which must not echo it either.
   const leaky = rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 500, reportedClamp: 500, adapterDone: SECRET }),
     'BOUNDED_READ_COMPLETENESS_UNPROVABLE')
   assert.ok(!JSON.stringify({ m: leaky.message, d: leaky.details }).includes(SECRET),
@@ -233,6 +304,103 @@ function driftGuard() {
   //     a bump there (behavioural change) RETs this and forces re-certification.
   assert.equal(BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION, bridgeAdapter.BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_VERSION,
     'implementationVersion must equal the adapter exported version — drift forces re-certification')
+}
+
+// ── 6b. ADAPTER REACHABILITY PIN — the certificate's BEHAVIOURAL claims ──
+//   §6 pins three LITERALS (500, the kind key, the version string). A literal cannot
+//   notice a behaviour change, so on its own the drift guard only proves "the profile
+//   matches the label", not "the profile matches the adapter". This section pins the
+//   three adapter behaviours the certificate actually rests on, driving the REAL adapter
+//   through its own `fetchImpl` seam (hermetic: no network, no DB, no runtime wiring —
+//   the test imports the adapter, the latent profile module still imports nothing).
+//
+//   *** If any assertion here has to change, the adapter's read/limit/completeness
+//   surface changed ⇒ BUMP BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_VERSION and re-certify.
+//   This section is that rule's enforcement; the version string alone is only a label. ***
+function bridgeSystemFixture() {
+  return {
+    id: 'bridge_gip_probe',
+    name: 'Readonly Bridge Agent (GIP probe)',
+    kind: BRIDGE_BOUNDED_READ_CONNECTOR_KIND,
+    role: 'source',
+    config: { baseUrl: 'http://127.0.0.1:19099/', maxLimit: 20, authHeaderName: 'X-MetaSheet-Bridge-Secret' },
+    credentials: { sharedSecret: 'probe-secret' },
+  }
+}
+
+// An agent that returns EXACTLY `recordCount` records — deliberately NOT sliced to the
+// requested limit, so "does the adapter trim?" is answered by the adapter, not the mock.
+function bridgeAdapterReturning(recordCount) {
+  return bridgeAdapter.createBridgeAgentReadonlyAdapter({
+    system: bridgeSystemFixture(),
+    fetchImpl: async (url, options = {}) => {
+      const body = options.body ? JSON.parse(options.body) : undefined
+      const payload = new URL(url).pathname === '/query/material' && options.method === 'POST'
+        ? {
+          object: 'material',
+          records: Array.from({ length: recordCount }, (_, i) => ({ FItemID: i + 1, FNumber: `MAT-${i + 1}` })),
+          limit: body && body.limit,
+          nextCursor: null,
+          done: true,
+        }
+        : { error: { code: 'UNKNOWN_OBJECT', message: 'not allowlisted' } }
+      return {
+        ok: payload.error === undefined,
+        status: payload.error === undefined ? 200 : 404,
+        async text() { return JSON.stringify(payload) },
+      }
+    },
+  })
+}
+
+async function adapterReachabilityPin() {
+  const REQUESTED_CLAMP = 7
+
+  // (a) SHORT_PAGE is REACHABLE — proven end-to-end, not by reading the adapter.
+  //     The adapter must report the clamp it applied (metadata.limit ⇒ the runtime's
+  //     `effectiveLimit`, read-source-read-runtime.cjs:308 `safeCount(metadata.limit, …)`),
+  //     because a short page cannot be judged without it. Drop it and this profile's ONLY
+  //     completeness proof becomes unreachable — i.e. the certificate would be a lie.
+  const shortRead = await bridgeAdapterReturning(2).read({ object: 'material', limit: REQUESTED_CLAMP })
+  assert.equal(shortRead.metadata.limit, REQUESTED_CLAMP,
+    'the adapter MUST report the clamp it applied — without it SHORT_PAGE is unreachable')
+  const reachedShortPage = adjudicateBoundedReadCompleteness({
+    pageRowCount: shortRead.records.length,
+    reportedClamp: shortRead.metadata.limit,
+  })
+  assert.deepEqual([...reachedShortPage.usedCompletenessProofs], ['SHORT_PAGE'],
+    'a real short read must adjudicate to the certified SHORT_PAGE proof')
+  assert.equal(assertCompletenessEvidenceCertified(reachedShortPage).runOutcome, 'successful')
+
+  // (b) DECLARED_TOTAL is UNREACHABLE — the reason the certificate narrows to SHORT_PAGE
+  //     ONLY (review P1). The runtime derives a source total from EXACTLY two metadata
+  //     keys (read-source-read-runtime.cjs:291 `safeCount(metadata.dataRowCount,
+  //     metadata.totalCount)`); the adapter propagates NEITHER, so `sourceTotalCount` is
+  //     permanently null and the feeder's declared_total proof can never fire. The exact
+  //     key-set pin is what makes this a guard rather than a comment: adding ANY metadata
+  //     key (a total most of all) reds here and forces re-certification.
+  assert.deepEqual(Object.keys(shortRead.metadata).sort(),
+    ['count', 'filterFields', 'filtersApplied', 'limit', 'object', 'source'],
+    'the adapter read metadata key set is CERTIFIED — a new key may change what the runtime can derive')
+  for (const totalKey of ['dataRowCount', 'totalCount']) {
+    assert.ok(!(totalKey in shortRead.metadata),
+      `the adapter must NOT propagate ${totalKey} — the certificate excludes DECLARED_TOTAL because it cannot`)
+  }
+
+  // (c) `rows > clamp` is RUNTIME-REACHABLE, not merely hypothetical — the source-code
+  //     claim the keep-strict fail-closed guard is justified by. The adapter does NOT trim
+  //     an agent's records to the limit it reported, so an anomalous agent genuinely
+  //     produces this shape; the profile then fails closed (false-fail, never
+  //     false-complete). If the adapter ever starts trimming, this band becomes dead and
+  //     the certificate's comment goes stale — red it here rather than let it rot.
+  const overRead = await bridgeAdapterReturning(9).read({ object: 'material', limit: REQUESTED_CLAMP })
+  assert.equal(overRead.records.length, 9,
+    'the adapter must NOT trim agent records to the reported clamp — that is why rows > clamp is reachable')
+  assert.equal(overRead.metadata.limit, REQUESTED_CLAMP)
+  rejectsWith(() => adjudicateBoundedReadCompleteness({
+    pageRowCount: overRead.records.length,
+    reportedClamp: overRead.metadata.limit,
+  }), 'BOUNDED_READ_RESULT_EXCEEDS_CLAMP')
 }
 
 // ── 7. Qualification digest binding (SCOPED) ──
@@ -274,15 +442,22 @@ function qualificationDigestBinding() {
     'a different profile version must not verify against this qualification')
 }
 
-function main() {
+async function main() {
   frozenVocabulary()
   profileIdentity()
   complianceHarness()
   recovery()
   adjudication()
   driftGuard()
+  await adapterReachabilityPin()
   qualificationDigestBinding()
   console.log('gip-bridge-bounded-read-profile.test.cjs OK')
 }
 
-main()
+main().catch((error) => {
+  // An async failure must exit NON-ZERO: this suite is a link in the `&&` chain that
+  // plugin-integration-core's `test` script runs, and a swallowed rejection would make
+  // the chain green on a red suite.
+  console.error(error)
+  process.exit(1)
+})
