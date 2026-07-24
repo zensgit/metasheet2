@@ -7,6 +7,8 @@ import { validatePassword } from '../auth/password-policy'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
+import { lockUserForAccessGraphWrite, recordDeprovisionEvent } from './deprovision-ledger'
+import { planDirectoryDeprovision, type PlannedEffect } from './deprovision-planner'
 import {
   fetchDingTalkAppAccessToken,
   getDingTalkDepartmentDetail,
@@ -1356,10 +1358,20 @@ export type DirectoryDeprovisionOutcome = {
    * ATTEMPT (preview mode included) — it does NOT mean the row actually flipped:
    * `deactivateUserOrgMembershipIfNoOtherActiveBinding` no-ops (without erroring) when the
    * org-scoped sibling check finds another active binding, or when no `user_orgs` row exists
-   * yet. Whether it actually flipped is not tracked (the shared
-   * helper's `UPDATE` has no `RETURNING`); this is attempt-visibility, not flip-visibility.
+   * yet. This is attempt-visibility, not flip-visibility — for what actually flipped, D4's
+   * effect ledger (`ledgerEffectCount` below, and the `directory_deprovision_effects` rows
+   * themselves) is the authoritative record.
    */
   membershipDeactivationAttemptedCount: number
+  /**
+   * D4 (deprovision design lock Rev 4.2 §5.3): how many deprovision EVENTS this run wrote, and
+   * how many effect rows they carry. Zero in preview mode by construction, and zero for a
+   * candidate whose effect set came out empty ("零 effect 零写") — an enabled run with
+   * candidates but no ledger rows means every candidate was already in the state the policy
+   * wanted, which is a materially different fact from "the writer did not run".
+   */
+  ledgerEventCount: number
+  ledgerEffectCount: number
   /** Set when the circuit breaker refused to act; `applied` is forced false. */
   abortedReason: DirectoryDeprovisionAbortReason | null
   affected: Array<{
@@ -1396,6 +1408,84 @@ type DeprovisionCandidateRow = {
   directory_account_id: string
   local_user_id: string
   deprovision_policy_override: string | null
+}
+
+/**
+ * D4 — would `deactivateUserOrgMembershipIfNoOtherActiveBinding` actually flip this membership?
+ *
+ * Deliberately re-states that helper's predicate rather than approximating it with "is there an
+ * active `user_orgs` row": the plan has to be the same decision as the write, and the write
+ * declines when another active binding in this org still vouches for the person. Called with the
+ * person's `users` row already locked, so its answer is the answer at write time.
+ */
+async function isUserOrgMembershipDeactivatable(
+  client: MembershipWriteClient,
+  options: { userId: string; orgId: string },
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1
+       FROM user_orgs
+      WHERE user_id = $1::text
+        AND org_id = $2::text
+        AND is_active = TRUE
+        AND NOT EXISTS (
+          SELECT 1
+          FROM directory_account_links l
+          JOIN directory_accounts a ON a.id = l.directory_account_id
+          JOIN directory_integrations i ON i.id = a.integration_id
+          WHERE l.local_user_id = $1::text
+            AND l.link_status = 'linked'
+            AND a.is_active = TRUE
+            AND i.org_id = $2::text
+        )`,
+    [options.userId, options.orgId],
+  )
+  return result.rows.length > 0
+}
+
+/**
+ * D4 — current DingTalk grant state from `user_external_auth_grants`, the table the OAuth login
+ * path itself reads. A missing row means "no grant", the same way `dingtalk-oauth.ts` reads it.
+ */
+async function isDingTalkGrantEnabled(
+  client: MembershipWriteClient,
+  localUserId: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT enabled
+       FROM user_external_auth_grants
+      WHERE provider = $1 AND local_user_id = $2
+      LIMIT 1`,
+    [DEFAULT_PROVIDER, localUserId],
+  )
+  return result.rows[0]?.enabled === true
+}
+
+/**
+ * D4 — "Apply≈Plan" (§11) as a runtime invariant, not a hope.
+ *
+ * The ledger is the evidence a later restore reasons from; an event that claims an effect which
+ * never landed (or omits one that did) turns every downstream restore decision into a guess. So
+ * a divergence throws, the sync transaction rolls back, and nothing is witnessed — rather than
+ * committing a record known to be wrong. Under the mutex this can only fire when another writer
+ * mutated the access graph without taking the same lock, which is exactly the D5 gap this slice
+ * does not close.
+ */
+function assertAppliedMatchesPlan(
+  localUserId: string,
+  planned: PlannedEffect[],
+  applied: PlannedEffect[],
+): void {
+  const key = (effect: PlannedEffect): string => `${effect.type}:${effect.orgId ?? ''}`
+  const plannedKeys = planned.map(key).sort()
+  const appliedKeys = applied.map(key).sort()
+  if (plannedKeys.join('|') === appliedKeys.join('|')) return
+  throw new Error(
+    `Directory deprovision effect divergence for user ${localUserId}: planned [${plannedKeys.join(', ')}] `
+    + `but applied [${appliedKeys.join(', ')}]. Another writer changed this person's access graph `
+    + 'without taking the users-row mutex (design lock Rev 4.2 §7.3, D5). Refusing to write a '
+    + 'deprovision event that disagrees with what actually happened.',
+  )
 }
 
 /**
@@ -1470,6 +1560,15 @@ export async function applyDirectoryDeprovisionPolicies(
     integrationDefaultPolicy: string
     enabled: boolean
     maxBatch?: number
+    /**
+     * D4: the sync run this deprovision belongs to. `directory_deprovision_events` requires it
+     * for `event_origin='sync'` (CHECK + trigger, §5.2), so an event can always be traced back
+     * to the run that produced it. Required even in preview mode — preview writes no events, but
+     * a caller that cannot name its run has no business enabling the writer either.
+     */
+    runId: string
+    /** Audit provenance for the event row (`triggered_by`). */
+    triggeredBy: string
   },
 ): Promise<DirectoryDeprovisionOutcome> {
   const outcome: DirectoryDeprovisionOutcome = {
@@ -1480,6 +1579,8 @@ export async function applyDirectoryDeprovisionPolicies(
     grantsDisabledCount: 0,
     usersDeactivatedCount: 0,
     membershipDeactivationAttemptedCount: 0,
+    ledgerEventCount: 0,
+    ledgerEffectCount: 0,
     abortedReason: null,
     affected: [],
     manualReviewPending: [],
@@ -1586,31 +1687,42 @@ export async function applyDirectoryDeprovisionPolicies(
   // (e.g. a `users`-row `FOR UPDATE` re-check at write time, mirroring the org-membership
   // helper) that is outside the owner's verbatim 4-item P2 spec this PR implements — left for
   // the owner to scope as a follow-up, not silently dropped.
-  const nonManualReviewUserIds = Array.from(byUser.entries())
-    .filter(([, c]) => c.policy !== 'manual_review')
-    .map(([localUserId]) => localUserId)
-
-  const globallyClearUserIds = new Set<string>()
-  if (nonManualReviewUserIds.length > 0) {
+  //
+  // D4 UPDATE (deprovision design lock Rev 4.2 §7.4) — the gap described immediately above is no
+  // longer deferred. §7.4 is the ratified fix and it is implemented below: the guard is re-read
+  // PER PERSON, inside that person's `users` row lock ("在同一 users FOR UPDATE 事务内重读
+  // sibling/global（含最新 directory_accounts.is_active）后再写 grant/user"), so the value the
+  // grant/platform-user writes are gated on is the value at write time rather than a batch
+  // snapshot taken before any write in this run. The batch pre-read this replaces is gone
+  // entirely; both write-skew shapes it documented (concurrent last-org departures, same-window
+  // rehire) are closed for THIS writer. They remain reachable from writers that do not yet take
+  // the mutex — that is D5 (全写者挂 mutex), a canary precondition, not part of this slice.
+  //
+  // Preview (`options.enabled === false`) takes no lock: it writes nothing, so there is nothing
+  // to serialise. It re-reads through the same helper so its reported counters come from the
+  // same predicate the enabled path decides on.
+  const evaluateGloballyClear = async (candidateUserId: string): Promise<boolean> => {
     const globalClear = await client.query(
-      `SELECT candidate_user AS local_user_id
-         FROM UNNEST($1::text[]) AS candidate_user
-        WHERE NOT EXISTS (
-          SELECT 1
-            FROM directory_account_links sibling_link
-            JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
-           WHERE sibling_link.local_user_id = candidate_user
-             AND sibling_link.link_status = 'linked'
-             AND sibling.is_active = true
-        )`,
-      [nonManualReviewUserIds],
+      `SELECT NOT EXISTS (
+                SELECT 1
+                  FROM directory_account_links sibling_link
+                  JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
+                 WHERE sibling_link.local_user_id = $1::text
+                   AND sibling_link.link_status = 'linked'
+                   AND sibling.is_active = true
+              ) AS globally_clear`,
+      [candidateUserId],
     )
-    for (const row of globalClear.rows as Array<{ local_user_id: string }>) {
-      globallyClearUserIds.add(row.local_user_id)
-    }
+    return globalClear.rows[0]?.globally_clear === true
   }
 
-  for (const [localUserId, { directoryAccountId, policy }] of byUser) {
+  // §7.2 批量: lock in a deterministic id order, so two runs touching the same two people in
+  // opposite order cannot deadlock against each other.
+  const orderedCandidates = Array.from(byUser.entries()).sort(([left], [right]) => (
+    left < right ? -1 : left > right ? 1 : 0
+  ))
+
+  for (const [localUserId, { directoryAccountId, policy }] of orderedCandidates) {
     if (policy === 'manual_review') {
       outcome.manualReviewCount += 1
       // Owner 裁决② (#4522 rev3 review — issuecomment-5042388830: "manual_review 保持 active
@@ -1621,7 +1733,25 @@ export async function applyDirectoryDeprovisionPolicies(
       continue
     }
 
-    const globallyClear = globallyClearUserIds.has(localUserId)
+    // §5.3 step 0 — the mutex comes FIRST, before anything this person's decision is read from.
+    // Only the enabled path locks: preview writes nothing, and taking row locks during a
+    // read-only preview would serialise real work behind a dry run for no benefit.
+    const lockedState = options.enabled
+      ? await lockUserForAccessGraphWrite(client, localUserId)
+      : null
+    if (options.enabled && !lockedState) {
+      // The user row disappeared between candidate selection and the lock. Nothing to
+      // deprovision, and nothing to witness — skip rather than write an event about a person
+      // who no longer exists (the event FK to `users` would reject it anyway).
+      logger.warn(
+        `Directory deprovision skipped ${localUserId} for ${options.integrationId}: `
+        + 'user row vanished between candidate selection and lock acquisition',
+      )
+      continue
+    }
+
+    // §7.4 — read under the lock, decide under the lock.
+    const globallyClear = await evaluateGloballyClear(localUserId)
     outcome.affected.push({ directoryAccountId, localUserId, policy, globallyClear })
 
     // W4-PRE-1d: org-membership deactivation is attempted for EVERY org-membership candidate
@@ -1630,6 +1760,36 @@ export async function applyDirectoryDeprovisionPolicies(
     // Same gate as before (breaker passed + `options.enabled`), see this field's own doc-comment
     // on `DirectoryDeprovisionOutcome` for the attempt-not-flip distinction.
     outcome.membershipDeactivationAttemptedCount += 1
+
+    // §5.3 steps 1-2 — with the lock held, read every layer's CURRENT active boolean and compute
+    // the effect set this person's writes are about to produce. `planDirectoryDeprovision` is the
+    // same function the admin preview calls, given the same gates (policy, org-scoped membership,
+    // globally-clear), so "Apply≈Plan" (§11) is a property of one shared decision rather than two
+    // implementations that have to be kept in agreement by hand.
+    const plannedEffects: PlannedEffect[] = []
+    let grantWasEnabled = false
+    if (options.enabled && lockedState) {
+      const membershipActive = await isUserOrgMembershipDeactivatable(client, {
+        userId: localUserId,
+        orgId,
+      })
+      grantWasEnabled = await isDingTalkGrantEnabled(client, localUserId)
+      const plan = planDirectoryDeprovision({
+        localUserId,
+        policy,
+        activationStatus: lockedState.activationStatus,
+        membershipOrgId: orgId,
+        membershipActive,
+        dingtalkGrantEnabled: grantWasEnabled,
+        userActive: lockedState.isActive,
+        globallyClear,
+      })
+      plannedEffects.push(...plan.effects)
+    }
+
+    /** What the writes below ACTUALLY changed — compared against the plan before anything is witnessed. */
+    const appliedEffects: PlannedEffect[] = []
+
     if (options.enabled) {
       // W4-PRE-1c (owner 裁决②, #4522 rev3 review — the only GitHub-persisted record is the
       // owner's own acknowledgment comment, issuecomment-5042388830: "不因单次同步缺失撤销
@@ -1654,7 +1814,18 @@ export async function applyDirectoryDeprovisionPolicies(
       // this call path, not merely inherited defense-in-depth. `manual_review` is excluded by
       // the `continue` above: a single missed sync, or a policy that never executes, must never
       // itself revoke membership.
-      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: localUserId, orgId })
+      const membershipFlipped = await deactivateUserOrgMembershipIfNoOtherActiveBinding(
+        client,
+        { userId: localUserId, orgId },
+      )
+      if (membershipFlipped > 0) {
+        appliedEffects.push({
+          type: 'membership_changed',
+          orgId,
+          beforeActive: true,
+          afterActive: false,
+        })
+      }
     }
 
     // W4-PRE-1d item 2: grant-disable and (for mark_inactive) platform-user deactivation are
@@ -1662,18 +1833,18 @@ export async function applyDirectoryDeprovisionPolicies(
     // through a DIFFERENT org's directory keeps DingTalk login and their platform account, even
     // though THIS org's membership was just deactivated above.
     //
-    // Known gap (review finding, deferred — see this function's `globallyClearUserIds` batch
-    // read above for the forward-direction case; this is the reverse): `globallyClear` here is
-    // the STALE batch snapshot, not re-checked at this write. If a concurrent transaction
-    // commits a brand-new linked+active directory account for this SAME person (rehire, or a
-    // new org's onboarding) in the window between that snapshot and this write, these two writes
-    // still fire against the stale `true`, closing the grant and (mark_inactive) deactivating an
-    // otherwise-currently-employed user. Same inherited-not-widened window as the guard's own
-    // doc-comment above; same deferred lock/reconciliation design decision.
+    // D4 (§7.4): `globallyClear` is no longer the stale batch snapshot the deferred-gap note
+    // above described — it was re-read a few lines up, under this person's `users` row lock, so
+    // these two writes are gated on the value at write time.
     if (globallyClear) {
       outcome.globalCandidateCount += 1
       outcome.grantsDisabledCount += 1
       if (options.enabled) {
+        // The INSERT stays unconditional so the row shape after a deprovision is exactly what it
+        // has always been. Whether an ACCESS CHANGE happened is a different question, and it is
+        // answered by the pre-read taken under this person's lock: writing a fresh
+        // `enabled=FALSE` row for someone who never had a grant took nothing away from them, and
+        // must not appear in the ledger as if it had.
         await client.query(
           `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
            VALUES ($1, $2, FALSE, $3, NOW(), NOW())
@@ -1681,17 +1852,63 @@ export async function applyDirectoryDeprovisionPolicies(
            DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
           [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
         )
+        if (grantWasEnabled) {
+          appliedEffects.push({
+            type: 'grant_changed',
+            orgId: null,
+            beforeActive: true,
+            afterActive: false,
+          })
+        }
       }
 
       if (policy === 'mark_inactive') {
         outcome.usersDeactivatedCount += 1
         if (options.enabled) {
-          await client.query(
-            `UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1::text`,
+          const userWrite = await client.query(
+            `UPDATE users SET is_active = FALSE, updated_at = NOW()
+              WHERE id = $1::text AND is_active = TRUE
+              RETURNING id`,
             [localUserId],
           )
+          if (userWrite.rows.length > 0) {
+            appliedEffects.push({
+              type: 'user_changed',
+              orgId: null,
+              beforeActive: true,
+              afterActive: false,
+            })
+          }
         }
       }
+    }
+
+    if (options.enabled) {
+      // §5.3 steps 3-4. Zero effects means zero evidence: no generation bump, no event, no effect
+      // rows — a bump with nothing behind it would invalidate every outstanding restore for this
+      // person for free.
+      if (appliedEffects.length === 0) continue
+
+      // "Apply≈Plan" is enforced, not assumed. Under the mutex the plan and the applied set can
+      // only diverge if some OTHER writer changed this person's access graph without taking the
+      // same lock — precisely the D5 gap. Committing a ledger that disagrees with what actually
+      // happened would poison every later restore decision, so a divergence aborts the run
+      // (rolling back this transaction) instead of writing evidence known to be wrong.
+      assertAppliedMatchesPlan(localUserId, plannedEffects, appliedEffects)
+
+      const recorded = await recordDeprovisionEvent(client, {
+        localUserId,
+        orgId,
+        integrationId: options.integrationId,
+        directoryAccountId,
+        runId: options.runId,
+        triggeredBy: options.triggeredBy,
+        policy,
+        globallyClear,
+        effects: appliedEffects,
+      })
+      outcome.ledgerEventCount += 1
+      outcome.ledgerEffectCount += recorded.effectCount
     }
   }
 
@@ -4152,6 +4369,10 @@ export async function syncDirectoryIntegration(
         syncedAccountCount: users.size,
         integrationDefaultPolicy: integration.default_deprovision_policy,
         enabled: isDirectoryDeprovisionEnabled(),
+        // D4: the event ledger is anchored to this run — `event_origin='sync'` requires a run of
+        // the SAME integration (CHECK + BEFORE INSERT trigger, §5.2).
+        runId,
+        triggeredBy,
       })
 
       // R5: per-run manager-binding snapshot. The live GET /manager-coverage endpoint
@@ -5319,12 +5540,17 @@ export async function upsertActiveUserOrgMembership(
 export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
   client: MembershipWriteClient,
   options: { userId: string; orgId: string },
-): Promise<void> {
+): Promise<number> {
   await client.query(
     `SELECT 1 FROM user_orgs WHERE user_id = $1::text AND org_id = $2::text FOR UPDATE`,
     [options.userId, options.orgId],
   )
-  await client.query(
+  // D4: `RETURNING` so the caller learns whether the row ACTUALLY flipped. The deprovision
+  // ledger records applied effects, and "the UPDATE ran" is not the same fact as "a membership
+  // was deactivated" — the predicate below deliberately declines to flip when another active
+  // binding still vouches for this person in this org. Existing callers ignore the return value;
+  // only the effect ledger needs it.
+  const flipped = await client.query(
     `UPDATE user_orgs
      SET is_active = FALSE
      WHERE user_id = $1::text
@@ -5339,9 +5565,11 @@ export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
            AND l.link_status = 'linked'
            AND a.is_active = TRUE
            AND i.org_id = $2::text
-       )`,
+       )
+     RETURNING user_id`,
     [options.userId, options.orgId],
   )
+  return flipped.rows.length
 }
 
 /**

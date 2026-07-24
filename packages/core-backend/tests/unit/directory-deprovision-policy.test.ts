@@ -41,14 +41,39 @@ import {
 // predicate" discipline — unless a test opts a user OUT via `notGloballyClear`, which is how
 // the new item-2 dispatch tests below exercise the "org-membership candidate but NOT globally
 // clear" branch without a real database.
+//
+// D4 (deprovision design lock Rev 4.2, §5.3/§7.2/§7.4): the executor now takes a per-user
+// `users ... FOR UPDATE` mutex, re-reads globally-clear PER PERSON inside that lock (the batch
+// `UNNEST` pre-read is gone), reads each layer's current active boolean to build the effect set,
+// and — only when that set is non-empty — bumps `access_generation` and writes the event/effect
+// ledger rows. The stub therefore has to model a COHERENT world rather than answering each query
+// in isolation: `applyDirectoryDeprovisionPolicies` cross-checks the plan against what the writes
+// actually returned and throws on divergence, so a stub whose "would this membership flip?" probe
+// disagrees with what its `UPDATE ... RETURNING` hands back would fail every test for a reason
+// that has nothing to do with the code under test. One flag drives both halves of each pair.
 const STUB_ORG_ID = 'org-1'
 
 function stubClient(
   candidates: Array<{ directory_account_id: string; local_user_id: string; deprovision_policy_override: string | null }>,
-  options: { notGloballyClear?: string[] } = {},
+  options: {
+    notGloballyClear?: string[]
+    /** Drives BOTH the plan probe and the `UPDATE user_orgs ... RETURNING` result. */
+    membershipDeactivatable?: boolean
+    grantEnabled?: boolean
+    userActive?: boolean
+    activationStatus?: string | null
+    /** Escape hatch for the divergence test: make the write disagree with the plan. */
+    membershipWriteFlips?: boolean
+  } = {},
 ) {
   const notGloballyClear = new Set(options.notGloballyClear ?? [])
+  const membershipDeactivatable = options.membershipDeactivatable ?? true
+  const membershipWriteFlips = options.membershipWriteFlips ?? membershipDeactivatable
+  const grantEnabled = options.grantEnabled ?? true
+  const userActive = options.userActive ?? true
+  const activationStatus = options.activationStatus === undefined ? 'activated' : options.activationStatus
   const queries: string[] = []
+  let eventSeq = 0
   return {
     queries,
     query: async (sql: string, params?: unknown[]) => {
@@ -58,21 +83,52 @@ function stubClient(
         // evaluate the predicate — see the scope note.
         return { rows: candidates }
       }
-      if (/INSERT INTO user_external_auth_grants/i.test(sql) || /UPDATE users SET is_active = FALSE/i.test(sql)) {
+      if (/INSERT INTO user_external_auth_grants/i.test(sql)) {
         return { rows: [] }
+      }
+      if (/UPDATE users SET is_active = FALSE/i.test(sql)) {
+        return { rows: userActive ? [{ id: String(params?.[0] ?? '') }] : [] }
       }
       if (/SELECT org_id\s+FROM directory_integrations/i.test(sql)) {
         return { rows: [{ org_id: STUB_ORG_ID }] }
+      }
+      // §7.2 mutex + the state the plan is computed from.
+      if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/i.test(sql)) {
+        return {
+          rows: [{
+            id: String(params?.[0] ?? ''),
+            activation_status: activationStatus,
+            is_active: userActive,
+            access_generation: 0,
+          }],
+        }
+      }
+      // §7.4 per-person globally-clear re-read, taken under the lock.
+      if (/AS globally_clear/i.test(sql)) {
+        return { rows: [{ globally_clear: !notGloballyClear.has(String(params?.[0] ?? '')) }] }
+      }
+      // "Would the org-scoped membership write actually flip?" — the plan's probe.
+      if (/SELECT 1\s+FROM user_orgs/i.test(sql) && /NOT EXISTS/i.test(sql)) {
+        return { rows: membershipDeactivatable ? [{ '?column?': 1 }] : [] }
+      }
+      if (/SELECT enabled\s+FROM user_external_auth_grants/i.test(sql)) {
+        return { rows: grantEnabled ? [{ enabled: true }] : [] }
       }
       if (/FROM user_orgs WHERE user_id = \$1::text AND org_id = \$2::text\s+FOR UPDATE/i.test(sql)) {
         return { rows: [] }
       }
       if (/UPDATE user_orgs\s+SET is_active = FALSE/i.test(sql)) {
-        return { rows: [] }
+        return { rows: membershipWriteFlips ? [{ user_id: String(params?.[0] ?? '') }] : [] }
       }
-      if (/FROM UNNEST\(\$1::text\[\]\) AS candidate_user/i.test(sql)) {
-        const requested = (params?.[0] as string[] | undefined) ?? []
-        return { rows: requested.filter((id) => !notGloballyClear.has(id)).map((id) => ({ local_user_id: id })) }
+      if (/UPDATE users\s+SET access_generation/i.test(sql)) {
+        return { rows: [{ access_generation: 1 }] }
+      }
+      if (/INSERT INTO directory_deprovision_events/i.test(sql)) {
+        eventSeq += 1
+        return { rows: [{ id: `evt-${eventSeq}` }] }
+      }
+      if (/INSERT INTO directory_deprovision_effects/i.test(sql)) {
+        return { rows: [] }
       }
       // Anything else is drift: a new query appeared that no test has reasoned about.
       throw new Error(`Unhandled SQL in deprovision stub:\n${sql}`)

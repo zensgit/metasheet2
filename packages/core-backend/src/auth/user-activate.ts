@@ -139,14 +139,18 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     }
 
     if (input.enableDingTalkGrant === true) {
+      // `user_external_auth_grants` is where the DingTalk grant lives — it is the table
+      // `dingtalk-oauth.ts` reads to decide whether a login is allowed. The first cut wrote
+      // `user_external_identities.grant_enabled`, a column that exists in no migration, behind a
+      // `.catch` that made the failure invisible: activation reported success while the person
+      // was never actually granted DingTalk login. Same upsert shape the OAuth bind path uses.
       await client.query(
-        `UPDATE user_external_identities
-            SET grant_enabled = TRUE, updated_at = NOW()
-          WHERE local_user_id = $1 AND provider = 'dingtalk'`,
-        [userId],
-      ).catch(() => {
-        /* grant column may be named differently — non-fatal for unit/mock */
-      })
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ('dingtalk', $1, TRUE, $2, NOW(), NOW())
+         ON CONFLICT (provider, local_user_id)
+         DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+        [userId, `activate:${input.adminUserId ?? 'system'}`],
+      )
     }
   })
 
