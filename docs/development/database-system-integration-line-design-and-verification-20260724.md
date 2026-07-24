@@ -44,11 +44,14 @@ Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲
      `copyData` (which indeed has no live in-tree caller), there is a **shipped, live multi-page OFFSET
      reader**: `pipeline-runner.cjs` runs `while (page < maxPages)` advancing `cursor = readResult.nextCursor`,
      and the `data-source:sql-readonly` adapter's NON-watermark branch emits
-     `nextCursor = String(offset + records.length)` on a full page — so a non-incremental pipeline over a
-     SQL data source pages by OFFSET **with no `orderBy` anywhere on the path**, stopping on a short page
+     `nextCursor = String(offset + records.length)` on a full page — so a pipeline over a SQL data source
+     pages by OFFSET **with no `orderBy` anywhere on the path**, stopping on a short page
      (`done: !fullPage`) evaluated against LIVE data. Earlier wording in this line implied the offset path
-     was merely *reachable*; it is **exercised by shipped pipeline code**. This raises, not lowers, the
-     priority of the B1a ordering contract and the migration that must precede B2;
+     was merely *reachable*; it is **exercised by shipped pipeline code**. Note the gate precisely: the
+     adapter takes the offset branch whenever the request carries no watermark keys (`!hasOwnKeys(request.watermark)`),
+     NOT merely when the pipeline mode is non-incremental — so an *incremental* run also pages by offset
+     until a watermark has been stored. This raises, not lowers, the priority of the B1a ordering contract
+     and the migration that must precede B2;
   4. values-free `unorderedOffsetAttemptCount` at **both** the route and the adapter entries — closes the runtime blind spot, but it is instrumentation. **Owner decision recorded: the B1-observability gate is NOT opened early** — it cannot accelerate #4437 and would add a new runtime deployment surface. M1's inventory therefore rests on items 1–3 and **must state this runtime residual explicitly** in the migration decision, not gloss it; the counter arrives in its §4 slot behind its own gate.
 
   ⟲R4 **M1 produces inventory evidence only — the B2 merge decision is NOT taken in M1.** Per §4, **#4591** (which superseded #4580) merges **LAST**, and only after adapter-chokepoint telemetry (B1-observability), the coverage-mapped caller inventory, and customer migration are complete: an HTTP access log cannot see plugin-internal or direct adapter callers, so "log-zero" alone can never green-light enforcement. This supersedes the earlier "inventory = 0 ⇒ merge B2" fast path (the conflict between that fast path and the §4 order is adjudicated in favour of §4). Standing rules regardless of counts: new paginated configs must declare a stable **unique** `orderBy` — ⟲C4 **fail-fast hardening, not stable-pagination certification** (presence-only; uniqueness, same-order-from-page-1, and same-snapshot remain unproven until B1b/B1c); any live configs found ⇒ versioned config migration + preflight rejection first; never auto-guess a primary-key order.
