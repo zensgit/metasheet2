@@ -1174,7 +1174,7 @@
             <p class="directory-admin__hint">
               本地用户：{{ item.account.localUser ? describeLocalUserIdentifier(item.account.localUser) : '未绑定' }} ·
               外部用户：{{ item.account.externalUserId }} ·
-              部门：{{ item.account.departmentPaths.join('，') || '未分配部门' }}
+              部门：{{ (item.account.departmentPaths || []).join('，') || '未分配部门' }}
             </p>
             <p v-if="item.kind === 'pending_binding' && item.recommendationStatus" class="directory-admin__hint">
               推荐判断：{{ item.recommendationStatus.message }}
@@ -1687,7 +1687,7 @@
             </div>
 
             <p class="directory-admin__hint">
-              部门：{{ account.departmentPaths.join('，') || '未分配部门' }}
+              部门：{{ (account.departmentPaths || []).join('，') || '未分配部门' }}
             </p>
             <div v-if="account.localUser?.id" class="directory-admin__actions">
               <router-link
@@ -1970,6 +1970,11 @@
             <p v-if="run.errorMessage" class="directory-admin__status directory-admin__status--error">{{ run.errorMessage }}</p>
           </article>
         </section>
+
+        <DirectoryDeprovisionEvidencePanel
+          v-if="selectedIntegration"
+          :integration-id="selectedIntegration.id"
+        />
       </section>
     </div>
   </section>
@@ -1978,6 +1983,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
@@ -2464,7 +2470,7 @@ const draft = reactive<DirectoryDraft>({
   memberGroupDefaultNamespacesText: '',
   status: 'active',
   scheduleCron: '',
-  defaultDeprovisionPolicy: 'mark_inactive',
+  defaultDeprovisionPolicy: 'manual_review',
   syncEnabled: false,
 })
 
@@ -2875,7 +2881,7 @@ function resetDraft() {
   draft.memberGroupDefaultNamespacesText = ''
   draft.status = 'active'
   draft.scheduleCron = ''
-  draft.defaultDeprovisionPolicy = 'mark_inactive'
+  draft.defaultDeprovisionPolicy = 'manual_review'
   draft.syncEnabled = false
 }
 
