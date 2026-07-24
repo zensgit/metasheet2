@@ -326,17 +326,15 @@ export class MySQLAdapter extends BaseDataAdapter {
     // over the WHOLE table and an over-max limit was served verbatim — the exact case A5's contract
     // says can never happen ("omit limit can never mean whole table"). Postgres/MSSQL enforced it;
     // MySQL did not, and no A5 test covered this adapter. resolveEffectiveLimit returns a validated
-    // positive integer, so the interpolation is injection-safe.
+    // positive integer, so the interpolation is injection-safe. Offset uses the shared normalizer
+    // (omit/null -> none; 0 legal & bounded; positive requires explicit orderBy; invalid -> throw)
+    // rather than a local parseInt that could silently drop bad offsets while still looking "safe".
     sql += ` LIMIT ${this.resolveEffectiveLimit(options.limit)}`
-    if (options.offset) {
-      const offset = parseInt(String(options.offset), 10)
-      if (!isNaN(offset) && offset >= 0) {
-        // Ordering boundary: an OFFSET page without a deterministic ORDER BY silently
-        // duplicates/skips. Validated against the PARSED offset so a non-numeric value that never
-        // reaches the SQL cannot trip the guard.
-        this.assertDeterministicOffsetOrdering(offset, options.orderBy)
-        sql += ` OFFSET ${offset}`
-      }
+    const offset = this.resolveEffectiveOffset(options.offset)
+    if (offset !== null && offset > 0) {
+      // Ordering boundary: a positive OFFSET page without explicit orderBy silently duplicates/skips.
+      this.assertExplicitOffsetOrdering(offset, options.orderBy)
+      sql += ` OFFSET ${offset}`
     }
 
     return this.query<T>(sql, params)

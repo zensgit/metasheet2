@@ -300,12 +300,14 @@ export class MSSQLAdapter extends BaseDataAdapter {
       : '*'
 
     // A5: `limit` is always a bounded positive int (omit -> MAX cap, > MAX -> throw), so a direct
-    // internal caller cannot issue an unbounded read.
+    // internal caller cannot issue an unbounded read. Offset uses the shared normalizer so invalid
+    // values (negative / NaN / Infinity / fractional) fail closed instead of dropping both TOP and
+    // FETCH (the historical path that emitted unbounded `SELECT * FROM [t]`).
     const limit = this.resolveEffectiveLimit(options.limit)
-    const offset = options.offset != null ? Math.floor(Number(options.offset)) : null
-    // Ordering boundary: an OFFSET page without a deterministic ORDER BY silently duplicates/skips.
-    this.assertDeterministicOffsetOrdering(offset, options.orderBy)
-    // limit-without-offset uses TOP (no ORDER BY required); offset uses OFFSET/FETCH.
+    const offset = this.resolveEffectiveOffset(options.offset)
+    // Ordering boundary: a positive OFFSET page without explicit orderBy silently duplicates/skips.
+    this.assertExplicitOffsetOrdering(offset, options.orderBy)
+    // limit-without-offset uses TOP (no ORDER BY required); positive offset uses OFFSET/FETCH.
     const useTop = offset == null || offset === 0
 
     let sql = `SELECT ${useTop ? `TOP (${limit}) ` : ''}${selectClause} FROM ${this.quoteIdent(table)}`
@@ -329,10 +331,12 @@ export class MSSQLAdapter extends BaseDataAdapter {
       : null
 
     if (offset != null && offset > 0) {
-      // An offset read must carry a deterministic order (see assertDeterministicOffsetOrdering,
-      // called above) — `orderBy` is therefore guaranteed present here. The former
-      // `ORDER BY (SELECT NULL)` fallback satisfied SQL Server's syntactic requirement while
-      // providing NO ordering guarantee, so paged reads could silently duplicate and skip rows.
+      // An offset read must carry an explicit orderBy (see assertExplicitOffsetOrdering,
+      // called above) — `orderBy` is therefore guaranteed present here. That is only a non-empty
+      // ORDER BY, not a proven total order (callers still need a unique tiebreaker for stable
+      // pages). The former `ORDER BY (SELECT NULL)` fallback satisfied SQL Server's syntactic
+      // requirement while providing NO ordering guarantee, so paged reads could silently
+      // duplicate and skip rows.
       sql += ` ORDER BY ${orderBy} OFFSET ${offset} ROWS`
       sql += ` FETCH NEXT ${limit} ROWS ONLY`
     } else if (orderBy) {

@@ -306,38 +306,77 @@ export abstract class BaseDataAdapter extends EventEmitter {
   }
 
   /**
+   * Offset normalizer/validator — the A5 sibling for the skip half of a paginated read.
+   *
+   * Centralized so MSSQL / Postgres / MySQL cannot each invent a different partial parse that
+   * drops the row bound (historically: MSSQL `Math.floor(Number(offset))` turned -1 / NaN into a
+   * state where neither TOP nor FETCH applied, emitting unbounded `SELECT * FROM [t]`).
+   *
+   *  - omitted / null  -> null (no OFFSET clause; still limit-bounded)
+   *  - 0               -> 0 (legal; still limit-bounded; no cross-page ordering contract)
+   *  - positive int    -> passthrough (caller must also supply explicit orderBy — see below)
+   *  - negative / NaN / ±Infinity / fractional / non-integer -> throw (fail closed; never emit)
+   *
+   * Only finite non-negative integers are accepted. Callers must not rely on silent coercion
+   * (`parseInt`, `Math.floor`, truthiness) — those paths are what produced the unbounded MSSQL bug.
+   */
+  protected resolveEffectiveOffset(offset?: number | null): number | null {
+    if (offset === undefined || offset === null) {
+      return null
+    }
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new Error(
+        `Invalid row offset ${JSON.stringify(offset)} (must be a finite non-negative integer)`
+      )
+    }
+    return offset
+  }
+
+  /**
    * Ordering-boundary policy — the A5 sibling for the OTHER half of a paginated read.
    *
    * A5 above bounds each page and tells callers to "paginate with limit+offset instead". But an
-   * OFFSET is only meaningful against a DETERMINISTIC total order: SQL gives no row-order guarantee
+   * OFFSET is only meaningful against a stable ordered scan: SQL gives no row-order guarantee
    * without ORDER BY, so `LIMIT n OFFSET k` over an unordered relation may return rows in a
    * different order on each call. The pages then SILENTLY overlap and skip — the caller reads N
    * rows, believes it read the table, and has both duplicates and holes with no error anywhere.
    * That is a data-integrity failure, not a performance wart, and it is invisible at every layer
    * above this one.
    *
-   * So an offset read MUST carry an explicit orderBy, and we fail closed when it does not. We do
-   * NOT auto-order by a discovered primary key: that would silently paper over the caller's missing
-   * ordering contract and keep the defect un-diagnosed. The caller has to state the order it is
-   * paginating by, because only the caller knows which order its cursor arithmetic assumes.
+   * So a positive-offset read MUST carry an explicit non-empty orderBy, and we fail closed when it
+   * does not. Honesty about what that checks: a non-empty orderBy is only proof that the caller
+   * requested *some* ORDER BY clause — it is NOT proof of a deterministic total order. Ties on the
+   * ordered columns still let the engine return peer rows in any relative order across pages.
+   * Caller pagination that needs stable pages MUST include a stable unique tiebreaker in orderBy
+   * (e.g. the primary key as a final sort key). We do NOT auto-order by a discovered primary key:
+   * that would silently paper over the caller's missing ordering contract and keep the defect
+   * un-diagnosed. The caller has to state the order it is paginating by, because only the caller
+   * knows which order its cursor arithmetic assumes.
    *
    * Enforced at the ADAPTER layer for the same reason A5 is — it is the chokepoint every structured
    * read passes through, INCLUDING direct internal callers that bypass the route.
    *
-   * Scope: `offset > 0` only. A limit-only first page (no offset) has no cross-page contract to
-   * violate, so it stays legal and unchanged.
+   * Scope: `offset > 0` only. A limit-only first page or `offset: 0` has no cross-page contract to
+   * violate at this layer, so it stays legal and unchanged.
+   *
+   * OUT OF SCOPE (separate owner gate): redesigning `data-source:sql-readonly` callers so every
+   * paginated path supplies an explicit orderBy + unique tiebreaker. That bridge currently uses
+   * offset reads without orderBy as an established mode; requiring order there is a pagination-
+   * contract redesign, not a small adapter-layer fix.
    */
-  protected assertDeterministicOffsetOrdering(
+  protected assertExplicitOffsetOrdering(
     offset: number | null | undefined,
     orderBy: QueryOptions['orderBy'] | undefined
   ): void {
-    const usesOffset = offset !== null && offset !== undefined && Number(offset) > 0
+    const usesOffset = offset !== null && offset !== undefined && offset > 0
     if (!usesOffset) return
     if (!Array.isArray(orderBy) || orderBy.length === 0) {
       throw new Error(
-        'OFFSET pagination requires an explicit orderBy: without a deterministic total order the ' +
-          'database may return rows in any order, so successive pages can silently duplicate and ' +
-          'skip rows. Pass orderBy (e.g. the primary key) alongside offset.'
+        'OFFSET pagination requires an explicit orderBy: without ORDER BY the database may return ' +
+          'rows in any order, so successive pages can silently duplicate and skip rows. A non-empty ' +
+          'orderBy is only explicit ordering, not proof of a deterministic total order — caller ' +
+          'pagination must include a stable unique tiebreaker (e.g. primary key) in orderBy. ' +
+          'Pass orderBy alongside offset.'
       )
     }
   }

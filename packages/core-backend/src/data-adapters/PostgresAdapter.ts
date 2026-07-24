@@ -198,12 +198,14 @@ export class PostgresAdapter extends BaseDataAdapter {
 
     // A5: always bound the read at the adapter layer (omit -> MAX cap, > MAX -> throw), so a direct
     // internal caller cannot issue an unbounded SELECT. resolveEffectiveLimit returns a validated
-    // positive integer, so the interpolation is injection-safe.
+    // positive integer, so the interpolation is injection-safe. Offset uses the shared normalizer
+    // (omit/null -> none; 0 legal & bounded; positive requires explicit orderBy; invalid -> throw).
     sql += ` LIMIT ${this.resolveEffectiveLimit(options.limit)}`
-    if (options.offset) {
-      // Ordering boundary: an OFFSET page without a deterministic ORDER BY silently duplicates/skips.
-      this.assertDeterministicOffsetOrdering(options.offset, options.orderBy)
-      sql += ` OFFSET ${options.offset}`
+    const offset = this.resolveEffectiveOffset(options.offset)
+    if (offset !== null && offset > 0) {
+      // Ordering boundary: a positive OFFSET page without explicit orderBy silently duplicates/skips.
+      this.assertExplicitOffsetOrdering(offset, options.orderBy)
+      sql += ` OFFSET ${offset}`
     }
 
     return this.query<T>(sql, params)

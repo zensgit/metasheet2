@@ -85,21 +85,25 @@ describe.each(SQL_ADAPTERS)('$name — adapter boundary policies', ({ make }) =>
   })
 
   // ── Ordering boundary: the other half of a paginated read ──────────────────────────────────
-  // An OFFSET is only meaningful against a deterministic total order. Without ORDER BY the engine
-  // may return rows in a different order per call, so successive pages overlap and leave holes.
+  // A positive OFFSET needs an explicit ORDER BY. Without it the engine may return rows in a
+  // different order per call, so successive pages overlap and leave holes. A non-empty orderBy is
+  // only explicit ordering (not proof of a total order); stable pagination also needs a unique
+  // tiebreaker — that is a caller contract, not something this guard can prove.
 
-  it('ordering: offset WITHOUT orderBy fails closed', async () => {
+  it('ordering: positive offset WITHOUT orderBy fails closed', async () => {
     const adapter = make()
     capture(adapter)
     await expect(select(adapter, { limit: 10, offset: 10 }))
       .rejects.toThrow(/OFFSET pagination requires an explicit orderBy/)
   })
 
-  it('ordering: offset WITH orderBy is allowed (positive control — not a blanket ban on offset)', async () => {
+  it('ordering: positive offset WITH orderBy is allowed (positive control — not a blanket ban)', async () => {
     const adapter = make()
     const sql = capture(adapter)
     await select(adapter, { limit: 10, offset: 10, orderBy: ORDERED })
     expect(sql[0]).toMatch(/ORDER BY/i)
+    // Dialect forms: PG/MySQL `OFFSET n`, MSSQL `OFFSET n ROWS`.
+    expect(sql[0]).toMatch(/\bOFFSET\s+10\b/i)
   })
 
   it('ordering: a limit-only first page stays legal (no cross-page contract to violate)', async () => {
@@ -107,6 +111,51 @@ describe.each(SQL_ADAPTERS)('$name — adapter boundary policies', ({ make }) =>
     const sql = capture(adapter)
     await select(adapter, { limit: 10 })
     expect(sql).toHaveLength(1)
+  })
+
+  // ── Offset normalizer: shared fail-closed contract (the MSSQL -1/NaN unbounded hole) ────────
+  // Invalid offsets must throw BEFORE any SQL is emitted. Historically MSSQL's
+  // Math.floor(Number(offset)) turned -1/NaN into a state where neither TOP nor FETCH applied.
+
+  it.each([
+    ['negative', -1],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['fractional', 1.5],
+    ['negative fractional', -0.5],
+  ] as const)('offset normalizer: refuses %s offset without emitting SQL', async (_label, offset) => {
+    const adapter = make()
+    const sql = capture(adapter)
+    await expect(select(adapter, { limit: 10, offset } as QueryOptions))
+      .rejects.toThrow(/Invalid row offset/)
+    expect(sql).toHaveLength(0)
+  })
+
+  it('offset normalizer: omitted/null means no OFFSET clause (still A5-bounded)', async () => {
+    const adapter = make()
+    const sql = capture(adapter)
+    await select(adapter, { limit: 10 })
+    await select(adapter, { limit: 10, offset: null as unknown as number })
+    expect(sql).toHaveLength(2)
+    for (const statement of sql) {
+      expect(statement).not.toMatch(/\bOFFSET\b/i)
+      // Still bounded: TOP (n) / LIMIT n / FETCH NEXT n.
+      // Note: do not use \b after `)` — `)` is non-word so TOP (10) would not match.
+      expect(statement).toMatch(/(?:TOP\s*\(\s*10\s*\)|LIMIT\s+10\b|FETCH NEXT\s+10\s+ROWS ONLY)/i)
+    }
+  })
+
+  it('offset normalizer: zero is legal, bounded, and does not require orderBy', async () => {
+    const adapter = make()
+    const sql = capture(adapter)
+    await select(adapter, { limit: 10, offset: 0 })
+    expect(sql).toHaveLength(1)
+    // offset 0 must not force a positive-offset pagination path (no OFFSET 0 required),
+    // and must remain row-bounded.
+    expect(sql[0]).toMatch(/(?:TOP\s*\(\s*10\s*\)|LIMIT\s+10\b|FETCH NEXT\s+10\s+ROWS ONLY)/i)
+    // Positive OFFSET clause should not appear for a zero skip (adapters omit the no-op).
+    expect(sql[0]).not.toMatch(/\bOFFSET\s+0\b/i)
   })
 })
 
@@ -141,8 +190,10 @@ describe('boundary policies — dialect-specific artifacts and known limits', ()
   // so a caller that reads page 1 with no offset/order and only supplies an order from page 2 still
   // has an incoherent sequence. The adapter cannot distinguish "standalone bounded preview" from
   // "page 1 of a sequence" — that intent is only known to the paginating caller, so the residual
-  // hole must be closed by the caller's ordering contract, not by over-strictness here (rejecting
-  // `offset: 0` would refuse reads that emit no OFFSET clause at all).
+  // hole must be closed by the caller's ordering contract (including a stable unique tiebreaker),
+  // not by over-strictness here (rejecting `offset: 0` would refuse reads that emit no OFFSET
+  // clause at all). The `data-source:sql-readonly` caller redesign that would close this end-to-end
+  // remains a separate owner gate.
   it('KNOWN LIMIT: a limit-only first page is not covered by the adapter-level ordering guard', async () => {
     const adapter = new PostgresAdapter(cfg('postgresql'))
     const sql = capture(adapter)
@@ -151,5 +202,16 @@ describe('boundary policies — dialect-specific artifacts and known limits', ()
     // …and page 2 of that same sequence IS refused, which is where the caller's intent becomes visible.
     await expect(select(adapter, { limit: 10, offset: 10 }))
       .rejects.toThrow(/OFFSET pagination requires an explicit orderBy/)
+  })
+
+  it('ordering error wording: orderBy is explicit ordering, not a proven total order', async () => {
+    const adapter = new PostgresAdapter(cfg('postgresql'))
+    capture(adapter)
+    await expect(select(adapter, { limit: 10, offset: 10 })).rejects.toThrow(
+      /only explicit ordering, not proof of a deterministic total order/
+    )
+    await expect(select(adapter, { limit: 10, offset: 10 })).rejects.toThrow(
+      /stable unique tiebreaker/
+    )
   })
 })
