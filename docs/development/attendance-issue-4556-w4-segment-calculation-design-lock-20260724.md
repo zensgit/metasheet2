@@ -47,19 +47,22 @@ listed so a rebase must re-find the code instead of carrying stale line numbers.
 | Daily projection | `attendance_records` is one mutable daily result with first/last timestamps, minutes, status, and meta. | `packages/core-backend/src/db/migrations/zzzz20260114090000_create_attendance_tables.ts` |
 | Daily statuses | Runtime storage accepts `normal`, `late`, `early_leave`, `late_early`, `partial`, `absent`, `adjusted`, `off`. | `zzzz20260114120000_add_attendance_scheduling_tables.ts` |
 | W3 segments | One to three dense ordered segments are persisted through the canonical shift service. | `zzzz20260724120000_create_attendance_shift_segments.ts`; `attendance-shift-service.cjs` |
-| W3 runtime hold | `SEGMENT_CALCULATION_IMPLEMENTED=false`; the org allowlist cannot activate calculation. | `attendance-shift-service.cjs:49-53,239-253` |
+| W3 runtime hold | `SEGMENT_CALCULATION_IMPLEMENTED=false`; the org allowlist cannot activate calculation. | `attendance-shift-service.cjs:54,245-254` |
 | W2 resolver | Six entrypoints return `resolved`, `ambiguous`, or `unresolved`; resolved `shiftId` is required and W2 `segmentIndex` is null. | `attendance-work-date-resolver.cjs:1-61`; `attendance-work-date-adapters.cjs` |
 | Context selection | Runtime precedence remains rotation, direct assignment, default rule, then holiday/calendar handling. | `resolveWorkContext` at `index.cjs:14581`; `resolveWorkContextFromPrefetch` at `:17278` |
-| Legacy metrics | `computeMetrics` uses elapsed first-in to last-out and daily status logic. | `index.cjs:11307-11358` |
+| Legacy metrics | `computeMetrics` uses elapsed first-in to last-out and daily status logic. | `index.cjs:11321-11372` |
 | DST hazard | `buildZonedDate` catches conversion failure and falls back to a UTC-constructed instant. | `index.cjs:6574-6591` |
 | Common writer | `upsertAttendanceRecord` and `computeAttendanceRecordUpsertValues` are common, but not exclusive. | `index.cjs:19361-19561` |
 | Bulk writers | `values`, `unnest`, and staging `INSERT ... SELECT` independently write the projection. | `batchUpsertAttendanceRecordsValues`, `batchUpsertAttendanceRecordsUnnest`, `batchUpsertAttendanceRecordsStaging` |
-| Scheduled side door | `generateAbsenceRecords` directly inserts `attendance_records`. | `index.cjs:21064-21082` |
+| Scheduled side door | `generateAbsenceRecords` directly inserts `attendance_records`; both the cron and the admin route call it. | `index.cjs:21101-21120`; `runAutoAbsenceForOrgDate` |
 | Import rollback | The rollback route directly deletes rows carrying `source_batch_id`. | `index.cjs:37971-37980` |
-| Approval paths | Correction, leave, overtime, outdoor punch, and manual edit ultimately mutate the daily row. | `applyAttendanceResultEdit`; approval terminal handling near `index.cjs:31026-31193` |
+| Approval paths | Correction, leave, overtime, and outdoor punch can all create or update the daily row; outdoor also inserts its punch event, while correction/leave/overtime also append an adjustment event. | `applyAttendanceResultEdit`; terminal branches in `resolveRequest` |
 | Outdoor first record | Request creation freezes event fields, but final approval can re-read current context and create the first row without W2 frozen attribution. | live/outdoor request and approval branches in `index.cjs` |
 | Merge second pass | `applyAttendanceInOutMergePolicy` can mutate first/last after the first upsert. | `index.cjs:19279`; live/outdoor callers |
 | Approval cancellation | Leave cancellation reverses its balance ledger but does not append a new attendance calculation. | cancellation branch near `index.cjs:31325-31420` |
+| Central approval side doors | Legacy approve/reject and generic action routes can currently terminalize a platform-source attendance approval instance without running attendance effects; the plugin has no reconciliation subscription. | `packages/core-backend/src/routes/approvals.ts`; `ApprovalBridgeService.dispatchAction`; `resolveRequest` |
+| Schedule-fact approvals | Terminal `shift_swap` and `schedule_dispatch` do not write a daily result, but do mutate shift assignments/group membership that future calculations consume. | `finalizeShiftSwapRequest`; `finalizeScheduleDispatchRequest` |
+| Decision authorization | Attendance decision/cancel handlers load the request by bare ID; the global attendance permission bypass is not itself org-scoped, while scheduler-scope authorization is. | `resolveRequest`; `cancelRequest`; `assertAttendanceRequestApprovalAllowed` |
 | Legacy import | `POST /api/attendance/import` has a private mapping/calculation/write loop. | route near `index.cjs:36337-36445` |
 | Integration sync | `/api/attendance/integrations/:id/sync` repeats import calculation in another loop. | route near `index.cjs:37135-37620` |
 | Explanation precedent | Wave 5 decision trace has separate admin/self hosts, active-org checks, token-subject self reads, and authorization before SQL. | `packages/core-backend/src/routes/attendance-admin.ts:1248-1471` |
@@ -67,6 +70,8 @@ listed so a rebase must re-find the code instead of carrying stale line numbers.
 | OpenAPI gap | `AttendanceRecord` has only the daily projection; no immutable segment calculation detail exists. | `packages/openapi/src/base.yml:431-470` |
 | Cleanup bypass | Generated cleanup SQL and staging helpers include direct record/event DML. | `scripts/attendance/generate-cleanup-sql.cjs`; `scripts/ops/staging-attendance-*.mjs` |
 | XLSX | The browser converts the first non-empty supported sheet to CSV and enters the existing CSV pipeline. | `AttendanceView.vue`; `importXlsxConvert.ts` |
+| Ordinary reader side doors | Anomaly listing, makeup-anomaly fact derivation, open-record work-date resolution, and Wave 5 DecisionTrace read `attendance_records` outside the headline record/summary/export surfaces. | `handleAttendanceAnomaliesGet`; `deriveMakeupAnomalyFacts`; `loadOpenRecordsForWorkDateResolver`; `AttendanceDecisionTrace.ts` |
+| Additional time fallbacks | Besides `buildZonedDate`, zoned-parts/work-date/minutes helpers silently fall back to UTC, while `parseDateInput` can interpret offset-less values in server-local time; default-rule timezone writes are not uniformly IANA-validated. | `getZonedParts`; `toWorkDate`; `getZonedMinutes`; `parseDateInput`; default-rule update route |
 
 ### 1.1 Current execution-path inventory is a completion artifact
 
@@ -89,11 +94,17 @@ separate debt entries even when they later call the same function.
 | P09 | Legacy `POST /api/attendance/import`: private per-row mapping/calculation/upsert loop. | W4C-3a: normalize and use canonical prepare/apply. |
 | P10 | `/api/attendance/integrations/:id/sync`: separate per-row calculation/upsert loop. | W4C-3a: normalize and use the same import kernel. |
 | P11 | `/import/rollback/:id`: hard delete of records carrying `source_batch_id`. | W4C-3a: remove delete and append same-record reversals. |
-| P12 | Approval request creation/edit: no attendance row yet and no complete immutable calculation snapshot today. | W4C-3b: append and bind immutable request snapshots before terminal processing. |
-| P13 | Approval terminal handling: correction/leave/overtime record upsert and outdoor/generic event insert. | W4C-3b: freeze closed facts; fresh-row creation is not a bypass. |
+| P12 | Approval request creation/edit: pending edit overwrites mutable `form_snapshot` without an `attendance_requests.version`; no complete immutable calculation snapshot exists today. | W4C-3b: append and bind immutable request snapshots before terminal processing. |
+| P13 | Attendance plugin terminal handling: correction/leave/overtime and outdoor can all upsert the row; outdoor inserts the punch event, and correction/leave/overtime also insert adjustment events. | W4C-3b: freeze closed facts and route every source/effect/result write through one transaction; fresh-row creation is not a bypass. |
 | P14 | Approved-request cancellation: balance/leave-ledger reversal only; it does **not** reverse an attendance result today. | W4C-3b: add an atomic calculation or explicit review/no-parent outcome; this is new capability, not a migration of an existing result reversal. |
 | P15 | `scripts/attendance/generate-cleanup-sql.cjs`: privileged generated record/event deletes. | W4C-3c: canonical retirement for W4-backed rows; no privileged destructive shortcut. |
 | P16 | Test-user cleanup and staging helpers: dynamic/direct synthetic deletes and inserts. | W4C-3c/W4C-5: classify tooling separately, retire W4-backed data canonically, and prove named-org residue cleanup. |
+| P17 | Central legacy approve/reject, generic action/bridge, and any card action capable of reaching an attendance instance can terminalize shared approval state outside the plugin body. | W4C-3b: identify attendance instances before terminal DML and either dispatch the canonical attendance command in the same transaction or fail closed; no split-brain terminal state. |
+| P18 | Terminal `shift_swap` and `schedule_dispatch` write schedule assignments/group membership outside the result transaction. | W4C-3b: classify them as schedule-fact writers and make their version/hash/lock participate in W4 context consistency before enabling authority. |
+| P19 | Decision and cancellation request lookup plus global permission bypass do not define an explicit org-bound authorization contract. | W4C-3b: lock request org first, derive org from the locked row, then apply the closed platform-admin versus org-member authorization matrix before shared/result DML. |
+| P20 | Anomaly, makeup-anomaly facts, open-record attribution, and DecisionTrace are direct ordinary readers absent from the named current-view list. | W4C-3c: move every one to the canonical active-current helper and give each an independent retired-row negative leg. |
+| P21 | Time conversion has multiple silent UTC/server-local fallback helpers and a default-rule timezone write path without uniform IANA validation. | W4C-1/W4C-2: strict-parse every business-time input and freeze the accepted zone/offset/instant; no helper-specific fallback path. |
+| P22 | Current request terminalization has three reachable execution bodies and no attendance reconciliation listener; later plugin approval may still apply effects after another body already made the instance terminal. | W4C-3b: one terminal attendance transition with expected version/status, canonical replay, and explicit rejection of a second execution body. |
 
 There is no general production recompute writer today. W4C-3c introduces
 prior-policy/default recompute and explicitly labeled current-policy recompute;
@@ -167,6 +178,12 @@ against W1 group-membership tables is a scope violation.
 | W4C-R26 | W4 atomic batches stay within one closed, tested bound. | 5001 items/targets fail before source DML; chunking or partial commit mutations fail. |
 | W4C-R27 | A completed operation cannot lose its required lifecycle event between DB commit and process emit. | Removing the transactional outbox reproduces commit-before-emit loss. |
 | W4C-R28 | Frozen per-segment grace is derived only from the selected shift/rule profile until a new schema is ratified. | Segment-specific injection or current-policy reread fails fingerprint/context tests. |
+| W4C-R29 | An attendance approval instance has one terminal execution body. | Legacy approve/reject, generic action/bridge, card action, and plugin decision mutations either converge before terminal DML or fail closed; a second body cannot apply or omit attendance effects. |
+| W4C-R30 | Attendance approval and cancellation authorization is explicit at the locked request org. | Cross-org attendance-admin/delegated UUID probes fail before shared/result SQL; platform-admin override requires the closed global posture and an audit witness. |
+| W4C-R31 | Schedule-fact writers cannot race or bypass frozen calculation context. | Moving shift-swap/schedule-dispatch/shift-assignment mutation outside the compatible lock/version protocol fails a concurrent calculation test. |
+| W4C-R32 | Every ordinary daily-row reader uses the active-current contract. | Independent retired-row legs cover anomaly, makeup-anomaly facts, open-record attribution, DecisionTrace, and every pre-existing list/summary/report/export reader. |
+| W4C-R33 | Every business-time ingress uses one strict timezone contract. | Invalid/missing zone, DST gap/fold, offset-less server-local parsing, and helper-level UTC fallback mutations all fail before source/result DML. |
+| W4C-R34 | Pending request edits are versioned immutable transitions. | Reusing mutable `form_snapshot`, omitting the expected snapshot hash/version, or an A -> B -> A edit without three snapshots fails. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1251,7 +1268,10 @@ pointer/owner/visibility/reason tuple; immutable rows never carry a mutable
 Create one canonical current-record view/query helper that includes
 `visibility_state='active'`. Every ordinary consumer must use it: employee/admin
 record lists, summary/payroll, report sync/digests, missed-punch/reminder
-selection, comprehensive-hours, export, and any integration/report reader.
+selection, anomaly listing, makeup-anomaly fact derivation, open-record
+work-date attribution, Wave 5 DecisionTrace, comprehensive-hours, export, and
+any integration/report reader. These are independent consumers even when they
+share a downstream helper; each receives its own retired-row negative test.
 Only explicitly named history/calculation-detail and operator audit paths may
 read retired parents.
 
@@ -1498,12 +1518,16 @@ edit must never commit a mixed snapshot.
 ### 8.3 Entrypoint parity
 
 Live, scheduled, three modern import transports, legacy import, integration
-sync, request creation/pending edit/intermediate or terminal decision,
+sync, request creation/pending edit/intermediate or terminal decision through
+the plugin, central legacy route, generic bridge, or verified card action,
 correction, leave/overtime, outdoor approval, manual override, recompute,
 approval reversal, import rollback, and operator retirement all use section
 8.1. A source-only request operation may seal a response without inserting a
 calculation, but it still uses operation preflight and immutable request
-snapshots. Rule preview remains non-authoritative and writes no snapshots.
+snapshots. Shift-swap and schedule-dispatch terminal operations are source-only
+schedule-fact commands: they use the operation boundary and compatible
+context-lock/version protocol but do not fabricate a daily calculation.
+Rule preview remains non-authoritative and writes no snapshots.
 
 ### 8.4 Source, effect, and result mechanical bypass guard
 
@@ -1539,6 +1563,19 @@ adapters.
 Removing the discriminator/hook or returning before it fails an attendance
 approval/ledger positive control; non-attendance approval behavior remains a
 separate positive control.
+
+The discriminator is enforced at every current terminal body, not only in the
+plugin: legacy `/api/approvals/:id/approve|reject`, generic
+`/api/approvals/:id/actions` through `ApprovalBridgeService`, any
+approval-card action capable of resolving an attendance instance, and the
+attendance plugin decision routes. An attendance instance cannot be committed
+terminal by a generic body and reconciled later. Before terminal shared-table
+DML, the body must either enter the same canonical attendance transaction or
+return the closed fail-closed response. The canonical transition locks
+`approval_instances`, requires the expected pending status/version, and seals
+operation replay with the exact terminal response. A later decision body
+therefore returns a congruent completed replay or a conflict and never applies
+attendance effects a second time.
 
 The CI guard parses/scans every runtime root, generated SQL, migrations, and
 operator scripts for INSERT/UPDATE/DELETE/TRUNCATE/MERGE, `COPY FROM|TO`,
@@ -1813,7 +1850,7 @@ Gates:
 - the collector generates an exact-head source/effect/result debt inventory
   naming every current command route, worker/recovery body, cron/admin
   initiator, first DML, shared-table hook, privileged/tooling path, and planned
-  canonical adapter. The initial set contains P01-P16 from section 1.1; its
+  canonical adapter. The initial set contains P01-P22 from section 1.1; its
   immutable debt IDs/content hash are generated from pinned baseline
   `e0defbe26...` before runtime changes. W4C-0 proves
   collection/positive controls and fails new, renamed, or unclassified DML;
@@ -1843,6 +1880,11 @@ late-tier thresholds, unknown enum, approved-fact omission, business-time
 omission, and current-context reread.
 Changing only `occurredAt` on an otherwise identical evidence ref must change
 the semantic hash.
+Invalid or missing IANA zones, every legacy helper-level UTC fallback, and
+offset-less values that would otherwise use server-local time fail before
+source/result DML. Default-rule and shift timezone writes use the same strict
+IANA validator; a persisted invalid zone is never accepted as a future
+calculation input.
 
 ### 12.3 W4C-2: live and scheduled shadow
 
@@ -1967,6 +2009,19 @@ Gates:
 - request create/edit/decision/cancel/outdoor route inventory entries are
   removed; operation claim/suspension precede first request, event, approval,
   assignment, and attendance-ledger DML;
+- P17/P22 central legacy approve/reject, generic bridge, verified card action,
+  and plugin decision converge before terminal DML or fail closed; a
+  central-first/plugin-second and plugin-first/central-second matrix proves one
+  terminal approval, one fact/result/effect set, and congruent replay or
+  conflict;
+- P19 authorization locks the request and derives its org before checking the
+  closed actor matrix: attendance-admin/delegated actors require active
+  membership in that org; a platform-admin cross-org override requires the
+  verified global posture and an audit witness; caller-supplied org never
+  widens either case;
+- P18 shift-swap and schedule-dispatch terminal writers use the same operation
+  preflight and compatible schedule-fact lock/version protocol; racing either
+  against a calculation cannot commit mixed context;
 - request, terminal approval, assignment, ledger fact/reversal, calculation,
   projection, and operation seal share one transaction/connection; every
   injected-failure leg rolls all of them back;
@@ -1981,6 +2036,8 @@ Gates:
   event row;
 - full/partial leave and overtime follow section 4.4;
 - cross-org/user or mutated frozen request fails;
+- cross-org UUID probes independently cover approve, reject, cancel, central
+  legacy, generic bridge, and card action before shared/result SQL;
 - terminal approval version/record ID and request-snapshot fingerprint are
   frozen from the same transaction; substituting mutable request state fails;
 - omitting any adapter from inventory fails.
@@ -2009,6 +2066,10 @@ Gates:
   fail;
 - every dedicated/shared source, effect, and result DML syntax positive control
   and every remaining side door mutation fails;
+- P20 anomaly listing, makeup-anomaly fact derivation, open-record work-date
+  attribution, and DecisionTrace each use the canonical active-current helper;
+  removing the predicate from any one surface exposes a retired fixture and
+  fails only that surface's positive control;
 - manual/recompute/operator inventory entries are removed and the final
   generated debt set is empty; CI changes from no-new-debt to zero-bypass hard
   enforcement.
@@ -2101,12 +2162,18 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-25 lifecycle delivery | (a) transactional closed outbox for existing attendance lifecycle events; (b) enumerate each best-effort event and prove no correctness consumer | (a) |
 | OD-W4C-26 grace source | (a) copy the selected shift/rule profile's two grace values identically into every frozen segment; (b) reopen W3 for true per-segment authoring | (a), no invented per-segment source |
 | OD-W4C-27 first-import reversal | (a) retired reversal carries the exact imported after-image plus explicit absent preimage; (b) separately define another non-null historical projection | (a), no zero/null fabrication |
+| OD-W4C-28 approval terminal body | (a) every attendance instance terminal route enters one canonical transaction or fails closed before terminal DML; (b) commit centrally then reconcile asynchronously | (a), no split-brain window |
+| OD-W4C-29 approval org authority | (a) attendance-admin/delegated actors require active membership in the locked request org; verified global platform-admin override is explicit and audited; (b) retain UUID plus global attendance permission behavior | (a) |
+| OD-W4C-30 schedule-fact approvals | (a) shift-swap/schedule-dispatch use the operation boundary and compatible context lock/version without fabricating a result; (b) leave them outside W4 | (a), they change future calculation input |
+| OD-W4C-31 current reader inventory | (a) anomaly, makeup facts, open-record attribution, and DecisionTrace join the canonical active-current contract with independent tests; (b) tolerate retired-row reads | (a) |
+| OD-W4C-32 timezone ingress | (a) strict IANA validation and explicit offset/instant across every helper and settings write; (b) retain helper-specific fallbacks | (a) |
+| OD-W4C-33 pending edit concurrency | (a) append immutable request snapshot versions with expected hash/version; (b) continue mutable `form_snapshot` overwrite | (a) |
 
 ## 14. RATIFY and execution sequence
 
 1. Rebase docs PR to current main.
 2. Re-verify anchors and regenerate writer inventory.
-3. Owner decides OD-W4C-1..27.
+3. Owner decides OD-W4C-1..33.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
 6. Owner RATIFYs exact merged SHA.
@@ -2123,6 +2190,10 @@ W4 is complete only when:
 - W4C-0, 1, 2, 3a, 3b, 3c, 4, and 5 are on main in order;
 - every source, shared-effect, result, and current-read DML side door is
   canonicalized;
+- every attendance approval terminal body converges before shared terminal DML,
+  and schedule-fact approval writers participate in context consistency;
+- anomaly, makeup-anomaly facts, open-record attribution, DecisionTrace, and
+  all previously named ordinary readers hide retired parents;
 - immutable constraints are proven on real PostgreSQL;
 - all three import transports use reversal rollback;
 - explicit import metrics/policy output are snapshotted and either congruent or
