@@ -75,6 +75,12 @@
       </div>
     </div>
 
+    <!-- W5-2 (Wave 5 explainability design-lock §6/§9 W5-2): 'setup-wizard' context help — ①
+         which starter template fits (reuses the four FE-constant templates, W4-2) + ② the
+         prefill -> preview -> confirm -> save chain (this wizard never writes on its own). Pure
+         display, zero fetch, zero write CTA — see attendanceContextHelp.ts. -->
+    <AttendanceContextHelp :tr="tr" context-id="setup-wizard" />
+
     <div
       v-if="loadState === 'loading' && steps.length === 0"
       class="setup-readiness__empty"
@@ -411,6 +417,7 @@ import {
   type AttendanceSetupTemplateId,
   type AttendanceSetupTemplateLabel,
 } from './attendanceSetupTemplates'
+import AttendanceContextHelp from './AttendanceContextHelp.vue'
 
 type TranslateFn = (en: string, zh: string) => string
 
