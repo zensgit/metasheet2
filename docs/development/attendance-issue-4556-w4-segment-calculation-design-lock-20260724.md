@@ -111,6 +111,8 @@ separate debt entries even when they later call the same function.
 | P24 | Integration sync has a distinct semantic pipeline, and `dryRun` still writes the run plus `last_sync_at`. | W4C-3a: freeze current compatibility semantics explicitly, use one W4 calculator, and make dry-run append audit-only state without result/batch/watermark mutation. |
 | P25 | Import token, preview/job, template-preference, upload-lifecycle, and temporary-staging writes are operational DML with different correctness contracts. | W4C-0: classify each explicitly; only business source/effect/result state enters the atomic result operation, while operational state gets its own allowlist and no authority over calculation truth. |
 | P26 | Central approval assignment mutation is not one route. `POST /api/approvals/admin/reassign` selects pending `source_system='platform'` instances without an attendance discriminator, deactivates/creates `approval_assignments`, and increments `approval_instances.version`; its target check is global-active only. Existing generic `approve` node advancement, `return`, and `revoke` also create or deactivate assignments, while jump, transfer, add/reduce-sign, timeout, and future actions may reach the same state. Route selection by `published_definition_id` is not an attendance exclusion proof. These paths can therefore change who may decide an attendance request outside the locked request-org authority contract. | W4C-3b: derive the completion inventory from the actual generic action union and assignment-DML call graph; classify attendance instances before every assignment DML, lock their request org and instance version, apply the closed actor/target membership matrix, and serialize mutation against terminal decision. Every named generic action either proves attendance unreachable for both normal attendance rows and an adversarial attendance row carrying `published_definition_id`, or enters the same contract before instance/assignment DML. |
+| P27 | Schedule publication (draft->live): terminal publish writes live shift assignments outside any result transaction (`index.cjs:42484/42503`), making it a schedule-fact writer that changes which shift governs a work date. | W4C-3b: classify with P18 as a schedule-fact writer; its version/hash/lock participates in W4 context consistency before enabling authority, and publishing a multi-segment shift into a live assignment consumes `resolveSegmentCalculationPosture` rather than any private flag read. |
+| P28 | Core-backend onboarding default shift: `POST /api/admin/users` with explicit `attendanceOrgId` inserts a default shift assignment from TypeScript (`packages/core-backend/src/routes/admin-users.ts:3348-3367`) — the second implementation of the flag predicate named by the prior audit (P3-1). | W4C-3b: this writer must consume `resolveSegmentCalculationPosture` (or its exported TS seam) at the flip as a required simultaneous edit — the flag-split disposition is settled here, not left to the generated inventory (§8.4) to rediscover. |
 
 There is no general production recompute writer today. W4C-3c introduces
 prior-policy/default recompute and explicitly labeled current-policy recompute;
@@ -2316,6 +2318,16 @@ Unsupported evidence returns values-free
 `undeterminable/frozen_evidence_unavailable`. Shadow trace is labeled shadow and
 never presented as the decision that produced the legacy current row.
 
+Cross-lane follow-up (explicit): the merged vNext Wave 5 explanation UX line
+(#4564/#4576 and its RATIFIED data-contract lock) currently derives its
+confidence/posture ceilings from the pre-W4 fact that status-class records
+carry no rule/result snapshot. Once W4 immutable evidence exists in an
+authoritative org, that ceiling changes for segment-governed records; the
+Wave 5 lock's posture-ceiling table must be revised in its own lane before the
+explanation surface may present W4-backed rows as snapshot-grounded. This lock
+only governs the backend trace behavior above; the UX-lane revision is a named
+follow-up, not silently implied.
+
 ## 11. Migration, retention, and performance
 
 Forward migration creates operation-batch/item/request-snapshot/calculation/
@@ -2494,7 +2506,7 @@ Gates:
 - the collector generates an exact-head source/effect/result debt inventory
   naming every current command route, worker/recovery body, cron/admin
   initiator, first DML, shared-table hook, privileged/tooling path, and planned
-  canonical adapter. The initial set contains P01-P26 from section 1.1; its
+  canonical adapter. The initial set contains P01-P28 from section 1.1; its
   immutable debt IDs/content hash are generated from pinned baseline
   `e0defbe26...` before runtime changes. W4C-0 proves
   collection/positive controls and fails new, renamed, or unclassified DML;
