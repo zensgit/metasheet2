@@ -3,7 +3,7 @@
 // forbidden, 503 DB_NOT_READY → db_not_ready, 200 valid → ok, everything else → fail-closed load
 // error), enum-strict body validation (invalid enum = malformed, never silently defaulted), and
 // the §6.1 readiness-derived task-home badge (①②③⑤ gating only; advisory ④⑥ never trigger).
-// Wired into .github/workflows/attendance-web-guard.yml (run-list + both path filters).
+// Wired into .github/workflows/attendance-web-guard.yml (run-list + relevant-change classifier).
 import { describe, expect, it, vi } from 'vitest'
 import {
   ATTENDANCE_SETUP_ADMIN_USERS_ROUTE_PATH,

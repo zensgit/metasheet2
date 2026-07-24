@@ -32,7 +32,7 @@
 //   5. AttendanceExperienceView navigation seams (memory router + child stubs): the OD-W4-7②
 //      切区确认 legs — refusing the confirm keeps the tab/route, confirming proceeds, and no
 //      prompt fires without a pending prefill.
-// Wired into .github/workflows/attendance-web-guard.yml (run-list + both path filters).
+// Wired into .github/workflows/attendance-web-guard.yml (run-list + relevant-change classifier).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
