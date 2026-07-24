@@ -145,7 +145,8 @@ function profileIdentity() {
   assert.equal(p.certificate.acquisitionMode, 'BOUNDED_READ')
   assert.equal(p.certificate.continuationLifetime, 'SINGLE_REQUEST')
   assert.deepEqual([...p.certificate.supportedConsistencyProofs], [])
-  // SHORT_PAGE ONLY — DECLARED_TOTAL is a v2 capability (adapter has no total propagation)
+  // SHORT_PAGE ONLY — DECLARED_TOTAL is NOT certified by the current v2 profile
+  // (the adapter has no total propagation); it would need a future certified profile/amendment.
   assert.deepEqual([...p.certificate.supportedCompletenessProofs], ['SHORT_PAGE'])
   assert.deepEqual(p.certificate.completenessCombinationRules.map((c) => [...c]), [['SHORT_PAGE']])
   assert.deepEqual(p.certificate.maxScale, { maxRowsPerBoundedRead: 500 })
@@ -205,8 +206,8 @@ function adjudication() {
   validateCompletenessEvidence(BRIDGE_BOUNDED_READ_PROFILE, shortEv)
   // …and it must actually VALIDATE against THIS certificate, not pass evidence through.
   // This is the module's whole contribution here: wiring the shared validator to the
-  // frozen profile. An uncertified proof (DECLARED_TOTAL — a v2 capability this adapter
-  // cannot produce) must be REFUSED. Reading `.runOutcome` off the result alone is
+  // frozen profile. An uncertified proof (DECLARED_TOTAL — not certified by the current v2
+  // profile, and unproducible by this adapter) must be REFUSED. Reading `.runOutcome` alone is
   // satisfied by any passthrough, so the negative case is what makes the wiring testable.
   for (const uncertified of [
     { runOutcome: 'successful', usedCompletenessProofs: ['DECLARED_TOTAL'] },
@@ -225,10 +226,11 @@ function adjudication() {
   rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 20, reportedClamp: 20 }),
     'BOUNDED_READ_COMPLETENESS_UNPROVABLE')
 
-  // ── DECLARED TOTAL IS A v2 CAPABILITY (review P1): a sourceDeclaredTotal input is
-  //    REFUSED fail-closed (unknown field), NOT silently used — the concrete bridge
-  //    adapter never propagates a total, so certifying/consuming one here would overstate
-  //    the adapter's capability. Trusted totals ⇒ separate runtime/profile-v2 gate.
+  // ── DECLARED_TOTAL IS NOT CERTIFIED BY THE CURRENT v2 PROFILE (review P1): a
+  //    sourceDeclaredTotal input is REFUSED fail-closed (unknown field), NOT silently used —
+  //    the concrete bridge adapter never propagates a total, so certifying/consuming one here
+  //    would overstate the adapter's capability. Trusted totals ⇒ a future independently
+  //    certified profile/amendment.
   rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 10, reportedClamp: 500, sourceDeclaredTotal: 20 }),
     'BOUNDED_READ_RESULT_INVALID')
   rejectsWith(() => adjudicateBoundedReadCompleteness({ pageRowCount: 500, reportedClamp: 500, sourceDeclaredTotal: 500 }),

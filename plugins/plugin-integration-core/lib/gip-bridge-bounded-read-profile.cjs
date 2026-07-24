@@ -124,10 +124,10 @@ const BRIDGE_BOUNDED_READ_PROFILE = normalizeCertifiedReadActionProfile({
     // limit (adapter v2 requires the agent's echoed data.limit to equal the requested clamp;
     // metadata.limit ⇒ effectiveLimit) so short_page is REACHABLE and evidence-backed, but it
     // NEVER propagates a source total (no sourceTotalCount / dataRowCount), so the feeder's
-    // declared_total proof is UNREACHABLE for this adapter. Certifying DECLARED_TOTAL
-    // would overstate the adapter's real capability — a trusted total needs an agent
-    // protocol + adapter propagation + same-read binding, i.e. a separate runtime /
-    // profile-v2 gate.
+    // declared_total proof is UNREACHABLE for this adapter. DECLARED_TOTAL is NOT certified
+    // by the current v2 profile — certifying it would overstate the adapter's real
+    // capability; a trusted total needs an agent protocol + adapter propagation + same-read
+    // binding, i.e. a FUTURE INDEPENDENTLY CERTIFIED profile/amendment.
     supportedCompletenessProofs: ['SHORT_PAGE'],
     completenessCombinationRules: [['SHORT_PAGE']],
     maxScale: { maxRowsPerBoundedRead: BRIDGE_BOUNDED_READ_MAX_ROWS },
@@ -143,10 +143,10 @@ const BRIDGE_BOUNDED_READ_PROFILE = normalizeCertifiedReadActionProfile({
 // but DELIBERATELY never consulted (the feeder distrusts an adapter's done:true as a
 // completeness proof) — carrying it in the shape makes "done is never read" a testable
 // negative control (a mutation that reads it flips a fail-closed case to accepted).
-// v1 accepts COUNTS ONLY. A `sourceDeclaredTotal` is DELIBERATELY not an accepted field
-// (review P1): this profile certifies SHORT_PAGE only, so a declared total is refused
-// fail-closed as an unknown field rather than silently ignored — trusted totals are a
-// profile-v2 capability. `adapterDone` is accepted but never consulted.
+// THIS PROFILE ACCEPTS COUNTS ONLY. A `sourceDeclaredTotal` is DELIBERATELY not an accepted
+// field (review P1): this profile certifies SHORT_PAGE only, so a declared total is refused
+// fail-closed as an unknown field rather than silently ignored — trusted totals belong to a
+// future independently certified profile/amendment. `adapterDone` is accepted but never consulted.
 const BOUNDED_READ_RESULT_FIELDS = Object.freeze([
   'pageRowCount',
   'reportedClamp',
