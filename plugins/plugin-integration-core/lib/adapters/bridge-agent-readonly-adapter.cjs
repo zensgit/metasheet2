@@ -426,6 +426,34 @@ function createBridgeAgentReadonlyAdapter({ system, fetchImpl = globalThis.fetch
       body,
     })
     const records = isPlainObject(data) && Array.isArray(data.records) ? data.records : []
+    // APPLIED-LIMIT VERIFICATION (completeness safety). The bound a downstream feeder judges
+    // "was this page full?" against MUST be the limit the AGENT actually applied, not the one
+    // we locally computed and requested. The BA-M1 agent echoes its applied limit in data.limit
+    // (bridge-agent-readonly.ps1 §/query: `limit = $limit`) and REJECTS an over-limit request
+    // with 400 INVALID_LIMIT rather than silently capping — so a conformant 200 ALWAYS carries
+    // data.limit === the limit we sent. We therefore require the echo to be present, a positive
+    // integer, and equal to the requested clamp; anything else (missing, non-integer, or a
+    // divergent value) means the applied bound is UNVERIFIED and we fail closed. Reporting our
+    // locally-fabricated `limit` here instead would let a full page at the agent's own smaller
+    // cap masquerade as a short (complete) page — a completeness fail-OPEN. Counts only in the
+    // error; never echo row content or the raw response.
+    const reportedLimit = isPlainObject(data) && Object.prototype.hasOwnProperty.call(data, 'limit')
+      ? data.limit
+      : undefined
+    if (!Number.isInteger(reportedLimit) || reportedLimit < 1 || reportedLimit !== limit) {
+      throw new BridgeAgentReadonlyAdapterError(
+        'Bridge Agent did not confirm the applied read limit; the page bound is unverified and completeness cannot be judged',
+        {
+          // In-vocabulary adapter-owned code (BRIDGE_AGENT_REQUEST_FAILED): the response is not
+          // an acceptable read result. A dedicated operator-facing code would have to be mirrored
+          // into apps/web errorCodeLabels.ts + its tripwire — deferred to keep this fix in-package.
+          code: 'BRIDGE_AGENT_REQUEST_FAILED',
+          status: 200,
+          requestedLimit: limit,
+          reportedLimit: Number.isInteger(reportedLimit) ? reportedLimit : null,
+        },
+      )
+    }
     return createReadResult({
       records,
       nextCursor: data && data.nextCursor,
@@ -433,7 +461,9 @@ function createBridgeAgentReadonlyAdapter({ system, fetchImpl = globalThis.fetch
       raw: data,
       metadata: {
         object,
-        limit,
+        // Sourced from the VERIFIED agent echo (=== requested clamp), not the locally computed
+        // request value — so this is evidence-backed provenance, not a fabricated assertion.
+        limit: reportedLimit,
         count: records.length,
         source: 'bridge:legacy-sql-readonly',
         filtersApplied: data && data.filtersApplied === true,
@@ -456,6 +486,14 @@ function createBridgeAgentReadonlyAdapter({ system, fetchImpl = globalThis.fetch
 function createBridgeAgentReadonlyAdapterFactory(defaults = {}) {
   return (input = {}) => createBridgeAgentReadonlyAdapter({ ...defaults, ...input })
 }
+
+// Incrementable implementation version of THIS adapter. Bump on any behavioural change
+// to the read/limit/completeness surface; the GIP bridge.bounded_read profile drift-guard
+// pins its implementationVersion to this constant, so a bump forces re-certification.
+// v2 (2026-07-24): read() now VERIFIES the agent-echoed applied limit (data.limit must be a
+// positive integer equal to the requested clamp) and sources metadata.limit from it, closing
+// a completeness fail-open where a fabricated limit could make a full page look short.
+const BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_VERSION = 'bridge-readonly-adapter.v2'
 
 const BRIDGE_READONLY_ADAPTER_METADATA = {
   label: 'Readonly Bridge Agent',
@@ -482,6 +520,7 @@ const BRIDGE_READONLY_ADAPTER_METADATA = {
 
 module.exports = {
   BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES,
+  BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_VERSION,
   BRIDGE_READONLY_ADAPTER_METADATA,
   BridgeAgentReadonlyAdapterError,
   createBridgeAgentReadonlyAdapter,

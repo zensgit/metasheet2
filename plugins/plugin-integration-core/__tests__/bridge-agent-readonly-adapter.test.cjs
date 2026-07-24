@@ -210,6 +210,56 @@ async function main() {
     (error) => error instanceof AdapterValidationError && /raw SQL/.test(error.message),
   )
 
+  // --- 3b. APPLIED-LIMIT VERIFICATION (completeness safety, adapter v2) -------------------
+  // read() must report the limit the AGENT confirms it applied (data.limit), not the value we
+  // locally requested — else a full page at the agent's own smaller cap masquerades as a short
+  // (complete) page downstream. A conformant 200 always carries data.limit === the sent limit
+  // (the agent echoes its applied limit and 400s an over-limit request, never silently caps);
+  // a missing / non-integer / divergent echo means the applied bound is UNVERIFIED ⇒ fail closed.
+  // (The GIP profile's §6b drives the same guard through the completeness adjudicator; this is the
+  // adapter's OWN durable regression home, independent of that latent suite.)
+  {
+    const queryOnlyMock = (queryBody) => async (url, options = {}) => {
+      const parsed = new URL(url)
+      if (parsed.pathname === '/query/material' && options.method === 'POST') {
+        const body = JSON.parse(options.body)
+        return jsonResponse(200, queryBody(body))
+      }
+      return jsonResponse(404, { error: { code: 'UNKNOWN_OBJECT', message: 'not allowlisted' } })
+    }
+    const readWith = (queryBody) => createBridgeAgentReadonlyAdapter({
+      system: createSystem(),
+      fetchImpl: queryOnlyMock(queryBody),
+    }).read({ object: 'material', limit: 7 })
+    const failsClosed = (label) => (error) => {
+      assert.ok(error instanceof BridgeAgentReadonlyAdapterError, `${label}: typed adapter error`)
+      assert.equal(error.code, 'BRIDGE_AGENT_REQUEST_FAILED', `${label}: in-vocabulary code`)
+      return true
+    }
+    // POSITIVE CONTROL — agent confirms the applied limit (=== request) ⇒ succeeds, verified.
+    const ok = await readWith((body) => ({ object: 'material', records: [{ FItemID: 1 }], limit: body.limit }))
+    assert.equal(ok.metadata.limit, 7, 'a confirmed applied limit passes through, sourced from the echo')
+    // DIVERGENT (the owner repro shape) — agent says it applied 2 while we asked 7 ⇒ fail closed.
+    await assert.rejects(() => readWith(() => ({ object: 'material', records: [{ FItemID: 1 }, { FItemID: 2 }], limit: 2 })),
+      failsClosed('divergent limit'))
+    // MISSING — no data.limit at all ⇒ fail closed.
+    await assert.rejects(() => readWith(() => ({ object: 'material', records: [{ FItemID: 1 }] })),
+      failsClosed('missing limit'))
+    // NON-INTEGER — data.limit is not a positive integer ⇒ fail closed.
+    await assert.rejects(() => readWith(() => ({ object: 'material', records: [{ FItemID: 1 }], limit: '7' })),
+      failsClosed('string limit'))
+    await assert.rejects(() => readWith(() => ({ object: 'material', records: [{ FItemID: 1 }], limit: 0 })),
+      failsClosed('zero limit'))
+    // VALUES-FREE — the fail-closed error carries counts only, never row content.
+    const leak = await readWith(() => ({ object: 'material', records: [{ SECRET: 'SECRET_ROW_Z9' }, { SECRET: 'x' }], limit: 2 }))
+      .then(() => null, (error) => error)
+    assert.ok(leak instanceof BridgeAgentReadonlyAdapterError)
+    assert.ok(!JSON.stringify({ m: leak.message, d: leak.details }).includes('SECRET_ROW_Z9'),
+      'the applied-limit failure must stay values-free')
+    assert.deepEqual(leak.details, { status: 200, code: 'BRIDGE_AGENT_REQUEST_FAILED', requestedLimit: 7, reportedLimit: 2 },
+      'details are counts/codes only')
+  }
+
   // --- 4. Unsafe config and object names fail before network I/O ---------
   assert.throws(
     () => createBridgeAgentReadonlyAdapter({
