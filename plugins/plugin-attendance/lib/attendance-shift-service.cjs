@@ -26,9 +26,10 @@
  *   - While ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED is OFF for an org,
  *     multi-segment authoring is preview-only: assertShiftReferenceAllowed /
  *     assertShiftSequenceReferenceAllowed make every reference-producing writer
- *     named in the erratum fail with a typed 422 and zero writes, and an existing
- *     active assignment / rotation / pending swap / pending-or-published dispatch
- *     blocks converting one segment to multiple (409, zero writes).
+ *     named in the erratum fail with a typed 422 and zero writes, and any durable
+ *     assignment / rotation / pending swap / pending-or-published dispatch reference
+ *     blocks converting one segment to multiple (409, zero writes), including ended
+ *     assignment history.
  *   - Delete shares one transaction-level lock protocol with reference writers:
  *     writers lock the shift row FOR SHARE inside their write transaction before
  *     inserting a reference; delete locks it FOR UPDATE before checking blockers,
@@ -450,8 +451,8 @@ function createAttendanceShiftService(deps) {
    * Canonical update. Three modes, exactly one per request:
    *   - segments: replace all segments, derive the envelope from them. Converting
    *     one segment to multiple is blocked (409, zero writes) while the flag is OFF
-   *     and the shift has an active assignment / rotation / pending swap /
-   *     pending-or-published dispatch reference.
+   *     and the shift has any durable assignment / rotation / pending swap /
+   *     pending-or-published dispatch reference, including ended history.
    *   - envelope: legacy start/end write on a single-segment shift; updates the
    *     envelope and segment 0 together. Rejected (422, zero writes) on a
    *     multi-segment shift — a start/end-only PUT cannot collapse segments.
@@ -490,12 +491,12 @@ function createAttendanceShiftService(deps) {
         segments = validateShiftSegments(patch.segments)
         const currentCount = currentSegmentCount === 0 ? 1 : currentSegmentCount
         if (segments.length > 1 && currentCount <= 1 && !isSegmentCalculationEnabled(orgId)) {
-          const blockers = await findActiveReferenceBlockers(trx, { orgId, shiftId, shiftName: existing.name })
+          const blockers = await findShiftDeleteBlockers(trx, { orgId, shiftId, shiftName: existing.name })
           if (blockers.length > 0) {
             throw new HttpError(
               409,
               SHIFT_SERVICE_ERROR.SEGMENT_CONVERSION_BLOCKED,
-              'Shift has active references and cannot be converted from one segment to multiple segments while segment calculation is disabled',
+              'Shift has durable references and cannot be converted from one segment to multiple segments while segment calculation is disabled',
               blockers.map((blocker) => ({ field: blocker.blocker, message: `${blocker.blocker}: ${blocker.count}` })),
             )
           }
@@ -693,33 +694,6 @@ function createAttendanceShiftService(deps) {
   }
 
   /**
-   * Active-reference blockers for the one-to-many segment conversion guard
-   * (erratum: active assignment, rotation, pending swap, pending/published
-   * dispatch). Unlike delete, ended/inactive assignment history does NOT block
-   * authoring-side conversion.
-   */
-  async function findActiveReferenceBlockers(trx, { orgId, shiftId, shiftName }) {
-    const blockers = []
-    const assignmentRows = await trx.query(
-      `SELECT COUNT(*)::int AS total
-         FROM attendance_shift_assignments
-        WHERE org_id = $1
-          AND shift_id = $2
-          AND is_active = true
-          AND (end_date IS NULL OR end_date >= CURRENT_DATE)`,
-      [orgId, shiftId],
-    )
-    const assignmentCount = Number(assignmentRows[0]?.total ?? 0)
-    if (assignmentCount > 0) blockers.push({ blocker: 'active_shift_assignments', count: assignmentCount })
-
-    const all = await findShiftDeleteBlockers(trx, { orgId, shiftId, shiftName })
-    for (const blocker of all) {
-      if (blocker.blocker !== 'shift_assignments') blockers.push(blocker)
-    }
-    return blockers
-  }
-
-  /**
    * Canonical delete. Shares the reference-writer lock protocol: the shift row is
    * locked FOR UPDATE before the blocker check, and every reference writer locks
    * the same row FOR SHARE inside its own transaction before inserting, so no
@@ -777,17 +751,30 @@ function createAttendanceShiftService(deps) {
     await assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer })
   }
 
-  async function assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer }) {
+  function assertSegmentCalculationAllowed({ orgId, shiftId, segmentCount, producer }) {
     if (isSegmentCalculationEnabled(orgId)) return
-    const segmentCount = await countPersistedSegments(trx, orgId, shiftId)
-    if (segmentCount > 1) {
+    const normalizedCount = Number(segmentCount)
+    if (segmentCount == null || !Number.isInteger(normalizedCount) || normalizedCount < 0) {
       throw new HttpError(
         422,
         SHIFT_SERVICE_ERROR.MULTI_SEGMENT_CALCULATION_DISABLED,
-        `Shift has ${segmentCount} segments; authoritative segment calculation is disabled for this org, so ${producer} cannot reference a multi-segment shift`,
+        `Shift segment state cannot be verified; authoritative segment calculation is disabled for this org, so ${producer} cannot continue`,
+        fieldDetail('shiftId', `Unable to verify segment state for shift ${shiftId}`),
+      )
+    }
+    if (normalizedCount > 1) {
+      throw new HttpError(
+        422,
+        SHIFT_SERVICE_ERROR.MULTI_SEGMENT_CALCULATION_DISABLED,
+        `Shift has ${normalizedCount} segments; authoritative segment calculation is disabled for this org, so ${producer} cannot use a multi-segment shift`,
         fieldDetail('shiftId', 'Multi-segment shift is authoring preview-only while segment calculation is disabled'),
       )
     }
+  }
+
+  async function assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer }) {
+    const segmentCount = await countPersistedSegments(trx, orgId, shiftId)
+    assertSegmentCalculationAllowed({ orgId, shiftId, segmentCount, producer })
   }
 
   /**
@@ -881,7 +868,7 @@ function createAttendanceShiftService(deps) {
     listShifts,
     deleteShift,
     findShiftDeleteBlockers,
-    findActiveReferenceBlockers,
+    assertSegmentCalculationAllowed,
     assertShiftReferenceAllowed,
     assertShiftSequenceReferenceAllowed,
     loadShiftNameLookup,

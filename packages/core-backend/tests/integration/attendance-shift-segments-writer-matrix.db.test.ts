@@ -373,6 +373,116 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(await segmentCount(shiftId)).toBe(1)
   })
 
+  it('blocks converting one segment to multiple when only ended assignment history references the shift', async () => {
+    const orgId = org('put-ended-conversion')
+    const token = await mintToken(`${orgId}-admin`)
+    const created = await createShiftViaApi(token, orgId, { name: 'Historic Day', workStartTime: '09:00', workEndTime: '18:00' })
+    const shiftId = created.body.data.id as string
+    await seedPublishedAssignment(orgId, `${orgId}-worker`, shiftId, '2020-01-06')
+
+    const res = await putJson(`/api/attendance/shifts/${shiftId}`, token, orgId, {
+      segments: [
+        { startTime: '08:00', endTime: '12:00' },
+        { startTime: '13:00', endTime: '17:00' },
+      ],
+    })
+    expect(res.status, res.raw).toBe(409)
+    expect(codeOf(res)).toBe(CONVERSION_BLOCKED_CODE)
+    expect((res.body?.error?.details ?? []).map((detail: any) => detail.field)).toContain('shift_assignments')
+    expect(await segmentCount(shiftId)).toBe(1)
+  })
+
+  it('fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope', async () => {
+    const orgId = org('runtime-ended-guard')
+    const userId = `${orgId}-worker`
+    const workDate = '2020-01-06'
+    const token = await mintToken(`${orgId}-admin`)
+    const created = await createShiftViaApi(token, orgId, {
+      name: 'Historic Split',
+      timezone: 'UTC',
+      workStartTime: '08:00',
+      workEndTime: '17:00',
+    })
+    const shiftId = created.body.data.id as string
+    await seedPublishedAssignment(orgId, userId, shiftId, workDate)
+
+    // Simulate a legacy/direct-DB invalid state that bypassed the authoring guard.
+    // The compatibility envelope spans 540 minutes; the two segments sum to 480.
+    await pool.query(
+      `UPDATE attendance_shift_segments
+          SET end_time = '12:00'
+        WHERE org_id = $1 AND shift_id = $2 AND segment_index = 0`,
+      [orgId, shiftId],
+    )
+    await injectSecondSegment(orgId, shiftId)
+    expect(await segmentCount(shiftId)).toBe(2)
+
+    const imported = await postJson('/api/attendance/import', token, orgId, {
+      userId,
+      mode: 'override',
+      rows: [{
+        workDate,
+        fields: {
+          firstInAt: `${workDate}T08:00:00Z`,
+          lastOutAt: `${workDate}T17:00:00Z`,
+        },
+      }],
+    })
+    expect(imported.status, imported.raw).toBe(422)
+    expect(codeOf(imported)).toBe(GUARD_CODE)
+
+    const records = await pool.query(
+      'SELECT work_minutes FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3',
+      [orgId, userId, workDate],
+    )
+    expect(records.rows).toHaveLength(0)
+  })
+
+  it('fails closed before a punch can calculate a forced multi-segment shift with the legacy envelope', async () => {
+    const orgId = org('runtime-punch-guard')
+    const userId = `${orgId}-worker`
+    const workDate = '2024-10-07'
+    const token = await mintToken(userId)
+    const created = await createShiftViaApi(token, orgId, {
+      name: 'Punch Split',
+      timezone: 'UTC',
+      workStartTime: '08:00',
+      workEndTime: '17:00',
+    })
+    const shiftId = created.body.data.id as string
+    await seedPublishedAssignment(orgId, userId, shiftId, workDate)
+
+    await pool.query(
+      `UPDATE attendance_shift_segments
+          SET end_time = '12:00'
+        WHERE org_id = $1 AND shift_id = $2 AND segment_index = 0`,
+      [orgId, shiftId],
+    )
+    await injectSecondSegment(orgId, shiftId)
+    expect(await segmentCount(shiftId)).toBe(2)
+
+    const punch = await postJson('/api/attendance/punch', token, orgId, {
+      eventType: 'check_in',
+      occurredAt: `${workDate}T08:00:00Z`,
+      timezone: 'UTC',
+    })
+    expect(punch.status, punch.raw).toBe(422)
+    expect(codeOf(punch)).toBe(GUARD_CODE)
+
+    const [events, records] = await Promise.all([
+      pool.query(
+        'SELECT id FROM attendance_events WHERE org_id = $1 AND user_id = $2 AND work_date = $3',
+        [orgId, userId, workDate],
+      ),
+      pool.query(
+        'SELECT id FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3',
+        [orgId, userId, workDate],
+      ),
+    ])
+    expect(events.rows).toHaveLength(0)
+    expect(records.rows).toHaveLength(0)
+  })
+
   it('rename + rejected segment conversion is atomic and leaves legacy rotation rules untouched', async () => {
     const orgId = org('put-rename-atomic')
     const token = await mintToken(`${orgId}-admin`)
