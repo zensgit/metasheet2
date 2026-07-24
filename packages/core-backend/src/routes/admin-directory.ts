@@ -41,6 +41,13 @@ import {
   saveApprovalCardPublicAppUrl,
 } from '../integrations/dingtalk/approval-card-config'
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
+import {
+  listDeprovisionEffects,
+  listDeprovisionEvents,
+  previewDeprovisionForUser,
+  readDeprovisionRuntimeFlags,
+  restoreDeprovisionEvent,
+} from '../directory/deprovision-evidence-api'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
@@ -1240,6 +1247,95 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to acknowledge directory alert')
       jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_ALERT_ACK_FAILED', message)
+    }
+  })
+
+  // ── D7 evidence chain: flags / plan preview / events / restore ────────────
+
+  router.get('/deprovision/flags', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    jsonOk(res, readDeprovisionRuntimeFlags())
+  })
+
+  router.get('/deprovision/preview/:userId', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const data = await previewDeprovisionForUser(req.params.userId)
+      jsonOk(res, data)
+    } catch (error) {
+      const code = (error as { code?: string })?.code
+      if (code === 'USER_NOT_FOUND') {
+        jsonError(res, 404, code, (error as Error).message)
+        return
+      }
+      jsonError(res, 500, 'DEPROVISION_PREVIEW_FAILED', readErrorMessage(error, 'Preview failed'))
+    }
+  })
+
+  router.get('/deprovision/events', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const items = await listDeprovisionEvents({
+        integrationId: typeof req.query.integrationId === 'string' ? req.query.integrationId : undefined,
+        localUserId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+        limit: typeof req.query.limit === 'string' ? Number(req.query.limit) : 50,
+      })
+      jsonOk(res, { items, flags: readDeprovisionRuntimeFlags() })
+    } catch (error) {
+      jsonError(res, 500, 'DEPROVISION_EVENTS_FAILED', readErrorMessage(error, 'List events failed'))
+    }
+  })
+
+  router.get('/deprovision/events/:eventId/effects', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const items = await listDeprovisionEffects(req.params.eventId)
+      jsonOk(res, { items })
+    } catch (error) {
+      jsonError(res, 500, 'DEPROVISION_EFFECTS_FAILED', readErrorMessage(error, 'List effects failed'))
+    }
+  })
+
+  router.post('/deprovision/events/:eventId/restore', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const modeRaw = String(req.body?.mode || 'rehire').trim()
+      const mode = modeRaw === 'admin_force' ? 'admin_force' : 'rehire'
+      const result = await restoreDeprovisionEvent({
+        eventId: req.params.eventId,
+        mode,
+        adminUserId,
+        confirm: req.body?.confirm === true,
+        note: typeof req.body?.note === 'string' ? req.body.note : undefined,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'directory-deprovision-event',
+        resourceId: req.params.eventId,
+        meta: {
+          restoreMode: mode,
+          restoredEffectCount: result.restoredEffectCount,
+          localUserId: result.localUserId,
+          noteLength: result.note ? result.note.length : 0,
+        },
+      })
+      jsonOk(res, result)
+    } catch (error) {
+      const code = (error as { code?: string })?.code || 'DEPROVISION_RESTORE_FAILED'
+      const status =
+        code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND' ? 404
+          : code === 'DRIFT_CONFLICT' || code === 'SOURCE_INACTIVE' || code === 'NO_EFFECTS' || code === 'NOT_APPLIED'
+            ? 409
+            : code === 'FORCE_CONFIRM_REQUIRED' || code === 'FORCE_NOTE_REQUIRED' ? 400
+              : 500
+      jsonError(res, status, code, (error as Error)?.message || 'Restore failed')
     }
   })
 

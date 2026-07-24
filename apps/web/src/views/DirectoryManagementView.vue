@@ -1970,6 +1970,11 @@
             <p v-if="run.errorMessage" class="directory-admin__status directory-admin__status--error">{{ run.errorMessage }}</p>
           </article>
         </section>
+
+        <DirectoryDeprovisionEvidencePanel
+          v-if="selectedIntegration"
+          :integration-id="selectedIntegration.id"
+        />
       </section>
     </div>
   </section>
@@ -1978,6 +1983,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
@@ -2464,7 +2470,7 @@ const draft = reactive<DirectoryDraft>({
   memberGroupDefaultNamespacesText: '',
   status: 'active',
   scheduleCron: '',
-  defaultDeprovisionPolicy: 'mark_inactive',
+  defaultDeprovisionPolicy: 'manual_review',
   syncEnabled: false,
 })
 
@@ -2875,7 +2881,7 @@ function resetDraft() {
   draft.memberGroupDefaultNamespacesText = ''
   draft.status = 'active'
   draft.scheduleCron = ''
-  draft.defaultDeprovisionPolicy = 'mark_inactive'
+  draft.defaultDeprovisionPolicy = 'manual_review'
   draft.syncEnabled = false
 }
 
