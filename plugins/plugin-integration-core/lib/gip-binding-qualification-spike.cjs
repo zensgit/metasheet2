@@ -299,6 +299,170 @@ const postgresTotalOrderProbeStrategy = Object.freeze({
   buildTotalOrderProbeSql: buildOrderingKeyTotalOrderProbeSql,
 })
 
+// ── B1b — KNOWN LIMITATION shared by ALL THREE builders (PG above, MySQL + SQL Server
+// below): DERIVED-TABLE DUPLICATE OUTPUT COLUMN. The duplicate sub-probe projects the key
+// columns AND a computed `duplicate_count`; the null sub-probe projects a literal
+// `null_key_row`. If an ordering KEY COLUMN is itself named `duplicate_count` (or
+// `null_key_row`), the derived table `gip_duplicate_probe` (resp. `gip_null_probe`) is
+// asked for two output columns of the same name.
+//   MEASURED (test battery, this environment): the built SQL string does contain the name
+//   twice — that half is a fact about our own generator, not about any server.
+//   REASONED — TO BE CONFIRMED BY SPIKE: MySQL rejects this at parse time (ER_DUP_FIELDNAME
+//   / error 1060 "Duplicate column name") and T-SQL rejects it ("The column ... was
+//   specified multiple times for 'gip_duplicate_probe'"), while PostgreSQL TOLERATES
+//   duplicate output column names in a derived table as long as nothing references the
+//   ambiguous name — and nothing here does, since the outer query only counts rows.
+// Either way the failure mode is FAIL-CLOSED, not a wrong answer: the driver rejects the
+// statement, runReadOnlyProbe's catch turns it into PROBE_QUERY_FAILED, and no
+// qualification is minted. It is recorded here rather than "fixed" by renaming, because a
+// rename would change the SQL shape (and thus what every pinned test asserts) to defend a
+// key column named `duplicate_count`, which no canonical object in this line has.
+//
+// ── B1b — MySQL certified dialect strategy ──────────────────────────────────────────
+// Identifier hygiene: backtick-quoted, per segment, embedded backticks doubled (mirrors
+// quoteIdentifier's double-quote doubling above — MySQL's own escaping rule).
+function quoteMysqlIdentifier(name) {
+  const trimmed = requiredString(name, 'identifier')
+  return `\`${trimmed.replace(/`/g, '``')}\``
+}
+
+function buildMysqlOrderingKeyDuplicateProbeSql({ objectName, keyColumns }) {
+  const object = quoteMysqlIdentifier(objectName)
+  const cols = normalizeKeyColumns(keyColumns).map((column) => quoteMysqlIdentifier(column)).join(', ')
+  return `SELECT ${cols}, COUNT(*) AS duplicate_count FROM ${object} GROUP BY ${cols} HAVING COUNT(*) > 1 LIMIT 1`
+}
+
+function buildMysqlOrderingKeyNullProbeSql({ objectName, keyColumns }) {
+  const object = quoteMysqlIdentifier(objectName)
+  const predicate = normalizeKeyColumns(keyColumns)
+    .map((column) => `${quoteMysqlIdentifier(column)} IS NULL`)
+    .join(' OR ')
+  return `SELECT 1 AS null_key_row FROM ${object} WHERE ${predicate} LIMIT 1`
+}
+
+// COUNT SHAPE (mirrors the PG ::int reasoning, MySQL syntax — NOT the PG cast, which is
+// invalid here): MySQL's COUNT(*) is BIGINT server-side. TO BE CONFIRMED BY SPIKE: mysql2
+// (the standard node driver), under its DEFAULT options, returns a BIGINT column as a JS
+// `number` when the value is within the safe-integer range, and only surfaces it as a
+// decimal STRING when `supportBigNumbers`+`bigNumberStrings` are both set. Because these
+// sampled counts are 0/1 by construction (LIMIT-1 subqueries, same as PG), EITHER shape is
+// already a safe non-negative decimal and normalizeProbeCount's acceptor (number OR
+// canonical digit string) already covers both without a cast. We CAST to SIGNED anyway —
+// for the same reason PG narrows to ::int: an explicit, driver-configuration-independent
+// type, not because correctness here depends on it.
+function buildMysqlOrderingKeyTotalOrderProbeSql({ objectName, keyColumns }) {
+  const columns = normalizeKeyColumns(keyColumns)
+  const dup = buildMysqlOrderingKeyDuplicateProbeSql({ objectName, keyColumns: columns })
+  const nul = buildMysqlOrderingKeyNullProbeSql({ objectName, keyColumns: columns })
+  return `SELECT CAST((SELECT COUNT(*) FROM (${dup}) AS gip_duplicate_probe) AS SIGNED) AS duplicate_groups_sampled, CAST((SELECT COUNT(*) FROM (${nul}) AS gip_null_probe) AS SIGNED) AS null_key_rows`
+}
+
+// Dialect strategy — MySQL/InnoDB (B1b). REASONED, NOT MEASURED — no real MySQL is
+// reachable from this environment; every claim below is "to be confirmed by spike".
+//
+// A single autocommit SELECT against InnoDB tables DOES get one consistent read view for
+// its own duration (InnoDB establishes the view at the start of the first — here, only —
+// read of an implicit autocommit transaction), so the SAME "one statement, one observed
+// state" property PG's MVCC gives unconditionally CAN hold here too. But unlike PG (whose
+// MVCC is a property of every heap table, unconditionally), that guarantee is CONDITIONAL
+// on THREE things this module cannot verify from a SQL string alone:
+//   (a) the probed object is backed by InnoDB (or another MVCC-capable engine) — a
+//       non-transactional engine (MyISAM, etc.) has no read view at all, and the
+//       duplicate/null subqueries could then observe DIFFERENT states (a torn check);
+//   (b) the connection is in autocommit / has no already-open transaction already holding
+//       an older snapshot from a previous statement;
+//   (c) the session's transaction ISOLATION LEVEL is READ COMMITTED or stricter. This
+//       third condition is NOT redundant with (a)+(b) and its omission was a real defect
+//       (review P2-4): under READ UNCOMMITTED, InnoDB does NOT establish a read view at
+//       all — plain SELECTs become dirty, non-consistent reads — so a consumer that
+//       verified only "InnoDB + autocommit" and trusted the token could still get exactly
+//       the torn check the token promises it will not get. Under READ COMMITTED a
+//       consistent read view is taken per statement, and under REPEATABLE READ (MySQL's
+//       default) / SERIALIZABLE at first read of the transaction; in all three, ONE
+//       autocommit statement observes ONE state, which is the property being claimed.
+// The token names all three conditions, rather than reusing `single_statement_mvcc` for
+// prestige — it is DELIBERATELY WEAKER than PG's. NOTE: this token is DIGEST-BEARING (it
+// flows into probe evidence → qualificationDigest, per the module header) — rewording it
+// later is a breaking change to every qualification minted under it, not a copy edit,
+// which is why the missing third condition is corrected NOW rather than "documented".
+const mysqlTotalOrderProbeStrategy = Object.freeze({
+  strategyId: 'gip.total_order_probe.mysql',
+  strategyVersion: 'v1',
+  dialect: 'mysql',
+  snapshotSemantics: 'single_statement_consistent_read_conditional_on_innodb_autocommit_and_isolation_read_committed_or_stricter',
+  buildTotalOrderProbeSql: buildMysqlOrderingKeyTotalOrderProbeSql,
+})
+
+// ── B1b — SQL Server certified dialect strategy ─────────────────────────────────────
+// Identifier hygiene: bracket-quoted, per segment, embedded `]` doubled (SQL Server's own
+// escaping rule — the closing-bracket analogue of quoteIdentifier's `"` doubling above).
+function quoteSqlServerIdentifier(name) {
+  const trimmed = requiredString(name, 'identifier')
+  return `[${trimmed.replace(/]/g, ']]')}]`
+}
+
+function buildSqlServerOrderingKeyDuplicateProbeSql({ objectName, keyColumns }) {
+  const object = quoteSqlServerIdentifier(objectName)
+  const cols = normalizeKeyColumns(keyColumns).map((column) => quoteSqlServerIdentifier(column)).join(', ')
+  // SQL Server has NO LIMIT — TOP (n) is the dialect equivalent (brief: "no LIMIT, use TOP").
+  return `SELECT TOP (1) ${cols}, COUNT(*) AS duplicate_count FROM ${object} GROUP BY ${cols} HAVING COUNT(*) > 1`
+}
+
+function buildSqlServerOrderingKeyNullProbeSql({ objectName, keyColumns }) {
+  const object = quoteSqlServerIdentifier(objectName)
+  const predicate = normalizeKeyColumns(keyColumns)
+    .map((column) => `${quoteSqlServerIdentifier(column)} IS NULL`)
+    .join(' OR ')
+  return `SELECT TOP (1) 1 AS null_key_row FROM ${object} WHERE ${predicate}`
+}
+
+// COUNT SHAPE: T-SQL `COUNT(*)` returns `int` (NOT bigint) — that is SQL Server's own
+// documented default (COUNT_BIG(*) is the bigint form). That is a LANGUAGE fact, statable
+// flatly, not a driver behaviour — so unlike PG (whose int8-as-string quirk is a driver
+// choice masking a wide server type) no cast/normalisation is needed to narrow the server
+// type here; it is already narrow. TO BE CONFIRMED BY SPIKE: that the `mssql`/tedious
+// driver surfaces a T-SQL `int` column as a plain JS number (its documented type mapping
+// says so, but this has not been run against a real server from this environment).
+function buildSqlServerOrderingKeyTotalOrderProbeSql({ objectName, keyColumns }) {
+  const columns = normalizeKeyColumns(keyColumns)
+  const dup = buildSqlServerOrderingKeyDuplicateProbeSql({ objectName, keyColumns: columns })
+  const nul = buildSqlServerOrderingKeyNullProbeSql({ objectName, keyColumns: columns })
+  return `SELECT (SELECT COUNT(*) FROM (${dup}) AS gip_duplicate_probe) AS duplicate_groups_sampled, (SELECT COUNT(*) FROM (${nul}) AS gip_null_probe) AS null_key_rows`
+}
+
+// Dialect strategy — SQL Server (B1b). REASONED, NOT MEASURED.
+//
+// SQL Server's DEFAULT isolation is READ COMMITTED WITHOUT row versioning (versioned reads
+// only happen if the database has READ_COMMITTED_SNAPSHOT or SNAPSHOT isolation explicitly
+// enabled — a database-level config this module cannot see or assume from a probe call).
+// Under that default, a read takes and releases short-lived locks AS it scans; there is NO
+// consistent read view established at statement start the way PG's MVCC or InnoDB's read
+// view provide. So the two internal subqueries of this ONE statement are each individually
+// "read committed" at the instant they scan, but are NOT guaranteed to observe the SAME
+// point-in-time state as each other — a row committed BETWEEN the two internal scans could
+// make the combined result a torn check under default settings. This is materially WEAKER
+// than both PG's and MySQL/InnoDB's claims, and the token says so rather than inheriting
+// `single_statement_mvcc`.
+//
+// THE TOKEN IS THE CERTIFICATION SIGNAL, not a disclaimer that argues against registering
+// this strategy: it is DIGEST-BEARING (flows into probe evidence → qualificationDigest), so
+// a qualification minted under it is PERMANENTLY distinguishable from a PG/MySQL one — a
+// downstream consumer (the gated wiring point, not this latent module) can read the token
+// and decide to refuse this dialect, or require the operator to enable RCSI/SNAPSHOT
+// isolation before trusting it. That decision is explicitly NOT made here.
+//
+// The token describes a read that is at least READ COMMITTED. A probe carrying the
+// T-SQL hints `WITH (NOLOCK)` / `READUNCOMMITTED` would perform DIRTY reads and make even
+// that weak claim untrue, so the read-only guard below blocks those hints outright —
+// without that, the honest token could sit on evidence from a read it does not describe.
+const sqlServerTotalOrderProbeStrategy = Object.freeze({
+  strategyId: 'gip.total_order_probe.sqlserver',
+  strategyVersion: 'v1',
+  dialect: 'sqlserver',
+  snapshotSemantics: 'no_single_statement_snapshot_under_default_read_committed',
+  buildTotalOrderProbeSql: buildSqlServerOrderingKeyTotalOrderProbeSql,
+})
+
 // TRUST is OBJECT IDENTITY, never a public field (review P1, round-6): a boolean
 // brand `__gipTrustedRegistry: true` is trivially duck-typed — a plain object carrying
 // that field + a resolve() passed the prober factory and minted candidates with an
@@ -382,6 +546,132 @@ function normalizeProbeCount(value) {
   return null
 }
 
+// ── B1b — dialect-aware hardening ────────────────────────────────────────────────────
+// EMPIRICALLY CONFIRMED (B1B brief, then re-run here): the guard below was PG-flavoured
+// and did not cover MySQL's or SQL Server's equivalents of "this SELECT takes server state
+// or executes arbitrary code" — WAITFOR, EXEC xp_cmdshell, OPENROWSET, GET_LOCK, BENCHMARK,
+// SLEEP and LOAD_FILE all passed unmodified as syntactically-legal expressions inside a
+// single SELECT, while the existing generic INTO token already caught MySQL's INTO OUTFILE/
+// DUMPFILE and SQL Server's SELECT...INTO, and the legitimate PG probe kept passing.
+//
+// FRAMING (honest, not a live vulnerability): this guard is documented DEFENSE-IN-DEPTH on
+// the probe's ONLY execution path — today the SQL it guards comes only from
+// server-registered strategy builders (never user input), so none of these gaps was
+// exploitable. They become materially relevant the moment a non-PG strategy is REGISTERED,
+// which is exactly what this slice does (mysqlTotalOrderProbeStrategy /
+// sqlServerTotalOrderProbeStrategy above).
+//
+// ── COVERAGE, PER CLASS × PER DIALECT (stated exactly) ──
+// RETRACTION FIRST, so a grep that stops at this line gets the right answer: an earlier
+// draft of this comment asserted that the state-taking-lock class was covered for
+// postgres/mysql/sqlserver. THAT ASSERTION WAS FALSE and has been withdrawn — SQL Server's
+// lock class had NO coverage at all (see LOCK-TAKING below). The table that follows is the
+// corrected statement, and it is what the test battery pins.
+//
+//   ARBITRARY CODE / REMOTE EXECUTION
+//     SQL Server  EXEC / EXECUTE, the xp_ / sp_ / fn_ routine-name families (xp_cmdshell,
+//                 sp_configure, fn_get_audit_file), OPENROWSET / OPENQUERY /
+//                 OPENDATASOURCE (ad-hoc remote and linked-server execution).
+//     MySQL, PG   NOT CLAIMED COMPLETE (round-2 re-verification NEW-3). An earlier draft said
+//                 "no additional members"; that was measured FALSE — PG `dblink` / `dblink_exec` /
+//                 `query_to_xml` execute SQL text and open network egress from the server, and all
+//                 three still pass every door. They are OUT OF SCOPE for this slice (extension-
+//                 provided, and the probe SQL is builder-minted), not covered.
+//
+//   UNBOUNDED SERVER-SIDE WORK (timing / DoS primitive)
+//     MySQL       SLEEP, BENCHMARK. NOT COMPLETE: MASTER_POS_WAIT / SOURCE_POS_WAIT /
+//                 WAIT_FOR_EXECUTED_GTID_SET / WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS are genuine
+//                 unbounded waits and still pass (round-2 NEW-3).
+//     SQL Server  WAITFOR.
+//     PG          pg_sleep AND its longer siblings pg_sleep_for / pg_sleep_until.
+//
+//   SCOPE OF THE MULTI-WORD TOKENS (round-2 NEW-2, stated so it is not over-read): phrase tokens
+//   such as `LOCK IN SHARE MODE` are closed against WHITESPACE, TAB, NEWLINE and CASE spellings —
+//   measured — but NOT against intra-phrase comments (`LOCK/**/IN/**/SHARE/**/MODE` trips no door;
+//   the ratified `FOR/**/SHARE` escapes the same way). No builder emits comments, and this guard
+//   only ever sees builder-minted SQL, so this is a bound on the CLAIM, not a reachable hole.
+//
+//   ARBITRARY SERVER-SIDE FILE ACCESS
+//     MySQL       LOAD_FILE (INTO OUTFILE / INTO DUMPFILE are the ratified INTO token).
+//     PG          pg_read_file, pg_read_binary_file, pg_stat_file, pg_ls_* (pg_ls_dir,
+//                 pg_ls_logdir), and the whole lo_ large-object family (lo_import,
+//                 lo_export, lo_get, …) — the family, not three hand-picked members.
+//     SQL Server  the fn_ family above (fn_get_audit_file, ::fn_trace_gettable).
+//
+//   STATE-TAKING LOCKS — the class that was WRONG before this fix
+//     PG          `FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE` (ratified clause token) plus
+//                 pg_advisory_lock / pg_advisory_xact_lock / pg_try_advisory_lock
+//                 (ratified) AND their `_shared` variants, which the ratified `\b`-
+//                 terminated tokens did NOT reach (a PRE-EXISTING gap, not introduced by
+//                 this slice; closed here because it is the same regex being touched).
+//     MySQL       the same `FOR UPDATE` / `FOR SHARE` clause (8.0+) — covered by the
+//                 ratified clause token — PLUS the pre-8.0 spelling `LOCK IN SHARE MODE`,
+//                 which is still supported and still takes shared row locks (REASONED, to
+//                 be confirmed by spike), and the GET_LOCK / RELEASE_LOCK /
+//                 RELEASE_ALL_LOCKS named-lock family.
+//     SQL Server  T-SQL HAS NO `FOR UPDATE` / `FOR SHARE` SYNTAX AT ALL (language fact),
+//                 so the ratified clause token matched NOTHING a T-SQL client can write:
+//                 before this fix this dialect's lock class had ZERO coverage. T-SQL takes
+//                 locks with TABLE HINTS, so those are the tokens: UPDLOCK, XLOCK, TABLOCK,
+//                 TABLOCKX, PAGLOCK, ROWLOCK, HOLDLOCK, SERIALIZABLE, REPEATABLEREAD,
+//                 READCOMMITTEDLOCK, READPAST. The same token also blocks the OPPOSITE
+//                 hazard — NOLOCK / READUNCOMMITTED (and READCOMMITTED), the hints that
+//                 DESTROY the read rather than lock it: a probe carrying WITH (NOLOCK)
+//                 performs dirty reads and would make the `sqlserver` strategy's snapshot
+//                 token describe a read that did not happen.
+//     NOT claimed IS_FREE_LOCK / IS_USED_LOCK (read-only lock INSPECTION, not state-taking)
+//                 are deliberately NOT blocked and are NOT claimed as covered.
+//
+//   NOT A TOKEN, EXCLUDED STRUCTURALLY: `LOAD DATA` is a standalone STATEMENT, not an
+//   expression, so the `^SELECT\b` anchor already excludes it — a different branch of this
+//   function, proven separately.
+//
+// ── OVERBREADTH, ENUMERATED MECHANICALLY (not "e.g.") ──
+// These patterns run on EVERY dialect, not only the one that owns the spelling, and they
+// are textual: they cannot tell a keyword from an identifier. Therefore, exactly:
+//   (1) every BARE token below rejects any SQL containing that word standing alone —
+//       including a column or object named exactly `exec`, `execute`, `waitfor`, `sleep`,
+//       `benchmark`, `openrowset`, `openquery`, `opendatasource`, `nolock`, `holdlock`,
+//       `serializable`, `repeatableread`, `readpast`, `readcommitted`, `readuncommitted`,
+//       `readcommittedlock`, `tablock`, `tablockx`, `updlock`, `xlock`, `rowlock`,
+//       `paglock`;
+//   (2) every PREFIX FAMILY rejects any identifier STARTING with it, in any dialect:
+//       `xp_`, `sp_`, `fn_`, `lo_`, `pg_sleep*`, `pg_read_file*`, `pg_read_binary_file*`,
+//       `pg_stat_file*`, `pg_ls_*`, `pg_advisory*`, `pg_try_advisory*`, `get_lock*`,
+//       `release_lock*`, `release_all_locks*`, `load_file*`. So an object named
+//       `sp_parts`, `fn_report`, `xp_report` or `lo_batch` fails a probe on PG and MySQL
+//       too. `lo_` and `fn_` are only two letters wide and are the widest of these — that
+//       is a deliberate blanket family choice, matching how `xp_`/`sp_` were already
+//       handled, NOT an oversight.
+//   (3) the keyword tokens are deliberately NOT prefix-extended (unlike the routine
+//       families): extending `EXEC` would reject an ordinary column named
+//       `execution_date`, and no dangerous callable is spelled `EXEC<something>`.
+// This is an accepted false-CLOSED trade-off for a defense-in-depth layer that is not the
+// primary safety mechanism (the builders above are safe by construction; a rare identifier
+// collision fails a probe, not a customer). The named cases are PINNED in the test battery
+// so a future "precision fix" of the overbreadth cannot silently reopen the hole.
+//
+// NO RATIFIED TOKEN IS TOUCHED OR WEAKENED: the two ratified patterns are extracted below
+// VERBATIM — same tokens, same order, same flags — and their `.source` is pinned
+// character-for-character by the test battery. Extraction exists so the new patterns can be
+// proven DISJOINT from them: without that, a mutation of a new pattern could be silently
+// caught by a ratified one and would prove nothing (fail-closed doors covering for each
+// other).
+const RATIFIED_WRITE_TOKEN_PATTERN = /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY|INTO|SETVAL|NEXTVAL|PG_ADVISORY_LOCK|PG_ADVISORY_XACT_LOCK|PG_TRY_ADVISORY_LOCK)\b/i
+const RATIFIED_ROW_LOCK_CLAUSE_PATTERN = /\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i
+// Keyword class — exact word, deliberately NOT prefix-extended (see overbreadth note (3)).
+const DIALECT_UNSAFE_TOKEN_PATTERN = /\b(SLEEP|BENCHMARK|WAITFOR|EXECUTE|EXEC|OPENROWSET|OPENQUERY|OPENDATASOURCE)\b/i
+// Routine families — PREFIX-matched with `[A-Za-z0-9_]*` so a LONGER identifier sharing the
+// prefix cannot escape (pg_sleep_for, pg_sleep_until, lo_get, pg_advisory_lock_shared…).
+// RELEASE_ALL_LOCKS is listed explicitly: prefix-extending RELEASE_LOCK does not reach it.
+const DIALECT_UNSAFE_ROUTINE_PREFIX_PATTERN = /\b(GET_LOCK|RELEASE_ALL_LOCKS|RELEASE_LOCK|LOAD_FILE|PG_SLEEP|PG_READ_FILE|PG_READ_BINARY_FILE|PG_STAT_FILE|PG_LS_|PG_ADVISORY|PG_TRY_ADVISORY|LO_)[A-Za-z0-9_]*\b/i
+// SQL Server routine-name prefix families: xp_ (extended), sp_ (system), fn_ (system
+// table-valued functions — fn_get_audit_file, fn_trace_gettable; neither xp_ nor sp_).
+const MSSQL_PROCEDURE_PREFIX_PATTERN = /\b(XP|SP|FN)_[A-Za-z0-9_]*\b/i
+// Lock-taking / read-weakening spellings that are NOT `FOR UPDATE|SHARE`: MySQL's pre-8.0
+// clause, and the T-SQL table-hint vocabulary (T-SQL has no FOR UPDATE at all).
+const DIALECT_LOCK_TAKING_PATTERN = /\b(LOCK\s+IN\s+SHARE\s+MODE|UPDLOCK|XLOCK|TABLOCKX|TABLOCK|PAGLOCK|ROWLOCK|HOLDLOCK|SERIALIZABLE|REPEATABLEREAD|READCOMMITTEDLOCK|READCOMMITTED|READUNCOMMITTED|READPAST|NOLOCK)\b/i
+
 // The probe refuses to execute anything but a single SELECT — read-only is a
 // runtime guard here, not a comment.
 function assertReadOnlySql(sql) {
@@ -391,8 +681,12 @@ function assertReadOnlySql(sql) {
   // SHARE takes row locks (review findings). The builder is safe by construction —
   // this guard is defense-in-depth and is wired on the probe's ONLY execution path.
   if (!/^SELECT\b/i.test(text) || /;/.test(text)
-    || /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY|INTO|SETVAL|NEXTVAL|PG_ADVISORY_LOCK|PG_ADVISORY_XACT_LOCK|PG_TRY_ADVISORY_LOCK)\b/i.test(text)
-    || /\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(text)) {
+    || RATIFIED_WRITE_TOKEN_PATTERN.test(text)
+    || RATIFIED_ROW_LOCK_CLAUSE_PATTERN.test(text)
+    || DIALECT_UNSAFE_TOKEN_PATTERN.test(text)
+    || DIALECT_UNSAFE_ROUTINE_PREFIX_PATTERN.test(text)
+    || MSSQL_PROCEDURE_PREFIX_PATTERN.test(text)
+    || DIALECT_LOCK_TAKING_PATTERN.test(text)) {
     fail('PROBE_SQL_NOT_READ_ONLY', 'qualification probe may only execute a single write-free SELECT', {})
   }
   return text
@@ -719,6 +1013,15 @@ module.exports = {
   buildOrderingKeyNullProbeSql,
   buildOrderingKeyTotalOrderProbeSql,
   postgresTotalOrderProbeStrategy,
+  // B1b — certified dialect strategies (MySQL / SQL Server), mirroring the PG reference.
+  buildMysqlOrderingKeyDuplicateProbeSql,
+  buildMysqlOrderingKeyNullProbeSql,
+  buildMysqlOrderingKeyTotalOrderProbeSql,
+  mysqlTotalOrderProbeStrategy,
+  buildSqlServerOrderingKeyDuplicateProbeSql,
+  buildSqlServerOrderingKeyNullProbeSql,
+  buildSqlServerOrderingKeyTotalOrderProbeSql,
+  sqlServerTotalOrderProbeStrategy,
   createProbeStrategyRegistry,
   createBindingQualificationProber,
   verifyBindingQualification,
@@ -728,6 +1031,19 @@ module.exports = {
     stableStringify,
     assertReadOnlySql,
     quoteIdentifier,
+    quoteMysqlIdentifier,
+    quoteSqlServerIdentifier,
+    // B1b — the guard's patterns, exposed so the battery can prove (a) the ratified two are
+    // byte-identical to their pin and (b) each discriminating probe is caught by EXACTLY
+    // ONE pattern, so no mutation can hide behind a neighbouring door.
+    readOnlyGuardPatterns: Object.freeze({
+      ratifiedWriteTokens: RATIFIED_WRITE_TOKEN_PATTERN,
+      ratifiedRowLockClause: RATIFIED_ROW_LOCK_CLAUSE_PATTERN,
+      dialectKeyword: DIALECT_UNSAFE_TOKEN_PATTERN,
+      dialectRoutinePrefix: DIALECT_UNSAFE_ROUTINE_PREFIX_PATTERN,
+      mssqlProcedurePrefix: MSSQL_PROCEDURE_PREFIX_PATTERN,
+      dialectLockTaking: DIALECT_LOCK_TAKING_PATTERN,
+    }),
     deriveQualificationInputsFromResolution,
     deriveProbeKeyColumns,
   },
