@@ -4633,6 +4633,8 @@ export function adminUsersRouter(): Router {
       return jsonOk(res, result)
     } catch (error) {
       const code = (error as { code?: string })?.code || 'ACTIVATE_FAILED'
+      // Only client/config conflicts are 409. ACTIVATE_ALIAS_FAILED is infrastructure
+      // (DB write) → 500. Never invent messages from raw driver text.
       const status =
         code === 'ACTIVATE_USER_NOT_FOUND' ? 404
           : code === 'ACTIVATE_NOT_PENDING'
@@ -4640,10 +4642,14 @@ export function adminUsersRouter(): Router {
             || code === 'ACTIVATE_LINK_MISMATCH'
             || code === 'ACTIVATE_ALIAS_CONFLICT'
             || code === 'ACTIVATE_ALIAS_REQUIRED'
-            || code === 'ACTIVATE_ALIAS_FAILED'
             ? 409
-            : code === 'ACTIVATE_USER_REQUIRED' ? 400 : 500
-      return jsonError(res, status, code, (error as Error)?.message || 'Activation failed')
+            : code === 'ACTIVATE_USER_REQUIRED' ? 400
+              : 500
+      const safeMessage =
+        code === 'ACTIVATE_ALIAS_FAILED'
+          ? 'Failed to claim login alias during activation'
+          : ((error as Error)?.message || 'Activation failed')
+      return jsonError(res, status, code, safeMessage)
     }
   })
 

@@ -173,9 +173,23 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
         client,
       })
       if (claimed.ok === false) {
+        // Never echo claim.message (may contain raw PostgreSQL text). Map codes only:
+        // CONFLICT / REQUIRED → client 409; WRITE_FAILED → 500 ACTIVATE_ALIAS_FAILED.
+        if (claimed.code === 'ALIAS_CONFLICT') {
+          throwCoded(
+            `Login alias for ${field.kind} is already claimed by another account`,
+            'ACTIVATE_ALIAS_CONFLICT',
+          )
+        }
+        if (claimed.code === 'ALIAS_EMPTY') {
+          throwCoded(
+            `Login alias for ${field.kind} is empty after normalization`,
+            'ACTIVATE_ALIAS_REQUIRED',
+          )
+        }
         throwCoded(
-          `Login alias claim failed (${field.kind}): ${claimed.message}`,
-          claimed.code === 'ALIAS_CONFLICT' ? 'ACTIVATE_ALIAS_CONFLICT' : 'ACTIVATE_ALIAS_FAILED',
+          'Failed to claim login alias during activation',
+          'ACTIVATE_ALIAS_FAILED',
         )
       }
       claimedAny = true

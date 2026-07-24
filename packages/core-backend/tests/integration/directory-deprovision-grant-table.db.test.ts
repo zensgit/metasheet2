@@ -23,22 +23,25 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const ORG = 'org-grant-fix-test'
 const USER = 'u-grant-fix-test'
+const USER_A = 'u-grant-fix-owner'
+const USER_B = 'u-grant-fix-pending'
 
 async function cleanup() {
-  await query(`DELETE FROM directory_deprovision_effects WHERE local_user_id = $1`, [USER]).catch(() => {})
-  await query(
-    `DELETE FROM directory_deprovision_events WHERE local_user_id = $1`, [USER]).catch(() => {})
-  await query(
-    `DELETE FROM directory_account_links WHERE local_user_id = $1`, [USER]).catch(() => {})
+  // Fail-honest: schema/env breakage must red the suite, not be swallowed.
+  for (const uid of [USER, USER_A, USER_B]) {
+    await query(`DELETE FROM directory_deprovision_effects WHERE local_user_id = $1`, [uid])
+    await query(`DELETE FROM directory_deprovision_events WHERE local_user_id = $1`, [uid])
+    await query(`DELETE FROM directory_account_links WHERE local_user_id = $1`, [uid])
+    await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [uid])
+    await query(`DELETE FROM user_login_aliases WHERE user_id = $1`, [uid])
+    await query(`DELETE FROM user_orgs WHERE user_id = $1`, [uid])
+    await query(`DELETE FROM users WHERE id = $1`, [uid])
+  }
   await query(`DELETE FROM directory_sync_runs WHERE integration_id IN
-                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG]).catch(() => {})
+                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG])
   await query(`DELETE FROM directory_accounts WHERE integration_id IN
-                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG]).catch(() => {})
-  await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [ORG]).catch(() => {})
-  await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [USER]).catch(() => {})
-  await query(`DELETE FROM user_login_aliases WHERE user_id = $1`, [USER]).catch(() => {})
-  await query(`DELETE FROM user_orgs WHERE user_id = $1`, [USER]).catch(() => {})
-  await query(`DELETE FROM users WHERE id = $1`, [USER]).catch(() => {})
+                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG])
+  await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [ORG])
 }
 
 async function seedDirectory(opts: { sourceActive: boolean }) {
@@ -229,5 +232,74 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     const effects = await query<{ status: string }>(
       `SELECT status FROM directory_deprovision_effects WHERE local_user_id = $1`, [USER])
     expect(effects.rows.map((r) => r.status)).toEqual(['applied'])
+  })
+
+  it('alias conflict rolls back users/membership/grant (real Postgres transaction)', async () => {
+    // A owns the global alias key "shared_login" (not necessarily their users.username —
+    // users.username is UNIQUE lower, so B uses a distinct username column only after we
+    // collide on the *alias table*, not the users unique index).
+    await query(
+      `INSERT INTO users (id, email, name, username, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'owner-a@example.com', 'Owner A', 'owner_a_user', 'hash-a', TRUE, 'activated', TRUE)`,
+      [USER_A],
+    )
+    await query(
+      `INSERT INTO user_login_aliases (user_id, kind, normalized_value, source)
+       VALUES ($1, 'username', 'shared_login', 'seed')`,
+      [USER_A],
+    )
+
+    // B is pending; username normalizes to the alias A already holds (global UNIQUE).
+    await query(
+      `INSERT INTO users (id, email, name, username, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'pending-b@example.com', 'Pending B', 'Shared_Login', 'hash-b', FALSE, 'pending_activation', FALSE)`,
+      [USER_B],
+    )
+
+    await expect(
+      activatePendingUser({
+        userId: USER_B,
+        mode: 'temp_password',
+        temporaryPassword: 'TempPass9A!',
+        adminUserId: 'admin-test',
+        orgId: ORG,
+        enableDingTalkGrant: true,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_ALIAS_CONFLICT' })
+
+    // Full transaction rolled back: activation, membership, grant never committed.
+    const b = await query<{
+      activation_status: string
+      is_active: boolean
+    }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`,
+      [USER_B],
+    )
+    expect(b.rows[0]?.activation_status).toBe('pending_activation')
+    expect(b.rows[0]?.is_active).toBe(false)
+
+    const membership = await query(
+      `SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE`,
+      [USER_B, ORG],
+    )
+    expect(membership.rows).toHaveLength(0)
+
+    const grant = await query(
+      `SELECT 1 FROM user_external_auth_grants WHERE local_user_id = $1 AND provider = 'dingtalk'`,
+      [USER_B],
+    )
+    expect(grant.rows).toHaveLength(0)
+
+    // Alias still exclusively owned by A; B never kept a claimed email alias either.
+    const aliasShared = await query<{ user_id: string }>(
+      `SELECT user_id FROM user_login_aliases WHERE normalized_value = 'shared_login'`,
+    )
+    expect(aliasShared.rows).toHaveLength(1)
+    expect(aliasShared.rows[0]?.user_id).toBe(USER_A)
+    const aliasB = await query(
+      `SELECT 1 FROM user_login_aliases WHERE user_id = $1`,
+      [USER_B],
+    )
+    expect(aliasB.rows).toHaveLength(0)
   })
 })

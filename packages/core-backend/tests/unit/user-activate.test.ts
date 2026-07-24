@@ -67,12 +67,12 @@ describe('activatePendingUser (T3)', () => {
     })
   })
 
-  it('rolls back activate when in-txn alias claim fails (shared transaction)', async () => {
+  it('maps alias conflict to ACTIVATE_ALIAS_CONFLICT without echoing claim.message', async () => {
     const { claimLoginAlias } = await import('../../src/auth/login-alias-service')
     vi.mocked(claimLoginAlias).mockResolvedValueOnce({
       ok: false,
       code: 'ALIAS_CONFLICT',
-      message: 'taken',
+      message: 'relation "user_login_aliases" does not exist DETAIL: secret',
     })
     pgMocks.query.mockResolvedValueOnce({
       rows: [{
@@ -85,13 +85,43 @@ describe('activatePendingUser (T3)', () => {
       }],
     }).mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
 
-    await expect(
-      activatePendingUser({ userId: 'u1', mode: 'temp_password', temporaryPassword: 'TempPass9A!' }),
-    ).rejects.toMatchObject({ code: 'ACTIVATE_ALIAS_CONFLICT' })
-    // claim used the txn client — failure aborts before commit returns
+    let thrown: unknown
+    try {
+      await activatePendingUser({ userId: 'u1', mode: 'temp_password', temporaryPassword: 'TempPass9A!' })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toMatchObject({ code: 'ACTIVATE_ALIAS_CONFLICT' })
+    expect(String((thrown as Error).message)).not.toMatch(/relation|DETAIL|secret/i)
     expect(claimLoginAlias).toHaveBeenCalledWith(
       expect.objectContaining({ client: expect.anything() }),
     )
+  })
+
+  it('maps ALIAS_WRITE_FAILED to ACTIVATE_ALIAS_FAILED (not conflict)', async () => {
+    const { claimLoginAlias } = await import('../../src/auth/login-alias-service')
+    vi.mocked(claimLoginAlias).mockResolvedValueOnce({
+      ok: false,
+      code: 'ALIAS_WRITE_FAILED',
+      message: 'connection refused 5432',
+    })
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'u1',
+        email: 'a@x.com',
+        username: null,
+        mobile: null,
+        activation_status: 'pending_activation',
+        is_active: false,
+      }],
+    }).mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'temp_password', temporaryPassword: 'TempPass9A!' }),
+    ).rejects.toMatchObject({
+      code: 'ACTIVATE_ALIAS_FAILED',
+      message: 'Failed to claim login alias during activation',
+    })
   })
 
   it('rejects non-pending users', async () => {
