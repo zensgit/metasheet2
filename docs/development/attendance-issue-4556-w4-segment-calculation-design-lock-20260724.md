@@ -1711,8 +1711,13 @@ alternate result algorithm.
 2. acquire the org rollout shared transaction advisory lock before any
    operation/source row lock and retain it through commit. Resolve rollout
    posture under that lock; if suspended, return the closed synchronous or
-   operational retry outcome before operation/source/result DML. Otherwise
-   acquire the section 9 exclusive identity advisory locks for every non-null
+   operational retry outcome before operation/source/result DML. The
+   synchronous branch performs zero DML. P07/P08 may lock only their
+   operational job row, idempotently preserve `status='queued'`, and set the
+   closed retry code in that transaction; this suspended branch acquires no
+   operation identity/operation/batch/item/target lock and cannot mark the job
+   failed. Otherwise acquire the section 9 exclusive identity advisory locks
+   for every non-null
    batch command and item operation identity in one canonical order, then
    re-read/lock exact operation rows in stable order. For P07/P08, lock and
    re-read the operational job after those operation rows and before
