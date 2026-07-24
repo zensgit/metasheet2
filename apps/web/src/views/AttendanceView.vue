@@ -570,6 +570,15 @@
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
           <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
           <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
+          <!-- W5-2 (Wave 5 explainability design-lock §6/§9 W5-2): 'self-request-center' context
+               help — the ④「查看计算依据/审计记录」deep link into the W5-1 decision-trace surface
+               that W5-1's PR body explicitly left for this slice. Read-only: the click intercept
+               only presets the trace category + scrolls (R1 — no write anywhere in this tree). -->
+          <AttendanceContextHelp
+            :tr="tr"
+            context-id="self-request-center"
+            @evidence-link-click="handleAttendanceContextHelpEvidenceLink"
+          />
           <div class="attendance__request-form">
             <label class="attendance__field" for="attendance-request-work-date">
               <span>{{ tr('Work date', '工作日期') }}</span>
@@ -5856,6 +5865,10 @@
                   </button>
                 </div>
               </div>
+              <!-- W5-2 (Wave 5 explainability design-lock §6/§9 W5-2): 'import' context help — ③
+                   常见失败与如何恢复, mapped from the EXISTING closed-set failure taxonomies
+                   (importXlsxConvert.ts / importFileGuard.ts) — zero new vocabulary. -->
+              <AttendanceContextHelp :tr="tr" context-id="import" />
               <small v-if="!importTemplateGuide" class="attendance__field-hint attendance__import-template-hint">
                 {{ tr('Click "Load template" to pick fields and generate an import template.', '点击「加载模板」可勾选字段生成导入模板。') }}
               </small>
@@ -9918,6 +9931,11 @@ import {
   type AttendanceDecisionTraceCategory,
 } from './attendance/attendanceDecisionTrace'
 import { useAttendanceDecisionTrace } from './attendance/useAttendanceDecisionTrace'
+// W5-2 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-2): contextual help mounted at the
+// 'import' and 'self-request-center' contexts (the 'setup-wizard' context is mounted INSIDE
+// AttendanceSetupReadiness.vue itself, not here — keeps this hot file's diff minimal, red line 10).
+import AttendanceContextHelp from './attendance/AttendanceContextHelp.vue'
+import type { AttendanceContextHelpEvidenceLink } from './attendance/attendanceContextHelp'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
 import {
   analyzeAttendanceShiftSegments,
@@ -14776,6 +14794,16 @@ function handleChangeSelfBalanceLeaveType(code: unknown): void {
 // section (the anchor's href stays the canonical query-form deep link, R2).
 function handleOpenSelfBalanceTrace(): void {
   selfTraceCategory.value = 'comp_time_balance'
+  loadSelfDecisionTrace()
+  void scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.decisionTrace)
+}
+
+// W5-2 (Wave 5 explainability design-lock §6/§9 W5-2): the context-help ④ evidence-link click —
+// same "preset + load + scroll" shape as `handleOpenSelfBalanceTrace` above, generalized over the
+// link's optional `presetCategory` hint. The anchor's `href` stays the canonical query-form deep
+// link (R2); only the CLICK is intercepted for the in-page preset + scroll (read-only end to end).
+function handleAttendanceContextHelpEvidenceLink(link: AttendanceContextHelpEvidenceLink): void {
+  if (link.presetCategory) selfTraceCategory.value = link.presetCategory
   loadSelfDecisionTrace()
   void scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.decisionTrace)
 }
