@@ -26,6 +26,58 @@ to restore from — with no error anywhere to indicate that.
 
 ---
 
+## 0.1 Empirical run (real Postgres, `main`'s own code)
+
+Static reads are not behaviour, so the findings below were re-established by **executing merged
+`main`**: worktree detached at `8aad0ef8f`, all migrations applied to a throwaway DB
+(`d4_probe_20260724`), then `applyDirectoryDeprovisionPolicies` / `previewDeprovisionForUser` /
+`restoreDeprovisionEvent` called directly. Probe scripts are session-scratch, not committed.
+
+### A — deprovision with `enabled: true` (what the canary GO turns on)
+
+| | before | after |
+|---|---|---|
+| `users.is_active` | true | **false** |
+| `user_orgs.is_active` | true | **false** |
+| grant `enabled` | true | **false** |
+| `users.access_generation` | 0 | **0** |
+| ledger events / effects | 0 / 0 | **0 / 0** |
+
+Writer returned `applied:true, grantsDisabledCount:1, usersDeactivatedCount:1`. So the person
+**was** fully deprovisioned, and **nothing was recorded**. That is the whole finding, measured
+rather than inferred.
+
+### B — D7 preview vs a grant that is genuinely ON
+
+Grant row in DB: `enabled = true`. Preview plan effects:
+`["clear_user_orgs","set_user_inactive"]` — **no `disable_dingtalk_grant`**. The preview cannot
+represent the grant, because it reads `user_external_identities.grant_enabled`, and
+`information_schema` confirms that column does not exist on the migrated database.
+
+### C — restore, with controls
+
+Same event shape each time; only the effect's *leg* and the drift condition change.
+
+| Case | Expected | Actual |
+|---|---|---|
+| **Control 1** — user leg, no drift | success, user reactivated | **SUCCESS**, `is_active` → true |
+| **Control 2** — user leg, real drift (user already active) | `DRIFT_CONFLICT` | **`DRIFT_CONFLICT`** ✓ |
+| **Subject** — grant leg, real drift (grant still enabled) | `DRIFT_CONFLICT` | **`25P02`**, nothing restored |
+
+The controls matter: they prove the restore machinery and the drift guard both work on a leg that
+reads a real column. The grant leg fails in two separate ways:
+
+1. **Drift is not detected.** `currentMatchesAfter` for the grant effect reads the phantom column;
+   the query errors, `.catch` turns it into "no grant", and "no grant" is read as *matching*
+   `after_active=false`. The gate is satisfied **by the read failing**, so it can never fire — the
+   subject case sailed past it despite the grant genuinely still being on.
+2. **The restore then aborts unconditionally.** `.catch(() => {})` swallows the JS rejection but
+   cannot un-abort a Postgres transaction: every later statement in that transaction fails with
+   `25P02`, so the whole restore rolls back and the admin gets an opaque error. Any event carrying
+   a `disable_dingtalk_grant` effect is **unrestorable**.
+
+---
+
 ## 1. The writer is not wired (P1)
 
 | Fact | Evidence |
@@ -95,13 +147,18 @@ authoritative table is `user_external_auth_grants (provider, local_user_id, enab
 
 Three merged paths write or read the non-existent column behind a swallow, so each fails silently:
 
-| Path | Landed behaviour | Impact |
-|---|---|---|
-| `user-activate.ts:141` (T3, #4574) | `UPDATE user_external_identities SET grant_enabled = TRUE` inside `.catch(() => {})` | Activation reports success; the person is **never granted DingTalk login** |
-| `deprovision-evidence-api.ts` preview (D7, #4575) | reads `COALESCE(grant_enabled, FALSE)` inside `.catch` | preview can **never** show a grant effect |
-| `deprovision-evidence-api.ts` restore (D7, #4575) | `UPDATE … SET grant_enabled = TRUE` inside `.catch` | restore reports success; the grant **stays revoked** |
+| Path | Landed behaviour | Impact | Measured |
+|---|---|---|---|
+| `user-activate.ts:141` (T3, #4574) | `UPDATE user_external_identities SET grant_enabled = TRUE` inside `.catch(() => {})` | Activation reports success; the person is **never granted DingTalk login** | column absent in `information_schema` |
+| `deprovision-evidence-api.ts` preview (D7, #4575) | reads `COALESCE(grant_enabled, FALSE)` inside `.catch` | preview can **never** show a grant effect | §0.1 B |
+| `deprovision-evidence-api.ts` restore (D7, #4575) | `UPDATE … SET grant_enabled = TRUE` inside `.catch` | drift gate can never fire, and the restore aborts (`25P02`) | §0.1 C |
 
 The T3 activation defect is live in merged code today and is independent of the deprovision flag.
+
+Note the `.catch(() => {})` idiom is worse than "silently no-ops" here: inside a transaction, a
+failed statement poisons the connection, so swallowing the rejection converts a precise error
+(`42703 column does not exist`) into a confusing one (`25P02 transaction is aborted`) raised by
+whatever innocent statement runs next.
 
 ---
 
