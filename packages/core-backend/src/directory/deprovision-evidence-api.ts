@@ -249,7 +249,7 @@ export async function restoreDeprovisionEvent(options: {
     currentMatchesAfter,
   })
 
-  if (!eligibility.ok) {
+  if (eligibility.ok === false) {
     const err = new Error(eligibility.message)
     ;(err as Error & { code?: string }).code =
       eligibility.code === 'DRIFT' ? 'DRIFT_CONFLICT' : eligibility.code

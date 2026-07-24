@@ -63,6 +63,11 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
 
     const root = mountPanel({ integrationId: 'int-1' })
     await flushUi()
+    expect(root.querySelector('[data-testid="deprovision-evidence-collapsed"]')).toBeTruthy()
+
+    const toggle = root.querySelector('[data-testid="deprovision-evidence-toggle"]') as HTMLButtonElement
+    toggle.click()
+    await flushUi()
 
     const banner = root.querySelector('[data-testid="deprovision-flags-banner"]')
     expect(banner?.textContent).toMatch(/false/)
@@ -91,6 +96,8 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
     })
 
     const root = mountPanel({ integrationId: 'int-1' })
+    await flushUi()
+    ;(root.querySelector('[data-testid="deprovision-evidence-toggle"]') as HTMLButtonElement).click()
     await flushUi()
 
     const input = root.querySelector('[data-testid="deprovision-preview-user-id"]') as HTMLInputElement
@@ -148,6 +155,8 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
     })
 
     const root = mountPanel({ integrationId: 'int-1' })
+    await flushUi()
+    ;(root.querySelector('[data-testid="deprovision-evidence-toggle"]') as HTMLButtonElement).click()
     await flushUi()
 
     const detailBtn = Array.from(root.querySelectorAll('button')).find((b) => b.textContent?.includes('详情'))

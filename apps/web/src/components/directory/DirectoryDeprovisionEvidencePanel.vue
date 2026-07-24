@@ -7,16 +7,32 @@
           预览计划、查看 effect 事件、执行 rehire / admin force 恢复。策略配置 ≠ 已执行。
         </p>
       </div>
-      <button
-        class="deprov-evidence__btn deprov-evidence__btn--secondary"
-        type="button"
-        :disabled="loadingFlags"
-        @click="void refreshAll()"
-      >
-        {{ loadingFlags ? '刷新中…' : '刷新' }}
-      </button>
+      <div class="deprov-evidence__row">
+        <button
+          class="deprov-evidence__btn deprov-evidence__btn--secondary"
+          type="button"
+          data-testid="deprovision-evidence-toggle"
+          @click="expanded = !expanded"
+        >
+          {{ expanded ? '收起' : '展开证据链' }}
+        </button>
+        <button
+          v-if="expanded"
+          class="deprov-evidence__btn deprov-evidence__btn--secondary"
+          type="button"
+          :disabled="loadingFlags"
+          @click="void refreshAll()"
+        >
+          {{ loadingFlags ? '刷新中…' : '刷新' }}
+        </button>
+      </div>
     </div>
 
+    <div v-if="!expanded" class="deprov-evidence__hint" data-testid="deprovision-evidence-collapsed">
+      默认收起，避免干扰目录主流程；需要时再展开加载 flags / events。
+    </div>
+
+    <template v-if="expanded">
     <div
       class="deprov-evidence__banner"
       :class="flags?.enabled ? 'deprov-evidence__banner--warn' : 'deprov-evidence__banner--ok'"
@@ -150,11 +166,12 @@
         {{ restoreConflict }}
       </p>
     </section>
+    </template>
   </article>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { apiFetch } from '../../utils/api'
 
 type DeprovisionFlags = {
@@ -205,6 +222,8 @@ const props = defineProps<{
   integrationId?: string | null
 }>()
 
+/** Collapsed by default so DirectoryManagementView existing tests / primary flows are not hit with extra API calls. */
+const expanded = ref(false)
 const flags = ref<DeprovisionFlags | null>(null)
 const loadingFlags = ref(false)
 const status = ref('')
@@ -365,12 +384,12 @@ async function refreshAll() {
 watch(
   () => props.integrationId,
   () => {
-    void loadEvents()
+    if (expanded.value) void loadEvents()
   },
 )
 
-onMounted(() => {
-  void refreshAll()
+watch(expanded, (isOpen) => {
+  if (isOpen) void refreshAll()
 })
 </script>
 

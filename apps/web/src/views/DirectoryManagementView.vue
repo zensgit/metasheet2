@@ -1174,7 +1174,7 @@
             <p class="directory-admin__hint">
               本地用户：{{ item.account.localUser ? describeLocalUserIdentifier(item.account.localUser) : '未绑定' }} ·
               外部用户：{{ item.account.externalUserId }} ·
-              部门：{{ item.account.departmentPaths.join('，') || '未分配部门' }}
+              部门：{{ (item.account.departmentPaths || []).join('，') || '未分配部门' }}
             </p>
             <p v-if="item.kind === 'pending_binding' && item.recommendationStatus" class="directory-admin__hint">
               推荐判断：{{ item.recommendationStatus.message }}
@@ -1687,7 +1687,7 @@
             </div>
 
             <p class="directory-admin__hint">
-              部门：{{ account.departmentPaths.join('，') || '未分配部门' }}
+              部门：{{ (account.departmentPaths || []).join('，') || '未分配部门' }}
             </p>
             <div v-if="account.localUser?.id" class="directory-admin__actions">
               <router-link
