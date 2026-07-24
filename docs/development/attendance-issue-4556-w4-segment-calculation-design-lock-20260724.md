@@ -65,6 +65,8 @@ listed so a rebase must re-find the code instead of carrying stale line numbers.
 | Decision authorization | Attendance decision/cancel handlers load the request by bare ID; the global attendance permission bypass is not itself org-scoped, while scheduler-scope authorization is. | `resolveRequest`; `cancelRequest`; `assertAttendanceRequestApprovalAllowed` |
 | Legacy import | `POST /api/attendance/import` has a private mapping/calculation/write loop. | route near `index.cjs:36337-36445` |
 | Integration sync | `/api/attendance/integrations/:id/sync` repeats import calculation in another loop. | route near `index.cjs:37135-37620` |
+| Integration semantic drift | Integration sync omits rule-engine/group-sync work performed by the modern commit path; even `dryRun` writes a run and updates `last_sync_at`. | integration sync loop and final run/watermark update |
+| Rollback authorization drift | Import rollback has org scoping and `attendance:import|admin`, but lacks the commit path's finer delegated scope/group check. | rollback route versus `assertAttendanceImportCommitAllowed` |
 | Explanation precedent | Wave 5 decision trace has separate admin/self hosts, active-org checks, token-subject self reads, and authorization before SQL. | `packages/core-backend/src/routes/attendance-admin.ts:1248-1471` |
 | Identity lifecycle | A usable subject now requires activated/active user state plus active org membership; directory deprovision may revoke `user_orgs` under its separately gated policy. | `user-activation.ts`; `directory-sync.ts` admission/deprovision helpers |
 | OpenAPI gap | `AttendanceRecord` has only the daily projection; no immutable segment calculation detail exists. | `packages/openapi/src/base.yml:431-470` |
@@ -105,6 +107,9 @@ separate debt entries even when they later call the same function.
 | P20 | Anomaly, makeup-anomaly facts, open-record attribution, and DecisionTrace are direct ordinary readers absent from the named current-view list. | W4C-3c: move every one to the canonical active-current helper and give each an independent retired-row negative leg. |
 | P21 | Time conversion has multiple silent UTC/server-local fallback helpers and a default-rule timezone write path without uniform IANA validation. | W4C-1/W4C-2: strict-parse every business-time input and freeze the accepted zone/offset/instant; no helper-specific fallback path. |
 | P22 | Current request terminalization has three reachable execution bodies and no attendance reconciliation listener; later plugin approval may still apply effects after another body already made the instance terminal. | W4C-3b: one terminal attendance transition with expected version/status, canonical replay, and explicit rejection of a second execution body. |
+| P23 | `/import/rollback/:id` accepts a broader authorization posture than import commit and can roll back another actor's org-local batch. | W4C-3a: bind rollback to the frozen batch owner/scope and re-run the commit-equivalent delegated authorization before claim/source DML. |
+| P24 | Integration sync has a distinct semantic pipeline, and `dryRun` still writes the run plus `last_sync_at`. | W4C-3a: freeze current compatibility semantics explicitly, use one W4 calculator, and make dry-run append audit-only state without result/batch/watermark mutation. |
+| P25 | Import token, preview/job, template-preference, upload-lifecycle, and temporary-staging writes are operational DML with different correctness contracts. | W4C-0: classify each explicitly; only business source/effect/result state enters the atomic result operation, while operational state gets its own allowlist and no authority over calculation truth. |
 
 There is no general production recompute writer today. W4C-3c introduces
 prior-policy/default recompute and explicitly labeled current-policy recompute;
@@ -184,6 +189,9 @@ against W1 group-membership tables is a scope violation.
 | W4C-R32 | Every ordinary daily-row reader uses the active-current contract. | Independent retired-row legs cover anomaly, makeup-anomaly facts, open-record attribution, DecisionTrace, and every pre-existing list/summary/report/export reader. |
 | W4C-R33 | Every business-time ingress uses one strict timezone contract. | Invalid/missing zone, DST gap/fold, offset-less server-local parsing, and helper-level UTC fallback mutations all fail before source/result DML. |
 | W4C-R34 | Pending request edits are versioned immutable transitions. | Reusing mutable `form_snapshot`, omitting the expected snapshot hash/version, or an A -> B -> A edit without three snapshots fails. |
+| W4C-R35 | Import rollback cannot exceed the original batch's authorization scope. | Another importer, delegated scope, group, and cross-org probes fail before operation claim or reversal DML unless the closed owner/admin matrix authorizes them. |
+| W4C-R36 | Integration dry-run cannot advance business state. | A dry-run may append its audit attempt but writes no attendance result/import batch/current pointer/`last_sync_at`; moving any forbidden write into that branch fails. |
+| W4C-R37 | Operational import state never becomes calculation authority. | Token, preview/job, template-preference, upload cleanup, and temporary-stage mutations cannot satisfy operation identity, evidence, promotion, or rollback truth. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1589,6 +1597,15 @@ handwritten plugin directory. Production DML is allowlisted only inside:
 - W4 forward migrations/backfills; and
 - fixtures that first prove zero operation/snapshot/calculation history.
 
+Operational import state is separately classified rather than swept into
+calculation authority: prepare/preview tokens, async job bookkeeping,
+template preferences, upload-file lifecycle, and session-local temporary
+staging have named owners and allowlists. They cannot mint evidence, satisfy
+promotion, identify a business operation, or authorize rollback. A path that
+does become a business source or shared effect must enter the canonical
+operation boundary before its first such DML; renaming it “operational” cannot
+evade the generated call-path test.
+
 For every source command, a generated route-to-first-DML test records operation
 claim and suspension-preflight witnesses and asserts both precede that first
 DML. Moving request create/edit/decision/cancel, outdoor event, import,
@@ -1850,7 +1867,7 @@ Gates:
 - the collector generates an exact-head source/effect/result debt inventory
   naming every current command route, worker/recovery body, cron/admin
   initiator, first DML, shared-table hook, privileged/tooling path, and planned
-  canonical adapter. The initial set contains P01-P22 from section 1.1; its
+  canonical adapter. The initial set contains P01-P25 from section 1.1; its
   immutable debt IDs/content hash are generated from pinned baseline
   `e0defbe26...` before runtime changes. W4C-0 proves
   collection/positive controls and fails new, renamed, or unclassified DML;
@@ -1949,7 +1966,10 @@ Gates:
   order into one prepared target calculation; rollback restores the one frozen
   pre-batch parent tuple, not a batch-internal predecessor;
 - native CSV/equivalent XLSX semantic same, provenance distinct;
-- integration/legacy import same semantic row result;
+- integration/legacy import same canonical W4 semantic row result; their
+  current compatibility projections are snapshotted separately, so the
+  integration path's missing rule-engine/group-sync work cannot be silently
+  presented as modern-import parity;
 - exact-presence imported metrics and frozen legacy policy/rule-engine output
   are snapshotted. Congruent values may proceed; mismatch or insufficient
   boundary evidence yields `import_metric_conflict` review and blocks
@@ -1975,15 +1995,28 @@ Gates:
 - Nth-row failure rolls back whole batch;
 - source/import item/result/operation seal share one transaction ID; injected
   failure at any stage leaves zero batch effect;
+- P23 rollback rechecks the frozen batch owner/delegated scope with the
+  commit-equivalent authorization matrix before operation claim; same-org
+  other-importer, wrong-group, inactive membership, and cross-org attempts
+  produce the closed not-found/forbidden shape with zero reversal DML;
+- P24 integration dry-run may append only its audit attempt. It cannot create
+  an import batch/result, change a current pointer, or update `last_sync_at`;
+  real sync freezes its compatibility pipeline and uses the canonical W4
+  calculator;
+- P25 operational import tables/files are explicitly classified and cannot
+  supply business evidence, operation identity, promotion success, or rollback
+  authority;
 - legacy import has durable batch/item identities before shadow;
 - P06 synchronous modern transport, P07 async worker, P08 restart recovery, P09
-  legacy import, P10 integration sync, and P11 rollback inventory entries are
-  removed independently; batch/item claims and suspension witnesses precede
-  import job/batch/item and integration source/effect DML;
+  legacy import, P10 integration sync, P11 rollback, and P23-P25 authorization/
+  integration/operational classifications are removed independently;
+  batch/item claims and suspension witnesses precede import job/batch/item and
+  integration business source/effect DML;
 - sync/worker/recovery parity is proven against the same prepared batch and the
   async operation replay is proven across process restart; deleting any one
   execution-body adapter or routing recovery around it fails its own leg;
-- records, payroll/summary, report sync/digest, reminder, comprehensive-hours,
+- records, payroll/summary, report sync/digest, reminder, anomalies, makeup
+  facts, open-record attribution, DecisionTrace, comprehensive-hours,
   integration, and export all hide retired rows while history detail shows
   them;
 - delete/cascade and omitted-transport mutations fail.
@@ -2168,12 +2201,15 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-31 current reader inventory | (a) anomaly, makeup facts, open-record attribution, and DecisionTrace join the canonical active-current contract with independent tests; (b) tolerate retired-row reads | (a) |
 | OD-W4C-32 timezone ingress | (a) strict IANA validation and explicit offset/instant across every helper and settings write; (b) retain helper-specific fallbacks | (a) |
 | OD-W4C-33 pending edit concurrency | (a) append immutable request snapshot versions with expected hash/version; (b) continue mutable `form_snapshot` overwrite | (a) |
+| OD-W4C-34 rollback authorization | (a) batch owner/delegated scope is frozen and rollback uses commit-equivalent authorization plus org binding; (b) any org-local importer may roll back any batch | (a) |
+| OD-W4C-35 integration dry-run | (a) audit attempt only, with no batch/result/pointer/`last_sync_at` write; (b) retain current watermark side effect | (a) |
+| OD-W4C-36 import operational state | (a) classify token/job/prefs/upload/temp state separately and deny calculation authority; (b) treat every operational row as business evidence | (a) |
 
 ## 14. RATIFY and execution sequence
 
 1. Rebase docs PR to current main.
 2. Re-verify anchors and regenerate writer inventory.
-3. Owner decides OD-W4C-1..33.
+3. Owner decides OD-W4C-1..36.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
 6. Owner RATIFYs exact merged SHA.
