@@ -14,6 +14,10 @@ import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from
 import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
+import {
+  findUserIdByLoginAlias,
+  isAuthLoginAliasCutoverEnabled,
+} from './login-alias-service'
 import { evaluateUserAuthenticationGate } from './user-activation'
 
 export interface User {
@@ -442,12 +446,25 @@ export class AuthService {
       const trimmedIdentifier = identifier.trim()
       if (!trimmedIdentifier) return null
 
-      const normalizedEmail = trimmedIdentifier.toLowerCase()
-      const normalizedUsername = trimmedIdentifier.toLowerCase()
-      const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
-
       try {
         const pool = poolManager.get()
+
+        // T2b: alias-only login (no OR fallback to users.email/username/mobile).
+        if (isAuthLoginAliasCutoverEnabled()) {
+          const userId = await findUserIdByLoginAlias(trimmedIdentifier)
+          if (!userId) return null
+          const byId = await pool.query(
+            `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1 LIMIT 1`,
+            [userId],
+          )
+          if (!byId.rows[0]) return null
+          return this.mapAuthUserRow(byId.rows[0] as UserRow)
+        }
+
+        // T2a (default): legacy OR-column path remains until cutover.
+        const normalizedEmail = trimmedIdentifier.toLowerCase()
+        const normalizedUsername = trimmedIdentifier.toLowerCase()
+        const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
         const result = await pool.query(
           `SELECT ${USER_AUTH_SELECT}
            FROM users
@@ -472,24 +489,7 @@ export class AuthService {
         }
 
         if (result.rows.length > 0) {
-          const row = result.rows[0] as UserRow
-          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [])
-          return {
-            id: row.id,
-            email: row.email,
-            username: row.username ?? null,
-            mobile: row.mobile ?? null,
-            name: row.name,
-            role: resolved.role,
-            permissions: resolved.permissions,
-            is_active: row.is_active,
-            must_change_password: row.must_change_password,
-            activation_status: row.activation_status,
-            local_password_set: row.local_password_set,
-            password_hash: row.password_hash,
-            created_at: row.created_at,
-            updated_at: row.updated_at
-          }
+          return this.mapAuthUserRow(result.rows[0] as UserRow)
         }
       } catch (dbError) {
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
@@ -498,6 +498,30 @@ export class AuthService {
     } catch (error) {
       this.logger.error('Get user by identifier error', error instanceof Error ? error : undefined)
       return null
+    }
+  }
+
+  private async mapAuthUserRow(row: UserRow): Promise<(User & { password_hash: string })> {
+    const resolved = await this.resolveRbacProfile(
+      row.id,
+      row.role,
+      Array.isArray(row.permissions) ? row.permissions : [],
+    )
+    return {
+      id: row.id,
+      email: row.email,
+      username: row.username ?? null,
+      mobile: row.mobile ?? null,
+      name: row.name,
+      role: resolved.role,
+      permissions: resolved.permissions,
+      is_active: row.is_active,
+      must_change_password: row.must_change_password,
+      activation_status: row.activation_status,
+      local_password_set: row.local_password_set,
+      password_hash: row.password_hash,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     }
   }
 
