@@ -196,13 +196,13 @@ against W1 group-membership tables is a scope violation.
 | W4C-R34 | Pending request edits are versioned immutable transitions. | Reusing mutable `form_snapshot`, omitting the expected snapshot hash/version, or an A -> B -> A edit without three snapshots fails. |
 | W4C-R35 | Import rollback cannot exceed the original batch's authorization scope. | Another importer, delegated scope, group, and cross-org probes fail before operation claim or reversal DML unless the closed owner/admin matrix authorizes them. |
 | W4C-R36 | Integration dry-run cannot advance business state. | A dry-run may append its audit attempt but writes no attendance result/import batch/current pointer/`last_sync_at`; moving any forbidden write into that branch fails. |
-| W4C-R37 | Operational import state never becomes calculation authority. | Token, preview/job, template-preference, upload cleanup, and temporary-stage mutations cannot satisfy operation identity, evidence, promotion, or rollback truth. |
+| W4C-R37 | Operational import state never becomes calculation authority. | Token, preview/job, template-preference, upload cleanup, and temporary-stage mutations cannot authorize, claim, complete, evidence, promote, or roll back a business operation. P07/P08 may transport strict-parsed but untrusted candidate command identities only to the private worker; every non-worker adapter rejects a retryable job's reserved tuple, and removing either boundary fails. |
 | W4C-R38 | Attendance approval assignment authority is org-bound, action-complete, and version-serialized. | A generated matrix from the actual generic action union and assignment-DML call graph covers bulk reassign, non-terminal `approve` advancement, `return`, `revoke`, jump, transfer, add/reduce-sign, timeout, and future assignment mutations. Each action proves the attendance instance unreachable or locks its request org/version and satisfies the closed actor/target matrix before instance/assignment DML; tests include both a normal attendance instance and an adversarial one carrying `published_definition_id`, and a mutation-versus-decision race cannot authorize the wrong actor. |
 | W4C-R39 | Closing a pre-W4 import rollback window is immutable, and rollback is serialized with closure, rollout transition, and writes to the same import batch. | Removing the append-only close witness, common rollout/operation-identity-advisory/operation-row/batch/target lock order, or final in-transaction eligibility recheck fails dual-connection races. For a legacy batch closed without preimage, close/transition first makes rollback return 409 with zero delete/reversal DML; rollback first makes transition wait and then re-evaluate. For source versus rollback on one batch, exactly one commits first and the waiter rechecks committed batch state before zero conflicting source/reversal DML. A batch with a valid frozen preimage retains its specified W4 reversal path. |
 | W4C-R40 | Operation lifecycle follows rollout posture and supplied identity without an implicit retry hole. | A new legacy request with no supplied stable operation ID creates no operation/outbox row; legacy with a supplied ID claims/seals a compatibility operation but still creates no outbox; every new `shadow|eligible|authoritative` request requires, claims, and seals its operation plus required outbox. Independent mutations that create a legacy operation without an ID, omit the legacy-with-ID compatibility operation, or skip claim/seal outside legacy fail. |
-| W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work, through one fail-closed advisory-key helper, a rollout-only `00` bigint key class, and one rollout-first lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues acquires the org rollout shared transaction advisory lock through the single canonical helper before locking operation/source rows and holds it through commit; transition/closure use that helper's matching exclusive mode before their rows. Removing either lock, changing one caller's namespace/key or two-bit key class, swallowing acquisition failure, or restoring operation-row-first locking fails an independent dual-connection leg. |
+| W4C-R41 | Rollout posture is frozen against every source transaction and durable async enqueue, including null-ID legacy work, through one fail-closed advisory-key helper, a rollout-only `00` bigint key class, and one rollout-first lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues and every P07 enqueue acquires the org rollout shared transaction advisory lock through the single canonical helper before resolving accepted posture or locking/writing operation, source, or job rows and holds it through commit; transition/closure use that helper's matching exclusive mode before their rows. Removing either lock, changing one caller's namespace/key or two-bit key class, swallowing acquisition failure, or restoring operation/job-row-first locking fails an independent dual-connection leg. |
 | W4C-R42 | Concurrent first claim of one batch or operation identity serializes before any unique-row insert through an operation-only `10` bigint key class; target locks use disjoint class `11`, and `01` is forbidden. | When the first holder commits within the closed lock budget, two connections presenting the same all-new identity both complete with the one stored response and exactly one source/result effect. When it exceeds that budget, the waiter returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` with zero DML and a later retry returns the stored response. Neither case exposes raw `23505` or `55P03`. Removing the canonical identity advisory lock, changing one caller's key derivation, crossing a rollout/operation/target class, sorting by tuple instead of final signed key, or acquiring identity/target locks in a different final-key order fails independently. |
-| W4C-R43 | A durable asynchronous job pauses before operation claim and resumes through one canonical queue execution path. | P07/P08 freeze `accepted_posture` and source identity on the operational job row, but create no batch/item operation row until the canonical worker transaction has acquired the org rollout shared lock and admitted the job. While the org is suspended, the effective state is the durable job plus the durable suspended rollout state: the handler performs zero operation/source/result DML, records only the closed values-free retry posture allowed by P25, and leaves the job retryable. After `suspended->authoritative` commits, the private queue worker/startup-recovery path re-enters the same job as an all-new batch under the ordinary section 8.2 identity locks; synchronous routes cannot adopt a job ID. Duplicate workers, another frozen posture, a partial batch/item claim, or any persisted `paused` operation state fails independently. |
+| W4C-R43 | A durable asynchronous job pauses before operation claim and resumes through one canonical queue execution path. | P07 enqueue freezes `accepted_posture` and source identity while holding class-`00` shared through job insert commit, but creates no batch/item operation row. While the org is suspended, the effective state is the durable job plus the durable suspended rollout state: P07/P08 lock only that job row, perform zero operation/source/result DML, record only the closed values-free retry posture allowed by P25, and leave the job retryable. After `suspended->authoritative` commits, startup recovery may re-enqueue and only the private queue processor enters the same job as an all-new batch under the ordinary section 8.2 identity locks; synchronous routes cannot adopt or reserve its identities. Duplicate workers, another frozen posture, a partial batch/item claim, or any persisted `paused` operation state fails independently. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1100,7 +1100,9 @@ preview/meta.
 - after fresh authorization, an exact-key read of batch/item operation rows is
   allowed before the suspension decision solely to classify replay; a
   congruent completed replay returns its stored response even while currently
-  suspended and performs no source/result write;
+  suspended and performs no source/result write. P07/P08 additionally require
+  the same non-locking read to observe the immutable job identity plus
+  `status='completed'`; operation rows alone cannot authorize their replay;
 - a missing, incomplete, mixed, or non-congruent operation is not a
   completed replay. Suspension is then checked before creating/advancing an
   operation row or touching any source row; synchronous work returns 503 and a
@@ -1128,27 +1130,36 @@ preview/meta.
 P07/P08 use the pre-existing `attendance_import_jobs` row as operational queue
 state, not as an operation claim or calculation authority. W4 freezes on that
 row the exact org, job/batch identity, actor/source identity, command
-fingerprint, and `accepted_posture` at enqueue. The HTTP route can only enqueue;
+fingerprint, and `accepted_posture` at enqueue. That enqueue transaction first
+acquires the org rollout shared lock, resolves accepted posture under it, and
+holds the lock through the job insert commit. The HTTP route can only enqueue;
 startup recovery may only re-enqueue, and only the module-private registered
 queue processor can load the row and call the canonical worker adapter. No
 request body, private boolean, process identity, or lease token can confer that
 authority.
 
-The worker checks the job identity and current status, enters the canonical
-transaction, acquires the org rollout shared lock, resolves posture, acquires
-the canonical batch/item identity locks, then locks and re-reads the job before
-operation/source DML. The pre-lock job read may derive candidate identities but
-confers no authority. If current rollout is `suspended`, if current posture
-differs from the frozen accepted posture, or if the locked row is no longer
-retryable, it creates no operation/batch/item/source/result row. Suspension
-keeps `status='queued'`, records only the closed values-free operational
-`retry_reason_code='SEGMENT_CALCULATION_SUSPENDED'`, and never records a
-`failed` business import. W4's final `queued->completed` job transition is in
-the same canonical transaction as operation/source/result seal; rollback leaves
-the job queued. After authoritative resume, the same durable job is processed
-as an ordinary all-new batch. Duplicate queue deliveries serialize through the
-canonical identity locks and then the job row. The batch and all item operation
-rows therefore remain all-new-or-all-completed; no paused or partially claimed
+The worker's pre-lock job read may derive candidate identities but confers no
+authority. It enters the canonical transaction, acquires the org rollout shared
+lock, and resolves posture. The branches are disjoint:
+
+- while suspended, it acquires no class-`10`/class-`11`, operation, batch/item,
+  or target lock. It locks only the job row, rechecks identity/status, preserves
+  `status='queued'`, records the closed values-free operational
+  `retry_reason_code='SEGMENT_CALCULATION_SUSPENDED'`, and never records a
+  `failed` business import;
+- otherwise it acquires the canonical batch/item identity locks, locks/re-reads
+  operation rows, then locks/re-reads the job. Exactly two state pairs are
+  legal: `(queued, all-new)` executes, while
+  `(completed, all-completed-congruent)` returns the stored response with zero
+  DML. Every mixed pair, including completed/all-new and queued/all-completed,
+  is conflict/remediation.
+
+W4's final `queued->completed` job transition is in the same canonical
+transaction as operation/source/result seal; rollback leaves the job queued.
+After authoritative resume, the same durable job is processed as an ordinary
+all-new batch. Duplicate queue deliveries serialize through the canonical
+identity locks and then the job row. The batch and all item operation rows
+therefore remain all-new-or-all-completed; no paused or partially claimed
 operation vector exists.
 
 For W4-enabled live punch and web approval decisions, OpenAPI and the web client
@@ -1649,11 +1660,14 @@ proves the branded authorization capability covers every envelope item and
 rechecks membership/source ownership in SQL. It opens one `SERIALIZABLE`
 transaction and performs an authorization-gated, non-locking read of supplied
 operation keys in stable order so an all-completed congruent replay can return
-with zero DML even under suspension. Any request that cannot return at that
-point acquires the org rollout shared advisory lock before it locks or claims
-an operation/source row, acquires the canonical exclusive identity advisory
-locks for all supplied batch/operation identities, re-reads the operation keys
-under those locks, and then resolves rollout posture. A new
+with zero DML even under suspension; P07/P08 also require the congruent completed
+job row. Any request that cannot return at that point acquires the org rollout
+shared advisory lock and resolves posture before it locks or claims an
+operation/source row. A suspended synchronous request returns with zero DML,
+while suspended P07/P08 may take only the job-row retry-code branch. Every
+other request acquires the canonical exclusive identity advisory locks for all
+supplied batch/operation identities, re-reads the operation keys under those
+locks, and for P07/P08 then locks the job row. A new
 `shadow|eligible|authoritative` request claims
 all item operations in stable order before invoking closed private adapters
 and seals them before commit. A new `legacy_projection_only` request invokes
@@ -1706,7 +1720,8 @@ alternate result algorithm.
 
 1. begin `SERIALIZABLE`; verify the frozen authorization and normalize the
    envelope, then non-locking-read any existing exact batch/item operation keys
-   in stable order; return only an all-completed congruent replay. A missing,
+   in stable order. Return only an all-completed congruent replay; P07/P08 also
+   require the congruent immutable job row in `completed` state. A missing,
    mixed, incomplete, or non-congruent state cannot continue from this read;
 2. acquire the org rollout shared transaction advisory lock before any
    operation/source row lock and retain it through commit. Resolve rollout
@@ -1721,11 +1736,11 @@ alternate result algorithm.
    batch command and item operation identity in one canonical order, then
    re-read/lock exact operation rows in stable order. For P07/P08, lock and
    re-read the operational job after those operation rows and before
-   import-batch/item source rows; require a retryable job whose immutable
-   identity/fingerprint is unchanged and whose frozen `accepted_posture` equals
-   the resolved posture. Its batch/item operation set must be all-new or an
-   all-completed congruent replay. After resume, the unchanged durable job
-   enters this ordinary all-new/replay protocol. For
+   import-batch/item source rows; require immutable identity/fingerprint and
+   frozen `accepted_posture` equality. Admit exactly `(queued, all-new)` for
+   execution or `(completed, all-completed-congruent)` for zero-DML replay.
+   Any other job/operation pair is conflict/remediation. After resume, the
+   unchanged durable job enters this ordinary all-new/replay protocol. For
    `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
    reject mixed or non-congruent state. For `legacy_projection_only`, reject
    any conflicting/incomplete existing operation state; claim a compatibility
@@ -1898,10 +1913,16 @@ Operational import state is separately classified rather than swept into
 calculation authority: prepare/preview tokens, async job bookkeeping,
 template preferences, upload-file lifecycle, and session-local temporary
 staging have named owners and allowlists. They cannot mint evidence, satisfy
-promotion, identify a business operation, or authorize rollback. A path that
-does become a business source or shared effect must enter the canonical
-operation boundary before its first such DML; renaming it “operational” cannot
-evade the generated call-path test.
+promotion, authorize rollback, or themselves claim/complete an operation.
+P07/P08 have one narrow transport exception: the job row may retain the
+strict-parsed but still untrusted batch/item command identities and fingerprint
+needed for the private worker to reconstruct its envelope after restart. Those
+values confer no authorization or completion evidence. While that job is
+retryable, every synchronous and non-worker import adapter rejects the same
+reserved `(org,entrypoint,batch/item identity)` tuple; only the private worker
+may present it to the canonical operation boundary. A path that does become a
+business source or shared effect must enter that boundary before its first such
+DML; renaming it “operational” cannot evade the generated call-path test.
 
 For every source command, a generated route-to-first-DML test records operation
 claim and suspension-preflight witnesses and asserts both precede that first
@@ -2044,16 +2065,17 @@ derivation, omitting final-key de-duplication, or exposing the test seam to
 production makes an exact gate fail.
 
 That stable org rollout advisory key has shared/exclusive transaction modes.
-Every new source/result transaction, including null-ID legacy work, acquires it
-shared before locking operation/source rows or resolving posture and holds it
-through commit. Rollback also takes it shared before operation-identity/
+Every new source/result transaction, including null-ID legacy work, and every
+P07 enqueue transaction acquires it shared before locking/writing
+operation/source/job rows or resolving accepted posture and holds it through
+commit. Rollback also takes it shared before operation-identity/
 operation-row/batch/target locks. Transition and rollback-window closure take
 it exclusive before locking
 the rollout state row where present, operation-identity advisory keys,
 operation rows, batch/items, or targets.
-Completed
-congruent replay may return from an authorization-gated non-locking read before
-this lock because it performs zero source/result DML. Any non-returning read is
+Completed congruent replay may return from an authorization-gated non-locking
+read before this lock because it performs zero source/result DML; P07/P08 must
+also observe their congruent job in `completed` state. Any non-returning read is
 discarded and repeated under the shared lock; no row lock survives across that
 acquisition. The advisory key, rather than existence of a rollout row, covers a
 legacy org with no persisted state. This freezes accepted posture without
@@ -2364,10 +2386,18 @@ Gates:
   transition wait and re-evaluate after its commit, while transition holding
   exclusive makes the source resolve the new posture after release. Removing
   either acquisition permits an old-posture commit and fails;
-- all four lock users import
+- P07 enqueue versus rollout transition is proven in both race orders. Enqueue
+  first holds shared from posture resolution through job insert, so transition
+  waits, sees the committed retryable job, and blocks if its accepted posture
+  would differ. Transition first holds exclusive, so enqueue waits and then
+  freezes only the new posture, or returns suspended with zero job row. Reading
+  posture before shared lock, releasing shared before insert commit, or omitting
+  the transition's retryable-job scan fails independently;
+- all five lock users import
   `acquireAttendanceCalculationRolloutLock`; mutating any one caller's
   namespace/key derivation or swallowing the helper's SQL error fails its own
-  cross-connection leg before source/rollback/transition/closure DML;
+  cross-connection leg before source/rollback/transition/closure/job-enqueue
+  DML;
 - every first-claiming command imports
   `acquireAttendanceResultOperationLocks`; mutation of identity normalization,
   namespace, rollout/operation/target two-bit class partition, final-key
@@ -2592,8 +2622,13 @@ Gates:
   real sync freezes its compatibility pipeline and uses the canonical W4
   calculator;
 - P25 operational import tables/files are explicitly classified and cannot
-  supply business evidence, operation identity, promotion success, or rollback
-  authority;
+  supply business evidence, promotion success, rollback authority, or an
+  operation claim. P07/P08's job row may transport only strict-parsed untrusted
+  batch/item command identities and fingerprint to the private worker; removing
+  the private-worker check or using those values as authorization/completion
+  evidence fails. While the job is retryable, sync/legacy/integration and every
+  non-worker adapter reject its reserved identity tuple before operation/source
+  DML;
 - legacy import has durable batch/item identities before shadow;
 - P06 synchronous modern transport, P07 async worker, P08 restart recovery, P09
   legacy import, P10 integration sync, P11 rollback, and P23-P25 authorization/
@@ -2609,9 +2644,12 @@ Gates:
   retry posture, create zero operation/batch/item/source/result rows, and leave
   the job retryable rather than failed. After authoritative resume, two
   concurrent deliveries of that job exercise both helper-wide deadline
-  branches: within budget one commits and the other returns/reuses the stored
-  completed response with zero extra DML; beyond budget the loser receives the
-  typed in-progress outcome, remains retryable, and its later attempt replays.
+  branches: within budget one atomically commits
+  `(completed,all-completed)` and the other accepts that pair for stored-response
+  replay with zero extra DML; beyond budget the loser receives the typed
+  in-progress outcome, remains retryable, and its later attempt accepts the
+  completed pair. `(queued,all-new)` is the only executable pair; every other
+  job/operation pair conflicts.
   A synchronous route calling the private worker, changing the frozen posture,
   accepting a partial batch/item vector, mapping suspension to failed, resetting
   the deadline, or persisting any `paused` operation state fails independently;
@@ -2848,7 +2886,7 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with section 9's complete org-rollout, rollout-state-if-written, operation-identity-advisory, operation-row, batch/item, then target lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
 | OD-W4C-40 rollout/source serialization | (a) completed congruent replay may non-locking-read and return with zero DML; every continuing source and rollback uses one fail-closed helper for class-`00` shared org rollout before class-`10` operation identities, rows/batches, and class-`11` targets, while transition and closure use rollout exclusive first; class `01` is reserved; (b) rely on operation-row scans and transaction isolation alone | (a), disjoint two-bit classes forbid cross-purpose lock upgrade, the shared rollout mode preserves ordinary write concurrency, covers null-ID legacy work, serializes same-batch source/rollback through their lower-order locks, and gives one complete order |
 | OD-W4C-41 concurrent first claim | (a) one canonical exclusive transaction-advisory helper strict-parses canonical UUID identities, derives class-`10` keys, de-duplicates and numerically sorts final signed keys, then serializes every supplied batch/item identity after class-`00` rollout and before row read/insert; the canonical target helper later does the same for class `11`; contention within 5 seconds replays the stored response, longer contention returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` and a later retry replays; (b) catch and retry unique-constraint `23505`; (c) rely on the unique constraint and surface one caller's failure | (a), the closed timeout is honest, raw `23505|55P03` never escapes, unrelated constraint failures stay fail-closed, cross-class upgrades are impossible, and unrelated operations remain concurrent except for harmless within-class hash collision |
-| OD-W4C-42 durable queued-job suspension | (a) freeze accepted posture and identity on the operational job, persist no operation row before the worker transaction, derive effective pause from retryable job plus suspended rollout, and after resume let only the private queue/recovery adapter enter the ordinary all-new/replay protocol; (b) persist a paused operation owner/lease; (c) let synchronous callers adopt a job ID | (a), preserves the one-transaction operation invariant, removes an unreachable intermediate operation state, keeps batch/items all-new-or-all-completed, and lets canonical locks handle duplicate delivery |
+| OD-W4C-42 durable queued-job suspension | (a) enqueue freezes accepted posture and untrusted command identity while holding class-`00` shared through job commit, persists no operation row before the worker transaction, derives effective pause from queued job plus suspended rollout, and after resume lets only the private queue processor admit `(queued,all-new)` execution or `(completed,all-completed-congruent)` replay; (b) persist a paused operation owner/lease; (c) let synchronous callers adopt or reserve a job identity | (a), preserves the one-transaction operation invariant, removes an unreachable intermediate operation state, keeps batch/items all-new-or-all-completed, and lets canonical locks handle duplicate delivery |
 
 ## 14. RATIFY and execution sequence
 
