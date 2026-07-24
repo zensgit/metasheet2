@@ -1156,7 +1156,7 @@ W4_MAX_BATCH_ITEMS = 5000
 W4_MAX_DISTINCT_TARGETS = 5000
 W4_TRANSACTION_STATEMENT_TIMEOUT_MS = 180000
 W4_TRANSACTION_LOCK_TIMEOUT_MS = 5000
-W4_OPERATION_IDENTITY_LOCK_WAIT_MS = 5000
+W4_OPERATION_IDENTITY_LOCK_WAIT_MS = W4_TRANSACTION_LOCK_TIMEOUT_MS
 W4_TRANSACTION_MAX_RETRIES = 2
 ```
 
@@ -1171,11 +1171,11 @@ out of W4 and records an explicit values-free
 promotion evidence. Benchmarks must prove the exact maxima and timeout/retry
 posture before promotion. Changing a constant requires a contract amendment.
 
-The operation-identity helper applies
-`W4_OPERATION_IDENTITY_LOCK_WAIT_MS` only to its own advisory acquisition.
-If that query raises SQLSTATE `55P03`, the transaction is rolled back and the
-outer operation boundary maps that helper-origin typed failure to values-free
-HTTP `409 ATTENDANCE_OPERATION_IN_PROGRESS`; it is not retried and raw SQL
+The operation-identity helper interprets
+`W4_OPERATION_IDENTITY_LOCK_WAIT_MS` only when SQLSTATE `55P03` comes from its
+own advisory acquisition query. The transaction is rolled back and the outer
+operation boundary maps that helper-origin typed failure to values-free HTTP
+`409 ATTENDANCE_OPERATION_IN_PROGRESS`; it is not retried and raw SQL
 state/message is never returned. A later retry performs normal authorization
 and replay. A timeout from any other statement is not relabeled as operation
 contention. The rollout helper likewise maps a `55P03` raised by its own
