@@ -363,9 +363,9 @@ canonical lowercase UUID for every W4-enabled posture. It may emit the exact
 ASCII sentinel `default` only for an existing `legacy_projection_only`
 compatibility command, because historical attendance rows used that sentinel;
 no whitespace/case alias is accepted, and `shadow|eligible|authoritative`
-reject it before source DML. Both advisory helpers consume only this branded
-parser output, so strict W4 tenancy and byte-compatible legacy operation
-locking do not conflict.
+reject it before source DML. All three advisory builders/helpers consume only
+this branded parser output, so strict W4 tenancy and byte-compatible legacy
+operation locking do not conflict.
 
 `CanonicalAttendanceUserIdV1` is the same strict lowercase UUID form.
 `CanonicalAttendanceWorkDateV1` is a calendar-valid ASCII `YYYY-MM-DD` with no
@@ -403,9 +403,10 @@ command IDs. A verified DingTalk/card decision uses the canonical UUID
 ID; provider prose, task ID, action label, operator ID, and callback payload
 never become identity bytes. Its requested action remains in the command
 fingerprint, so reusing one delivery ID for a different action conflicts.
-Case, whitespace, Unicode normalization, overlength, NUL, ordinal, date, and
-tuple-boundary mutations must either canonicalize to the same UUID or fail
-before source DML exactly as specified here.
+ASCII uppercase hexadecimal UUID input canonicalizes to the same lowercase
+UUID and key. Whitespace, Unicode lookalike/normalization, overlength, NUL,
+malformed ordinal/date/fingerprint, and tuple-boundary mutations fail before
+source DML.
 
 Every variant also carries schema version, org, subject, correlation ID, and
 its closed entrypoint/capability discriminants. External aliases such as
@@ -1141,10 +1142,12 @@ returned only after every item is reauthorized and congruent. It is stored as
 an order vector plus an object keyed by item operation ID, so positional output
 cannot be replayed against a reordered request.
 
-Import item operation IDs are deterministically derived from a fixed UUID
-namespace plus batch command ID, canonical row ordinal, and item semantic
-fingerprint. Integration items use the durable sync-run ID plus immutable
-provider item key/version, canonical input ordinal, and semantic fingerprint.
+Import item operation IDs are deterministically derived from the fixed UUID
+namespace, batch command ID, canonical row ordinal, and item semantic
+fingerprint in section 4. Integration item UUIDv5 input is exactly the durable
+sync-run ID, canonical input ordinal, and semantic fingerprint in section 4;
+the immutable provider item key/version is an input to that semantic
+fingerprint and is not appended again to the UUIDv5 name bytes.
 Identical retry input therefore regenerates the exact ordered sequence;
 reordering changes `item_sequence_fingerprint`, while adding, removing, or
 changing a row also changes the set/count and conflicts before DML.
@@ -1156,7 +1159,7 @@ W4_MAX_BATCH_ITEMS = 5000
 W4_MAX_DISTINCT_TARGETS = 5000
 W4_TRANSACTION_STATEMENT_TIMEOUT_MS = 180000
 W4_TRANSACTION_LOCK_TIMEOUT_MS = 5000
-W4_OPERATION_IDENTITY_LOCK_WAIT_MS = W4_TRANSACTION_LOCK_TIMEOUT_MS
+W4_ADVISORY_HELPER_WAIT_MS = W4_TRANSACTION_LOCK_TIMEOUT_MS
 W4_TRANSACTION_MAX_RETRIES = 2
 ```
 
@@ -1171,19 +1174,30 @@ out of W4 and records an explicit values-free
 promotion evidence. Benchmarks must prove the exact maxima and timeout/retry
 posture before promotion. Changing a constant requires a contract amendment.
 
-The operation-identity helper interprets
-`W4_OPERATION_IDENTITY_LOCK_WAIT_MS` only when SQLSTATE `55P03` comes from its
-own advisory acquisition query. The transaction is rolled back and the outer
-operation boundary maps that helper-origin typed failure to values-free HTTP
+Operation and target acquisition each enforce one helper-wide monotonic
+deadline, not one fresh timeout per key. At helper entry, the production
+monotonic clock fixes
+`deadline = now + W4_ADVISORY_HELPER_WAIT_MS`. Before each final-key
+query the helper computes the positive integer remaining milliseconds, applies
+that value through transaction-local `set_config('lock_timeout', ..., true)`,
+acquires exactly that key, and checks the same deadline again. Expiry before a
+query or after the final acquisition throws the helper's typed busy error and
+rolls back all acquired transaction locks and DML. On successful completion it
+restores `W4_TRANSACTION_LOCK_TIMEOUT_MS`. A module-private test clock is the
+only clock seam and production construction cannot inject it.
+
+SQLSTATE `55P03` from the operation helper's own acquisition query maps after
+rollback to values-free HTTP
 `409 ATTENDANCE_OPERATION_IN_PROGRESS`; it is not retried and raw SQL
 state/message is never returned. A later retry performs normal authorization
 and replay. A timeout from any other statement is not relabeled as operation
-contention. The rollout helper likewise maps a `55P03` raised by its own
+contention. The rollout helper has one key and maps a `55P03` raised by its own
 acquisition to values-free `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` after the
-whole transaction rolls back. The target helper maps its own acquisition
-timeout to values-free `503 ATTENDANCE_CALCULATION_TARGET_BUSY` under the same
-rollback rule. No other `55P03` is relabeled or retried. None of these timeouts
-permits compatibility fallback or partial DML.
+whole transaction rolls back. The target helper uses the same helper-wide
+deadline protocol and maps its own acquisition timeout to values-free
+`503 ATTENDANCE_CALCULATION_TARGET_BUSY`. No other `55P03` or `57014` is
+relabeled or retried. None of these timeouts permits compatibility fallback or
+partial DML.
 
 After private adapters resolve targets, a batch groups all items with the same
 `(org,user,workDate)` into one ordered evidence fold and produces exactly one
@@ -1743,7 +1757,7 @@ A separate two-connection first-claim test starts with no batch/item operation
 row, submits the same authenticated payload and identities concurrently, and
 holds the first transaction after identity-lock acquisition. The second waits,
 then re-reads and returns the first transaction's stored response when the
-first holder commits within `W4_OPERATION_IDENTITY_LOCK_WAIT_MS`. Both callers
+first holder commits within `W4_ADVISORY_HELPER_WAIT_MS`. Both callers
 succeed with exactly one operation/batch/item set, one source/result effect,
 and no surfaced `23505`. A second leg deliberately holds the first transaction
 beyond that budget: the waiter receives values-free
@@ -2264,6 +2278,14 @@ Gates:
   batch or only its items, changing one identity tuple, moving acquisition
   after INSERT, or broadly relabeling another `55P03` fails an exclusive
   two-connection leg;
+- a multi-key deadline leg blocks the helper's first final key for less than
+  five seconds and its second key long enough that cumulative wait exceeds
+  five seconds. It must return the exact operation/target busy code within the
+  one helper budget, roll back with zero DML, and succeed or replay after the
+  blockers release. Resetting the deadline per key, omitting the
+  post-acquisition check, using wall-clock time, failing to restore the normal
+  lock timeout after success, or exposing the test clock to production fails
+  independently;
 - item/target limit, lock/statement timeout, and retry constants are one
   exported contract; above-limit W4 commands fail before source DML, and
   authoritative mode cannot fall back to chunked/partial legacy commits;
@@ -2299,11 +2321,12 @@ Gates:
   relabeling another query's `55P03` fails;
 - direct, verified-channel, import, integration, and scheduled identity tests
   pin the section 4 UUID parser, three namespace constants, UUIDv5 name bytes,
-  and exact lowercase output. Whitespace, braces, URN, case, Unicode
-  lookalikes, NUL, overlength, malformed ordinal/date/fingerprint, and
-  tuple-boundary mutations fail before operation/source DML. An exact
-  `default` org key succeeds only for a legacy compatibility command and fails
-  for every W4-enabled posture; changing either leg fails independently;
+  and exact lowercase output. Uppercase ASCII UUID input must produce the same
+  identity/key. Whitespace, braces, URN, Unicode lookalikes, NUL, overlength,
+  malformed ordinal/date/fingerprint, and tuple-boundary mutations fail before
+  operation/source DML. An exact `default` org key succeeds only for a legacy
+  compatibility command and fails for every W4-enabled posture; changing
+  either leg fails independently;
 - an incomplete stable-ID operation versus rollout transition proves the common
   rollout-then-operation-identity-advisory-then-operation-row lock order
   completes without deadlock or bounded-retry exhaustion; moving either
