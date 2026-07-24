@@ -110,7 +110,7 @@ separate debt entries even when they later call the same function.
 | P23 | `/import/rollback/:id` accepts a broader authorization posture than import commit and can roll back another actor's org-local batch. | W4C-3a: bind rollback to the frozen batch owner/scope and re-run the commit-equivalent delegated authorization before claim/source DML. |
 | P24 | Integration sync has a distinct semantic pipeline, and `dryRun` still writes the run plus `last_sync_at`. | W4C-3a: freeze current compatibility semantics explicitly, use one W4 calculator, and make dry-run append audit-only state without result/batch/watermark mutation. |
 | P25 | Import token, preview/job, template-preference, upload-lifecycle, and temporary-staging writes are operational DML with different correctness contracts. | W4C-0: classify each explicitly; only business source/effect/result state enters the atomic result operation, while operational state gets its own allowlist and no authority over calculation truth. |
-| P26 | Central `POST /api/approvals/admin/reassign` selects pending `source_system='platform'` instances without an attendance discriminator, deactivates/creates `approval_assignments`, and increments `approval_instances.version`; its target check is global-active only. It can therefore change who may decide an attendance request outside the locked request-org authority contract. | W4C-3b: classify attendance instances before assignment DML, lock their request org and instance version, apply the closed actor/target membership matrix, and serialize reassignment against terminal decision. Central admin jump/generic non-terminal actions either prove attendance unreachable or enter the same contract. |
+| P26 | Central approval assignment mutation is not one route. `POST /api/approvals/admin/reassign` selects pending `source_system='platform'` instances without an attendance discriminator, deactivates/creates `approval_assignments`, and increments `approval_instances.version`; its target check is global-active only. Existing generic `approve` node advancement, `return`, and `revoke` also create or deactivate assignments, while jump, transfer, add/reduce-sign, timeout, and future actions may reach the same state. Route selection by `published_definition_id` is not an attendance exclusion proof. These paths can therefore change who may decide an attendance request outside the locked request-org authority contract. | W4C-3b: derive the completion inventory from the actual generic action union and assignment-DML call graph; classify attendance instances before every assignment DML, lock their request org and instance version, apply the closed actor/target membership matrix, and serialize mutation against terminal decision. Every named generic action either proves attendance unreachable for both normal attendance rows and an adversarial attendance row carrying `published_definition_id`, or enters the same contract before instance/assignment DML. |
 
 There is no general production recompute writer today. W4C-3c introduces
 prior-policy/default recompute and explicitly labeled current-policy recompute;
@@ -197,7 +197,9 @@ against W1 group-membership tables is a scope violation.
 | W4C-R35 | Import rollback cannot exceed the original batch's authorization scope. | Another importer, delegated scope, group, and cross-org probes fail before operation claim or reversal DML unless the closed owner/admin matrix authorizes them. |
 | W4C-R36 | Integration dry-run cannot advance business state. | A dry-run may append its audit attempt but writes no attendance result/import batch/current pointer/`last_sync_at`; moving any forbidden write into that branch fails. |
 | W4C-R37 | Operational import state never becomes calculation authority. | Token, preview/job, template-preference, upload cleanup, and temporary-stage mutations cannot satisfy operation identity, evidence, promotion, or rollback truth. |
-| W4C-R38 | Attendance approval assignment authority is org-bound and version-serialized. | Generic bulk reassign, jump, transfer, add/reduce-sign, timeout, or future assignment mutations either prove the attendance instance unreachable or lock its request org/version and satisfy the closed actor/target matrix before assignment DML; a reassignment-versus-decision race cannot authorize the wrong actor. |
+| W4C-R38 | Attendance approval assignment authority is org-bound, action-complete, and version-serialized. | A generated matrix from the actual generic action union and assignment-DML call graph covers bulk reassign, non-terminal `approve` advancement, `return`, `revoke`, jump, transfer, add/reduce-sign, timeout, and future assignment mutations. Each action proves the attendance instance unreachable or locks its request org/version and satisfies the closed actor/target matrix before instance/assignment DML; tests include both a normal attendance instance and an adversarial one carrying `published_definition_id`, and a mutation-versus-decision race cannot authorize the wrong actor. |
+| W4C-R39 | Closing a pre-W4 import rollback window is immutable and serialized with rollback and rollout transition. | Removing the append-only close witness, common org-rollout/batch lock order, or final in-transaction eligibility recheck fails dual-connection races for a legacy batch closed without preimage: close/transition first makes rollback return 409 with zero delete/reversal DML; rollback first makes transition wait and then re-evaluate. A batch with a valid frozen preimage retains its specified W4 reversal path. |
+| W4C-R40 | Operation lifecycle follows rollout posture without an implicit legacy exception. | A new legacy request creates/seals no operation or outbox row, while every new `shadow|eligible|authoritative` request claims and seals its operation. Independent mutations that write an operation in legacy or skip claim/seal outside legacy fail. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1413,9 +1415,26 @@ in `legacy` and every affected parent has zero immutable W4 calculation,
 pointer, or operation rows. A pre-W4 batch without a frozen target preimage
 cannot cross into W4 rollback semantics by inference: transition to
 `shadow|eligible|authoritative` is blocked while such a batch remains
-reversible, unless a separately audited operator action first closes the
-rollback window without touching business rows. If a legacy batch nevertheless
-reaches rollback after W4 acceptance, the route returns 409
+reversible, unless a separately audited operator action first appends one
+immutable `attendance_import_rollback_closures` witness for the batch without
+touching business rows. The witness is unique by `(org_id,batch_id)` and stores
+the locked batch identity/fingerprint, actor identity and authorization
+posture, reason code, closed timestamp, and audit correlation ID; it is never
+updated or deleted.
+
+Legacy rollback, rollback-window close, and every rollout transition use one
+`SERIALIZABLE` protocol. They first acquire the same org rollout advisory/row
+lock, then lock affected batch rows in stable ID order, then read the closure
+witness and reversible/preimage state, and finally recheck those predicates
+before commit. The close action inserts the witness only when no rollback is
+in progress and emits its rollout audit in the same transaction. A transition
+does not trust an earlier scan: while holding the same locks it proves every
+pre-W4 batch is closed or has a frozen target preimage. A rollback that sees a
+closure witness returns 409 with zero delete/reversal DML. If rollback wins the
+lock, close/transition waits and then re-evaluates the committed batch state;
+if close/transition wins, rollback cannot use a stale pre-lock read.
+
+If a legacy batch nevertheless reaches rollback after W4 acceptance, the route returns 409
 `IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE` with zero writes; it never falls back to
 DELETE, reconstructs a preimage from the mutable parent, or detaches immutable
 children. W4 posture uses an OpenAPI-locked result with exact counts `affected`,
@@ -1478,11 +1497,15 @@ writeAttendanceCalculationsBatch(
 `executeAttendanceResultOperation` is the only public write boundary. It first
 proves the branded authorization capability covers every envelope item and
 rechecks membership/source ownership in SQL. It opens one `SERIALIZABLE`
-transaction, resolves suspension, and claims all item operations in stable
-order before invoking closed private adapters for their entrypoints. Those
-adapters alone may create/lock the event, request, terminal approval,
-batch/item, edit, scheduled-run, or operator source rows and mint internal
-intents.
+transaction and first reads any supplied operation keys in stable order so an
+already completed congruent replay can return even under suspension. It then
+resolves rollout posture. A new `shadow|eligible|authoritative` request claims
+all item operations in stable order before invoking closed private adapters
+and seals them before commit. A new `legacy_projection_only` request invokes
+the same closed adapters and atomic compatibility path without creating,
+claiming, or sealing an operation row. Those adapters alone may create/lock
+the event, request, terminal approval, batch/item, edit, scheduled-run, or
+operator source rows and mint internal intents.
 
 For attendance workflows, that transaction is also the transaction for every
 shared approval/assignment/leave/comp-time/overtime ledger effect. Named generic
@@ -1523,11 +1546,15 @@ alternate result algorithm.
 ### 8.2 Transaction and lock order
 
 1. begin `SERIALIZABLE`; verify the frozen authorization and normalize the
-   envelope, then read/lock exact batch/item operation keys in stable order;
-   return only an all-completed congruent replay;
+   envelope, then read/lock any existing exact batch/item operation keys in
+   stable order; return only an all-completed congruent replay. A missing key
+   is not inserted yet, and mixed, incomplete, or non-congruent existing state
+   is retained for the posture-specific decision;
 2. resolve rollout posture; if suspended, stop before operation/source DML;
-   otherwise insert/claim all-new batch/item rows and reject mixed or
-   non-congruent state;
+   for `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
+   reject mixed or non-congruent state. For `legacy_projection_only`, reject
+   any conflicting/incomplete existing operation state and continue without
+   inserting or claiming an operation row;
 3. run the closed entrypoint adapter: lock/create its source rows, capture any
    `approval_records.id RETURNING` value as evidence, and mint internal intents;
 4. run candidate resolution inside the transaction;
@@ -1553,8 +1580,10 @@ alternate result algorithm.
     required by this source operation; the separate
     `legacy_projection_only` branch has already preserved its existing emit
     behavior and writes no operation/outbox row;
-15. seal operation result/fingerprints/response and existing audit/batch/request
-    state;
+15. for `shadow|eligible|authoritative`, seal operation
+    result/fingerprints/response; for `legacy_projection_only`, seal no
+    operation. In both branches update the existing entrypoint-owned
+    audit/batch/request state required by the frozen compatibility contract;
 16. commit.
 
 Any failure rolls back all steps. Unique record/version is the concurrency
@@ -1573,6 +1602,13 @@ the whole attendance workflow; splitting or nesting the transaction fails.
 Every contributing writer must use compatible locks or change a version/hash
 seen by the recheck. A real-DB race between calculation and assignment/segment
 edit must never commit a mixed snapshot.
+
+Two independent operation-lifecycle mutations are mandatory. Making a new
+legacy request insert or seal an operation must fail a zero-operation-row leg.
+Making any new `shadow|eligible|authoritative` request skip claim or seal must
+fail durable replay and atomicity legs. The presence of the neighboring outbox
+or source-row guard is not accepted as the exclusive failure reason for either
+mutation.
 
 ### 8.3 Entrypoint parity
 
@@ -1682,6 +1718,11 @@ timestamp, optimistic lock version, prior state, and
 `eligible->authoritative|shadow`, `authoritative->suspended`, and
 `suspended->authoritative`.
 
+Pre-W4 import rollback-window closure is not inferred from time and is not a
+mutable field on this state row. It is the append-only per-batch witness defined
+in section 7.9. Rollback, closure, and every transition share that section's
+org-rollout then batch lock order and final in-transaction recheck.
+
 One async `resolveSegmentCalculationPosture(trx,orgId)` is the sole truth for
 calculator mode, shift capability output, single/sequence reference guards,
 conversion/deletion guards, and rollout commands. It combines implementation
@@ -1726,11 +1767,12 @@ Effective state requires:
    Operators complete or cancel-before-source under legacy/shadow semantics;
    W4 never backfills from mutable current config and never rebases an accepted
    operation posture; and
-7. every pre-W4 import batch in the synthetic source set is either outside its
-   rollback window or has an immutable target-level preimage created by a
-   separately audited migration/reconciliation protocol. A reversible legacy
-   batch with no frozen preimage blocks transition rather than inheriting the
-   destructive rollback route; and
+7. every pre-W4 import batch in the synthetic source set either has the
+   append-only rollback-closure witness from section 7.9 or has an immutable
+   target-level preimage created by a separately audited
+   migration/reconciliation protocol. Wall-clock age alone never proves the
+   window closed. A reversible legacy batch with neither proof blocks
+   transition rather than inheriting the destructive rollback route; and
 8. transition to `eligible` or `authoritative` has zero unresolved
    `legacy_time_ingress_not_authoritative` review in the synthetic source set.
    Clients must first send strictly zoned replacement evidence or resolve the
@@ -1854,14 +1896,16 @@ never presented as the decision that produced the legacy current row.
 ## 11. Migration, retention, and performance
 
 Forward migration creates operation-batch/item/request-snapshot/calculation/
-segment/outbox/rollout tables, current-record view, triggers, deferred
-constraints, pointer/owner/visibility/reason fields, indexes, and FKs. It does
-not fabricate historical segments or baselines. Existing rows remain
+segment/outbox/rollout tables, the append-only import rollback-closure table,
+current-record view, triggers, deferred constraints,
+pointer/owner/visibility/reason fields, indexes, and FKs. It does not fabricate
+historical segments, rollback closures, or baselines. Existing rows remain
 legacy-untracked. Fresh/upgrade/replay must pass.
 
 Down first proves zero operation batches/items, request snapshots,
-calculations, segments, outbox rows, rollout events, and pointers. Any row
-aborts before DDL. It does not clear history to make down pass.
+calculations, segments, outbox rows, rollout events, rollback-closure
+witnesses, and pointers. Any row aborts before DDL. It does not clear history
+to make down pass.
 
 W4 adds no purge. History lives at least as long as parent/payroll/audit
 retention; parent deletion is blocked by RESTRICT. Future retention must honor
@@ -1883,9 +1927,10 @@ canonical boundary, and insert no W4 calculation, operation, or outbox row.
 ### 12.1 W4C-0: contracts and durable storage
 
 Deliver durable batch/item operation registries, immutable request snapshots,
-calculation/baseline/segment/outbox tables, types, validators, triggers,
-pointer/owner/visibility/reason constraints, rollout state, and canonical
-authorization/write/enqueue interfaces with no caller cutover.
+calculation/baseline/segment/outbox tables, immutable import rollback-closure
+witnesses, types, validators, triggers, pointer/owner/visibility/reason
+constraints, rollout state, and canonical authorization/write/enqueue
+interfaces with no caller cutover.
 
 Gates:
 
@@ -1909,6 +1954,9 @@ Gates:
   authoritative mode cannot fall back to chunked/partial legacy commits;
 - outbox identity/payload is immutable; invalid event kind/key set, duplicate
   operation event, illegal delivery transition, and down-with-row all fail;
+- rollback-closure identity/evidence is immutable; duplicate close is
+  idempotent only when byte-congruent, while conflicting actor/reason/batch
+  fingerprint returns 409 and UPDATE/DELETE/TRUNCATE/cascade all fail;
 - replay under a different actor/token subject or after authorization revocation
   cannot read the stored response;
 - approval decision operation identity is claimed before terminal state/record
@@ -2080,6 +2128,15 @@ Gates:
   commit-equivalent authorization matrix before operation claim; same-org
   other-importer, wrong-group, inactive membership, and cross-org attempts
   produce the closed not-found/forbidden shape with zero reversal DML;
+- legacy rollback, append-only rollback-window closure, and rollout transition
+  acquire the common org-rollout then batch lock order in one `SERIALIZABLE`
+  transaction and recheck at commit. For a legacy batch closed without
+  preimage, dual-connection tests prove both race orders:
+  closure/transition first makes rollback return 409 with zero
+  delete/reversal DML; rollback first makes closure/transition wait and then
+  re-evaluate. A separate frozen-preimage leg proves that transition does not
+  disable its W4 reversal path. Removing the closure witness, common lock, or
+  final recheck fails independently;
 - P24 integration dry-run may append only its audit attempt. It cannot create
   an import batch/result, change a current pointer, or update `last_sync_at`;
   real sync freezes its compatibility pipeline and uses the canonical W4
@@ -2123,8 +2180,15 @@ Gates:
 - request create/edit/decision/cancel/outdoor route inventory entries are
   removed; operation claim/suspension precede first request, event, approval,
   assignment, and attendance-ledger DML;
-- P26 central bulk reassignment identifies an attendance instance from the
-  exact workflow key plus locked request join before assignment DML. For an
+- P26 central assignment-mutation inventory is generated from the actual
+  generic action union plus every assignment-DML call site. It names bulk
+  reassign, non-terminal `approve` advancement, `return`, `revoke`, jump,
+  transfer, add/reduce-sign, timeout, and future additions. Each action tests
+  both a normal attendance instance and an adversarial attendance instance
+  carrying `published_definition_id`; route selection by that field cannot
+  prove attendance unreachable;
+- central bulk reassignment identifies an attendance instance from the exact
+  workflow key plus locked request join before assignment DML. For an
   attendance instance, the actor is either the verified platform-admin
   override or an active member of the locked request org holding both
   `approvals:admin` and the closed attendance-admin posture; the target is
@@ -2140,11 +2204,13 @@ Gates:
   decision cannot both succeed. Independent legs cover same-org success,
   inactive/deprovisioned/non-member target, org-local actor missing either
   permission, platform-admin override, same-ID not-found, and two-org spoof;
-- central admin jump, transfer, add/reduce-sign, timeout transfer/jump, and
-  future generic assignment mutation each have a named reachability test:
-  current unsupported attendance instances fail before assignment/instance
-  DML; making one reachable without routing it through the P26 org/version
-  contract fails the generated debt guard;
+- generic non-terminal `approve` advancement, `return`, `revoke`, admin jump,
+  transfer, add/reduce-sign, timeout transfer/jump, and future generic
+  assignment mutation each have a named reachability test. Unsupported
+  attendance instances fail before assignment/instance DML; a supported action
+  routes through the P26 org/version contract. Removing an action-union member,
+  assignment-DML call site, normal attendance fixture, or
+  `published_definition_id` adversarial fixture fails the generated debt guard;
 - P17/P22 central legacy approve/reject, generic bridge, verified card action,
   and plugin decision converge before terminal DML or fail closed; a
   central-first/plugin-second and plugin-first/central-second matrix proves one
@@ -2316,12 +2382,14 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-35 integration dry-run | (a) audit attempt only, with no batch/result/pointer/`last_sync_at` write; (b) retain current watermark side effect | (a) |
 | OD-W4C-36 import operational state | (a) classify token/job/prefs/upload/temp state separately and deny calculation authority; (b) treat every operational row as business evidence | (a) |
 | OD-W4C-37 attendance assignment mutation | (a) central reassign and any reachable generic assignment mutation use the locked request-org actor/target matrix plus approval-version serialization; unsupported generic actions prove zero attendance DML; (b) retain global `approvals:admin` plus globally active target behavior | (a), changing who may approve is an org-bound security decision |
+| OD-W4C-38 operation lifecycle by posture | (a) completed congruent replay is read first; new legacy work writes no operation/outbox, while new shadow/eligible/authoritative work must claim and seal an operation plus required outbox; (b) persist operations in legacy too | (a), preserves legacy byte behavior while removing the contradictory implicit exception |
+| OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness and serialize rollback/closure/transition with the common org-rollout then batch lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback race |
 
 ## 14. RATIFY and execution sequence
 
 1. Rebase docs PR to current main.
 2. Re-verify anchors and regenerate writer inventory.
-3. Owner decides OD-W4C-1..37.
+3. Owner decides OD-W4C-1..39.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
 6. Owner RATIFYs exact merged SHA.
