@@ -24,7 +24,7 @@ import {
   SUPPORTED_DATA_SOURCE_TYPES
 } from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
-import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
+import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS, DataSourceOffsetOrderingError } from '../data-adapters/BaseAdapter'
 
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
@@ -898,6 +898,14 @@ export function dataSourcesRouter(): Router {
         return res.status(404).json({
           ok: false,
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
+        })
+      }
+      if (error instanceof DataSourceOffsetOrderingError) {
+        // Closed 422: a read-CONTRACT violation (offset pagination without a deterministic order)
+        // is a caller/config error, not a server fault — it must never surface as SELECT_ERROR 500.
+        return res.status(422).json({
+          ok: false,
+          error: { code: error.code, message: error.message }
         })
       }
       return res.status(500).json({

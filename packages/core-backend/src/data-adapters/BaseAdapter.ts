@@ -83,6 +83,22 @@ export interface QueryOptions {
 export const DATA_SOURCE_MAX_ROWS = 10000
 export const DATA_SOURCE_DEFAULT_LIMIT = 1000
 
+/** Closed error code for the offset-ordering read contract (mapped to HTTP 422 at route surfaces). */
+export const DATA_SOURCE_OFFSET_ORDERING_REQUIRED_CODE = 'DATA_SOURCE_OFFSET_ORDERING_REQUIRED'
+
+/**
+ * Typed, closed contract error for an offset read with no deterministic order. A CALLER/CONFIG
+ * error, not a server fault: HTTP surfaces map it to 422 with the closed code above — without the
+ * type, the /select route's catch-all reported this as `SELECT_ERROR` 500.
+ */
+export class DataSourceOffsetOrderingError extends Error {
+  readonly code = DATA_SOURCE_OFFSET_ORDERING_REQUIRED_CODE
+  constructor(message: string) {
+    super(message)
+    this.name = 'DataSourceOffsetOrderingError'
+  }
+}
+
 export interface QueryResult<T = Record<string, DbValue>> {
   data: T[]
   metadata?: {
@@ -303,6 +319,46 @@ export abstract class BaseDataAdapter extends EventEmitter {
       )
     }
     return limit
+  }
+
+  /**
+   * Ordering-boundary policy — the A5 sibling for the OTHER half of a paginated read.
+   *
+   * A5 above bounds each page and tells callers to "paginate with limit+offset instead". But an
+   * OFFSET is only meaningful against a DETERMINISTIC total order: SQL gives no row-order guarantee
+   * without ORDER BY, so `LIMIT n OFFSET k` over an unordered relation may return rows in a
+   * different order on each call. The pages then SILENTLY overlap and skip — the caller reads N
+   * rows, believes it read the table, and has both duplicates and holes with no error anywhere.
+   * That is a data-integrity failure, not a performance wart, and it is invisible at every layer
+   * above this one.
+   *
+   * So an offset read MUST carry an explicit orderBy, and we fail closed when it does not — with a
+   * TYPED, closed contract error so HTTP surfaces can map it to 422 (caller/config error) instead
+   * of a 500 server fault. We do NOT auto-order by a discovered primary key: that would silently
+   * paper over the caller's missing ordering contract and keep the defect un-diagnosed. Only the
+   * caller knows which order its cursor arithmetic assumes.
+   *
+   * Enforced at the ADAPTER layer for the same reason A5 is — it is the chokepoint every structured
+   * read passes through, INCLUDING direct internal callers that bypass the route.
+   *
+   * Scope: `offset > 0` only. A limit-only first page (no offset) has no cross-page contract to
+   * violate, so it stays legal and unchanged. (Known limit, pinned in the conformance suite: a
+   * caller that reads page 1 unordered and only orders from page 2 is still incoherent — that
+   * intent is only visible to the paginating caller and closes in the caller's contract.)
+   */
+  protected assertDeterministicOffsetOrdering(
+    offset: number | null | undefined,
+    orderBy: QueryOptions['orderBy'] | undefined
+  ): void {
+    const usesOffset = offset !== null && offset !== undefined && Number(offset) > 0
+    if (!usesOffset) return
+    if (!Array.isArray(orderBy) || orderBy.length === 0) {
+      throw new DataSourceOffsetOrderingError(
+        'OFFSET pagination requires an explicit orderBy: without a deterministic total order the ' +
+          'database may return rows in any order, so successive pages can silently duplicate and ' +
+          'skip rows. Pass orderBy (e.g. the primary key) alongside offset.'
+      )
+    }
   }
 
   protected buildWhereClause(where: WhereClause): { sql: string; params: DbValue[] } {
