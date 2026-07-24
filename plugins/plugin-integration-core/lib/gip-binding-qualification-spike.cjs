@@ -22,9 +22,99 @@
 // values-free, input-bound (digest binds every input — no cross-object reuse) and
 // optionally expiring; customers can never submit or reuse one (enforced at the
 // future binding runtime — the spike freezes the shapes that make it checkable).
+//
+// ── B1a / R3.3 — RESOLUTION-BOUND ENTRY POINTS (still LATENT) ────────────────────
+//
+// WHY THIS EXISTS. Both ratified entry points take the qualification tuple as CALLER
+// DATA: probe() reads actionProfileVersion/systemContentKey/configContentKey/objectKey/
+// canonicalObjectVersion AND keyColumns out of run input, and
+// verifyBindingQualification() recomputes the digest from a caller-assembled
+// `expectedInputs`. A caller that assembles either by hand can MIX AND MATCH:
+// "config A's contentKey with field set B", or "config A + system-or-profile B".
+//
+// WHY DETECTION IS IMPOSSIBLE, SO CONSTRUCTION-PREVENTION IS THE ONLY ANSWER.
+// Probe evidence is VALUES-FREE by design: it carries `checkedKeyColumnCount` — a
+// COUNT — and never the field names it checked. So a qualification probed over field
+// set B while carrying config A's contentKey is BYTE-IDENTICAL to an honest one: same
+// evidence shape, same digest arithmetic, same envelope MAC. Nothing in the
+// qualification, in the digest, or in any audit record names the fields, so NO
+// after-the-fact check — not a reviewer, not a log, not a replay — can tell the two
+// apart. The forgery is therefore made INEXPRESSIBLE at construction time rather than
+// detectable afterwards. Putting field NAMES into evidence to make it detectable was
+// considered and REJECTED: it would break the values-free discipline and leak customer
+// schema into digests and audit records.
+//
+// HOW. `probeFromResolution()` and `verifyBindingQualificationFromResolution()` take a
+// RESOLUTION OBJECT produced by gip-approved-binding-resolver.cjs and authenticated by
+// that module's WeakSet IDENTITY predicate (never a public brand — a brand is
+// duck-typable). Every digest input, AND the probed field set, is read BY NAME off the
+// resolution; the run-input key allowlist REFUSES any tuple field (and `expectedInputs`)
+// supplied alongside it, counted and never echoed. No cached caller-side tuple is
+// honoured: both paths re-enter through the resolver's object on every call.
+//
+// FIELD-SET DERIVATION — NAMED DECISION (reconciles with the resolver's R6 header).
+// `keyColumns` is derived from `resolution.orderingKeySpec` fieldIds, IN ORDER. It must
+// be: a caller-supplied field set is exactly the "config A + field set B" forgery, and
+// it is undetectable (above). The resolver's header states that a `fieldId` is a
+// CANONICAL CLEANSING-ZONE identity and is NOT a source column name — that stands: this
+// module passes fieldIds through BY IDENTITY and deliberately does NOT translate them.
+// B1a is LATENT (no runtime consumer, no SQL reaches a real source), and the
+// target → source-column translation is the NAMED GATED FOLLOW-UP that B1b owns; when it
+// lands it is inserted at THIS ONE derivation point (deriveProbeKeyColumns) and nowhere
+// else. Note that the field set is bound to the config TRANSITIVELY regardless of
+// translation: orderingKeySpec lives in the immutable approved body, so it is covered by
+// contentKeyFor(body) ⇒ configContentKey ⇒ the digest.
+//
+// DEPENDENCY DIRECTION IS ONE-WAY: this module requires the resolver; the resolver must
+// NEVER require this module (it would be a cycle, and the resolver is the lower layer —
+// it derives what this module consumes).
+//
+// API CHOICE — ADDITIVE, NOT BREAKING. `verifyBindingQualification()` and `probe()` keep
+// their ratified signatures and stay exported, so the ratified spike battery keeps
+// proving what it proved. They REMAIN caller-supplied surfaces: nothing here stops a
+// future consumer from calling them. Closure is enforced at the (gated) wiring point,
+// which binds the runtime to the *FromResolution* entry points only.
+//
+// SCOPE OF THE INEXPRESSIBILITY CLAIM — MEASURED, NOT ASSUMED. TWO residuals, both pinned
+// behaviourally in the spike battery so this paragraph cannot rot into a stale claim.
+//
+// RESIDUAL 1 — THE FIELD SET, on the ratified path. The forgery is inexpressible for callers
+// restricted to the *FromResolution* pair. It is NOT inexpressible module-wide: the ratified
+// probe() still takes `keyColumns` as run data, so a caller holding resolution A can mint a
+// qualification carrying A's five digest fields while probing FIELD SET B, and
+// verifyBindingQualificationFromResolution() then returns verified:true — because evidence is
+// values-free, verify cannot see which fields were probed. Pinned by
+// ratifiedPathRemainsAnOpenConstruction. A count check in verify would NOT close it: it would
+// catch a different-SIZE field set and miss a same-size foreign one — a partial detector for a
+// hole the wiring gate closes completely, and it would contradict the impossibility argument
+// above.
+//
+// RESIDUAL 2 — THE SOURCE HANDLE, on the resolution-bound path itself. probeFromResolution()
+// derives the tuple and the field set from the resolution, but `query` is still CALLER-
+// SUPPLIED: the probe never learns WHICH system its rows came from, so evidence need not come
+// from the bound system at all. The suite's own fixtures are the demonstration — every probe
+// in this battery is answered by an in-test `async () => ({ rows: [...] })` that touches no
+// system, and the resulting qualification verifies. That is not a fixture shortcut; it is the
+// module boundary: B1a is LATENT and no SQL reaches a real source, so there is nothing here to
+// bind a handle to. THE FIX IS NAMED AND DEFERRED, NOT DONE: the source handle must be derived
+// from the resolution's OWN system record (the same record whose lossless config backs
+// systemContentKey — see the resolver's D2.1), which requires the per-system connection wiring
+// the gated wiring point owns. Until then a qualification proves "these six approved inputs +
+// this evidence", NOT "this evidence was observed on the bound system". Pinned by
+// callerSuppliedQueryRemainsAnOpenConstruction.
+//
+// A RESOLUTION IS AUTHENTICATED AND IMMUTABLE — NOT FRESH. Approval, tenant/workspace scope
+// and system admission are re-verified by the resolver at RESOLVE time, not at probe/verify
+// time. Nothing here bounds how long a caller may hold a resolution, so a config retired or
+// a system deactivated after resolution is not observed by a held one; the qualification's
+// `expiresAt` bounds the QUALIFICATION, not the resolution. Resolution freshness/TTL is a
+// named follow-up for the wiring gate, not something this module can assert.
 
 const crypto = require('node:crypto')
 const { CanonicalDomainError, stableCanonicalStringify } = require('./gip-canonical-json.cjs')
+// TRUST BY OBJECT IDENTITY, borrowed from the module that mints resolutions. This is a
+// predicate over a module-private WeakSet — there is no public field to duck-type.
+const { isTrustedBindingResolution } = require('./gip-approved-binding-resolver.cjs')
 
 const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'QUALIFICATION_INPUT_INVALID',
@@ -38,10 +128,21 @@ const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'QUALIFICATION_ENVELOPE_MISMATCH',
   'QUALIFICATION_EXPIRED',
   'QUALIFICATION_STATUS_INVALID',
+  // B1a / R3.3 — resolution-bound entry points (exact pin lives in the spike battery;
+  // a change here MUST update that pin in the same edit, both directions).
+  'QUALIFICATION_RESOLUTION_NOT_TRUSTED',
+  'QUALIFICATION_RESOLUTION_INPUT_CONFLICT',
 ])
 const QUALIFICATION_ERROR_REASON_SET = new Set(QUALIFICATION_ERROR_REASONS)
 
 const QUALIFICATION_STATUSES = Object.freeze(['candidate', 'revoked'])
+
+// EXACT run-input allowlists for the resolution-bound entry points. Everything else about
+// a run is DERIVED from the resolution, so any other key is a caller trying to supply what
+// the resolver owns — refused, not ignored, so a caller can never believe it was honoured.
+// `expectedInputs` is deliberately absent from the verify list: it IS the surface R3 closes.
+const RESOLUTION_PROBE_INPUT_KEYS = Object.freeze(['resolution', 'query', 'envelopeKey', 'probedAt', 'expiresAt'])
+const RESOLUTION_VERIFY_INPUT_KEYS = Object.freeze(['resolution', 'qualification', 'envelopeKey', 'now'])
 
 class GipQualificationError extends Error {
   constructor(reason, message, details = {}) {
@@ -257,8 +358,15 @@ function createBindingQualificationProber(strategyRegistry) {
     fail('QUALIFICATION_INPUT_INVALID', 'a trusted probe-strategy registry (from createProbeStrategyRegistry) is required', { field: 'strategyRegistry' })
   }
   return Object.freeze({
+    // RATIFIED signature — run data carries the tuple. Kept working on purpose (additive
+    // API choice, see the header): the ratified battery proves what it proves.
     probe(input) {
       return probeWithTrustedRegistry(strategyRegistry, input)
+    },
+    // B1a / R3.3 — the tuple AND the probed field set come from an authenticated
+    // resolution; run data carries only the source handle, the envelope key and time.
+    probeFromResolution(input) {
+      return probeFromResolutionWithTrustedRegistry(strategyRegistry, input)
     },
   })
 }
@@ -438,6 +546,80 @@ async function probeWithTrustedRegistry(trustedRegistry, input) {
   })
 }
 
+// ── B1a / R3.3 — derivation from an AUTHENTICATED resolution ────────────────────────
+// ONE PARAMETER, and it is the resolution. An override is INEXPRESSIBLE here, not merely
+// rejected: there is no argument a caller value could arrive through, and every field is
+// read BY NAME (never a spread), so an extra property on a resolution can never reach the
+// digest either. This is the single choke point both resolution-bound entry points use.
+function deriveQualificationInputsFromResolution(resolution) {
+  // IDENTITY, not a property: the ONLY way in is to have been minted by the approved-
+  // binding resolver. A structurally perfect, deep-frozen hand-built clone is refused.
+  if (!isTrustedBindingResolution(resolution)) {
+    fail('QUALIFICATION_RESOLUTION_NOT_TRUSTED', 'a binding resolution produced by the approved-binding resolver is required', {})
+  }
+  return {
+    actionProfileVersion: resolution.actionProfileVersion,
+    systemContentKey: resolution.systemContentKey,
+    configContentKey: resolution.configContentKey,
+    objectKey: resolution.objectKey,
+    canonicalObjectVersion: resolution.canonicalObjectVersion,
+    keyColumns: deriveProbeKeyColumns(resolution.orderingKeySpec),
+  }
+}
+
+// THE ONE PLACE the probed field set is decided (header: FIELD-SET DERIVATION). fieldIds
+// are passed through BY IDENTITY and deliberately NOT translated to source columns; the
+// gated target → source translation lands HERE and nowhere else. Order is preserved — an
+// ordering key is a sequence. Shape is not re-litigated: normalizeKeyColumns is the
+// fail-closed gate (an empty or malformed spec lands there as QUALIFICATION_INPUT_INVALID).
+function deriveProbeKeyColumns(orderingKeySpec) {
+  const columns = []
+  const length = Array.isArray(orderingKeySpec) ? orderingKeySpec.length : 0
+  for (let index = 0; index < length; index += 1) {
+    columns.push(orderingKeySpec[index] && orderingKeySpec[index].fieldId)
+  }
+  return columns
+}
+
+// EXACT key allowlist. The offending key name is attacker-chosen text and is NEVER echoed —
+// a COUNT is the observable substitute (values-free discipline).
+function assertResolutionInputKeys(input, allowedKeys) {
+  const keys = Object.keys(input)
+  let rejectedKeyCount = 0
+  for (let index = 0; index < keys.length; index += 1) {
+    if (!allowedKeys.includes(keys[index])) rejectedKeyCount += 1
+  }
+  if (rejectedKeyCount > 0) {
+    fail('QUALIFICATION_RESOLUTION_INPUT_CONFLICT', 'run input supplies keys the resolution owns (they are derived, never supplied)', {
+      rejectedKeyCount,
+    })
+  }
+}
+
+// probeFromResolution — the resolution-bound probe path. Same probe, same read-only guard,
+// same single statement; what changes is WHERE the tuple and the field set come from.
+async function probeFromResolutionWithTrustedRegistry(trustedRegistry, input) {
+  if (!isPlainObject(input)) {
+    fail('QUALIFICATION_INPUT_INVALID', 'resolution-bound probe needs a plain-object input', {})
+  }
+  // AUTHENTICATE provenance first, then police the request shape.
+  const derived = deriveQualificationInputsFromResolution(input.resolution)
+  assertResolutionInputKeys(input, RESOLUTION_PROBE_INPUT_KEYS)
+  // Run data is assembled by NAMED READS into an object THIS module owns, at parse time —
+  // load-bearing twice over: (a) a tuple field is inexpressible in it, and (b) the tuple
+  // fields are read AFTER the source round-trip inside probeWithTrustedRegistry, so a
+  // caller mutating its own input object during that window must not be able to reach them.
+  const runData = {
+    query: input.query,
+    envelopeKey: input.envelopeKey,
+    probedAt: input.probedAt,
+  }
+  if (input.expiresAt !== undefined) runData.expiresAt = input.expiresAt
+  // RESOLUTION LAST — deliberate: even if a future refactor let a tuple field through the
+  // allowlist, the resolution's value would still be the one that wins.
+  return probeWithTrustedRegistry(trustedRegistry, { ...runData, ...derived })
+}
+
 // verifyBindingQualification — PURE LOCAL, transaction-safe: recomputes the digest
 // from the caller's expected inputs + the qualification's own evidence, then checks
 // binding, status and expiry. ZERO external I/O by construction. An expired
@@ -498,9 +680,38 @@ function verifyBindingQualification({ qualification, expectedInputs, envelopeKey
   return Object.freeze({ verified: true, qualificationDigest: recomputed })
 }
 
+// verifyBindingQualificationFromResolution — B1a / R3.3. The function above with its
+// caller-supplied `expectedInputs` surface REMOVED: the five digest inputs are read BY NAME
+// off an AUTHENTICATED resolution, on every call, so no cached caller-side tuple is ever
+// honoured. `expectedInputs` is REFUSED rather than ignored — a caller must never be able to
+// believe it was honoured. It DELEGATES to the ratified function, so there is exactly ONE
+// digest/envelope implementation and the two paths cannot drift. Stays as pure-local and as
+// transaction-safe as its delegate: it adds no external I/O of any kind.
+function verifyBindingQualificationFromResolution(input) {
+  if (!isPlainObject(input)) {
+    fail('QUALIFICATION_NOT_OBJECT', 'resolution-bound verification needs a plain-object input', {})
+  }
+  const derived = deriveQualificationInputsFromResolution(input.resolution)
+  assertResolutionInputKeys(input, RESOLUTION_VERIFY_INPUT_KEYS)
+  return verifyBindingQualification({
+    qualification: input.qualification,
+    expectedInputs: {
+      actionProfileVersion: derived.actionProfileVersion,
+      systemContentKey: derived.systemContentKey,
+      configContentKey: derived.configContentKey,
+      objectKey: derived.objectKey,
+      canonicalObjectVersion: derived.canonicalObjectVersion,
+    },
+    envelopeKey: input.envelopeKey,
+    now: input.now,
+  })
+}
+
 module.exports = {
   QUALIFICATION_ERROR_REASONS,
   QUALIFICATION_STATUSES,
+  RESOLUTION_PROBE_INPUT_KEYS,
+  RESOLUTION_VERIFY_INPUT_KEYS,
   GipQualificationError,
   computeQualificationDigest,
   computeEnvelopeMac,
@@ -511,10 +722,13 @@ module.exports = {
   createProbeStrategyRegistry,
   createBindingQualificationProber,
   verifyBindingQualification,
+  verifyBindingQualificationFromResolution,
   __internals: {
     fail,
     stableStringify,
     assertReadOnlySql,
     quoteIdentifier,
+    deriveQualificationInputsFromResolution,
+    deriveProbeKeyColumns,
   },
 }

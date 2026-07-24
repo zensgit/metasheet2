@@ -18,6 +18,7 @@ const {
   GIP_CROSS_ROLE_TEMPORAL_POLICIES,
   GIP_CONSISTENCY_REQUIREMENT_STATUSES,
   GIP_PROFILE_ERROR_REASONS,
+  PAGED_READ_LEGAL_COMBINATIONS,
   GipProfileContractError,
   normalizeCertifiedReadActionProfile,
   normalizeCertifiedApplyProfile,
@@ -94,11 +95,29 @@ function frozenVocabularies() {
     'ROLE_TYPE_INVALID',
     'EXTERNAL_WRITE_TARGET_FORBIDDEN',
   ])
+  // R5 — the frozen PAGED_READ legal-combination table. EXACT pin: adding a row
+  // (widening what PAGED_READ may certify) and dropping a row both fail closed here.
+  assert.deepEqual(PAGED_READ_LEGAL_COMBINATIONS.map((row) => ({ ...row })), [
+    { consistencyProof: 'SOURCE_SNAPSHOT_TXN', continuationLifetime: 'CONNECTION_BOUND' },
+    { consistencyProof: 'IMMUTABLE_SNAPSHOT_TOKEN', continuationLifetime: 'DURABLE_TOKEN' },
+  ])
   for (const vocab of [GIP_ACQUISITION_MODES, GIP_CONSISTENCY_PROOFS, GIP_CONTINUATION_LIFETIMES,
     GIP_COMPLETENESS_PROOFS, GIP_APPLY_MODES, GIP_RECOVERY_STRATEGIES, GIP_ROLE_TYPES,
-    GIP_CROSS_ROLE_TEMPORAL_POLICIES, GIP_CONSISTENCY_REQUIREMENT_STATUSES, GIP_PROFILE_ERROR_REASONS]) {
+    GIP_CROSS_ROLE_TEMPORAL_POLICIES, GIP_CONSISTENCY_REQUIREMENT_STATUSES, GIP_PROFILE_ERROR_REASONS,
+    PAGED_READ_LEGAL_COMBINATIONS]) {
     assert.ok(Object.isFrozen(vocab))
   }
+  // rows are frozen too, and every cell is drawn from the frozen closed vocabularies —
+  // the table can never introduce a proof/lifetime the schema does not know.
+  for (const row of PAGED_READ_LEGAL_COMBINATIONS) {
+    assert.ok(Object.isFrozen(row))
+    assert.ok(GIP_CONSISTENCY_PROOFS.includes(row.consistencyProof))
+    assert.ok(GIP_CONTINUATION_LIFETIMES.includes(row.continuationLifetime))
+  }
+  // v1 decision, pinned: MONOTONIC_VERSION_PIN is UNMAPPED for PAGED_READ (it detects
+  // drift; it does not make pages mutually consistent) while staying a legal proof class.
+  assert.ok(!PAGED_READ_LEGAL_COMBINATIONS.some((row) => row.consistencyProof === 'MONOTONIC_VERSION_PIN'))
+  assert.ok(GIP_CONSISTENCY_PROOFS.includes('MONOTONIC_VERSION_PIN'))
   // 'NONE' must never be a proof class — "not required" lives in the status field.
   assert.ok(!GIP_CONSISTENCY_PROOFS.includes('NONE'))
 }
@@ -225,6 +244,127 @@ function crossDimensionLegality() {
   })), 'COMPLETENESS_COMBINATION_INVALID')
 }
 
+// ── 4b. R5 — the frozen PAGED_READ legal-combination table (rule 5) ──
+//
+// Rule 5 is PAGED_READ-SCOPED and strictly additive to rules 1-4. Every refusal below
+// is rule-5-EXCLUSIVE (rules 1-4 are silent on it), pinned via details.rule so a test
+// can never be satisfied by rule 4's DURABLE_TOKEN anchor firing instead.
+function pagedReadLegalCombinationTable() {
+  const pagedCert = (consistency, lifetime) => fixtureProfile({
+    certificate: {
+      acquisitionMode: 'PAGED_READ',
+      supportedConsistencyProofs: consistency,
+      continuationLifetime: lifetime,
+      supportedCompletenessProofs: ['SHORT_PAGE'],
+    },
+  })
+  const refusedByRule = (consistency, lifetime, expectedRule) => {
+    const label = `PAGED_READ [${consistency.join(',')}] ${lifetime}`
+    let produced = 'NOT_SET'
+    let caught = null
+    try {
+      produced = normalizeCertifiedReadActionProfile(pagedCert(consistency, lifetime))
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught instanceof GipProfileContractError,
+      `rule 5 must REFUSE the out-of-table combination ${label} — nothing was thrown`)
+    assert.equal(caught.reason, 'ILLEGAL_CAPABILITY_COMBINATION', `${label} must be refused as ILLEGAL_CAPABILITY_COMBINATION`)
+    // NEVER-DOWNGRADE proof: an out-of-table PAGED_READ profile must yield NO certified
+    // profile at all — refusal is a throw, never a silent rewrite to BOUNDED_READ.
+    assert.equal(produced, 'NOT_SET',
+      `${label} must produce NO certified profile — a refusal is never a silent downgrade to BOUNDED_READ`)
+    assert.equal(caught.details.rule, expectedRule,
+      `${label} must be owned by rule 5 (${expectedRule}), got rule ${caught.details && caught.details.rule}`)
+    return caught
+  }
+
+  // POSITIVE CONTROLS — every row of the exported table certifies. Bound to the ONE
+  // exported source, never a re-typed literal: a row the table declares must be legal.
+  assert.ok(PAGED_READ_LEGAL_COMBINATIONS.length > 0, 'the table must have rows to positively control')
+  for (const row of PAGED_READ_LEGAL_COMBINATIONS) {
+    const certified = normalizeCertifiedReadActionProfile(
+      pagedCert([row.consistencyProof], row.continuationLifetime),
+    )
+    assert.equal(certified.certificate.acquisitionMode, 'PAGED_READ')
+    assert.equal(certified.certificate.continuationLifetime, row.continuationLifetime)
+    assert.deepEqual([...certified.certificate.supportedConsistencyProofs], [row.consistencyProof])
+  }
+
+  // NEGATIVE CONTROL (a) — the ratified scale-D0 §2 row 5 combination must STILL
+  // certify. Rule 5 is PAGED_READ-scoped; MONOTONIC_VERSION_PIN stays legal on
+  // CHANGE_FEED even though it is unmapped inside the PAGED_READ table.
+  let enterpriseError = null
+  try {
+    normalizeCertifiedReadActionProfile(fixtureProfile({
+      certificate: {
+        acquisitionMode: 'CHANGE_FEED',
+        continuationLifetime: 'DURABLE_TOKEN',
+        supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'],
+        supportedCompletenessProofs: ['DECLARED_TOTAL'],
+      },
+    }))
+  } catch (error) {
+    enterpriseError = error
+  }
+  assert.ok(
+    enterpriseError === null,
+    'NEGATIVE CONTROL (a): the ratified CHANGE_FEED + MONOTONIC_VERSION_PIN + DURABLE_TOKEN '
+      + 'combination must STILL certify — rule 5 must stay PAGED_READ-scoped (got '
+      + (enterpriseError ? `${enterpriseError.reason}/${enterpriseError.details && enterpriseError.details.rule}` : 'none')
+      + ')',
+  )
+  // …and the same proof stays legal on a CHANGE_FEED with a non-durable lifetime.
+  normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: {
+      acquisitionMode: 'CHANGE_FEED',
+      continuationLifetime: 'CONNECTION_BOUND',
+      supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'],
+      supportedCompletenessProofs: ['DECLARED_TOTAL'],
+    },
+  }))
+
+  // NEGATIVE CONTROL (b) — the deliberately UNMAPPED proof is refused on PAGED_READ.
+  // Rule-5-exclusive: CONNECTION_BOUND keeps rule 4 out of it.
+  const unmapped = refusedByRule(['MONOTONIC_VERSION_PIN'], 'CONNECTION_BOUND', 'PAGED_READ_LEGAL_COMBINATION')
+
+  // Right proof, WRONG lifetime — the table pairs rows, it is not two independent lists.
+  refusedByRule(['IMMUTABLE_SNAPSHOT_TOKEN'], 'CONNECTION_BOUND', 'PAGED_READ_LEGAL_COMBINATION')
+  refusedByRule(['SOURCE_SNAPSHOT_TXN'], 'SINGLE_REQUEST', 'PAGED_READ_LEGAL_COMBINATION')
+
+  // EVERY declared proof must anchor the declared lifetime — "at least one" would
+  // certify this mixed set and then let a run claim MONOTONIC_VERSION_PIN alone as its
+  // proofClasses (validateConsistencyEvidence only checks used ⊆ supported).
+  refusedByRule(['SOURCE_SNAPSHOT_TXN', 'MONOTONIC_VERSION_PIN'], 'CONNECTION_BOUND', 'PAGED_READ_LEGAL_COMBINATION')
+
+  // EMPTY consistency set on PAGED_READ — refused under its OWN rule token, so the
+  // decision is pinned rather than incidental. CONNECTION_BOUND keeps rule 4 out.
+  refusedByRule([], 'CONNECTION_BOUND', 'PAGED_READ_REQUIRES_CONSISTENCY_PROOF')
+  // POSITIVE CONTROL for that refusal: the empty set stays a legal honest declaration
+  // outside PAGED_READ (a validator that refuses every empty set must not pass).
+  const honestEmpty = normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: { acquisitionMode: 'BOUNDED_READ', continuationLifetime: 'SINGLE_REQUEST', supportedConsistencyProofs: [] },
+  }))
+  assert.deepEqual([...honestEmpty.certificate.supportedConsistencyProofs], [])
+
+  // Rule 5 lives in the SHARED cross-dimension function, so derivation refuses the same
+  // certificate with the same reason — no resume strategy for an out-of-table profile.
+  rejectsWith(() => deriveRecoveryStrategy({
+    acquisitionMode: 'PAGED_READ',
+    continuationLifetime: 'CONNECTION_BOUND',
+    supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'],
+    supportedCompletenessProofs: ['SHORT_PAGE'],
+  }), 'ILLEGAL_CAPABILITY_COMBINATION')
+
+  // VALUES-FREE: the refusal carries a closed rule token and a COUNT — never the
+  // offending proof names, and never the table contents.
+  const serialized = JSON.stringify({ m: unmapped.message, d: unmapped.details })
+  assert.ok(!serialized.includes('MONOTONIC_VERSION_PIN'), 'the refusal must not echo the offending proof')
+  assert.ok(!serialized.includes('SOURCE_SNAPSHOT_TXN'), 'the refusal must not echo the table contents')
+  assert.ok(!serialized.includes('IMMUTABLE_SNAPSHOT_TOKEN'), 'the refusal must not echo the table contents')
+  assert.equal(unmapped.details.declaredProofCount, 1)
+}
+
 // ── 5. Recovery derivation matrix (derived, never declared) ──
 function recoveryDerivation() {
   // deriveRecoveryStrategy validates the FULL certificate (review P2 fail-closed), so
@@ -339,6 +479,7 @@ function main() {
   readProfileHappyPath()
   readProfileFailClosed()
   crossDimensionLegality()
+  pagedReadLegalCombinationTable()
   recoveryDerivation()
   applyProfile()
   evidenceShapes()

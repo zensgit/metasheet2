@@ -212,6 +212,29 @@ const READ_CERTIFICATE_FIELDS = Object.freeze([
 // (= profileId); the action/queryPreset version is pinned INSIDE this definition and
 // is never an independent digest input (review P2: two implementations must not each
 // compute their own digest).
+// FROZEN PAGED_READ legal-combination table (R5; scale-D0 §2). Consulted by rule 5
+// below and ONLY when acquisitionMode === 'PAGED_READ'. Exported so tests and future
+// slices bind to this ONE source instead of re-typing the literal.
+//
+// A table ROW pairs a consistency proof with the continuation lifetime that proof can
+// actually anchor across pages:
+//   SOURCE_SNAPSHOT_TXN      → CONNECTION_BOUND  (the snapshot lives in the open txn)
+//   IMMUTABLE_SNAPSHOT_TOKEN → DURABLE_TOKEN     (the snapshot outlives the connection)
+//
+// MONOTONIC_VERSION_PIN is deliberately UNMAPPED for PAGED_READ in v1: a version pin
+// DETECTS drift between pages, it does not make the pages mutually consistent. It stays
+// legal where already ratified in OTHER modes — rule 3 (CHANGE_FEED ⇒
+// MONOTONIC_VERSION_PIN) and rule 4's CHANGE_FEED watermark anchor are untouched, so
+// the ratified CHANGE_FEED × MONOTONIC_VERSION_PIN × DURABLE_TOKEN combination still
+// certifies. This table is PAGED_READ-scoped, strictly additive to rules 1-4.
+//
+// Shape note: an array of rows, not a keyed object — a `table[proof]` lookup would walk
+// the prototype chain for names like 'constructor'. `.some()` over frozen rows cannot.
+const PAGED_READ_LEGAL_COMBINATIONS = Object.freeze([
+  Object.freeze({ consistencyProof: 'SOURCE_SNAPSHOT_TXN', continuationLifetime: 'CONNECTION_BOUND' }),
+  Object.freeze({ consistencyProof: 'IMMUTABLE_SNAPSHOT_TOKEN', continuationLifetime: 'DURABLE_TOKEN' }),
+])
+
 // Frozen cross-dimension legality (scale-D0 §2) — shared so deriveRecoveryStrategy
 // re-checks it too (review P2: derivation must never grant a resume strategy to a
 // schema-ILLEGAL certificate). Reads only membership of already-frozen closed sets.
@@ -236,6 +259,43 @@ function assertCertificateCrossDimensionLegal({ acquisitionMode, continuationLif
     const watermarkAnchor = acquisitionMode === 'CHANGE_FEED' && consistency.includes('MONOTONIC_VERSION_PIN')
     if (!immutableAnchor && !watermarkAnchor) {
       fail('ILLEGAL_CAPABILITY_COMBINATION', 'DURABLE_TOKEN continuation requires a durable consistency anchor', { rule: 'DURABLE_TOKEN_REQUIRES_DURABLE_ANCHOR' })
+    }
+  }
+  // 5. PAGED_READ consults the FROZEN legal-combination table (R5). Scoped to
+  //    PAGED_READ ONLY, and strictly ADDITIVE: rules 1-4 keep owning the other modes,
+  //    so MONOTONIC_VERSION_PIN — unmapped HERE — stays legal on CHANGE_FEED (rule 3)
+  //    including the ratified CHANGE_FEED × MONOTONIC_VERSION_PIN × DURABLE_TOKEN
+  //    watermark combination (rule 4's second anchor).
+  if (acquisitionMode === 'PAGED_READ') {
+    // EMPTY consistency set — DECIDED, not incidental. The empty set is a legal, honest
+    // "no snapshot proof" declaration elsewhere in this module (see GIP_CONSISTENCY_PROOFS),
+    // but it cannot satisfy any table row, and pages carrying no snapshot proof at all are
+    // not mutually consistent. A PAGED_READ certificate declaring it is therefore REFUSED,
+    // under its own rule token so the decision is assertable rather than inferred.
+    if (consistency.length === 0) {
+      fail('ILLEGAL_CAPABILITY_COMBINATION', 'PAGED_READ requires a consistency proof from the frozen legal-combination table', {
+        rule: 'PAGED_READ_REQUIRES_CONSISTENCY_PROOF',
+      })
+    }
+    // EVERY declared proof must anchor the DECLARED lifetime under the table — not merely
+    // "at least one". validateConsistencyEvidence only checks used ⊆ supported, so an
+    // unmapped proof riding along in supportedConsistencyProofs could later be claimed
+    // ALONE as a run's proofClasses — exactly the unsound consistency claim this table
+    // exists to forbid.
+    // An out-of-table PAGED_READ profile is REFUSED at certification time. It is NEVER
+    // silently downgraded to BOUNDED_READ: a bounded need certifies its own bounded
+    // profile, and a silent downgrade would hand a paged caller a different contract than
+    // the one it declared.
+    for (const proof of consistency) {
+      const anchored = PAGED_READ_LEGAL_COMBINATIONS.some(
+        (row) => row.consistencyProof === proof && row.continuationLifetime === continuationLifetime,
+      )
+      if (!anchored) {
+        fail('ILLEGAL_CAPABILITY_COMBINATION', 'PAGED_READ combination is outside the frozen legal-combination table', {
+          rule: 'PAGED_READ_LEGAL_COMBINATION',
+          declaredProofCount: consistency.length,
+        })
+      }
     }
   }
 }
@@ -552,6 +612,7 @@ module.exports = {
   GIP_CROSS_ROLE_TEMPORAL_POLICIES,
   GIP_CONSISTENCY_REQUIREMENT_STATUSES,
   GIP_PROFILE_ERROR_REASONS,
+  PAGED_READ_LEGAL_COMBINATIONS,
   GipProfileContractError,
   normalizeCertifiedReadActionProfile,
   normalizeCertifiedApplyProfile,
