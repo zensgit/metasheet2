@@ -8760,24 +8760,11 @@
                   </select>
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ shiftTimezoneLabel }}</small>
                 </label>
-                <label class="attendance__field" for="attendance-shift-start">
-                  <span>{{ tr('Work start', '上班开始') }}</span>
-                  <input
-                    id="attendance-shift-start"
-                    name="shiftWorkStartTime"
-                    v-model="shiftForm.workStartTime"
-                    type="time"
-                  />
-                </label>
-                <label class="attendance__field" for="attendance-shift-end">
-                  <span>{{ tr('Work end', '下班结束') }}</span>
-                  <input
-                    id="attendance-shift-end"
-                    name="shiftWorkEndTime"
-                    v-model="shiftForm.workEndTime"
-                    type="time"
-                  />
-                </label>
+                <AttendanceShiftSegmentsEditor
+                  v-model:segments="shiftForm.segments"
+                  :analysis="shiftSegmentAnalysis"
+                  :preview-only="shiftSegmentPreviewOnly"
+                />
                 <label class="attendance__field" for="attendance-shift-late-grace">
                   <span>{{ tr('Late grace (min)', '迟到宽限（分钟）') }}</span>
                   <input
@@ -8834,8 +8821,8 @@
                     <tr>
                       <th>{{ tr('Name', '名称') }}</th>
                       <th>{{ tr('Timezone', '时区') }}</th>
-                      <th>{{ tr('Start', '开始') }}</th>
-                      <th>{{ tr('End', '结束') }}</th>
+                      <th>{{ tr('Segments', '时段') }}</th>
+                      <th>{{ tr('Planned', '计划时长') }}</th>
                       <th>{{ tr('Working days', '工作日') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
@@ -8844,8 +8831,17 @@
                     <tr v-for="shift in shifts" :key="shift.id">
                       <td>{{ shift.name }}</td>
                       <td>{{ displayTimezone(shift.timezone) }}</td>
-                      <td>{{ shift.workStartTime }}</td>
-                      <td>{{ shift.workEndTime }}</td>
+                      <td>
+                        <span data-attendance-shift-list-segments>{{ shiftSegmentsLabel(shift) }}</span>
+                        <span
+                          v-if="shiftIsPreviewOnly(shift)"
+                          class="attendance__shift-preview-badge"
+                          data-attendance-shift-list-preview-only
+                        >
+                          {{ tr('Preview only', '仅供预览') }}
+                        </span>
+                      </td>
+                      <td class="attendance__tabular-number">{{ shiftPlannedMinutes(shift) }} {{ tr('min', '分钟') }}</td>
                       <td>{{ shift.workingDays.join(',') }}</td>
                       <td class="attendance__table-actions">
                         <button class="attendance__btn" @click="editShift(shift)">{{ tr('Edit', '编辑') }}</button>
@@ -9756,8 +9752,20 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
+import AttendanceShiftSegmentsEditor from './attendance/AttendanceShiftSegmentsEditor.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
+import {
+  analyzeAttendanceShiftSegments,
+  calculateAttendanceShiftPlannedMinutes,
+  cloneAttendanceShiftSegmentDrafts,
+  formatAttendanceShiftSegments,
+  isAttendanceShiftPreviewOnly,
+  normalizeAttendanceShiftSegments,
+  type AttendanceShiftSegment,
+  type AttendanceShiftSegmentCapabilities,
+  type AttendanceShiftSegmentDraft,
+} from './attendance/attendanceShiftSegments'
 import { attendanceSetupPrefillPending } from './attendance/attendanceSetupPrefillLeaveGuard'
 import {
   buildAttendanceSetupTemplatePrefillPlan,
@@ -11120,6 +11128,10 @@ interface AttendanceShift {
   earlyGraceMinutes: number
   roundingMinutes: number
   workingDays: number[]
+  segments?: AttendanceShiftSegment[]
+  calculationMode?: 'envelope' | 'segments'
+  plannedMinutes?: number
+  capabilities?: AttendanceShiftSegmentCapabilities
 }
 
 interface AttendanceAssignment {
@@ -14526,6 +14538,7 @@ const setupTemplateDialog = ref<null | {
   orgTimezone: string | null
   snapshot: AttendanceSetupPrefillSnapshot
 }>(null)
+const setupTemplateShiftSegmentsSnapshot = ref<AttendanceShiftSegmentDraft[] | null>(null)
 
 // Applied-but-unsaved prefill tracker (per target form). Cleared by: undo (both), a successful
 // group save, and each form's reset (reset discards the prefilled content, so the leave warning
@@ -14588,6 +14601,7 @@ function openSetupTemplate(templateId: AttendanceSetupTemplateId): void {
   const orgTimezone = resolveAttendanceSetupOrgTimezone(
     attendanceGroups.value.map((group) => group.timezone),
   )
+  setupTemplateShiftSegmentsSnapshot.value = cloneAttendanceShiftSegmentDrafts(shiftForm.segments)
   setupTemplateDialog.value = {
     stage: 'confirm',
     templateId,
@@ -14620,6 +14634,12 @@ function applySetupTemplate(): void {
     shiftForm.timezone = plan.shift.timezone
     shiftForm.workStartTime = plan.shift.workStartTime
     shiftForm.workEndTime = plan.shift.workEndTime
+    replaceShiftSegments([{
+      startTime: plan.shift.workStartTime,
+      startDayOffset: 0,
+      endTime: plan.shift.workEndTime,
+      endDayOffset: plan.shift.workEndTime <= plan.shift.workStartTime ? 1 : 0,
+    }])
     shiftForm.lateGraceMinutes = plan.shift.lateGraceMinutes
     shiftForm.earlyGraceMinutes = plan.shift.earlyGraceMinutes
     shiftForm.roundingMinutes = plan.shift.roundingMinutes
@@ -14636,6 +14656,7 @@ function applySetupTemplate(): void {
 function cancelSetupTemplateConfirm(): void {
   // Confirm-stage cancel: nothing was applied, nothing to restore.
   setupTemplateDialog.value = null
+  setupTemplateShiftSegmentsSnapshot.value = null
 }
 
 function closeSetupTemplateDialogKeepPrefill(): void {
@@ -14643,6 +14664,7 @@ function closeSetupTemplateDialogKeepPrefill(): void {
   // pending-unsaved tracker (leave warnings stay armed); only the dialog and its undo snapshot
   // are released — exactly what the dialog's undo-scope copy promises.
   setupTemplateDialog.value = null
+  setupTemplateShiftSegmentsSnapshot.value = null
 }
 
 function undoSetupTemplate(): void {
@@ -14661,12 +14683,21 @@ function undoSetupTemplate(): void {
   shiftForm.timezone = snapshot.shift.timezone
   shiftForm.workStartTime = snapshot.shift.workStartTime
   shiftForm.workEndTime = snapshot.shift.workEndTime
+  replaceShiftSegments(
+    setupTemplateShiftSegmentsSnapshot.value ?? [{
+      startTime: snapshot.shift.workStartTime,
+      startDayOffset: 0,
+      endTime: snapshot.shift.workEndTime,
+      endDayOffset: snapshot.shift.workEndTime <= snapshot.shift.workStartTime ? 1 : 0,
+    }],
+  )
   shiftForm.lateGraceMinutes = snapshot.shift.lateGraceMinutes
   shiftForm.earlyGraceMinutes = snapshot.shift.earlyGraceMinutes
   shiftForm.roundingMinutes = snapshot.shift.roundingMinutes
   shiftForm.workingDays = snapshot.shift.workingDays
   setupTemplatePrefillPending.value = { group: false, shift: false, templateId: null }
   setupTemplateDialog.value = null
+  setupTemplateShiftSegmentsSnapshot.value = null
 }
 
 function navigateSetupTemplate(sectionId: string): void {
@@ -15582,11 +15613,24 @@ const shiftForm = reactive({
   timezone: defaultTimezone,
   workStartTime: '09:00',
   workEndTime: '18:00',
+  segments: [
+    {
+      startTime: '09:00',
+      startDayOffset: 0,
+      endTime: '18:00',
+      endDayOffset: 0,
+    },
+  ] as AttendanceShiftSegmentDraft[],
   lateGraceMinutes: 10,
   earlyGraceMinutes: 10,
   roundingMinutes: 5,
   workingDays: '1,2,3,4,5',
 })
+
+watch(
+  () => shiftForm.segments.map(segment => `${segment.startTime}/${segment.endTime}/${segment.endDayOffset}`).join('|'),
+  () => syncShiftEnvelopeFields(),
+)
 
 const assignmentForm = reactive({
   userId: '',
@@ -25918,6 +25962,45 @@ async function deleteRotationAssignment(id: string) {
   }
 }
 
+function replaceShiftSegments(segments: AttendanceShiftSegmentDraft[]): void {
+  shiftForm.segments.splice(0, shiftForm.segments.length, ...cloneAttendanceShiftSegmentDrafts(segments))
+  syncShiftEnvelopeFields()
+}
+
+function syncShiftEnvelopeFields(): void {
+  const first = shiftForm.segments[0]
+  const last = shiftForm.segments[shiftForm.segments.length - 1]
+  if (!first || !last) return
+  shiftForm.workStartTime = first.startTime
+  shiftForm.workEndTime = last.endTime
+}
+
+const shiftSegmentAnalysis = computed(() => analyzeAttendanceShiftSegments(shiftForm.segments, tr))
+
+const shiftSegmentValidationErrors = computed(() => shiftSegmentAnalysis.value.errors)
+const editingShift = computed(() => (
+  shiftEditingId.value
+    ? shifts.value.find(shift => shift.id === shiftEditingId.value) ?? null
+    : null
+))
+const shiftSegmentPreviewOnly = computed(() => {
+  if (shiftForm.segments.length <= 1) return false
+  const capability = editingShift.value?.capabilities?.segmentCalculation
+  return capability?.authoritativeResults !== true || capability?.multiSegmentAuthoring !== 'enabled'
+})
+
+function shiftSegmentsLabel(shift: AttendanceShift): string {
+  return formatAttendanceShiftSegments(shift, tr)
+}
+
+function shiftPlannedMinutes(shift: AttendanceShift): number {
+  return calculateAttendanceShiftPlannedMinutes(shift)
+}
+
+function shiftIsPreviewOnly(shift: AttendanceShift): boolean {
+  return isAttendanceShiftPreviewOnly(shift)
+}
+
 function resetShiftForm() {
   // W4-2: a reset discards any template-prefilled shift content (save success also lands here) —
   // stop the unsaved-prefill leave warning for this form.
@@ -25927,6 +26010,12 @@ function resetShiftForm() {
   shiftForm.timezone = defaultTimezone
   shiftForm.workStartTime = '09:00'
   shiftForm.workEndTime = '18:00'
+  replaceShiftSegments([{
+    startTime: '09:00',
+    startDayOffset: 0,
+    endTime: '18:00',
+    endDayOffset: 0,
+  }])
   shiftForm.lateGraceMinutes = 10
   shiftForm.earlyGraceMinutes = 10
   shiftForm.roundingMinutes = 5
@@ -25939,6 +26028,7 @@ function editShift(shift: AttendanceShift) {
   shiftForm.timezone = shift.timezone
   shiftForm.workStartTime = shift.workStartTime
   shiftForm.workEndTime = shift.workEndTime
+  replaceShiftSegments(normalizeAttendanceShiftSegments(shift))
   shiftForm.lateGraceMinutes = shift.lateGraceMinutes
   shiftForm.earlyGraceMinutes = shift.earlyGraceMinutes
   shiftForm.roundingMinutes = shift.roundingMinutes
@@ -25977,14 +26067,23 @@ async function loadShifts() {
 }
 
 async function saveShift() {
+  if (shiftSegmentValidationErrors.value.length > 0) {
+    setStatus(shiftSegmentValidationErrors.value[0]!, 'error')
+    return
+  }
   shiftSaving.value = true
   const isEditing = Boolean(shiftEditingId.value)
   try {
     const payload = {
       name: shiftForm.name,
       timezone: shiftForm.timezone,
-      workStartTime: shiftForm.workStartTime,
-      workEndTime: shiftForm.workEndTime,
+      segments: shiftForm.segments.map((segment, segmentIndex) => ({
+        segmentIndex,
+        startTime: segment.startTime,
+        startDayOffset: 0,
+        endTime: segment.endTime,
+        endDayOffset: segment.endDayOffset,
+      })),
       lateGraceMinutes: Number(shiftForm.lateGraceMinutes) || 0,
       earlyGraceMinutes: Number(shiftForm.earlyGraceMinutes) || 0,
       roundingMinutes: Number(shiftForm.roundingMinutes) || 0,
@@ -26018,7 +26117,10 @@ async function saveShift() {
 }
 
 async function deleteShift(id: string) {
-  if (!window.confirm(tr('Delete this shift? Assignments will be removed.', '确认删除该班次吗？关联分配也会被移除。'))) return
+  if (!window.confirm(tr(
+    'Delete this shift? Deletion is blocked while assignments, rotation rules, pending swaps, or pending/published dispatches still reference it.',
+    '确认删除该班次吗？只要仍有分配、轮班规则、待处理换班，或待处理/已发布调度引用它，系统就会阻止删除。',
+  ))) return
   try {
     const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -28722,6 +28824,21 @@ defineExpose({
 
 .attendance__field--full {
   flex: 1;
+}
+
+.attendance__shift-preview-badge {
+  display: inline-block;
+  margin-left: var(--ms-space-2);
+  padding: 2px var(--ms-space-2);
+  border: 1px solid var(--ms-color-warning);
+  border-radius: var(--ms-radius-sm);
+  color: var(--ms-text-1);
+  background: var(--ms-bg-page);
+  white-space: nowrap;
+}
+
+.attendance__tabular-number {
+  font-variant-numeric: tabular-nums;
 }
 
 .attendance__field--compact {

@@ -645,6 +645,33 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     timezone: 'Asia/Shanghai',
     workStartTime: '10:30',
     workEndTime: '19:30',
+    segments: [
+      {
+        id: 's1-segment-1',
+        segmentIndex: 0,
+        startTime: '10:30',
+        startDayOffset: 0,
+        endTime: '14:00',
+        endDayOffset: 0,
+      },
+      {
+        id: 's1-segment-2',
+        segmentIndex: 1,
+        startTime: '15:00',
+        startDayOffset: 0,
+        endTime: '19:30',
+        endDayOffset: 0,
+      },
+    ],
+    calculationMode: 'segments',
+    plannedMinutes: 480,
+    capabilities: {
+      segmentCalculation: {
+        enabled: false,
+        authoritativeResults: false,
+        multiSegmentAuthoring: 'preview_only',
+      },
+    },
     lateGraceMinutes: 25,
     earlyGraceMinutes: 20,
     roundingMinutes: 15,
@@ -737,13 +764,22 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
   /** EVERY field applySetupTemplate writes (plus both save-button labels = the editing posture),
    *  so a before/after deepEqual can never pass on a partial restore. */
   function readFormState() {
+    const shiftSegments = Array.from(
+      container!.querySelectorAll<HTMLElement>('[data-attendance-shift-segment-row]'),
+    ).map((row) => ({
+      startTime: row.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start]')!.value,
+      startDayOffset: 0,
+      endTime: row.querySelector<HTMLInputElement>('[data-attendance-shift-segment-end]')!.value,
+      endDayOffset: Number(
+        row.querySelector<HTMLSelectElement>('[data-attendance-shift-segment-end-day]')!.value,
+      ),
+    }))
     return {
       groupName: groupNameInput().value,
       groupTimezone: container!.querySelector<HTMLSelectElement>('#attendance-group-timezone')!.value,
       groupType: container!.querySelector<HTMLSelectElement>('#attendance-group-type')!.value,
       shiftName: shiftNameInput().value,
-      shiftStart: container!.querySelector<HTMLInputElement>('#attendance-shift-start')!.value,
-      shiftEnd: container!.querySelector<HTMLInputElement>('#attendance-shift-end')!.value,
+      shiftSegments,
       shiftTimezone: container!.querySelector<HTMLSelectElement>('#attendance-shift-timezone')!.value,
       shiftLateGrace: container!.querySelector<HTMLInputElement>('#attendance-shift-late-grace')!.value,
       shiftEarlyGrace: container!.querySelector<HTMLInputElement>('#attendance-shift-early-grace')!.value,
@@ -922,8 +958,12 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
       groupTimezone: 'Asia/Shanghai',
       groupType: 'fixed_shift',
       shiftName: 'Office shift 09:00-18:00',
-      shiftStart: '09:00',
-      shiftEnd: '18:00',
+      shiftSegments: [{
+        startTime: '09:00',
+        startDayOffset: 0,
+        endTime: '18:00',
+        endDayOffset: 0,
+      }],
       shiftTimezone: 'Asia/Shanghai',
       shiftLateGrace: '10',
       shiftEarlyGrace: '10',
@@ -983,14 +1023,28 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     expect(writes.map((c) => ({ url: c.url, method: c.method }))).toEqual([
       { url: '/api/attendance/shifts/s1', method: 'PUT' },
     ])
-    // Full body shape — the ORIGINAL shift record byte for byte (grace/rounding/workingDays are
-    // all non-default, so any missed field in undoSetupTemplate turns this red; no orgId key —
-    // the harness org is blank and JSON.stringify drops the undefined normalizedOrgId()).
+    // Full canonical body shape — the ORIGINAL two-segment shift plus its non-default
+    // grace/rounding/workingDays. Any missed field in undoSetupTemplate turns this red; no orgId
+    // key because the harness org is blank and JSON.stringify drops normalizedOrgId().
     expect(JSON.parse(writes[0].body || 'null')).toEqual({
       name: 'Night audit shift',
       timezone: 'Asia/Shanghai',
-      workStartTime: '10:30',
-      workEndTime: '19:30',
+      segments: [
+        {
+          segmentIndex: 0,
+          startTime: '10:30',
+          startDayOffset: 0,
+          endTime: '14:00',
+          endDayOffset: 0,
+        },
+        {
+          segmentIndex: 1,
+          startTime: '15:00',
+          startDayOffset: 0,
+          endTime: '19:30',
+          endDayOffset: 0,
+        },
+      ],
       lateGraceMinutes: 25,
       earlyGraceMinutes: 20,
       roundingMinutes: 15,
