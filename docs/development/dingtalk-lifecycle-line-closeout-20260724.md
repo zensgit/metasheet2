@@ -9,7 +9,7 @@
 |-------|-----|------------------------|--------|
 | **T1** dual-axis + gates | [#4559](https://github.com/zensgit/metasheet2/pull/4559) | `27178ef4423dcc06446aef0d7d206687ff8ff55d` | `activation_status` / `local_password_set`; pending create **default OFF**; invite accept real-DB concurrency goldens |
 | **T2+T3+D1–D6 backend** | [#4574](https://github.com/zensgit/metasheet2/pull/4574) | `014fc23acb58feb1863f79a1c4151b0313fb654b` | aliases, activate, planner/ledger/restore eligibility; flags default-off |
-| **D7 UI + alias env contract** | *(this PR)* | *(fill after merge)* | `AUTH_LOGIN_USE_ALIASES` templates + closeout contract; admin deprovision evidence panel |
+| **D7 UI + alias env contract** | [#4575](https://github.com/zensgit/metasheet2/pull/4575) | `71405cdb40659f31ddd0b98948c9eba646327d2d` | `AUTH_LOGIN_USE_ALIASES` templates + closeout contract; admin deprovision evidence panel |
 
 ## Verification evidence
 
