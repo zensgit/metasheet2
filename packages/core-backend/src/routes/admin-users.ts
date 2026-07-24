@@ -1743,6 +1743,50 @@ async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise
   )
 }
 
+/**
+ * Error surface for `POST /api/admin/users/:id/activate`.
+ *
+ * Exported so the contract is testable: before this existed, the mapping lived inline in the
+ * handler and nothing asserted it, so re-classifying an infrastructure failure as a client 409
+ * was a silent one-line regression.
+ *
+ * Two rules, both about not letting the driver speak for us:
+ *
+ *  - The API's `code` is ours. `activatePendingUser` throws `ACTIVATE_*` codes; a `pg` error
+ *    carries a SQLSTATE in the SAME `.code` property, so reading `.code` unconditionally
+ *    published e.g. `42703` as if it were an API error code. Anything not `ACTIVATE_*` is
+ *    infrastructure and collapses to `ACTIVATE_FAILED` / 500.
+ *  - The message is ours too, whenever the code is not. `ACTIVATE_*` messages are authored in
+ *    `throwCoded`; everything else is driver text (`column "created_at" of relation "user_orgs"
+ *    does not exist` — schema shape handed to the client) and is replaced wholesale.
+ */
+export function mapActivateError(error: unknown): { status: number; code: string; message: string } {
+  const rawCode = (error as { code?: unknown } | null)?.code
+  const code = typeof rawCode === 'string' && rawCode.startsWith('ACTIVATE_')
+    ? rawCode
+    : 'ACTIVATE_FAILED'
+
+  // Only client/config conflicts are 409. ACTIVATE_ALIAS_FAILED is infrastructure (DB write)
+  // → 500, and so is every unmapped failure.
+  const status =
+    code === 'ACTIVATE_USER_NOT_FOUND' ? 404
+      : code === 'ACTIVATE_NOT_PENDING'
+        || code.startsWith('ACTIVATE_SOURCE')
+        || code === 'ACTIVATE_LINK_MISMATCH'
+        || code === 'ACTIVATE_ALIAS_CONFLICT'
+        || code === 'ACTIVATE_ALIAS_REQUIRED'
+        ? 409
+        : code === 'ACTIVATE_USER_REQUIRED' ? 400
+          : 500
+
+  const message =
+    code === 'ACTIVATE_ALIAS_FAILED' ? 'Failed to claim login alias during activation'
+      : code === 'ACTIVATE_FAILED' ? 'Activation failed'
+        : ((error as Error)?.message || 'Activation failed')
+
+  return { status, code, message }
+}
+
 export function adminUsersRouter(): Router {
   const r = Router()
 
@@ -4632,24 +4676,8 @@ export function adminUsersRouter(): Router {
       })
       return jsonOk(res, result)
     } catch (error) {
-      const code = (error as { code?: string })?.code || 'ACTIVATE_FAILED'
-      // Only client/config conflicts are 409. ACTIVATE_ALIAS_FAILED is infrastructure
-      // (DB write) → 500. Never invent messages from raw driver text.
-      const status =
-        code === 'ACTIVATE_USER_NOT_FOUND' ? 404
-          : code === 'ACTIVATE_NOT_PENDING'
-            || code.startsWith('ACTIVATE_SOURCE')
-            || code === 'ACTIVATE_LINK_MISMATCH'
-            || code === 'ACTIVATE_ALIAS_CONFLICT'
-            || code === 'ACTIVATE_ALIAS_REQUIRED'
-            ? 409
-            : code === 'ACTIVATE_USER_REQUIRED' ? 400
-              : 500
-      const safeMessage =
-        code === 'ACTIVATE_ALIAS_FAILED'
-          ? 'Failed to claim login alias during activation'
-          : ((error as Error)?.message || 'Activation failed')
-      return jsonError(res, status, code, safeMessage)
+      const mapped = mapActivateError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
     }
   })
 
