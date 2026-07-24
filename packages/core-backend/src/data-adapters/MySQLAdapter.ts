@@ -320,13 +320,14 @@ export class MySQLAdapter extends BaseDataAdapter {
       sql += ` ORDER BY ${orderClauses.join(', ')}`
     }
 
-    // Add limit and offset (these are numeric, validate them)
-    if (options.limit) {
-      const limit = parseInt(String(options.limit), 10)
-      if (!isNaN(limit) && limit > 0) {
-        sql += ` LIMIT ${limit}`
-      }
-    }
+    // A5: always bound the read at the adapter layer (omit -> MAX cap, > MAX -> throw), so a direct
+    // internal caller cannot issue an unbounded SELECT. This adapter previously only appended a
+    // LIMIT when the caller supplied a truthy one, so an omitted limit produced `SELECT * FROM t`
+    // over the WHOLE table and an over-max limit was served verbatim — exactly what A5's contract
+    // says can never happen ("omit limit can never mean whole table"). Postgres/MSSQL enforced it;
+    // MySQL did not, and no A5 test covered this adapter. resolveEffectiveLimit returns a validated
+    // positive integer, so the interpolation is injection-safe.
+    sql += ` LIMIT ${this.resolveEffectiveLimit(options.limit)}`
     if (options.offset) {
       const offset = parseInt(String(options.offset), 10)
       if (!isNaN(offset) && offset >= 0) {
