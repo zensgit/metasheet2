@@ -185,7 +185,7 @@ against W1 group-membership tables is a scope violation.
 | W4C-R24 | Payable minutes are the intersection of actual and planned segment intervals, extended only by bounded frozen overtime. | Restoring raw actual-span arithmetic counts a planned break and fails. |
 | W4C-R25 | Imported explicit metrics/policy results are never dropped or silently made authoritative. | Removing snapshot presence or congruence checks fails a metric-conflict fixture. |
 | W4C-R26 | W4 atomic batches stay within one closed, tested bound. | 5001 items/targets fail before source DML; chunking or partial commit mutations fail. |
-| W4C-R27 | A completed operation cannot lose its required lifecycle event between DB commit and process emit. | Removing the transactional outbox reproduces commit-before-emit loss. |
+| W4C-R27 | A completed non-legacy W4 operation cannot lose its required lifecycle event between DB commit and process emit. | Removing the transactional outbox from a `shadow|eligible|authoritative` operation reproduces commit-before-emit loss; `legacy_projection_only` remains outside this invariant. |
 | W4C-R28 | Frozen per-segment grace is derived only from the selected shift/rule profile until a new schema is ratified. | Segment-specific injection or current-policy reread fails fingerprint/context tests. |
 | W4C-R29 | An attendance approval instance has one terminal execution body. | Legacy approve/reject, generic action/bridge, card action, and plugin decision mutations either converge before terminal DML or fail closed; a second body cannot apply or omit attendance effects. |
 | W4C-R30 | Attendance approval and cancellation authorization is explicit at the locked request org. | Cross-org attendance-admin/delegated UUID probes fail before shared/result SQL; platform-admin override requires the closed global posture and an audit witness. |
@@ -1094,10 +1094,16 @@ produced by another item in the same batch.
 ### 7.1a Transactional event outbox
 
 Create durable `attendance_result_event_outbox`. Each W4-covered source
-operation in section 8.3 that currently reaches `emitEvent` stores one closed
-event row in the same transaction as its operation seal and source/effect/
-result writes. W4C-0 generates the exact reachable event-kind/payload inventory;
-unrelated configuration/report events remain outside this lock. The unique identity is
+operation in section 8.3 running in `shadow|eligible|authoritative` that
+currently reaches `emitEvent` stores one closed event row in the same
+transaction as its operation seal and source/effect/result writes. This
+durability contract does not apply to `legacy_projection_only`: that posture
+has no mandatory `operationId` or operation row and preserves the existing
+synchronous/best-effort emit behavior and response bytes. `suspended` admits no
+new source operation; congruent replay of an already completed non-legacy
+operation may wake its pending outbox row without re-running business DML.
+W4C-0 generates the exact reachable event-kind/payload inventory; unrelated
+configuration/report events remain outside this lock. The unique identity is
 `(org_id,entrypoint,operation_id,event_kind)`; payload schema/version,
 business-key fingerprint, guarded `pending|delivered` state, attempts,
 next-attempt time, and created/delivered timestamps are explicit. Identity and
@@ -1470,8 +1476,11 @@ function with the same `trx`. Non-attendance product callers retain their
 existing public generic transaction path. A callback that commits W4 and then
 lets a caller-owned approval/ledger transaction commit or fail is forbidden.
 Every attendance lifecycle notification required by the existing event
-contract is enqueued in the section 7.1a outbox before the operation is sealed;
-direct post-commit emit without a durable row is forbidden.
+contract for a `shadow|eligible|authoritative` operation is enqueued in the
+section 7.1a outbox before the operation is sealed; direct post-commit emit
+without a durable row is forbidden in those postures. The closed
+`legacy_projection_only` branch retains its existing synchronous/best-effort
+emit and creates neither an operation row nor an outbox row.
 
 `writeAttendanceCalculationsBatch`, prepare, and apply are private to that
 transaction. The batch function validates every minted intent against its
@@ -1522,7 +1531,10 @@ alternate result algorithm.
 11. allocate next version;
 12. insert calculation and required segment children;
 13. execute the prepared projection directive and pointer change;
-14. append the closed outbox event rows required by this source operation;
+14. for `shadow|eligible|authoritative`, append the closed outbox event rows
+    required by this source operation; the separate
+    `legacy_projection_only` branch has already preserved its existing emit
+    behavior and writes no operation/outbox row;
 15. seal operation result/fingerprints/response and existing audit/batch/request
     state;
 16. commit.
@@ -1843,7 +1855,7 @@ adversarial review 0 P1/P2, exact-head tests/mutations, and no runtime org
 enablement unless section 12.8 explicitly receives owner authorization.
 Every cut-over slice proves its newly covered entrypoints in
 `legacy_projection_only` retain flag-OFF response/projection bytes, use the
-canonical boundary, and insert no W4 calculation.
+canonical boundary, and insert no W4 calculation, operation, or outbox row.
 
 ### 12.1 W4C-0: contracts and durable storage
 
@@ -1956,6 +1968,10 @@ Gates:
 - live/scheduled outbox rows are inserted before operation seal; crash after
   commit/before emit, dispatcher restart, concurrent dispatcher, and emit
   failure eventually deliver without repeating source/result DML;
+- the same live/scheduled entrypoints in `legacy_projection_only` retain their
+  existing synchronous/best-effort emit behavior and create no operation,
+  calculation, or outbox row; removing either side of this posture split fails
+  independently;
 - P01 live, P02 merge second-pass, P03 cron absence, and P04 administrator-run
   absence inventory entries are removed independently; claim and suspension
   witnesses precede each first source DML under call-order mutation;
@@ -2098,9 +2114,11 @@ Gates:
   reversal path, while approved overtime/correction/outdoor/shift-swap/
   schedule-dispatch remain rejected before operation/source/shared/result DML;
   making any of them cancellable fails a scope-boundary test;
-- approval/resolution/cancellation lifecycle events use closed outbox kinds;
-  commit-before-emit crash and replay cannot lose or duplicate the durable
-  event row;
+- approval/resolution/cancellation lifecycle events in
+  `shadow|eligible|authoritative` use closed outbox kinds; commit-before-emit
+  crash and replay cannot lose or duplicate the durable event row, while the
+  same entrypoints in `legacy_projection_only` preserve existing emit behavior
+  and create no operation/calculation/outbox row;
 - full/partial leave and overtime follow section 4.4;
 - cross-org/user or mutated frozen request fails;
 - cross-org UUID probes independently cover approve, reject, cancel, central
