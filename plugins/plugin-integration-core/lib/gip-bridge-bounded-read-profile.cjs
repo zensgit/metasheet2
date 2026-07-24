@@ -25,10 +25,12 @@
 //     honest consistency-proof set is EMPTY (not a fabricated SOURCE_SNAPSHOT_TXN).
 //
 // The profileId literal `bridge.bounded_read.v1` decomposes (per PROFILE_ID_PATTERN,
-// which cannot hold a colon) to connectorKind `bridge` + action `bounded_read`; the
-// precise runtime kind string is carried as implementationVersion. There is no semver
-// literal in the source, so implementationVersion anchors to the real kind string
-// (drift-guarded against SOURCE_KIND_CAPABILITIES keys) — a deliberate choice.
+// which cannot hold a colon) to connectorKind `bridge` + action `bounded_read`. The full
+// runtime kind (`bridge:legacy-sql-readonly`, which contains a colon) is carried in the
+// certified `connectorKind` field, drift-guarded against the feeder's SOURCE_KIND_
+// CAPABILITIES keys. `implementationVersion` is a SEPARATE, independently incrementable
+// adapter identity (`bridge-readonly-adapter.vN`), drift-guarded against the adapter's own
+// exported version constant — a bump there forces re-certification here (review P2).
 
 const {
   normalizeCertifiedReadActionProfile,
@@ -91,7 +93,10 @@ const BRIDGE_BOUNDED_READ_CONNECTOR_KIND = 'bridge:legacy-sql-readonly'
 // The adapter IMPLEMENTATION VERSION — a SEPARATE, incrementable identity (review P2).
 // Drift-guarded against the adapter's exported BRIDGE_READONLY_ADAPTER_IMPLEMENTATION_
 // VERSION by the test; a bump there forces re-certification here.
-const BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION = 'bridge-readonly-adapter.v1'
+// v2: the adapter now verifies the agent-echoed applied limit (see the adapter constant).
+// The certified CAPABILITY is unchanged (bounded_read, SHORT_PAGE only) — only the backing
+// implementation hardened — so profileId stays `bridge.bounded_read.v1`.
+const BRIDGE_BOUNDED_READ_IMPLEMENTATION_VERSION = 'bridge-readonly-adapter.v2'
 
 // ── The certified profile — built (and frozen) through the shared schema normalizer,
 //    so it is schema-valid BY CONSTRUCTION (a malformed literal would throw at load). ─
@@ -105,9 +110,10 @@ const BRIDGE_BOUNDED_READ_PROFILE = normalizeCertifiedReadActionProfile({
     // single standalone SELECT, no txn/snapshot ⇒ honest EMPTY consistency set.
     supportedConsistencyProofs: [],
     continuationLifetime: 'SINGLE_REQUEST',
-    // SHORT_PAGE ONLY (review P1): the concrete bridge adapter reports its applied limit
-    // (metadata.limit ⇒ effectiveLimit) so short_page is REACHABLE, but it NEVER
-    // propagates a source total (no sourceTotalCount / dataRowCount), so the feeder's
+    // SHORT_PAGE ONLY (review P1): the concrete bridge adapter reports its VERIFIED applied
+    // limit (adapter v2 requires the agent's echoed data.limit to equal the requested clamp;
+    // metadata.limit ⇒ effectiveLimit) so short_page is REACHABLE and evidence-backed, but it
+    // NEVER propagates a source total (no sourceTotalCount / dataRowCount), so the feeder's
     // declared_total proof is UNREACHABLE for this adapter. Certifying DECLARED_TOTAL
     // would overstate the adapter's real capability — a trusted total needs an agent
     // protocol + adapter propagation + same-read binding, i.e. a separate runtime /

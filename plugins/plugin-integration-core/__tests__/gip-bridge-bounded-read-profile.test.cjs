@@ -68,6 +68,15 @@ function rejectsWith(fn, reason) {
   return caught
 }
 
+// Async sibling: await `fn`, assert it rejected, and that `predicate(error)` holds.
+async function rejectsAsync(fn, predicate, message) {
+  let caught = null
+  try { await fn() } catch (error) { caught = error }
+  assert.ok(caught, `${message} — expected a rejection, got none`)
+  assert.ok(predicate(caught), `${message} — rejection did not match (got: ${caught && caught.code} / ${caught && caught.message})`)
+  return caught
+}
+
 // The compliance battery runs against the REAL exported profile, not a re-typed copy — a
 // hand-maintained duplicate can silently diverge, leaving the battery to certify a fiction.
 // `actionProfileVersion` is stripped because the normalizer EMITS it but REJECTS it as
@@ -129,7 +138,7 @@ function profileIdentity() {
   // connector kind is the FULL runtime kind; implementation version is a SEPARATE identity
   assert.equal(p.connectorKind, 'bridge:legacy-sql-readonly')
   assert.equal(p.actionId, 'bounded_read')
-  assert.equal(p.implementationVersion, 'bridge-readonly-adapter.v1')
+  assert.equal(p.implementationVersion, 'bridge-readonly-adapter.v2')
   assert.notEqual(p.connectorKind, p.implementationVersion, 'kind must not be borrowed by implementationVersion')
   assert.equal(p.certificate.acquisitionMode, 'BOUNDED_READ')
   assert.equal(p.certificate.continuationLifetime, 'SINGLE_REQUEST')
@@ -328,27 +337,35 @@ function bridgeSystemFixture() {
   }
 }
 
-// An agent that returns EXACTLY `recordCount` records — deliberately NOT sliced to the
-// requested limit, so "does the adapter trim?" is answered by the adapter, not the mock.
-function bridgeAdapterReturning(recordCount) {
+// A configurable fake BA-M1 agent. CRITICAL: `recordCount` (what the agent returns) and
+// `echoLimit` (what the agent SAYS it applied, data.limit) are INDEPENDENT knobs — the two
+// were collapsed in the earlier version of this fake (`limit: body.limit`), which is exactly
+// why it could not witness the applied-limit tear the owner reproduced. Records are NOT
+// sliced to any limit, so "does the adapter trim?" is answered by the adapter, not the mock.
+//   echoLimit: 'match'  → echo the requested clamp (conformant agent; the ONLY 200 shape a
+//                         real agent produces — it 400s an over-limit request, never caps).
+//   echoLimit: <int>    → echo a fixed value (simulate a non-conformant / divergent agent).
+//   echoLimit: 'omit'   → return no data.limit at all (older/incomplete agent).
+//   echoLimit: <other>  → return that raw value (e.g. a non-integer).
+function bridgeAdapterReturning(recordCount, { echoLimit = 'match' } = {}) {
   return bridgeAdapter.createBridgeAgentReadonlyAdapter({
     system: bridgeSystemFixture(),
     fetchImpl: async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : undefined
-      const payload = new URL(url).pathname === '/query/material' && options.method === 'POST'
-        ? {
-          object: 'material',
-          records: Array.from({ length: recordCount }, (_, i) => ({ FItemID: i + 1, FNumber: `MAT-${i + 1}` })),
-          limit: body && body.limit,
-          nextCursor: null,
-          done: true,
-        }
-        : { error: { code: 'UNKNOWN_OBJECT', message: 'not allowlisted' } }
-      return {
-        ok: payload.error === undefined,
-        status: payload.error === undefined ? 200 : 404,
-        async text() { return JSON.stringify(payload) },
+      const isQuery = new URL(url).pathname === '/query/material' && options.method === 'POST'
+      if (!isQuery) {
+        return { ok: false, status: 404, async text() { return JSON.stringify({ error: { code: 'UNKNOWN_OBJECT', message: 'not allowlisted' } }) } }
       }
+      const payload = {
+        object: 'material',
+        records: Array.from({ length: recordCount }, (_, i) => ({ FItemID: i + 1, FNumber: `MAT-${i + 1}` })),
+        nextCursor: null,
+        done: true,
+      }
+      if (echoLimit !== 'omit') {
+        payload.limit = echoLimit === 'match' ? (body && body.limit) : echoLimit
+      }
+      return { ok: true, status: 200, async text() { return JSON.stringify(payload) } }
     },
   })
 }
@@ -371,6 +388,37 @@ async function adapterReachabilityPin() {
   assert.deepEqual([...reachedShortPage.usedCompletenessProofs], ['SHORT_PAGE'],
     'a real short read must adjudicate to the certified SHORT_PAGE proof')
   assert.equal(assertCompletenessEvidenceCertified(reachedShortPage).runOutcome, 'successful')
+
+  // (a′) APPLIED-LIMIT VERIFICATION — the P1 the owner reproduced. The completeness reasoning
+  //      may ONLY rest on the limit the AGENT confirms it applied (data.limit), never on the
+  //      value the adapter locally computed and requested. adapter v2 fails closed unless the
+  //      echo is present, a positive integer, and equal to the requested clamp.
+  //
+  //      *** THE EXACT OWNER REPRO — must FAIL CLOSED, not certify SHORT_PAGE ***
+  //      request 7, the agent says it applied 2, and returns 2 records. Reporting our local 7
+  //      would make a full page (2/2 at the agent's own bound) look like a short page (2/7 —
+  //      "complete"): a completeness fail-OPEN. The adapter must refuse.
+  await rejectsAsync(
+    () => bridgeAdapterReturning(2, { echoLimit: 2 }).read({ object: 'material', limit: REQUESTED_CLAMP }),
+    (error) => bridgeAdapter.BridgeAgentReadonlyAdapterError && error instanceof bridgeAdapter.BridgeAgentReadonlyAdapterError
+      && error.code === 'BRIDGE_AGENT_REQUEST_FAILED',
+    'agent-echoed limit (2) ≠ requested clamp (7) must FAIL CLOSED — a full page must never masquerade as short')
+  //      POSITIVE CONTROL: same request, but the agent confirms it applied 7 (the conformant
+  //      shape) and returns 2 rows ⇒ a genuine short page, which must SUCCEED and certify.
+  const conformantShort = await bridgeAdapterReturning(2, { echoLimit: 'match' }).read({ object: 'material', limit: REQUESTED_CLAMP })
+  assert.equal(conformantShort.metadata.limit, REQUESTED_CLAMP, 'a confirmed applied limit passes through verified')
+  assert.deepEqual([...adjudicateBoundedReadCompleteness({
+    pageRowCount: conformantShort.records.length, reportedClamp: conformantShort.metadata.limit,
+  }).usedCompletenessProofs], ['SHORT_PAGE'])
+  //      MISSING and NON-INTEGER echoes must also fail closed (unverified bound).
+  await rejectsAsync(
+    () => bridgeAdapterReturning(2, { echoLimit: 'omit' }).read({ object: 'material', limit: REQUESTED_CLAMP }),
+    (error) => error && error.code === 'BRIDGE_AGENT_REQUEST_FAILED',
+    'a missing applied-limit echo must fail closed')
+  await rejectsAsync(
+    () => bridgeAdapterReturning(2, { echoLimit: 'not-an-int' }).read({ object: 'material', limit: REQUESTED_CLAMP }),
+    (error) => error && error.code === 'BRIDGE_AGENT_REQUEST_FAILED',
+    'a non-integer applied-limit echo must fail closed')
 
   // (b) DECLARED_TOTAL is UNREACHABLE — the reason the certificate narrows to SHORT_PAGE
   //     ONLY (review P1). The runtime derives a source total from EXACTLY two metadata
