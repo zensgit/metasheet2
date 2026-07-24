@@ -111,8 +111,8 @@ separate debt entries even when they later call the same function.
 | P24 | Integration sync has a distinct semantic pipeline, and `dryRun` still writes the run plus `last_sync_at`. | W4C-3a: freeze current compatibility semantics explicitly, use one W4 calculator, and make dry-run append audit-only state without result/batch/watermark mutation. |
 | P25 | Import token, preview/job, template-preference, upload-lifecycle, and temporary-staging writes are operational DML with different correctness contracts. | W4C-0: classify each explicitly; only business source/effect/result state enters the atomic result operation, while operational state gets its own allowlist and no authority over calculation truth. |
 | P26 | Central approval assignment mutation is not one route. `POST /api/approvals/admin/reassign` selects pending `source_system='platform'` instances without an attendance discriminator, deactivates/creates `approval_assignments`, and increments `approval_instances.version`; its target check is global-active only. Existing generic `approve` node advancement, `return`, and `revoke` also create or deactivate assignments, while jump, transfer, add/reduce-sign, timeout, and future actions may reach the same state. Route selection by `published_definition_id` is not an attendance exclusion proof. These paths can therefore change who may decide an attendance request outside the locked request-org authority contract. | W4C-3b: derive the completion inventory from the actual generic action union and assignment-DML call graph; classify attendance instances before every assignment DML, lock their request org and instance version, apply the closed actor/target membership matrix, and serialize mutation against terminal decision. Every named generic action either proves attendance unreachable for both normal attendance rows and an adversarial attendance row carrying `published_definition_id`, or enters the same contract before instance/assignment DML. |
-| P27 | Schedule publication (draft->live): terminal publish writes live shift assignments outside any result transaction (`index.cjs:42484/42503`), making it a schedule-fact writer that changes which shift governs a work date. | W4C-3b: classify with P18 as a schedule-fact writer; its version/hash/lock participates in W4 context consistency before enabling authority, and publishing a multi-segment shift into a live assignment consumes `resolveSegmentCalculationPosture` rather than any private flag read. |
-| P28 | Core-backend onboarding default shift: `POST /api/admin/users` with explicit `attendanceOrgId` inserts a default shift assignment from TypeScript (`packages/core-backend/src/routes/admin-users.ts:3348-3367`) — the second implementation of the flag predicate named by the prior audit (P3-1). | W4C-3b: this writer must consume `resolveSegmentCalculationPosture` (or its exported TS seam) at the flip as a required simultaneous edit — the flag-split disposition is settled here, not left to the generated inventory (§8.4) to rediscover. |
+| P27 | Schedule publication (draft->live): `POST /api/attendance/schedule-publications` writes `attendance_shift_assignments` and `attendance_rotation_assignments` to published in `plugins/plugin-attendance/index.cjs` (`schedulePublicationSchema`; route at `:42426`; publication DML at `:42584` and `:42600`), making it a schedule-fact writer that changes which shift governs a work date. | W4C-3b: classify with P18 as a schedule-fact writer; its version/hash/lock participates in W4 context consistency before enabling authority, and publishing a multi-segment shift into a live assignment consumes `resolveSegmentCalculationPosture` rather than any private flag read. |
+| P28 | Core-backend onboarding default shift: `POST /api/admin/users` in `packages/core-backend/src/routes/admin-users.ts` (route at `:3138`; `FOR SHARE` reference guard at `:3348`; `attendance_shift_assignments` INSERT at `:3461`) writes a default assignment through the second implementation of the flag predicate named by the prior audit (P3-1). | W4C-3b: this writer must consume `resolveSegmentCalculationPosture` (or its exported TS seam) at the flip as a required simultaneous edit — the flag-split disposition is settled here, not left to the generated inventory (§8.4) to rediscover. |
 
 There is no general production recompute writer today. W4C-3c introduces
 prior-policy/default recompute and explicitly labeled current-policy recompute;
@@ -1901,6 +1901,9 @@ calculation, but it still uses operation preflight and immutable request
 snapshots. Shift-swap and schedule-dispatch terminal operations are source-only
 schedule-fact commands: they use the operation boundary and compatible
 context-lock/version protocol but do not fabricate a daily calculation.
+P27 schedule publication and P28 administrator onboarding default assignment
+are separate schedule-fact writers with their own W4C-3b gates; satisfying the
+P18 approval legs is not parity proof for either path.
 Rule preview remains non-authoritative and writes no snapshots.
 
 ### 8.4 Source, effect, and result mechanical bypass guard
@@ -2894,6 +2897,22 @@ Gates:
 - P18 shift-swap and schedule-dispatch terminal writers use the same operation
   preflight and compatible schedule-fact lock/version protocol; racing either
   against a calculation cannot commit mixed context;
+- P27 `POST /api/attendance/schedule-publications` locks the assignment and
+  compatible context version/hash before changing draft/pending rows to
+  published. A two-connection publication-versus-calculation race in both
+  commit orders produces one compatible context; restoring a private flag
+  predicate, omitting either shift/rotation publication DML site, or moving its
+  lock/version recheck after publication fails an independent leg;
+- P28 `POST /api/admin/users` proves both explicit `attendanceOrgId` and
+  group/shift-derived-org onboarding paths consume the one exported
+  org-scoped posture seam before the default assignment INSERT. Flag-OFF
+  single-segment bytes remain unchanged; a multi-segment reference is admitted
+  only in the closed W4 synthetic postures. Restoring its local hard block,
+  reading a private environment flag, trusting a body org, or testing only one
+  org-derivation path fails independently;
+- W4C-3b cannot complete until generated debt IDs P18, P27, and P28 are each
+  removed by their named adapters and independent positive controls; the later
+  all-debt-empty gate cannot defer or mask one of these owning-slice failures;
 - request, terminal approval, assignment, ledger fact/reversal, calculation,
   projection, and operation seal share one transaction/connection; every
   injected-failure leg rolls all of them back;
