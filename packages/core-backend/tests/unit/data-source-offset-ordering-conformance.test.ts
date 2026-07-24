@@ -15,6 +15,7 @@ import {
 import { MSSQLAdapter } from '../../src/data-adapters/MSSQLAdapter'
 import { PostgresAdapter } from '../../src/data-adapters/PostgresAdapter'
 import { dataSourcesRouter } from '../../src/routes/data-sources'
+import { usePinnedServer } from '../utils/pinned-server'
 import type { DataSourceConfig, QueryOptions } from '../../src/data-adapters/BaseAdapter'
 
 /**
@@ -148,6 +149,7 @@ describe('dialect artifacts and known limits', () => {
 
 describe('/select route — the typed contract error maps to a CLOSED 422, never a 500', () => {
   let currentUser: { id: string; role?: string } | undefined
+  const pinned = usePinnedServer()
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => { (req as { user?: unknown }).user = currentUser; next() })
@@ -163,14 +165,15 @@ describe('/select route — the typed contract error maps to a CLOSED 422, never
   beforeEach(() => {
     currentUser = admin('alice')
     vi.restoreAllMocks()
+    pinned.setApp(app)
   })
 
   it('an offset-ordering violation returns 422 with the closed code (not SELECT_ERROR 500)', async () => {
     vi.spyOn(DataSourceManager.prototype, 'select').mockRejectedValue(
       new DataSourceOffsetOrderingError('OFFSET pagination requires an explicit orderBy: …')
     )
-    await request(app).post('/api/data-sources').send(body('ord-422'))
-    const res = await request(app)
+    await request(pinned.url()).post('/api/data-sources').send(body('ord-422'))
+    const res = await request(pinned.url())
       .post('/api/data-sources/ord-422/select')
       .send({ table: 't', limit: 10, offset: 10 })
     expect(res.status).toBe(422)
@@ -179,8 +182,8 @@ describe('/select route — the typed contract error maps to a CLOSED 422, never
 
   it('a generic failure still maps to SELECT_ERROR 500 (the 422 mapping is closed, not widened)', async () => {
     vi.spyOn(DataSourceManager.prototype, 'select').mockRejectedValue(new Error('boom'))
-    await request(app).post('/api/data-sources').send(body('ord-500'))
-    const res = await request(app)
+    await request(pinned.url()).post('/api/data-sources').send(body('ord-500'))
+    const res = await request(pinned.url())
       .post('/api/data-sources/ord-500/select')
       .send({ table: 't', limit: 10 })
     expect(res.status).toBe(500)
@@ -189,8 +192,8 @@ describe('/select route — the typed contract error maps to a CLOSED 422, never
 
   it('a successful select still returns 200 (positive control)', async () => {
     vi.spyOn(DataSourceManager.prototype, 'select').mockResolvedValue({ data: [] })
-    await request(app).post('/api/data-sources').send(body('ord-200'))
-    const res = await request(app)
+    await request(pinned.url()).post('/api/data-sources').send(body('ord-200'))
+    const res = await request(pinned.url())
       .post('/api/data-sources/ord-200/select')
       .send({ table: 't', limit: 10, offset: 10, orderBy: [{ column: 'id', direction: 'asc' }] })
     expect(res.status).toBe(200)
