@@ -149,6 +149,8 @@ same semantic input while XLSX/CSV origin remains separate provenance.
 - a new universal attendance-group save endpoint;
 - native device integrations;
 - automatic historical restatement.
+- new post-approval cancellation eligibility for request kinds that are not
+  cancellable today.
 
 W4 stores `calculationGroupId=null` and `contextSelector='legacy'`. A W4 query
 against W1 group-membership tables is a scope violation.
@@ -1382,9 +1384,18 @@ created the first parent. It never forces a retired preimage active and never
 leaves imported compatibility values visible after reporting success. Mixed
 shadow/authoritative batches use the authoritative all-or-nothing rule.
 
-Legacy posture keeps the existing rollback response. W4 posture uses an
-OpenAPI-locked result with exact counts `affected`, `restored`, and `retired`;
-it does not call a logical retirement “deleted”.
+Legacy posture keeps the existing rollback response only while the org remains
+in `legacy` and every affected parent has zero immutable W4 calculation,
+pointer, or operation rows. A pre-W4 batch without a frozen target preimage
+cannot cross into W4 rollback semantics by inference: transition to
+`shadow|eligible|authoritative` is blocked while such a batch remains
+reversible, unless a separately audited operator action first closes the
+rollback window without touching business rows. If a legacy batch nevertheless
+reaches rollback after W4 acceptance, the route returns 409
+`IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE` with zero writes; it never falls back to
+DELETE, reconstructs a preimage from the mutable parent, or detaches immutable
+children. W4 posture uses an OpenAPI-locked result with exact counts `affected`,
+`restored`, and `retired`; it does not call a logical retirement “deleted”.
 
 A current reversal with restore target exposes reversal lineage and reads
 segment detail only from that same-record restore target. A retired reversal
@@ -1394,8 +1405,12 @@ has no effective segments and returns explicit retired detail.
 
 - pending cancellation that never affected calculation writes no calculation;
 - approved fact cancellation appends a new calculation from prior frozen
-  attribution/evidence in the same transaction as allowed ledger/request
-  reversal;
+  attribution/evidence in the same transaction as an already allowed
+  ledger/request reversal. W4 does not widen the public cancellation-eligibility
+  matrix: at the pinned baseline this path is approved leave only. Approved
+  overtime, correction, outdoor, shift-swap, and schedule-dispatch requests
+  remain non-cancellable and fail before operation/source/shared/result DML
+  unless a later RATIFIED contract explicitly adds their compensating effects;
 - missing frozen evidence is review/no-parent fail-close, never current-policy
   reconstruction;
 - operator cleanup uses `ops_retirement`,
@@ -1680,7 +1695,12 @@ Effective state requires:
    `claimed|paused` operation/batch/job accepted in a different posture.
    Operators complete or cancel-before-source under legacy/shadow semantics;
    W4 never backfills from mutable current config and never rebases an accepted
-   operation posture.
+   operation posture; and
+7. every pre-W4 import batch in the synthetic source set is either outside its
+   rollback window or has an immutable target-level preimage created by a
+   separately audited migration/reconciliation protocol. A reversible legacy
+   batch with no frozen preimage blocks transition rather than inheriting the
+   destructive rollback route.
 
 Wildcard org is forbidden for W4 staging.
 
@@ -1993,6 +2013,10 @@ Gates:
   exact retired owner/pointer/visibility/reason tuple and never forces active;
 - shadow first/update rollback applies frozen absent/existing compatibility
   preimage and leaves no imported ordinary projection visible;
+- a reversible pre-W4 batch without immutable target preimages blocks W4
+  transition and, if presented to a W4 rollback route, returns
+  `IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE` with zero parent/calculation/history
+  writes; the legacy DELETE path cannot be selected;
 - a later valid non-rollback source reactivates an import-rollback tombstone
   from durable evidence only; hidden imported/default fields are never inferred;
 - later punch/correction blocks entire batch 409;
@@ -2070,6 +2094,10 @@ Gates:
   source path until the new calculation or explicit review/no-parent outcome is
   atomic with that financial reversal; no test may imply an existing attendance
   result reversal;
+- cancellation eligibility remains byte-identical: approved leave gets the W4
+  reversal path, while approved overtime/correction/outdoor/shift-swap/
+  schedule-dispatch remain rejected before operation/source/shared/result DML;
+  making any of them cancellable fails a scope-boundary test;
 - approval/resolution/cancellation lifecycle events use closed outbox kinds;
   commit-before-emit crash and replay cannot lose or duplicate the durable
   event row;
