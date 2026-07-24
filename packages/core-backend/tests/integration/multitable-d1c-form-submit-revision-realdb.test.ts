@@ -42,6 +42,8 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
 import { recordRecordRevision } from '../../src/multitable/record-history-service'
+import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
+import { pruneSealedHistoryOperations } from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -100,6 +102,19 @@ async function cutoffAfterVersion(recordId: string, version: number): Promise<st
   return new Date(ms + 5).toISOString()
 }
 
+/** Real sealed operation id for a fenced writer revision — exact-anchor authority for recovery previews. */
+async function sealedOperationId(recordId: string, version: number): Promise<string> {
+  const r = await q(
+    `SELECT operation_id::text AS op FROM meta_record_revisions
+      WHERE sheet_id = $1 AND record_id = $2 AND version = $3 AND operation_id IS NOT NULL
+      ORDER BY seq DESC LIMIT 1`,
+    [SHEET, recordId, version],
+  )
+  const op = (r.rows[0] as { op: string } | undefined)?.op
+  expect(op).toBeTruthy()
+  return op!
+}
+
 async function liveRecord(recordId: string): Promise<{ data: Record<string, unknown>; version: number } | undefined> {
   const r = await q('SELECT data, version FROM meta_records WHERE id = $1', [recordId])
   return r.rows[0] as { data: Record<string, unknown>; version: number } | undefined
@@ -136,6 +151,10 @@ describeIfDatabase('D-1c slice ① — form-submit CREATE/EDIT write public-form
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'D1C1 Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'D1C1 Sheet'])
+    // Covering checkpoint while empty so later fenced form writes can serve as exact recovery anchors.
+    await poolManager.get().transaction(async ({ query }) => {
+      await activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET })
+    })
     await q(
       'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_NAME, SHEET, 'Name', 'string', '{}', 1],
@@ -169,13 +188,26 @@ describeIfDatabase('D-1c slice ① — form-submit CREATE/EDIT write public-form
       patch: {},
       snapshot: { [FLD_NAME]: 'link-target-1' },
     })
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [MEMBER])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ADMIN])
+    for (const userId of [MEMBER, ADMIN]) {
+      await q(
+        "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+        [userId, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+      )
+    }
+    // Fence on so form-submit CREATE/EDIT mint sealed operation endpoints usable as anchors.
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
   })
 
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    await pruneSealedHistoryOperations(SHEET).catch(() => {})
     await q('DELETE FROM meta_links WHERE field_id = $1', [FLD_LINK]).catch(() => {})
+    await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -229,13 +261,13 @@ describeIfDatabase('D-1c slice ① — form-submit CREATE/EDIT write public-form
       expect(state.get(recId)?.version).toBe(1)
     })
 
-    test('Reset-to-T (esp. CREATE): a record created BEFORE reset-T is NOT pushed into the delete-set (Reset would otherwise destroy it — §0.5 corrected CREATE risk)', async () => {
+    test('Reset-to-T (esp. CREATE): a record created AT the sealed create operation is NOT pushed into the delete-set (Reset would otherwise destroy it — §0.5 corrected CREATE risk)', async () => {
       const recId = await createAnonRecord('anon-created-v3')
-      const asOf = await cutoffAfterVersion(recId, 1)
+      const anchorOperationId = await sealedOperationId(recId, 1)
       process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
       try {
         asUser(ADMIN, ['multitable:read', 'multitable:write', 'multitable:share'])
-        const pv = await request(app).post(`/api/multitable/sheets/${SHEET}/reset-preview`).send({ asOf })
+        const pv = await request(app).post(`/api/multitable/sheets/${SHEET}/reset-preview`).send({ anchorOperationId })
         expect(pv.status).toBe(200)
         const deleteIds = (pv.body as { data?: { deleteRecordIds?: string[] } }).data?.deleteRecordIds ?? []
         expect(deleteIds).not.toContain(recId)
@@ -322,7 +354,7 @@ describeIfDatabase('D-1c slice ① — form-submit CREATE/EDIT write public-form
       expect((last.snapshot as Record<string, unknown>)?.[FLD_LINK]).toEqual([LINK_TARGET_1])
     })
 
-    test('the destructive leg: revert-preview at asOf AFTER the edit proposes ZERO reverts for this record (PIT/revert no longer lies)', async () => {
+    test('the destructive leg: revert-preview at the sealed edit operation proposes ZERO reverts for this record (PIT/revert no longer lies)', async () => {
       const created = await createMemberRecord('destr-v1')
       asUser(MEMBER, ['multitable:read', 'multitable:write'])
       const editRes = await request(app)
@@ -330,12 +362,13 @@ describeIfDatabase('D-1c slice ① — form-submit CREATE/EDIT write public-form
         .send({ recordId: created.id, expectedVersion: created.version, data: { [FLD_NAME]: 'destr-v2' } })
       expect(editRes.status).toBe(200)
 
-      const asOf = await cutoffAfterVersion(created.id, 2)
+      const anchorOperationId = await sealedOperationId(created.id, 2)
       asUser(ADMIN, ['multitable:read', 'multitable:write', 'multitable:share'])
-      const pv = await request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({ asOf })
+      const pv = await request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({ anchorOperationId })
       expect(pv.status).toBe(200)
       const proposedIds = ((pv.body as { data?: { records?: Array<{ recordId: string }> } }).data?.records ?? []).map((r) => r.recordId)
       expect(proposedIds).not.toContain(created.id)
+      expect(pv.body?.data?.summary?.visibleRevertCount ?? 0).toBe(0)
     })
 
     test('atomicity (EDIT): if the revision INSERT throws, the UPDATE rolls back — record unchanged, no half-write', async () => {

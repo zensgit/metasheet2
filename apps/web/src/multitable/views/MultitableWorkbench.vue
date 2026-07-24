@@ -57,12 +57,15 @@
     <ResetToPointPicker
       v-if="workbench.activeSheetId.value"
       :pit-reset-enabled="pitResetEnabled"
+      :sheet-revert-enabled="sheetRevertEnabled"
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
       :list-history-events="listHistoryEventsWire"
       :reset-preview="resetPreviewWire"
       :reset-execute="resetExecuteWire"
-      :on-done="onResetDone"
+      :revert-preview="revertPreviewWire"
+      :revert-execute="revertExecuteWire"
+      :on-done="onRecoveryDone"
     />
     <div v-if="showTemplateLibrary" class="mt-template-library" data-testid="multitable-template-library">
       <div class="mt-template-library__header">
@@ -659,7 +662,7 @@ import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
-import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
+import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord, ExactAnchorRequest } from '../api/client'
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
@@ -801,17 +804,20 @@ const personalViewsEnabled = computed(() => capabilitySource.value?.personalView
 const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId, isPersonalMode: personalView.isPersonalMode })
 
-// T8-2 Reset UI T-source entry wiring (#3250/#3251 flagged the missing T-source). Gate on the flag-derived
-// pitResetEnabled signal alone (it already encodes canManageSheetAccess); pass Global History listing plus the raw
-// reset client signatures so the picker owns + tests the (sheetId, asOf) composition; refresh the grid after success.
+// W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
+// owns the (sheetId, exact-anchor) composition and the dialogs execute token-only. Revert keeps post-anchor-created
+// records; Reset may delete them and retains its typed confirmation. No wall-clock asOf crosses either wire.
 const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
+const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEnabled === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
 ) => workbench.client.listHistoryEvents(baseId, params)
-const resetPreviewWire = (sid: string, asOf: string) => workbench.client.resetPreview(sid, asOf)
-const resetExecuteWire = (sid: string, asOf: string, previewIdentity: string) => workbench.client.resetExecute(sid, asOf, previewIdentity)
-const onResetDone = () => { void grid.reloadCurrentPage() }
+const resetPreviewWire = (sid: string, anchor: ExactAnchorRequest) => workbench.client.resetPreview(sid, anchor)
+const resetExecuteWire = (sid: string, previewIdentity: string) => workbench.client.resetExecute(sid, previewIdentity)
+const revertPreviewWire = (sid: string, anchor: ExactAnchorRequest) => workbench.client.revertPreview(sid, anchor)
+const revertExecuteWire = (sid: string, previewIdentity: string) => workbench.client.revertExecute(sid, previewIdentity)
+const onRecoveryDone = async (): Promise<void> => { await grid.reloadCurrentPage() }
 
 // Slice 3: per-view personal-toggle click + "reset to shared". Reset deletes the actor's own personal-config
 // row then re-fetches via loadSheetMeta so the rendered config becomes whatever the server now resolves

@@ -79,6 +79,10 @@ import {
   sweepLinkTombstoneRetention,
   type MetaRevisionRetentionConfig,
 } from '../../src/multitable/meta-revision-retention'
+import {
+  prepareExactAnchorHistoryFixture,
+  pruneSealedHistoryOperations,
+} from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -262,13 +266,18 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
       ;(req as any).user = { id: OWNER, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }
       next()
     })
-    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '50' // G5 drives the PIT revert route
+    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '50' // G5 drives the exact-anchor revert-preview surface
     // Interim revert-execute master gate (current-risk mitigation): default-OFF now — keep it on for this
-    // suite's G5 golden (which drives revert-execute), unchanged behavior.
+    // suite's G5 golden (which drives the exact-anchor recovery surface), unchanged enablement posture.
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
     app.use('/api/multitable', univerMetaRouter())
 
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [OWNER])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [OWNER, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE, 'D2 Base', OWNER])
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE_X, 'D2 Base X', OWNER])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_A, BASE, 'D2 A'])
@@ -302,8 +311,14 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
     for (const flag of [SIDE_DOOR_FLAG, CAPTURE_FLAG, CAP_ROWS, INBOUND_FLAG, PIT_UNDELETE_FLAG]) delete process.env[flag]
     delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     await q('DELETE FROM users WHERE id = $1', [OWNER]).catch(() => {})
     for (const sheet of [SHEET_A, SHEET_B, SHEET_X, SHEET_G5]) {
+      await pruneSealedHistoryOperations(sheet).catch(() => {})
+      await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
@@ -927,74 +942,107 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
     await q('UPDATE meta_records SET locked = false, locked_by = NULL WHERE id = $1', [R])
   })
 
-  // ── G5 — PIT-resurrect equivalence (the SECOND resurrection surface) ──────────────────────────────
+  // ── G5 — exact-anchor resurrect FAIL-CLOSED (the SECOND resurrection surface is no longer executable) ──
   /**
-   * G4 covers `restoreRecord` (the recycle-bin surface, anchored on `meta_records_trash.delete_revision_id`).
-   * The PIT revert route is a SECOND, INDEPENDENT resurrection surface: it has no trash row to read, so it
-   * DERIVES the anchor from the revert's `asOf` T — "the removing deletion is the first `action='delete'`
-   * revision strictly AFTER T" (univer-meta.ts:10196-10201, R11 A′). The lock demanded this be PROVEN, not
-   * assumed, and the reason is now concrete: that anchor query selects on `action='delete' AND created_at > T`
-   * and does NOT filter on `source` — so a side-door (`source:'automation'`/`'plugin'`) delete revision is
-   * eligible as an anchor, and because D-2 PRE-GENERATES that revision's id, the tombstones it captured hang
-   * off exactly that id. If either half were untrue (a `source` filter, or a self-generated revision id) the
-   * resurrect surface would silently replay NOTHING for machine-deleted records while reporting success.
+   * G4 covers `restoreRecord` (the recycle-bin surface, anchored on `meta_records_trash.delete_revision_id`)
+   * and still proves side-door tombstones are restorable through trash. Under W0 L8 exact-anchor wiring the
+   * sheet-level revert surface categorically refuses any resurrection plan as `INBOUND_UNPROVABLE` — preview
+   * discloses the candidate set but mints `executable=false` / `previewIdentity=null` and performs ZERO writes.
+   * Old PIT undelete success must NOT be revived via wall-clock `asOf` or by weakening the kernel.
    *
-   * NOTE: the D-2 lock §3 describes this as "the :10183 latest-delete-revision heuristic". That description
-   * is STALE — the heuristic was replaced by the T-derived anchor (R11 A′, ratified 2026-07-11) after the
-   * lock was drafted. The obligation is unchanged and is discharged against the anchor as it ACTUALLY is.
+   * This golden still exercises the load-bearing D-2 side-door properties that made the old PIT path matter:
+   * automation delete writes `source:'automation'`, captures inbound tombstones on the PRE-GENERATED delete
+   * revision id, and parks a trash row — then proves exact-anchor recovery cannot resurrect past that fact.
    */
-  test('G5 PIT-resurrect equivalence [automation]: the revert surface anchors to the SIDE-DOOR delete revision and replays ITS captured inbound vintage', async () => {
+  test('G5 exact-anchor resurrect [automation]: side-door tombstones are captured, but sheet-level resurrect is fail-closed (no token / no write)', async () => {
     process.env[SIDE_DOOR_FLAG] = 'true'
     process.env[CAPTURE_FLAG] = 'true'
     process.env[PIT_UNDELETE_FLAG] = 'true'
     process.env[INBOUND_FLAG] = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+
+    // Fresh exact-anchor range on the isolated G5 sheet (other goldens never touch it).
+    await pruneSealedHistoryOperations(SHEET_G5).catch(() => {})
+    await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET_G5]).catch(() => {})
+    await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET_G5]).catch(() => {})
+    await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET_G5]).catch(() => {})
+    await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [SHEET_G5]).catch(() => {})
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_G5]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_G5]).catch(() => {})
+    const fixture = await prepareExactAnchorHistoryFixture(SHEET_G5)
 
     const F = mkField('g5') // link field lives on the NEIGHBOUR's sheet (cross-sheet by construction)
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [
       F, SHEET_B, F, 'link', '{}', seq,
     ])
     const R = mkRecord('g5r')
-    await insertRecord(SHEET_G5, R, { [G5_NAME]: 'g5 victim' }) // data keyed by a REAL field id (see beforeAll)
+    const snap = { [G5_NAME]: 'g5 victim' } // data keyed by a REAL field id (see beforeAll)
+    await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [
+      R, SHEET_G5, JSON.stringify(snap), OWNER,
+    ])
+    await fixture.insertRevision({
+      recordId: R,
+      version: 1,
+      action: 'create',
+      snapshot: snap,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      phase: 'anchor',
+      changedFieldIds: [G5_NAME],
+    })
     const N = mkRecord('g5n')
     await insertRecord(SHEET_B, N, { [F]: [R] })
     await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [F, N, R])
 
-    // T must be a CLEAN millisecond boundary: the revert route round-trips `asOf` through
-    // `new Date(asOf).toISOString()`, which TRUNCATES to milliseconds — a microsecond-precision cutoff
-    // (the `cutoffAfter` trick the PIT goldens use) would be silently rounded DOWN, dropping the create
-    // revision out of `created_at <= T` and leaving the record "absent at T" ⇒ not a resurrect candidate
-    // ⇒ empty preview. So backdate the create revision and pick T strictly between it and the delete.
-    const T_CREATE = '2026-01-01T00:00:00.000Z'
-    const T_ASOF = '2026-01-02T00:00:00.000Z' // R is ALIVE at T; the side-door delete lands at now() > T
-    await q(`UPDATE meta_record_revisions SET created_at = $1 WHERE record_id = $2 AND action = 'create'`, [T_CREATE, R])
-    const asOf = T_ASOF
-
-    // …then the SIDE DOOR destroys it: D-1 revision (source:'automation') + D-2 trash + D-2 tombstone.
+    // SIDE DOOR destroys it: D-1 revision (source:'automation') + D-2 trash + D-2 tombstone (production path,
+    // after the sealed exact-anchor endpoint — seq is above the fixture reservation).
     expect((await automationDelete(R, { sheetId: SHEET_G5 })).status).toBe('success')
     const revs = await deleteRevisions(R)
     expect(revs).toHaveLength(1)
     expect(revs[0]!.source).toBe('automation')
-    const anchor = revs[0]!.id
+    const deleteRevisionId = revs[0]!.id
     const tombs = await tombstones(R)
     expect(tombs).toHaveLength(1)
-    expect(tombs[0]!.source_revision_id).toBe(anchor) // the captured vintage hangs off the side-door revision
+    expect(tombs[0]!.source_revision_id).toBe(deleteRevisionId) // captured vintage hangs off the side-door revision
+    expect(await edgeAlive(F, N, R)).toBe(false)
+    expect(await trashRow(R)).toBeTruthy()
+    expect(await recordExists(R)).toBe(false)
+
+    const beforeLive = (await q('SELECT 1 FROM meta_records WHERE id = $1', [R])).rows.length
+    const beforeTrash = (await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [R])).rows.length
+    const beforeEdges = (await q('SELECT 1 FROM meta_links WHERE field_id=$1 AND record_id=$2 AND foreign_record_id=$3', [F, N, R])).rows.length
+    const beforeTombs = (await q('SELECT count(*)::int AS c FROM meta_link_tombstones WHERE foreign_record_id = $1', [R])).rows[0]
+
+    // Wall-clock asOf is uniformly refused — must not re-open the old PIT undelete success path.
+    const wall = await request(app).post(`/api/multitable/sheets/${SHEET_G5}/revert-preview`).send({ asOf: '2026-01-02T00:00:00.000Z' })
+    expect(wall.status).toBe(400)
+    expect(wall.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+
+    // Exact-anchor preview discloses the resurrect candidate but mints NO executable token.
+    const prev = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_G5}/revert-preview`)
+      .send({ anchorOperationId: fixture.anchorOperationId() })
+    expect(prev.status).toBe(200)
+    expect(prev.body?.data?.undeleteRecordIds).toEqual(expect.arrayContaining([R]))
+    expect(prev.body?.data?.undeleteSupported).toBe(false)
+    expect(prev.body?.data?.undeleteBlockedReason).toBe('INBOUND_UNPROVABLE')
+    expect(prev.body?.data?.executable).toBe(false)
+    expect(prev.body?.data?.previewIdentity).toBeNull()
+
+    // ZERO writes: side-door trash/tombstone/edge state is unchanged; the record stays deleted.
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [R])).rows.length).toBe(beforeLive)
+    expect((await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [R])).rows.length).toBe(beforeTrash)
+    expect((await q('SELECT 1 FROM meta_links WHERE field_id=$1 AND record_id=$2 AND foreign_record_id=$3', [F, N, R])).rows.length).toBe(beforeEdges)
+    expect((await q('SELECT count(*)::int AS c FROM meta_link_tombstones WHERE foreign_record_id = $1', [R])).rows[0]).toEqual(beforeTombs)
+    expect(await recordExists(R)).toBe(false)
     expect(await edgeAlive(F, N, R)).toBe(false)
 
-    // Resurrect through the PIT revert route (NOT restoreRecord — the other surface entirely).
-    const prev = await request(app).post(`/api/multitable/sheets/${SHEET_G5}/revert-preview`).send({ asOf })
-    expect(prev.status).toBe(200)
-    const identity = prev.body?.data?.previewIdentity ?? prev.body?.previewIdentity
-    expect(identity).toBeTruthy()
-
-    const exec = await request(app)
-      .post(`/api/multitable/sheets/${SHEET_G5}/revert-execute`)
-      .send({ asOf, previewIdentity: identity, confirm: 'undelete' })
-    expect(exec.status).toBe(200)
-
-    // The payoff: the record is back AND its inbound edge was replayed from tombstones captured by a
-    // MACHINE delete — the D-2 anchor is what made the second resurrection surface reach them.
-    const inbound = exec.body?.data?.undeleteInbound ?? exec.body?.undeleteInbound
-    expect(inbound).toMatchObject({ replayed: 1 })
+    // Lower-level restore surface (G4's domain) still reaches the side-door tombstones — recoverability is
+    // preserved via trash, not via sheet-level exact-anchor undelete.
+    const restore = await request(app).post(`/api/multitable/records/${R}/restore`)
+    expect(restore.status).toBe(200)
+    expect(restore.body?.data?.inbound).toMatchObject({ replayed: 1 })
     expect(await recordExists(R)).toBe(true)
     expect(await edgeAlive(F, N, R)).toBe(true)
   })

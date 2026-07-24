@@ -1608,6 +1608,27 @@ export async function resolveSheetCapabilities(
   sheetScope?: SheetPermissionScope
 }> {
   const access = await resolveRequestAccess(req)
+  return resolveSheetCapabilitiesForAccess(query, sheetId, access)
+}
+
+/**
+ * Resolve sheet capabilities from an already-adjudicated access snapshot.
+ *
+ * Most request paths use {@link resolveSheetCapabilities}. Recovery additionally needs a DB-fresh,
+ * transaction-bound access snapshot so an expired JWT/RBAC cache cannot survive a revoke that committed
+ * before the destructive transaction. Keeping the scope composition here gives both callers one policy
+ * implementation instead of cloning the permission rules in the recovery route.
+ */
+export async function resolveSheetCapabilitiesForAccess(
+  query: QueryFn,
+  sheetId: string,
+  access: ResolvedRequestAccess,
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+}> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)

@@ -13,22 +13,31 @@
  * field F pointing at D) lives on SHEET_B — same trap as the RB matrix (tombstone's sheet_id stores
  * D's sheet, field_id/record_id belong to N's).
  *
+ * Migrated to exact-anchor authority (W0 L8): free wall-clock `asOf` is refused; destructive reset
+ * is driven by a sealed `anchorOperationId` + token-only execute. Capture/restore contracts are
+ * unchanged.
+ *
  * (a) happy path: reset-execute captures the inbound tombstone anchored to the SAME delete revision
  *     id it writes into the trash row; a subsequent restore (record-service.restoreRecord, flag on)
  *     replays the edge — full round trip through the D-3 capture point.
- * (b) cap breach: MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS forced to 0 with capture ON → reset-execute
- *     422 TOMBSTONE_CAPTURE_CAP_EXCEEDED, and the WHOLE reset rolls back — the delete target stays
- *     live, the unrelated revert candidate stays unreverted, and the neighbour's edge is untouched
- *     (fail-closed, never a half-captured destruction).
+ * (b) cap breach: MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS forced to 1 with capture ON → reset-execute
+ *     returns the stable 422 TOMBSTONE_CAPTURE_CAP_EXCEEDED contract and the WHOLE reset rolls back —
+ *     the delete target stays live, the unrelated revert candidate stays unreverted, and the
+ *     neighbour's edge is untouched (fail-closed, never a half-captured destruction).
  *
  * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import {
+  prepareExactAnchorHistoryFixture,
+  pruneSealedHistoryOperations,
+  type ExactAnchorHistoryFixture,
+} from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -41,23 +50,23 @@ const RESET_FLAG = 'MULTITABLE_ENABLE_PIT_RESET'
 const CAPTURE_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED'
 const INBOUND_FLAG = 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND'
 const CAP_ROWS_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS'
-const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
+const T0 = '2026-01-01T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
+let fixture: ExactAnchorHistoryFixture
 let seq = 0
 const mkFieldId = (tag: string) => `fld_ric_${tag}_${TS}_${seq++}`
 const mkRecordId = (tag: string) => `rec_ric_${tag}_${TS}_${seq++}`
 
-const resetPreview = () => request(app).post(`/api/multitable/sheets/${SHEET_A}/reset-preview`).send({ asOf: T1 })
-const resetExecute = (previewIdentity: string) => request(app).post(`/api/multitable/sheets/${SHEET_A}/reset-execute`).send({ asOf: T1, previewIdentity, confirm: 'reset' })
+const resetPreview = () =>
+  request(app).post(`/api/multitable/sheets/${SHEET_A}/reset-preview`).send({ anchorOperationId: fixture.anchorOperationId() })
+const resetExecute = (previewIdentity: string) =>
+  request(app).post(`/api/multitable/sheets/${SHEET_A}/reset-execute`).send({ previewIdentity, confirm: 'reset' })
 const httpRestore = (recordId: string) => request(app).post(`/api/multitable/records/${recordId}/restore`)
 const recordRow = async (id: string) => (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
 const edgeCount = async (fieldId: string, recordId: string, foreignId: string): Promise<number> =>
   (await q('SELECT 1 FROM meta_links WHERE field_id=$1 AND record_id=$2 AND foreign_record_id=$3', [fieldId, recordId, foreignId])).rows.length
-const rev = (sheetId: string, id: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
-  q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
-     VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[]::text[],'{}'::jsonb,$5::jsonb,$6)`, [sheetId, id, version, action, JSON.stringify(snap), at])
 
 async function insertField(sheetId: string, fieldId: string, type = 'link', property = '{}'): Promise<void> {
   await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [
@@ -71,18 +80,41 @@ async function insertLink(fieldId: string, recordId: string, foreignRecordId: st
   await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [fieldId, recordId, foreignRecordId])
 }
 
-/** D is a delete-candidate under reset-to-T1 (created at T2, after T1): live row + a lone create
- * revision after T1. N (on SHEET_B) points at D through link field F. */
-async function fixture(tag: string): Promise<{ F: string; D: string; N: string }> {
+/**
+ * D is a delete-candidate under reset-to-anchor (created after the sealed anchor): live row + a lone
+ * create after the anchor. N (on SHEET_B) points at D through link field F. A stable survivor S owns
+ * the sealed anchor operation (no restorable delta — present only to pin the exact causal endpoint).
+ */
+async function fixtureDeleteTarget(tag: string): Promise<{ F: string; D: string; N: string; S: string }> {
+  const S = mkRecordId(`${tag}s`)
+  await insertRecord(SHEET_A, S, { [NAME]: 'stable' }, 1)
+  await fixture.insertRevision({
+    recordId: S,
+    version: 1,
+    action: 'create',
+    snapshot: { [NAME]: 'stable' },
+    createdAt: T0,
+    phase: 'anchor',
+    changedFieldIds: [NAME],
+  })
+
   const F = mkFieldId(tag)
   await insertField(SHEET_B, F)
   const D = mkRecordId(`${tag}d`)
   await insertRecord(SHEET_A, D, { [NAME]: 'newbie' })
-  await rev(SHEET_A, D, 1, 'create', { [NAME]: 'newbie' }, T2)
+  await fixture.insertRevision({
+    recordId: D,
+    version: 1,
+    action: 'create',
+    snapshot: { [NAME]: 'newbie' },
+    createdAt: T2,
+    phase: 'after',
+    changedFieldIds: [NAME],
+  })
   const N = mkRecordId(`${tag}n`)
   await insertRecord(SHEET_B, N, { [F]: [D] })
   await insertLink(F, N, D)
-  return { F, D, N }
+  return { F, D, N, S }
 }
 
 describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capture (real DB)', () => {
@@ -96,9 +128,14 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_A, BASE, 'RIC A'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_B, BASE, 'RIC B'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET_A, 'Name', 'string', '{}', 0])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     process.env[RESET_FLAG] = 'true'
     process.env[CAPTURE_FLAG] = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
   })
 
   afterAll(async () => {
@@ -107,7 +144,13 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     delete process.env[INBOUND_FLAG]
     delete process.env[CAP_ROWS_FLAG]
     delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     for (const sheet of [SHEET_A, SHEET_B]) {
+      await pruneSealedHistoryOperations(sheet).catch(() => {})
+      await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
@@ -120,6 +163,27 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
   })
 
+  beforeEach(async () => {
+    process.env[RESET_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+    await pruneSealedHistoryOperations(SHEET_A).catch(() => {})
+    await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
+    await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
+    await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
+    await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
+    // Neighbour sheet B is not under exact-anchor recovery; only clear rows between cases.
+    await q('DELETE FROM meta_link_tombstones WHERE sheet_id = ANY($1::text[])', [[SHEET_A, SHEET_B]]).catch(() => {})
+    await q('DELETE FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)', [SHEET_B]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_B]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id <> $2', [SHEET_A, NAME]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_B]).catch(() => {})
+    fixture = await prepareExactAnchorHistoryFixture(SHEET_A)
+  })
+
   afterEach(() => {
     delete process.env[INBOUND_FLAG]
     delete process.env[CAP_ROWS_FLAG]
@@ -129,13 +193,16 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
   test('(a) happy path: reset-execute captures the inbound tombstone anchored to the trash delete_revision_id; restore replays it', async () => {
-    const { F, D, N } = await fixture('a')
+    const { F, D, N } = await fixtureDeleteTarget('a')
     expect(await edgeCount(F, N, D)).toBe(1) // baseline: the edge exists before reset
 
     const pv = await resetPreview()
     expect(pv.status).toBe(200)
     expect(pv.body?.data?.deleteRecordIds).toEqual([D])
-    const ex = await resetExecute(pv.body?.data?.previewIdentity)
+    expect(pv.body?.data?.executable).toBe(true)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+    const ex = await resetExecute(token)
     expect(ex.status).toBe(200)
     expect(ex.body?.data?.deletedCount).toBe(1)
 
@@ -159,8 +226,8 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     expect(await edgeCount(F, N, D)).toBe(1)
   })
 
-  test('(b) cap breach: 2 inbound edges > MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS=1 → 422 TOMBSTONE_CAPTURE_CAP_EXCEEDED, WHOLE reset rolled back', async () => {
-    const { F, D, N } = await fixture('b')
+  test('(b) cap breach: 2 inbound edges > MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS=1 → refuse + WHOLE reset rolled back (zero writes)', async () => {
+    const { F, D, N } = await fixtureDeleteTarget('b')
     // A second neighbour pointing at D — 2 inbound edges total, exceeding the forced cap of 1.
     // (resolveTombstoneCaptureMaxRows treats a non-positive override as "unset" and falls back to the
     // 50000 default, so the cap must be crossed by row COUNT, not by a zero/negative override.)
@@ -171,20 +238,38 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     expect(await edgeCount(F, N2, D)).toBe(1)
 
     // An unrelated revert candidate in the SAME sheet — proves the rollback is transaction-wide, not
-    // just the failing delete's own row.
+    // just the failing delete's own row. Create@anchor + update@after on the same fixture.
     const A = mkRecordId('b_a')
     await insertRecord(SHEET_A, A, { [NAME]: 'new' }, 2)
-    await rev(SHEET_A, A, 1, 'create', { [NAME]: 'old' }, T0)
-    await rev(SHEET_A, A, 2, 'update', { [NAME]: 'new' }, T2)
+    await fixture.insertRevision({
+      recordId: A,
+      version: 1,
+      action: 'create',
+      snapshot: { [NAME]: 'old' },
+      createdAt: T0,
+      phase: 'before',
+      changedFieldIds: [NAME],
+    })
+    await fixture.insertRevision({
+      recordId: A,
+      version: 2,
+      action: 'update',
+      snapshot: { [NAME]: 'new' },
+      createdAt: T2,
+      phase: 'after',
+      changedFieldIds: [NAME],
+    })
 
     const pv = await resetPreview()
     expect(pv.status).toBe(200)
     expect(pv.body?.data?.deleteRecordIds).toEqual(expect.arrayContaining([D]))
+    const token = pv.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
 
     process.env[CAP_ROWS_FLAG] = '1' // D would capture 2 inbound rows > cap 1 → assertWithinCaptureCap throws
-    const ex = await resetExecute(pv.body?.data?.previewIdentity)
+    const ex = await resetExecute(token)
     expect(ex.status).toBe(422)
-    expect(ex.body?.error?.code).toBe('TOMBSTONE_CAPTURE_CAP_EXCEEDED')
+    expect(ex.body).toMatchObject({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED' } })
 
     // Fail-closed, all-or-nothing: NOTHING written.
     expect(await recordRow(D)).toBeTruthy() // D still LIVE, never soft-deleted
@@ -195,5 +280,7 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     const a = await recordRow(A)
     expect(a?.data?.[NAME]).toBe('new') // the unrelated revert candidate was NOT reverted either — whole-txn rollback
     expect(a?.version).toBe(2)
+    // Token burn rolled back with the txn (at-most-once barrier is not durable on a refused apply).
+    expect(Number(((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET_A])).rows[0] as { c: number }).c)).toBe(0)
   })
 })

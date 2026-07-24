@@ -995,20 +995,43 @@ export interface RestorePreviewResult {
   previewIdentity: string | null
 }
 
-// T8-2 Reset-to-T (DESTRUCTIVE sheet-wide PIT restore). `summary.deleteCount` = records created after T that go to the
-// recycle bin; `visibleRevertCount` = survivors reverted to T. `previewIdentity` is null when there is nothing to do.
+// T8-2 / W2 exact-anchor Reset (DESTRUCTIVE sheet-wide recovery). Destructive authority is EXACT only — a
+// Global History `historyBatchId` (server-resolved to its sealed terminal operation) or a direct
+// `anchorOperationId` (sealed operation endpoint id). A free wall-clock time is never accepted; `createdAt`/
+// `asOf` display text is rendered client-side from history-batch metadata and is never part of this request.
+export type ExactAnchorRequest =
+  | { historyBatchId: string; anchorOperationId?: never }
+  | { anchorOperationId: string; historyBatchId?: never }
+
+// `summary.deleteCount` = records created after the anchor (plus deleted-at-anchor-but-live-now) that go to
+// the recycle bin; `visibleRevertCount` = survivors reverted to the anchor state. `summary.resurrectCount` =
+// records that existed at the anchor but have no live row now — the exact-anchor kernel fails these CLOSED
+// (`inbound-unprovable`, at-anchor inbound link history can't be proven), so the server withholds the token.
+// The client independently refuses malformed/incompatible responses that combine this count with a token.
+// No recovered field VALUES are exposed here — only ids and counts.
 export interface ResetPreview {
-  asOf: string
   strategy: string
-  summary: { visibleRevertCount: number; deleteCount: number; visibleUndeleteCount?: number; conflictCount?: number }
+  anchorOperationId?: string
+  anchorSeq?: string
+  checkpointId?: string
+  historyBatchId?: string
+  summary: {
+    visibleRevertCount: number
+    deleteCount: number
+    resurrectCount: number
+    driftCount: number
+    effectiveWriteCount: number
+  }
   deleteRecordIds: string[]
   previewIdentity: string | null
 }
 export interface ResetResult {
-  asOf: string
   strategy: string
-  records?: Array<{ recordId: string; status?: string }>
+  mode?: string
+  anchorOperationId?: string
+  anchorSeq?: string
   revertedCount?: number
+  deletedCount?: number
   deletedRecordIds?: string[]
 }
 
@@ -2087,23 +2110,44 @@ export class MultitableApiClient {
     this.configRestoreConfirmByToken.delete(previewToken)
   }
 
-  // T8-2: preview a sheet-wide Reset-to-T (DESTRUCTIVE — records created after T → recycle bin; survivors reverted).
+  // T8-2 / W2: preview an exact-anchor Reset (DESTRUCTIVE — records created after the anchor → recycle bin;
+  // survivors reverted). `anchor` is EXCLUSIVE (historyBatchId XOR anchorOperationId) — never a wall-clock time.
   // Server computes the revert set + delete-set + a signed previewIdentity binding BOTH scopes. Behind
   // MULTITABLE_ENABLE_PIT_RESET; `403 RESET_DISABLED` when off, `403` for non-sheet-admin, `413` over the size ceiling.
-  async resetPreview(sheetId: string, asOf: string): Promise<ResetPreview> {
+  async resetPreview(sheetId: string, anchor: ExactAnchorRequest): Promise<ResetPreview> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/reset-preview`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asOf }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(anchor),
     })
     return this.parseJson<ResetPreview>(res)
   }
 
-  // T8-2: execute Reset-to-T. REQUIRES the typed `confirm:'reset'` (D4) + the server `previewIdentity` (binds the
-  // delete-set; a record created since preview re-enumerates → `409`). Single-transaction all-or-nothing on the server;
-  // `409 RESET_BLOCKED` if any target is locked/denied (zero writes).
-  async resetExecute(sheetId: string, asOf: string, previewIdentity: string): Promise<ResetResult> {
+  // T8-2 / W2: execute exact-anchor Reset. REQUIRES the typed `confirm:'reset'` (D4) + the server
+  // `previewIdentity` (token-bound anchor + scope; a record created since preview re-enumerates → `409`).
+  // The token is the SOLE authority — no anchor/asOf is re-sent here. Single-transaction all-or-nothing on
+  // the server; `409 RESET_BLOCKED` if any target is locked/denied (zero writes).
+  async resetExecute(sheetId: string, previewIdentity: string): Promise<ResetResult> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/reset-execute`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ asOf, previewIdentity, confirm: 'reset' }),
+      body: JSON.stringify({ previewIdentity, confirm: 'reset' }),
+    })
+    return this.parseJson<ResetResult>(res)
+  }
+
+  // W2: preview an exact-anchor Revert. The anchor contract is identical to Reset, but Revert keeps records
+  // created after the anchor and is exposed only when the server-derived sheetRevertEnabled capability is on.
+  async revertPreview(sheetId: string, anchor: ExactAnchorRequest): Promise<ResetPreview> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/revert-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(anchor),
+    })
+    return this.parseJson<ResetPreview>(res)
+  }
+
+  // Execute is token-only. Revert has no typed destructive confirmation because it cannot delete
+  // post-anchor-created records; the verified token binds both the exact anchor and mode server-side.
+  async revertExecute(sheetId: string, previewIdentity: string): Promise<ResetResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/revert-execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ previewIdentity }),
     })
     return this.parseJson<ResetResult>(res)
   }

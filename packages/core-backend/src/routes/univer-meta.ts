@@ -4,7 +4,6 @@ import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
-import { db as kyselyDb } from '../db/db'
 import { eventBus } from '../integration/events/event-bus'
 import {
   deriveFieldPermissions,
@@ -21,10 +20,9 @@ import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitabl
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
-import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
-  normalizePermissionCodes,
   resolveRequestAccess,
   type MultitableCapabilities,
   type ResolvedRequestAccess,
@@ -34,7 +32,6 @@ import {
   MANAGED_SHEET_PERMISSION_CODES,
   PUBLIC_FORM_CAPABILITIES,
   applyContextSheetSchemaWriteGrant,
-  applySheetPermissionScope,
   buildRowActionOverrides,
   canReadWithSheetGrant,
   deriveCapabilityOrigin,
@@ -64,19 +61,44 @@ import {
   resolveSheetReadableCapabilities,
   type MultitableCapabilityOrigin,
   type MultitableRowActions,
-  type MultitableSheetAccessLevel,
   type MultitableSheetPermissionCandidate,
-  type MultitableSheetPermissionEntry,
-  type MultitableSheetPermissionSubjectType,
   type SheetPermissionScope,
 } from '../multitable/permission-service'
+import {
+  lockRecoveryAuthorityUsers,
+  RecoveryAuthorityUnavailableError,
+  resolveRecoverySheetAuthority,
+} from '../multitable/recovery-authorization-stability'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { precheckSheetHistoryIntegrity, HistoryIncompleteInTxnError } from '../multitable/history-integrity-precheck'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import {
+  checkExactAnchorRecoveryTrust,
+  enforceSheetRecoverySizeCeiling,
+  executeExactAnchorRecoveryApply,
+  httpForPreviewFailure,
+  mapApplyRefusal,
+  mapParseRefusal,
+  mapSizeCeilingFailure,
+  parseRecoveryAnchorRequest,
+  previewExactAnchorRecovery,
+  mapRecoveryTrustRefusal,
+  type ExactAnchorBody,
+} from '../multitable/exact-anchor-recovery-route'
+import {
+  pruneExpiredRecoveryTokenBurns,
+  resolveForeignSheetIdFromProperty,
+  type ExactAnchorAppliedMutation,
+  type ExactAnchorLinkInvalidation,
+  type ExactAnchorPlanAuthContext,
+} from '../multitable/exact-anchor-recovery-execute'
+import {
+  isLiveLinkTargetForeignKeyViolation,
+  isRetryableLiveLinkDatabaseConflict,
+} from '../multitable/live-link-projection-integrity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -233,13 +255,9 @@ import {
   backfillAutoNumberField,
 } from '../multitable/auto-number-service'
 import {
-  acquireCanonicalSheetFence,
   assertNoActiveWriterBlock,
-  claimDurableWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
-  PIT_RECOVERY_LOCK_NS,
-  setRecoveryWriterState,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
@@ -252,16 +270,6 @@ import {
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, recordRecordRevisionsBatch, recordVersionMarker, type RecordRevisionEntry, type RecordRevisionInput } from '../multitable/record-history-service'
 import { mintOperation, sealOperation } from '../multitable/operation-ledger'
-import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
-import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
-
-// 4c-3: pre-migration deploy window guard for the delete_revision_id column (mirrors record-service).
-function isUndefinedColumnError42703(err: unknown, columnName: string): boolean {
-  const code = (err as { code?: string } | null)?.code
-  const msg = err instanceof Error ? err.message : String(err)
-  if (code === '42703') return msg.includes(columnName)
-  return msg.includes(`column "${columnName}" does not exist`)
-}
 import {
   isPersonalViewsEnabled,
   applyPersonalViewOverlay,
@@ -281,6 +289,7 @@ import {
   subscribeRecord,
   unsubscribeRecord,
 } from '../multitable/record-subscription-service'
+import { notifyRecordSubscribersBestEffort } from '../multitable/record-subscription-service'
 import {
   CONDITIONAL_FORMATTING_RULE_LIMIT,
   sanitizeConditionalFormattingRules,
@@ -477,11 +486,6 @@ type UniverMetaViewConfig = {
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-const DEFAULT_BASE_ID = 'base_legacy'
-const DEFAULT_BASE_NAME = 'Migrated Base'
-// W0-1 C4 fence: `PIT_RECOVERY_LOCK_NS` (recovery-only advisory lock namespace, paired with
-// `hashtext(sheetId)` as the per-sheet key) now lives in `canonical-sheet-fence.ts` — single source of
-// truth shared by reset-execute AND revert-execute (see that module's RECOVERY-VS-RECOVERY doc section).
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
 // ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
@@ -6433,7 +6437,7 @@ async function hasFullTableReadAccess(
   req: Request,
   query: QueryFn,
   sheetId: string,
-  access: { userId: string | null; isAdminRole: boolean },
+  access: ResolvedRequestAccess,
   capabilities: MultitableCapabilities,
 ): Promise<boolean> {
   if (!access.userId) return false // anonymous/unscoped → fail closed
@@ -6444,7 +6448,22 @@ async function hasFullTableReadAccess(
   const unscoped = computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
   if (scoped.size !== unscoped.size) return false
   for (const id of unscoped) if (!scoped.has(id)) return false
-  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped)
+  // Formula-taint resolution traverses foreign-sheet/base readability through request-shaped helpers.
+  // Recovery must not feed those helpers the original JWT/cache claims after DB-fresh adjudication:
+  // expose only the transaction-fresh access snapshot while inheriting the request's non-auth surface.
+  const authorityReq = Object.create(req) as Request
+  Object.defineProperty(authorityReq, 'user', {
+    value: {
+      id: access.userId,
+      perms: access.permissions,
+      permissions: access.permissions,
+      roles: access.isAdminRole ? ['admin'] : [],
+      role: access.isAdminRole ? 'admin' : 'user',
+    },
+    enumerable: true,
+    configurable: true,
+  })
+  const masked = await maskStoredRecordFieldIds(authorityReq, query, sheetId, undefined, scoped)
   return masked.size === scoped.size
 }
 
@@ -6596,6 +6615,11 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
   // →undelete cycle can never rehydrate from the WRONG cycle's captures.
   const deleteRevisionId = opts.deleteRevisionId ?? null
   if (deleteRevisionId) {
+    // W0 L6: this config-restore branch already holds the canonical sheet fence at its caller. Mint one
+    // record-history operation for every record revision produced by this field rehydration so the restored
+    // state becomes a selectable exact anchor. With the fence flag OFF the ledger is inert and the legacy
+    // write shape stays unchanged; with it ON, schema absence fails the enclosing transaction closed.
+    const operation = await mintOperation(query, sheetId)
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
@@ -6655,6 +6679,7 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
         patch: { [fieldId]: row.rehydrated_value as unknown },
         snapshot: normalizeJson(row.data),
         batchId: recordBatchId,
+        ledger: operation,
       }))
       await recordRecordRevisionsBatch(query, revisionInputs)
     }
@@ -6688,6 +6713,10 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
         [fieldId, sheetId, lastValue],
       )
     }
+    // Seal after every record/link/sequence write. A zero-row rehydration tracks no events and therefore
+    // intentionally produces no record anchor; otherwise the deferred FK + endpoint validation make an
+    // unsealed or miscounted operation fail the whole field-undelete transaction at COMMIT.
+    await sealOperation(query, operation)
   }
 }
 
@@ -9036,6 +9065,12 @@ export function univerMetaRouter(): Router {
             return null
           })
         } catch (e) {
+          if (isLiveLinkTargetForeignKeyViolation(e) || isRetryableLiveLinkDatabaseConflict(e)) {
+            return res.status(409).json({
+              ok: false,
+              error: { code: 'LINK_INTEGRITY', message: 'A linked record was deleted concurrently; retry the undelete.' },
+            })
+          }
           if (e instanceof RecordServiceRestoreConflictError) {
             return res.status(409).json({ ok: false, error: { code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' } })
           }
@@ -10072,193 +10107,26 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  // ============================================================================================================
-  // T8-1: Point-in-Time Revert-to-T (non-destructive sheet rollback). Per the T8 design-lock (PIT-1..7):
-  // preview-first + PIT identity (PIT-1), reuse reconstructRecordsAtT (PIT-4, no re-derivation), counts never leak
-  // (PIT-3/LOCK-3 — denied rows invisible), forward-only source=restore (PIT-5), reveal NEVER composes (PIT-7 —
-  // this path calls NO reveal/reveal-grant function; the writable set is the actor's normal mask). Revert undoes
-  // post-T value changes and KEEPS records created after T (non-destructive); it NEVER deletes. Undelete of post-T
-  // deletions is CLASSIFIED in the preview but its EXECUTE is deferred to the codebase-wide undelete slice
-  // (resurrect + meta_links rebuild is "Slice 2" across the restore routes). The destructive Reset is T8-2.
-  type RevertSheetCaps = Awaited<ReturnType<typeof resolveSheetCapabilities>>
-  // D3 / PIT-6 hard ceiling: a whole-sheet revert above this many records is REFUSED fail-closed (not processed
-  // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
-  // Resolved ONCE here (router construction), exactly as the pre-extraction route-local const did; the shared
-  // resolver now also backs the 4c-1 lossy-retype write-symmetric cap (C4 — same ceiling, one definition).
+  // D3 / PIT-6 hard ceiling shared by exact-anchor Revert and Reset. The legacy wall-clock calculators were
+  // removed when the four routes moved to the L6/L7/L8 exact-anchor authority below; keeping a second, unreachable
+  // recovery planner here would invite a future accidental re-wire to an untrusted `asOf` path.
   const SHEET_REVERT_MAX_RECORDS = resolveSheetRevertMaxRecords()
-  type SheetRevertTooLarge = { tooLarge: true; recordCount: number; scope: 'live_sheet' | 'effective_write_set' }
-  const sheetRevertTooLargeMessage = (computed: SheetRevertTooLarge) => {
-    if (computed.scope === 'effective_write_set') return `This revert would touch ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
-    return `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
-  }
-  const computeSheetRevert = async (
-    pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
-    access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | SheetRevertTooLarge | { historyIncomplete: true } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
-    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
-    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
-    if (!patchContext) return null
-    const { fieldById } = patchContext
-    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
-    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount, scope: 'live_sheet' } // D3/PIT-6 fail-closed before the full scan
-    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): fail-closed integrity precheck,
-    // SHARED by preview and execute (both call this compute — the execute re-check is by construction, and it
-    // runs BEFORE the previewIdentity verification, which is revision-derived and blind to uncaptured writes).
-    // Refusal ⇒ no token minted, zero rows written.
-    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
-    if (!integrity.ok) return { historyIncomplete: true }
-    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
-    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
-    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
-    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
-    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
-    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
-      liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
-    }
-    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso) // delete-aware, deterministic (PIT-4)
-    const reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }> = []
-    const resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }> = []
-    let undeleteCount = 0, keptCreatedAfterT = 0, driftCount = 0
-    for (const [recordId, target] of stateMap) {
-      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted/resurrected — no denied-record oracle)
-      const live = liveById.get(recordId)
-      if (target.exists) {
-        if (!live) {
-          // existed at T, gone now (deleted after T) → T8-1 undelete. Collect the FULL server-side T-snapshot (NOT a
-          // masked diff — undelete re-creates the whole record; read-masking still applies on later reads). The
-          // snapshotHash binds the exact target into the resurrect identity (a deleted record has no live version).
-          const snap = asRec(target.data)
-          // Schema-drift guard (parity with the live-revert branch below): if the T-snapshot carries a field that no
-          // longer exists in the current schema, do NOT resurrect — re-inserting would write a stale field key into
-          // meta_records.data. Exclude it (counted as drift → re-preview), never resurrect a schema-drifted snapshot.
-          let resurrectDrift = false
-          for (const fid of Object.keys(snap)) if (!fieldById.has(fid)) { resurrectDrift = true; break }
-          if (resurrectDrift) { driftCount++; continue }
-          resurrects.push({ recordId, snapshot: snap, snapshotHash: hashPreviewChanges(Object.entries(snap).map(([fieldId, value]) => ({ fieldId, op: 'set', value }))) })
-          undeleteCount++; continue
-        }
-        const targetSnapshot = asRec(target.data)
-        let drift = false
-        for (const fid of Object.keys(targetSnapshot)) if (!fieldById.has(fid)) { drift = true; break }
-        if (drift) { driftCount++; continue } // schema drift → excluded → re-preview
-        const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: live.version, normalizeLinkIds })
-        const masked = diff.filter((c) => allowed.has(c.fieldId))
-        if (masked.length === 0) continue // already matches T in the actor's visible fields
-        reverts.push({ recordId, diff: masked, changesHash: hashPreviewChanges(masked.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: live.version })
-      }
-      // target deleted-at-T: live present → KEPT (non-destructive, never re-delete); live absent → unchanged.
-    }
-    const createdAfterTIds: string[] = []
-    for (const id of liveById.keys()) if (!stateMap.has(id) && !deniedIds.has(id)) { keptCreatedAfterT++; createdAfterTIds.push(id) } // created after T (visible) → KEPT by revert; the DELETE-SET for reset (T8-2)
-    // Unified ceiling (T8-1): the early `recordCount` guard counts LIVE rows only — a sheet with few live records but a
-    // large deleted history could resurrect far more than the ceiling. Re-check the EFFECTIVE write set (reverts +
-    // resurrects) so undelete can't bypass SHEET_REVERT_MAX_RECORDS.
-    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length, scope: 'effective_write_set' }
-    return { reverts, resurrects, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
-  }
 
-  type PitResetRevert = { recordId: string; diff: RecordChange[]; changesHash: string; version: number }
-  type PitResetDelete = { recordId: string; version: number; data: Record<string, unknown> }
-  type PitResetComputation =
-    | null
-    | { tooLarge: true; recordCount: number }
-    | { historyIncomplete: true }
-    | { blocked: true; reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported' }
-    | {
-        reverts: PitResetRevert[]
-        deletes: PitResetDelete[]
-        patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>>
-      }
-
-  const computeSheetReset = async (
-    pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
-    access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<PitResetComputation> => {
-    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
-    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
-    if (!patchContext) return null
-    const { fieldById, fieldPermissions } = patchContext
-    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
-    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount }
-    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): shared fail-closed precheck — same
-    // doctrine as computeSheetRevert above. Rule 3 is load-bearing HERE: the delete-set loop below pushes live
-    // rows absent from the reconstruction into `deletes`, so an uncaptured-CREATE row would be silently
-    // destroyed if the precheck did not enumerate the LIVE row set first.
-    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
-    if (!integrity.ok) return { historyIncomplete: true }
-    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
-    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
-    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
-    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
-    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
-    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
-      liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
-    }
-    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso)
-    const reverts: PitResetRevert[] = []
-    const deletes: PitResetDelete[] = []
-    for (const [recordId, live] of liveById) {
-      const target = stateMap.get(recordId)
-      if (!target || !target.exists) {
-        if (deniedIds.has(recordId)) return { blocked: true, reason: 'denied' }
-        deletes.push({ recordId, version: live.version, data: live.data })
-      }
-    }
-    for (const [recordId, target] of stateMap) {
-      if (!target.exists) continue
-      const live = liveById.get(recordId)
-      if (!live) return { blocked: true, reason: 'undelete_unsupported' }
-      const targetSnapshot = asRec(target.data)
-      for (const fid of Object.keys(targetSnapshot)) {
-        if (!fieldById.has(fid)) return { blocked: true, reason: 'schema_drift' }
-      }
-      const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: live.version, normalizeLinkIds })
-      if (diff.length === 0) continue
-      if (deniedIds.has(recordId)) return { blocked: true, reason: 'denied' }
-      if (diff.some((c) => {
-        const guard = fieldById.get(c.fieldId)
-        const perm = fieldPermissions[c.fieldId]
-        return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true) || !allowed.has(c.fieldId)
-      })) return { blocked: true, reason: 'forbidden' }
-      reverts.push({ recordId, diff, changesHash: hashPreviewChanges(diff.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: live.version })
-    }
-    return { reverts, deletes, patchContext }
-  }
-
-  // D-1c §0.6 unified refusal (rule 1): one values-free 409 for all four routes (revert/reset × preview/execute).
-  // Deliberately carries NO record ids and NO counts — the refusal must not become a denied-record existence
-  // oracle — and, being an error response, carries no previewIdentity: refusal ⇒ no execute token exists.
-  const sendHistoryIncomplete = (res: Response) => res.status(409).json({
-    ok: false,
-    error: {
-      code: 'HISTORY_INCOMPLETE',
-      message: 'Record history for this sheet is incomplete or inconsistent with its live data; destructive recovery is refused and nothing was written. History must be trustworthy before revert/reset can run.',
-    },
-  })
-
-  const sendPitResetBlocked = (res: Response, reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported') => {
-    if (reason === 'schema_drift' || reason === 'undelete_unsupported') {
-      return res.status(422).json({ ok: false, error: { code: 'RESET_UNSUPPORTED', message: 'Reset-to-T cannot be executed for this sheet without a separate schema-drift/undelete slice; nothing written.' } })
-    }
-    return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is denied or forbidden, so nothing was written.' } })
-  }
-
-  // T8-1 undelete: PIT Revert resurrects records that existed at T but are deleted now. Default-OFF flag (ON TOP of
-  // canManageSheetAccess), and at execute the undelete-specific floor is canDeleteRecord (NEVER canEditRecord) + a
-  // typed confirm:'undelete'. The resurrect set is bound into the SAME pit-revert identity (resurrectScopeHash); the
-  // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
-  // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
+  // T8-1 → W0 L8: exact-anchor undelete (resurrection) is categorically FAIL-CLOSED (INBOUND_UNPROVABLE)
+  // until an at-anchor inbound reconstruction authority exists — the L8 kernel whole-refuses any plan that
+  // contains resurrects, and a resurrect-bearing preview never mints an executable token. The legacy
+  // MULTITABLE_ENABLE_PIT_UNDELETE flag can therefore no longer make `undeleteSupported` true on this
+  // surface; it is still resolved so the preview's blocked-reason disclosure can distinguish "flag off"
+  // (UNDELETE_DISABLED) from "flag on but authority missing" (INBOUND_UNPROVABLE), and so the flag's
+  // manifest-pinned source read stays live.
   const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
-  // Interim revert-execute master gate (current-risk mitigation, owner-directed). The first-cut W0-1
-  // generation-aware precheck (#4269) improves on #4234, but exact committed-event anchoring, the all-writer
-  // fence, trust checkpoints, target-generation validation, and Revert's outer transaction are still required
-  // before destructive recovery is enablement-ready. This flag therefore stays default-OFF; turning it on is a
-  // separate owner-gated rollout decision after the complete W0 trust correction lands and passes staging. Mirrors
-  // reset-execute's PIT_RESET_ENABLED() gate exactly (same String(env).trim().toLowerCase()==='true'
-  // resolution). revert-preview stays UNGATED (read-only, no writes to protect, and the FE preview UI still
-  // needs to render even while the button that would call execute is hidden).
+  // Revert-execute master gate (default-OFF). The exact-anchor authority is WIRED (L6 resolveExactAnchor +
+  // L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing); enablement remains a separate
+  // owner-gated ops decision. Mirrors reset-execute's PIT_RESET_ENABLED() gate exactly (same
+  // String(env).trim().toLowerCase()==='true' resolution). revert-preview is outside the execution-feature
+  // flag so the FE can render a read-only plan while execute remains hidden; it is not open access: the route
+  // still requires authentication, sheet management, conservative full-read, and the recovery trust pair
+  // before it can mint an execute token.
   const SHEET_REVERT_ENABLED = () => String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true'
 
   // ── W0-1 L5-wire: trust-checkpoint ACTIVATION (the production caller for activateCheckpoint) ────────────
@@ -10323,286 +10191,16 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
-    try {
-      const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: a sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write (interim for a dedicated history-restore cap)
-      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
-      const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
-      const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
-        ? mintPitRevertPreviewIdentity({
-            sheetId, asOf: asOfIso, strategy: 'revert',
-            scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-            resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
-            actorId: access.userId,
-          })
-        : null // nothing to revert AND nothing to resurrect → no-op, no executable token
-      return res.json({ ok: true, data: {
-        asOf: asOfIso, strategy: 'revert',
-        summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
-        records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
-        undeleteRecordIds: resurrects.map((r) => r.recordId),
-        // The undelete-revert face rides INSIDE revert-execute, whose SHEET_REVERT master gate (#4261) is
-        // checked FIRST — so undelete is only actually supported when BOTH gates are on. Reporting
-        // PIT_UNDELETE alone would promise an undelete that revert-execute then refuses with REVERT_DISABLED.
-        undeleteSupported: PIT_UNDELETE_ENABLED() && SHEET_REVERT_ENABLED(), previewIdentity,
-      } })
-    } catch (err) {
-      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
-      const hint = getDbNotReadyMessage(err)
-      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] revert-preview failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to compute revert preview' } })
-    }
-  })
-
-  router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
-    if (!SHEET_REVERT_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Sheet revert is disabled (MULTITABLE_ENABLE_SHEET_REVERT is off).' } })
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.string().optional() }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
-    try {
-      const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write
-      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
-      // D-1c §0.6 rule 4 (TOCTOU): the execute re-check refuses HERE — before previewIdentity verification and
-      // before any transaction — so a preview that passed never licenses an execute over history that has since
-      // gone untrustworthy. Zero writes on this path.
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
-      const { reverts, resurrects, patchContext } = computed
-      // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
-      // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.
-      if (resurrects.length > 0) {
-        if (!PIT_UNDELETE_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'UNDELETE_DISABLED', message: 'PIT undelete is disabled (MULTITABLE_ENABLE_PIT_UNDELETE is off).' } })
-        if (!capabilities.canDeleteRecord) return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Undelete requires delete permission (canDeleteRecord).' } })
-        if ((parsed.data.confirm ?? '').trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm resurrecting deleted records.' } })
-      }
-      const verdict = verifyPitRevertPreviewIdentity(parsed.data.previewIdentity, {
-        sheetId, asOf: asOfIso, strategy: 'revert',
-        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-        resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
-        actorId: access.userId,
-      })
-      if (!verdict.valid) {
-        const status = verdict.reason === 'expired' ? 410 : 409
-        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Revert preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
-      }
-      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
-      const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
-      // W0-1 L4 durable block (v3.6 §4 item 3): revert-execute mutates across MULTIPLE transactions (the
-      // resurrect txn + the per-record patch loop), so the transaction-scoped canonical advisory fence —
-      // released at each COMMIT — cannot hold external writers off across the whole operation. Commit a
-      // DURABLE `applying` block under the fence in a short claim txn, release the advisory fence, then apply.
-      // Every external fenced writer that later acquires the fence observes `applying` and parks; the block is
-      // cleared (or set `paused_retryable` on failure) in the finally below. No-op when the L4 flag is off.
-      //
-      // P2 follow-up (v3.6 §4.1 fixed lock order): the claim ALSO takes `PIT_RECOVERY_LOCK_NS`, right after
-      // the canonical fence — the SAME order reset-execute uses. This was previously missing entirely (revert
-      // took no PIT lock at all), so reset-execute's comment claiming the PIT lock "serializes recovery-vs-
-      // recovery" was an overclaim: the two operations' PIT locks never intersected. It is not what closes
-      // the reset-during-revert race (that's reset's `assertNoActiveWriterBlock` below, catching the
-      // committed durable block across revert's released-fence gap — see canonical-sheet-fence.ts's
-      // RECOVERY-VS-RECOVERY doc); it brings revert into the same fixed canonical→PIT discipline as reset so
-      // the two mechanisms actually intersect where their transactions do overlap.
-      const writerFenceOn = isWriterFenceEnabled()
-      if (writerFenceOn) {
-        try {
-          await pool.transaction(async ({ query }) => {
-            await acquireCanonicalSheetFence(query, sheetId)
-            await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
-            await claimDurableWriterBlock(query, sheetId)
-          })
-        } catch (claimErr) {
-          if (claimErr instanceof SheetWriterBlockedError) return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-          throw claimErr
-        }
-      }
-      let blockResolution: 'clear' | 'paused_retryable' = 'clear'
-      try {
-      // T8-1 undelete — run FIRST (atomic, all-or-nothing) so a resurrect conflict aborts the request with ZERO writes
-      // BEFORE any best-effort field-revert is applied (no mixed partial). Each resurrect re-inserts the FULL T-snapshot
-      // (schema-drift-rejected in computeSheetRevert) under its ORIGINAL id with a FOR UPDATE id-collision reject (L1),
-      // rebuilds OUTBOUND meta_links (L3; NO inbound — L4 A: inbound re-appears on the linking record's next save), and
-      // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
-      const resurrectedIds: string[] = []
-      const undeleteInboundTotals = { replayed: 0, total: 0 }
-      if (resurrects.length > 0) {
-        // Mirror-read-only hardening (C2/I-1): resurrect only WRITABLE (forward) links, never the mirror side of a
-        // twoWay link (the patchContext guard's `readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). Explicit skip so
-        // the spine invariant (mirror never owns a meta_links row) is structural, not snapshot-hygiene-reliant.
-        const linkFieldIds = fields.filter((f) => f.type === 'link' && fieldById.get(f.id)?.readOnly !== true).map((f) => f.id)
-        const undeleteActorId = getRequestActorId(req)
-        // P1#2d REPLACE — build each resurrect's event payload ONCE before the txn (stable `_eventId`) so the
-        // same-txn durable enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF)
-        // carry the same event identity. Keyed by recordId; total over `resurrects` by construction — the txn is
-        // all-or-nothing, so on success `resurrectedIds` is exactly the ids of `resurrects`.
-        const undeleteEventPayloads = new Map(
-          resurrects.map((r) => [r.recordId, withAutomationEventId({ sheetId, recordId: r.recordId, actorId: undeleteActorId })]),
-        )
-        try {
-          await pool.transaction(async ({ query }) => {
-            // W0-1 L4: the recovery's OWN resurrect writes take the canonical fence (for seq-ordering) but
-            // bypass the durable block THEY committed above. No-op when the L4 flag is off.
-            await fenceWriterEntry(query, sheetId, { bypassBlockCheck: true })
-            const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-            if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
-            for (const r of resurrects) {
-              const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
-              if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
-              try {
-                // revision-emitted: PIT resurrect — recordRecordRevision(action:'create') below, same txn.
-                await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
-              } catch (e) {
-                if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
-                throw e
-              }
-              for (const fieldId of linkFieldIds) {
-                for (const foreignId of normalizeLinkIds(r.snapshot[fieldId])) {
-                  await query('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [`lnk_${randomUUID()}`.slice(0, 50), fieldId, r.recordId, foreignId])
-                }
-              }
-              await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
-              // 4c-3 §7: the SECOND resurrection surface reuses the SAME replay helper — never a
-              // parallel inbound semantic. Anchor derivation (R11 A′, ratified 2026-07-11 — replaces the
-              // R8 `created_at DESC` latest-delete heuristic): resurrect has no trash row to read an
-              // anchor off (unlike restoreRecord's `meta_records_trash.delete_revision_id`), but the
-              // revert already carries `asOf` T on the wire and the semantics are "restore the record as
-              // it existed at T". A record is in the resurrect set precisely because its latest revision
-              // with `created_at <= T` is NOT a delete (reconstructRecordsAtT, delete-aware), so the
-              // deletion that removed that T-era record is the FIRST 'delete' revision strictly AFTER T.
-              // Deriving the anchor from T (below) is therefore vintage-EXACT: under multi-vintage churn
-              // (delete → restore → delete → resurrect an OLDER vintage via PIT asOf) it anchors to THAT
-              // vintage's deletion and replays exactly that vintage's captured edges — never a later
-              // vintage's, never a cross-vintage union. The deterministic tiebreak
-              // `created_at ASC, version ASC, id ASC` (LOCK-11 parity, complement of reconstruct's
-              // `created_at <= T ... DESC`) makes the choice unique and stable even when two delete
-              // revisions share a millisecond (version is the exercised discriminator; id is
-              // belt-and-suspenders — the version index is not UNIQUE). A delete at exactly
-              // `created_at == T` that is the record's latest `<= T` revision ⇒ absent at T ⇒ not in the
-              // resurrect set (golden E). The STRICTNESS of `> T` (vs `>= T`) is load-bearing in the
-              // inverse case: a re-create at exactly T makes the record PRESENT at T, so its removing
-              // delete is a strictly-later one — `>= T` would mis-anchor to the prior vintage's
-              // same-instant delete (golden F). If the deletion
-              // happened while capture was off (or its tombstones aged out via retention) the anchor
-              // still resolves but carries zero tombstones ⇒ zero replay — silent and honest, never
-              // fabricated. OVER-replay stays impossible regardless, because precondition 6 (neighbour
-              // consent — replay only what N's OWN live `data` still declares) gates every edge
-              // independently of the anchor. See `multitable-undelete-inbound-resurrect-realdb.test.ts`
-              // for the vintage-exact + same-ms tiebreak + boundary goldens. Runs AFTER the outbound
-              // loop (NOT EXISTS must see those rows; self-link stays single).
-              if (isRecordUndeleteInboundEnabled()) {
-                const anchorRes = await query(
-                  `SELECT id FROM meta_record_revisions
-                    WHERE sheet_id = $1 AND record_id = $2 AND action = 'delete' AND created_at > $3
-                    ORDER BY created_at ASC, version ASC, id ASC LIMIT 1`,
-                  [sheetId, r.recordId, asOfIso],
-                )
-                const anchorId = ((anchorRes.rows as Array<{ id?: string }>)[0]?.id) ?? null
-                if (anchorId) {
-                  const replay = await replayInboundLinks(query, anchorId)
-                  undeleteInboundTotals.replayed += replay.replayed
-                  undeleteInboundTotals.total += replay.total
-                }
-              }
-              // P1#2d REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with THIS
-              // record's resurrect INSERT + links + 'restore' create-revision (any conflict throw in this loop
-              // rolls the WHOLE txn — and every enqueue — back; nothing half-delivered). One enqueue per
-              // resurrected record, mirroring the legacy per-record post-commit emit 1:1. Flag OFF ⇒ no-op.
-              const undeleteDurablePayload = undeleteEventPayloads.get(r.recordId)
-              if (undeleteDurablePayload) {
-                await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.record.created', undeleteDurablePayload)
-              }
-              resurrectedIds.push(r.recordId)
-            }
-          })
-        } catch (err) {
-          if (err instanceof RecordServiceRestoreConflictError) return res.status(409).json({ ok: false, error: { code: 'UNDELETE_CONFLICT', message: `${err.message}; the sheet changed since preview — re-preview` } })
-          throw err
-        }
-        for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
-          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
-          // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emit (the SAME prebuilt payload object — byte-identical
-          // fields); flag ON ⇒ SUPPRESSED (the same-txn enqueue inside the txn above is the delivery path).
-          const undeleteLegacyPayload = undeleteEventPayloads.get(recordId)
-          if (undeleteLegacyPayload) emitRecordEventIfLegacy(eventBus, 'multitable.record.created', undeleteLegacyPayload)
-        }
-      }
-      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
-      if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
-      type Outcome = { recordId: string; status: 'reverted' | 'skipped'; newVersion?: number; skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error' }
-      const outcomes: Outcome[] = []
-      for (const c of reverts) {
-        if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
-        const hasForbidden = c.diff.some((ch) => {
-          const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
-          // W1-3 LOCK-F2: shared predicate for the layer-3 clause, same invariant as before.
-          return !(guard && !guard.hidden && guard.readOnly !== true) || isFieldWriteForbidden(perm)
-        })
-        if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
-        try {
-          const result = await recordWriteService.patchRecords({ sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req), fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds, attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore', bypassWriterBlock: true /* W0-1 L4: recovery's own in-fence patch — bypass the durable block it owns */ })
-          outcomes.push({ recordId: c.recordId, status: 'reverted', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version })
-        } catch (err) {
-          if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
-          if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
-          if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
-          throw err
-        }
-      }
-      const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds, ...(isRecordUndeleteInboundEnabled() && resurrectedIds.length > 0 ? { undeleteInbound: undeleteInboundTotals } : {}) } })
-      } catch (revertApplyErr) {
-        // W0-1 L4: a failure AFTER the durable block was claimed (and possibly after the resurrect txn already
-        // COMMITTED) = a half-applied recovery. Keep the sheet blocked (`paused_retryable` — recoverable by a
-        // re-run's claim) so no external writer races the partial state; the finally persists it, then the
-        // outer catch maps the error to its response.
-        blockResolution = 'paused_retryable'
-        throw revertApplyErr
-      } finally {
-        if (writerFenceOn) {
-          await pool.transaction(async ({ query }) => {
-            await acquireCanonicalSheetFence(query, sheetId)
-            // P2 follow-up: same fixed canonical→PIT order as the claim above (see its comment).
-            await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
-            await setRecoveryWriterState(query, sheetId, blockResolution === 'clear' ? null : 'paused_retryable')
-          })
-        }
-      }
-    } catch (err) {
-      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
-      const hint = getDbNotReadyMessage(err)
-      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] revert-execute failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute revert' } })
-    }
-  })
-
-  // ── T8-2 Reset-to-T (DESTRUCTIVE PIT restore) ─────────────────────────────────────────────────────────────────
-  // Reset = T8-1 Revert (surviving records → their T-state) + SOFT-DELETE the records CREATED AFTER T (Revert keeps
-  // them). Gated behind a default-OFF env flag (D1, belt-and-suspenders) ON TOP OF canManageSheetAccess (D2), the
-  // size ceiling (D3), a typed two-step confirm:'reset' (D4), whole-sheet only (D5). The destructive delete-set is
-  // bound into the signed identity by record id + preview-time version and RE-ENUMERATED + re-compared at execute,
-  // so Reset can NEVER delete a record/version the actor did not see in the preview. PIT-2: all revert + delete
-  // writes happen in ONE transaction; a single denied/forbidden/locked/conflicted target aborts the whole Reset with
-  // zero writes/deletes/revisions.
+  // ── W0 L8 exact-anchor wiring: revert/reset preview+execute ─────────────────────────────────────────────
+  // All four surfaces run on L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery
+  // (via the exact-anchor-recovery-route helpers). Destructive authority is EXACTLY one historyBatchId or
+  // anchorOperationId; any nonblank free wall-clock `asOf` refuses EXACT_ANCHOR_REQUIRED before any DB
+  // access, and both ids together refuse AMBIGUOUS_ANCHOR. Execute is TOKEN-ONLY authority (P1-1): the
+  // verified previewIdentity carries the mode/anchor/scope; the request supplies no mode and a wrong-mode
+  // token refuses BEFORE any write. Master flags stay default-OFF (SHEET_REVERT / PIT_RESET); the trust
+  // pair (WRITER_FENCE + CONTIGUITY_STRICT) is required by both preview and execute
+  // (RECOVERY_TRUST_REQUIRED otherwise). The apply is one transaction, all-or-nothing — the legacy
+  // per-record best-effort loop and the multi-transaction durable-block claim/release dance are gone.
   const PIT_RESET_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true'
   const PIT_RESET_RETENTION_BLOCKED = () => String(process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED ?? '').trim() === '1'
   const sendPitResetRetentionBlocked = (res: Response) => res.status(409).json({
@@ -10613,382 +10211,665 @@ export function univerMetaRouter(): Router {
     },
   })
 
-  router.post('/sheets/:sheetId/reset-preview', async (req: Request, res: Response) => {
-    if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
-    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
-    try {
-      const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-admin cap, above plain record-write
-      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities)
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
-      if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
-      const { reverts, deletes } = computed
-      const previewIdentity = (reverts.length > 0 || deletes.length > 0)
-        ? mintPitResetPreviewIdentity({
-            sheetId, asOf: asOfIso, strategy: 'reset',
-            revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-            deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
-          })
-        : null // nothing to revert AND nothing to delete → no-op, no executable token
-      return res.json({ ok: true, data: {
-        asOf: asOfIso, strategy: 'reset',
-        summary: { visibleRevertCount: reverts.length, deleteCount: deletes.length, visibleUndeleteCount: 0, conflictCount: 0 },
-        records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
-        deleteRecordIds: deletes.map((d) => d.recordId),
-        undeleteSupported: false, previewIdentity,
-      } })
-    } catch (err) {
-      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
-      const hint = getDbNotReadyMessage(err)
-      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] reset-preview failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to compute reset preview' } })
-    }
-  })
-
-  router.post('/sheets/:sheetId/reset-execute', async (req: Request, res: Response) => {
-    if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
-    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    // D4: a typed two-step confirm — Reset (destructive) cannot be triggered by a stray Revert-shaped call.
-    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.literal('reset') }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity and confirm:"reset" are required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
-    try {
-      const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2
-      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities) // RE-ENUMERATE reverts + delete-set
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
-      // D-1c §0.6 rule 4 (TOCTOU): execute re-check — refused before previewIdentity verification and before
-      // the destructive transaction. Zero writes on this path.
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
-      if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
-      const { reverts, deletes, patchContext } = computed
-      // Verify the signed reset identity against the RE-ENUMERATED reverts AND delete-set. A record created between
-      // preview and execute re-enumerates into deletes; a delete target edited since preview changes its bound version.
-      const verdict = verifyPitResetPreviewIdentity(parsed.data.previewIdentity, {
-        sheetId, asOf: asOfIso, strategy: 'reset',
-        revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-        deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
-      })
-      if (!verdict.valid) {
-        const status = verdict.reason === 'expired' ? 410 : 409
-        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Reset preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
-      }
-      const { fieldById } = patchContext
-
-      const actorId = getRequestActorId(req)
-      const affectedIds = [...new Set([...reverts.map((r) => r.recordId), ...deletes.map((d) => d.recordId)])]
-      const batchId = randomUUID()
-      const updatedRows: Array<{ recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown> }> = []
-      const deletedRecordIds: string[] = []
-      // P1#2d REPLACE — per-row event payloads, built ONCE (stable `_eventId`) INSIDE the txn at the point each
-      // row's write completes (the update payload's `changes` = the in-txn-computed revisionPatch, so it CANNOT
-      // be prebuilt before the txn), shared verbatim by the same-txn durable enqueue (flag ON) and the legacy
-      // post-commit emit loops below (flag OFF). A txn abort discards them with the response (409/422/…).
-      const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
-      const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
-
+  /**
+   * In-fence full-read adjudication for exact-anchor preview/apply (P1-2 TOCTOU): ALWAYS re-resolve
+   * access/capabilities from the provided query — never close over pre-fence results. A revoke that lands
+   * while the apply parks on the canonical fence is observed here.
+   */
+  const makeFullReadEvaluator = (req: Request, sheetId: string) =>
+    async (query: TrustCheckpointQueryFn): Promise<boolean> => {
       try {
-        await pool.transaction(async ({ query }) => {
-          // W0-1 L4 (§4.1 canonical fence convergence — the §0.2-i fix): acquire the CANONICAL sheet-write
-          // fence (the same advisory key every ordinary writer now takes) as the FIRST statement, THEN
-          // refuse if a recovery already holds a durable writer-block — `fenceWriterEntry` is the SAME
-          // standard L4 entry point every other fully-fenced writer uses (REST/bulk/plugin/attachment/
-          // lock-unlock; see canonical-sheet-fence.ts). This is the load-bearing correction for TWO separate
-          // bugs, fixed together because they're both "reset didn't converge onto the shared fence
-          // discipline": (a) pre-L4, reset held ONLY `PIT_RECOVERY_LOCK_NS`, DISJOINT from the auto-
-          // number/writer fence, so an ordinary concurrent fenced writer did not block on reset and the
-          // causal-seq guarantee evaporated (v3.6 §0.2-i); (b) reset never checked `recovery_writer_state`
-          // at all, so a reset that began during revert-execute's multi-txn apply window — where the
-          // canonical fence is released BETWEEN revert's own transactions but its durable `applying` block
-          // is already committed — proceeded and interleaved two destructive recoveries (P2 follow-up: see
-          // canonical-sheet-fence.ts's RECOVERY-VS-RECOVERY doc for the full two-direction analysis). A
-          // block observed here throws `SheetWriterBlockedError`, caught below and mapped to the same 409
-          // RECOVERY_IN_PROGRESS revert-execute's own claim step returns. No-op when the L4 flag is off ⇒
-          // this destructive txn keeps its exact pre-L4 lock shape (byte-identical).
-          await fenceWriterEntry(query, sheetId)
-          // W0-1 C4 FENCE (owner §6.2.4) + v3.6 §4.1 fixed lock order (canonical → PIT, always in this
-          // order to introduce no deadlock): the recovery-only advisory lock, retained UNCONDITIONALLY
-          // (pre-L4 behaviour, flag or no flag). `FOR UPDATE` on scope rows alone does NOT stop a concurrent
-          // NEW-record insert (phantom) landing between the outer/preview check and this write; the
-          // advisory lock plus the in-txn re-check below closes the check→write window. Chosen over
-          // SERIALIZABLE (lowest blast radius, no serialization-failure retry loop). Namespace int is the
-          // fixed W0-1 constant exported from canonical-sheet-fence.ts (single source of truth — revert-
-          // execute's claim/release steps take the SAME lock, same order); `hashtext(sheetId)` is the
-          // per-sheet key. NOTE this lock is NOT what closes the reset-vs-revert race above: reset's window
-          // holding it does not overlap revert's (revert only holds it briefly during its own claim/release,
-          // not across its multi-txn apply gap) — the `fenceWriterEntry` block-check above is the mechanism
-          // that does that job; this lock is the design's mandated companion for the windows where the two
-          // operations' transactions DO overlap (see canonical-sheet-fence.ts).
-          await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
-          // W0-1 C8 (same-txn re-check): re-run the integrity precheck INSIDE the fenced transaction. A
-          // phantom uncaptured write that committed after the outer computeSheetReset precheck (which runs
-          // BEFORE this transaction) is caught HERE — the check and the destructive write are now atomic.
-          // Refusal throws → the whole reset rolls back (zero writes) → mapped to the 409 below.
-          //
-          // L6-SEAM (v3.7 §9.5 / §5 "in-fence execute recompute"): the FULL fix recomputes target/schema/set
-          // (`computeSheetReset`) UNDER this fence with the token-bound anchorSeq, not just re-running the
-          // integrity precheck — a stale delete-set computed before the fence can still mis-target (v3.7
-          // §0.1 P1-B). L4 delivers the fence-first ORDERING that makes such an in-fence recompute sound; the
-          // exact-anchor resolver + full in-fence recompute land in L6/L7. Marked here as the wiring seam.
-          const inTxnIntegrity = await precheckSheetHistoryIntegrity(query, sheetId)
-          if (inTxnIntegrity.ok === false) throw new HistoryIncompleteInTxnError(inTxnIntegrity.reason)
-          const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as Record<string, unknown> | undefined
-          const baseId = typeof baseRow?.base_id === 'string' ? baseRow.base_id : null
-          const lockedRows = affectedIds.length > 0
-            ? (await query(
-                `SELECT id, version, data, created_by, locked, locked_by, created_at, updated_at
-                   FROM meta_records
-                  WHERE sheet_id = $1 AND id = ANY($2::text[])
-                  FOR UPDATE`,
-                [sheetId, affectedIds],
-              )).rows as Array<Record<string, unknown>>
-            : []
-          const rowById = new Map(lockedRows.map((r) => [String(r.id), r]))
-
-          for (const candidate of reverts) {
-            const row = rowById.get(candidate.recordId)
-            if (!row) throw new ServiceVersionConflictError(candidate.recordId, 0)
-            ensureRecordNotLocked(actorId, row, () => new ServiceValidationError(`Record is locked: ${candidate.recordId}`, 'FORBIDDEN'))
-            const serverVersion = Number(row.version ?? 1)
-            if (serverVersion !== candidate.version) throw new ServiceVersionConflictError(candidate.recordId, serverVersion)
-            const previousData = normalizeJson(row.data)
-            const patch: Record<string, unknown> = {}
-            const unsetIds: string[] = []
-            for (const change of candidate.diff) {
-              if (change.op === 'unset') unsetIds.push(change.fieldId)
-              else patch[change.fieldId] = change.value
-            }
-            const updateRes = unsetIds.length > 0
-              // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
-              // revision-emitted: PIT reset revert unset+set — recordRecordRevision below, same txn.
-              ? await query(
-                  `UPDATE meta_records
-                     SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
-                   WHERE sheet_id = $2 AND id = $3
-                   RETURNING version`,
-                  [JSON.stringify(patch), sheetId, candidate.recordId, actorId, unsetIds],
-                )
-              // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
-              // revision-emitted: PIT reset revert set-only — recordRecordRevision below, same txn.
-              : await query(
-                  `UPDATE meta_records
-                     SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
-                   WHERE sheet_id = $2 AND id = $3
-                   RETURNING version`,
-                  [JSON.stringify(patch), sheetId, candidate.recordId, actorId],
-                )
-            const nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion + 1)
-            const afterImage: Record<string, unknown> = { ...previousData, ...patch }
-            const revisionPatch: Record<string, unknown> = { ...patch }
-            for (const removedId of unsetIds) {
-              delete afterImage[removedId]
-              revisionPatch[removedId] = null
-            }
-            await recordRecordRevision(query, {
-              sheetId,
-              recordId: candidate.recordId,
-              version: nextVersion,
-              action: 'update',
-              source: 'restore',
-              actorId,
-              changedFieldIds: [...Object.keys(patch), ...unsetIds],
-              patch: revisionPatch,
-              snapshot: afterImage,
-              batchId,
-            })
-            for (const change of candidate.diff) {
-              const field = fieldById.get(change.fieldId)
-              // Mirror-read-only hardening (C2/I-1): never reset/replay the mirror side of a twoWay link
-              // (`readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). DEFENSE-IN-DEPTH: the reset-preview PREFLIGHT
-              // (RESET_BLOCKED, ~:9322) is the reachable PRIMARY guard — it refuses a mirror-diff reset before this
-              // replay runs; this skip is the second door, reached only if that preflight were ever bypassed.
-              if (field?.type !== 'link' || field.readOnly === true) continue
-              const ids = change.op === 'unset' ? [] : normalizeLinkIds(change.value)
-              const cfg = field.link
-              if (ids.length > 0 && !cfg?.foreignSheetId) {
-                throw new ServiceValidationError('Link field is missing its foreign sheet target', 'FORBIDDEN')
-              }
-              if (ids.length > 0) {
-                const exists = await query(
-                  'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-                  [cfg.foreignSheetId, ids],
-                )
-                const found = new Set((exists.rows as Array<{ id: unknown }>).map((r) => String(r.id)))
-                if (ids.some((id) => !found.has(id))) {
-                  throw new ServiceValidationError('Linked reset target is no longer valid', 'FORBIDDEN')
-                }
-              }
-              const current = await query('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2', [change.fieldId, candidate.recordId])
-              const existingIds = (current.rows as Array<{ foreign_record_id: unknown }>).map((r) => String(r.foreign_record_id))
-              const existing = new Set(existingIds)
-              const next = new Set(ids)
-              const toDelete = existingIds.filter((id) => !next.has(id))
-              const toInsert = ids.filter((id) => !existing.has(id))
-              if (toDelete.length > 0) {
-                await query(
-                  'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
-                  [change.fieldId, candidate.recordId, toDelete],
-                )
-              }
-              for (const foreignId of toInsert) {
-                await query(
-                  `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-                   VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-                  [buildId('lnk').slice(0, 50), change.fieldId, candidate.recordId, foreignId],
-                )
-              }
-              if (ids.length === 0) await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [change.fieldId, candidate.recordId])
-            }
-            // P1#2d REPLACE: build this row's payload ONCE, then same-transaction durable enqueue on the SUCCESS
-            // path (flag ON) — atomic with the row's UPDATE + revision + link replay (any later candidate's
-            // conflict throw rolls the WHOLE reset — and every enqueue — back). One enqueue per updated row,
-            // mirroring the legacy per-row post-commit emit 1:1. Flag OFF ⇒ no-op (legacy loop below fires).
-            const updatedEventPayload = withAutomationEventId({ sheetId, recordId: candidate.recordId, changes: revisionPatch, actorId })
-            updatedEventPayloads.push(updatedEventPayload)
-            await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.record.updated', updatedEventPayload)
-            updatedRows.push({ recordId: candidate.recordId, version: nextVersion, fieldIds: [...Object.keys(patch), ...unsetIds], patch: revisionPatch })
-          }
-
-          for (const candidate of deletes) {
-            const row = rowById.get(candidate.recordId)
-            if (!row) throw new ServiceVersionConflictError(candidate.recordId, 0)
-            ensureRecordNotLocked(actorId, row, () => new ServiceValidationError(`Record is locked: ${candidate.recordId}`, 'FORBIDDEN'))
-            const serverVersion = Number(row.version ?? 1)
-            if (serverVersion !== candidate.version) throw new ServiceVersionConflictError(candidate.recordId, serverVersion)
-            const createdBy = typeof row.created_by === 'string' ? row.created_by : null
-            if (!capabilities.canDeleteRecord || !ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'delete')) {
-              throw new ServiceValidationError('Record deletion is not allowed', 'FORBIDDEN')
-            }
-            const snapshot = normalizeJson(row.data)
-            // 4c-3 §7 (D-3): this inline delete wrote trash + a delete revision but never CAPTURED —
-            // it was the second resurrection surface whose inbound edges were silently lost forever.
-            // Pre-generate the revision id so the tombstones can anchor to it (same shape as
-            // record-service.deleteRecord); capture MUST run before the links DELETE below destroys
-            // the rows. Cap breach throws (TombstoneCaptureCapExceededError) → whole reset rolls
-            // back, fail-closed — never a half-captured destruction.
-            const resetDeleteRevisionId = randomUUID()
-            if (isTombstoneCaptureEnabled()) {
-              const totalToCapture = await countInboundLinkCaptureRows(query, candidate.recordId)
-              assertWithinCaptureCap(totalToCapture)
-              await insertInboundLinkTombstones(query, { sheetId, recordId: candidate.recordId, sourceRevisionId: resetDeleteRevisionId })
-            }
-            await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [candidate.recordId])
-            await recordRecordRevision(query, {
-              sheetId,
-              recordId: candidate.recordId,
-              version: serverVersion,
-              action: 'delete',
-              source: 'restore',
-              actorId,
-              changedFieldIds: [],
-              patch: {},
-              snapshot,
-              batchId,
-              id: resetDeleteRevisionId,
-            })
-            try {
-              await query(
-                `INSERT INTO meta_records_trash
-                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at, delete_revision_id)
-                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
-                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null, resetDeleteRevisionId],
-              )
-            } catch (err) {
-              if (!isUndefinedColumnError42703(err, 'delete_revision_id')) throw err
-              await query(
-                `INSERT INTO meta_records_trash
-                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
-                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
-                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
-              )
-            }
-            // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
-            // revision-emitted: PIT reset delete — recordRecordRevision(action:'delete') below, same txn.
-            await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
-            // P1#2d REPLACE: build this row's payload ONCE, then same-transaction durable enqueue on the SUCCESS
-            // path (flag ON) — atomic with the row's tombstone capture + trash + delete revision + DELETE. One
-            // enqueue per deleted record, mirroring the legacy per-record post-commit emit 1:1. Flag OFF ⇒ no-op.
-            const deletedEventPayload = withAutomationEventId({ sheetId, recordId: candidate.recordId, actorId })
-            deletedEventPayloads.push(deletedEventPayload)
-            await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.record.deleted', deletedEventPayload)
-            deletedRecordIds.push(candidate.recordId)
-          }
-        })
-      } catch (err) {
-        // W0-1 L4 P2 follow-up: `fenceWriterEntry` observed another recovery's durable writer-block
-        // (revert-execute mid-apply) and refused BEFORE any read/write in this transaction — same
-        // RECOVERY_IN_PROGRESS 409 shape as revert-execute's own claim-step refusal.
-        if (err instanceof SheetWriterBlockedError) return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-        // W0-1 C8: the in-txn integrity re-check refused — the whole reset rolled back (zero writes). Map to
-        // the same values-free 409 as the outer precheck (no denied-record oracle, no token).
-        if (err instanceof HistoryIncompleteInTxnError) return sendHistoryIncomplete(res)
-        if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
-          return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: 'Reset target changed since preview; nothing written — re-preview.' } })
-        }
-        if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError || err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
-          return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is forbidden/locked, so nothing was written.' } })
-        }
-        // 4c-3 c4 (review P3-1): a cap breach inside the reset txn rolls the WHOLE reset back
-        // (fail-closed) — map it to the same 422 the delete route uses instead of a generic 500.
-        if (err instanceof TombstoneCaptureCapExceededError) {
-          return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
-        }
-        throw err
+        const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
+        if (!access.userId || !capabilities.canManageSheetAccess) return false
+        return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
+      } catch (error) {
+        if (error instanceof RecoveryAuthorityUnavailableError) return false
+        throw error
       }
-      if (updatedRows.length > 0) {
+    }
+
+  /**
+   * REQUIRED in-fence WRITE authorization over the TRUE restorable delta (kernel `EvaluatePlanAuthorization`).
+   * Runs INSIDE the destructive transaction, after the L7 plan + restorable projection and BEFORE any
+   * value/existence validator, so a denied actor receives one uniform `forbidden` (no value/target oracle).
+   * WHOLE-refuses unless ALL hold, re-resolved FRESH from the in-fence query (never pre-fence closures):
+   *   1. canManageSheetAccess + conservative full-table read (same floor as preview);
+   *   2. per-source-row edit (reverts) / delete (reset deletes) authority against CURRENT created_by,
+   *      sheet own-write scope, and record permission scopes;
+   *   3. layer-3 writable field permission for every true changedFieldId (visible ∧ not readOnly ∧ not
+   *      always-read-only);
+   *   4. native person membership / restrict-group validity for every changed person value;
+   *   5. for every changed forward link: an unambiguous foreign sheet the actor can CURRENTLY read + edit,
+   *      and every target record readable (row-deny) + editable (created_by / record scopes).
+   */
+  const makePlanAuthorization = (req: Request, sheetId: string) =>
+    async (query: TrustCheckpointQueryFn, ctx: ExactAnchorPlanAuthContext): Promise<boolean> => {
+      // Freeze the actor plus every person id the recovery could assign BEFORE the final authority
+      // reads. DB triggers on RBAC/users/member-group relations acquire these same per-user locks, so
+      // deactivation/revoke/membership changes cannot commit until this destructive txn finishes.
+      const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+      const fieldByIdFull = new Map(fields.map((f) => [f.id, f]))
+      const authorityUserIds = new Set<string>([ctx.actorId])
+      for (const rw of ctx.revertWrites) {
+        for (const fid of rw.changedFieldIds) {
+          if (fieldByIdFull.get(fid)?.type !== 'person') continue
+          const raw = rw.patch[fid]
+          if (!Array.isArray(raw)) continue
+          for (const candidate of raw) {
+            if (typeof candidate !== 'string' && typeof candidate !== 'number') continue
+            const userId = String(candidate).trim()
+            if (userId) authorityUserIds.add(userId)
+          }
+        }
+      }
+      try {
+        await lockRecoveryAuthorityUsers(query, authorityUserIds)
+      } catch (error) {
+        if (error instanceof RecoveryAuthorityUnavailableError) return false
+        throw error
+      }
+
+      const { access, capabilities, sheetScope } = await resolveRecoverySheetAuthority(req, query, sheetId)
+      if (access.userId !== ctx.actorId) return false
+      if (!access.userId || !capabilities.canManageSheetAccess) return false
+      if (!(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) return false
+
+      // 2. Source-row authority: CURRENT created_by + record permission scopes, whole-refuse.
+      const sourceIds = [...new Set([...ctx.revertWrites.map((rw) => rw.recordId), ...ctx.deleteRecordIds])]
+      const createdByById = new Map<string, string | null>()
+      if (sourceIds.length > 0) {
+        const rows = (await query(
+          'SELECT id, created_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+          [sheetId, sourceIds],
+        )).rows as Array<{ id: unknown; created_by: unknown }>
+        for (const r of rows) createdByById.set(String(r.id), typeof r.created_by === 'string' ? r.created_by : null)
+      }
+      const recordScopeMap = sourceIds.length > 0
+        ? await loadRecordPermissionScopeMap(query, sheetId, sourceIds, access.userId)
+        : new Map<string, RecordPermissionScope>()
+      for (const rw of ctx.revertWrites) {
+        if (!createdByById.has(rw.recordId)) return false
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdByById.get(rw.recordId) ?? null, 'edit', recordScopeMap, rw.recordId)) return false
+      }
+      for (const recordId of ctx.deleteRecordIds) {
+        if (!capabilities.canDeleteRecord) return false
+        if (!createdByById.has(recordId)) return false
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdByById.get(recordId) ?? null, 'delete', recordScopeMap, recordId)) return false
+      }
+
+      // 3. Layer-3 field-write gate over the TRUE changed set.
+      const changedFieldIds = new Set(ctx.revertWrites.flatMap((rw) => rw.changedFieldIds))
+      if (changedFieldIds.size > 0) {
+        const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+        const fieldPermissions = deriveFieldPermissions(fields, capabilities, { fieldScopeMap: scopeMap })
+        for (const fid of changedFieldIds) {
+          const field = fieldByIdFull.get(fid)
+          if (!field) return false
+          if (isFieldAlwaysReadOnly(field)) return false
+          if (isFieldWriteForbidden(fieldPermissions[fid])) return false
+        }
+      }
+
+      // 4. Person membership / restrict-group validity for every changed person value.
+      const resolvePersonMemberUserIds = createPersonMemberResolver(query, sheetId)
+      for (const rw of ctx.revertWrites) {
+        for (const fid of rw.changedFieldIds) {
+          const field = fieldByIdFull.get(fid)
+          if (!field || field.type !== 'person') continue
+          const value = rw.patch[fid]
+          if (value === null || value === undefined) continue
+          try {
+            const allowed = await resolvePersonMemberUserIds(personRestrictGroupIds(field))
+            validatePersonValue(value, fid, allowed, isPersonSingleRecord(field.property))
+          } catch {
+            return false
+          }
+        }
+      }
+
+      // 5. Forward-link foreign authority (read + edit on the CURRENT foreign sheet + target records).
+      const linkTargetsByField = new Map<string, string[]>()
+      for (const rw of ctx.revertWrites) {
+        for (const lu of rw.linkUpdates) {
+          if (lu.targetIds.length === 0) continue
+          linkTargetsByField.set(lu.fieldId, [...(linkTargetsByField.get(lu.fieldId) ?? []), ...lu.targetIds])
+        }
+      }
+      if (linkTargetsByField.size > 0) {
+        // RAW property blobs — alias ambiguity must fail closed (serializeFieldRow collapses aliases).
+        const rawPropRes = await query(
+          'SELECT id, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+          [sheetId, [...linkTargetsByField.keys()]],
+        )
+        const rawPropById = new Map<string, Record<string, unknown>>()
+        for (const r of rawPropRes.rows as Array<{ id: unknown; property: unknown }>) {
+          let prop: Record<string, unknown> = {}
+          if (r.property && typeof r.property === 'object' && !Array.isArray(r.property)) {
+            prop = r.property as Record<string, unknown>
+          } else if (typeof r.property === 'string' && r.property.trim()) {
+            try {
+              const parsed = JSON.parse(r.property) as unknown
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) prop = parsed as Record<string, unknown>
+            } catch { /* malformed property JSON → empty bag → fail closed below */ }
+          }
+          rawPropById.set(String(r.id), prop)
+        }
+        const targetsByForeignSheet = new Map<string, Set<string>>()
+        for (const [fieldId, rawTargets] of linkTargetsByField) {
+          const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(fieldId))
+          if (!foreignSheetId) return false
+          const targets = targetsByForeignSheet.get(foreignSheetId) ?? new Set<string>()
+          for (const id of rawTargets) targets.add(id)
+          targetsByForeignSheet.set(foreignSheetId, targets)
+        }
+
+        for (const foreignSheetId of [...targetsByForeignSheet.keys()].sort()) {
+          const targetIds = [...(targetsByForeignSheet.get(foreignSheetId) ?? [])].sort()
+          // Establish foreign-sheet authority before any target-row lookup, preserving the no-oracle
+          // order for an actor who can manage the source sheet but cannot inspect the foreign sheet.
+          const resolved = await resolveRecoverySheetAuthority(req, query, foreignSheetId)
+          if (!resolved.access.userId || !resolved.capabilities.canRead || !resolved.capabilities.canEditRecord) {
+            return false
+          }
+          // Lock target rows BEFORE reading data-dependent row denial or created_by authority. FOR UPDATE
+          // (not KEY SHARE) blocks both delete and ordinary data updates through COMMIT; all targets for a
+          // sheet are acquired in one deterministic statement to avoid per-field lock-order drift.
+          const targetRows = (await query(
+            `SELECT id, created_by FROM meta_records
+              WHERE sheet_id = $1 AND id = ANY($2::text[])
+              ORDER BY id
+              FOR UPDATE`,
+            [foreignSheetId, targetIds],
+          )).rows as Array<{ id: unknown; created_by: unknown }>
+          const foreignCreatedBy = new Map(targetRows.map((r) => [String(r.id), typeof r.created_by === 'string' ? r.created_by : null]))
+          // A missing target cannot be authority-proven — uniform forbidden HERE keeps the later
+          // link-integrity validator from becoming an existence oracle for unauthorized actors.
+          if (foreignCreatedBy.size !== targetIds.length) return false
+          if (!resolved.access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
+            const denied = await loadDeniedRecordIds(query, foreignSheetId, resolved.access.userId)
+            if (targetIds.some((id) => denied.has(id))) return false
+          }
+          const foreignScopeMap = await loadRecordPermissionScopeMap(query, foreignSheetId, targetIds, resolved.access.userId)
+          for (const id of targetIds) {
+            if (!ensureRecordWriteAllowed(resolved.capabilities, resolved.sheetScope, resolved.access, foreignCreatedBy.get(id) ?? null, 'edit', foreignScopeMap, id)) return false
+          }
+        }
+      }
+      return true
+    }
+
+  /** Trust pair (fence + CONTIGUITY_STRICT), env-only + values-free: 409 RECOVERY_TRUST_REQUIRED. */
+  const requireRecoveryTrust = (res: Response): boolean => {
+    if (checkExactAnchorRecoveryTrust().ok) return true
+    const m = mapRecoveryTrustRefusal()
+    res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+    return false
+  }
+
+  const bestEffortYjsInvalidate = async (recordIds: string[]) => {
+    if (!yjsInvalidator || recordIds.length === 0) return
+    try {
+      await yjsInvalidator(recordIds)
+    } catch (err) {
+      console.warn('[univer-meta] yjs invalidation after recovery failed (non-fatal):', err)
+    }
+  }
+
+  /** Best-effort burn retention sweep after a successful recovery — never fails the HTTP response. */
+  const bestEffortPruneRecoveryBurns = async (pool: ReturnType<typeof poolManager.get>) => {
+    try {
+      await pruneExpiredRecoveryTokenBurns(pool.query.bind(pool) as unknown as TrustCheckpointQueryFn)
+    } catch (err) {
+      console.warn('[univer-meta] recovery token burn prune failed (non-fatal):', err)
+    }
+  }
+
+  const parseAnchorBody = (req: Request): ExactAnchorBody => {
+    const b = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>
+    return {
+      ...(Object.prototype.hasOwnProperty.call(b, 'historyBatchId') ? { historyBatchId: b.historyBatchId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'anchorOperationId') ? { anchorOperationId: b.anchorOperationId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'asOf') ? { asOf: b.asOf } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'previewIdentity') ? { previewIdentity: b.previewIdentity } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'confirm') ? { confirm: b.confirm } : {}),
+    }
+  }
+
+  /** One APPLIED revert's post-commit facts (route-memory only — patch NEVER serializes into HTTP). */
+  type AppliedRevertFact = { recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown>; revisionId: string }
+
+  /**
+   * Post-commit recovery side effects (best-effort, non-fatal — a committed recovery must never turn into
+   * an HTTP 500 here): RecordWriteService-parity formula/related recompute over the recovered source rows
+   * (derived values are NOT restored history — they are recomputed AFTER the source commit), then
+   * source-sheet true-delta realtime (+ recomputed formula keys; the shared publisher strips patch values
+   * before broadcast), subscriber notifications, and related-sheet PURE-INVALIDATION fan-out (fieldIds +
+   * recordIds only, no recordPatches). Returns the Yjs record-id set to invalidate.
+   */
+  const runRecoveryPostCommitSideEffects = async (
+    req: Request,
+    pool: ReturnType<typeof poolManager.get>,
+    sheetId: string,
+    actorId: string,
+    appliedReverts: AppliedRevertFact[],
+    linkInvalidations: ExactAnchorLinkInvalidation[],
+  ): Promise<{ yjsRecordIds: string[] }> => {
+    const formulaByRecord = new Map<string, Record<string, unknown>>()
+    let relatedRecords: RelatedComputedRecord[] = []
+    try {
+      const helpers = createRecordWriteHelpers(req, pool)
+      const query = pool.query.bind(pool) as QueryFn
+      const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+      const recordIds = appliedReverts.map((r) => r.recordId)
+      const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
+      if (changedFieldIds.length > 0 && recordIds.length > 0) {
+        // RWS Step 4 parity: hydrate the recovered source rows BEFORE formula recompute so a
+        // formula-over-lookup sees the real lookup value (load rows → link values → applyLookupRollup →
+        // snapshot hydrated data → related recompute → recalculateFormulaFields(hydrated)).
+        const recordRes = await query(
+          'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+          [sheetId, recordIds],
+        )
+        const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
+          id: String(row.id),
+          version: Number(row.version ?? 0),
+          data: normalizeJson(row.data),
+        })) as UniverMetaRecord[]
+
+        let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
+        if (rows.length > 0) {
+          const relationalLinkFields = fields
+            .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+            .filter((v): v is { fieldId: string; cfg: NonNullable<ReturnType<typeof parseLinkFieldConfig>> } => !!v && !!v.cfg)
+          const linkValuesByRecord = await helpers.loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
+          await helpers.applyLookupRollup(query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+          hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
+        }
+
+        relatedRecords = await helpers.computeDependentLookupRollupRecords(query, sheetId, recordIds, changedFieldIds)
+
+        const formulaRecords = await helpers.recalculateFormulaFields(query, sheetId, fields, recordIds, changedFieldIds, hydratedDataByRecord)
+        for (const fr of formulaRecords) formulaByRecord.set(fr.recordId, fr.data)
+      }
+    } catch (err) {
+      console.warn('[univer-meta] recovery post-commit formula/related recompute failed (non-fatal):', err)
+    }
+
+    // Source-sheet realtime: true-delta patches + recomputed formula keys. The shared publisher strips
+    // recordPatches before broadcast — receivers refetch under their own mask (RWS parity).
+    if (appliedReverts.length > 0) {
+      try {
+        const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
         publishMultitableSheetRealtime({
           spreadsheetId: sheetId,
           actorId,
           source: 'multitable',
           kind: 'record-updated',
-          recordIds: updatedRows.map((r) => r.recordId),
-          fieldIds: [...new Set(updatedRows.flatMap((r) => r.fieldIds))],
-          recordPatches: updatedRows.map((r) => ({ recordId: r.recordId, version: r.version, patch: r.patch })),
+          recordIds: appliedReverts.map((r) => r.recordId),
+          fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
+          recordPatches: appliedReverts.map((r) => ({
+            recordId: r.recordId,
+            version: r.version,
+            patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
+          })),
         })
-        // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emits (the SAME prebuilt per-row payload objects —
-        // byte-identical fields: recordId/changes are the very candidate.recordId/revisionPatch the legacy
-        // literal read back off updatedRows); flag ON ⇒ SUPPRESSED (the same-txn enqueues are the delivery path).
-        for (const updatedLegacyPayload of updatedEventPayloads) {
-          emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', updatedLegacyPayload)
-        }
+      } catch (err) {
+        console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
       }
-      if (deletedRecordIds.length > 0) {
+    }
+
+    for (const r of appliedReverts) {
+      await notifyRecordSubscribersBestEffort(
+        pool.query.bind(pool) as QueryFn,
+        { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
+        'exact-anchor-recovery',
+      )
+    }
+
+    // Related-sheet fan-out is PURE INVALIDATION (no recordPatches / no snapshots — RWS FOL-1 parity).
+    const affectedRelatedBySheet = new Map<string, { recordIds: string[]; fieldIds: Set<string> }>()
+    for (const record of relatedRecords) {
+      if (!Array.isArray(record.affectedFieldIds) || record.affectedFieldIds.length === 0) continue
+      let group = affectedRelatedBySheet.get(record.sheetId)
+      if (!group) {
+        group = { recordIds: [], fieldIds: new Set<string>() }
+        affectedRelatedBySheet.set(record.sheetId, group)
+      }
+      group.recordIds.push(record.recordId)
+      for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
+    }
+    // Link-table invalidations are collected from the authoritative edge mutation INSIDE the recovery
+    // transaction. They cover two-way mirror targets changed by a forward-link revert and surviving
+    // source records whose inbound edge to a Reset-deleted target disappeared. IDs only; receivers refetch
+    // under their own masks, matching RecordWriteService's mirror/FOL invalidation contract.
+    for (const invalidation of linkInvalidations) {
+      let group = affectedRelatedBySheet.get(invalidation.sheetId)
+      if (!group) {
+        group = { recordIds: [], fieldIds: new Set<string>() }
+        affectedRelatedBySheet.set(invalidation.sheetId, group)
+      }
+      const seen = new Set(group.recordIds)
+      for (const recordId of invalidation.recordIds) {
+        if (seen.has(recordId)) continue
+        seen.add(recordId)
+        group.recordIds.push(recordId)
+      }
+      for (const fieldId of invalidation.fieldIds) group.fieldIds.add(fieldId)
+    }
+    try {
+      for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
         publishMultitableSheetRealtime({
-          spreadsheetId: sheetId,
-          actorId,
+          spreadsheetId: relatedSheetId,
+          ...(relatedSheetId === sheetId ? { actorId } : {}),
           source: 'multitable',
-          kind: 'record-deleted',
-          recordIds: deletedRecordIds,
+          kind: 'record-updated',
+          recordIds: group.recordIds,
+          fieldIds: [...group.fieldIds],
         })
-        // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emits (same prebuilt objects); flag ON ⇒ SUPPRESSED.
-        for (const deletedLegacyPayload of deletedEventPayloads) {
-          emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', deletedLegacyPayload)
-        }
       }
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'reset', revertedCount: updatedRows.length, deletedCount: deletedRecordIds.length, deletedRecordIds } })
+    } catch (err) {
+      console.warn('[univer-meta] recovery related-sheet invalidation publish failed (non-fatal):', err)
+    }
+
+    const yjsRecordIds = [
+      ...appliedReverts.map((r) => r.recordId),
+      ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
+    ]
+    return { yjsRecordIds: [...new Set(yjsRecordIds)] }
+  }
+
+  /**
+   * Shared PREVIEW handler for both modes. No-oracle ordering: parse shape (no DB) → 401/403 admin floor →
+   * existence-hidden 403 for non-admin unknown sheets → conservative full-read 403 → system-admin-only 404 →
+   * trust 409 → live-count ceiling 413 → L6/L7 preview. The response is
+   * VALUES-FREE (record/field ids + counts only; never targetData/live snapshots), and `previewIdentity`
+   * is present ONLY when the plan is executable — resurrection-bearing, schema-drifted, and no-op plans
+   * never receive a destructive token.
+   */
+  const handleExactAnchorPreview = async (req: Request, res: Response, mode: 'revert' | 'reset') => {
+    if (mode === 'reset') {
+      if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+      if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
+    }
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    const parsed = parseRecoveryAnchorRequest(parseAnchorBody(req))
+    if (parsed.ok === false) {
+      const m = mapParseRefusal(parsed.reason)
+      return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-admin floor, above plain record-write
+      const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
+      // A non-system-admin who can manage some sheets must not use 404 vs 403 to probe whether another sheet
+      // exists. Only a system admin may receive an explicit missing-sheet result; everyone else gets the same
+      // values-free 403 as an existing sheet they cannot read in full.
+      if (exists.rows.length === 0) {
+        if (!access.isAdminRole) return sendForbidden(res)
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      // Conservative full-table read before anchor/history/size adjudication — an actor without it sees 403
+      // before any recovery-state oracle.
+      if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
+        return sendForbidden(res)
+      }
+      if (!requireRecoveryTrust(res)) return
+      // Primary live-sheet ceiling (D3/PIT-6) AFTER full-read — no size oracle for denied actors.
+      const ceiling = await enforceSheetRecoverySizeCeiling(pool.query.bind(pool) as QueryFn, sheetId, SHEET_REVERT_MAX_RECORDS)
+      if (ceiling.ok === false) {
+        const m = mapSizeCeilingFailure(ceiling, mode)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+
+      const preview = await previewExactAnchorRecovery(pool.query.bind(pool) as QueryFn, {
+        sheetId,
+        request: parsed.request,
+        actorId: access.userId,
+        mode,
+        evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),
+        evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
+      })
+      if (preview.ok === false) {
+        const m = httpForPreviewFailure(preview, mode)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+      const { summary } = preview
+      return res.json({
+        ok: true,
+        data: {
+          strategy: mode,
+          anchorOperationId: preview.anchor.anchorOperationId,
+          anchorSeq: preview.anchor.anchorSeq,
+          checkpointId: preview.anchor.checkpointId,
+          ...(parsed.request.kind === 'history-batch' ? { historyBatchId: parsed.request.historyBatchId } : {}),
+          summary: {
+            visibleRevertCount: summary.reverts.length,
+            // Canonical W2 wire fields consumed by the reset/revert UI.
+            resurrectCount: summary.resurrectIds.length,
+            driftCount: summary.driftCount,
+            effectiveWriteCount: summary.effectiveWriteCount,
+            deleteCount: summary.deleteIds.length,
+            // Compatibility aliases for older clients; values are derived from the same plan.
+            visibleUndeleteCount: summary.resurrectIds.length,
+            keptCreatedAfterTCount: summary.keptCreatedAfterAnchorCount,
+            conflictCount: summary.driftCount,
+          },
+          records: summary.reverts,
+          undeleteRecordIds: summary.resurrectIds,
+          deleteRecordIds: summary.deleteIds,
+          // Exact-anchor undelete is categorically fail-closed (INBOUND_UNPROVABLE) — never promised.
+          undeleteSupported: false,
+          ...(summary.resurrectIds.length > 0
+            ? { undeleteBlockedReason: PIT_UNDELETE_ENABLED() ? 'INBOUND_UNPROVABLE' : 'UNDELETE_DISABLED' }
+            : {}),
+          previewIdentity: preview.previewIdentity,
+          executable: preview.executable,
+        },
+      })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] reset-execute failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute reset' } })
+      console.error(`[univer-meta] ${mode}-preview failed:`, err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: `Failed to compute ${mode} preview` } })
     }
-  })
+  }
+
+  /**
+   * Shared EXECUTE handler. TOKEN-ONLY authority: the body carries `previewIdentity` (+ typed
+   * `confirm:'reset'` for reset); mode comes from the VERIFIED token and a wrong-mode token refuses
+   * BEFORE any transaction/write. The kernel re-adjudicates everything in-fence (full-read + plan
+   * authorization + drift/schema/value/link/lock) and the apply is all-or-nothing: any refusal maps to a
+   * typed envelope with ZERO writes (burn included). Post-commit side effects are best-effort — they can
+   * never turn a committed recovery into a 500.
+   */
+  const handleExactAnchorExecute = async (req: Request, res: Response, mode: 'revert' | 'reset') => {
+    if (mode === 'revert') {
+      if (!SHEET_REVERT_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Sheet revert is disabled (MULTITABLE_ENABLE_SHEET_REVERT is off).' } })
+    } else {
+      if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+      if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
+    }
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const body = parseAnchorBody(req)
+    const previewIdentity = typeof body.previewIdentity === 'string' ? body.previewIdentity : ''
+    const confirm = typeof body.confirm === 'string' ? body.confirm : ''
+    if (!sheetId || !previewIdentity) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: mode === 'reset' ? 'sheetId, previewIdentity and confirm:"reset" are required' : 'sheetId and previewIdentity are required' } })
+    }
+    // No free wall-clock authority survives on ANY destructive surface: a nonblank asOf refuses even at
+    // execute (the token is the only authority; a wall-clock echo is never silently ignored).
+    if (Object.prototype.hasOwnProperty.call(body, 'asOf') && typeof body.asOf !== 'string') {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a string when present.' } })
+    }
+    if (typeof body.asOf === 'string' && body.asOf.trim()) {
+      const m = mapParseRefusal('exact-anchor-required')
+      return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+    }
+    // Execute is token-only. Never silently ignore a second authority or a caller-supplied mode: the
+    // verified token owns both anchor and mode. Rejecting the shape also makes stale clients re-preview
+    // instead of accidentally succeeding under a different contract.
+    const rawBody = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>
+    if (
+      Object.prototype.hasOwnProperty.call(rawBody, 'historyBatchId') ||
+      Object.prototype.hasOwnProperty.call(rawBody, 'anchorOperationId') ||
+      Object.prototype.hasOwnProperty.call(rawBody, 'mode')
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Execute accepts previewIdentity only; anchor and mode are bound by the verified preview token.',
+        },
+      })
+    }
+    // D4: Reset keeps the typed two-step confirm — a stray Revert-shaped call cannot trigger a Reset.
+    if (mode === 'reset' && confirm.trim() !== 'reset') {
+      return res.status(400).json({ ok: false, error: { code: 'RESET_CONFIRM_REQUIRED', message: 'Type "reset" to confirm this operation.' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2
+      const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
+      // Match preview's existence-hiding contract before token verification. A non-system-admin must not
+      // distinguish an unknown sheet from an existing sheet they cannot read in full by observing 409 vs 403.
+      if (exists.rows.length === 0) {
+        if (!access.isAdminRole) return sendForbidden(res)
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      // Fresh conservative full-read BEFORE token/anchor adjudication — no oracle for denied actors.
+      if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
+        return sendForbidden(res)
+      }
+
+      // TOKEN-ONLY authority (P1-1): verify + MODE-ISOLATE before any transaction or write.
+      const verified = verifyExactAnchorRecoveryIdentity(previewIdentity, { sheetId, actorId: access.userId })
+      if (!verified.valid || !verified.claims) {
+        const status = verified.reason === 'expired' ? 410 : 409
+        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `${mode === 'reset' ? 'Reset' : 'Revert'} preview identity rejected; the sheet changed since preview — re-preview` } })
+      }
+      if (verified.claims.mode !== mode) {
+        return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Preview identity was minted for a different recovery mode; re-preview as ${mode}.` } })
+      }
+
+      if (!requireRecoveryTrust(res)) return
+      const ceiling = await enforceSheetRecoverySizeCeiling(pool.query.bind(pool) as QueryFn, sheetId, SHEET_REVERT_MAX_RECORDS)
+      if (ceiling.ok === false) {
+        const m = mapSizeCeilingFailure(ceiling, mode)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+
+      const actorId = access.userId
+      // Same-transaction mutation facts + stable event payloads (P1#2d): built ONCE inside the txn hook,
+      // durable-enqueued atomically with each mutation's writes, and REUSED verbatim for the post-commit
+      // legacy emit. A refusal rolls everything back — the collected arrays are then simply discarded.
+      const appliedReverts: AppliedRevertFact[] = []
+      const appliedDeleteIds: string[] = []
+      const appliedLinkInvalidations: ExactAnchorLinkInvalidation[] = []
+      const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+      const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+      const result = await executeExactAnchorRecoveryApply(
+        (fn) => pool.transaction(async ({ query }) => fn(query as unknown as TrustCheckpointQueryFn)),
+        {
+          token: previewIdentity,
+          sheetId,
+          actorId,
+          evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),
+          evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
+          onMutationApplied: async (query, mutation: ExactAnchorAppliedMutation) => {
+            appliedLinkInvalidations.push(...mutation.linkInvalidations)
+            const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
+              const r = await query(sql, params)
+              return { rows: r.rows as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+            })
+            if (mutation.kind === 'revert') {
+              const payload = withAutomationEventId({ sheetId, recordId: mutation.recordId, changes: mutation.patch, actorId })
+              updatedEventPayloads.push(payload)
+              appliedReverts.push({
+                recordId: mutation.recordId,
+                version: mutation.version,
+                fieldIds: mutation.changedFieldIds,
+                patch: mutation.patch,
+                revisionId: mutation.revisionId,
+              })
+              await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.updated', payload)
+            } else {
+              const payload = withAutomationEventId({ sheetId, recordId: mutation.recordId, actorId })
+              deletedEventPayloads.push(payload)
+              appliedDeleteIds.push(mutation.recordId)
+              await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.deleted', payload)
+            }
+          },
+        },
+      )
+      if (result.ok === false) {
+        const m = mapApplyRefusal(result.reason)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+
+      // Post-commit: recompute/realtime/subscribers/Yjs/legacy-emit are best-effort — NEVER a 500 after commit.
+      try {
+        const side = await runRecoveryPostCommitSideEffects(
+          req,
+          pool,
+          sheetId,
+          actorId,
+          appliedReverts,
+          appliedLinkInvalidations,
+        )
+        // Flag OFF ⇒ legacy post-commit emits (the SAME prebuilt payload objects the durable enqueue used);
+        // flag ON ⇒ suppressed (the same-txn enqueues above are the delivery path).
+        for (const p of updatedEventPayloads) emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', p)
+        if (appliedDeleteIds.length > 0) {
+          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId, source: 'multitable', kind: 'record-deleted', recordIds: appliedDeleteIds })
+          for (const p of deletedEventPayloads) emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', p)
+        }
+        await bestEffortYjsInvalidate([...new Set([...side.yjsRecordIds, ...appliedDeleteIds])])
+        void bestEffortPruneRecoveryBurns(pool)
+      } catch (sideErr) {
+        console.warn('[univer-meta] exact-anchor recovery post-commit side effects failed (non-fatal):', sideErr)
+      }
+
+      // Counts/ids only — no recovered values, no patches (values-free result contract).
+      return res.json({
+        ok: true,
+        data: {
+          strategy: mode,
+          mode: result.mode,
+          anchorSeq: result.anchorSeq,
+          checkpointId: result.checkpointId,
+          anchorOperationId: verified.claims.anchorOperationId,
+          revertedCount: result.applied.reverts,
+          resurrectedCount: result.applied.resurrects,
+          keptCreatedAfterAnchor: result.keptCreatedAfterAnchor,
+          records: appliedReverts.map((r) => ({ recordId: r.recordId, status: 'reverted' as const, fieldIds: r.fieldIds, revisionId: r.revisionId })),
+          ...(mode === 'reset' ? { deletedCount: result.applied.deletes, deletedRecordIds: appliedDeleteIds } : {}),
+        },
+      })
+    } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+      }
+      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error(`[univer-meta] ${mode}-execute failed:`, err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: `Failed to execute ${mode}` } })
+    }
+  }
+
+  router.post('/sheets/:sheetId/revert-preview', (req: Request, res: Response) => handleExactAnchorPreview(req, res, 'revert'))
+  router.post('/sheets/:sheetId/revert-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'revert'))
+  router.post('/sheets/:sheetId/reset-preview', (req: Request, res: Response) => handleExactAnchorPreview(req, res, 'reset'))
+  router.post('/sheets/:sheetId/reset-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'reset'))
 
   router.get('/sheets/:sheetId/records/:recordId/subscriptions', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -11212,13 +11093,19 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      await pool.query(
-        `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (record_id, subject_type, subject_id)
-         DO UPDATE SET access_level = EXCLUDED.access_level`,
-        [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
-      )
+      await pool.transaction(async ({ query }) => {
+        // Exact-anchor recovery holds this authority row through COMMIT. Serialize every record-level
+        // grant/revoke with that final adjudication so a permission change cannot land after the in-fence
+        // authorization check but before the destructive write commits.
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        await query(
+          `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (record_id, subject_type, subject_id)
+           DO UPDATE SET access_level = EXCLUDED.access_level`,
+          [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
+        )
+      })
 
       return res.json({
         ok: true,
@@ -11249,10 +11136,13 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
 
-      const result = await pool.query(
-        'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
-        [permissionId, sheetId, recordId],
-      )
+      const result = await pool.transaction(async ({ query }) => {
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        return query(
+          'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
+          [permissionId, sheetId, recordId],
+        )
+      })
       if ((result.rowCount ?? 0) === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
       }
@@ -11329,6 +11219,10 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        // Exact-anchor recovery binds its plan to the complete field schema. Join the canonical
+        // sheet fence before reading or changing that schema so a create cannot commit between
+        // the recovery transaction's schema hash and its final writes. Flag-off remains a no-op.
+        await fenceWriterEntry(query, sheetId)
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the new field + any shifted fields share it
         const { type, property } = await normalizeFieldWriteInput(
           query as unknown as QueryFn,
@@ -11664,6 +11558,9 @@ export function univerMetaRouter(): Router {
       // response counts are internally consistent (no re-query drift between the two).
       let bulkRecomputeRecordIds: string[] | null = null
       const updated = await pool.transaction(async ({ query }) => {
+        // Fence before re-reading the field: recovery hashes and applies against one schema
+        // generation, while field retype/property/order writes serialize outside that window.
+        await fenceWriterEntry(query, preflightSheetId)
         const existing = await query(
           'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
           [fieldId],
@@ -12946,7 +12843,7 @@ export function univerMetaRouter(): Router {
       // ON DELETE CASCADE so their OUTBOUND edges go — but foreign_record_id has NO FK, so INBOUND edges from
       // OTHER sheets pointing to these records would DANGLE. Clean those inbound edges FIRST, in the SAME
       // transaction, before the records vanish (else the subquery can't find them) — atomic delete-edges+sheet.
-      const del = await pool.transaction(async ({ query }) => {
+      await pool.transaction(async ({ query }) => {
         await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
         return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       })
@@ -14467,7 +14364,6 @@ export function univerMetaRouter(): Router {
 
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
       const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
-      const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
       const fieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, effectiveAccess.userId) : new Map()
       const viewScopeMap = (effectiveAccess.userId && resolved.view) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [resolved.view.id], effectiveAccess.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, {
@@ -14478,7 +14374,7 @@ export function univerMetaRouter(): Router {
       // D1 (#2106): the record-value echo must honor layer-3 (field_permissions), not just layer-1∧2 — the
       // same composite /view + /records enforce (#2028). visibleFields already applied layer-1 (view.hidden) ∧
       // layer-2 (property.hidden); fieldPermissions[].visible adds layer-3. For an ANONYMOUS public-form caller
-      // effectiveAccess.userId='' → fieldScopeMap is empty → this equals visibleFieldIds (the public path is
+      // effectiveAccess.userId='' → fieldScopeMap is empty → this equals the layer-1/2 visible set (the public path is
       // unchanged; anonymous has no subject to scope to).
       let readableFieldIds = new Set(visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id))
       // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): in edit-mode
@@ -14998,10 +14894,10 @@ export function univerMetaRouter(): Router {
         // site A6): this INSERT previously created a brand-new meta_records row with NO revision —
         // reconstructRecordsAtT derives record EXISTENCE purely from meta_record_revisions, so this
         // record was invisible to it at every T, including "now". Worse than incomplete history: a
-        // Reset-to-T run at any T after this create could not tell "created after T" from "created
-        // before T but never captured", so `computeSheetReset` pushed it into the unconditional
-        // delete-set and Reset would DESTROY a record that legitimately existed at T (§0.5's corrected
-        // CREATE risk). snapshot=patch is the full row — a create's `data` IS the submitted+allocated
+        // destructive recovery could not tell "created after the anchor" from "created before the anchor
+        // but never captured". The exact-anchor trust precheck now refuses that incomplete chain before
+        // planning; this revision supplies the positive history needed for a trustworthy decision (§0.5's
+        // corrected CREATE risk). snapshot=patch is the full row — a create's `data` IS the submitted+allocated
         // patch (link ids already folded in via `patch[fieldId]=ids` above, same as the auto-number
         // values just assigned). source='public-form' per OD-2 — unlike the EDIT branch, THIS branch is
         // genuinely reachable by an anonymous public submitter, so the surface name is exactly accurate
@@ -15041,11 +14937,10 @@ export function univerMetaRouter(): Router {
         data: normalizeJson(row.data),
       }
       const visibleFormFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
-      const visibleFormFieldIds = new Set(visibleFormFields.map((field) => field.id))
       // D1 (#2106): gate the write echo by layer-2 ∧ layer-3 (the #2028 composite), not just layer-1∧2. This
       // covers a denied field the submitter never sent — a server-assigned / recalculated formula value. The
       // submit handler loads no fieldScopeMap today; add one. ANONYMOUS (effectiveAccess.userId='') → empty
-      // scope map → readableEchoFieldIds equals visibleFormFieldIds, so the public-form echo is unchanged.
+      // scope map → readableEchoFieldIds equals the layer-1/2 visible set, so the public-form echo is unchanged.
       const echoFieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), view.sheetId, effectiveAccess.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, { hiddenFieldIds: view.hiddenFieldIds ?? [], fieldScopeMap: echoFieldScopeMap })
       // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds) — C1: in
@@ -15192,6 +15087,18 @@ export function univerMetaRouter(): Router {
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      if (isLiveLinkTargetForeignKeyViolation(err)) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'LINK_INTEGRITY', message: 'A linked record was deleted concurrently; retry the form submission.' },
+        })
+      }
+      if (isRetryableLiveLinkDatabaseConflict(err)) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'LINK_CONFLICT', message: 'Linked records changed concurrently; retry the form submission.' },
+        })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

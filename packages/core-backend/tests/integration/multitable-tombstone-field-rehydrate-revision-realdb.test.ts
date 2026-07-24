@@ -36,6 +36,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
+import {
+  prepareExactAnchorHistoryFixture,
+  pruneSealedHistoryOperations,
+  type ExactAnchorHistoryFixture,
+} from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -43,6 +48,8 @@ const BASE = `base_tfrr_${TS}`
 const UNDELETE_FLAG = 'MULTITABLE_ENABLE_CONFIG_UNDELETE'
 const CAPTURE_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED'
 const REVERT_FLAG = 'MULTITABLE_ENABLE_SHEET_REVERT'
+const FENCE_FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
+const STRICT_FLAG = 'MULTITABLE_HISTORY_CONTIGUITY_STRICT'
 
 type Actor = { id: string; roles: string[]; perms: string[] }
 // 'multitable:share' is what `canManageSheetAccess` actually keys on (sheet-capabilities.ts) — needed for
@@ -86,7 +93,14 @@ async function seedCreateRevision(sheetId: string, recordId: string, data: Recor
 const deleteField = (fieldId: string) => request(app).delete(`/api/multitable/fields/${fieldId}`)
 const preview = (sheetId: string, revisionId: string, as: Actor = MANAGER) => { actor = as; return request(app).post(`/api/multitable/sheets/${sheetId}/config-restore-preview`).send({ revisionId }) }
 const execute = (sheetId: string, body: Record<string, unknown>, as: Actor = MANAGER) => { actor = as; return request(app).post(`/api/multitable/sheets/${sheetId}/config-restore-execute`).send(body) }
-const revertPreview = (sheetId: string, asOf: string, as: Actor = MANAGER) => { actor = as; return request(app).post(`/api/multitable/sheets/${sheetId}/revert-preview`).send({ asOf }) }
+const revertPreview = (sheetId: string, anchorOperationId: string, as: Actor = MANAGER) => {
+  actor = as
+  return request(app).post(`/api/multitable/sheets/${sheetId}/revert-preview`).send({ anchorOperationId })
+}
+const revertPreviewByBatch = (sheetId: string, historyBatchId: string, as: Actor = MANAGER) => {
+  actor = as
+  return request(app).post(`/api/multitable/sheets/${sheetId}/revert-preview`).send({ historyBatchId })
+}
 
 async function lastFieldDeleteRevisionId(sheetId: string, fieldId: string): Promise<string> {
   const r = await q(
@@ -100,9 +114,9 @@ async function recordRow(recordId: string): Promise<{ version: number; data: Rec
   const r = await q('SELECT version, data FROM meta_records WHERE id = $1', [recordId])
   return r.rows[0] as { version: number; data: Record<string, unknown> } | undefined
 }
-type RevisionRow = { version: number; action: string; source: string; actor_id: string | null; changed_field_ids: string[]; patch: Record<string, unknown>; snapshot: Record<string, unknown> | null; batch_id: string | null }
+type RevisionRow = { version: number; action: string; source: string; actor_id: string | null; changed_field_ids: string[]; patch: Record<string, unknown>; snapshot: Record<string, unknown> | null; batch_id: string | null; operation_id: string | null; seq: string }
 async function revisionsFor(recordId: string): Promise<RevisionRow[]> {
-  const r = await q('SELECT version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id FROM meta_record_revisions WHERE record_id = $1 ORDER BY version', [recordId])
+  const r = await q('SELECT version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id, operation_id::text, seq::text FROM meta_record_revisions WHERE record_id = $1 ORDER BY version', [recordId])
   return r.rows as RevisionRow[]
 }
 /** meta_fields uses HARD delete (no `deleted_at` column) — "still deleted" for a field means "still absent". */
@@ -127,13 +141,21 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     app.use((req, _res, next) => { ;(req as { user?: Actor }).user = actor; next() })
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'TFRR Base'])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [MANAGER.id, JSON.stringify(MANAGER.perms)],
+    )
   })
 
   afterAll(async () => {
     for (const s of CREATED_SHEETS) {
+      await pruneSealedHistoryOperations(s).catch(() => {})
       await q('DELETE FROM meta_field_value_tombstones WHERE sheet_id = $1', [s]).catch(() => {})
       await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [s]).catch(() => {})
       await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [s]).catch(() => {})
+      await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [s]).catch(() => {})
+      await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [s]).catch(() => {})
+      await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [s]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [s]).catch(() => {})
       await q('DELETE FROM meta_record_version_markers WHERE sheet_id = $1', [s]).catch(() => {})
       await q('DELETE FROM meta_records WHERE sheet_id = $1', [s]).catch(() => {})
@@ -141,36 +163,49 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
       await q('DELETE FROM meta_sheets WHERE id = $1', [s]).catch(() => {})
     }
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [MANAGER.id]).catch(() => {})
   })
 
   beforeEach(() => {
     process.env[CAPTURE_FLAG] = 'true'
     process.env[UNDELETE_FLAG] = 'true'
     process.env[REVERT_FLAG] = 'true' // revert-preview itself is ungated, but set for parity/§ interplay clarity
+    // Trust pair required for exact-anchor recovery preview; also seals rehydration revisions as anchors.
+    process.env[FENCE_FLAG] = 'true'
+    process.env[STRICT_FLAG] = 'true'
   })
   afterEach(() => {
     delete process.env[UNDELETE_FLAG]
     delete process.env[CAPTURE_FLAG]
     delete process.env[REVERT_FLAG]
+    delete process.env[FENCE_FLAG]
+    delete process.env[STRICT_FLAG]
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
   test('happy path: two rehydrated records each get version+1 and a revision AT THE NEW version (full snapshot, shared batch), reconstructRecordsAtT sees the before/after boundary, and revert-preview (W0-1 contiguity + content-projection) 200s — the positive control', async () => {
     const s = await freshSheet('happy')
+    const fixture: ExactAnchorHistoryFixture = await prepareExactAnchorHistoryFixture(s)
     const F = mkFieldId('happy')
     await insertField(s, F, 'HappyVal', 'string', 1)
 
     const R1 = mkRecordId('happy1')
     const R2 = mkRecordId('happy2')
-    const T0 = new Date(Date.now() - 60_000).toISOString()
+    const T0 = '2026-01-01T00:00:00.000Z'
+    const T2 = '2026-01-03T00:00:00.000Z'
     // Live rows start WITH F (so field-delete's capture actually tombstones a value for each).
     await insertRecord(s, R1, { [F]: 'original-1', other: 'x1' })
     await insertRecord(s, R2, { [F]: 'original-2', other: 'x2' })
     // Each record's OWN pre-rehydration revision-timeline baseline is WITHOUT F (see helper docstring).
-    await seedCreateRevision(s, R1, { other: 'x1' }, T0)
-    await seedCreateRevision(s, R2, { other: 'x2' }, T0)
-    const tBeforeRehydrate = new Date(Date.parse(T0) + 30_000).toISOString() // 30s after T0, well before "now"
+    // R1 create is the sealed exact anchor; R2 create is causally before it.
+    await fixture.insertRevision({
+      recordId: R1, version: 1, action: 'create', snapshot: { other: 'x1' }, createdAt: T0, phase: 'anchor',
+    })
+    await fixture.insertRevision({
+      recordId: R2, version: 1, action: 'create', snapshot: { other: 'x2' }, createdAt: T0, phase: 'before',
+    })
+    const tBeforeRehydrate = T2 // wall-clock helper for reconstructRecordsAtT only (not a recovery route)
 
     expect((await deleteField(F)).status).toBe(200)
     const revF = await lastFieldDeleteRevisionId(s, F)
@@ -210,6 +245,19 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     expect(rehydrateRev1?.batch_id).toBeTruthy()
     expect(rehydrateRev1?.batch_id).toBe(rehydrateRev2?.batch_id)
 
+    // L6 exact-anchor closure: one fenced field-undelete is one sealed operation. Both the direct operation
+    // id and the History Center batch resolver must select the same post-rehydration boundary.
+    expect(rehydrateRev1?.operation_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(rehydrateRev1?.operation_id).toBe(rehydrateRev2?.operation_id)
+    const endpoint = await q(
+      'SELECT endpoint_seq::text, event_count FROM meta_record_history_operations WHERE sheet_id = $1 AND operation_id = $2::uuid',
+      [s, rehydrateRev1?.operation_id],
+    )
+    expect(endpoint.rows).toEqual([{
+      endpoint_seq: [rehydrateRev1?.seq, rehydrateRev2?.seq].sort((a, b) => BigInt(a ?? '0') < BigInt(b ?? '0') ? -1 : 1).at(-1),
+      event_count: 2,
+    }])
+
     // ---- reconstructRecordsAtT: before the rehydration (field absent) vs after (rehydrated value) ----
     const beforeState = (await reconstructRecordsAtT(q, s, tBeforeRehydrate, [R1])).get(R1)
     expect(beforeState).toMatchObject({ exists: true, version: 1, data: { other: 'x1' } })
@@ -221,8 +269,34 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     // this fix, `history-integrity-precheck.ts`'s own docstring named this exact site as a DEFERRED content-
     // integrity gap — the rehydrated live data had no matching revision, so the content-projection layer would
     // have refused (content_mismatch) the very next revert/reset-preview on this sheet.
-    const pv = await revertPreview(s, tAfterRehydrate)
-    expect(pv.status).toBe(200)
+    const direct = await revertPreview(s, rehydrateRev1?.operation_id ?? '')
+    expect(direct.status).toBe(200)
+    expect(direct.body?.data?.anchorOperationId).toBe(rehydrateRev1?.operation_id)
+    const byBatch = await revertPreviewByBatch(s, rehydrateRev1?.batch_id ?? '')
+    expect(byBatch.status).toBe(200)
+    expect(byBatch.body?.data?.anchorOperationId).toBe(rehydrateRev1?.operation_id)
+    // The older fixture anchor remains valid too; adding the new endpoint never invalidates prior anchors.
+    expect((await revertPreview(s, fixture.anchorOperationId())).status).toBe(200)
+  })
+
+  test('flag-off parity: rehydration keeps operation_id NULL and creates no sealed endpoint', async () => {
+    const s = await freshSheet('inert-ledger')
+    const F = mkFieldId('inert-ledger')
+    const R = mkRecordId('inert-ledger')
+    await insertField(s, F, 'InertLedger', 'string', 1)
+    await insertRecord(s, R, { [F]: 'restored' })
+    await seedCreateRevision(s, R, {}, new Date(Date.now() - 60_000).toISOString())
+    expect((await deleteField(F)).status).toBe(200)
+    const revF = await lastFieldDeleteRevisionId(s, F)
+    const p = await preview(s, revF)
+    expect(p.status).toBe(200)
+
+    delete process.env[FENCE_FLAG]
+    const ok = await execute(s, { revisionId: revF, previewToken: p.body.data.previewToken, confirm: 'undelete' })
+    expect(ok.status).toBe(200)
+    const rehydrated = (await revisionsFor(R)).find((row) => row.version === 2)
+    expect(rehydrated?.operation_id).toBeNull()
+    expect((await q('SELECT 1 FROM meta_record_history_operations WHERE sheet_id = $1', [s])).rows).toHaveLength(0)
   })
 
   test('zero-row / concurrent-delete leg: a record hard-deleted between field-delete and field-undelete gets NO ghost revision; its live sibling still rehydrates correctly', async () => {

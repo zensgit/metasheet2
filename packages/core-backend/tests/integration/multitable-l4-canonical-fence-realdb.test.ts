@@ -94,6 +94,11 @@ import {
   __resetRecoveryWriterStateColumnProbe,
   type WriterBlockState,
 } from '../../src/multitable/canonical-sheet-fence'
+import {
+  prepareExactAnchorHistoryFixture,
+  pruneSealedHistoryOperations,
+  type ExactAnchorHistoryFixture,
+} from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -519,20 +524,30 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
   const RNAME = `fld_l4_rxr_name_${TS}`
   const RACTOR = `user_l4_rxr_${TS}`
   const T0 = '2026-01-01T00:00:00.000Z'
-  const T1 = '2026-01-02T00:00:00.000Z'
   const T2 = '2026-01-03T00:00:00.000Z'
 
   let app: Express
-  const resetPreview = () => request(app).post(`/api/multitable/sheets/${RSHEET}/reset-preview`).send({ asOf: T1 })
+  let fixture: ExactAnchorHistoryFixture
+  const resetPreview = () => request(app).post(`/api/multitable/sheets/${RSHEET}/reset-preview`).send({ anchorOperationId: fixture.anchorOperationId() })
   const resetExecute = (body: Record<string, unknown>) => request(app).post(`/api/multitable/sheets/${RSHEET}/reset-execute`).send(body)
-  const revertPreview = () => request(app).post(`/api/multitable/sheets/${RSHEET}/revert-preview`).send({ asOf: T1 })
+  const revertPreview = () => request(app).post(`/api/multitable/sheets/${RSHEET}/revert-preview`).send({ anchorOperationId: fixture.anchorOperationId() })
   const revertExecute = (body: Record<string, unknown>) => request(app).post(`/api/multitable/sheets/${RSHEET}/revert-execute`).send(body)
-  const rev = (id: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
-    q(
-      `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
-       VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[$5]::text[],'{}'::jsonb,$6::jsonb,$7)`,
-      [RSHEET, id, version, action, RNAME, JSON.stringify(snap), at],
-    )
+  const rev = (
+    id: string,
+    version: number,
+    action: 'create' | 'update' | 'delete',
+    snap: Record<string, unknown>,
+    at: string,
+    options?: { anchor?: boolean },
+  ) => fixture.insertRevision({
+    recordId: id,
+    version,
+    action,
+    snapshot: snap,
+    createdAt: at,
+    phase: options?.anchor ? 'anchor' : at === T0 ? 'before' : 'after',
+    changedFieldIds: [RNAME],
+  })
   const recordRow = async (id: string) =>
     (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as
       | { data: Record<string, unknown>; version: number }
@@ -578,7 +593,12 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: RACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
     app.use('/api/multitable', univerMetaRouter())
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [RACTOR])
+    await q(
+      `INSERT INTO users (id, password_hash, permissions)
+       VALUES ($1,'x',$2::jsonb)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
+      [RACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [RBASE, 'L4 RXR Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [RSHEET, RBASE, 'L4 RXR Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [RNAME, RSHEET, 'Note', 'string', '{}', 1])
@@ -588,9 +608,11 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
     delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
-    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [RSHEET]).catch(() => {})
-    await q('DELETE FROM meta_records WHERE sheet_id = $1', [RSHEET]).catch(() => {})
-    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [RSHEET]).catch(() => {})
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    await pruneSealedHistoryOperations(RSHEET).catch(() => {})
+    for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_record_version_markers', 'meta_record_revisions', 'meta_records', 'meta_fields']) {
+      await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [RSHEET]).catch(() => {})
+    }
     await q('DELETE FROM meta_sheets WHERE id = $1', [RSHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [RBASE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [RACTOR]).catch(() => {})
@@ -600,11 +622,18 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
     delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
     __resetRecoveryWriterStateColumnProbe()
+    await pruneSealedHistoryOperations(RSHEET)
+    await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [RSHEET]).catch(() => {})
+    await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [RSHEET]).catch(() => {})
+    await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [RSHEET]).catch(() => {})
+    await q('DELETE FROM meta_record_version_markers WHERE sheet_id = $1', [RSHEET]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [RSHEET])
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [RSHEET])
     await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [RSHEET])
+    fixture = await prepareExactAnchorHistoryFixture(RSHEET)
   })
 
   test('sentinel: DATABASE_URL is set (this suite must RUN, never skip-green)', () => {
@@ -614,7 +643,7 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
   test('RXR1 [reset vs revert] a concurrent reset-execute REFUSES (409 RECOVERY_IN_PROGRESS) while revert holds/commits its durable applying block — fence-before-check, never interleaves', async () => {
     const R = `rec_l4_rxr1_${TS}`
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [R, RSHEET, JSON.stringify({ [RNAME]: 'new' })])
-    await rev(R, 1, 'create', { [RNAME]: 'old' }, T0)
+    await rev(R, 1, 'create', { [RNAME]: 'old' }, T0, { anchor: true })
     await rev(R, 2, 'update', { [RNAME]: 'new' }, T2)
 
     const pv = await resetPreview()
@@ -631,7 +660,8 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
       await b.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(RSHEET)])
       await b.query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, RSHEET])
 
-      const resetPromise = fireNow(resetExecute({ asOf: T1, previewIdentity, confirm: 'reset' }))
+      // Token-only execute — anchor is bound by the verified previewIdentity.
+      const resetPromise = fireNow(resetExecute({ previewIdentity, confirm: 'reset' }))
       await waitUntilBlockedOnFence(bPid) // proves reset's fence-acquire genuinely parked on B, not racing free
 
       await b.query("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [RSHEET]) // revert's committed claim
@@ -653,7 +683,7 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
   test("RXR2 [revert vs reset] revert PARKS on an in-flight reset's held fence and only proceeds AFTER reset concludes — never interleaves (symmetric direction)", async () => {
     const R = `rec_l4_rxr2_${TS}`
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [R, RSHEET, JSON.stringify({ [RNAME]: 'new' })])
-    await rev(R, 1, 'create', { [RNAME]: 'old' }, T0)
+    await rev(R, 1, 'create', { [RNAME]: 'old' }, T0, { anchor: true })
     await rev(R, 2, 'update', { [RNAME]: 'new' }, T2)
 
     const pv = await revertPreview()
@@ -671,7 +701,8 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
       await b.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(RSHEET)])
       await b.query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, RSHEET])
 
-      const revertPromise = fireNow(revertExecute({ asOf: T1, previewIdentity }))
+      // Token-only execute — anchor is bound by the verified previewIdentity.
+      const revertPromise = fireNow(revertExecute({ previewIdentity }))
       await waitUntilBlockedOnFence(bPid) // proves revert's claim genuinely parked on B (reset's held fence)
 
       await b.query('COMMIT') // "reset concludes" — releases both locks; recovery_writer_state stays NULL (reset never sets one)

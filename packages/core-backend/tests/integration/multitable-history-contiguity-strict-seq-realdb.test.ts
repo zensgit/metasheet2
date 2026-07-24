@@ -31,7 +31,8 @@
  *       app-level writer) refuses, never coerced to zero.
  *   FORMULA-NOT-REFUSED            a live formula-field value that differs from its stored snapshot (formula
  *       fields recompute live, never captured in a revision) does not trigger the content-projection layer.
- *   POSITIVE CONTROL               a full healthy chain reverts and executes under strict mode.
+ *   POSITIVE CONTROL               the strict comparator passes a full healthy chain; the retired
+ *       wall-clock HTTP authority still refuses before it can mint or execute a token.
  *
  * Two-point wiring: plugin-tests.yml real-DB run list + vitest.integration.config.ts. Runs only with
  * DATABASE_URL. Fixture hygiene (P2-C): every seq value here is either the natural `DEFAULT nextval(...)`
@@ -107,24 +108,22 @@ async function sheetWriteState(sheet: string) {
 }
 
 /**
- * Owner P2 (2026-07-16): under the wired strict-enablement gate (seam held false — owner ruling 2026-07-17),
- * EVERY strict-flag-on production request
- * refuses `strict_enablement_unmet` before the comparator runs — so the HTTP 409 alone would be a VACUOUS
- * proof of the chain-level verdict. This helper therefore asserts BOTH layers: the comparator itself (called
- * directly — the pure strict function, per the owner's prescription) returns the expected chain-level reason,
- * AND the production path refuses with the values-free unified envelope + zero writes (D-1c rule 1: the body
- * is deliberately indistinguishable from any other integrity refusal — no oracle).
+ * Owner P2 (2026-07-16) + L8 exact-anchor wiring: the STRICT comparator is asserted DIRECTLY (pure function).
+ * The HTTP surface no longer accepts free wall-clock `asOf` — it refuses EXACT_ANCHOR_REQUIRED (400) with
+ * zero writes before any integrity oracle. Chain-level verdicts therefore cannot be proven via the wall-clock
+ * path; they are proven by the direct comparator call. HTTP zero-writes is still asserted for the wall-clock
+ * refusal shape (values-free, no mint, no writes).
  */
 async function expectRevertRefusesWithZeroWrites(sheet: string, expectedReason: 'chain_hole' | 'chain_corrupt' | 'comparator_error'): Promise<void> {
   const pool = poolManager.get()
   expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), sheet)).toEqual({ ok: false, reason: expectedReason })
   const before = await sheetWriteState(sheet)
   const pv = await revertPreview(sheet)
-  expect(pv.status).toBe(409)
-  expect(pv.body).toEqual(HISTORY_INCOMPLETE_BODY)
+  expect(pv.status).toBe(400)
+  expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   const ex = await revertExecute(sheet, 'dummy-never-minted')
-  expect(ex.status).toBe(409)
-  expect(ex.body).toEqual(HISTORY_INCOMPLETE_BODY)
+  expect(ex.status).toBe(400)
+  expect(ex.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   expect(await sheetWriteState(sheet)).toEqual(before)
 }
 
@@ -206,9 +205,10 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
 
     const pool = poolManager.get()
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
-    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT // strict-on HTTP is gate-refused (see ENABLEMENT-GATE golden)
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT // wall-clock HTTP is exact-anchor-refused (L8 wiring)
     const pv = await revertPreview(SHEET)
-    expect(pv.status).toBe(200)
+    expect(pv.status).toBe(400)
+    expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   })
 
   // ── TARGET-GENERATION HOLE, CLEAN TERMINAL (owner High-2) ────────────────────────────────────────────────
@@ -306,8 +306,10 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     const pool = poolManager.get()
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    // L8 wiring: free wall-clock is refused; chain health is proven by the direct comparator above.
     const pv = await revertPreview(SHEET)
-    expect(pv.status).toBe(200)
+    expect(pv.status).toBe(400)
+    expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   })
 
   // ── EXACT BIGINT > 2^53 (v3.7 §9.7 / P2-C: explicit synthetic seq, NEVER setval) ─────────────────────────
@@ -326,7 +328,8 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     const pv = await revertPreview(SHEET)
-    expect(pv.status).toBe(200)
+    expect(pv.status).toBe(400)
+    expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   })
 
   // ── ILLEGAL-SEQ FAIL-CLOSE ───────────────────────────────────────────────────────────────────────────────
@@ -352,55 +355,50 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     const pv = await revertPreview(SHEET)
-    expect(pv.status).toBe(200)
+    expect(pv.status).toBe(400)
+    expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
   })
 
   // ── POSITIVE CONTROL ─────────────────────────────────────────────────────────────────────────────────────
-  test('POSITIVE CONTROL: strict comparator passes the healthy chain; the full revert executes end-to-end (flag off — strict-on HTTP is gate-refused for this checkpoint-less sheet)', async () => {
+  test('POSITIVE CONTROL: strict comparator passes the healthy chain; wall-clock HTTP is refused EXACT_ANCHOR_REQUIRED (L8 wiring — end-to-end exact-anchor execute is covered by the route-wiring suite)', async () => {
     const pool = poolManager.get()
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    const before = await sheetWriteState(SHEET)
     const pv = await revertPreview(SHEET)
-    expect(pv.status).toBe(200)
-    expect(pv.body?.data?.summary?.visibleRevertCount).toBe(1)
-    const ex = await revertExecute(SHEET, pv.body?.data?.previewIdentity)
-    expect(ex.status).toBe(200)
+    expect(pv.status).toBe(400)
+    expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+    expect(await sheetWriteState(SHEET)).toEqual(before)
+    // Shared fixture H still at 'new' (no wall-clock revert applied).
     const h = await recordRow(`rec_h_${TS}`)
-    expect(h?.data?.[NAME]).toBe('old')
-    expect(h?.version).toBe(3)
+    expect(h?.data?.[NAME]).toBe('new')
   })
 
-  // ── STRICT-ENABLEMENT GATE (owner P2, 2026-07-16; seam HELD false, owner ruling 2026-07-17) ─────────────
-  test('ENABLEMENT-GATE: strict ON — a NO-checkpoint sheet refuses fail-closed with zero writes; a checkpoint-bearing HEALTHY sheet is STILL refused (seam held false until the Revert/Reset wiring PR)', async () => {
+  // ── STRICT-ENABLEMENT GATE (owner P2; seam true after L8 route wiring, owner ruling 2026-07-17) ─────────
+  test('ENABLEMENT-GATE: strict ON — a NO-checkpoint sheet refuses fail-closed; a checkpoint-bearing HEALTHY sheet can enable (seam true after L8 wiring)', async () => {
     // The shared fixture record is HEALTHY (the strict comparator passes it), so any gate verdict below is
     // attributable ONLY to the enablement precondition, not to a chain verdict.
     const pool = poolManager.get()
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
 
-    // (a) NO active checkpoint: BOTH halves unmet (the seam is held false too). The WIRED entry returns
-    // `strict_enablement_unmet`, and the production HTTP surface refuses with the unified values-free
-    // envelope + zero writes (no oracle — D-1c).
+    // (a) NO active checkpoint: only the checkpoint half is unmet (reconstruction causality landed with L8 wiring).
     const beforeState = await sheetWriteState(SHEET)
     const preNoCkpt = await checkStrictEnablementPrecondition(pool.query.bind(pool), SHEET)
     expect(preNoCkpt.canEnable).toBe(false)
-    expect([...preNoCkpt.unmet].sort()).toEqual(['no_active_checkpoint', 'reconstruction_non_causal'])
+    expect(preNoCkpt.unmet).toEqual(['no_active_checkpoint'])
     expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'strict_enablement_unmet' })
+    // Wall-clock asOf is uniformly refused by the exact-anchor routes (not the integrity precheck).
     const pv1 = await revertPreview(SHEET)
-    expect(pv1.status).toBe(409)
-    expect(pv1.body).toEqual(HISTORY_INCOMPLETE_BODY)
+    expect(pv1.status).toBe(400)
+    expect(pv1.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
     expect(await sheetWriteState(SHEET)).toEqual(beforeState)
 
-    // (b) checkpoint-BEARING sheet: the refusal narrows to EXACTLY the held-back seam — and the WIRED entry
-    // STILL refuses. This is the backstop pin at the wired layer (owner ruling 2026-07-17): even a healthy,
-    // checkpoint-bearing sheet stays categorically refused until the PR that wires legacy Revert/Reset onto
-    // the L8 exact-anchor apply flips `RECONSTRUCTION_CAUSALITY_LANDED`. The unmet SET changing (not just its
-    // size) proves the checkpoint half is evaluated independently on this path.
+    // (b) checkpoint-BEARING sheet: both halves satisfied — can enable. Comparator still PASSES when called
+    // directly (keeps this golden non-vacuous about WHAT the gate evaluates).
     await pool.transaction(async ({ query }) => activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }))
     const preCkpt = await checkStrictEnablementPrecondition(pool.query.bind(pool), SHEET)
-    expect(preCkpt).toEqual({ canEnable: false, unmet: ['reconstruction_non_causal'] })
-    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'strict_enablement_unmet' })
-    // The comparator itself still PASSES the healthy chain when called directly — the refusal above is the
-    // gate, not a chain verdict (keeps this golden non-vacuous about WHAT refused).
+    expect(preCkpt).toEqual({ canEnable: true, unmet: [] })
+    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
     // cleanup: remove the checkpoint rows so sibling tests see a checkpoint-free sheet.
     await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET]).catch(() => {})

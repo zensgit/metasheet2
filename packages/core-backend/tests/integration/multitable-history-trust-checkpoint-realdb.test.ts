@@ -411,22 +411,19 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     expect(ck?.system_kind).toBe('approval_projection')
   })
 
-  // ── P3-2 ENABLEMENT PRECONDITION (real-DB checkpoint half) — the HELD-FALSE BACKSTOP PIN ─────────────
-  test('checkStrictEnablementPrecondition: checkpoint-less sheet lists BOTH unmet; a checkpoint-bearing sheet is STILL refused (seam held false until the Revert/Reset wiring PR)', async () => {
+  // ── P3-2 ENABLEMENT PRECONDITION (real-DB checkpoint half) — seam true after the L8 route wiring ─────
+  test('checkStrictEnablementPrecondition: checkpoint-less sheet lists only no_active_checkpoint; a checkpoint-bearing sheet can enable (seam true after L8 wiring)', async () => {
     const S = await mkSheet()
-    // No checkpoint yet AND the seam is held false ⇒ BOTH conditions listed (the guard distinguishes them).
+    // No checkpoint yet; reconstruction causality is true ⇒ ONLY the checkpoint half is unmet.
     const before = await checkStrictEnablementPrecondition(q, S)
     expect(before.canEnable).toBe(false)
-    expect([...before.unmet].sort()).toEqual(['no_active_checkpoint', 'reconstruction_non_causal'])
+    expect(before.unmet).toEqual(['no_active_checkpoint'])
 
     await activate(S)
-    // Checkpoint half satisfied — the refusal narrows to EXACTLY the held-back seam. This is the end-to-end
-    // backstop pin (owner ruling 2026-07-17): a trustworthy, checkpoint-bearing sheet is STILL categorically
-    // refused until the PR that wires legacy Revert/Reset onto the L8 apply flips the seam. It also proves the
-    // checkpoint half is evaluated independently on the WIRED path (not a count-only guard): activating the
-    // checkpoint changed the unmet SET, not just its size.
+    // Both halves satisfied after the L8 route wiring flipped the seam. Activating the checkpoint changed
+    // the unmet SET (not just its size), proving the checkpoint half is evaluated independently.
     const after = await checkStrictEnablementPrecondition(q, S)
-    expect(after.canEnable).toBe(false)
-    expect(after.unmet).toEqual(['reconstruction_non_causal'])
+    expect(after.canEnable).toBe(true)
+    expect(after.unmet).toEqual([])
   })
 })

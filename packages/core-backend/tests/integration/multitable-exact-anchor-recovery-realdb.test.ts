@@ -24,8 +24,9 @@
  *
  * Two-point wiring: plugin-tests.yml real-DB run list + vitest.integration.config.ts. Runs only with
  * DATABASE_URL (a top-level sentinel FAILS — not skips — in the real-DB allowlist step). Fixture hygiene (P2-C):
- * every seq is an EXPLICIT literal on an isolated fixture row; this file NEVER calls `setval` on the shared
- * `meta_record_chain_seq`, and cleans up only its own sheet/base/user rows.
+ * causal counterexamples use isolated explicit seqs; checkpoint-backed anchors reserve real `nextval()` values
+ * after activation so repeated runs remain covered. This file NEVER calls `setval` on the shared sequence and
+ * cleans up only its own sheet/base/user rows.
  */
 import { randomUUID } from 'node:crypto'
 
@@ -89,6 +90,15 @@ const insertEndpoint = (run: Run, opId: string, endpointSeq: string, eventCount:
      VALUES ($1,$2::uuid,$3::bigint,$4::int)`,
     [SHEET, opId, endpointSeq, eventCount],
   )
+
+const nextSeqs = async (count: number): Promise<string[]> => {
+  const seqs: string[] = []
+  for (let i = 0; i < count; i++) {
+    const res = await q(`SELECT nextval('meta_record_chain_seq')::text AS seq`)
+    seqs.push(String((res.rows[0] as { seq: string }).seq))
+  }
+  return seqs
+}
 
 /** Seal one operation: `eventSeqs` synthetic revisions for a record, endpoint_seq = exact MAX (validate trigger).
  *  `batchId` (optional) stamps the S1 user-action grouping onto the revisions — the ruling-⑤ resolver's key. */
@@ -215,18 +225,56 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
   // ── ANCHOR RESOLUTION ────────────────────────────────────────────────────────────────────────────────────
   test('RESOLVE: a sealed endpoint under a covering checkpoint → exact anchorSeq + a verifiable token', async () => {
     const R = `rec_res_${TS}`
-    const opId = await sealOp(R, ['7001', '7002', '7003'])
-    await activate() // trusted_since = a small nextval ≤ 7003 ⇒ covers the anchor
+    await activate()
+    const seqs = await nextSeqs(3)
+    const opId = await sealOp(R, seqs)
     const res = await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: opId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(res.ok).toBe(true)
     if (!res.ok) return
-    expect(res.anchorSeq).toBe('7003') // the sealed endpoint_seq, exact — NOT a live MAX(seq)
+    expect(res.anchorSeq).toBe(seqs[2]) // the sealed endpoint_seq, exact — NOT a live MAX(seq)
     expect(res.anchorOperationId).toBe(opId)
     expect(res.mode).toBe('revert') // the mode the token authorizes — frozen at preview (P1-1)
     // the minted token executes end-to-end for the same sheet+actor.
     const ex = await executeExactAnchorRecovery(q, { token: res.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(ex.ok).toBe(true)
-    if (ex.ok) expect(ex.anchorSeq).toBe('7003')
+    if (ex.ok) expect(ex.anchorSeq).toBe(seqs[2])
+  })
+
+  test('RESOLVE fail-closed: malformed checkpoint JSON is never coerced into a signed recovery state', async () => {
+    const R = `rec_bad_baseline_${TS}`
+    const checkpoint = await activate()
+    const opId = await sealOp(R, await nextSeqs(1))
+    await q(
+      `INSERT INTO meta_history_baselines (checkpoint_id, sheet_id, record_id, data, version, is_trashed)
+       VALUES ($1,$2,$3,$4::jsonb,1,false)`,
+      [checkpoint.checkpointId, SHEET, `rec_corrupt_${TS}`, JSON.stringify('not-an-object')],
+    )
+
+    expect(await resolveExactAnchor(q, {
+      sheetId: SHEET,
+      request: { kind: 'exact-anchor', anchorOperationId: opId },
+      actorId: ACTOR,
+      mode: 'revert',
+      evaluateFullReadAccess: ALLOW_FULL_READ,
+    })).toEqual({ ok: false, reason: 'history-incomplete' })
+  })
+
+  test('RESOLVE fail-closed: malformed live version identity is never normalized into a signed token', async () => {
+    const R = `rec_bad_live_${TS}`
+    await activate()
+    const opId = await sealOp(R, await nextSeqs(1))
+    await q(
+      'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,-1)',
+      [`rec_negative_version_${TS}`, SHEET, JSON.stringify({ [F_STR]: 'invalid' })],
+    )
+
+    expect(await resolveExactAnchor(q, {
+      sheetId: SHEET,
+      request: { kind: 'exact-anchor', anchorOperationId: opId },
+      actorId: ACTOR,
+      mode: 'revert',
+      evaluateFullReadAccess: ALLOW_FULL_READ,
+    })).toEqual({ ok: false, reason: 'history-incomplete' })
   })
 
   test('RESOLVE refusals: unknown anchor, checkpoint-less anchor, wall-clock, non-uuid', async () => {
@@ -243,7 +291,7 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
     expect(await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: randomUUID() }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ }))
       .toEqual({ ok: false, reason: 'unknown-anchor' })
     // a sealed endpoint but NO active checkpoint covering it → no-covering-checkpoint (fail-closed).
-    const opId = await sealOp(`rec_nock_${TS}`, ['8001', '8002'])
+    const opId = await sealOp(`rec_nock_${TS}`, await nextSeqs(2))
     expect(await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: opId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ }))
       .toEqual({ ok: false, reason: 'no-covering-checkpoint' })
   })
@@ -251,29 +299,31 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
   // ── EXECUTE — TOKEN-BOUND ANCHOR, NEVER MAX(seq) ─────────────────────────────────────────────────────────
   test('EXECUTE never recomputes MAX(seq): a later write advances MAX yet execute stays on the token-bound anchor', async () => {
     const R = `rec_max_${TS}`
-    const opId = await sealOp(R, ['7001', '7002', '7003'])
     await activate()
+    const seqs = await nextSeqs(3)
+    const opId = await sealOp(R, seqs)
     const res = await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: opId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(res.ok).toBe(true)
     if (!res.ok) return
 
-    // A NEW record is created AFTER the anchor (seq 9000 > 7003, legacy NULL operation_id — no endpoint needed).
-    // It is absent from the reconstruction AT the token anchor (7003), so the token's scopeHash still matches and
-    // execute succeeds. If execute recomputed the anchor as MAX(seq)=9000, this new record would appear ⇒ the
+    // A NEW record is created AFTER the anchor (legacy NULL operation_id — no endpoint needed).
+    // It is absent from the reconstruction AT the token anchor, so the token's scopeHash still matches and
+    // execute succeeds. If execute recomputed the anchor as MAX(seq), this new record would appear ⇒ the
     // reconstructed set diverges from the frozen scopeHash ⇒ scope-drift. (That is the mutation this golden reds.)
-    await revSeq(`rec_late_${TS}`, 1, 'create', { [F_STR]: 'late' }, '9000')
+    await revSeq(`rec_late_${TS}`, 1, 'create', { [F_STR]: 'late' }, (await nextSeqs(1))[0])
     const ex = await executeExactAnchorRecovery(q, { token: res.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(ex.ok).toBe(true)
     if (ex.ok) {
-      expect(ex.anchorSeq).toBe('7003')
+      expect(ex.anchorSeq).toBe(seqs[2])
       expect(ex.stateMap.has(`rec_late_${TS}`)).toBe(false) // the post-anchor record is NOT in the plan
     }
   })
 
   test('EXECUTE replay/tamper: cross-sheet, cross-actor, and a wrong scopeHash all refuse (identity-invalid / scope-drift)', async () => {
     const R = `rec_tamper_${TS}`
-    const opId = await sealOp(R, ['7001', '7002', '7003'])
     await activate()
+    const seqs = await nextSeqs(3)
+    const opId = await sealOp(R, seqs)
     const res = await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: opId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(res.ok).toBe(true)
     if (!res.ok) return
@@ -300,7 +350,7 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
     // authorizedScopeHash is the MATCHING one so this golden isolates the scopeHash axis (P1-2's own axis
     // has its own goldens below).
     const forged = mintExactAnchorRecoveryIdentity({
-      sheetId: SHEET, anchorOperationId: opId, anchorSeq: '7003', checkpointId: (res as { checkpointId: string }).checkpointId,
+      sheetId: SHEET, anchorOperationId: opId, anchorSeq: seqs[2], checkpointId: (res as { checkpointId: string }).checkpointId,
       scopeHash: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
       liveSetHash: 'c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0000', // shape-valid; the read-half checks scopeHash only
       schemaHash: 'b'.repeat(64), // shape-valid; L6-b read-half does not re-check schema (L8 apply does)
@@ -314,8 +364,8 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
   // ── P1-2 KERNEL ADJUDICATION (full-read gate + signed authorization basis) ───────────────────────────────
   test('AUTH: a non-full-read actor is refused at PREVIEW (forbidden, no token, no stateMap) — before any anchor oracle', async () => {
     const R = `rec_auth_${TS}`
-    const opId = await sealOp(R, ['7001', '7002'])
     await activate()
+    const opId = await sealOp(R, await nextSeqs(2))
     // DENY ⇒ forbidden. The anchor EXISTS and is covered — the refusal must reveal none of that.
     expect(await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: opId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: DENY_FULL_READ }))
       .toEqual({ ok: false, reason: 'forbidden' })
@@ -326,8 +376,8 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
 
   test('AUTH: permission revoked BETWEEN preview and execute ⇒ forbidden (fresh adjudication, not the token echo)', async () => {
     const R = `rec_authrev_${TS}`
-    const opId = await sealOp(R, ['7001', '7002', '7003'])
     await activate()
+    const opId = await sealOp(R, await nextSeqs(3))
     const res = await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: opId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(res.ok).toBe(true)
     if (!res.ok) return
@@ -341,8 +391,8 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
 
   test('AUTH: a validly-signed token whose authorizedScopeHash does not match the recomputed v1 basis ⇒ forbidden', async () => {
     const R = `rec_authhash_${TS}`
-    const opId = await sealOp(R, ['7001', '7002', '7003'])
     await activate()
+    const opId = await sealOp(R, await nextSeqs(3))
     const res = await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'exact-anchor', anchorOperationId: opId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(res.ok).toBe(true)
     if (!res.ok) return
@@ -362,20 +412,21 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
   test('RESOLVER (d): a batch spanning N sealed operations on this sheet anchors on the MAX endpoint_seq terminal op', async () => {
     const R = `rec_batch_${TS}`
     const batchId = `batch_hb_${TS}`
-    // TWO sealed operations whose revisions share ONE user-action batch_id (the S1 multi-txn commit shape).
-    const op1 = await sealOp(R, ['7001', '7002'], batchId)
-    const op2 = await sealOp(`${R}_2`, ['7005', '7006'], batchId)
     await activate()
+    const seqs = await nextSeqs(4)
+    // TWO sealed operations whose revisions share ONE user-action batch_id (the S1 multi-txn commit shape).
+    const op1 = await sealOp(R, seqs.slice(0, 2), batchId)
+    const op2 = await sealOp(`${R}_2`, seqs.slice(2), batchId)
     const res = await resolveExactAnchor(q, { sheetId: SHEET, request: { kind: 'history-batch', historyBatchId: batchId }, actorId: ACTOR, mode: 'revert', evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.anchorOperationId).toBe(op2) // the TERMINAL sealed op — MAX endpoint_seq (7006 > 7002)
-    expect(res.anchorSeq).toBe('7006')
+    expect(res.anchorSeq).toBe(seqs[3])
     expect(op1).not.toBe(op2)
     // and the minted token executes end-to-end (same trust chain as a direct exact-anchor).
     const ex = await executeExactAnchorRecovery(q, { token: res.token, sheetId: SHEET, actorId: ACTOR, evaluateFullReadAccess: ALLOW_FULL_READ })
     expect(ex.ok).toBe(true)
-    if (ex.ok) expect(ex.anchorSeq).toBe('7006')
+    if (ex.ok) expect(ex.anchorSeq).toBe(seqs[3])
   })
 
   test('RESOLVER (e): a legacy/unsealed batch (no sealed operation) refuses exact-anchor-required — never a wall-clock fallback, no unknown-vs-unsealed oracle', async () => {

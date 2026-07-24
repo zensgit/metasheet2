@@ -44,6 +44,10 @@ import {
 } from './record-subscription-service'
 import { ensureRecordNotLocked } from './record-lock'
 import { insertCommittedAuditInTxn, type OapiWriteAuditContext } from './oapi-write-audit'
+import {
+  isLiveLinkTargetForeignKeyViolation,
+  isRetryableLiveLinkDatabaseConflict,
+} from './live-link-projection-integrity'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -1132,6 +1136,12 @@ export class RecordWriteService {
                   [h.buildId('lnk').slice(0, 50), fieldId, recordId, foreignId],
                 )
               } catch (err) {
+                if (isLiveLinkTargetForeignKeyViolation(err)) {
+                  throw new RecordValidationError(`Linked record no longer exists: ${foreignId}`)
+                }
+                if (isRetryableLiveLinkDatabaseConflict(err)) {
+                  throw new RecordValidationError('Linked records changed concurrently; retry the write')
+                }
                 throw err
               }
             }

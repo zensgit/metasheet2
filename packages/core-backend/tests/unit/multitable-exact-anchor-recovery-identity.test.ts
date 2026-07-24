@@ -75,7 +75,7 @@ describe('L6-b exact-anchor recovery identity — mint/verify', () => {
 
   test('P1 token contract — mode is REQUIRED and closed-vocabulary: a pre-contract token (no mode) and a garbage mode both fail closed as pre_contract_token', () => {
     // A token signed under the PRE-contract shape (its destructive semantics were caller-chosen) must
-    // verify INVALID — deliberate hard cutover; the module is unwired so no live token predates this.
+    // verify INVALID — deliberate hard cutover; an older-shape token must re-preview under the current contract.
     // NIT-1: reason is `pre_contract_token` (not the imprecise `malformed_anchorSeq`).
     const { mode: _m, ...noMode } = CLAIMS
     const preContract = mintExactAnchorRecoveryIdentity(noMode as unknown as ExactAnchorRecoveryIdentityClaims)
