@@ -1032,10 +1032,12 @@ with `calculated|shadow_only`; `reversed` pairs only with
 `import_rollback_reversal|operator_retirement`; the middle error set pairs with
 `review_required`.
 
-`IMPORT_ROLLBACK_SUPERSEDED`, `SEGMENT_CALCULATION_SUSPENDED`, and
-`W4_ATTRIBUTION_UNSUPPORTED`, `ATTENDANCE_OPERATION_CONFLICT`, and
-`ATTENDANCE_WRITE_NOT_AUTHORIZED` are no-write request/transition errors, not
-persisted reasons.
+`IMPORT_ROLLBACK_SUPERSEDED`, `SEGMENT_CALCULATION_SUSPENDED`,
+`ATTENDANCE_ASYNC_JOB_POSTURE_CONFLICT`, `W4_ATTRIBUTION_UNSUPPORTED`,
+`ATTENDANCE_OPERATION_CONFLICT`, and `ATTENDANCE_WRITE_NOT_AUTHORIZED` are not
+calculation reasons. They are no-source-write request/transition outcomes;
+P07/P08 may persist only the two named async outcomes in the operational job's
+closed `execution_reason_code`.
 
 ### 6.3 Daily aggregation
 
@@ -1145,14 +1147,19 @@ lock, and resolves posture. The branches are disjoint:
 - while suspended, it acquires no class-`10`/class-`11`, operation, batch/item,
   or target lock. It locks only the job row, rechecks identity/status, preserves
   `status='queued'`, records the closed values-free operational
-  `retry_reason_code='SEGMENT_CALCULATION_SUSPENDED'`, and never records a
+  `execution_reason_code='SEGMENT_CALCULATION_SUSPENDED'`, and never records a
   `failed` business import;
 - otherwise it acquires the canonical batch/item identity locks, locks/re-reads
-  operation rows, then locks/re-reads the job. Exactly two state pairs are
-  legal: `(queued, all-new)` executes, while
+  operation rows, then locks/re-reads the job. A
   `(completed, all-completed-congruent)` returns the stored response with zero
-  DML. Every mixed pair, including completed/all-new and queued/all-completed,
-  is conflict/remediation.
+  DML under its frozen accepted posture. A `(queued, all-new)` executes only
+  when current posture equals the frozen accepted posture. If that pair has a
+  non-suspended posture mismatch, it writes no operation/source/result row and
+  atomically changes only the job to `status='failed'` with values-free
+  `execution_reason_code='ATTENDANCE_ASYNC_JOB_POSTURE_CONFLICT'`; accepted posture
+  remains immutable and operator resubmission/remediation is required. Every
+  mixed pair, including completed/all-new and queued/all-completed, is
+  conflict/remediation.
 
 W4's final `queued->completed` job transition is in the same canonical
 transaction as operation/source/result seal; rollback leaves the job queued.
@@ -1229,15 +1236,16 @@ rolls back all acquired transaction locks and DML. On successful completion it
 restores `W4_TRANSACTION_LOCK_TIMEOUT_MS`. A module-private test clock is the
 only clock seam and production construction cannot inject it.
 
-SQLSTATE `55P03` from the operation helper's own acquisition query maps after
-rollback to values-free HTTP
+The operation helper's own typed busy error, whether raised by a monotonic
+pre/post-query budget check or by mapping SQLSTATE `55P03` from its acquisition
+query, maps after rollback to values-free HTTP
 `409 ATTENDANCE_OPERATION_IN_PROGRESS`; it is not retried and raw SQL
 state/message is never returned. A later retry performs normal authorization
 and replay. A timeout from any other statement is not relabeled as operation
-contention. The rollout helper has one key and maps a `55P03` raised by its own
-acquisition to values-free `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` after the
-whole transaction rolls back. The target helper uses the same helper-wide
-deadline protocol and maps its own acquisition timeout to values-free
+contention. The rollout helper maps its own typed budget/acquisition timeout to
+values-free `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` after the whole
+transaction rolls back. The target helper uses the same helper-wide deadline
+protocol and maps its own typed budget/acquisition timeout to values-free
 `503 ATTENDANCE_CALCULATION_TARGET_BUSY`. No other `55P03` or `57014` is
 relabeled or retried. None of these timeouts permits compatibility fallback or
 partial DML.
@@ -1664,7 +1672,7 @@ with zero DML even under suspension; P07/P08 also require the congruent complete
 job row. Any request that cannot return at that point acquires the org rollout
 shared advisory lock and resolves posture before it locks or claims an
 operation/source row. A suspended synchronous request returns with zero DML,
-while suspended P07/P08 may take only the job-row retry-code branch. Every
+while suspended P07/P08 may take only the job-row execution-reason branch. Every
 other request acquires the canonical exclusive identity advisory locks for all
 supplied batch/operation identities, re-reads the operation keys under those
 locks, and for P07/P08 then locks the job row. A new
@@ -1729,18 +1737,20 @@ alternate result algorithm.
    operational retry outcome before operation/source/result DML. The
    synchronous branch performs zero DML. P07/P08 may lock only their
    operational job row, idempotently preserve `status='queued'`, and set the
-   closed retry code in that transaction; this suspended branch acquires no
+   closed execution reason in that transaction; this suspended branch acquires no
    operation identity/operation/batch/item/target lock and cannot mark the job
    failed. Otherwise acquire the section 9 exclusive identity advisory locks
    for every non-null
    batch command and item operation identity in one canonical order, then
    re-read/lock exact operation rows in stable order. For P07/P08, lock and
    re-read the operational job after those operation rows and before
-   import-batch/item source rows; require immutable identity/fingerprint and
-   frozen `accepted_posture` equality. Admit exactly `(queued, all-new)` for
-   execution or `(completed, all-completed-congruent)` for zero-DML replay.
+   import-batch/item source rows and require immutable identity/fingerprint
+   equality. Admit `(completed, all-completed-congruent)` for zero-DML replay
+   under its stored accepted posture. Admit `(queued, all-new)` for execution
+   only when the resolved posture equals the frozen accepted posture; otherwise
+   set only the closed operational posture-conflict failure under the job lock.
    Any other job/operation pair is conflict/remediation. After resume, the
-   unchanged durable job enters this ordinary all-new/replay protocol. For
+   unchanged authoritative job enters this ordinary all-new/replay protocol. For
    `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
    reject mixed or non-congruent state. For `legacy_projection_only`, reject
    any conflicting/incomplete existing operation state; claim a compatibility
@@ -2147,8 +2157,10 @@ Effective state requires:
    incomplete. Merely having an `unsupported` snapshot never clears the gate;
 6. transition to `eligible` or `authoritative` has zero active/reversible
    legacy request fact referenced by the synthetic source set and zero
-   incomplete operation/batch or retryable asynchronous job accepted in a
-   different posture.
+   incomplete operation/batch. Every rollout transition also has zero retryable
+   asynchronous job whose frozen accepted posture differs from the transition's
+   target write posture; `authoritative->suspended->authoritative` compares
+   against the preserved authoritative posture.
    Operators complete or cancel-before-source under legacy/shadow semantics;
    W4 never backfills from mutable current config and never rebases an accepted
    operation posture; and
@@ -2181,8 +2193,10 @@ not a new result-producing write and returns its stored response under
 keys are not replay and remain blocked.
 
 Promotion drains or cancels every incomplete org operation before changing
-posture and blocks on every retryable asynchronous job accepted in a different
-posture. `authoritative->suspended` takes the exclusive rollout lock, so every
+posture. Every transition blocks on a retryable asynchronous job accepted in a
+different target write posture, with the authoritative posture preserved across
+the suspend/resume pair. `authoritative->suspended` takes the exclusive rollout
+lock, so every
 source transaction has either committed or rolled back before the state
 changes. It never mutates an operation/batch/item row. An authoritative P07/P08
 job that has not produced source DML remains durable in its operational queue
@@ -2206,7 +2220,7 @@ committed before the worker observed suspension. Synchronous live, approval,
 import, manual, recompute, and operator routes check suspension before writing
 events, requests, batch state, approval terminal state, or other source rows
 and return 503 with zero writes. An already-durable queued job remains
-`status='queued'` with the closed operational suspension retry code, has no
+`status='queued'` with the closed operational suspension execution reason, has no
 operation row, and writes no result. Resume
 requires owner incident review, compatible engine version, and an offline
 read-only shadow replay of the suspended source set with zero
@@ -2323,7 +2337,7 @@ only its compatibility operation and no W4 result pointer.
 ### 12.1 W4C-0: contracts and durable storage
 
 Deliver durable batch/item operation registries, the P07 operational-job frozen
-identity/accepted-posture/closed retry-code fields, immutable request snapshots,
+identity/accepted-posture/closed execution-reason fields, immutable request snapshots,
 calculation/baseline/segment/outbox tables, immutable import rollback-closure
 witnesses, types, validators, triggers, pointer/owner/visibility/reason
 constraints, rollout state, and canonical authorization/write/enqueue
@@ -2341,6 +2355,13 @@ Gates:
   persist; injected rollback leaves no new operation row. Removing, making
   immediate, or weakening either deferred constraint fails its own
   transaction-bound leg;
+- P07 job identity, command fingerprint, and accepted posture are immutable.
+  `execution_reason_code` is closed to null,
+  `SEGMENT_CALCULATION_SUSPENDED`, or
+  `ATTENDANCE_ASYNC_JOB_POSTURE_CONFLICT`; suspension pairs only with queued,
+  posture conflict only with failed, and completed pairs with null. Unknown
+  code, wrong status pairing, or accepted-posture UPDATE fails at the DB
+  boundary;
 - no source disables triggers after data exists;
 - cross-org pointer and cross-record/org lineage refusal;
 - same-org shadow/review pointer and pointer/state mismatch refusal;
@@ -2365,10 +2386,12 @@ Gates:
   five seconds and its second key long enough that cumulative wait exceeds
   five seconds. It must return the exact operation/target busy code within the
   one helper budget, roll back with zero DML, and succeed or replay after the
-  blockers release. Resetting the deadline per key, omitting the
-  post-acquisition check, using wall-clock time, failing to restore the normal
-  lock timeout after success, or exposing the test clock to production fails
-  independently;
+  blockers release. Separate mutations exhaust the budget before issuing the
+  next query and immediately after the final acquisition; both helper-origin
+  typed errors map to the same closed code as the helper's own `55P03`.
+  Resetting the deadline per key, omitting either budget check, using wall-clock
+  time, failing to restore the normal lock timeout after success, or exposing
+  the test clock to production fails independently;
 - item/target limit, lock/statement timeout, and retry constants are one
   exported contract; above-limit W4 commands fail before source DML, and
   authoritative mode cannot fall back to chunked/partial legacy commits;
@@ -2393,6 +2416,11 @@ Gates:
   freezes only the new posture, or returns suspended with zero job row. Reading
   posture before shared lock, releasing shared before insert commit, or omitting
   the transition's retryable-job scan fails independently;
+- the retryable-job scan runs for every legal state transition against the
+  target effective write posture, preserving authoritative across
+  suspend/resume. Removing the scan from `legacy->shadow`,
+  `shadow->eligible|legacy`, `eligible->authoritative|shadow`, or either
+  suspend/resume direction fails its own posture-specific leg;
 - all five lock users import
   `acquireAttendanceCalculationRolloutLock`; mutating any one caller's
   namespace/key derivation or swallowing the helper's SQL error fails its own
@@ -2649,7 +2677,11 @@ Gates:
   replay with zero extra DML; beyond budget the loser receives the typed
   in-progress outcome, remains retryable, and its later attempt accepts the
   completed pair. `(queued,all-new)` is the only executable pair; every other
-  job/operation pair conflicts.
+  job/operation pair conflicts. A forced non-suspended posture mismatch on the
+  queued/all-new pair produces only
+  `failed/ATTENDANCE_ASYNC_JOB_POSTURE_CONFLICT`, preserves accepted posture,
+  and writes zero operation/source/result row; leaving it queued or mutating
+  accepted posture fails;
   A synchronous route calling the private worker, changing the frozen posture,
   accepting a partial batch/item vector, mapping suspension to failed, resetting
   the deadline, or persisting any `paused` operation state fails independently;
