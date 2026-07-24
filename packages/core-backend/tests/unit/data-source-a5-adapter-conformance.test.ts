@@ -74,7 +74,34 @@ describe('A5 roster pin — bound to the production registry, not to a hand-main
     expect(exercised).toEqual(registered)
     expect(SQL_TYPES_UNDER_TEST.length).toBeGreaterThan(0) // the derivation must not be vacuous
   })
+
+  // NEGATIVE CONTROLS — the single source is only single if it cannot be mutated at runtime.
+  // `as const` is compile-time only; another module could otherwise assign/delete/push an entry and
+  // re-desync registration from the derived supported-type set. Both must be FROZEN.
+  it('the registry is frozen — assignment, replacement, and deletion are all rejected at runtime', () => {
+    const reg = DEFAULT_ADAPTER_REGISTRY as unknown as Record<string, unknown>
+    expect(Object.isFrozen(DEFAULT_ADAPTER_REGISTRY)).toBe(true)
+    expect(() => { 'use strict'; reg.oracle = MysqlLikeStub }).toThrow() // add a new type
+    expect(() => { 'use strict'; reg.mysql = MysqlLikeStub }).toThrow() // replace an existing adapter
+    expect(() => { 'use strict'; delete reg.plm }).toThrow() // remove a type
+    // …and none of the attempts left a mark.
+    expect(Object.keys(DEFAULT_ADAPTER_REGISTRY).sort()).toEqual(['http', 'mysql', 'plm', 'postgres', 'postgresql', 'sqlserver'])
+  })
+
+  it('the derived supported-type list is frozen — push/splice cannot inject an unregistered type', () => {
+    const list = SUPPORTED_DATA_SOURCE_TYPES as unknown as string[]
+    expect(Object.isFrozen(SUPPORTED_DATA_SOURCE_TYPES)).toBe(true)
+    expect(() => { 'use strict'; list.push('oracle') }).toThrow()
+    expect(() => { 'use strict'; list.splice(0, 1) }).toThrow()
+    // still exactly the registry's keys.
+    expect([...SUPPORTED_DATA_SOURCE_TYPES].sort()).toEqual(Object.keys(DEFAULT_ADAPTER_REGISTRY).sort())
+  })
 })
+
+// A stand-in adapter class for the mutation-attempt negative controls (never registered).
+class MysqlLikeStub {
+  isSqlDialect(): boolean { return true }
+}
 
 describe.each(SQL_TYPES_UNDER_TEST)('%s — A5 result boundary', type => {
   const make = () => instantiate(type)

@@ -47,21 +47,26 @@ class ManagedPLMAdapter extends PLMAdapter {
 // forgetting the constant would leave it publicly unsupported AND invisible to any test that pins
 // coverage against the constant. Declared after ManagedPLMAdapter because it references that class.
 // A4: public support is intentionally narrowed to the verified runtime set.
-export const DEFAULT_ADAPTER_REGISTRY = {
+// FROZEN at runtime (not just `as const`, which is compile-time only). Another module could
+// otherwise assign/delete/replace an entry at runtime and re-open the very drift this single source
+// closes: registration iterates this object and SUPPORTED_DATA_SOURCE_TYPES is derived from its
+// keys, so a runtime mutation would desync registered adapters from the public supported set.
+export const DEFAULT_ADAPTER_REGISTRY = Object.freeze({
   postgresql: PostgresAdapter,
   postgres: PostgresAdapter, // accepted alias of postgresql — same adapter class
   http: HTTPAdapter,
   sqlserver: MSSQLAdapter,
   mysql: MySQLAdapter,
   plm: ManagedPLMAdapter,
-} as const
+} as const)
 
 export type SupportedDataSourceType = keyof typeof DEFAULT_ADAPTER_REGISTRY
 
-// DERIVED at runtime from the registry above — not a second hand-written list. The assertion
-// restores the non-empty-tuple shape `z.enum` requires (routes/data-sources.ts); it is sound by
-// construction because the registry is a non-empty object literal with string-literal keys.
-export const SUPPORTED_DATA_SOURCE_TYPES = Object.keys(DEFAULT_ADAPTER_REGISTRY) as unknown as
+// DERIVED at runtime from the registry above — not a second hand-written list — and itself FROZEN,
+// so a caller cannot push/splice a type into the "supported" set without a corresponding adapter.
+// The assertion restores the non-empty-tuple shape `z.enum` requires (routes/data-sources.ts); it
+// is sound by construction because the registry is a non-empty frozen literal with string keys.
+export const SUPPORTED_DATA_SOURCE_TYPES = Object.freeze(Object.keys(DEFAULT_ADAPTER_REGISTRY)) as unknown as
   readonly [SupportedDataSourceType, ...SupportedDataSourceType[]]
 
 function optionIsTrue(options: AdapterOptions | undefined, key: string): boolean {
