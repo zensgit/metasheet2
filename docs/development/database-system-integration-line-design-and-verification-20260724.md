@@ -38,7 +38,17 @@ Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲
 - *Direct-DB line:* values-free inventory first — and ⟲C2 **"0" only carries migration meaning once the coverage relations and the observation window are explicit.** The evidence set and what each piece covers:
   1. DB inventory (approved configs / pipelines / `integration_runs`) — config-driven plugin reads;
   2. the deployment's full `/select` access log, **with stated retention scope and time window** — ad-hoc HTTP callers, within that window only;
-  3. a static tree-wide enumeration of `manager.select` / `adapter.select` callers — in-repo direct entry points (currently: the `/select` route, the plugin adapter, `copyData` with no live callers);
+  3. a static tree-wide enumeration of `manager.select` / `adapter.select` callers — in-repo direct entry
+     points. ⚠️ **CORRECTED (verified 2026-07-24, independent review + my own re-verification): this group is
+     materially LARGER than earlier stated in this document.** Beyond the `/select` route and
+     `copyData` (which indeed has no live in-tree caller), there is a **shipped, live multi-page OFFSET
+     reader**: `pipeline-runner.cjs` runs `while (page < maxPages)` advancing `cursor = readResult.nextCursor`,
+     and the `data-source:sql-readonly` adapter's NON-watermark branch emits
+     `nextCursor = String(offset + records.length)` on a full page — so a non-incremental pipeline over a
+     SQL data source pages by OFFSET **with no `orderBy` anywhere on the path**, stopping on a short page
+     (`done: !fullPage`) evaluated against LIVE data. Earlier wording in this line implied the offset path
+     was merely *reachable*; it is **exercised by shipped pipeline code**. This raises, not lowers, the
+     priority of the B1a ordering contract and the migration that must precede B2;
   4. values-free `unorderedOffsetAttemptCount` at **both** the route and the adapter entries — closes the runtime blind spot, but it is instrumentation. **Owner decision recorded: the B1-observability gate is NOT opened early** — it cannot accelerate #4437 and would add a new runtime deployment surface. M1's inventory therefore rests on items 1–3 and **must state this runtime residual explicitly** in the migration decision, not gloss it; the counter arrives in its §4 slot behind its own gate.
 
   ⟲R4 **M1 produces inventory evidence only — the B2 merge decision is NOT taken in M1.** Per §4, **#4591** (which superseded #4580) merges **LAST**, and only after adapter-chokepoint telemetry (B1-observability), the coverage-mapped caller inventory, and customer migration are complete: an HTTP access log cannot see plugin-internal or direct adapter callers, so "log-zero" alone can never green-light enforcement. This supersedes the earlier "inventory = 0 ⇒ merge B2" fast path (the conflict between that fast path and the §4 order is adjudicated in favour of §4). Standing rules regardless of counts: new paginated configs must declare a stable **unique** `orderBy` — ⟲C4 **fail-fast hardening, not stable-pagination certification** (presence-only; uniqueness, same-order-from-page-1, and same-snapshot remain unproven until B1b/B1c); any live configs found ⇒ versioned config migration + preflight rejection first; never auto-guess a primary-key order.
@@ -121,6 +131,9 @@ Sealed export is the **preferred** exit for the bridge / big-data / non-paginata
 - **Trust is object identity** (module-private WeakSet) for strategy registries and the B1a resolver — never duck-type or "brand" objects with public fields.
 - **`/select` error mapping** (`routes/data-sources.ts`): the catch maps only "not found" → 404; everything else → 500. The closed-422 mapping is IMPLEMENTED in #4591 (`DataSourceOffsetOrderingError` → 422, closed: generic errors still 500).
 - **Inventory scripts: schema-probe FIRST.** Real run table = `integration_runs` (migration 057); there is no `metrics.pageCount` (real fields `details`/`rows_read`); `data_sources` shape varies across migrations. Central-DB counts cannot prove the absence of on-site `/select` callers — per-deployment access logs are required.
+- **The offset path is EXERCISED, not merely reachable** — `pipeline-runner.cjs`'s `while (page < maxPages)`
+  loop pages the `data-source:sql-readonly` adapter's non-watermark branch via `nextCursor = offset + n`,
+  with no `orderBy`. Any statement that the exposure is limited to `copyData` (no live caller) is WRONG.
 - **#4580's branch carried the pre-split A-half** — RESOLVED: re-cut from current main as #4591; #4580 CLOSED as superseded. Do not revive the old branch.
 - **Bridge feeder test fixtures must echo `data.limit`** — adapter v2 fail-closes without the echo (a fixture that omits it is not "the real agent", which always echoes).
 - **Do not raise the 500 single-page bound; do not wire the latent GIP profile** — both owner-gated.
