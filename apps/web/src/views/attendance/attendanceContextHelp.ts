@@ -38,7 +38,8 @@
 //     call site, `plugins/plugin-attendance/index.cjs`) and are deliberately excluded — mapping
 //     them would mean inventing a word list the backend does not actually guarantee.
 //   - Zero DOM, zero fetch, zero runtime interpolation of request/user/env values — every string
-//     here is a byte-fixed literal, or a reused byte-fixed literal from another closed-set module.
+//     here is a byte-fixed literal, one reused from another closed-set module, or a literal derived
+//     from a compile-time constant (`IMPORT_XLSX_MAX_BYTES`) — none of the three carries runtime data.
 //     values-free by construction (charter L225's six-item list: no customer id, no real user, no
 //     token, no host, no internal log path, no env secret — none of those concepts appear anywhere
 //     below).
