@@ -136,7 +136,9 @@ same semantic input while XLSX/CSV origin remains separate provenance.
 - W2 `resolved|ambiguous|unresolved` semantics and OD-4556-6/7/8;
 - current rotation/direct/default-rule context precedence;
 - W3 segment limits, ordering, envelope compatibility, and flag-OFF guards;
-- existing approval authorization and leave/overtime financial contracts;
+- existing approval assignment semantics and leave/overtime financial
+  contracts; approval authorization is tightened by W4C-R30 and is not
+  inherited as a sufficient org-bound check;
 - current `internalWinsOnIn` and `externalWinsOnOut` meanings.
 
 ### 2.3 OUT
@@ -363,10 +365,14 @@ object and nested arrays/objects, and registers it in a module-private
 compares that digest before reading a field. The CJS plugin cannot satisfy the
 runtime check by object-shape imitation, spread, JSON clone, prototype
 replacement, or post-mint mutation of the original object.
-Each adapter mints it only after its existing permission check, token-subject
-binding, `users.is_active=true`,
+Each adapter mints it only after its entrypoint-specific permission check and
+the stricter closed W4 authorization contract for that entrypoint,
+token-subject binding, `users.is_active=true`,
 `COALESCE(users.activation_status,'activated')='activated'`, active
-`user_orgs` membership/delegated scope, and source ownership check. The
+`user_orgs` membership/delegated scope, and source ownership check. In
+particular, an existing global attendance permission is only an input to the
+actor-posture decision; it never substitutes for the locked-request-org matrix
+in W4C-R30. The
 canonical writer rechecks the target org/subject, active user/activation state,
 and necessary membership/source row inside its transaction. A directory
 deprovision or activation change therefore invalidates a newly minted witness;
