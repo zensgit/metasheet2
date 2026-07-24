@@ -199,7 +199,8 @@ against W1 group-membership tables is a scope violation.
 | W4C-R37 | Operational import state never becomes calculation authority. | Token, preview/job, template-preference, upload cleanup, and temporary-stage mutations cannot satisfy operation identity, evidence, promotion, or rollback truth. |
 | W4C-R38 | Attendance approval assignment authority is org-bound, action-complete, and version-serialized. | A generated matrix from the actual generic action union and assignment-DML call graph covers bulk reassign, non-terminal `approve` advancement, `return`, `revoke`, jump, transfer, add/reduce-sign, timeout, and future assignment mutations. Each action proves the attendance instance unreachable or locks its request org/version and satisfies the closed actor/target matrix before instance/assignment DML; tests include both a normal attendance instance and an adversarial one carrying `published_definition_id`, and a mutation-versus-decision race cannot authorize the wrong actor. |
 | W4C-R39 | Closing a pre-W4 import rollback window is immutable and serialized with rollback and rollout transition. | Removing the append-only close witness, common org-rollout/batch lock order, or final in-transaction eligibility recheck fails dual-connection races for a legacy batch closed without preimage: close/transition first makes rollback return 409 with zero delete/reversal DML; rollback first makes transition wait and then re-evaluate. A batch with a valid frozen preimage retains its specified W4 reversal path. |
-| W4C-R40 | Operation lifecycle follows rollout posture without an implicit legacy exception. | A new legacy request creates/seals no operation or outbox row, while every new `shadow|eligible|authoritative` request claims and seals its operation. Independent mutations that write an operation in legacy or skip claim/seal outside legacy fail. |
+| W4C-R40 | Operation lifecycle follows rollout posture and supplied identity without an implicit retry hole. | A new legacy request with no supplied stable operation ID creates no operation/outbox row; legacy with a supplied ID claims/seals a compatibility operation but still creates no outbox; every new `shadow|eligible|authoritative` request requires, claims, and seals its operation plus required outbox. Independent mutations that create a legacy operation without an ID, omit the legacy-with-ID compatibility operation, or skip claim/seal outside legacy fail. |
+| W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work. | Source operations hold the org rollout shared transaction advisory lock from posture resolution through commit; transition/closure hold the matching exclusive lock. Removing either lock permits the dual-connection null-ID legacy-write-versus-shadow-transition mutation to commit an old-posture source after promotion. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -413,9 +414,13 @@ may carry raw business times, and they remain bound to an org-scoped import
 item. Approved facts, manual snapshots, rollout posture, tier, and provenance
 are minted by prepare, not supplied by an adapter.
 
-In `legacy_projection_only`, `operationId` may remain null and no operation row
-is required, preserving the existing API. In every W4 posture it is mandatory.
-`operationId` is not caller prose. Stable identities are:
+In `legacy_projection_only`, `operationId` may remain null, preserving the
+existing API. A null-ID legacy command creates no operation row. If a legacy
+caller does supply a valid stable ID, the boundary claims and seals a
+compatibility operation so response-loss retry remains idempotent across a
+later rollout transition; that row still has no W4 result pointer or outbox.
+In every W4 posture the ID and operation row are mandatory. `operationId` is
+not caller prose. Stable identities are:
 
 - client-generated UUID reused for a live punch, web approval decision,
   manual edit, recompute, rollback, or operator command;
@@ -1118,10 +1123,13 @@ operation in section 8.3 running in `shadow|eligible|authoritative` that
 currently reaches `emitEvent` stores one closed event row in the same
 transaction as its operation seal and source/effect/result writes. This
 durability contract does not apply to `legacy_projection_only`: that posture
-has no mandatory `operationId` or operation row and preserves the existing
-synchronous/best-effort emit behavior and response bytes. `suspended` admits no
-new source operation; congruent replay of an already completed non-legacy
-operation may wake its pending outbox row without re-running business DML.
+has no mandatory `operationId`; when one is supplied its compatibility
+operation stores the legacy response but creates no outbox. Legacy preserves
+the existing synchronous/best-effort emit behavior and response bytes.
+`suspended` admits no new source operation; congruent replay of an already
+completed non-legacy operation may wake its pending outbox row without
+re-running business DML, while completed legacy compatibility replay performs
+no emit or business DML.
 W4C-0 generates the exact reachable event-kind/payload inventory; unrelated
 configuration/report events remain outside this lock. The unique identity is
 `(org_id,entrypoint,operation_id,event_kind)`; payload schema/version,
@@ -1426,13 +1434,21 @@ Legacy rollback, rollback-window close, and every rollout transition use one
 `SERIALIZABLE` protocol. They first acquire the same org rollout advisory/row
 lock, then lock affected batch rows in stable ID order, then read the closure
 witness and reversible/preimage state, and finally recheck those predicates
-before commit. The close action inserts the witness only when no rollback is
-in progress and emits its rollout audit in the same transaction. A transition
-does not trust an earlier scan: while holding the same locks it proves every
-pre-W4 batch is closed or has a frozen target preimage. A rollback that sees a
-closure witness returns 409 with zero delete/reversal DML. If rollback wins the
-lock, close/transition waits and then re-evaluates the committed batch state;
-if close/transition wins, rollback cannot use a stale pre-lock read.
+before commit. The advisory component is the section 9 posture lock:
+rollback takes it shared, while close and transition take it exclusive. The
+rollout row is then locked where present; the advisory lock also covers
+missing-state legacy orgs. The close action inserts the witness only when no rollback is
+in progress and the locked legacy batch has zero frozen target preimages and
+zero W4 operation, calculation, or pointer references. If any such durable
+reversal evidence or reference exists, closure returns 409 and writes neither
+witness nor audit row. Only an eligible closure emits its rollout audit in the
+same transaction. A transition does not trust an earlier scan: while holding
+the same locks it proves every pre-W4 batch is closed or has a frozen target
+preimage. A rollback that sees a closure witness therefore necessarily has no
+valid frozen preimage and returns 409 with zero delete/reversal DML. If
+rollback wins the lock, close/transition waits and then re-evaluates the
+committed batch state; if close/transition wins, rollback cannot use a stale
+pre-lock read.
 
 If a legacy batch nevertheless reaches rollback after W4 acceptance, the route returns 409
 `IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE` with zero writes; it never falls back to
@@ -1502,10 +1518,13 @@ already completed congruent replay can return even under suspension. It then
 resolves rollout posture. A new `shadow|eligible|authoritative` request claims
 all item operations in stable order before invoking closed private adapters
 and seals them before commit. A new `legacy_projection_only` request invokes
-the same closed adapters and atomic compatibility path without creating,
-claiming, or sealing an operation row. Those adapters alone may create/lock
-the event, request, terminal approval, batch/item, edit, scheduled-run, or
-operator source rows and mint internal intents.
+the same closed adapters and atomic compatibility path. With no supplied stable
+ID it creates no operation row; with a supplied stable ID it claims and seals
+a compatibility operation in the same transaction so a later cross-posture
+retry returns the stored legacy response. Neither legacy form creates an
+outbox. Those adapters alone may create/lock the event, request, terminal
+approval, batch/item, edit, scheduled-run, or operator source rows and mint
+internal intents.
 
 For attendance workflows, that transaction is also the transaction for every
 shared approval/assignment/leave/comp-time/overtime ledger effect. Named generic
@@ -1521,7 +1540,8 @@ contract for a `shadow|eligible|authoritative` operation is enqueued in the
 section 7.1a outbox before the operation is sealed; direct post-commit emit
 without a durable row is forbidden in those postures. The closed
 `legacy_projection_only` branch retains its existing synchronous/best-effort
-emit and creates neither an operation row nor an outbox row.
+emit and creates no outbox row; it creates a compatibility operation only when
+the caller supplied a stable operation ID.
 
 `writeAttendanceCalculationsBatch`, prepare, and apply are private to that
 transaction. The batch function validates every minted intent against its
@@ -1550,11 +1570,14 @@ alternate result algorithm.
    stable order; return only an all-completed congruent replay. A missing key
    is not inserted yet, and mixed, incomplete, or non-congruent existing state
    is retained for the posture-specific decision;
-2. resolve rollout posture; if suspended, stop before operation/source DML;
+2. acquire the org rollout shared transaction advisory lock, resolve rollout
+   posture while holding it, and retain it through commit; if suspended, stop
+   before operation/source DML;
    for `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
    reject mixed or non-congruent state. For `legacy_projection_only`, reject
-   any conflicting/incomplete existing operation state and continue without
-   inserting or claiming an operation row;
+   any conflicting/incomplete existing operation state; claim a compatibility
+   operation only for each command carrying a supplied stable ID, and create no
+   operation for a null-ID command;
 3. run the closed entrypoint adapter: lock/create its source rows, capture any
    `approval_records.id RETURNING` value as evidence, and mint internal intents;
 4. run candidate resolution inside the transaction;
@@ -1579,11 +1602,12 @@ alternate result algorithm.
 14. for `shadow|eligible|authoritative`, append the closed outbox event rows
     required by this source operation; the separate
     `legacy_projection_only` branch has already preserved its existing emit
-    behavior and writes no operation/outbox row;
+    behavior and writes no outbox row;
 15. for `shadow|eligible|authoritative`, seal operation
-    result/fingerprints/response; for `legacy_projection_only`, seal no
-    operation. In both branches update the existing entrypoint-owned
-    audit/batch/request state required by the frozen compatibility contract;
+    result/fingerprints/response; for `legacy_projection_only`, seal the stored
+    legacy response only when a compatibility operation was claimed. In both
+    branches update the existing entrypoint-owned audit/batch/request state
+    required by the frozen compatibility contract;
 16. commit.
 
 Any failure rolls back all steps. Unique record/version is the concurrency
@@ -1603,12 +1627,15 @@ Every contributing writer must use compatible locks or change a version/hash
 seen by the recheck. A real-DB race between calculation and assignment/segment
 edit must never commit a mixed snapshot.
 
-Two independent operation-lifecycle mutations are mandatory. Making a new
-legacy request insert or seal an operation must fail a zero-operation-row leg.
-Making any new `shadow|eligible|authoritative` request skip claim or seal must
-fail durable replay and atomicity legs. The presence of the neighboring outbox
-or source-row guard is not accepted as the exclusive failure reason for either
-mutation.
+Three independent operation-lifecycle mutations are mandatory. Making a new
+null-ID legacy request insert or seal an operation must fail a
+zero-operation-row leg. Making a stable-ID legacy request skip its compatibility
+claim/seal must fail a response-loss test that commits under legacy, transitions
+to shadow, retries the same ID, and requires the stored response with zero new
+source/result DML. Making any new `shadow|eligible|authoritative` request skip
+claim or seal must fail durable replay and atomicity legs. The presence of the
+neighboring outbox or source-row guard is not accepted as the exclusive failure
+reason for any mutation.
 
 ### 8.3 Entrypoint parity
 
@@ -1722,6 +1749,16 @@ Pre-W4 import rollback-window closure is not inferred from time and is not a
 mutable field on this state row. It is the append-only per-batch witness defined
 in section 7.9. Rollback, closure, and every transition share that section's
 org-rollout then batch lock order and final in-transaction recheck.
+
+The stable org rollout advisory key has shared/exclusive transaction modes.
+Every new source/result transaction, including null-ID legacy work, acquires it
+shared before resolving posture and holds it through commit. Rollback also
+takes it shared before batch locks. Transition and rollback-window closure take
+it exclusive before reading/updating rollout or batch state. Completed
+congruent replay may return before this lock because it performs zero
+source/result DML. The advisory key, rather than existence of a rollout row,
+covers a legacy org with no persisted state. This freezes accepted posture
+without serializing ordinary same-org source writes against one another.
 
 One async `resolveSegmentCalculationPosture(trx,orgId)` is the sole truth for
 calculator mode, shift capability output, single/sequence reference guards,
@@ -1922,7 +1959,9 @@ adversarial review 0 P1/P2, exact-head tests/mutations, and no runtime org
 enablement unless section 12.8 explicitly receives owner authorization.
 Every cut-over slice proves its newly covered entrypoints in
 `legacy_projection_only` retain flag-OFF response/projection bytes, use the
-canonical boundary, and insert no W4 calculation, operation, or outbox row.
+canonical boundary, and insert no W4 calculation or outbox row. A null-ID
+legacy command inserts no operation row; a stable-ID legacy command inserts
+only its compatibility operation and no W4 result pointer.
 
 ### 12.1 W4C-0: contracts and durable storage
 
@@ -1957,6 +1996,15 @@ Gates:
 - rollback-closure identity/evidence is immutable; duplicate close is
   idempotent only when byte-congruent, while conflicting actor/reason/batch
   fingerprint returns 409 and UPDATE/DELETE/TRUNCATE/cascade all fail;
+- closure of a batch with any frozen target preimage or W4
+  operation/calculation/pointer reference returns 409 and inserts neither
+  closure witness nor audit event; removing each eligibility predicate fails
+  its own leg;
+- org rollout advisory shared/exclusive behavior is proven with two
+  connections: a null-ID legacy source holding the shared lock makes
+  transition wait and re-evaluate after its commit, while transition holding
+  exclusive makes the source resolve the new posture after release. Removing
+  either acquisition permits an old-posture commit and fails;
 - replay under a different actor/token subject or after authorization revocation
   cannot read the stored response;
 - approval decision operation identity is claimed before terminal state/record
@@ -2135,8 +2183,10 @@ Gates:
   closure/transition first makes rollback return 409 with zero
   delete/reversal DML; rollback first makes closure/transition wait and then
   re-evaluate. A separate frozen-preimage leg proves that transition does not
-  disable its W4 reversal path. Removing the closure witness, common lock, or
-  final recheck fails independently;
+  disable its W4 reversal path: closure is first rejected with no witness/audit,
+  transition then succeeds, and W4 reversal restores the frozen preimage.
+  Removing the closure eligibility check, witness, common lock, or final
+  recheck fails independently;
 - P24 integration dry-run may append only its audit attempt. It cannot create
   an import batch/result, change a current pointer, or update `last_sync_at`;
   real sync freezes its compatibility pipeline and uses the canonical W4
@@ -2382,14 +2432,15 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-35 integration dry-run | (a) audit attempt only, with no batch/result/pointer/`last_sync_at` write; (b) retain current watermark side effect | (a) |
 | OD-W4C-36 import operational state | (a) classify token/job/prefs/upload/temp state separately and deny calculation authority; (b) treat every operational row as business evidence | (a) |
 | OD-W4C-37 attendance assignment mutation | (a) central reassign and any reachable generic assignment mutation use the locked request-org actor/target matrix plus approval-version serialization; unsupported generic actions prove zero attendance DML; (b) retain global `approvals:admin` plus globally active target behavior | (a), changing who may approve is an org-bound security decision |
-| OD-W4C-38 operation lifecycle by posture | (a) completed congruent replay is read first; new legacy work writes no operation/outbox, while new shadow/eligible/authoritative work must claim and seal an operation plus required outbox; (b) persist operations in legacy too | (a), preserves legacy byte behavior while removing the contradictory implicit exception |
-| OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness and serialize rollback/closure/transition with the common org-rollout then batch lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback race |
+| OD-W4C-38 operation lifecycle by posture | (a) completed congruent replay is read first; null-ID legacy writes no operation/outbox, stable-ID legacy claims/seals a compatibility operation with no outbox, and shadow/eligible/authoritative require claim/seal plus required outbox; (b) require operation IDs from every legacy caller | (a), preserves the existing optional-ID API while closing cross-posture response-loss replay |
+| OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with the common org-rollout then batch lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
+| OD-W4C-40 rollout/source serialization | (a) source and rollback hold a shared org rollout advisory lock; transition and closure hold the matching exclusive lock; (b) rely on operation-row scans and transaction isolation alone | (a), the shared mode preserves ordinary write concurrency and covers null-ID legacy work |
 
 ## 14. RATIFY and execution sequence
 
 1. Rebase docs PR to current main.
 2. Re-verify anchors and regenerate writer inventory.
-3. Owner decides OD-W4C-1..39.
+3. Owner decides OD-W4C-1..40.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
 6. Owner RATIFYs exact merged SHA.
