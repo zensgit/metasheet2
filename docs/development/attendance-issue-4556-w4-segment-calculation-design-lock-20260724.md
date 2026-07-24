@@ -1,6 +1,6 @@
 # Attendance Issue #4556 W4 Segment Calculation and Immutable Snapshot Design Lock
 
-> Status: **PROPOSED**
+> Status: **RATIFIED**
 >
 > Pinned baseline: `origin/main@e0defbe26d7f2e1747e74aa908ca710422812bf7`
 >
@@ -8,9 +8,16 @@
 >
 > Scope: issue #4556, W4 only
 >
-> Authorization: this document authorizes **no runtime code, migration, flag
-> change, deployment, rollout, or issue closure** before the owner RATIFYs the
-> exact merged document SHA.
+> Ratified object: merged document
+> `a3e5765727ca608e8c49c7a44a025e6e4aae5d40` on 2026-07-24.
+>
+> Authorization: on 2026-07-24 the owner granted autonomous completion of
+> issue #4556 and accepted every recommended option `(a)` in
+> `OD-W4C-1..42`. This RATIFY authorizes the ordered W4C-0 through W4C-5
+> implementation, tests, adversarial review, and pull-request landing defined
+> here. It does **not** authorize production or customer-data access,
+> deployment, flag enablement, customer UAT claims, or issue closure before
+> the separately gated verification and closeout decisions.
 
 ## 0. Purpose and authority
 
@@ -34,8 +41,9 @@ W4 amendment to
 It governs W4 only. W5 flex, W6 read aggregation, W7 group-policy cutover, W8
 closeout, production enablement, and customer UAT remain separately gated.
 
-Every `OD-W4C-*` row in section 13 is OPEN. A merged PROPOSED document is not
-implementation authorization.
+Every `OD-W4C-*` row in section 13 is DECIDED as option `(a)`. Runtime
+authorization remains limited to the ordered, independently gated W4 slices;
+it does not imply rollout authorization.
 
 ## 1. Verified current-state spine
 
@@ -3028,11 +3036,13 @@ Every new test proves local collection, DB exclude/run-list wiring, workflow
 positive control, and exact mutation/failing leg. Frontend additions update both
 path filters and explicit web-guard run list. Skip-green is a failed gate.
 
-## 13. Owner decision menu
+## 13. Owner decisions
 
-All decisions remain **OPEN** until exact merged-SHA RATIFY.
+All decisions are **DECIDED** by exact merged-SHA RATIFY of
+`a3e5765727ca608e8c49c7a44a025e6e4aae5d40`. The owner accepted each
+recommended option `(a)` without extending the scope in sections 0 or 14.
 
-| ID | Options | Recommendation |
+| ID | Options | RATIFIED decision |
 | --- | --- | --- |
 | OD-W4C-1 status/reasons | (a) accept section 6; (b) amend exact values | (a) |
 | OD-W4C-2 capture cells | (a) midpoint partition; (b) new explicit windows | (a), no hidden setting |
@@ -3084,7 +3094,9 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 3. Owner decides OD-W4C-1..42.
 4. Amend until no decision is ambiguous.
 5. Merge document as PROPOSED.
-6. Owner RATIFYs exact merged SHA.
+6. Owner RATIFYs exact merged SHA. **Completed 2026-07-24 for
+   `a3e5765727ca608e8c49c7a44a025e6e4aae5d40`; OD-W4C-1..42 all chose
+   option `(a)`.**
 7. Only then start W4C-0 from fresh main.
 8. Each runtime slice follows section 12 and enables no org.
 9. W4C-5 staging requires separate owner authorization.
