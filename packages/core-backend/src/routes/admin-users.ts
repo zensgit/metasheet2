@@ -25,6 +25,10 @@ import {
   setUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import {
+  assertPendingUserCannotBeActivatedViaGenericStatusApi,
+  PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
+} from '../auth/user-activation'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
@@ -41,6 +45,8 @@ type AdminUserProfile = {
   role: string
   is_active: boolean
   is_admin: boolean
+  activationStatus?: string
+  localPasswordSet?: boolean
   last_login_at: string | null
   created_at: string
   updated_at?: string
@@ -342,6 +348,8 @@ const ADMIN_USER_PROFILE_SELECT = `
   role,
   is_active,
   is_admin,
+  COALESCE(activation_status, 'activated') AS "activationStatus",
+  COALESCE(local_password_set, TRUE) AS "localPasswordSet",
   last_login_at,
   created_at,
   updated_at
@@ -3356,9 +3364,15 @@ export function adminUsersRouter(): Router {
         await client.query(
           `INSERT INTO users (
              id, email, username, name, mobile, employee_no, department, position, hire_date,
-             password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at
+             password_hash, must_change_password, role, permissions, is_active, is_admin,
+             activation_status, local_password_set,
+             created_at, updated_at
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15, NOW(), NOW())`,
+           VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15,
+             'activated', TRUE,
+             NOW(), NOW()
+           )`,
           [
             userId,
             cleanEmail || null,
@@ -4051,6 +4065,21 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
+      try {
+        assertPendingUserCannotBeActivatedViaGenericStatusApi(profile.activationStatus, isActive)
+      } catch (error) {
+        const code = (error as Error & { code?: string }).code
+        if (code === PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) {
+          return jsonError(
+            res,
+            400,
+            PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
+            (error as Error).message,
+          )
+        }
+        throw error
+      }
+
       await query(
         `UPDATE users
          SET is_active = $1, updated_at = NOW()
@@ -4109,7 +4138,10 @@ export function adminUsersRouter(): Router {
       const passwordHash = await bcrypt.hash(temporaryPassword, getBcryptSaltRounds())
       await query(
         `UPDATE users
-         SET password_hash = $1, must_change_password = TRUE, updated_at = NOW()
+         SET password_hash = $1,
+             must_change_password = TRUE,
+             local_password_set = TRUE,
+             updated_at = NOW()
          WHERE id = $2`,
         [passwordHash, userId],
       )

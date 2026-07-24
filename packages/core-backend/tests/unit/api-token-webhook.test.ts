@@ -73,6 +73,32 @@ function createMockDb(): Kysely<Database> {
 //  API Token Service
 // ═══════════════════════════════════════════════════════════════════════
 
+/** Active creator row for validateToken creator-gate (T1). */
+const ACTIVE_CREATOR = {
+  id: 'user1',
+  is_active: true,
+  role: 'user',
+  activation_status: 'activated',
+  local_password_set: true,
+}
+
+function tokenRow(
+  created: { token: { id: string; name: string; tokenHash: string; tokenPrefix: string; scopes: ApiTokenScope[]; createdAt: string } },
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id: created.token.id,
+    name: created.token.name,
+    token_hash: created.token.tokenHash,
+    token_prefix: created.token.tokenPrefix,
+    scopes: JSON.stringify(created.token.scopes),
+    created_by: 'user1',
+    created_at: created.token.createdAt,
+    revoked: false,
+    ...overrides,
+  }
+}
+
 describe('ApiTokenService', () => {
   let svc: ApiTokenService
   let db: Kysely<Database>
@@ -157,16 +183,7 @@ describe('ApiTokenService', () => {
       name: 'Valid',
       scopes: ['records:read'],
     })
-    executeTakeFirstQueue.push({
-      id: created.token.id,
-      name: created.token.name,
-      token_hash: created.token.tokenHash,
-      token_prefix: created.token.tokenPrefix,
-      scopes: JSON.stringify(created.token.scopes),
-      created_by: 'user1',
-      created_at: created.token.createdAt,
-      revoked: false,
-    })
+    executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR })
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(true)
     if (result.valid) {
@@ -194,20 +211,70 @@ describe('ApiTokenService', () => {
       scopes: ['records:read'],
     })
     expect(created.token.lastUsedAt).toBeUndefined()
-    executeTakeFirstQueue.push({
-      id: created.token.id,
-      name: created.token.name,
-      token_hash: created.token.tokenHash,
-      token_prefix: created.token.tokenPrefix,
-      scopes: JSON.stringify(created.token.scopes),
-      created_by: 'user1',
-      created_at: created.token.createdAt,
-      revoked: false,
-    })
+    executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR })
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(true)
     if (result.valid) {
       expect(result.token.lastUsedAt).toBeDefined()
+    }
+  })
+
+  test('validateToken fails when creator is missing', async () => {
+    const created = await svc.createToken('user1', { name: 'NoCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), undefined)
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/creator not found/i)
+  })
+
+  test('validateToken fails when creator is pending_activation', async () => {
+    const created = await svc.createToken('user1', { name: 'PendingCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      activation_status: 'pending_activation',
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/pending activation/i)
+  })
+
+  test('validateToken fails when creator is inactive', async () => {
+    const created = await svc.createToken('user1', { name: 'InactiveCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      is_active: false,
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/inactive|disabled/i)
+  })
+
+  test('validateToken fails when creator activation_status is invalid', async () => {
+    const created = await svc.createToken('user1', { name: 'InvalidCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      activation_status: 'corrupted',
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/invalid/i)
+  })
+
+  test('mutation: omitting creator gate would green the four negative creator cases', async () => {
+    // Load-bearing: each negative creator state must fail with the current gate.
+    // If the creator query/gate is deleted, these would incorrectly become valid.
+    const cases = [
+      { label: 'missing', creator: undefined as unknown, reason: /creator not found/i },
+      { label: 'pending', creator: { ...ACTIVE_CREATOR, activation_status: 'pending_activation' }, reason: /pending activation/i },
+      { label: 'inactive', creator: { ...ACTIVE_CREATOR, is_active: false }, reason: /inactive|disabled/i },
+      { label: 'invalid', creator: { ...ACTIVE_CREATOR, activation_status: 'corrupted' }, reason: /invalid/i },
+    ] as const
+    for (const c of cases) {
+      const created = await svc.createToken('user1', { name: c.label, scopes: ['records:read'] })
+      executeTakeFirstQueue.push(tokenRow(created), c.creator)
+      const result = await svc.validateToken(created.plainTextToken)
+      expect(result.valid, c.label).toBe(false)
+      if (!result.valid) expect(result.reason, c.label).toMatch(c.reason)
     }
   })
 
@@ -349,17 +416,10 @@ describe('ApiTokenService', () => {
       scopes: ['records:read'],
       expiresAt: future,
     })
-    executeTakeFirstQueue.push({
-      id: created.token.id,
-      name: created.token.name,
-      token_hash: created.token.tokenHash,
-      token_prefix: created.token.tokenPrefix,
-      scopes: JSON.stringify(created.token.scopes),
-      created_by: 'user1',
-      created_at: created.token.createdAt,
-      expires_at: future,
-      revoked: false,
-    })
+    executeTakeFirstQueue.push(
+      tokenRow(created, { expires_at: future }),
+      { ...ACTIVE_CREATOR },
+    )
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(true)
   })
@@ -415,18 +475,22 @@ describe('ApiTokenService', () => {
       created_at: oldToken.createdAt,
       revoked: true,
     })
+    // revoked fails before creator lookup
     expect((await svc.validateToken(oldPt)).valid).toBe(false)
 
-    executeTakeFirstQueue.push({
-      id: newToken.id,
-      name: newToken.name,
-      token_hash: newToken.tokenHash,
-      token_prefix: newToken.tokenPrefix,
-      scopes: JSON.stringify(newToken.scopes),
-      created_by: 'user1',
-      created_at: newToken.createdAt,
-      revoked: false,
-    })
+    executeTakeFirstQueue.push(
+      {
+        id: newToken.id,
+        name: newToken.name,
+        token_hash: newToken.tokenHash,
+        token_prefix: newToken.tokenPrefix,
+        scopes: JSON.stringify(newToken.scopes),
+        created_by: 'user1',
+        created_at: newToken.createdAt,
+        revoked: false,
+      },
+      { ...ACTIVE_CREATOR },
+    )
     expect((await svc.validateToken(newPt)).valid).toBe(true)
 
     expect(newToken.scopes).toEqual(

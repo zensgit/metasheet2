@@ -18,6 +18,7 @@ import {
   readDingTalkAllowedCorpIds,
 } from '../integrations/dingtalk/runtime-policy'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import { evaluateUserAuthenticationGate } from './user-activation'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 
 const logger = new Logger('DingTalkOAuth')
@@ -56,6 +57,7 @@ interface LocalUserRow {
   name: string
   role: string
   is_active: boolean
+  activation_status?: string | null
 }
 
 export type DingTalkOAuthIntent = 'login' | 'bind'
@@ -553,7 +555,8 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
             email,
             COALESCE(name, '') AS name,
             COALESCE(role, 'user') AS role,
-            COALESCE(is_active, TRUE) AS is_active
+            COALESCE(is_active, TRUE) AS is_active,
+            activation_status
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -570,7 +573,8 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
               u.email,
               COALESCE(u.name, '') AS name,
               COALESCE(u.role, 'user') AS role,
-              COALESCE(u.is_active, TRUE) AS is_active
+              COALESCE(u.is_active, TRUE) AS is_active,
+              u.activation_status
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
@@ -604,12 +608,23 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
 }
 
 function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
-  if (localUser.role === 'disabled' || localUser.is_active === false) {
-    throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+  // Shared closed-set gate (PR #4559): only exact pending_activation | activated.
+  const denial = evaluateUserAuthenticationGate({
+    is_active: localUser.is_active,
+    role: localUser.role,
+    activation_status: localUser.activation_status,
+  })
+  if (!denial) return
+  if (denial.code === 'ACCOUNT_PENDING_ACTIVATION' || denial.code === 'ACCOUNT_ACTIVATION_INVALID') {
+    throw createPolicyError(denial.message, {
       statusCode: 403,
-      code: 'local_user_disabled',
+      code: denial.code,
     })
   }
+  throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+    statusCode: 403,
+    code: 'local_user_disabled',
+  })
 }
 
 // W4-PRE-1 policy (§3.3 item 2 of the Wave-4 onboarding design lock, docs/development/
@@ -651,13 +666,18 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
 
   try {
     const result = await query<LocalUserRow>(
-      `INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 'user', NOW(), NOW())
+      `INSERT INTO users (
+         id, email, name, password_hash, role,
+         activation_status, local_password_set, is_active,
+         created_at, updated_at
+       )
+       VALUES ($1, $2, $3, $4, 'user', 'activated', FALSE, TRUE, NOW(), NOW())
        RETURNING id,
                  email,
                  COALESCE(name, '') AS name,
                  COALESCE(role, 'user') AS role,
-                 COALESCE(is_active, TRUE) AS is_active`,
+                 COALESCE(is_active, TRUE) AS is_active,
+                 activation_status`,
       [userId, email, name, passwordHash],
     )
 

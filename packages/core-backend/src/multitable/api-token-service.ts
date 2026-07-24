@@ -7,6 +7,7 @@
 import { createHash, randomBytes } from 'crypto'
 import type { Kysely } from 'kysely'
 import { Logger } from '../core/logger'
+import { evaluateUserAuthenticationGate } from '../auth/user-activation'
 import type { Database } from '../db/types'
 import { nowTimestamp, toJsonValue } from '../db/type-helpers'
 import type {
@@ -242,6 +243,27 @@ export class ApiTokenService {
 
     if (row.expires_at && new Date(row.expires_at as unknown as string) < new Date()) {
       return { valid: false, reason: 'Token has expired' }
+    }
+
+    // T1: fail-closed on creator account state (pending / inactive / invalid activation).
+    const creator = await this.db
+      .selectFrom('users')
+      .select(['id', 'is_active', 'role', 'activation_status', 'local_password_set'])
+      .where('id', '=', row.created_by)
+      .executeTakeFirst()
+
+    if (!creator) {
+      return { valid: false, reason: 'Token creator not found' }
+    }
+
+    const gate = evaluateUserAuthenticationGate({
+      is_active: creator.is_active,
+      role: creator.role,
+      activation_status: creator.activation_status,
+      local_password_set: creator.local_password_set,
+    })
+    if (gate) {
+      return { valid: false, reason: gate.message }
     }
 
     // Update last used timestamp

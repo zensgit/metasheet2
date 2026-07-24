@@ -36,6 +36,10 @@ import {
 import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import {
+  buildUnusablePasswordHash,
+  isDirectoryPendingActivationEnabled,
+} from '../auth/user-activation'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
@@ -602,7 +606,11 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
   }
   temporaryPassword?: string
   inviteToken: string | null
-  onboarding: ReturnType<typeof buildOnboardingPacket>
+  /** Null when pending_activation — no usable password / login messaging. */
+  onboarding: ReturnType<typeof buildOnboardingPacket> | null
+  /** Actual grant applied (pending forces false regardless of request). */
+  enableDingTalkGrantApplied: boolean
+  activationStatus: 'pending_activation' | 'activated'
 }
 
 export type DirectoryAccountBatchAdmissionOutcome = {
@@ -3947,8 +3955,17 @@ export async function syncDirectoryIntegration(
                       open_id: account.open_id,
                     })
                 const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
-                const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
-                const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                // T1 pending mode: unusable hash, no temp password, no invite/onboarding packet.
+                // Default-off path keeps temporary password + invite semantics for activated users.
+                const pendingMode = isDirectoryPendingActivationEnabled()
+                let generatedPassword: string | null = null
+                let passwordHash: string
+                if (pendingMode) {
+                  passwordHash = await buildUnusablePasswordHash()
+                } else {
+                  generatedPassword = generateDirectoryAdmissionTemporaryPassword()
+                  passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                }
                 // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
                 // condition instead of hardcoding grant=true. A corp-scoped account
                 // (corp_id set) without an openId cannot use DingTalk login and would
@@ -3957,7 +3974,9 @@ export async function syncDirectoryIntegration(
                 // an account is admitted with the grant OFF (directory binding still
                 // happens), and the assertion is enforced before INSERT (see
                 // createDirectoryAdmittedUserInTransaction) so no orphan can be created.
-                const canGrantDingTalkLogin = resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
+                const canGrantDingTalkLogin = pendingMode
+                  ? false
+                  : resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
                 const created = await createDirectoryAdmittedUserInTransaction(client, {
                   account: {
                     id: account.id,
@@ -3978,43 +3997,45 @@ export async function syncDirectoryIntegration(
                   username: generatedUsername,
                   mobile: cleanMobile,
                   passwordHash,
-                  mustChangePassword: true,
+                  mustChangePassword: !pendingMode,
                   enableDingTalkGrant: canGrantDingTalkLogin,
                 })
-                let inviteToken: string | null = null
-                if (cleanEmail) {
-                  inviteToken = issueInviteToken({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    presetId: null,
-                  })
-                  autoAdmissionInvites.push({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    inviteToken,
-                  })
-                } else {
-                  autoAdmittedNoEmailCount += 1
-                  autoAdmissionOnboardingPackets.push({
-                    userId: created.userId,
-                    name: cleanName,
-                    email: cleanEmail,
-                    username: generatedUsername,
-                    mobile: cleanMobile,
-                    temporaryPassword: generatedPassword,
-                    onboarding: buildOnboardingPacket({
+                if (!pendingMode) {
+                  let inviteToken: string | null = null
+                  if (cleanEmail) {
+                    inviteToken = issueInviteToken({
+                      userId: created.userId,
                       email: cleanEmail,
-                      accountLabel: resolveDirectoryAdmissionAccountLabel({
-                        email: cleanEmail,
-                        username: generatedUsername,
-                        mobile: cleanMobile,
-                        userId: created.userId,
-                      }),
-                      temporaryPassword: generatedPassword,
-                      preset: null,
+                      presetId: null,
+                    })
+                    autoAdmissionInvites.push({
+                      userId: created.userId,
+                      email: cleanEmail,
                       inviteToken,
-                    }),
-                  })
+                    })
+                  } else if (generatedPassword) {
+                    autoAdmittedNoEmailCount += 1
+                    autoAdmissionOnboardingPackets.push({
+                      userId: created.userId,
+                      name: cleanName,
+                      email: cleanEmail,
+                      username: generatedUsername,
+                      mobile: cleanMobile,
+                      temporaryPassword: generatedPassword,
+                      onboarding: buildOnboardingPacket({
+                        email: cleanEmail,
+                        accountLabel: resolveDirectoryAdmissionAccountLabel({
+                          email: cleanEmail,
+                          username: generatedUsername,
+                          mobile: cleanMobile,
+                          userId: created.userId,
+                        }),
+                        temporaryPassword: generatedPassword,
+                        preset: null,
+                        inviteToken,
+                      }),
+                    })
+                  }
                 }
                 localUserId = created.userId
                 linkStatus = 'linked'
@@ -5342,9 +5363,21 @@ async function applyDirectoryAccountBindInTransaction(
     enableDingTalkGrant: boolean
     account: DirectoryBindingTargetAccountRow
     localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'username' | 'name'>
+    /**
+     * T1 pending create: link + identity only — no active user_orgs until activate (Action C).
+     * Default false preserves W4-PRE-1b membership maintenance for normal bind/admit.
+     */
+    skipUserOrgMembership?: boolean
   },
 ): Promise<void> {
-  const { normalizedAccountId, normalizedAdminUserId, enableDingTalkGrant, account, localUser } = options
+  const {
+    normalizedAccountId,
+    normalizedAdminUserId,
+    enableDingTalkGrant,
+    account,
+    localUser,
+    skipUserOrgMembership = false,
+  } = options
   const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
   if (!identityExternalKey) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
@@ -5506,8 +5539,10 @@ async function applyDirectoryAccountBindInTransaction(
   )
 
   // W4-PRE-1b item A: the account is now linked to `localUser` — maintain their ACTIVE
-  // membership in the SAME transaction. Runs for every caller (manual bind, admit, batch).
-  await upsertActiveUserOrgMembership(client, { userId: localUser.id, orgId })
+  // membership in the SAME transaction. Skipped for pending_activation creates (T1 design lock).
+  if (!skipUserOrgMembership) {
+    await upsertActiveUserOrgMembership(client, { userId: localUser.id, orgId })
+  }
 
   // W4-PRE-1b item B: if this account previously belonged to a DIFFERENT local user, the link
   // upsert above just displaced them — deactivate their membership in THIS org unless they hold
@@ -5532,6 +5567,13 @@ async function createDirectoryAdmittedUserInTransaction(
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
+  // T1: pending-create runtime is default OFF. When enabled, admit creates pending users
+  // (is_active=false, no active user_orgs, grant off). When off, preserve pre-T1 behavior.
+  const pendingMode = isDirectoryPendingActivationEnabled()
+  const enableDingTalkGrant = pendingMode ? false : options.enableDingTalkGrant
+  const isActive = pendingMode ? false : true
+  const activationStatus = pendingMode ? 'pending_activation' : 'activated'
+  const localPasswordSet = pendingMode ? false : true
   // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row — the cheapest
   // and most common orphan cause (grant requested for an account that cannot hold one).
   // But this alone is not sufficient: applyDirectoryAccountBindInTransaction (called AFTER
@@ -5540,7 +5582,7 @@ async function createDirectoryAdmittedUserInTransaction(
   // throws, swallowed by the sync loop's catch, historically committed an orphan. The
   // SAVEPOINT around INSERT+bind (below) makes the whole admission all-or-nothing: a bind
   // that throws for ANY reason rolls the users row back, so the loop's swallow is safe.
-  assertDirectoryAccountCanEnableDingTalkGrant(options.account, options.enableDingTalkGrant)
+  assertDirectoryAccountCanEnableDingTalkGrant(options.account, enableDingTalkGrant)
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
   }
@@ -5614,15 +5656,37 @@ async function createDirectoryAdmittedUserInTransaction(
   await client.query('SAVEPOINT directory_admit_user')
   try {
     await client.query(
-      `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-       VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
-      [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+      `INSERT INTO users (
+         id, email, username, name, mobile, password_hash, must_change_password,
+         role, permissions, is_active, is_admin,
+         activation_status, local_password_set,
+         created_at, updated_at
+       )
+       VALUES (
+         $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean,
+         'user', $8::jsonb, $9::boolean, FALSE,
+         $10::text, $11::boolean,
+         NOW(), NOW()
+       )`,
+      [
+        userId,
+        options.email,
+        options.username,
+        options.name,
+        options.mobile,
+        options.passwordHash,
+        options.mustChangePassword,
+        JSON.stringify([]),
+        isActive,
+        activationStatus,
+        localPasswordSet,
+      ],
     )
 
     await applyDirectoryAccountBindInTransaction(client, {
       normalizedAccountId: options.account.id,
       normalizedAdminUserId: options.adminUserId,
-      enableDingTalkGrant: options.enableDingTalkGrant,
+      enableDingTalkGrant,
       account: options.account,
       localUser: {
         id: userId,
@@ -5630,6 +5694,7 @@ async function createDirectoryAdmittedUserInTransaction(
         username: options.username,
         name: options.name,
       },
+      skipUserOrgMembership: pendingMode,
     })
   } catch (error) {
     // Undo the users INSERT (and recover the transaction if the throw came from a failed
@@ -6201,7 +6266,9 @@ export async function admitDirectoryAccountUser(
   const cleanUsername = sanitizeDirectoryAdmissionUsername(input.username)
   const cleanMobile = sanitizeDirectoryAdmissionMobile(input.mobile)
   const requestedPassword = normalizeText(input.password)
-  const enableDingTalkGrant = input.enableDingTalkGrant !== false
+  const pendingMode = isDirectoryPendingActivationEnabled()
+  // Pending create: never grant DingTalk login; credentials deferred to T3 activate.
+  const enableDingTalkGrant = pendingMode ? false : input.enableDingTalkGrant !== false
 
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
@@ -6213,11 +6280,20 @@ export async function admitDirectoryAccountUser(
   const usernameValidationError = validateDirectoryAdmissionUsername(cleanUsername)
   if (usernameValidationError) throw new Error(usernameValidationError)
 
-  const generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
-  const mustChangePassword = requestedPassword.length === 0
-  const passwordValidation = validatePassword(generatedPassword)
-  if (!passwordValidation.valid) {
-    throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+  // Pending: ignore any requested password — unusable hash only (no temp credentials).
+  let generatedPassword: string | null = null
+  let passwordHash: string
+  let mustChangePassword = false
+  if (pendingMode) {
+    passwordHash = await buildUnusablePasswordHash()
+  } else {
+    generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
+    mustChangePassword = requestedPassword.length === 0
+    const passwordValidation = validatePassword(generatedPassword)
+    if (!passwordValidation.valid) {
+      throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+    }
+    passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   }
 
   const [account, previousLinkedUser] = await Promise.all([
@@ -6231,7 +6307,6 @@ export async function admitDirectoryAccountUser(
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
-  const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   let userId = ''
 
   await transaction(async (client) => {
@@ -6249,15 +6324,14 @@ export async function admitDirectoryAccountUser(
     userId = created.userId
   })
 
-  const resolvedInviteToken = cleanEmail
-    ? issueInviteToken({
+  // Pending: never issue invite or temporary password (T3 owns activation credentials).
+  let resolvedInviteToken: string | null = null
+  if (!pendingMode && cleanEmail) {
+    resolvedInviteToken = issueInviteToken({
       userId,
       email: cleanEmail,
       presetId: null,
     })
-    : null
-
-  if (cleanEmail && resolvedInviteToken) {
     await recordInvite({
       userId,
       email: cleanEmail,
@@ -6273,6 +6347,27 @@ export async function admitDirectoryAccountUser(
   if (!summary) {
     throw new Error('Directory account bound but summary reload failed')
   }
+
+  const isActive = !pendingMode
+  const returnTempPassword = !pendingMode && requestedPassword.length === 0 && generatedPassword
+    ? generatedPassword
+    : undefined
+
+  // Pending: no misleading onboarding (no usable password, cannot login until T3 activate).
+  const onboarding = pendingMode
+    ? null
+    : buildOnboardingPacket({
+      email: cleanEmail || null,
+      accountLabel: resolveDirectoryAdmissionAccountLabel({
+        email: cleanEmail || null,
+        username: cleanUsername,
+        mobile: cleanMobile,
+        userId,
+      }),
+      temporaryPassword: returnTempPassword ?? null,
+      preset: null,
+      inviteToken: resolvedInviteToken,
+    })
 
   return {
     account: summary,
@@ -6290,22 +6385,15 @@ export async function admitDirectoryAccountUser(
       name: cleanName,
       mobile: cleanMobile,
       role: 'user',
-      is_active: true,
+      is_active: isActive,
     },
-    temporaryPassword: requestedPassword.length === 0 ? generatedPassword : undefined,
+    temporaryPassword: returnTempPassword,
     inviteToken: resolvedInviteToken,
-    onboarding: buildOnboardingPacket({
-      email: cleanEmail || null,
-      accountLabel: resolveDirectoryAdmissionAccountLabel({
-        email: cleanEmail || null,
-        username: cleanUsername,
-        mobile: cleanMobile,
-        userId,
-      }),
-      temporaryPassword: requestedPassword.length === 0 ? generatedPassword : null,
-      preset: null,
-      inviteToken: resolvedInviteToken,
-    }),
+    // When pending, onboarding is null — callers must not invent temp-password messaging.
+    onboarding,
+    // Actual grant applied (pending forces false).
+    enableDingTalkGrantApplied: enableDingTalkGrant,
+    activationStatus: pendingMode ? 'pending_activation' : 'activated',
   }
 }
 

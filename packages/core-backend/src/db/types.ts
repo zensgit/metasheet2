@@ -747,6 +747,10 @@ export interface UsersTable {
   mobile: string | null
   password_hash: string
   must_change_password: boolean
+  /** T1: pending_activation | activated */
+  activation_status: string
+  /** T1: whether password_hash is a usable local login secret */
+  local_password_set: boolean
   role: string
   permissions: JSONColumnType<string[]>
   avatar_url: string | null
