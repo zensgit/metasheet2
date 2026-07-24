@@ -148,11 +148,12 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
       shift_work_start_time: '22:00',
       shift_work_end_time: '06:00',
       shift_is_overnight: true,
+      shift_segment_count: 1,
     }
     const fakeDb = {
       query: async (sql: string, params?: unknown[]) => {
         const text = String(sql)
-        if (text.includes('FROM attendance_shifts WHERE id = $1 AND org_id = $2')) {
+        if (text.includes('FROM attendance_shifts s') && text.includes('s.id = $1 AND s.org_id = $2')) {
           if (params?.[0] === 'sh-overnight' && params?.[1] === 'default') {
             return [{
               id: 'sh-overnight',
@@ -166,6 +167,7 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
               early_grace_minutes: 10,
               rounding_minutes: 5,
               working_days: [1, 2, 3, 4, 5],
+              segment_count: 1,
             }]
           }
           return []
@@ -197,6 +199,7 @@ describe('attendance live punch work_date overnight anchoring helpers', () => {
               shift_early_grace_minutes: 10,
               shift_rounding_minutes: 5,
               shift_working_days: [1, 2, 3, 4, 5],
+              shift_segment_count: 1,
             }]
           }
           return []
