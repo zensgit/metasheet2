@@ -153,7 +153,15 @@ Three merged paths write or read the non-existent column behind a swallow, so ea
 | `deprovision-evidence-api.ts` preview (D7, #4575) | reads `COALESCE(grant_enabled, FALSE)` inside `.catch` | preview can **never** show a grant effect | §0.1 B |
 | `deprovision-evidence-api.ts` restore (D7, #4575) | `UPDATE … SET grant_enabled = TRUE` inside `.catch` | drift gate can never fire, and the restore aborts (`25P02`) | §0.1 C |
 
-The T3 activation defect is live in merged code today and is independent of the deprovision flag.
+**Trigger condition for the T3 defect (precise).** `POST /api/admin/users/:id/activate` accepts
+`enableDingTalkGrant` from the request body with no flag of its own, but `activatePendingUser`
+only accepts a user already in `activation_status='pending_activation'`
+(`user-activate.ts:112`), and pending users are created **only** by the directory admission paths
+gated on `isDirectoryPendingActivationEnabled()` (three call sites in `directory-sync.ts`,
+default OFF). So the defect is **latent today** and **arms at canary step 2**
+(`DIRECTORY_PENDING_ACTIVATION_ENABLED=true`) — the first write-bearing step of the canary
+sequence, reached before deprovision is ever touched. It is not blocked by, and does not wait
+for, the deprovision flag.
 
 Note the `.catch(() => {})` idiom is worse than "silently no-ops" here: inside a transaction, a
 failed statement poisons the connection, so swallowing the rejection converts a precise error
