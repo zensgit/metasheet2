@@ -105,7 +105,7 @@ separate debt entries even when they later call the same function.
 | P18 | Terminal `shift_swap` and `schedule_dispatch` write schedule assignments/group membership outside the result transaction. | W4C-3b: classify them as schedule-fact writers and make their version/hash/lock participate in W4 context consistency before enabling authority. |
 | P19 | Decision and cancellation request lookup plus global permission bypass do not define an explicit org-bound authorization contract. | W4C-3b: lock request org first, derive org from the locked row, then apply the closed platform-admin versus org-member authorization matrix before shared/result DML. |
 | P20 | Anomaly, makeup-anomaly facts, open-record attribution, and DecisionTrace are direct ordinary readers absent from the named current-view list. | W4C-3c: move every one to the canonical active-current helper and give each an independent retired-row negative leg. |
-| P21 | Time conversion has multiple silent UTC/server-local fallback helpers and a default-rule timezone write path without uniform IANA validation. | W4C-1/W4C-2: strict-parse every business-time input and freeze the accepted zone/offset/instant; no helper-specific fallback path. |
+| P21 | Time conversion has multiple silent UTC/server-local fallback helpers and a default-rule timezone write path without uniform IANA validation. | W4C-1/W4C-2: strict-parse every candidate for W4 authority and freeze the accepted zone/offset/instant; `legacy_projection_only` preserves current parsing, while `shadow` preserves the legacy result but records a non-promotable review for legacy-only time input. No helper-specific fallback may become W4 evidence. |
 | P22 | Current request terminalization has three reachable execution bodies and no attendance reconciliation listener; later plugin approval may still apply effects after another body already made the instance terminal. | W4C-3b: one terminal attendance transition with expected version/status, canonical replay, and explicit rejection of a second execution body. |
 | P23 | `/import/rollback/:id` accepts a broader authorization posture than import commit and can roll back another actor's org-local batch. | W4C-3a: bind rollback to the frozen batch owner/scope and re-run the commit-equivalent delegated authorization before claim/source DML. |
 | P24 | Integration sync has a distinct semantic pipeline, and `dryRun` still writes the run plus `last_sync_at`. | W4C-3a: freeze current compatibility semantics explicitly, use one W4 calculator, and make dry-run append audit-only state without result/batch/watermark mutation. |
@@ -191,7 +191,7 @@ against W1 group-membership tables is a scope violation.
 | W4C-R30 | Attendance approval and cancellation authorization is explicit at the locked request org. | Cross-org attendance-admin/delegated UUID probes fail before shared/result SQL; platform-admin override requires the closed global posture and an audit witness. |
 | W4C-R31 | Schedule-fact writers cannot race or bypass frozen calculation context. | Moving shift-swap/schedule-dispatch/shift-assignment mutation outside the compatible lock/version protocol fails a concurrent calculation test. |
 | W4C-R32 | Every ordinary daily-row reader uses the active-current contract. | Independent retired-row legs cover anomaly, makeup-anomaly facts, open-record attribution, DecisionTrace, and every pre-existing list/summary/report/export reader. |
-| W4C-R33 | Every business-time ingress uses one strict timezone contract. | Invalid/missing zone, DST gap/fold, offset-less server-local parsing, and helper-level UTC fallback mutations all fail before source/result DML. |
+| W4C-R33 | Every business time admitted as W4 evidence uses one strict timezone contract. | Invalid/missing zone, DST gap/fold, offset-less server-local parsing, and helper-level UTC fallback mutations cannot produce a completed W4 calculation: legacy remains byte-compatible, shadow records a non-promotable review while preserving the legacy result, and eligible/authoritative fail before source/result DML. |
 | W4C-R34 | Pending request edits are versioned immutable transitions. | Reusing mutable `form_snapshot`, omitting the expected snapshot hash/version, or an A -> B -> A edit without three snapshots fails. |
 | W4C-R35 | Import rollback cannot exceed the original batch's authorization scope. | Another importer, delegated scope, group, and cross-org probes fail before operation claim or reversal DML unless the closed owner/admin matrix authorizes them. |
 | W4C-R36 | Integration dry-run cannot advance business state. | A dry-run may append its audit attempt but writes no attendance result/import batch/current pointer/`last_sync_at`; moving any forbidden write into that branch fails. |
@@ -359,6 +359,21 @@ private adapter generates request/approval UUIDs and stores them in the
 operation response. Replay returns those stored IDs before adapter execution;
 randomly regenerated IDs are never part of the command fingerprint and never
 substitute for the client command identity.
+
+Business-time parsing has an explicit migration split. In
+`legacy_projection_only`, the closed legacy branch preserves the current
+parser and response/projection bytes and emits no W4 row. In effective
+`shadow`, a value accepted only by the legacy parser, including an offset-less
+timestamp that would use process-local time, still executes the prepared legacy
+source/projection behavior; the W4 side freezes the raw value, the exact
+legacy-resolved instant, and parser/environment provenance and appends only
+`review_required/legacy_time_ingress_not_authoritative` with zero segments and
+no current pointer. That review can never satisfy eligibility or promotion.
+Effective `eligible` and `authoritative` reject the same input before any
+source/effect/result DML. A successfully strict-parsed value follows the normal
+shadow/authoritative path. This compatibility exception never permits a legacy
+resolved instant, UTC fallback, or process timezone to become W4 calculation
+evidence.
 
 The authorization context is an in-process branded value, never request JSON.
 The host factory normalizes and deep-copies every value, freezes the outer
@@ -933,6 +948,7 @@ frozen_evidence_unavailable
 context_resolution_ambiguous
 context_mismatch
 input_schema_invalid
+legacy_time_ingress_not_authoritative
 approved_fact_conflict
 manual_override_invalid
 import_metric_conflict
@@ -1712,7 +1728,12 @@ Effective state requires:
    rollback window or has an immutable target-level preimage created by a
    separately audited migration/reconciliation protocol. A reversible legacy
    batch with no frozen preimage blocks transition rather than inheriting the
-   destructive rollback route.
+   destructive rollback route; and
+8. transition to `eligible` or `authoritative` has zero unresolved
+   `legacy_time_ingress_not_authoritative` review in the synthetic source set.
+   Clients must first send strictly zoned replacement evidence or resolve the
+   item through a separately RATIFIED correction path; the legacy-resolved
+   instant itself is never promoted.
 
 Wildcard org is forbidden for W4 staging.
 
@@ -1936,10 +1957,13 @@ omission, and current-context reread.
 Changing only `occurredAt` on an otherwise identical evidence ref must change
 the semantic hash.
 Invalid or missing IANA zones, every legacy helper-level UTC fallback, and
-offset-less values that would otherwise use server-local time fail before
-source/result DML. Default-rule and shift timezone writes use the same strict
-IANA validator; a persisted invalid zone is never accepted as a future
-calculation input.
+offset-less values that would otherwise use server-local time cannot enter a
+completed W4 calculation. Pure-calculator tests reject them. The W4C-2
+entrypoint matrix separately proves legacy byte compatibility, shadow legacy
+success plus `legacy_time_ingress_not_authoritative` review, and
+eligible/authoritative rejection before source/result DML. Default-rule and
+shift timezone writes use the same strict IANA validator; a persisted invalid
+zone is never accepted as a future calculation input.
 
 ### 12.3 W4C-2: live and scheduled shadow
 
@@ -1992,6 +2016,15 @@ Gates:
   prepare fails a mutation;
 - a W4 review outcome still applies the exact prepared legacy projection in
   shadow; duplicate/DST review cannot make flag-OFF projection stale;
+- an offset-less or otherwise legacy-only business time has a three-posture
+  matrix: `legacy_projection_only` preserves exact current response/projection
+  with no W4 row; effective `shadow` preserves that response/projection and
+  appends exactly one zero-segment/no-pointer
+  `legacy_time_ingress_not_authoritative` review carrying raw plus
+  legacy-parser provenance; effective `eligible|authoritative` rejects before
+  event/request/result/effect DML. Treating the legacy-resolved instant as W4
+  evidence, omitting the shadow review, or rejecting the shadow legacy write
+  fails independently;
 - flag/state OFF externally preserves legacy projection/response bytes; shadow
   DB evidence exists only in shadow/eligible.
 
@@ -2194,6 +2227,8 @@ Gates:
 - zero pending or still-reversible calculation-affecting request whose latest
   snapshot is missing, unsupported, payload-stale, or reversal-incomplete
   before authority;
+- zero unresolved `legacy_time_ingress_not_authoritative` review before
+  eligibility or authority, with a negative transition test;
 - minimum seven calendar days, zero critical diffs, zero unresolved reviews;
 - reversal and suspend/resume drills;
 - authoritative suspend preserves owner/pointer, offline replay is clean,
@@ -2251,7 +2286,7 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-29 approval org authority | (a) attendance-admin/delegated actors require active membership in the locked request org; verified global platform-admin override is explicit and audited; (b) retain UUID plus global attendance permission behavior | (a) |
 | OD-W4C-30 schedule-fact approvals | (a) shift-swap/schedule-dispatch use the operation boundary and compatible context lock/version without fabricating a result; (b) leave them outside W4 | (a), they change future calculation input |
 | OD-W4C-31 current reader inventory | (a) anomaly, makeup facts, open-record attribution, and DecisionTrace join the canonical active-current contract with independent tests; (b) tolerate retired-row reads | (a) |
-| OD-W4C-32 timezone ingress | (a) strict IANA validation and explicit offset/instant across every helper and settings write; (b) retain helper-specific fallbacks | (a) |
+| OD-W4C-32 timezone ingress | (a) strict IANA validation and explicit offset/instant for W4 evidence and settings writes, with the section 4.1 legacy/shadow compatibility quarantine; (b) retain helper-specific fallbacks as W4 evidence | (a), observe legacy-only clients in shadow without admitting ambiguous time to authority |
 | OD-W4C-33 pending edit concurrency | (a) append immutable request snapshot versions with expected hash/version; (b) continue mutable `form_snapshot` overwrite | (a) |
 | OD-W4C-34 rollback authorization | (a) batch owner/delegated scope is frozen and rollback uses commit-equivalent authorization plus org binding; (b) any org-local importer may roll back any batch | (a) |
 | OD-W4C-35 integration dry-run | (a) audit attempt only, with no batch/result/pointer/`last_sync_at` write; (b) retain current watermark side effect | (a) |
