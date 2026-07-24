@@ -202,7 +202,7 @@ against W1 group-membership tables is a scope violation.
 | W4C-R40 | Operation lifecycle follows rollout posture and supplied identity without an implicit retry hole. | A new legacy request with no supplied stable operation ID creates no operation/outbox row; legacy with a supplied ID claims/seals a compatibility operation but still creates no outbox; every new `shadow|eligible|authoritative` request requires, claims, and seals its operation plus required outbox. Independent mutations that create a legacy operation without an ID, omit the legacy-with-ID compatibility operation, or skip claim/seal outside legacy fail. |
 | W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work, through one fail-closed advisory-key helper, a rollout-only `00` bigint key class, and one rollout-first lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues acquires the org rollout shared transaction advisory lock through the single canonical helper before locking operation/source rows and holds it through commit; transition/closure use that helper's matching exclusive mode before their rows. Removing either lock, changing one caller's namespace/key or two-bit key class, swallowing acquisition failure, or restoring operation-row-first locking fails an independent dual-connection leg. |
 | W4C-R42 | Concurrent first claim of one batch or operation identity serializes before any unique-row insert through an operation-only `10` bigint key class; target locks use disjoint class `11`, and `01` is forbidden. | When the first holder commits within the closed lock budget, two connections presenting the same all-new identity both complete with the one stored response and exactly one source/result effect. When it exceeds that budget, the waiter returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` with zero DML and a later retry returns the stored response. Neither case exposes raw `23505` or `55P03`. Removing the canonical identity advisory lock, changing one caller's key derivation, crossing a rollout/operation/target class, sorting by tuple instead of final signed key, or acquiring identity/target locks in a different final-key order fails independently. |
-| W4C-R43 | A paused durable queued operation has one closed resume owner and never becomes a second claim. | Only the existing dispatcher/retry owner may resume an exact, fully congruent, source-free operation whose frozen `accepted_posture=authoritative`, and only after `suspended->authoritative` has committed. It locks the existing row through the section 8.2 order, performs no INSERT and no `paused->claimed` transition, then completes `paused->completed` atomically with the one source/result effect. A synchronous caller, different posture/identity, source-bearing row, duplicate resume, or implementation that inserts/reclaims the operation fails independently. |
+| W4C-R43 | A durable asynchronous job pauses before operation claim and resumes through one canonical queue execution path. | P07/P08 freeze `accepted_posture` and source identity on the operational job row, but create no batch/item operation row until the canonical worker transaction has acquired the org rollout shared lock and admitted the job. While the org is suspended, the effective state is the durable job plus the durable suspended rollout state: the handler performs zero operation/source/result DML, records only the closed values-free retry posture allowed by P25, and leaves the job retryable. After `suspended->authoritative` commits, the private queue worker/startup-recovery path re-enters the same job as an all-new batch under the ordinary section 8.2 identity locks; synchronous routes cannot adopt a job ID. Duplicate workers, another frozen posture, a partial batch/item claim, or any persisted `paused` operation state fails independently. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1101,27 +1101,20 @@ preview/meta.
   allowed before the suspension decision solely to classify replay; a
   congruent completed replay returns its stored response even while currently
   suspended and performs no source/result write;
-- a missing, incomplete, paused, mixed, or non-congruent operation is not a
+- a missing, incomplete, mixed, or non-congruent operation is not a
   completed replay. Suspension is then checked before creating/advancing an
   operation row or touching any source row; synchronous work returns 503 and a
-  durable queued item remains paused;
-- states are closed to `claimed|paused|completed|canceled`; only
-  `claimed->paused|completed|canceled` and `paused->completed|canceled` are
-  legal, and cancel is allowed only before source DML;
-- `claimed->paused` is restricted to the rollout transition's treatment of an
-  already durable queued source with complete identity, frozen
-  `accepted_posture=authoritative`, and zero source DML. After a successful
-  `suspended->authoritative` commit, the existing dispatcher/retry owner
-  re-enters the exact operation. It does not create or reclaim an operation row
-  and does not use a synthetic `paused->claimed` transition: after
-  authorization, exact congruence, and the section 8.2 locks, it proceeds from
-  the frozen durable source and seals `paused->completed` in the same
-  transaction as the one source/result effect. Synchronous callers cannot
-  adopt a paused row. A different accepted posture, incomplete identity,
-  source-bearing paused row, or second concurrent resume is blocked for the
-  section 9 cancellation/remediation path;
+  durable asynchronous job remains retryable under W4C-R43;
+- operation states are closed to `claimed|completed|canceled`; only
+  `claimed->completed|canceled` is legal, and cancel is allowed only before
+  source DML. `claimed` is an in-transaction state: a successful commit exposes
+  only `completed` or a source-free `canceled` row, while rollback exposes no
+  new row. A deferred commit-time constraint trigger on both batch and item
+  registries rejects `claimed`, so an implementation cannot satisfy this rule
+  by committing an incomplete claim. A persisted `paused` operation state is
+  forbidden by the closed state constraint;
 - state changes occur in the same transaction as request/event/calculation
-  effects; an already durable queued source may remain `paused`;
+  effects;
 - operation and batch rows reject DELETE/TRUNCATE. After `completed`, command,
   actor/source/subject/capability, accepted posture, fingerprints, resolved
   refs, response, and state are immutable; no parent/source FK cascades them;
@@ -1131,6 +1124,32 @@ preview/meta.
   lock for every supplied batch/operation identity before re-reading or
   inserting that identity. The unique constraint remains a corruption
   backstop, not an expected `23505` control path.
+
+P07/P08 use the pre-existing `attendance_import_jobs` row as operational queue
+state, not as an operation claim or calculation authority. W4 freezes on that
+row the exact org, job/batch identity, actor/source identity, command
+fingerprint, and `accepted_posture` at enqueue. The HTTP route can only enqueue;
+startup recovery may only re-enqueue, and only the module-private registered
+queue processor can load the row and call the canonical worker adapter. No
+request body, private boolean, process identity, or lease token can confer that
+authority.
+
+The worker checks the job identity and current status, enters the canonical
+transaction, acquires the org rollout shared lock, resolves posture, acquires
+the canonical batch/item identity locks, then locks and re-reads the job before
+operation/source DML. The pre-lock job read may derive candidate identities but
+confers no authority. If current rollout is `suspended`, if current posture
+differs from the frozen accepted posture, or if the locked row is no longer
+retryable, it creates no operation/batch/item/source/result row. Suspension
+keeps `status='queued'`, records only the closed values-free operational
+`retry_reason_code='SEGMENT_CALCULATION_SUSPENDED'`, and never records a
+`failed` business import. W4's final `queued->completed` job transition is in
+the same canonical transaction as operation/source/result seal; rollback leaves
+the job queued. After authoritative resume, the same durable job is processed
+as an ordinary all-new batch. Duplicate queue deliveries serialize through the
+canonical identity locks and then the job row. The batch and all item operation
+rows therefore remain all-new-or-all-completed; no paused or partially claimed
+operation vector exists.
 
 For W4-enabled live punch and web approval decisions, OpenAPI and the web client
 add a required UUID `operationId`. The client allocates it once per user gesture
@@ -1690,19 +1709,20 @@ alternate result algorithm.
    in stable order; return only an all-completed congruent replay. A missing,
    mixed, incomplete, or non-congruent state cannot continue from this read;
 2. acquire the org rollout shared transaction advisory lock before any
-   operation/source row lock and retain it through commit. Acquire the section
-   9 exclusive identity advisory locks for every non-null batch command and
-   item operation identity in one canonical order, then re-read/lock exact
-   operation rows in stable order and resolve rollout posture. If suspended,
-   stop before operation/source DML;
-   for `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
-   reject mixed or non-congruent state. An exact congruent `paused` row is
-   resumable only under W4C-R43: current and accepted posture are both
-   `authoritative`, its durable source identity is complete and source-free,
-   and the caller is the existing dispatcher/retry owner. Keep that row
-   `paused` through execution; do not insert, reclaim, or transition it to
-   `claimed`, and seal the direct `paused->completed` transition with the
-   result. For `legacy_projection_only`, reject
+   operation/source row lock and retain it through commit. Resolve rollout
+   posture under that lock; if suspended, return the closed synchronous or
+   operational retry outcome before operation/source/result DML. Otherwise
+   acquire the section 9 exclusive identity advisory locks for every non-null
+   batch command and item operation identity in one canonical order, then
+   re-read/lock exact operation rows in stable order. For P07/P08, lock and
+   re-read the operational job after those operation rows and before
+   import-batch/item source rows; require a retryable job whose immutable
+   identity/fingerprint is unchanged and whose frozen `accepted_posture` equals
+   the resolved posture. Its batch/item operation set must be all-new or an
+   all-completed congruent replay. After resume, the unchanged durable job
+   enters this ordinary all-new/replay protocol. For
+   `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
+   reject mixed or non-congruent state. For `legacy_projection_only`, reject
    any conflicting/incomplete existing operation state; claim a compatibility
    operation only for each command carrying a supplied stable ID, and create no
    operation for a null-ID command;
@@ -2049,9 +2069,10 @@ For an import source and rollback of the same batch, the complete common order
 after the shared rollout lock is: all current/original batch and item operation
 identities through the canonical exclusive identity advisory helper in final
 signed-bigint numeric order; their operation rows in stable
-`(entrypoint,operation_id,item_key)` order; the import batch and item rows in
-stable ID order; then affected `(org,user,workDate)` target advisory/parent rows
-in the section 8.2 order. The source must recheck that the batch remains writable
+`(entrypoint,operation_id,item_key)` order; the async job row when P07/P08 is
+the source; the import batch and item rows in stable ID order; then affected
+`(org,user,workDate)` target advisory/parent rows in the section 8.2 order. The
+source must recheck that the batch remains writable
 immediately before its source DML. Rollback must recheck the locked batch
 fingerprint, item set, closure, reversal/preimage, and W4 references immediately
 before reversal DML. If source commits first, rollback waits and evaluates that
@@ -2099,7 +2120,8 @@ Effective state requires:
    incomplete. Merely having an `unsupported` snapshot never clears the gate;
 6. transition to `eligible` or `authoritative` has zero active/reversible
    legacy request fact referenced by the synthetic source set and zero
-   `claimed|paused` operation/batch/job accepted in a different posture.
+   incomplete operation/batch or retryable asynchronous job accepted in a
+   different posture.
    Operators complete or cancel-before-source under legacy/shadow semantics;
    W4 never backfills from mutable current config and never rebases an accepted
    operation posture; and
@@ -2128,22 +2150,25 @@ Wildcard org is forbidden for W4 staging.
 An already completed, newly reauthorized, fully congruent idempotent replay is
 not a new result-producing write and returns its stored response under
 `suspended`. It is recognized only by the operation-table preflight in section
-8.2 and performs zero source/result DML. Missing, paused, incomplete, or
-conflicting keys are not replay and remain blocked.
+8.2 and performs zero source/result DML. Missing, incomplete, or conflicting
+keys are not replay and remain blocked.
 
 Promotion drains or cancels every incomplete org operation before changing
-posture. `authoritative->suspended` may pause a durable queued operation only
-when its accepted posture is already authoritative and its source identity is
-complete and no source DML exists. The exclusive transition changes those
-eligible `claimed` rows to `paused`; it never pauses synchronous or
-source-bearing work. `suspended->authoritative` admits only that same-posture
-paused set after the offline replay, but does not execute or change those rows
-inside the transition. After the transition commits, only their existing
-dispatcher/retry owner may perform W4C-R43's direct `paused->completed` path;
-any shadow/eligible/unknown accepted posture blocks
-resume and must be canceled before source; if source already exists, resume
-fails for explicit operator remediation under a separately reviewed protocol.
-No transition mutates `accepted_posture`.
+posture and blocks on every retryable asynchronous job accepted in a different
+posture. `authoritative->suspended` takes the exclusive rollout lock, so every
+source transaction has either committed or rolled back before the state
+changes. It never mutates an operation/batch/item row. An authoritative P07/P08
+job that has not produced source DML remains durable in its operational queue
+row and is effectively paused by the pair `(job retryable, rollout suspended)`.
+A worker observing that pair creates no operation/source/result row and does not
+mark the business import failed. `suspended->authoritative` validates the
+offline replay and commits the rollout event/state without executing a job;
+after commit, the private dispatcher/startup-recovery path may enqueue the same
+durable job. It then starts through the ordinary all-new operation protocol,
+with duplicate deliveries serialized by the job and identity locks. A
+shadow/eligible/unknown frozen posture blocks transition, and any pre-existing
+source-bearing mismatch requires explicit operator remediation. No transition
+mutates `accepted_posture`, and no operation state named `paused` exists.
 
 Suspension records prior state and exact reason/engine/evidence in its
 append-only event. Suspension is not rollback. It preserves pointers/history
@@ -2154,7 +2179,8 @@ committed before the worker observed suspension. Synchronous live, approval,
 import, manual, recompute, and operator routes check suspension before writing
 events, requests, batch state, approval terminal state, or other source rows
 and return 503 with zero writes. An already-durable queued job remains
-retryable/paused with the closed suspension code and writes no result. Resume
+`status='queued'` with the closed operational suspension retry code, has no
+operation row, and writes no result. Resume
 requires owner incident review, compatible engine version, and an offline
 read-only shadow replay of the suspended source set with zero
 critical/unresolved diffs. That replay writes no operation, calculation,
@@ -2269,7 +2295,8 @@ only its compatibility operation and no W4 result pointer.
 
 ### 12.1 W4C-0: contracts and durable storage
 
-Deliver durable batch/item operation registries, immutable request snapshots,
+Deliver durable batch/item operation registries, the P07 operational-job frozen
+identity/accepted-posture/closed retry-code fields, immutable request snapshots,
 calculation/baseline/segment/outbox tables, immutable import rollback-closure
 witnesses, types, validators, triggers, pointer/owner/visibility/reason
 constraints, rollout state, and canonical authorization/write/enqueue
@@ -2282,13 +2309,11 @@ Gates:
 - immutable-table UPDATE/DELETE/TRUNCATE refusal; operation/batch
   DELETE/TRUNCATE/cascade refusal, illegal state-transition refusal, and
   completed-response/fingerprint immutability;
-- a durable authoritative queued operation pauses only before source DML;
-  after an accepted resume transition, two concurrent dispatcher/retry
-  attempts lock the same existing row, produce exactly one source/result
-  effect and one direct `paused->completed` transition, and the waiter returns
-  the stored response. Re-inserting/reclaiming the operation, adding
-  `paused->claimed`, admitting a synchronous caller, accepting another frozen
-  posture, or pausing a source-bearing row fails its own leg;
+- operation storage rejects a `paused` state and its deferred commit-time
+  constraint rejects `claimed` batch/item rows. A source-free cancel may
+  persist; injected rollback leaves no new operation row. Removing, making
+  immediate, or weakening either deferred constraint fails its own
+  transaction-bound leg;
 - no source disables triggers after data exists;
 - cross-org pointer and cross-record/org lineage refusal;
 - same-org shadow/review pointer and pointer/state mismatch refusal;
@@ -2457,8 +2482,8 @@ Gates:
   calculation, or outbox row; removing either side of this posture split fails
   independently;
 - P01 live, P02 merge second-pass, P03 cron absence, and P04 administrator-run
-  absence inventory entries are removed independently; claim and suspension
-  witnesses precede each first source DML under call-order mutation;
+  absence inventory entries are removed independently; operation claim and
+  suspension preflight precede each first source DML under call-order mutation;
 - mutating either absence initiator to bypass the canonical writer, or restoring
   the P02 post-upsert mutation, fails its own positive-control leg;
 - scheduled direct-insert mutation fails DML guard;
@@ -2466,8 +2491,9 @@ Gates:
 - wildcard/missing/legacy/suspended posture cannot enable capability,
   calculator, or reference writers; removing any one shared resolver call
   fails;
-- shadow/eligible promotion is blocked by every claimed/paused operation or
-  queued job; accepted posture is immutable and cannot be silently rebased;
+- shadow/eligible promotion is blocked by every incomplete operation/batch or
+  retryable job accepted in another posture; accepted posture is immutable and
+  cannot be silently rebased;
 - a newly authorized congruent completed replay returns its stored response
   under suspension with zero DML; missing/conflicting/incomplete operation
   state returns suspension/conflict and writes nothing;
@@ -2567,11 +2593,23 @@ Gates:
 - P06 synchronous modern transport, P07 async worker, P08 restart recovery, P09
   legacy import, P10 integration sync, P11 rollback, and P23-P25 authorization/
   integration/operational classifications are removed independently;
-  batch/item claims and suspension witnesses precede import job/batch/item and
+  batch/item claims and suspension preflight precede import batch/item and
   integration business source/effect DML;
 - sync/worker/recovery parity is proven against the same prepared batch and the
   async operation replay is proven across process restart; deleting any one
   execution-body adapter or routing recovery around it fails its own leg;
+- P07 enqueue freezes an immutable job/batch identity, actor/source identity,
+  command fingerprint, and accepted posture but creates no operation row.
+  While suspended, worker and restart recovery both emit the closed values-free
+  retry posture, create zero operation/batch/item/source/result rows, and leave
+  the job retryable rather than failed. After authoritative resume, two
+  concurrent deliveries of that job exercise both helper-wide deadline
+  branches: within budget one commits and the other returns/reuses the stored
+  completed response with zero extra DML; beyond budget the loser receives the
+  typed in-progress outcome, remains retryable, and its later attempt replays.
+  A synchronous route calling the private worker, changing the frozen posture,
+  accepting a partial batch/item vector, mapping suspension to failed, resetting
+  the deadline, or persisting any `paused` operation state fails independently;
 - records, payroll/summary, report sync/digest, reminder, anomalies, makeup
   facts, open-record attribution, DecisionTrace, comprehensive-hours,
   integration, and export all hide retired rows while history detail shows
@@ -2743,9 +2781,9 @@ Gates:
 - authoritative suspend preserves owner/pointer, offline replay is clean,
   resume returns authoritative, and the first changed punch supersedes the
   preserved pointer successfully;
-- suspend/resume admits only paused operations already accepted as
-  authoritative; a shadow/eligible/unknown accepted posture blocks transition,
-  and source-bearing mismatches require explicit incident remediation;
+- suspend/resume leaves authoritative retryable jobs durable without operation
+  rows; a shadow/eligible/unknown accepted posture blocks transition, and
+  source-bearing mismatches require explicit incident remediation;
 - valid pointers and unchanged historical hashes;
 - suspension preflight causes zero synchronous source/result writes and an
   already-durable job remains retryable without a projection;
@@ -2805,7 +2843,7 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with section 9's complete org-rollout, rollout-state-if-written, operation-identity-advisory, operation-row, batch/item, then target lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
 | OD-W4C-40 rollout/source serialization | (a) completed congruent replay may non-locking-read and return with zero DML; every continuing source and rollback uses one fail-closed helper for class-`00` shared org rollout before class-`10` operation identities, rows/batches, and class-`11` targets, while transition and closure use rollout exclusive first; class `01` is reserved; (b) rely on operation-row scans and transaction isolation alone | (a), disjoint two-bit classes forbid cross-purpose lock upgrade, the shared rollout mode preserves ordinary write concurrency, covers null-ID legacy work, serializes same-batch source/rollback through their lower-order locks, and gives one complete order |
 | OD-W4C-41 concurrent first claim | (a) one canonical exclusive transaction-advisory helper strict-parses canonical UUID identities, derives class-`10` keys, de-duplicates and numerically sorts final signed keys, then serializes every supplied batch/item identity after class-`00` rollout and before row read/insert; the canonical target helper later does the same for class `11`; contention within 5 seconds replays the stored response, longer contention returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` and a later retry replays; (b) catch and retry unique-constraint `23505`; (c) rely on the unique constraint and surface one caller's failure | (a), the closed timeout is honest, raw `23505|55P03` never escapes, unrelated constraint failures stay fail-closed, cross-class upgrades are impossible, and unrelated operations remain concurrent except for harmless within-class hash collision |
-| OD-W4C-42 paused durable operation | (a) only the existing dispatcher/retry owner resumes an exact authoritative, source-free paused row after resume commits, preserving `paused` until one atomic `paused->completed`; (b) reclaim or reinsert it; (c) let synchronous callers adopt it | (a), closes the lifecycle without a second claim, duplicate source effect, or invented state transition |
+| OD-W4C-42 durable queued-job suspension | (a) freeze accepted posture and identity on the operational job, persist no operation row before the worker transaction, derive effective pause from retryable job plus suspended rollout, and after resume let only the private queue/recovery adapter enter the ordinary all-new/replay protocol; (b) persist a paused operation owner/lease; (c) let synchronous callers adopt a job ID | (a), preserves the one-transaction operation invariant, removes an unreachable intermediate operation state, keeps batch/items all-new-or-all-completed, and lets canonical locks handle duplicate delivery |
 
 ## 14. RATIFY and execution sequence
 
