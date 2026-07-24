@@ -51,25 +51,43 @@ export async function findUserIdByLoginAlias(rawIdentifier: string): Promise<str
   return result.rows[0].user_id
 }
 
+type AliasQueryClient = {
+  query: <T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: T[] }>
+}
+
 export async function claimLoginAlias(options: {
   userId: string
   rawValue: string
   kind?: LoginAliasKind
   source?: string
+  /** When set, runs inside caller's transaction (T3 activate must claim before commit). */
+  client?: AliasQueryClient
 }): Promise<{ ok: true; normalized: string } | { ok: false; code: string; message: string }> {
   const normalized = normalizeLoginIdentifier(options.rawValue)
   if (!normalized) {
     return { ok: false, code: 'ALIAS_EMPTY', message: 'Identifier is empty after normalization' }
   }
   const kind = options.kind ?? inferLoginAliasKind(options.rawValue)
+  const runQuery = async <T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }> => {
+    if (options.client) {
+      return options.client.query<T>(sql, params)
+    }
+    return query<T>(sql, params)
+  }
   try {
-    await query(
+    await runQuery(
       `INSERT INTO user_login_aliases (user_id, kind, normalized_value, source)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (normalized_value) DO NOTHING`,
       [options.userId, kind, normalized, options.source ?? 'claim'],
     )
-    const check = await query<{ user_id: string }>(
+    const check = await runQuery<{ user_id: string }>(
       `SELECT user_id FROM user_login_aliases WHERE normalized_value = $1`,
       [normalized],
     )

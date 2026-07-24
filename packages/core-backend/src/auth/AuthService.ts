@@ -15,6 +15,7 @@ import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
+  assertAliasCutoverAllowed,
   findUserIdByLoginAlias,
   isAuthLoginAliasCutoverEnabled,
 } from './login-alias-service'
@@ -450,7 +451,11 @@ export class AuthService {
         const pool = poolManager.get()
 
         // T2b: alias-only login (no OR fallback to users.email/username/mobile).
+        // Enforce admin-alias readiness gate on every auth path that would use aliases —
+        // enabling AUTH_LOGIN_USE_ALIASES without a password-capable admin must not lock
+        // operators out while reporting ready:true elsewhere.
         if (isAuthLoginAliasCutoverEnabled()) {
+          await assertAliasCutoverAllowed()
           const userId = await findUserIdByLoginAlias(trimmedIdentifier)
           if (!userId) return null
           const byId = await pool.query(

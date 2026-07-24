@@ -4665,19 +4665,33 @@ export function adminUsersRouter(): Router {
   })
 
   // T2b readiness probe (does not flip the env flag).
+  // When the env switch is OFF, report ready based on admin-alias gate only — never
+  // ready:true merely because cutover is disabled (that misled ops into flipping env).
   r.get('/api/admin/login-aliases/cutover-status', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
     try {
       const enabled = isAuthLoginAliasCutoverEnabled()
-      if (enabled) await assertAliasCutoverAllowed()
-      return jsonOk(res, { enabled, ready: true })
+      const { hasActiveAdminWithPasswordAlias } = await import('../auth/login-alias-service')
+      const adminAliasReady = await hasActiveAdminWithPasswordAlias()
+      if (enabled) {
+        await assertAliasCutoverAllowed()
+      }
+      return jsonOk(res, {
+        enabled,
+        ready: adminAliasReady,
+        adminAliasReady,
+        // Explicit: operators must not flip AUTH_LOGIN_USE_ALIASES until ready===true
+        canEnableCutover: adminAliasReady,
+      })
     } catch (error) {
       const code = (error as { code?: string })?.code
       if (code === 'ALIAS_CUTOVER_BLOCKED') {
         return jsonOk(res, {
           enabled: isAuthLoginAliasCutoverEnabled(),
           ready: false,
+          adminAliasReady: false,
+          canEnableCutover: false,
           code,
           message: (error as Error).message,
         })
