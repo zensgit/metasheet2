@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- W5-1 evidence harness page (copied to apps/web/w51-decision-trace-harness.html at capture
+     time by capture-decision-trace.mjs — not part of the app build; vite only builds index.html).
+     Mounts the REAL AttendanceDecisionTrace.vue with the REAL tokens.css. Synthetic fixtures only
+     (lock P2-a: screenshots never carry real user data). -->
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>W5-1 decision-trace evidence harness</title>
+    <style>
+      body { margin: 0; background: var(--ms-bg-page, #f5f6f7); padding: 24px 16px; }
+      #app { max-width: 1176px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 16px; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/dev-harness/w51DecisionTraceHarness.ts"></script>
+  </body>
+</html>

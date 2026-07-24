@@ -131,6 +131,8 @@
         :annual-self-balance-loading="annualSelfBalanceLoading"
         :annual-self-balance-error="annualSelfBalanceError"
         :annual-self-balance-summary="annualSelfBalanceSummary"
+        :balance-leave-type="selfBalanceLeaveType"
+        :balance-trace-href="selfBalanceTraceHref"
         :self-rules-loading="selfRulesLoading"
         :self-rules-error="selfRulesError"
         :self-rules-has-data="selfRulesHasData"
@@ -150,6 +152,8 @@
         @update:punch-outdoor-note-draft="punchOutdoorNoteDraft = $event"
         @status-action="runStatusAction"
         @self-service-action="runSelfServiceAction"
+        @change-balance-leave-type="handleChangeSelfBalanceLeaveType"
+        @open-balance-trace="handleOpenSelfBalanceTrace"
       >
         <template #historyFilters>
           <label class="attendance__field" for="attendance-from-date">
@@ -1107,6 +1111,78 @@
         </ul>
       </section>
 
+      <!-- W5-1 (Wave 5 explainability design-lock §6/§9 W5-1): SELF face of the read-only
+           decision-trace surface (charter §3.1 first-screen question 3 「为什么异常」). Consumes
+           GET /api/attendance/decision-trace (W5-0 #4557): subject = token — this face has NO
+           user input by design (§4.1 「绝不接受 userId 参数」); masking is the employee档 served
+           by the endpoint (§5.1). Canonical deep link: ?section=attendance-overview-decision-trace
+           (R2 query form, never hash). Read-only end to end (R1). -->
+      <section
+        v-if="showOverview"
+        class="attendance__card"
+        v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.decisionTrace)"
+        data-attendance-decision-trace-self
+      >
+        <div class="attendance__requests-header">
+          <div>
+            <h3>{{ tr('Why this result (decision trace)', '结果解释（查看依据）') }}</h3>
+            <small class="attendance__field-hint">
+              {{ tr(
+                'Explains your own attendance results from real stored evidence. Read-only — nothing here edits your records.',
+                '基于真实存储证据解释您本人的考勤结果。只读页面——不会修改您的任何记录。',
+              ) }}
+            </small>
+          </div>
+        </div>
+        <div class="attendance__admin-grid">
+          <label class="attendance__field" for="attendance-decision-trace-self-category">
+            <span>{{ tr('Explanation category', '解释类别') }}</span>
+            <select id="attendance-decision-trace-self-category" v-model="selfTraceCategory" data-decision-trace-self-category>
+              <option v-for="option in decisionTraceCategoryOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label v-if="selfTraceTargetKind === 'workDate'" class="attendance__field" for="attendance-decision-trace-self-date">
+            <span>{{ tr('Work date', '工作日期') }}</span>
+            <input id="attendance-decision-trace-self-date" v-model="selfTraceWorkDate" type="date" data-decision-trace-self-date />
+          </label>
+          <label v-if="selfTraceTargetKind === 'requestId'" class="attendance__field" for="attendance-decision-trace-self-request">
+            <span>{{ tr('Overtime request ID', '加班申请 ID') }}</span>
+            <input id="attendance-decision-trace-self-request" v-model.trim="selfTraceRequestId" type="text" data-decision-trace-self-request />
+          </label>
+          <label v-if="selfTraceTargetKind === 'instanceId'" class="attendance__field" for="attendance-decision-trace-self-instance">
+            <span>{{ tr('Approval instance ID', '审批实例 ID') }}</span>
+            <input id="attendance-decision-trace-self-instance" v-model.trim="selfTraceInstanceId" type="text" data-decision-trace-self-instance />
+          </label>
+          <!-- §4.1 self multi-org leg 3/4: the org input appears only after the endpoint answers
+               400 ORG_ID_REQUIRED (or an org is already chosen) — a single-org member never sees
+               it and the endpoint auto-selects. -->
+          <label v-if="selfTraceNeedsOrg" class="attendance__field" for="attendance-decision-trace-self-org">
+            <span>{{ tr('Organization ID', '组织 ID') }}</span>
+            <input id="attendance-decision-trace-self-org" v-model.trim="selfTraceOrgId" type="text" data-decision-trace-self-org />
+          </label>
+        </div>
+        <div class="attendance__admin-actions">
+          <button
+            class="attendance__btn attendance__btn--primary"
+            :disabled="selfTrace.state.value === 'loading'"
+            data-decision-trace-self-load
+            @click="loadSelfDecisionTrace"
+          >
+            {{ selfTrace.state.value === 'loading' ? tr('Loading...', '加载中...') : tr('Load trace', '查询轨迹') }}
+          </button>
+        </div>
+        <AttendanceDecisionTrace
+          :tr="tr"
+          audience="self"
+          :load-state="selfTrace.state.value"
+          :error-kind="selfTrace.errorKind.value"
+          :trace="selfTrace.trace.value"
+          @reload="loadSelfDecisionTrace"
+        />
+      </section>
+
       <section
         class="attendance__card"
         v-if="showReports"
@@ -1475,6 +1551,71 @@
                 @undo="undoSetupTemplate"
                 @close="closeSetupTemplateDialogKeepPrefill"
                 @navigate="navigateSetupTemplate"
+              />
+            </div>
+            <!-- W5-1 (Wave 5 explainability design-lock §6/§9 W5-1): ADMIN face of the read-only
+                 decision-trace surface. Consumes GET /api/attendance-admin/decision-trace (W5-0
+                 #4557) — target user is an explicit admin input; masking is the admin档 served by
+                 the endpoint (§5.1, by construction — this host never re-fetches to enrich, R3).
+                 Read-only end to end (R1): the only actions are query + reload. -->
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace)"
+              data-attendance-decision-trace-section
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Decision trace (read-only)', '决策轨迹（只读）') }}</h4>
+              </div>
+              <p class="attendance__field-hint">
+                {{ tr(
+                  'Explains why a result is what it is, from real stored evidence only. This surface never edits records, balances, or configuration.',
+                  '仅基于真实存储证据解释「为什么是这个结果」。本页面不会修改任何记录、余额或配置。',
+                ) }}
+              </p>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-decision-trace-admin-user">
+                  <span>{{ tr('User ID', '用户 ID') }}</span>
+                  <input id="attendance-decision-trace-admin-user" v-model.trim="adminTraceUserId" type="text" data-decision-trace-admin-user />
+                </label>
+                <label class="attendance__field" for="attendance-decision-trace-admin-category">
+                  <span>{{ tr('Explanation category', '解释类别') }}</span>
+                  <select id="attendance-decision-trace-admin-category" v-model="adminTraceCategory" data-decision-trace-admin-category>
+                    <option v-for="option in decisionTraceCategoryOptions" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
+                <label v-if="adminTraceTargetKind === 'workDate'" class="attendance__field" for="attendance-decision-trace-admin-date">
+                  <span>{{ tr('Work date', '工作日期') }}</span>
+                  <input id="attendance-decision-trace-admin-date" v-model="adminTraceWorkDate" type="date" data-decision-trace-admin-date />
+                </label>
+                <label v-if="adminTraceTargetKind === 'requestId'" class="attendance__field" for="attendance-decision-trace-admin-request">
+                  <span>{{ tr('Overtime request ID', '加班申请 ID') }}</span>
+                  <input id="attendance-decision-trace-admin-request" v-model.trim="adminTraceRequestId" type="text" data-decision-trace-admin-request />
+                </label>
+                <label v-if="adminTraceTargetKind === 'instanceId'" class="attendance__field" for="attendance-decision-trace-admin-instance">
+                  <span>{{ tr('Approval instance ID', '审批实例 ID') }}</span>
+                  <input id="attendance-decision-trace-admin-instance" v-model.trim="adminTraceInstanceId" type="text" data-decision-trace-admin-instance />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="adminTrace.state.value === 'loading'"
+                  data-decision-trace-admin-load
+                  @click="loadAdminDecisionTrace"
+                >
+                  {{ adminTrace.state.value === 'loading' ? tr('Loading...', '加载中...') : tr('Load trace', '查询轨迹') }}
+                </button>
+              </div>
+              <AttendanceDecisionTrace
+                :tr="tr"
+                audience="admin"
+                :load-state="adminTrace.state.value"
+                :error-kind="adminTrace.errorKind.value"
+                :trace="adminTrace.trace.value"
+                @reload="loadAdminDecisionTrace"
               />
             </div>
             <div
@@ -6986,9 +7127,21 @@
                   <span>{{ tr('User ID', '用户 ID') }}</span>
                   <input id="attendance-annual-balance-user" v-model="annualBalanceUserId" type="text" />
                 </label>
+                <!-- W5-1 / OD-W5-7: leave-type select drives the #4562-parameterized read path.
+                     Closed set only (annual | comp_time); the handler re-validates before any
+                     fetch (UI 输入自验). Default 'annual' keeps the pre-parameterization query
+                     byte-identical. The adjust registry stays annual-only (comp_time manual
+                     adjustment is an explicit OUT — lock §2). -->
+                <label class="attendance__field" for="attendance-annual-balance-leave-type">
+                  <span>{{ tr('Leave type', '假期类型') }}</span>
+                  <select id="attendance-annual-balance-leave-type" v-model="adminBalanceLeaveType" data-admin-balance-leave-type>
+                    <option value="annual">{{ tr('Annual leave', '年假') }}</option>
+                    <option value="comp_time">{{ tr('Comp time', '调休') }}</option>
+                  </select>
+                </label>
               </div>
               <div class="attendance__admin-actions">
-                <button class="attendance__btn attendance__btn--primary" :disabled="annualBalanceLoading" @click="() => loadAnnualLeaveBalance()">
+                <button class="attendance__btn attendance__btn--primary" :disabled="annualBalanceLoading" @click="loadAdminBalanceWithType">
                   {{ annualBalanceLoading ? tr('Loading...', '加载中...') : tr('Load balance', '查询余额') }}
                 </button>
               </div>
@@ -9754,6 +9907,17 @@ import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import AttendanceShiftSegmentsEditor from './attendance/AttendanceShiftSegmentsEditor.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
+// W5-1 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-1): dual-face decision-trace wiring.
+import AttendanceDecisionTrace from './attendance/AttendanceDecisionTrace.vue'
+import {
+  ATTENDANCE_DECISION_TRACE_CATEGORIES,
+  attendanceTraceCategoryLabel,
+  buildAttendanceSelfDecisionTraceDeepLink,
+  isAttendanceBalanceLeaveTypeCode,
+  type AttendanceBalanceLeaveTypeCode,
+  type AttendanceDecisionTraceCategory,
+} from './attendance/attendanceDecisionTrace'
+import { useAttendanceDecisionTrace } from './attendance/useAttendanceDecisionTrace'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
 import {
   analyzeAttendanceShiftSegments,
@@ -9962,6 +10126,8 @@ const ATTENDANCE_OVERVIEW_SECTION_IDS = {
   anomalies: 'attendance-overview-anomalies',
   requestReport: 'attendance-overview-request-report',
   records: 'attendance-overview-records',
+  // W5-1 (Wave 5 explainability design-lock §6/§9 W5-1): self face of the decision-trace surface.
+  decisionTrace: 'attendance-overview-decision-trace',
 } as const
 type AttendanceOverviewSectionId = typeof ATTENDANCE_OVERVIEW_SECTION_IDS[keyof typeof ATTENDANCE_OVERVIEW_SECTION_IDS]
 type AttendanceStatusAction =
@@ -14519,6 +14685,109 @@ watch(setupTaskHomeVisible, (open) => {
 watch(orgId, () => {
   if (setupSectionActive.value || setupTaskHomeVisible.value) void loadSetupReadiness(normalizedOrgId())
 })
+
+// ---------------------------------------------------------------------------
+// W5-1 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-1): dual-face decision-trace wiring.
+// The parent owns ONLY loading + target selection (charter L265 division: 「权威数据加载与字段
+// 脱敏」 belongs to parent/backend; masking itself is server-side by construction — §5.1 — this
+// host performs NO second fetch to reassemble anything, R3). Both faces are read-only end to end
+// (R1): the composable issues exactly one GET per query and this host wires no write from any
+// trace surface.
+// ---------------------------------------------------------------------------
+
+const decisionTraceCategoryOptions = computed(() =>
+  ATTENDANCE_DECISION_TRACE_CATEGORIES.map((category) => ({
+    value: category,
+    label: attendanceTraceCategoryLabel(category, tr),
+  })),
+)
+
+function decisionTraceTargetKind(category: AttendanceDecisionTraceCategory): 'workDate' | 'requestId' | 'instanceId' | 'none' {
+  if (category === 'today_status' || category === 'late_early' || category === 'missing_punch') return 'workDate'
+  if (category === 'overtime_segmentation') return 'requestId'
+  if (category === 'approver_source') return 'instanceId'
+  return 'none'
+}
+
+// --- admin face (consumes GET /api/attendance-admin/decision-trace) ---
+const adminTrace = useAttendanceDecisionTrace()
+const adminTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
+const adminTraceUserId = ref('')
+const adminTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
+const adminTraceRequestId = ref('')
+const adminTraceInstanceId = ref('')
+const adminTraceTargetKind = computed(() => decisionTraceTargetKind(adminTraceCategory.value))
+
+function loadAdminDecisionTrace(): void {
+  void adminTrace.loadTrace(
+    'admin',
+    {
+      category: adminTraceCategory.value,
+      workDate: adminTraceWorkDate.value,
+      requestId: adminTraceRequestId.value,
+      instanceId: adminTraceInstanceId.value,
+    },
+    // Blank org normalizes to the plugin default org — same resolution the W4-1 setup-readiness
+    // admin surface uses (`resolveAttendanceReadinessOrgId`), so the default-org admin path works
+    // without hand-typing an org id.
+    { orgId: resolveAttendanceReadinessOrgId(normalizedOrgId()), userId: adminTraceUserId.value },
+  )
+}
+
+// --- self face (consumes GET /api/attendance/decision-trace; subject = token, NEVER a userId
+// parameter — §4.1; multi-org members pick an org only after the endpoint answers
+// 400 ORG_ID_REQUIRED, self four-leg contract P2-d) ---
+const selfTrace = useAttendanceDecisionTrace()
+const selfTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
+const selfTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
+const selfTraceRequestId = ref('')
+const selfTraceInstanceId = ref('')
+const selfTraceOrgId = ref('')
+const selfTraceTargetKind = computed(() => decisionTraceTargetKind(selfTraceCategory.value))
+const selfTraceNeedsOrg = computed(() => selfTrace.errorKind.value === 'org_required' || selfTraceOrgId.value.trim().length > 0)
+
+function loadSelfDecisionTrace(): void {
+  void selfTrace.loadTrace(
+    'self',
+    {
+      category: selfTraceCategory.value,
+      workDate: selfTraceWorkDate.value,
+      requestId: selfTraceRequestId.value,
+      instanceId: selfTraceInstanceId.value,
+    },
+    { orgId: selfTraceOrgId.value.trim() || undefined },
+  )
+}
+
+// --- OD-W5-7 / #4562 comp_time channel (UI 输入自验): the toggle's payload is validated against
+// the closed set BEFORE any fetch — an out-of-set literal never reaches the wire. The shared
+// annualSelfBalance state then correctly holds the SELECTED type's data (card title follows). ---
+const selfBalanceLeaveType = ref<AttendanceBalanceLeaveTypeCode>('annual')
+const selfBalanceTraceHref = buildAttendanceSelfDecisionTraceDeepLink()
+
+function handleChangeSelfBalanceLeaveType(code: unknown): void {
+  if (!isAttendanceBalanceLeaveTypeCode(code)) return
+  if (selfBalanceLeaveType.value === code) return
+  selfBalanceLeaveType.value = code
+  void loadAnnualSelfBalance(code)
+}
+
+// The comp_time balance card's「查看依据」entry: preset ⑤ + load + scroll to the self trace
+// section (the anchor's href stays the canonical query-form deep link, R2).
+function handleOpenSelfBalanceTrace(): void {
+  selfTraceCategory.value = 'comp_time_balance'
+  loadSelfDecisionTrace()
+  void scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.decisionTrace)
+}
+
+// --- OD-W5-7 admin leg: leave-type select on the admin balance query (same #4562-parameterized
+// read path; default 'annual' keeps the pre-parameterization URL byte-identical). ---
+const adminBalanceLeaveType = ref<AttendanceBalanceLeaveTypeCode>('annual')
+
+function loadAdminBalanceWithType(): void {
+  if (!isAttendanceBalanceLeaveTypeCode(adminBalanceLeaveType.value)) return
+  void loadAnnualLeaveBalance(adminBalanceLeaveType.value)
+}
 
 // ---------------------------------------------------------------------------
 // W4-2 (design-lock §5/§9 W4-2): template-prefill orchestration. The four templates are FE
