@@ -113,9 +113,12 @@ unavailable:
 - assignments, rotation assignments, swaps, dispatch targets, schedule
   publish, and automatic matching cannot create a live reference to a
   multi-segment shift;
-- converting a referenced one-segment shift to multiple segments is rejected;
+- converting a durably referenced one-segment shift to multiple segments is
+  rejected, including when the only assignment reference is inactive or ended
+  history;
 - typed rejection occurs before any durable write;
-- the legacy envelope cannot be used as authoritative payable time.
+- a second runtime guard rejects any resolved multi-segment shift before the
+  legacy envelope can be used as authoritative payable time.
 
 No environment flag was enabled by W3.
 

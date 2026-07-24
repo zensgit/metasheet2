@@ -8187,6 +8187,7 @@ function mapShiftRow(row) {
   const workStartTime = row.work_start_time ?? DEFAULT_SHIFT.workStartTime
   const workEndTime = row.work_end_time ?? DEFAULT_SHIFT.workEndTime
   const isOvernight = resolveOvernightFlag(row.is_overnight, workStartTime, workEndTime)
+  const rawSegmentCount = row.shift_segment_count ?? row.segment_count
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -8207,6 +8208,7 @@ function mapShiftRow(row) {
     rounding_minutes: Number(row.rounding_minutes ?? DEFAULT_SHIFT.roundingMinutes),
     workingDays: normalizeWorkingDays(row.working_days),
     working_days: normalizeWorkingDays(row.working_days),
+    segmentCount: rawSegmentCount == null ? null : Number(rawSegmentCount),
   }
 }
 
@@ -8229,6 +8231,17 @@ function getAttendanceShiftService() {
     })
   }
   return attendanceShiftService
+}
+
+function assertWorkContextSegmentCalculationAllowed(orgId, workContext) {
+  if (!workContext || workContext.source === 'rule') return
+  const shift = workContext.rule
+  getAttendanceShiftService().assertSegmentCalculationAllowed({
+    orgId,
+    shiftId: shift?.id,
+    segmentCount: shift?.segmentCount,
+    producer: 'attendance calculation',
+  })
 }
 
 function respondAttendanceShiftServiceError(res, error) {
@@ -9283,6 +9296,7 @@ function mapShiftFromAssignmentRow(row) {
     early_grace_minutes: row.shift_early_grace_minutes,
     rounding_minutes: row.shift_rounding_minutes,
     working_days: row.shift_working_days,
+    shift_segment_count: row.shift_segment_count,
   })
 }
 
@@ -14287,7 +14301,10 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
-              s.working_days AS shift_working_days
+              s.working_days AS shift_working_days,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = a.org_id AND seg.shift_id = a.shift_id) AS shift_segment_count
        FROM attendance_shift_assignments a
        JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
        WHERE a.org_id = $1
@@ -14317,7 +14334,13 @@ async function loadShiftById(db, orgId, shiftId) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
-      'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2 LIMIT 1',
+      `SELECT s.*,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segment_count
+         FROM attendance_shifts s
+        WHERE s.id = $1 AND s.org_id = $2
+        LIMIT 1`,
       [shiftId, targetOrg]
     )
     if (!rows.length) return null
@@ -14377,7 +14400,12 @@ async function loadShiftReferenceLookup(db, orgId, options = {}) {
   let rows
   if (!ids.length && !names.length) {
     rows = await db.query(
-      'SELECT * FROM attendance_shifts WHERE org_id = $1',
+      `SELECT s.*,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segment_count
+         FROM attendance_shifts s
+        WHERE s.org_id = $1`,
       [targetOrg]
     )
   } else {
@@ -14385,16 +14413,20 @@ async function loadShiftReferenceLookup(db, orgId, options = {}) {
     const predicates = []
     if (ids.length) {
       params.push(ids)
-      predicates.push(`id = ANY($${params.length}::uuid[])`)
+      predicates.push(`s.id = ANY($${params.length}::uuid[])`)
     }
     if (names.length) {
       params.push(names)
-      predicates.push(`name = ANY($${params.length}::text[])`)
+      predicates.push(`s.name = ANY($${params.length}::text[])`)
     }
     rows = await db.query(
-      `SELECT * FROM attendance_shifts
-       WHERE org_id = $1
-         AND (${predicates.join(' OR ')})`,
+      `SELECT s.*,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segment_count
+         FROM attendance_shifts s
+        WHERE s.org_id = $1
+          AND (${predicates.join(' OR ')})`,
       params
     )
   }
@@ -14599,6 +14631,7 @@ async function resolveWorkContext(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
+  assertWorkContextSegmentCalculationAllowed(orgId, context)
   // Step 5: layer calendarPolicy.overrides on top of profile/holiday. D4
   // pinned: only hit the DB when we actually have overrides to match, and
   // accept caller-provided overrides/scopeContext to avoid redundant
@@ -15140,9 +15173,12 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
             s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
             s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
             s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
-            s.working_days AS shift_working_days
+            s.working_days AS shift_working_days,
+            (SELECT COUNT(*)::int
+               FROM attendance_shift_segments seg
+              WHERE seg.org_id = a.org_id AND seg.shift_id = a.shift_id) AS shift_segment_count
      FROM attendance_shift_assignments a
-     JOIN attendance_shifts s ON s.id = a.shift_id
+     JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
      WHERE a.org_id = $1
        AND a.user_id = ANY($2::text[])
        AND a.is_active = true
@@ -17307,6 +17343,7 @@ function resolveWorkContextFromPrefetch(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
+  assertWorkContextSegmentCalculationAllowed(orgId, context)
   // Step 5: apply calendarPolicy.overrides when the prefetch carries both
   // the policy list and the user's scope context. D5 pinned: when either
   // is missing (old fixtures that build prefetched manually), behave
