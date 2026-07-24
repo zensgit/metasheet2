@@ -8,6 +8,8 @@ import { describe, expect, it } from 'vitest'
 import {
   ATTENDANCE_CONTEXT_HELP_CATEGORIES,
   ATTENDANCE_CONTEXT_HELP_CONTEXTS,
+  ATTENDANCE_IMPORT_HELP_BLOCKED_KINDS,
+  ATTENDANCE_IMPORT_HELP_CONVERT_FAILURES,
   attendanceContextHelpCategoryLabel,
   getAttendanceContextHelpEntries,
   isAttendanceContextHelpContextId,
@@ -97,10 +99,34 @@ describe("attendanceContextHelp — 'import' context (category ③, existing clo
   it('body has EXACTLY one line per closed-set failure code — 2 BlockedSpreadsheetKind + 4 AttendanceXlsxConvertFailure, zero invented/extra entries', () => {
     const entries = getAttendanceContextHelpEntries('import', trZh)
     const failureRecovery = entries.find((entry) => entry.category === 'failure_recovery')!
-    const blockedKinds: readonly BlockedSpreadsheetKind[] = ['xlsx', 'xls']
-    const convertFailures: readonly AttendanceXlsxConvertFailure[] = ['too-large', 'encrypted', 'empty', 'unreadable']
-    expect(failureRecovery.body).toHaveLength(blockedKinds.length + convertFailures.length)
+    // Anchored on the module's OWN Record-derived closed set (never re-transcribed here): a spec
+    // that keeps its own copy of the literals is a same-source guard, and a drifting union walks
+    // straight past it (gate finding P2-1). Adding a union member now (a) fails `vue-tsc` at the
+    // Record literal and (b) grows this derived length past the pinned 6 below — two doors.
+    expect(failureRecovery.body).toHaveLength(
+      ATTENDANCE_IMPORT_HELP_BLOCKED_KINDS.length + ATTENDANCE_IMPORT_HELP_CONVERT_FAILURES.length,
+    )
     expect(failureRecovery.body).toHaveLength(6)
+    // The derived sets ARE the real union — an omitted key would shrink these, a renamed one would
+    // change them. Pinned member-wise so a silent substitution cannot keep the count at 6.
+    expect([...ATTENDANCE_IMPORT_HELP_BLOCKED_KINDS]).toEqual(['xlsx', 'xls'])
+    expect([...ATTENDANCE_IMPORT_HELP_CONVERT_FAILURES]).toEqual(['too-large', 'encrypted', 'empty', 'unreadable'])
+  })
+
+  it('no help line is manual-length — "不复制手册" has a mechanical door, not just intent (lock §9 W5-2)', () => {
+    // Every context, every line: contextual help is a task-scoped hint, not a pasted manual
+    // paragraph. 280 chars ≈ two short sentences in either locale; a copied handbook section runs
+    // several times that. Gate finding P3-3 (longest line at the time: 243).
+    for (const contextId of ATTENDANCE_CONTEXT_HELP_CONTEXTS) {
+      for (const tr of [trZh, trEn]) {
+        for (const entry of getAttendanceContextHelpEntries(contextId, tr)) {
+          for (const line of entry.body) {
+            expect(line.length).toBeGreaterThan(0)
+            expect(line.length).toBeLessThanOrEqual(280)
+          }
+        }
+      }
+    }
   })
 
   it('each line mentions the format it is about (.xlsx/.xls/CSV) — the closed set drives distinct, on-topic copy', () => {

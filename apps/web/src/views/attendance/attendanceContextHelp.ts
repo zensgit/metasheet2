@@ -185,47 +185,62 @@ function buildSetupWizardEntries(tr: TranslateFn): AttendanceContextHelpEntry[] 
 // text is ABSENT before any xlsx file is selected — a real regression caught by the full guard
 // run-list, not merely a naming coincidence). The two copy surfaces are kept deliberately
 // non-identical in wording; the negative spec asserts this non-collision explicitly.
-const BLOCKED_SPREADSHEET_KINDS: readonly BlockedSpreadsheetKind[] = ['xlsx', 'xls']
-const XLSX_CONVERT_FAILURES: readonly AttendanceXlsxConvertFailure[] = ['too-large', 'encrypted', 'empty', 'unreadable']
 const IMPORT_XLSX_MAX_MB = IMPORT_XLSX_MAX_BYTES / (1024 * 1024)
 
-function blockedSpreadsheetHelpLine(kind: BlockedSpreadsheetKind, tr: TranslateFn): string {
-  switch (kind) {
-    case 'xlsx':
-      return tr('A selected .xlsx workbook is blocked before upload — export it as CSV.', '选择 .xlsx 工作簿会在上传前被拦截——请导出为 CSV。')
-    case 'xls':
-      return tr('A selected legacy .xls workbook is blocked before upload — export it as CSV.', '选择旧版 .xls 工作簿会在上传前被拦截——请导出为 CSV。')
-  }
+// Copy is keyed by a `Record<UnionType, …>` — NOT by a hand-written array — so the closed set
+// cannot silently lose a member. Gate finding P2-1 (#4576): with a literal array + an exhaustive
+// `switch`, adding a fifth `AttendanceXlsxConvertFailure` and its switch branch while forgetting
+// the display array compiled clean and left every spec green (`toHaveLength(6)` still held) — the
+// help panel just silently dropped one recovery line. With these Records, a new union member makes
+// the object literal miss a key => `vue-tsc` fails; and because the rendered list is DERIVED from
+// the Record keys, the count assertion turns red too. Two independent doors, neither masking the
+// other (see the per-door mutation legs in attendance-context-help.spec.ts).
+const BLOCKED_SPREADSHEET_HELP_LINES: Record<BlockedSpreadsheetKind, (tr: TranslateFn) => string> = {
+  xlsx: (tr) =>
+    tr('A selected .xlsx workbook is blocked before upload — export it as CSV.', '选择 .xlsx 工作簿会在上传前被拦截——请导出为 CSV。'),
+  xls: (tr) =>
+    tr('A selected legacy .xls workbook is blocked before upload — export it as CSV.', '选择旧版 .xls 工作簿会在上传前被拦截——请导出为 CSV。'),
 }
 
-function xlsxConvertFailureHelpLine(reason: AttendanceXlsxConvertFailure, tr: TranslateFn): string {
-  switch (reason) {
-    case 'too-large':
-      return tr(
-        `A workbook larger than ${IMPORT_XLSX_MAX_MB}MB is refused — export a CSV copy instead.`,
-        `超过 ${IMPORT_XLSX_MAX_MB}MB 的工作簿会被拒绝——请改为导出 CSV 副本。`,
-      )
-    case 'encrypted':
-      return tr(
-        'A locked / password-protected workbook cannot be converted — unlock it, or export as CSV.',
-        '加密/有密码保护的工作簿无法转换——请先解除密码，或导出为 CSV。',
-      )
-    case 'empty':
-      return tr(
-        'A workbook with no usable rows on any sheet converts to nothing — confirm the sheet has data, or export as CSV directly.',
-        '所有工作表均无可用数据行的工作簿转换后为空——请确认工作表有数据，或直接导出为 CSV。',
-      )
-    case 'unreadable':
-      return tr(
-        'A workbook that fails to parse (often a corrupted download) — re-export it as CSV.',
-        '无法解析的工作簿（常见于下载损坏）——请重新导出为 CSV。',
-      )
-  }
+const XLSX_CONVERT_FAILURE_HELP_LINES: Record<AttendanceXlsxConvertFailure, (tr: TranslateFn) => string> = {
+  'too-large': (tr) =>
+    tr(
+      `A workbook larger than ${IMPORT_XLSX_MAX_MB}MB is refused — export a CSV copy instead.`,
+      `超过 ${IMPORT_XLSX_MAX_MB}MB 的工作簿会被拒绝——请改为导出 CSV 副本。`,
+    ),
+  encrypted: (tr) =>
+    tr(
+      'A locked / password-protected workbook cannot be converted — unlock it, or export as CSV.',
+      '加密/有密码保护的工作簿无法转换——请先解除密码，或导出为 CSV。',
+    ),
+  empty: (tr) =>
+    tr(
+      'A workbook with no usable rows on any sheet converts to nothing — confirm the sheet has data, or export as CSV directly.',
+      '所有工作表均无可用数据行的工作簿转换后为空——请确认工作表有数据，或直接导出为 CSV。',
+    ),
+  unreadable: (tr) =>
+    tr(
+      'A workbook that fails to parse (often a corrupted download) — re-export it as CSV.',
+      '无法解析的工作簿（常见于下载损坏）——请重新导出为 CSV。',
+    ),
 }
+
+/** The exact closed set the ③ help body covers, DERIVED from the copy Records above (never
+ *  re-transcribed). Exported so the spec anchors on the same derivation instead of keeping its own
+ *  copy of the literals — a re-transcribed list in the spec is a same-source guard that a drifting
+ *  union walks straight past (gate P2-1). */
+export const ATTENDANCE_IMPORT_HELP_BLOCKED_KINDS = Object.keys(
+  BLOCKED_SPREADSHEET_HELP_LINES,
+) as readonly BlockedSpreadsheetKind[]
+export const ATTENDANCE_IMPORT_HELP_CONVERT_FAILURES = Object.keys(
+  XLSX_CONVERT_FAILURE_HELP_LINES,
+) as readonly AttendanceXlsxConvertFailure[]
 
 function buildImportEntries(tr: TranslateFn): AttendanceContextHelpEntry[] {
-  const spreadsheetLines = BLOCKED_SPREADSHEET_KINDS.map((kind) => blockedSpreadsheetHelpLine(kind, tr))
-  const xlsxConvertLines = XLSX_CONVERT_FAILURES.map((reason) => xlsxConvertFailureHelpLine(reason, tr))
+  const spreadsheetLines = ATTENDANCE_IMPORT_HELP_BLOCKED_KINDS.map((kind) => BLOCKED_SPREADSHEET_HELP_LINES[kind](tr))
+  const xlsxConvertLines = ATTENDANCE_IMPORT_HELP_CONVERT_FAILURES.map((reason) =>
+    XLSX_CONVERT_FAILURE_HELP_LINES[reason](tr),
+  )
   return [failureRecoveryEntry(tr, [...spreadsheetLines, ...xlsxConvertLines])]
 }
 

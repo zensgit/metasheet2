@@ -9,6 +9,12 @@ import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
 import { useLocale } from '../src/composables/useLocale'
 import { ATTENDANCE_SETUP_TEMPLATES } from '../src/views/attendance/attendanceSetupTemplates'
+import {
+  ATTENDANCE_IMPORT_HELP_BLOCKED_KINDS,
+  ATTENDANCE_IMPORT_HELP_CONVERT_FAILURES,
+} from '../src/views/attendance/attendanceContextHelp'
+import { blockedSpreadsheetMessage } from '../src/views/attendance/importFileGuard'
+import { xlsxConvertFailureMessage } from '../src/views/attendance/importXlsxConvert'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -138,7 +144,20 @@ describe('W5-2 context-help wiring', () => {
     // (v-show) — this help copy must never collide with the REACTIVE xlsx-guard banner text that
     // an unrelated test (attendance-import-preview-regression.spec.ts) asserts is ABSENT before
     // any file is selected.
-    expect(bodyText).not.toContain('This looks like an Excel file')
+    // Gate finding P3-1: this mount is zh-CN, so asserting the ENGLISH banner literal was
+    // vacuous — it could never appear here regardless of collision. Assert BOTH locales' real
+    // banner strings, taken from the producing functions themselves (never re-transcribed, so the
+    // guard follows the banner copy if it is ever reworded).
+    for (const kind of ATTENDANCE_IMPORT_HELP_BLOCKED_KINDS) {
+      const banner = blockedSpreadsheetMessage(kind)
+      expect(bodyText).not.toContain(banner.zh)
+      expect(bodyText).not.toContain(banner.en)
+    }
+    for (const reason of ATTENDANCE_IMPORT_HELP_CONVERT_FAILURES) {
+      const banner = xlsxConvertFailureMessage(reason)
+      expect(bodyText).not.toContain(banner.zh)
+      expect(bodyText).not.toContain(banner.en)
+    }
     // Zero write affordance (and zero anchors — failure_recovery carries no link).
     expect(help!.querySelectorAll('button, input, form, a').length).toBe(0)
     // R1: mounting + reading this section issues zero non-GET calls.
