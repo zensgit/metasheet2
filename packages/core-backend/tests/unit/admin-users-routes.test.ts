@@ -46,11 +46,21 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   getDingTalkRuntimeStatus: vi.fn(),
 }))
 
+const activateMocks = vi.hoisted(() => ({
+  activatePendingUser: vi.fn(),
+}))
+
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: Request, _res: Response, next: (error?: unknown) => void) => {
     req.user = state.authUser as never
     next()
   },
+}))
+
+// Load-bearing for T3 HTTP mapping (#4581 r3): service-layer unit tests alone cannot
+// catch reverting ACTIVATE_ALIAS_FAILED → 409 or echoing raw driver text.
+vi.mock('../../src/auth/user-activate', () => ({
+  activatePendingUser: activateMocks.activatePendingUser,
 }))
 
 vi.mock('../../src/db/pg', () => ({
@@ -233,6 +243,7 @@ describe('admin-users routes', () => {
       autoProvision: false,
       unavailableReason: null,
     })
+    activateMocks.activatePendingUser.mockReset()
   })
 
   it('lists users with pagination payload', async () => {
@@ -3478,5 +3489,54 @@ describe('admin-users routes', () => {
       '2026-03-10T00:00:00.000Z',
       '2026-03-12T23:59:59.999Z',
     ])
+  })
+
+  it('POST activate maps ACTIVATE_ALIAS_FAILED to 500 with fixed safe message (no PG text)', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const pgLeak =
+      'duplicate key value violates unique constraint "user_login_aliases_normalized_value_key" DETAIL: Key (normalized_value)=(shared) already exists. connection refused 5432'
+    const err = new Error(pgLeak) as Error & { code?: string }
+    err.code = 'ACTIVATE_ALIAS_FAILED'
+    activateMocks.activatePendingUser.mockRejectedValueOnce(err)
+
+    const response = await invokeRoute('post', '/api/admin/users/:id/activate', {
+      params: { id: 'pending-user-1' },
+      body: { mode: 'temp_password', temporaryPassword: 'TempPass9A!' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    const body = response.body as { ok?: boolean; error?: { code?: string; message?: string } }
+    expect(body.ok).toBe(false)
+    expect(body.error?.code).toBe('ACTIVATE_ALIAS_FAILED')
+    expect(body.error?.message).toBe('Failed to claim login alias during activation')
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toMatch(/duplicate key|DETAIL|connection refused|5432|user_login_aliases/i)
+    expect(activateMocks.activatePendingUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'pending-user-1',
+        mode: 'temp_password',
+        adminUserId: 'admin-1',
+      }),
+    )
+  })
+
+  it('POST activate maps ACTIVATE_ALIAS_CONFLICT to 409 (positive control)', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const err = new Error(
+      'Login alias for username is already claimed by another account',
+    ) as Error & { code?: string }
+    err.code = 'ACTIVATE_ALIAS_CONFLICT'
+    activateMocks.activatePendingUser.mockRejectedValueOnce(err)
+
+    const response = await invokeRoute('post', '/api/admin/users/:id/activate', {
+      params: { id: 'pending-user-2' },
+      body: { mode: 'temp_password', temporaryPassword: 'TempPass9A!' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    const body = response.body as { ok?: boolean; error?: { code?: string; message?: string } }
+    expect(body.ok).toBe(false)
+    expect(body.error?.code).toBe('ACTIVATE_ALIAS_CONFLICT')
+    expect(body.error?.message).toMatch(/already claimed/i)
   })
 })
