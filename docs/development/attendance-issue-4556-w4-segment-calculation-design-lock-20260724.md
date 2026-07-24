@@ -200,7 +200,7 @@ against W1 group-membership tables is a scope violation.
 | W4C-R38 | Attendance approval assignment authority is org-bound, action-complete, and version-serialized. | A generated matrix from the actual generic action union and assignment-DML call graph covers bulk reassign, non-terminal `approve` advancement, `return`, `revoke`, jump, transfer, add/reduce-sign, timeout, and future assignment mutations. Each action proves the attendance instance unreachable or locks its request org/version and satisfies the closed actor/target matrix before instance/assignment DML; tests include both a normal attendance instance and an adversarial one carrying `published_definition_id`, and a mutation-versus-decision race cannot authorize the wrong actor. |
 | W4C-R39 | Closing a pre-W4 import rollback window is immutable and serialized with rollback and rollout transition. | Removing the append-only close witness, common org-rollout/batch lock order, or final in-transaction eligibility recheck fails dual-connection races for a legacy batch closed without preimage: close/transition first makes rollback return 409 with zero delete/reversal DML; rollback first makes transition wait and then re-evaluate. A batch with a valid frozen preimage retains its specified W4 reversal path. |
 | W4C-R40 | Operation lifecycle follows rollout posture and supplied identity without an implicit retry hole. | A new legacy request with no supplied stable operation ID creates no operation/outbox row; legacy with a supplied ID claims/seals a compatibility operation but still creates no outbox; every new `shadow|eligible|authoritative` request requires, claims, and seals its operation plus required outbox. Independent mutations that create a legacy operation without an ID, omit the legacy-with-ID compatibility operation, or skip claim/seal outside legacy fail. |
-| W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work. | Source operations hold the org rollout shared transaction advisory lock from posture resolution through commit; transition/closure hold the matching exclusive lock. Removing either lock permits the dual-connection null-ID legacy-write-versus-shadow-transition mutation to commit an old-posture source after promotion. |
+| W4C-R41 | Rollout posture is frozen against every source transaction, including null-ID legacy work, without an inverse operation/rollout lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues acquires the org rollout shared transaction advisory lock before locking operation/source rows and holds it through commit; transition/closure hold the matching exclusive lock before their rows. Removing either lock permits the dual-connection null-ID legacy-write-versus-shadow-transition mutation to commit an old-posture source after promotion, while restoring operation-row-first locking fails the deadlock-order leg. |
 
 ## 4. Canonical intent, prepared plan, and evidence
 
@@ -1513,8 +1513,11 @@ writeAttendanceCalculationsBatch(
 `executeAttendanceResultOperation` is the only public write boundary. It first
 proves the branded authorization capability covers every envelope item and
 rechecks membership/source ownership in SQL. It opens one `SERIALIZABLE`
-transaction and first reads any supplied operation keys in stable order so an
-already completed congruent replay can return even under suspension. It then
+transaction and performs an authorization-gated, non-locking read of supplied
+operation keys in stable order so an all-completed congruent replay can return
+with zero DML even under suspension. Any request that cannot return at that
+point acquires the org rollout shared advisory lock before it locks or claims
+an operation/source row, re-reads the operation keys under that lock, and then
 resolves rollout posture. A new `shadow|eligible|authoritative` request claims
 all item operations in stable order before invoking closed private adapters
 and seals them before commit. A new `legacy_projection_only` request invokes
@@ -1566,13 +1569,13 @@ alternate result algorithm.
 ### 8.2 Transaction and lock order
 
 1. begin `SERIALIZABLE`; verify the frozen authorization and normalize the
-   envelope, then read/lock any existing exact batch/item operation keys in
-   stable order; return only an all-completed congruent replay. A missing key
-   is not inserted yet, and mixed, incomplete, or non-congruent existing state
-   is retained for the posture-specific decision;
-2. acquire the org rollout shared transaction advisory lock, resolve rollout
-   posture while holding it, and retain it through commit; if suspended, stop
-   before operation/source DML;
+   envelope, then non-locking-read any existing exact batch/item operation keys
+   in stable order; return only an all-completed congruent replay. A missing,
+   mixed, incomplete, or non-congruent state cannot continue from this read;
+2. acquire the org rollout shared transaction advisory lock before any
+   operation/source row lock, retain it through commit, then re-read/lock exact
+   operation keys in stable order and resolve rollout posture. If suspended,
+   stop before operation/source DML;
    for `shadow|eligible|authoritative`, insert/claim all-new batch/item rows and
    reject mixed or non-congruent state. For `legacy_projection_only`, reject
    any conflicting/incomplete existing operation state; claim a compatibility
@@ -1636,6 +1639,13 @@ source/result DML. Making any new `shadow|eligible|authoritative` request skip
 claim or seal must fail durable replay and atomicity legs. The presence of the
 neighboring outbox or source-row guard is not accepted as the exclusive failure
 reason for any mutation.
+
+A separate lock-order mutation restores operation-row locking before the
+rollout shared advisory lock. A two-connection test with an incomplete stable-ID
+operation and a concurrent rollout transition must then fail: the canonical
+implementation completes in the common rollout-then-operation order without a
+deadlock or bounded-retry exhaustion, and the transition's committed posture
+governs any source DML that follows.
 
 ### 8.3 Entrypoint parity
 
@@ -1752,13 +1762,16 @@ org-rollout then batch lock order and final in-transaction recheck.
 
 The stable org rollout advisory key has shared/exclusive transaction modes.
 Every new source/result transaction, including null-ID legacy work, acquires it
-shared before resolving posture and holds it through commit. Rollback also
+shared before locking operation/source rows or resolving posture and holds it
+through commit. Rollback also
 takes it shared before batch locks. Transition and rollback-window closure take
 it exclusive before reading/updating rollout or batch state. Completed
-congruent replay may return before this lock because it performs zero
-source/result DML. The advisory key, rather than existence of a rollout row,
-covers a legacy org with no persisted state. This freezes accepted posture
-without serializing ordinary same-org source writes against one another.
+congruent replay may return from an authorization-gated non-locking read before
+this lock because it performs zero source/result DML. Any non-returning read is
+discarded and repeated under the shared lock; no row lock survives across that
+acquisition. The advisory key, rather than existence of a rollout row, covers a
+legacy org with no persisted state. This freezes accepted posture without
+serializing ordinary same-org source writes against one another.
 
 One async `resolveSegmentCalculationPosture(trx,orgId)` is the sole truth for
 calculator mode, shift capability output, single/sequence reference guards,
@@ -2005,6 +2018,10 @@ Gates:
   transition wait and re-evaluate after its commit, while transition holding
   exclusive makes the source resolve the new posture after release. Removing
   either acquisition permits an old-posture commit and fails;
+- an incomplete stable-ID operation versus rollout transition proves the common
+  rollout-then-operation row lock order completes without deadlock or
+  bounded-retry exhaustion; moving the operation row lock ahead of the shared
+  rollout lock fails this leg;
 - replay under a different actor/token subject or after authorization revocation
   cannot read the stored response;
 - approval decision operation identity is claimed before terminal state/record
@@ -2434,7 +2451,7 @@ All decisions remain **OPEN** until exact merged-SHA RATIFY.
 | OD-W4C-37 attendance assignment mutation | (a) central reassign and any reachable generic assignment mutation use the locked request-org actor/target matrix plus approval-version serialization; unsupported generic actions prove zero attendance DML; (b) retain global `approvals:admin` plus globally active target behavior | (a), changing who may approve is an org-bound security decision |
 | OD-W4C-38 operation lifecycle by posture | (a) completed congruent replay is read first; null-ID legacy writes no operation/outbox, stable-ID legacy claims/seals a compatibility operation with no outbox, and shadow/eligible/authoritative require claim/seal plus required outbox; (b) require operation IDs from every legacy caller | (a), preserves the existing optional-ID API while closing cross-posture response-loss replay |
 | OD-W4C-39 legacy rollback-window closure | (a) append an immutable per-batch closure witness only for a batch with zero frozen preimage/W4 references, and serialize rollback/closure/transition with the common org-rollout then batch lock protocol; (b) infer closure from time or an unlocked scan | (a), no stale-read destructive rollback or suppression of valid W4 reversal |
-| OD-W4C-40 rollout/source serialization | (a) source and rollback hold a shared org rollout advisory lock; transition and closure hold the matching exclusive lock; (b) rely on operation-row scans and transaction isolation alone | (a), the shared mode preserves ordinary write concurrency and covers null-ID legacy work |
+| OD-W4C-40 rollout/source serialization | (a) completed congruent replay may non-locking-read and return with zero DML; every continuing source and rollback takes the shared org rollout advisory lock before operation/source/batch row locks, while transition and closure take the matching exclusive lock first; (b) rely on operation-row scans and transaction isolation alone | (a), the shared mode preserves ordinary write concurrency, covers null-ID legacy work, and gives one rollout-first lock order |
 
 ## 14. RATIFY and execution sequence
 
