@@ -27,6 +27,14 @@ Independent review also found three legacy-data hazards:
    account corp still matched its parent integration;
 3. duplicate same-corp unionId/openId identity rows were loaded with last-row-wins semantics.
 
+The exact-head adversarial review then found three additional runtime hazards:
+
+4. bind/admit trusted a transaction-external account snapshot and did not prove that the account
+   corp still matched its parent integration;
+5. unbind could report success while leaving a legacy blank-corp identity behind;
+6. the sync matcher read identities through the global pool, so a concurrent identity writer
+   could change the match set between the snapshot and the link write.
+
 ## 2. Deployment lock
 
 ### Phase A: matcher and callback hardening
@@ -39,13 +47,17 @@ Locked behavior:
 1. raw external key, unionId, and openId matching use an injective normalized tuple key;
 2. duplicate same-scope identities resolve as ambiguous and never auto-link;
 3. apply, same-batch admission, preview, and admin-review matching share the same semantics;
-4. bind and unbind compare normalized corp scope, treating NULL/blank/whitespace as one legacy
-   scope;
+4. bind, admit, and unbind lock the account and parent integration in the same transaction,
+   require provider/corp agreement, and perform no identity/link/grant write before that check;
 5. sync refreshes an existing account corp from its immutable parent integration;
 6. the generic integration update cannot set, clear, or change corp, including an empty legacy
    value;
 7. approval callbacks require a nonblank account corp equal to the pinned integration corp;
-8. no deployment, automatic sync, deprovision, flag, or user-creation behavior changes.
+8. sync serializes the identity match snapshot with identity writers and reads it through the
+   same transaction connection; a duplicate that lands later is treated as ambiguous before the
+   `already_linked` short-circuit on the next sync;
+9. integration corp IDs are printable, whitespace-free ASCII tokens after normalization;
+10. no deployment, automatic sync, deprovision, flag, or user-creation behavior changes.
 
 ### Phase B: schema expansion
 
@@ -77,6 +89,17 @@ The sync upsert sets `corp_id = EXCLUDED.corp_id`, repairing historical child dr
 already-immutable integration config. Generic integration editing remains fail closed; it is not
 a repair transaction and cannot safely coordinate with a concurrent sync.
 
+Bind/admit/unbind no longer authorize from the pre-read account object. Their shared write helper
+locks `directory_accounts` and its parent `directory_integrations`, then requires normalized
+provider and corp equality before deriving or mutating any identity. Unbind separately locks
+candidate identities; a blank or different-corp candidate aborts the entire transaction rather
+than unlinking while leaving stale login identity behind.
+
+Until Phase B's database uniqueness is deployed, sync takes
+`SHARE ROW EXCLUSIVE` on `user_external_identities` before loading the match maps through the same
+transaction client. This makes the snapshot and link decision one serialized local apply. Phase B
+remains mandatory: it prevents a later writer from creating the duplicate at all.
+
 The approval-card callback joins the pinned `directory_integrations` row and requires:
 
 ```text
@@ -99,16 +122,20 @@ Phase A must retain these discriminating controls:
 | immutable tenant | empty/set, set/change, and set/clear generic edits reject | same-corp resend succeeds |
 | callback corp pin | drifted linked account cannot act | same-corp linked account acts |
 | bind/unbind scope | corp-A legacy identity does not block or get deleted by corp B | same-corp lifecycle succeeds |
+| authoritative bind scope | drifted account corp rejects with zero identity/link writes | same-corp bind succeeds |
+| legacy unbind scope | blank/different-corp identity aborts without severing the link | same-corp identity is deleted |
+| match snapshot serialization | concurrent identity writer blocks until sync's link decision commits | later duplicate is reconciled as ambiguous |
+| corp token grammar | embedded ASCII/Unicode whitespace rejects | ordinary DingTalk corp token succeeds |
 
 Local exact-worktree verification:
 
-- focused unit suites: 33/33;
-- focused real-PostgreSQL 15 suites: 47/47;
+- focused unit suites: 36/36;
+- focused real-PostgreSQL 15 suites: 55/55;
 - required real-DB wiring and values-free contracts: 82/82;
 - TypeScript: `tsc --noEmit` clean;
 - `git diff --check` clean.
 
-Six discriminating mutations were killed:
+Nine discriminating mutations were killed:
 
 1. neutering duplicate-provider-identity ambiguity changed `ambiguous` to `none`;
 2. restoring delimiter concatenation made two different corp/provider tuples match;
@@ -117,6 +144,11 @@ Six discriminating mutations were killed:
 5. reopening empty-to-set generic integration edits completed the forbidden update;
 6. removing normalized corp comparison let a whitespace-drifted same-corp identity bind a second
    local user.
+7. removing the in-transaction account/integration corp equality let a drifted account bind;
+8. suppressing the unbind identity-scope refusal severed the link while retaining the stale
+   identity;
+9. replacing the identity table lock with a no-op let the concurrent writer pass before the link
+   decision.
 
 Required CI is a separate head-scoped gate and is not claimed here until the pushed Phase A head
 settles.

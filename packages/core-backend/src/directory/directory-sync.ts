@@ -1232,8 +1232,10 @@ export type DirectoryIdentityMatchOutcome =
 /**
  * The identity-matching cascade `syncDirectoryIntegration` walks for every pulled DingTalk
  * user, extracted so `previewDirectorySyncIntegration` can walk the exact same cascade
- * instead of approximating it. Order matters and mirrors apply: already-linked short-circuit,
- * then external-identity (union/open id or external_key), then unique email, then unique
+ * instead of approximating it. Order matters and mirrors apply: ambiguous external identity
+ * first (including an account that was linked before the duplicate appeared), then the
+ * already-linked short-circuit, external-identity (union/open id or external_key), unique email,
+ * then unique
  * mobile, then ambiguous-identifier. `{ matched: 'none' }` is the ONLY outcome under which
  * apply reaches the auto-admission branch — that is the exact condition preview must gate
  * `autoAdmissionCandidateCount` behind to avoid over-counting accounts that would actually be
@@ -1244,10 +1246,6 @@ export function resolveDirectoryIdentityMatch(
   existingLink: DirectoryIdentityExistingLink | null | undefined,
   maps: DirectoryIdentityMatchMaps,
 ): DirectoryIdentityMatchOutcome {
-  if (existingLink && existingLink.link_status === 'linked' && existingLink.local_user_id) {
-    return { matched: 'already_linked' }
-  }
-
   const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
   const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
   const scopedExternalIdentityKey = buildScopedIdentityKey(account.corpId, account.externalKey)
@@ -1260,6 +1258,10 @@ export function resolveDirectoryIdentityMatch(
       && maps.ambiguousScopedUnionIdentityKeys.has(scopedUnionIdentityKey))
   )
   if (hasAmbiguousExternalIdentity) return { matched: 'ambiguous' }
+
+  if (existingLink && existingLink.link_status === 'linked' && existingLink.local_user_id) {
+    return { matched: 'already_linked' }
+  }
 
   const externalIdentityUserId = (scopedExternalIdentityKey
     ? maps.scopedExternalIdentityMap.get(scopedExternalIdentityKey)
@@ -2366,6 +2368,9 @@ function normalizeIntegrationInput(
 
   if (!name) throw new Error('Integration name is required')
   if (!corpId) throw new Error('corpId is required')
+  if (!/^[!-~]+$/.test(corpId)) {
+    throw new Error('corpId must be a printable ASCII token without whitespace')
+  }
   if (!appKey) throw new Error('appKey is required')
   if (!appSecret) throw new Error('appSecret is required')
   assertDingTalkCorpAllowed(corpId, { context: 'Directory integration corpId' })
@@ -3274,7 +3279,12 @@ export function buildUniqueLocalUserMatchMap(
   return { uniqueMap, ambiguousKeys }
 }
 
-async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
+async function loadMatchMaps(
+  accounts: DirectoryAccountRow[],
+  identityClient?: {
+    query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
+  },
+) {
   const externalKeys = Array.from(new Set(accounts.map((account) => account.external_key).filter(Boolean)))
   const unionIds = Array.from(new Set(
     accounts
@@ -3297,9 +3307,9 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
       .filter(Boolean),
   ))
 
-  const [externalIdentities, emailUsers, mobileUsers] = await Promise.all([
-    externalKeys.length > 0 || unionIds.length > 0 || openIds.length > 0
-      ? query<ExternalIdentityRow>(
+  const externalIdentityPromise = externalKeys.length > 0 || unionIds.length > 0 || openIds.length > 0
+    ? identityClient
+      ? identityClient.query(
         `SELECT external_key, provider_union_id, provider_open_id, corp_id, local_user_id
          FROM user_external_identities
          WHERE provider = $1
@@ -3310,7 +3320,21 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
            )`,
         [DEFAULT_PROVIDER, externalKeys, unionIds, openIds],
       )
-      : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<ExternalIdentityRow>>>),
+      : query<ExternalIdentityRow>(
+        `SELECT external_key, provider_union_id, provider_open_id, corp_id, local_user_id
+         FROM user_external_identities
+         WHERE provider = $1
+           AND (
+             external_key = ANY($2::text[])
+             OR provider_union_id = ANY($3::text[])
+             OR provider_open_id = ANY($4::text[])
+           )`,
+        [DEFAULT_PROVIDER, externalKeys, unionIds, openIds],
+      )
+    : Promise.resolve({ rows: [] })
+
+  const [externalIdentities, emailUsers, mobileUsers] = await Promise.all([
+    externalIdentityPromise,
     emails.length > 0
       ? query<LocalUserRow>(
         `SELECT id, email
@@ -3335,7 +3359,8 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
   const ambiguousScopedExternalIdentityKeys = new Set<string>()
   const ambiguousScopedUnionIdentityKeys = new Set<string>()
   const ambiguousScopedOpenIdentityKeys = new Set<string>()
-  for (const row of externalIdentities.rows) {
+  for (const rawRow of externalIdentities.rows) {
+    const row = rawRow as ExternalIdentityRow
     addScopedIdentityCandidate(
       scopedExternalIdentityMap,
       ambiguousScopedExternalIdentityKeys,
@@ -3916,6 +3941,14 @@ export async function syncDirectoryIntegration(
         departmentIdMap,
       })
 
+      // Phase A mixed-version safety: until the corp-scoped identity indexes from Phase B are
+      // deployed, the database cannot reject a second same-scope union/open identity. Serialize
+      // the match snapshot with every INSERT/UPDATE/DELETE writer by taking a table lock that
+      // conflicts with ROW EXCLUSIVE. The query below must use THIS transaction client; taking
+      // the lock here and reading through the global pool would leave the original TOCTOU open.
+      // SHARE ROW EXCLUSIVE also serializes concurrent directory applies, avoiding lock-upgrade
+      // deadlocks when both later create identities.
+      await client.query('LOCK TABLE user_external_identities IN SHARE ROW EXCLUSIVE MODE')
       const {
         scopedExternalIdentityMap,
         scopedUnionIdentityMap,
@@ -3929,6 +3962,7 @@ export async function syncDirectoryIntegration(
         ambiguousMobileKeys,
       } = await loadMatchMaps(
         Array.from(accountIdMap.values()),
+        client,
       )
 
       const existingLinksResult = await client.query(
@@ -5457,13 +5491,60 @@ export const __userOrgsMembershipInternalsForTests = {
   deactivateUserOrgMembershipIfNoOtherActiveBinding,
 }
 
+async function lockAuthoritativeDirectoryBindingAccount(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  directoryAccountId: string,
+): Promise<DirectoryBindingTargetAccountRow | null> {
+  const result = await client.query(
+    `SELECT
+       account.id,
+       account.integration_id,
+       account.provider,
+       account.corp_id,
+       account.external_user_id,
+       account.union_id,
+       account.open_id,
+       account.external_key,
+       account.name,
+       account.email,
+       account.mobile,
+       integration.provider AS integration_provider,
+       integration.corp_id AS integration_corp_id
+     FROM directory_accounts account
+     JOIN directory_integrations integration ON integration.id = account.integration_id
+     WHERE account.id = $1::uuid
+     FOR UPDATE OF account, integration`,
+    [directoryAccountId],
+  )
+  const row = result.rows[0] as (
+    DirectoryBindingTargetAccountRow
+    & { integration_provider: string; integration_corp_id: string }
+  ) | undefined
+  if (!row) return null
+
+  const accountCorpId = normalizeText(row.corp_id)
+  const integrationCorpId = normalizeText(row.integration_corp_id)
+  if (
+    normalizeText(row.provider) !== normalizeText(row.integration_provider)
+    || !accountCorpId
+    || !integrationCorpId
+    || accountCorpId !== integrationCorpId
+  ) {
+    throw new Error('Directory account tenant scope is inconsistent; synchronize or repair it before binding')
+  }
+
+  return {
+    ...row,
+    corp_id: accountCorpId,
+  }
+}
+
 async function applyDirectoryAccountBindInTransaction(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   options: {
     normalizedAccountId: string
     normalizedAdminUserId: string
     enableDingTalkGrant: boolean
-    account: DirectoryBindingTargetAccountRow
     localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'username' | 'name'>
     /**
      * T1 pending create: link + identity only — no active user_orgs until activate (Action C).
@@ -5476,10 +5557,11 @@ async function applyDirectoryAccountBindInTransaction(
     normalizedAccountId,
     normalizedAdminUserId,
     enableDingTalkGrant,
-    account,
     localUser,
     skipUserOrgMembership = false,
   } = options
+  const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
+  if (!account) throw new Error('Directory account not found')
   const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
   if (!identityExternalKey) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
@@ -5804,7 +5886,6 @@ async function createDirectoryAdmittedUserInTransaction(
       normalizedAccountId: options.account.id,
       normalizedAdminUserId: options.adminUserId,
       enableDingTalkGrant,
-      account: options.account,
       localUser: {
         id: userId,
         email: options.email,
@@ -6344,7 +6425,6 @@ export async function bindDirectoryAccount(
       normalizedAccountId,
       normalizedAdminUserId,
       enableDingTalkGrant,
-      account,
       localUser,
     })
   })
@@ -6519,11 +6599,6 @@ export async function unbindDirectoryAccount(
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
 
-  const account = await loadDirectoryBindingTargetAccount(normalizedAccountId)
-  if (!account) throw new Error('Directory account not found')
-
-  const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
-
   // #4526 review fix: `previousLinkedUser` used to be read via `loadDirectoryLinkedUser` OUTSIDE
   // this transaction (alongside `account`, in the `Promise.all` this replaced). That pre-read was
   // load-bearing but stale: if this account's link changed between the pre-read and the
@@ -6538,6 +6613,14 @@ export async function unbindDirectoryAccount(
   let previousLinkedUser: DirectoryAccountLinkedUserRow | null = null
 
   await transaction(async (client) => {
+    const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
+    if (!account) throw new Error('Directory account not found')
+    const identityExternalKey = buildDingTalkIdentityExternalKey(
+      account.corp_id,
+      account.open_id,
+      account.union_id,
+    )
+
     const linkedUserLockResult = await client.query(
       `SELECT l.local_user_id,
               u.email AS local_user_email,
@@ -6553,54 +6636,52 @@ export async function unbindDirectoryAccount(
     previousLinkedUser = (linkedUserLockResult.rows[0] as DirectoryAccountLinkedUserRow | undefined) ?? null
 
     if (previousLinkedUser?.local_user_id) {
-      const deleteIdentityParams: unknown[] = [
+      const candidateIdentityParams: unknown[] = [
         account.provider,
         previousLinkedUser.local_user_id,
-      ]
-      const deleteIdentityClauses = [
-        'provider = $1',
-        'local_user_id = $2',
       ]
       const identityMatchClauses: string[] = []
 
       if (identityExternalKey) {
-        deleteIdentityParams.push(identityExternalKey, account.corp_id)
-        identityMatchClauses.push(
-          `(external_key = $${deleteIdentityParams.length - 1}
-            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
-        )
+        candidateIdentityParams.push(identityExternalKey)
+        identityMatchClauses.push(`external_key = $${candidateIdentityParams.length}`)
       }
       if (normalizeText(account.external_key) && account.external_key !== identityExternalKey) {
-        deleteIdentityParams.push(account.external_key, account.corp_id)
-        identityMatchClauses.push(
-          `(external_key = $${deleteIdentityParams.length - 1}
-            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
-        )
+        candidateIdentityParams.push(account.external_key)
+        identityMatchClauses.push(`external_key = $${candidateIdentityParams.length}`)
       }
       if (normalizeText(account.open_id)) {
-        deleteIdentityParams.push(account.open_id, account.corp_id)
-        identityMatchClauses.push(
-          `(provider_open_id = $${deleteIdentityParams.length - 1}
-            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
-        )
+        candidateIdentityParams.push(account.open_id)
+        identityMatchClauses.push(`provider_open_id = $${candidateIdentityParams.length}`)
       }
       if (normalizeText(account.union_id)) {
-        deleteIdentityParams.push(account.union_id, account.corp_id)
-        identityMatchClauses.push(
-          `(provider_union_id = $${deleteIdentityParams.length - 1}
-            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
-        )
-      }
-      if (identityMatchClauses.length > 0) {
-        deleteIdentityClauses.push(`(${identityMatchClauses.join(' OR ')})`)
+        candidateIdentityParams.push(account.union_id)
+        identityMatchClauses.push(`provider_union_id = $${candidateIdentityParams.length}`)
       }
 
-      if (deleteIdentityClauses.length > 2) {
-        await client.query(
-          `DELETE FROM user_external_identities
-           WHERE ${deleteIdentityClauses.join(' AND ')}`,
-          deleteIdentityParams,
+      if (identityMatchClauses.length > 0) {
+        const identityCandidates = await client.query(
+          `SELECT id::text AS id, corp_id
+           FROM user_external_identities
+           WHERE provider = $1
+             AND local_user_id = $2
+             AND (${identityMatchClauses.join(' OR ')})
+           FOR UPDATE`,
+          candidateIdentityParams,
         )
+        if (identityCandidates.rows.some((row) => normalizeText(row.corp_id) !== account.corp_id)) {
+          throw new Error('Directory identity tenant scope is inconsistent; repair it before unbinding')
+        }
+        const candidateIds = identityCandidates.rows
+          .map((row) => normalizeText(row.id))
+          .filter(Boolean)
+        if (candidateIds.length > 0) {
+          await client.query(
+            `DELETE FROM user_external_identities
+             WHERE id = ANY($1::uuid[])`,
+            [candidateIds],
+          )
+        }
       }
 
       if (disableDingTalkGrant) {

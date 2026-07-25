@@ -103,6 +103,63 @@ describe('directory review identity corp scope', () => {
       },
     )).toEqual({ matched: 'ambiguous' })
   })
+
+  it.each([
+    ['external', 'duplicate-external', 'duplicate-external', null, null],
+    ['open', 'duplicate-open', null, 'duplicate-open', null],
+  ])('keeps the %s ambiguity branch load-bearing', (_kind, ambiguousId, externalKey, openId, unionId) => {
+    const scopedKey = JSON.stringify(['corp-a', ambiguousId])
+    expect(resolveDirectoryIdentityMatch(
+      {
+        corpId: 'corp-a',
+        externalKey: externalKey ?? 'unrelated',
+        unionId,
+        openId,
+        email: null,
+        mobile: null,
+      },
+      null,
+      {
+        scopedExternalIdentityMap: new Map(),
+        scopedUnionIdentityMap: new Map(),
+        scopedOpenIdentityMap: new Map(),
+        ambiguousScopedExternalIdentityKeys: new Set(externalKey ? [scopedKey] : []),
+        ambiguousScopedUnionIdentityKeys: new Set(),
+        ambiguousScopedOpenIdentityKeys: new Set(openId ? [scopedKey] : []),
+        emailMap: new Map(),
+        mobileMap: new Map(),
+        ambiguousEmailKeys: new Set(),
+        ambiguousMobileKeys: new Set(),
+      },
+    )).toEqual({ matched: 'ambiguous' })
+  })
+
+  it('re-evaluates ambiguity before preserving an existing linked account', () => {
+    const scopedKey = JSON.stringify(['corp-a', 'duplicate-union'])
+    expect(resolveDirectoryIdentityMatch(
+      {
+        corpId: 'corp-a',
+        externalKey: 'duplicate-union',
+        unionId: 'duplicate-union',
+        openId: null,
+        email: null,
+        mobile: null,
+      },
+      { local_user_id: 'previous-user', link_status: 'linked' },
+      {
+        scopedExternalIdentityMap: new Map(),
+        scopedUnionIdentityMap: new Map(),
+        scopedOpenIdentityMap: new Map(),
+        ambiguousScopedExternalIdentityKeys: new Set(),
+        ambiguousScopedUnionIdentityKeys: new Set([scopedKey]),
+        ambiguousScopedOpenIdentityKeys: new Set(),
+        emailMap: new Map(),
+        mobileMap: new Map(),
+        ambiguousEmailKeys: new Set(),
+        ambiguousMobileKeys: new Set(),
+      },
+    )).toEqual({ matched: 'ambiguous' })
+  })
 })
 
 describe('listDirectoryReviewItems', () => {
