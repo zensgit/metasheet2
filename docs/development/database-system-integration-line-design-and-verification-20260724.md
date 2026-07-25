@@ -1,12 +1,23 @@
 # Database & System Integration Line — Design and Verification (2026-07-24)
 
-**Status:** §1 is a **RECORD** of landed, verified facts (head-scoped SHAs). §2–§6 are **PROPOSED / design-first / doc-only**.
+**Status:** §1 is a **RECORD** of landed, verified facts (head-scoped SHAs). §2–§6 are **PROPOSED / design-first**; the document itself ships no code. What its approval unlocks is defined in **Gate** immediately below — a bounded **authority-substrate** gate, **not** "latent only". **§4 is the single authoritative slice order** and is currently **PENDING RE-RATIFICATION**.
 
-**Gate (owner, 2026-07-24):** approval of this document unlocks **only the B1a latent contract + harness slice**. It does **not** authorize: runtime enforcement (merging **#4591** / B2), arming or runtime wiring of any GIP profile, telemetry or handshake **wiring**, sealed-snapshot implementation, page-size ceiling changes, or rollout. Each of those is its own owner gate.
+**Gate (owner, 2026-07-24; ⟲B2 REVISED).** The earlier wording — *"unlocks only the B1a latent contract + harness slice"* — is **WITHDRAWN as self-contradictory**: §3.0's boundaries cannot be met inside a latent slice. A real **config v2** changes a **live approved-config validation path**, and the identity read / canonical contract registry / server-bound source executor add **internal derivation and connection paths**. Calling that "contract + harness only" would have let production-path changes land under a gate that never authorized them. The gate is therefore renamed for what it actually is:
+
+> **B1a AUTHORITY-SUBSTRATE gate — PERMITTED, bounded:**
+> - **additive** `orderingKeySpec` / `actionProfileVersion` acceptance in the approved-config validator — closed rejection on shape, and **no behaviour change for any config that omits them**;
+> - a purpose-built **system identity read** that does **not** decrypt credentials (B-2);
+> - a **first-party canonical object contract registry** and its version lookup (B-3);
+> - a **server-bound source executor** — resolution-derived handle, first-party statement builders, restricted statement seam — plus certified source-column translation (B-1, B-6);
+> - **removal or privatisation** of the legacy `probe()` entry point (B-4).
+>
+> **STILL FORBIDDEN — each its own later gate:** any HTTP route or otherwise request-reachable surface over the above; any **runtime consumer** of a GIP profile; arming / activation / rollout; telemetry or handshake **wiring** (B1-observability); the **B2 enforcement merge** (**#4591**); sealed-snapshot implementation; page-size ceiling changes; CDC / external write-back / D2 / W3 / G1 (frozen).
+>
+> **Boundary test, so this cannot be argued case by case:** if a change makes a new behaviour reachable **from a request or from a scheduled run**, it is OUTSIDE this gate — no matter which §3.0 boundary motivated it.
 
 This is the line's single design-and-verification document (owner directive: consolidate closeout facts into one MD; stop letting working memos drift). It absorbs and supersedes the session working memos (`/tmp/gip-decision-memo-20260724.md`, `/tmp/b1-paged-read-certification-design-20260724.md` rev‑1) and the retired ad-hoc inventory SQL (NO-GO; §5).
 
-Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲P1-b (probe ≠ paged execution), ⟲P2-a (frozen combinations / no silent downgrade), ⟲P2-b (latent vs telemetry), ⟲P3-a (sealed snapshot not the sole exit). Codex-review absorptions (2026-07-24) are marked ⟲C1 (M0 exact-SHA package policy — BLOCKING), ⟲C2 (inventory-zero coverage map), ⟲C3 (#4580 re-cut + typed 422 as merge condition), ⟲C4 (orderBy = fail-fast, not stable pagination), ⟲C5 (per-capability routing, not per-brand). Owner ratify-review absorptions (2026-07-24, round 2) are marked ⟲R1 (exact-SHA exits: two-proof-only + freeze the new SHA), ⟲R2 (deep-immutable resolution, not provenance-only), ⟲R3 (full-tuple resolver), ⟲R4 (M1 = evidence only; the §4 order wins), ⟲R5 (combinations scoped to PAGED_READ), ⟲R6 (orderingKeySpec closed schema). Package/decision round (owner, 2026-07-24 late): ⟲R7 (complete-package two-SHA structure), plus three recorded decisions — package policy (b) with a build-only authorization boundary; B1-observability NOT opened early; B2 re-cut now as Draft **#4591**, superseding #4580.
+Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲P1-b (probe ≠ paged execution), ⟲P2-a (frozen combinations / no silent downgrade), ⟲P2-b (latent vs telemetry), ⟲P3-a (sealed snapshot not the sole exit). Codex-review absorptions (2026-07-24) are marked ⟲C1 (M0 exact-SHA package policy — BLOCKING), ⟲C2 (inventory-zero coverage map), ⟲C3 (#4580 re-cut + typed 422 as merge condition), ⟲C4 (orderBy = fail-fast, not stable pagination), ⟲C5 (per-capability routing, not per-brand). Owner ratify-review absorptions (2026-07-24, round 2) are marked ⟲R1 (exact-SHA exits: two-proof-only + freeze the new SHA), ⟲R2 (deep-immutable resolution, not provenance-only), ⟲R3 (full-tuple resolver), ⟲R4 (M1 = evidence only; the §4 order wins), ⟲R5 (combinations scoped to PAGED_READ), ⟲R6 (orderingKeySpec closed schema). Package/decision round (owner, 2026-07-24 late): ⟲R7 (complete-package two-SHA structure), plus three recorded decisions — package policy (b) with a build-only authorization boundary; B1-observability NOT opened early; B2 re-cut now as Draft **#4591**, superseding #4580. Qualification-authenticity round (owner, 2026-07-24, round 3): ⟲B (the six §3.0 boundaries). Boundary-review round (owner, 2026-07-24, round 4): ⟲B2 — authority-substrate gate replaces the self-contradictory "latent only" wording; `canonicalObjectVersion` = first-party contract version, drift belongs elsewhere; `systemContentKey` freeze material completed; §4 becomes the single authoritative order and is un-ratified until re-approved.
 
 **Doc charter** ⟲Codex: this document is an **execution index + evidence ledger**. Authoritative contracts live in code and their own frozen design docs — referenced here by symbol + SHA, never copied — so this file cannot drift into another competing fact source. Model task cards derived from it must carry **symbol + exact head + acceptance predicate**, not bare line numbers.
 
@@ -61,45 +72,107 @@ Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲
 
 ## 3. B1 design (REVISED — owner findings absorbed)
 
-### 3.0 ⟲B — B1a IS REDONE: six boundaries the first implementation did not meet
+### 3.0 ⟲B — B1a REDO REQUIRED: six boundaries frozen (redo NOT started)
 
-**Status of the first B1a attempt (#4596 `774bdb5e6`, #4597 `d0313feec`): HELD, to be redone.** Owner review
-found four P1s and two P2s. Every one is verified — three of them by me re-running the reviewer's probe and,
-in one case, finding the defect to be *wider* than reported. The slice's own stated goal — *forgery is
-inexpressible by construction* — was **not met**. These boundaries are now part of the design, not notes on
-an implementation.
+**Status of the first B1a attempt (#4596 `774bdb5e6`, #4597 `d0313feec`): HELD; redo REQUIRED and NOT
+STARTED.** ⟲B2 The earlier heading "B1a IS REDONE" was misread-able as *implementation already redone* — it
+was never that. What is done is that the boundaries below are **frozen into the design**; no redo code
+exists. Owner review found four P1s and two P2s. Every one is verified — three of them by me re-running the
+reviewer's probe and, in one case, finding the defect to be *wider* than reported. The slice's own stated
+goal — *forgery is inexpressible by construction* — was **not met**.
 
 **B-1 · A qualification must prove the evidence came from the bound system.**
-The first attempt minted and verified a qualification from a **caller-supplied `query` function that never
-touched any external system** (its own suite does this at `gip-approved-binding-resolver.test.cjs`
-L740-L772, and at L807-L840 one fabricated answer satisfies **two resolutions bound to different systems**).
-This was recorded as an accepted "residual". That grading was wrong: **latency does not make an untrue
+Two residuals, both **measured by the first attempt's own suite** and both pinned in
+`__tests__/gip-binding-qualification-spike.test.cjs` **@ `774bdb5e6`** (⟲B2 symbol + exact head, per the doc
+charter — the line numbers alone will rot, and the redo rewrites this file; ⟲B2 also: *not* the resolver
+test, which is where an earlier revision of this paragraph wrongly pointed):
+- `ratifiedPathRemainsAnOpenConstruction()` **L752-L805** — a qualification minted through the ratified
+  `probe()` path over a **foreign field set** still verifies against the resolution, because evidence is
+  values-free (`checkedKeyColumnCount` only) and verify therefore cannot see the field set;
+- `callerSuppliedQueryRemainsAnOpenConstruction()` **L813-L847** — ONE caller-side answer that touches no
+  system at all satisfies **two resolutions bound to different systems**, and both verify.
+
+Both were recorded as accepted "residuals". That grading was wrong: **latency does not make an untrue
 qualification trustworthy** — a qualification that verifies against evidence never observed on the bound
 system is a false qualification whether or not anything consumes it yet. Required boundary: the source
-handle is **derived from the resolution's system record by a server-bound source executor**; no caller may
-supply the query path. This is a *precondition* of B1a, not a follow-up to it.
+handle is **derived from the resolution's own system record by a server-bound source executor**, and the
+probed field set is derived from the resolution too; no caller may supply the query path. This is a
+*precondition* of B1a, not a follow-up to it.
 
-**B-2 · System identity comes from a dedicated lossless identity read — not from hashing the config.**
-The first attempt hashed the whole system config (`lib/gip-approved-binding-resolver.cjs` L153-L169). The
-identity that matters is **endpoint + auth principal + scope**, read by a purpose-built lossless identity
-read. That read must **not decrypt credentials** — the first attempt obtained decrypted credentials through
-the adapter API and then discarded them, an unnecessarily wide permission surface for an identity derivation.
+**B-2 · System identity comes from a dedicated lossless identity read — not from hashing the whole config.**
 
-**B-3 · `canonicalObjectVersion` comes from a first-party canonical object contract registry.**
-The first attempt derived it from `systemContentKey + objectKey + fieldMap`, and the code itself admits
-(L232-L252) that it **cannot detect source-side schema drift**. A "canonical object version" that cannot
-witness the object's schema is not one; it must not be invented locally.
+⟲B2 **What the first attempt actually hashes today** — `deriveSystemContentKey`,
+`lib/gip-approved-binding-resolver.cjs` L153-L169 @ `774bdb5e6`:
+
+```
+{ domain tag, systemId, tenantId, workspaceId, kind, role, config }      // `config` enters WHOLE
+```
+
+Two defects, pulling in opposite directions:
+- it **over-includes**. `config` enters whole, and the external-system config is an **open-shaped JSON
+  object** — `external-systems.cjs` L93 `config: jsonObject(input.config, 'config')`, no key allowlist — so
+  every non-identity field a connector happens to store there becomes part of the system's identity. Where a
+  config carries a default object or a filter, an ordinary **config edit moves the system content key**: a
+  config change presenting itself as a system repoint. This is exactly what B-2's headline rejects.
+- it obtains **decrypted credentials** through the adapter read only to discard them at the boundary — an
+  unnecessarily wide permission surface for an identity derivation.
+
+⟲B2 **Frozen material the redo's identity read must produce.** The tables below are a **SPEC for the redo**,
+not a description of the code above — earlier wording called them a completion of "the ratified formula",
+which they are not: the ratified formula does **not** exclude object/filter selection, it includes them by
+hashing `config` whole. My own earlier list ("endpoint + auth principal + scope") erred in the other
+direction — it dropped `kind`/`role`, which the first attempt does hash and which genuinely are identity.
+
+| INCLUDED | why |
+|---|---|
+| scheme / domain tag | a future derivation change can neither collide with this one nor impersonate it |
+| scope — `tenantId`, `workspaceId`, `systemId` | a config may not bind a system outside its own scope |
+| **system / connector kind**, and the read `role` (`source` \| `bidirectional`) | ⟲B2 the same endpoint reached through a *different connector kind* is a **different system**; omitting kind lets two connectors share one identity |
+| endpoint / connection identity, and the **auth principal** (its identity, never its secret) | repointing at another host must invalidate qualifications taken against the old one |
+
+| EXCLUDED | why |
+|---|---|
+| credential material **and secret version** | ⟲B2 a rotation does not change WHICH system this is; a version-sensitive key would churn on every rotation |
+| **object / filter selection** | ⟲B2 that is `configContentKey` / binding territory — it would make an ordinary config edit look like a system repoint, and double-count the same fact in two tuple fields. **Not satisfied today** — see the whole-`config` hash above |
+| `name`, `status`, `capabilities`, `lastTestedAt`, `lastError` | mutable human label and operational state; `status` is an **admission gate**, not identity |
+
+**B-3 · `canonicalObjectVersion` pins a FIRST-PARTY canonical object contract version.**
+⟲B2 **The earlier wording in this section was wrong about the field's job** and is withdrawn: it argued from
+*"the code admits it cannot detect source-side schema drift"* (`gip-approved-binding-resolver.cjs`
+L232-L252 @ `774bdb5e6`), which invites exactly the wrong
+fix — an implementer would try to satisfy it by pushing **external database schema identity into the
+canonical contract**. Correct division of responsibility:
+- `canonicalObjectVersion` names the version of **our own first-party canonical object contract** — the
+  declared canonical fields and semantics of the object, registered and versioned as a first-party artefact.
+  Detecting source-side drift is **not** its job and never was.
+- **External source schema drift** is carried by **source-catalog evidence**, by the **BindingQualification**,
+  and by the **field-mapping qualification proof** — the artefacts actually observed against the live source.
+
+So the real defect in the first attempt is not "it cannot witness the source schema"; it is that it
+**invented the version locally**, deriving it from `systemContentKey + objectKey + fieldMap` — a pure
+function of inputs **already present elsewhere in the same tuple**, which therefore adds no contract identity
+whatsoever. It must be looked up from the first-party canonical object contract registry.
 
 **B-4 · A probe SQL denylist is NOT a security boundary.**
 `createProbeStrategyRegistry()` accepts an arbitrary `buildTotalOrderProbeSql`, so SQL-text inspection is the
 wrong control surface. Verified — the owner supplied one bypass, and re-running it I found two more of the
-same class, all passing the hardened guard while the un-concatenated control is correctly blocked:
+same class. ⟲B2 Attribution, so this block is reproducible rather than asserted: guard =
+`__internals.assertReadOnlySql` in `lib/gip-binding-qualification-spike.cjs` **@ `d0313feec`** (B1b lane),
+whose token list is `RATIFIED_WRITE_TOKEN_PATTERN` + five dialect patterns.
 ```
-PASSES   SELECT * FROM dblink('conn', 'DE' || 'LETE FROM x') AS t(x int)
-PASSES   SELECT * FROM dblink('c', 'DR'||'OP TABLE x') AS t(x int)
-PASSES   SELECT * FROM dblink('c', chr(68)||chr(69)||'LETE FROM x') AS t(x int)
-BLOCKED  SELECT * FROM dblink('c', 'DELETE FROM x') AS t(x int)          <- control
+control-pass  SELECT 1                                                  <- positive control: the guard is
+                                                                           not a blanket refuser
+PASSES        SELECT * FROM dblink('conn', 'DE' || 'LETE FROM x') AS t(x int)
+PASSES        SELECT * FROM dblink('c', 'DR'||'OP TABLE x') AS t(x int)
+PASSES        SELECT * FROM dblink('c', chr(68)||chr(69)||'LETE FROM x') AS t(x int)
+BLOCKED       SELECT * FROM dblink('c', 'DELETE FROM x') AS t(x int)    <- negative control
+              (PROBE_SQL_NOT_READ_ONLY)
 ```
+Both controls are load-bearing: without the `SELECT 1` pass the block would also be produced by a guard that
+refuses everything, and without the un-concatenated `DELETE` refusal it would also be produced by a guard
+that is not wired at all. (First re-run of this probe reported all four as BLOCKED — a `TypeError` from
+calling a non-exported symbol, caught by the same `catch` that was meant to observe refusals. The controls
+are what exposed it.)
 String concatenation defeats the token list; `chr()` defeats it with no literal keyword at all. The
 7-constructs-to-0 result reported for B1b therefore measures resistance to **accidents, not construction**.
 Required boundary: **only first-party builders registered by module-private identity**, or a **restricted
@@ -115,14 +188,16 @@ the code checks **none** — they must be established **empirically on the same 
 certification gate does not open until a **real MySQL / SQL Server capability spike** passes.
 
 **B-6 · Two namespace/closure gaps.** ⟲P2 `orderingKeySpec` `fieldId`s are canonical TARGET fields (the
-resolver says so at L102-L120) but were passed straight to the SQL builder — a **certified source-column
-translation** is required. ⟲P2 The production approved-config allowlist does not accept `orderingKeySpec` or
+resolver says so at `gip-approved-binding-resolver.cjs` L102-L120 @ `774bdb5e6`) but were passed straight to
+the SQL builder — a **certified source-column translation** is required. ⟲P2 The production approved-config
+allowlist (`read-source-config.cjs` `ALLOWED_CONFIG_KEYS`) does not accept `orderingKeySpec` or
 `actionProfileVersion`, so the hermetic suite never exercised the real **save → approve → re-read → qualify**
 loop; B1a is not provable until a real **config v2** carries these fields.
 
 **Owner-set redo order for B1a:** real config v2 → system identity read with no credential decryption →
 first-party canonical contract version → server-bound source executor with field translation → remove or
-privatise the legacy `probe()` entry point.
+privatise the legacy `probe()` entry point. ⟲B2 It is transcribed into **§4 step 1**, which is the single
+authoritative order; if this line and §4 ever disagree, **§4 wins**.
 
 **Consequence for this line's status:** the earlier conclusion that *"the remaining critical path is owner
 decisions, not engineering"* is **withdrawn** — there is real qualification-authenticity implementation work
@@ -175,24 +250,72 @@ Any other `PAGED_READ` combination ⇒ **closed rejection at certification time*
 
 ### 3.4 ⟲P2-b — contracts may be latent; counters cannot
 
-`unorderedOffsetAttemptCount` only means something as **runtime instrumentation**, and a capability handshake is only real at a **wired endpoint** — both are incompatible with "latent" by definition. Therefore B1a freezes the **contract shapes only**, with hermetic harness tests:
+`unorderedOffsetAttemptCount` only means something as **runtime instrumentation**, and a capability handshake is only real at a **wired endpoint** — both are incompatible with "latent" by definition. Therefore B1a freezes the **counter and handshake contract shapes only** — ⟲B2 a statement about *these two artefacts*, not a claim that B1a as a whole is contract-only (see Gate) — with hermetic harness tests:
 - counter: name + values-free semantics (counts only, no identifiers);
 - handshake: request/response schema — `clientBuild` / `connectorProtocolVersion` / `profileId` / `configVersion` → `READY` / `UPGRADE_REQUIRED` / `CONFIG_MIGRATION_REQUIRED`, version-incompatible ⇒ refuse to run.
 
-**Wiring either is B1-observability — a separate runtime-authorization gate.** Nothing in B1a touches a live path.
+**Wiring either is B1-observability — a separate runtime-authorization gate.** ⟲B2 Precision, since the
+authority-substrate gate does permit an additive change to the approved-config validator: B1a **wires
+neither** the counter nor the handshake into any live path, and adds **no request-reachable surface**. That
+is a narrower and true claim than the earlier *"nothing in B1a touches a live path"*, which the config-v2
+boundary contradicts.
 
 ### 3.5 ⟲P3-a — sealed snapshot's true scope
 
 Sealed export is the **preferred** exit for the bridge / big-data / non-paginatable class (#4437's blocker class). It is **not** the sole exit for SQL sources: a direct SQL database may certify `PAGED_READ` once the B1c connection-bound snapshot reader exists. rev‑1's "multi-page consistency ⇒ sealed-export territory" is corrected to per-source-class — and ⟲C5 the routing decision is made **per capability spike** (does THIS source hold durable snapshots / stable cursors?), never uniformly per database brand.
 
-## 4. Slice order (owner-ratified)
+## 4. Slice order — ⟲B2 PENDING RE-RATIFICATION; this section is the SINGLE authoritative order
 
-1. **B1a** — config normalization (`orderingKeySpec` closed schema in the approved config version, §3.1⟲R6) + server-side approved-binding resolver (full six-field tuple, deep-immutable, §3.1⟲R2/⟲R3) + qualification input binding (resolution-object-only, probe AND verify) + `PAGED_READ_LEGAL_COMBINATIONS` contract (§3.3⟲R5) + closed errors + hermetic harness. Latent.
-2. **B1b** — MySQL / MSSQL total-order probe strategies: each with its own certified SQL builder + snapshot-semantics claim, registered per `actionProfileVersion`; unbound ⇒ `PROBE_STRATEGY_UNBOUND` (existing, fail-closed by name). PostgreSQL reuses the shipped reference strategy.
-3. **B1c** — cross-page snapshot/session executor: design + per-dialect certification of a page-sequence consistency context.
-4. **B1-observability** — counter + field-client handshake **wiring**. Separate runtime gate.
-5. **Customer migration** — in-repo inventory script per deployment; migrate any live configs to the versioned shape.
-6. **B2 = #4591 enforcement** (adapter ordering guard + typed closed 422 + MSSQL fallback deletion). **LAST.** (#4580 CLOSED as superseded — see §1.)
+**The previous order was ratified BEFORE §3.0 and is superseded.** It described B1a as *latent* and let B1b
+register *certified* strategies directly — both now false. It is **un-ratified until the owner re-approves
+this section**. Precedence rule, so the document cannot hold two orders at once: **where any earlier
+paragraph (§2, §3.x) still implies a different sequencing or a different scope, §4 wins.**
+
+1. **B1a (REDO)** — the authority substrate, in the owner-set order, each step landing behind the
+   authority-substrate gate and **none of them request-reachable**:
+   1. **real config v2** — `orderingKeySpec` (closed schema, §3.1⟲R6) + `actionProfileVersion` accepted by
+      the approved-config validator, additively; the existing test that asserts today's rejection **flips in
+      the same PR**, and configs omitting the fields are unaffected;
+   2. **system identity read** — purpose-built, lossless, **no credential decryption**, over the frozen
+      material of **B-2**;
+   3. **first-party canonical object contract registry** + version lookup (**B-3**) — no locally invented
+      version;
+   4. **server-bound source executor** — handle and field set derived from the resolution, first-party
+      statement builders admitted by module-private identity, restricted statement seam, plus **certified
+      source-column translation** for `orderingKeySpec` (**B-1**, **B-6**);
+   5. **remove or privatise the legacy `probe()` entry point** (**B-4**).
+   - Retained from the prior design, unchanged: approved-binding resolver over the full six-field tuple,
+     deep-immutable (§3.1⟲R2/⟲R3); qualification input binding through the resolution object for **probe AND
+     verify**; `PAGED_READ_LEGAL_COMBINATIONS` (§3.3⟲R5); closed errors; hermetic harness.
+   - **Acceptance predicate (not a slogan):** the two measured residuals of §3.0 B-1 must **invert** —
+     `ratifiedPathRemainsAnOpenConstruction` and `callerSuppliedQueryRemainsAnOpenConstruction`
+     (`gip-binding-qualification-spike.test.cjs` L752-L805 / L813-L847 @ `774bdb5e6`) assert
+     *verified: true* today; after the redo the same constructions must produce a **closed refusal**, with a
+     positive control proving a genuine server-executed probe still qualifies.
+2. **B1b capability spike — REAL MySQL and SQL Server, before any certification.** Empirical only: establish
+   on the **same connection** whether the claimed guarantees hold (MySQL: InnoDB, autocommit, isolation ≥
+   READ COMMITTED; SQL Server: whether a single-statement snapshot is obtainable at all under the engine
+   default). Mints **no certification** and registers **no strategy**. ⟲B2 This step did not exist in the
+   ratified order and is the reason B1b previously shipped a strategy whose own token names the **absence**
+   of a guarantee (**B-5**).
+3. **B1b certification — opens ONLY if step 2 passes**, per dialect and per capability, never per brand.
+   Each strategy carries a **verified** snapshot-semantics guarantee, registered per `actionProfileVersion`;
+   where the guarantee is unobtainable under the engine default it must **refuse certification** rather than
+   mint a candidate. Builders are admitted by **module-private identity**; the SQL denylist is
+   defence-in-depth and **may never be cited as the boundary** (**B-4**). Unbound ⇒ `PROBE_STRATEGY_UNBOUND`
+   (existing, fail-closed by name). PostgreSQL reuses the shipped reference strategy.
+4. **B1c** — cross-page snapshot/session executor: design + per-dialect certification of a page-sequence
+   consistency context.
+5. **B1-observability** — counter + field-client handshake **wiring**. Separate runtime gate; owner decision
+   recorded: **not opened early**.
+6. **Customer migration** — in-repo inventory script per deployment; migrate any live configs to the
+   versioned shape.
+7. **B2 = #4591 enforcement** (adapter ordering guard + typed closed 422 + MSSQL fallback deletion).
+   **LAST.** (#4580 CLOSED as superseded — see §1.)
+
+**Parallel and unblocked by all of the above:** the on-prem M0 track — build and verify the complete RC-A
+package, and prepare the bounded approved config (§2, authorization boundary strict: build + verify + revise
+the #4437 pointer; **not** deployment, **not** flag-ON).
 
 ## 5. Implementer landmines (session-verified; read before touching)
 
@@ -208,7 +331,27 @@ Sealed export is the **preferred** exit for the bridge / big-data / non-paginata
 - **#4580's branch carried the pre-split A-half** — RESOLVED: re-cut from current main as #4591; #4580 CLOSED as superseded. Do not revive the old branch.
 - **Bridge feeder test fixtures must echo `data.limit`** — adapter v2 fail-closes without the echo (a fixture that omits it is not "the real agent", which always echoes).
 - **Do not raise the 500 single-page bound; do not wire the latent GIP profile** — both owner-gated.
+- ⟲B2 **Config v2 is now IN scope, and it is a LIVE validation path.** `read-source-config.cjs`'s
+  `ALLOWED_CONFIG_KEYS` does not contain `orderingKeySpec` / `actionProfileVersion`, so a body carrying them
+  is rejected **at save time today**, and the B1a suite asserts that rejection *behaviourally*. Adding the
+  keys is **additive only** — closed rejection on shape, no behaviour change for configs that omit them —
+  and the assertion that pins today's rejection must be **flipped in the same PR**, never deleted.
+- ⟲B2 **`canonicalObjectVersion` is a first-party contract version.** Do not attempt to make it witness the
+  external source's schema; drift belongs to source-catalog evidence / BindingQualification / field-mapping
+  proof (§3.0 B-3). A derivation that is a pure function of the other tuple fields adds nothing.
+- ⟲B2 **`systemContentKey` must include the system/connector `kind`** (and read `role`) and must exclude
+  secret version and object/filter selection (§3.0 B-2). Same endpoint + different connector kind = a
+  **different** system.
 
 ## 6. Fences
 
-Nothing in this document authorizes: runtime enforcement (#4591/B2), arming or runtime wiring of any GIP profile, telemetry/handshake wiring, sealed-snapshot implementation, page-size ceiling changes, CDC / external write-back / D2 / W3 / G1 work (frozen), or rollout. Approval of this document unlocks **B1a (latent contract + harness) only**; every later slice re-enters its own gate.
+Nothing in this document authorizes: runtime enforcement (#4591/B2), arming or runtime wiring of any GIP
+profile, telemetry/handshake wiring, sealed-snapshot implementation, page-size ceiling changes, CDC /
+external write-back / D2 / W3 / G1 work (frozen), or rollout.
+
+⟲B2 Approval unlocks the **B1a authority-substrate gate** as defined verbatim in **Gate** at the head of this
+document — **not** "latent contract + harness only", which is withdrawn. That gate permits the five bounded
+internal changes of §4 step 1 and forbids every request-reachable or runtime-consuming surface over them;
+the one-line test is *"reachable from a request or a scheduled run ⇒ outside the gate."* Every later slice
+re-enters its own gate. **§4 is itself pending re-ratification** — until the owner re-approves it, no slice
+after B1a step 1 is scheduled by this document.
