@@ -260,3 +260,141 @@ shared-approval 未列名路径 bypass / operator-script 未列前缀 bypass / �
     （应在 baseline 重生成时冒出假 debt「SET」表）、`isMigrationPath` 恒 false（migrations 内
     schema DDL 会被误判为 tracked，`unclaimed` 增多）——本阶段验证了两条最核心判据（P01 claim 删除
     + canonical boundary 恒真），未逐一穷举以上三条，如实声明留给 Stage F。
+
+---
+
+## Stage E1+E2 — DB gates + identity gates（DONE, commit `c802811e5`）
+
+### 完成项与落点
+
+两个新真库测试文件（各自两点接线：plugin-tests.yml attendance 步紧跟 Stage C 行 +
+vitest.config.ts exclude 注释块）：
+
+**E1 `packages/core-backend/tests/integration/attendance-w4c0-db-gates-e1.db.test.ts`（20 用例）**
+— §12.1 DB 门全条：
+
+- 迁移生命周期（测试自建 scratch database `ms2_w4c0_e1_<run>`，最小 legacy 副本表只含迁移
+  DDL/触发器引用的列；行为矩阵全部跑在主库真实 schema 上，副本仅驱动 DDL 生命周期——测试注释
+  已明示）：fresh+upgrade（up() 覆盖既存 legacy job/record 行 → 逐字节保留 + W4 shape 全 null）、
+  up() 连跑幂等、空表 down() 全量回收（表/函数/列/约束全消失 + legacy 行逐字节保留）+ up() 复活、
+  populated down() 对 **V1-job 与 rollout-state 两类**（补 smoke 的 registry 类）pre-DDL 拒绝且
+  零 DDL；
+- 不可变面全表扫（snapshots/calculations/segments/closures/rollout events 各 UPDATE/DELETE/
+  TRUNCATE；registries DELETE/TRUNCATE/CASCADE、paused 拒绝、非法转移、completed
+  response/fingerprint 不可变；rollout state 合法边正控 + 非法边/prior/version/identity/初始态/
+  DELETE/TRUNCATE 全拒）。TRUNCATE 腿用 rollback-only helper（守卫被 neuter 时也不会真清共享库，
+  腿仍翻红）；
+- deferred 约束 transaction-bound 腿：同事务 claim+seal 提交成功（**若约束被改 immediate 则
+  INSERT 即炸——这是判别腿**）、未 seal claim/batch 提交拒、注入回滚零行、source-free cancel
+  裸 SQL 腿；batch/segment 双侧计数守卫（不足/超额/**事后补插额外 child 在其自身 commit 翻红**、
+  review 行零 child）；calculation insert 后注入失败 → 无 child/pointer/projection；
+- pointer 门（set_active 正控、drift、visibility mismatch、shadow/review 目标、跨 org FK、
+  authoritative 清指针拒、set_retired reason 匹配正/负 + §7.6 视图不可见性）；lineage
+  strictly-older/missing/cross-record 拒 + `uq_arc_operation` retry 幂等 backstop；snapshot
+  A→B→A 三版本 + 重复 version + 篡改拒；outbox 状态机全腿（非法 kind/重复键/非法转移/
+  attempts 单调/delivered 终态）；closure 唯一性；
+- P07 全条：冻结字段矩阵（**含 legacy null→1 promotion 拒**）、execution_reason_code 闭集配对
+  五腿、legacy 行不可带 reason、partial shape 两腿补充、proof-vector CHECK 矩阵（乱序/重复/
+  缺/多/篡改 root/错 namespace/多 key/缺 key 八腿 + 零行落库断言）、**两真连接 reservation
+  backstop 双 commit 序**（holder 回滚 → waiter 锁下重读后 created；holder 提交 → 同 job
+  existing；全程 23505 不外泄 + 裸 SQL bypass 正控证 unique index 真实存在并以 23505 命名
+  `uq_attendance_import_jobs_w4_reservation`）、changed-actor 409、**legacy-only batch root 的
+  reservation 必须 created**（null-version job 不满足 W4 replay）；
+- 触发器姿态扫（全部 trg_a% ON attendance_% 的 tgenabled='O'，声明为弱判别，见未竟 46）+
+  两点接线自证腿。
+
+**E2 `packages/core-backend/tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts`
+（10 用例）** — 修订 §2 八门逐条真库腿（unit 腿在 Stage B 文件）：
+
+- 门1：rehydrator（=DB reload 面）default×{legacy OK 正控 / shadow 拒 / authoritative 拒 /
+  eligible 值直接 W4C0_WRITE_POSTURE_INVALID}；真持久 eligible 行（shadow→eligible 合法转移
+  fixture）经 resolver 归一 shadow；JSON 序列化毁 witness；**DB CHECK 腿**：裸 SQL default+shadow/
+  authoritative 在 operations/batches/jobs 三面各自被 `chk_aro/arob/aij_w4_default_org_posture`
+  拒 + default+legacy 正控落库；
+- 门2：六个有序跨 namespace 冒充（import↔integration↔scheduled 全对称）逐条
+  `chk_aro_derived_identity` 拒 + integration/scheduled 正确 namespace 正控落库（import 正控在
+  smoke）；
+- 门3：SQL tuple 逐字段突变（root/ordinal/fp/namespace/user/date）UUID 全不同、NUL 分隔符
+  load-bearing（无 NUL 拼接 ≠ 有 NUL）、正确 UUID 配错 tuple（ordinal 0 的 UUID 报 ordinal 1）拒；
+- 门4：json-clone/spread/prototype-lookalike/plain-object 四伪造 → builder 拒 + acquisition
+  helper **零 SQL**（计数 wrapper trx 断言 issued=0）+ 真 witness 同 client 正控过锁；
+- 门5：三 source family（import_item/scheduled/verified_delivery）真落库→worker 形状 reload
+  （`proof_work_date::text`）→ rehydrate → 真锁验证 builder-grade；漂移矩阵十腿（opId/ordinal/
+  fp/root/date/user/ledger-root/多 proof 字段/缺 proof 字段/JS Date）各自精确错误码；缺 key/多 key
+  → DURABLE_ROW_INVALID；P07 vector reload 逐条经 factory 复推 + 换 fp 篡改 → PROOF_DRIFT；
+- 门6：三 namespace SQL 金标字面（与 Stage B parity/unit 同字面）；
+- 门7：unknown kind（接受 chk_aro_source_kind|chk_aro_entrypoint_source_pair 二名——未知 kind
+  构造性同时违反两 CHECK，PG 报哪个先到；测试注释已说明）、非法 scalar 组合六腿（direct 多
+  root/scheduled 缺 user/import_item 缺 ordinal（带 business snapshot 隔离 shape CHECK）/
+  scheduled 带 ordinal（**正确 derived ID** 隔离 shape CHECK）/verified_delivery root≠id）+
+  零行落库；
+- 门8：rollout helper 词法再验（'Default'/前后空白/braces/URN 五腿零 SQL）、大写 org UUID 与小写
+  同 key、posture witness 必需（浅拷贝拒）、org-key-changed、字面 'default' 配 shadow witness →
+  ORG_KEY_CHANGED（posture 永不来自 org 字面）、candidate（pre-lock 推导）被 builder+helper 拒
+  零 SQL、大写 client UUID → 同 identity 同 key；+ 两点接线自证腿。
+
+**迁移文件两处声明性加固**（同文件 `zzzz20260725120000_...ts`，未合 main 可直改；down() 同步）：
+
+1. `chk_aro_default_org_posture` / `chk_arob_default_org_posture` / `chk_aij_w4_default_org_posture`
+   —— 修订 §1.2 「default with shadow|authoritative fails before operation or source DML」落到
+   DB 边界（防绕过 factory 的裸写手）；对现存运行时行字节惰性（legacy 行全 null 安全通过）。
+2. `attendance_w4_operation_items_commit_guard`（AFTER INSERT DEFERRABLE 于 operations）——
+   completed batch 计数守卫的 **item 侧镜像**：事后对已 completed batch 补插额外 item 只有
+   item 侧触发器能看见（batch 侧守卫只在 batch 行自身 INSERT/UPDATE 时触发）。正常 claim→seal
+   事务不可见（commit 时 batch completed 且计数相等）。
+
+### 实跑实数（Stage E1+E2）
+
+- `npx tsc --noEmit`（core-backend）干净。
+- E1：`DATABASE_URL=… ATTENDANCE_TEST_DATABASE_URL=… npx vitest run --config
+  vitest.integration.config.ts tests/integration/attendance-w4c0-db-gates-e1.db.test.ts`
+  → **20/20 passed**（ms2_w4c0）。
+- E2：同法 → **10/10 passed**。
+- 五个 w4c0 db 文件同跑 → **48/48 passed**（smoke 7 + parity 3 + registry 8 + E1 20 + E2 10）。
+- w4c0 unit 两文件 → **60/60 passed**（Stage B 37 + Stage C 23，零改写，仍绿）。
+- **CI 同构 attendance 步全量（58 文件，加入 E1/E2 后的 workflow 实际清单）在全新 CI 形库
+  `ms2_w4c0_e1fresh`（fresh CREATE DATABASE → 全链 db:migrate with CI MIGRATION_EXCLUDE →
+  单次整步）→ 742/742 passed, 58/58 files。**
+- plugin-tests.yml YAML parse OK。
+- 既有测试零改写（本阶段只新增 2 测试文件 + 迁移加固 + 两点接线行）。
+
+### 未竟 / 两读（Stage F 必读，禁静默跳过）
+
+43. **共享脏库上 attendance-plugin.test.ts 的 auto-shift 块不可复跑**（与本 diff 无关的既有
+    现象，三重证据链）：该套件在固定 org 'default' 上创建 `attendance_scheduler_scopes`
+    active 行与 'Auto Shift%' shifts（本地 ms2_w4c0 已积 91 个）且从不回收；同库第二次跑
+    「scheduler_scope_forbidden」前置即被残留 scope 破坏（appliedCount 1≠0）。全新库上整步
+    单跑 = 742/742 全绿；同一全新库先 standalone 后整步 = 又红（standalone 自己制造了残留）。
+    CI 每 run 新建库不受影响。**门审在 ms2_w4c0 复跑该文件前须先
+    `UPDATE attendance_scheduler_scopes SET is_active=false WHERE created_by='integration-test'
+    AND subject_ref='system:attendance-auto-shift'`，且期望 auto-shift 三用例可能仍因 shift
+    残留翻红——用 ms2_w4c0_e1fresh 或重建库复跑才是有效证据。**
+44. **两处迁移加固是本阶段裁量**（完成项节已述理由）：default-org CHECK 是修订 §1.2 字面往 DB
+    边界的下沉（rollout state 表本身未加 default 限制——default org 的 rollout 行仍可入库，
+    但其身份在 factory/rehydrator/三 CHECK 处全拒）；item 侧计数触发器把「later extra child」
+    从服务层不可达升为 DB 拒绝。PR 诚实偏离节需列出。
+45. **§12.1 rollback-closure eligibility 门未做**（「closure of a batch with any frozen target
+    preimage or W4 operation/calculation/pointer reference returns 409 … removing each
+    eligibility predicate fails its own leg」）：W4C-0 代码里没有 closure 写入 service（Stage C
+    只交付表 + witness 不可变性；§8.1 write-boundary 为纯类型，未竟 21）。E1 只测了表级
+    不可变/唯一门。该 eligibility 逻辑属 W4C-3a 的 rollback 切片（§12.4 亦有同门）——呈裁：
+    若门审判定 W4C-0 必须交付，需在 registry 层补 closure service；本阶段判断其无调用方形态
+    与「no caller cutover」一致，不属本片。
+46. 「no source disables triggers after data exists」只有弱判别覆盖（tgenabled='O' 全表扫 +
+    Stage D collector 保证无未认领写点）；无法证明「任何未来代码不会 DISABLE TRIGGER」。
+47. E2 门1 的 factory 路径 default×shadow 拒绝腿在 unit（stub trx 喂 default 行）——真库无法
+    构造：往 rollout state 插 org='default' shadow 行会永久污染共享库（append-only 不可删）。
+    真库面由 rehydrator 腿 + 三 DB CHECK 腿覆盖。呈裁点（若门审要求真库 factory 腿，需接受
+    default rollout 行残留或建独立库）。
+48. E1 门「upgrade fixtures preserve every byte」的 jsonb 键序比较依赖 jsonb 规范化序（两侧
+    同为 jsonb 产物，删键不改剩余键相对序）——非文本级 diff；字段值全等已覆盖。
+49. E3（真并发 first-claim 矩阵/null-version worker terminal-without-effect/enqueue vs 同步
+    双 commit 序/rollout lock 序/multi-key deadline 双腿）与 Stage F mutation 轮不在本阶段；
+    Stage C 未竟 30/31 仍开放。E1 的 P07 backstop 双连接腿已给 E3 可直接复用的双 client 驱动
+    形状（见 E1 文件 P07 reservation 用例）。
+50. 本地库现状：`ms2_w4c0`（主验证库，已带加固后 schema + 各阶段残留 fixture）、
+    `ms2_w4c0_cycle`（Stage A down/up 循环）、`ms2_w4c0_e1fresh`（本阶段全新 CI 形库，
+    742/742 证据现场，保留给门审）；E1 scratch 库 `ms2_w4c0_e1_<run>` 每次运行自建自删。
+51. E2 会向 ms2_w4c0 的 rollout state 表新增每 run 两个随机 org 的 shadow/eligible 行
+    （append-only 设计内残留）；E2 门1 正控会在 'default' org registry 留一条
+    legacy_projection_only completed 行（同属设计内）。CI 新库无此累积。
