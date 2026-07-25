@@ -34,6 +34,18 @@ function search_fixed_string() {
   grep -rIF -- "$needle" "$@" >/dev/null 2>&1
 }
 
+function search_extended_regex() {
+  local pattern="$1"
+  shift
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -- "$pattern" "$@" >/dev/null 2>&1
+    return
+  fi
+
+  grep -rIE -- "$pattern" "$@" >/dev/null 2>&1
+}
+
 function verify_windows_entrypoints() {
   local root="$1"
   local start_script="${root}/deploy.bat"
@@ -648,6 +660,10 @@ function write_optional_report() {
       '    {' \
       '      "name": "no-github-links",' \
       "      \"status\": \"${link_status}\"" \
+      '    },' \
+      '    {' \
+      '      "name": "loopback",' \
+      '      "status": "PASS"' \
       '    }' \
       '  ],' \
       "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
@@ -677,6 +693,7 @@ function write_optional_report() {
       echo "- Required content: \`PASS\` (${#required[@]} paths)"
       echo "- Deployability contract: \`PASS\` (deployable-onprem-app-package, directReplaceSafe=false, nodeModulesBundled=false)"
       echo "- No GitHub links in delivery docs: \`${link_status}\`"
+      echo "- Loopback frontend config: \`PASS\` (no loopback VITE_API_URL/BASE embedded in apps/web/dist)"
     } > "$report_md_tmp"
     mv "$report_md_tmp" "$VERIFY_REPORT_MD"
   fi
@@ -709,6 +726,27 @@ function verify_no_github_links() {
       die "Found disallowed GitHub links in on-prem package delivery files"
     fi
     rm -f /tmp/multitable_onprem_link_hits.txt || true
+  fi
+}
+
+# Ported from scripts/ops/attendance-onprem-package-verify.sh's loopback rule (same
+# pattern, same target: apps/web/dist). A frontend bundle that embeds a loopback
+# VITE_API_URL/BASE (baked in at web-build time, pointing at 127.0.0.1/localhost) would
+# be wired to the CI runner's own loopback instead of the operator's configured API host
+# once deployed on-prem — the multitable on-prem path never had this check; attendance's
+# did. Unlike attendance's package (which always contains apps/web/dist because it is
+# the only frontend-bearing on-prem package), this function guards its own precondition
+# explicitly: `search_extended_regex` returns non-zero (no match) for a target directory
+# that does not exist at all, which would otherwise let a package missing apps/web/dist
+# silently report PASS instead of failing loud.
+function verify_no_loopback_frontend_config() {
+  local root="$1"
+  local web_dist="${root}/apps/web/dist"
+
+  [[ -d "$web_dist" ]] || die "apps/web/dist missing; cannot verify frontend bundle is loopback-free"
+
+  if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "$web_dist"; then
+    die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
   fi
 }
 
@@ -1006,6 +1044,7 @@ verify_migration_bridge_contract "$pkg_root"
 verify_stock_preparation_mvp_contract "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"
+verify_no_loopback_frontend_config "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
