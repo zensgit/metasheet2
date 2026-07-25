@@ -617,6 +617,19 @@ function buildHostileForeignError(sentinel, impersonatedReason) {
 // redundant with `message` under every mutation tried so far (default
 // Error#toString is `${name}: ${message}`) — kept as a second, cheap
 // confirmation, not claimed as independently discriminating.
+//
+// The `stack` check (review round 4) has the SAME independence property as
+// `cause`, verified the same way: a mutation that "helpfully" forwards ONLY
+// the foreign error's `.stack` (`wrapped.stack = error.stack`, at each site,
+// leaving the fixed message/details/no-cause otherwise intact). An isolated
+// script (not this test file, so no assertion here can short-circuit past
+// the ones that matter) constructs the same hostile-error scenario at both
+// catch sites, PRINTS all five surfaces, then checks each independently —
+// message/details/cause/String(error) all print and check clean under this
+// mutation, and ONLY the stack check fails, proving `stack` is independently
+// discriminating, not merely present alongside `cause`. Script + full
+// before/after output for both sites is recorded in the PR body (round 4
+// section) alongside the `cause` probe above.
 function assertNoSurfaceLeaksSentinel(error, sentinel, label) {
   assert.ok(!String(error.message).includes(sentinel), `${label}: message must not carry the sentinel`)
   assert.ok(!JSON.stringify(error.details).includes(sentinel), `${label}: details (including nested fields) must not carry the sentinel`)

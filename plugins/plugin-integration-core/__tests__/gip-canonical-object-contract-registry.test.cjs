@@ -24,6 +24,7 @@ const {
   CANONICAL_OBJECT_CONTRACT_REGISTRY,
   GipCanonicalObjectContractError,
   CANONICAL_OBJECT_CONTRACT_ERROR_REASONS,
+  __internals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-canonical-object-contract-registry.cjs'))
 
 function rejects(fn, reason, message) {
@@ -209,7 +210,27 @@ function activationGateThreeStates() {
 }
 
 // ---------------------------------------------------------------------------
-// (8) Vocabulary discipline.
+// (8) P2 FIX (review round 4 — blocking): __internals's own key set was never
+// pinned in this file — the same gap gip-connector-kind-registry.test.cjs had
+// (see that file's matching fix note). A junk key added under __internals, or
+// — decisively — RE-EXPORTING this module's private module-scope trust
+// WeakSet through __internals (the exact regression the module's own header
+// comment says is closed by staying unexported) both passed silently before
+// this test existed. (Deliberately not naming the private WeakSet's
+// identifier in this comment or a fixture — doing so would itself add a hit
+// to a `grep -rn` over __tests__ that this PR's body cites as returning
+// zero — see the sibling file's matching note.)
+// ---------------------------------------------------------------------------
+function internalsExactKeySet() {
+  assert.deepEqual(
+    Object.keys(__internals).sort(),
+    ['fail', 'hasControlCharacter', 'normalizeContractEntry', 'requiredIdentityToken'],
+    '__internals must expose exactly this key set — in particular, the module-private trust WeakSet must never be re-exported under any name',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (9) Vocabulary discipline.
 // ---------------------------------------------------------------------------
 function frozenVocabularyIsExhaustive() {
   assert.deepEqual(
@@ -233,6 +254,7 @@ function main() {
   noAutoVivification()
   malformedEntriesRefused()
   activationGateThreeStates()
+  internalsExactKeySet()
   frozenVocabularyIsExhaustive()
   console.log('gip-canonical-object-contract-registry.test.cjs OK')
 }

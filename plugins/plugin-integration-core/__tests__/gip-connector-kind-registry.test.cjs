@@ -19,6 +19,7 @@ const {
   CERTIFIED_CONNECTOR_KIND_REGISTRY,
   GipConnectorKindRegistryError,
   CONNECTOR_KIND_REGISTRY_ERROR_REASONS,
+  __internals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-connector-kind-registry.cjs'))
 
 const {
@@ -244,7 +245,30 @@ async function legacyPathKeepsWorkingWhileGipBindingRefuses() {
 }
 
 // ---------------------------------------------------------------------------
-// (7) Vocabulary discipline: fail() may never throw an undeclared reason —
+// (7) P2 FIX (review round 4 — blocking): __internals's own key set was never
+// pinned in this file. gip-system-identity-read.test.cjs's exactPublicExportKeySet
+// already pins __internals's key set for its own module (round 3's P2 fix) —
+// this module and gip-canonical-object-contract-registry.cjs were the two
+// files that fix was never mirrored into, so a junk key added under this
+// module's __internals, or — decisively — RE-EXPORTING this module's private
+// module-scope trust WeakSet through __internals (the exact regression the
+// module's own header comment says is closed by staying unexported) both
+// passed silently before this test existed. Pinning the exact key set
+// catches both: any addition under __internals, under any name, reds this
+// deepEqual. (Deliberately not naming the private WeakSet's identifier in
+// this comment or a fixture — doing so would itself add a hit to a
+// `grep -rn` over __tests__ that this PR's body cites as returning zero.)
+// ---------------------------------------------------------------------------
+function internalsExactKeySet() {
+  assert.deepEqual(
+    Object.keys(__internals).sort(),
+    ['fail', 'normalizeDeclaration', 'requiredIdentityToken'],
+    '__internals must expose exactly this key set — in particular, the module-private trust WeakSet must never be re-exported under any name',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (8) Vocabulary discipline: fail() may never throw an undeclared reason —
 // the same three-layer pin used elsewhere on this line (exact array + a
 // runtime consumer that enforces membership).
 // ---------------------------------------------------------------------------
@@ -263,6 +287,7 @@ async function main() {
   missingExtractorsRefusedAtRegistration()
   malformedDeclarationsRefused()
   await legacyPathKeepsWorkingWhileGipBindingRefuses()
+  internalsExactKeySet()
   frozenVocabularyIsExhaustive()
   console.log('gip-connector-kind-registry.test.cjs OK')
 }

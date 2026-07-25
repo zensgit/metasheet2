@@ -39,13 +39,17 @@
 // Rotation semantics (the observable contract, ledger §4.0 row α): key
 // rotated, principal and permission scope unchanged => systemContentKey
 // UNCHANGED (true simply because the secret is never a hash input). This was
-// verified load-bearing, not just claimed: a manual mutation pass temporarily
-// folded the connection secret into computeSystemContentKey's material (the
-// exact #4596-class defect) and reran the test suite, which reds the
-// "rotation-unchanged" case in rotationSemanticsBothDirections — the patch
-// was reverted (never committed); the command + output are recorded in PR
-// #4610, not in this file or the test file. Principal OR tenant scope
-// changed => systemContentKey changes, forcing lineage rebuild +
+// verified load-bearing, not just claimed (review round 4): this module's
+// on-disk source was mutated in place — folding the connection secret into
+// computeSystemContentKey's material (the exact #4596-class defect) — then
+// the REAL test file's rotationSemanticsBothDirections was run as-is (not a
+// stand-in), reds the "rotation-unchanged" assertion specifically. Reverted
+// from a pre-mutation backup and diff-verified byte-identical immediately
+// after; the mutated state was never committed. The command + output
+// transcript is pasted in PR #4610's body (round 4 section), not in this
+// file or the test file.
+// Principal OR tenant scope changed => systemContentKey changes, forcing
+// lineage rebuild +
 // re-qualification upstream (a later slice's job; this module only
 // guarantees the key itself moves).
 
@@ -140,11 +144,15 @@ function isPlainObject(value) {
 // so an exact `value === '[redacted]'` check — the prior implementation —
 // would silently miss every one of those embedded cases. Detects every
 // marker shape sanitizeIntegrationPayload can leave behind, real-code
-// detection, not a comment; a manual mutation pass reverting this to the
-// exact-equality, hand-listed form and confirming the sanitizer-derived
-// battery in losslessnessGuardIsSourcedFromTheRealSanitizer goes red (patch
-// reverted, never committed) is recorded in PR #4610 — see that test for the
-// concrete failing cases.
+// detection, not a comment (review round 4): this module's on-disk source
+// was mutated in place — the string check below reverted to the
+// exact-equality, hand-listed form (the prior implementation) — then the
+// REAL test file's losslessnessGuardIsSourcedFromTheRealSanitizer was run
+// as-is (not a stand-in), reds specifically on the URL-userinfo
+// embedded-substring case. Reverted from a pre-mutation backup and
+// diff-verified byte-identical immediately after; the mutated state was
+// never committed. The command + output transcript is pasted in PR #4610's
+// body (round 4 section), not in this file or the test file.
 //   - '[redacted]', '[redacted-jwt]', '[redacted-secret-id]' — key- and
 //     value-based redaction, anywhere in the string (substring, not whole-
 //     value equality)
@@ -397,6 +405,29 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
     }
     fail('SYSTEM_IDENTITY_INPUT_INVALID', 'registry must be a trusted connector-kind registry (from createConnectorKindRegistry)', { field: 'registry' })
   }
+
+  // P3 NOTE (review round 4): "closed on both counts" two comments above names
+  // the catch-site relabel just above and the registries' un-exported trust
+  // WeakSets (P2, round 3) — it does not name a THIRD dependency this function
+  // also relies on. Every direct `declaration.*` property read below —
+  // `declaration.extractEndpointIdentity` (passed into runExtractor, not
+  // called inline, so a malicious GETTER on that property would run OUTSIDE
+  // runExtractor's try), the two extractor reads at the credential-store
+  // boundary, and `declaration.kind` at the two computeSystemContentKey/return
+  // sites — is not wrapped by any catch. This is safe TODAY only because (a)
+  // `normalizeDeclaration` (gip-connector-kind-registry.cjs) always returns a
+  // freshly `Object.freeze`d, plain-data-property copy, so reading any of its
+  // fields can never execute foreign code, and (b) the trust WeakSet stays
+  // module-private, so `assertTrustedRegistry` can only ever be satisfied by a
+  // registry whose `resolve()` returns one of THOSE frozen copies — a forged
+  // registry cannot substitute a raw object with a malicious getter in
+  // `declaration`'s place. Both (a) and (b) are exactly the mechanism the
+  // forged-registry attack this round's blocking fix (see the two registries'
+  // own `__internals` key-set pins) closes off. Not restructured here: this
+  // dependency is not reachable at head (LATENT slice, no runtime consumer,
+  // no forged registry can be constructed from outside this codebase today) —
+  // recorded so a future change to either registry's freeze/export discipline
+  // is reviewed with this function's reliance on it in view.
 
   // P3-a FIX (review round 2): a non-plain-object system.config used to
   // silently substitute {} (the `Number(x) || 0` class of bug) and the
