@@ -14,9 +14,13 @@
 // This mirrors the fail-closed / enum-strict / coarse-reason idiom of normalizeReadSmokeContract.
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
-// PROFILE_ID_PATTERN is IMPORTED, never duplicated, so actionProfileVersion here and the GIP certification
-// module's profileId vocabulary cannot drift apart (ledger §4 step 1.1).
-const { __internals: { PROFILE_ID_PATTERN } } = require('./gip-profile-certification-contracts.cjs')
+// isValidProfileId is IMPORTED from the certification module's PUBLIC surface — never __internals,
+// never a second copy of the regex — so actionProfileVersion here and the GIP certification module's
+// profileId vocabulary cannot drift apart (ledger §4 step 1.1; review B1a-1 P2: a live save path must
+// not depend on another module's private/test surface). isValidProfileId carries the same <=128-char
+// bound this field needs and is untrimmed, matching this module's own untrimmed validate-then-trim
+// shape (see normalizeReadSourceConfig below) — see its definition for the exact semantics.
+const { isValidProfileId } = require('./gip-profile-certification-contracts.cjs')
 
 // The four proven read modes (standard names from #3416); nothing else is accepted.
 const READ_SOURCE_MODES = Object.freeze(['single_record', 'list_page', 'detail_with_lines', 'resolver_lookup'])
@@ -278,16 +282,11 @@ function validateReadSourceConfig(config) {
   }
 
   // actionProfileVersion — B1a §4 step 1.1. OPTIONAL; omitted ⇒ no behaviour change. Validated against the
-  // SAME PROFILE_ID_PATTERN vocabulary as GIP certification (imported above, never duplicated) so the two
-  // cannot drift; this field must not move systemContentKey (GIP-D0 §6) — it is a config-plane value only.
-  if (config.actionProfileVersion !== undefined) {
-    if (
-      typeof config.actionProfileVersion !== 'string' ||
-      config.actionProfileVersion.length > 128 ||
-      !PROFILE_ID_PATTERN.test(config.actionProfileVersion)
-    ) {
-      push('READ_SOURCE_ACTION_PROFILE_VERSION_INVALID', 'actionProfileVersion', 'not_allowlisted')
-    }
+  // SAME profileId vocabulary as GIP certification via its PUBLIC isValidProfileId (imported above, never
+  // duplicated, never reaching into __internals) so the two cannot drift; this field must not move
+  // systemContentKey (GIP-D0 §6) — it is a config-plane value only.
+  if (config.actionProfileVersion !== undefined && !isValidProfileId(config.actionProfileVersion)) {
+    push('READ_SOURCE_ACTION_PROFILE_VERSION_INVALID', 'actionProfileVersion', 'not_allowlisted')
   }
 
   // R0 resolver_lookup contract (rule-gated multiplicity; #1709 / resolver design-lock). The resolver keys

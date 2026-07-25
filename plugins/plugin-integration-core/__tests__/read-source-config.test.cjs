@@ -177,14 +177,17 @@ assert.equal(validateReadSourceConfig(null).errors[0].code, 'READ_SOURCE_CONFIG_
 // 1.1, §3.1⟲R6. Both fields are OPTIONAL — omitting them must not change behaviour (every mode's
 // baseValid() above omits both and passes unaffected; 8c below asserts it explicitly).
 //
-// THE FLIP: no test on main names either key before this PR (verified by tree-wide grep at `402f04982`) —
-// the "existing test that asserts today's rejection" the ledger points at does not exist as a named case;
-// the generic `nefariousKey` case at line 127 is the only prior guard and stays in place (8b below shows the
-// widening is exactly two keys, not "anything goes"). This block IS the flip: before the lib change below,
-// every assertion in 8a-8f that expects `valid === true` instead red with `READ_SOURCE_UNEXPECTED_FIELD` /
-// `READ_SOURCE_ORDERING_KEY_SPEC_INVALID` / `READ_SOURCE_ACTION_PROFILE_VERSION_INVALID` absent from the
-// error-code vocabulary (those codes don't exist yet either) — captured verbatim in the PR description as
-// the red run.
+// Owner ruling on this block's description: no NAMED test on `main` asserted rejection of either key
+// before this PR (verified by tree-wide grep at `402f04982` — `orderingKeySpec` appears nowhere in
+// code or tests; `actionProfileVersion` appears only in three unrelated GIP certification/qualification
+// test files, none of which exercise this validator or module). So there was no existing named case to
+// "flip". This block is a NEWLY ADDED, NAMED pre-change RED / post-change GREEN characterisation test:
+// before the lib change below, every assertion in 8a-8f that expects `valid === true` instead red with
+// `READ_SOURCE_UNEXPECTED_FIELD` / `READ_SOURCE_ORDERING_KEY_SPEC_INVALID` /
+// `READ_SOURCE_ACTION_PROFILE_VERSION_INVALID` absent from the error-code vocabulary (those codes don't
+// exist yet either) — captured verbatim in the PR description as the pre-change red run. The PRE-EXISTING
+// generic `nefariousKey` case at line 127 is a separate, already-passing negative control and is
+// RETAINED unchanged (8b below shows the widening this PR adds is exactly two keys, not "anything goes").
 
 // 8a. Well-shaped orderingKeySpec + actionProfileVersion together must be ACCEPTED and survive normalization.
 {

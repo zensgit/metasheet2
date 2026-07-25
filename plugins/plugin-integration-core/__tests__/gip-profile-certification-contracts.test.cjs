@@ -19,12 +19,14 @@ const {
   GIP_CONSISTENCY_REQUIREMENT_STATUSES,
   GIP_PROFILE_ERROR_REASONS,
   GipProfileContractError,
+  isValidProfileId,
   normalizeCertifiedReadActionProfile,
   normalizeCertifiedApplyProfile,
   deriveRecoveryStrategy,
   validateConsistencyEvidence,
   validateCompletenessEvidence,
   assertRoleTypeAllowed,
+  __internals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-profile-certification-contracts.cjs'))
 
 function rejectsWith(fn, reason) {
@@ -333,6 +335,46 @@ function coarseDetails() {
     'offending values must never appear in thrown errors')
 }
 
+// ── 10. Public isValidProfileId is the SAME source of truth as the internal PROFILE_ID_PATTERN ──
+// Review B1a-1 P2: isValidProfileId (public) must never become a second copy of the profileId
+// regex. This table proves it agrees with __internals.PROFILE_ID_PATTERN (plus the shared 128-char
+// bound) across valid/invalid ids — including the two edge cases that would silently pass a hand-
+// rolled-regex or dropped-bound divergence: an over-length id that is otherwise pattern-valid, and
+// an id rejected purely by shape (not length).
+function publicHelperAgreesWithInternalPattern() {
+  const overLength = `fixture.${'a'.repeat(120)}.v1` // pattern-valid, 131 chars > 128 bound
+  const table = [
+    'fixture.paged_read.v1',
+    'fixture.paged_read.v12',
+    'fixture.multi.part.name.v3',
+    'FIXTURE.paged_read.v1', // uppercase — invalid
+    'fixture_paged_read_v1', // no dot — invalid
+    'fixture.paged_read', // no version token — invalid
+    'fixture.paged_read.v1.', // trailing dot — invalid
+    '.fixture.paged_read.v1', // leading dot — invalid
+    'fixture.paged_read.v0', // v0 — invalid (v[1-9][0-9]* excludes leading zero)
+    '', // empty — invalid
+    overLength,
+  ]
+  for (const id of table) {
+    const expected = typeof id === 'string' && id.length <= 128 && __internals.PROFILE_ID_PATTERN.test(id)
+    assert.equal(
+      isValidProfileId(id),
+      expected,
+      `isValidProfileId must agree with __internals.PROFILE_ID_PATTERN (+128 bound) for ${JSON.stringify(id)}`,
+    )
+  }
+  // Guard the table itself: each dimension must actually be exercised, or a broken helper could
+  // still pass this function vacuously (e.g. an all-accept or all-reject helper against a table
+  // that never varies).
+  assert.ok(table.some((id) => isValidProfileId(id)), 'table must include at least one accepted id')
+  assert.ok(table.some((id) => !__internals.PROFILE_ID_PATTERN.test(id)), 'table must include a pattern-invalid id')
+  assert.ok(
+    overLength.length > 128 && __internals.PROFILE_ID_PATTERN.test(overLength) && !isValidProfileId(overLength),
+    'table must include an id that is pattern-valid but rejected ONLY by the 128-char bound',
+  )
+}
+
 function main() {
   frozenVocabularies()
   everyFailCallSiteUsesADeclaredReason()
@@ -344,6 +386,7 @@ function main() {
   evidenceShapes()
   roleTypeGate()
   coarseDetails()
+  publicHelperAgreesWithInternalPattern()
   console.log('gip-profile-certification-contracts.test.cjs OK')
 }
 
