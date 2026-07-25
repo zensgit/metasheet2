@@ -133,6 +133,9 @@ Local exact-worktree verification:
 - focused unit suites: 43/43;
 - focused real-PostgreSQL 15 suites: 55/55;
 - required attendance directory/user-org real-DB regressions: 14/14;
+- required admission real-DB regressions: 9/9, including a NULL-corp rollback with zero
+  `users`/link/identity residue;
+- combined affected real-PostgreSQL 15 files: 78/78;
 - required real-DB wiring and values-free contracts: 82/82;
 - TypeScript: `tsc --noEmit` clean;
 - `git diff --check` clean.
