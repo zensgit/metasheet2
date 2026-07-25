@@ -16,12 +16,21 @@ const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsFor
  * The invariant asserted here: if the requested grant cannot be honored, the
  * function must throw BEFORE any `users` row is written.
  */
-function fakeClient() {
+function fakeClient(account = CORP_ACCOUNT_WITHOUT_OPENID) {
   const queries: string[] = []
   return {
     queries,
     query: async (sql: string) => {
       queries.push(sql)
+      if (/FROM directory_accounts account/.test(sql)) {
+        return {
+          rows: [{
+            ...account,
+            integration_provider: account.provider,
+            integration_corp_id: 'corpA',
+          }] as Array<Record<string, unknown>>,
+        }
+      }
       // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
       // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing
       // user_orgs. This fixture's account.integration_id must resolve to SOME org for the
@@ -96,15 +105,31 @@ describe('DT-HARDEN-02 auto-admission orphan guard', () => {
   })
 
   it('still grants a corp account that has an openId', async () => {
-    const client = fakeClient()
+    const account = { ...CORP_ACCOUNT_WITHOUT_OPENID, open_id: 'open-1' }
+    const client = fakeClient(account)
 
     await createDirectoryAdmittedUserInTransaction(client, {
       ...baseOptions,
-      account: { ...CORP_ACCOUNT_WITHOUT_OPENID, open_id: 'open-1' },
+      account,
       enableDingTalkGrant: true,
     })
 
     expect(insertedUsers(client.queries)).toHaveLength(1)
     expect(client.queries.some((sql) => /user_external_auth_grants/i.test(sql))).toBe(true)
+  })
+
+  it('rolls back the admitted user when the authoritative account is not corp-pinned', async () => {
+    const account = { ...CORP_ACCOUNT_WITHOUT_OPENID, corp_id: null }
+    const client = fakeClient(account)
+
+    await expect(
+      createDirectoryAdmittedUserInTransaction(client, {
+        ...baseOptions,
+        account,
+        enableDingTalkGrant: false,
+      }),
+    ).rejects.toThrow(/tenant scope is inconsistent/i)
+
+    expect(client.queries.some((sql) => /ROLLBACK TO SAVEPOINT directory_admit_user/i.test(sql))).toBe(true)
   })
 })
