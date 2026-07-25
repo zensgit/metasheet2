@@ -6,9 +6,9 @@
 
 > **B1a AUTHORITY-SUBSTRATE gate — PERMITTED, bounded:**
 > - **additive** `orderingKeySpec` / `actionProfileVersion` acceptance in the approved-config validator — closed rejection on shape, and **no behaviour change for any config that omits them**;
-> - a purpose-built **system identity read** implementing the ratified GIP-D0 §6 formula (B-2). ⟲B2-self **The flat "does not decrypt credentials" wording is WITHDRAWN as unsatisfiable:** for every shipped connector kind the auth principal and scope live in the **encrypted credential envelope**, not in `config`, so that rule and the ratified formula cannot both hold. Which rule replaces it is **owner decision (α) at §4 step 1.2**, and this bullet does not authorize either answer until it is taken;
+> - a purpose-built **system identity read** implementing the ratified GIP-D0 §6 formula (B-2). ⟲OD The flat "does not decrypt credentials" wording is withdrawn as unsatisfiable — the auth principal and scope live in the **encrypted credential envelope**, not in `config` — and is **replaced by the ruled rule (owner decision (α), 2026-07-25)**: decrypt **only inside the `credential-store` boundary**, only **briefly**, only to extract **connector-certified** principal/scope material; **domain-separated HMAC / canonicalise immediately, then discard the plaintext**; **secrets and principal plaintext never enter evidence, logs or errors**. Full text and the rotation semantics at §4 step 1.2;
 > - a **first-party canonical object contract registry** and its version lookup (B-3);
-> - a **server-bound source executor** — resolution-derived handle, first-party statement builders, restricted statement seam — plus certified source-column translation (B-1, B-4, B-6). ⟲B2-self This bullet **includes the bounded core-backend statement seam** of §3.2 (not request-reachable, accepts only strategy-minted statements); it is named here because every other bullet is plugin-layer, and a second-package production change permitted only by implication is the very thing owner finding P1-1 was raised about. ⟲B2-self **Credential and connection scope, stated rather than left silent:** this executor unavoidably needs connection material. Under this gate it may derive and hold a handle **from fixture / harness connection material only** — ⟲B2-self deriving a handle out of a **stored system's encrypted credential envelope** is deferred to decision (α) exactly as bullet 2 is, since the "harness / fixture source" clause bounds *where it executes*, not *what it decrypts to build the handle* — and may execute **only against a harness / fixture source**; **any connection to a live customer system is outside this gate** and is its own ops-gated step (⟲B2-self *not* §4 step 2, which an earlier revision named by default — that step runs against first-party engine instances and never claimed customer connection);
+> - a **server-bound source executor** — resolution-derived handle, first-party statement builders, restricted statement seam — plus certified source-column translation (B-1, B-4, B-6). ⟲B2-self This bullet **includes the bounded core-backend statement seam** of §3.2 (not request-reachable, accepts only strategy-minted statements); it is named here because every other bullet is plugin-layer, and a second-package production change permitted only by implication is the very thing owner finding P1-1 was raised about. ⟲B2-self **Credential and connection scope, stated rather than left silent:** this executor unavoidably needs connection material. ⟲OD Under this gate it may derive and hold a handle **under decision (α)'s bounded rule** — same boundary, same immediate-HMAC-and-discard, same never-into-evidence constraint as the identity read, since the "harness / fixture source" clause bounds *where it executes*, not *what it decrypts to build the handle* — and may execute **only against a harness / fixture source, or a first-party engine instance**; **any connection to a live customer system is outside this gate** and is its own ops-gated step (⟲B2-self *not* §4 step 2, which an earlier revision named by default — that step runs against first-party engine instances and never claimed customer connection);
 > - **removal or privatisation** of the legacy `probe()` entry point — ⟲B2-self this closes **B-1**'s first residual (the caller-supplied tuple / `keyColumns` path), **not B-4**; B-4 is closed by **bullet 4's module-private builder identity and by §4 step 3** — ⟲B2-self naming step 3 alone (an earlier draft) reads as putting builder identity outside this gate, which bullet 4 contradicts;
 > - the previously-designed B1a internals that are **not** request-reachable and are unchanged by ⟲B: full-tuple resolver (**minus** `canonicalObjectVersion`, which now comes from bullet 3's registry), deep-immutable resolution, `PAGED_READ_LEGAL_COMBINATIONS`, closed errors, hermetic harness (§4 step 1, "Retained") — **plus** §3.4's counter and handshake **contract shapes**, hermetic tests only, **no wiring**. ⟲B2-self This bullet exists because withdrawing the "latent contract + harness" clause withdrew the only sentence that authorized these artefacts, while §4 and §3.4 still schedule them — a regression this revision introduced, not an inherited one.
 >
@@ -22,7 +22,7 @@
 
 This is the line's single design-and-verification document (owner directive: consolidate closeout facts into one MD; stop letting working memos drift). It absorbs and supersedes the session working memos (`/tmp/gip-decision-memo-20260724.md`, `/tmp/b1-paged-read-certification-design-20260724.md` rev‑1) and the retired ad-hoc inventory SQL (NO-GO; §5).
 
-Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲P1-b (probe ≠ paged execution), ⟲P2-a (frozen combinations / no silent downgrade), ⟲P2-b (latent vs telemetry), ⟲P3-a (sealed snapshot not the sole exit). Codex-review absorptions (2026-07-24) are marked ⟲C1 (M0 exact-SHA package policy — BLOCKING), ⟲C2 (inventory-zero coverage map), ⟲C3 (#4580 re-cut + typed 422 as merge condition), ⟲C4 (orderBy = fail-fast, not stable pagination), ⟲C5 (per-capability routing, not per-brand). Owner ratify-review absorptions (2026-07-24, round 2) are marked ⟲R1 (exact-SHA exits: two-proof-only + freeze the new SHA), ⟲R2 (deep-immutable resolution, not provenance-only), ⟲R3 (full-tuple resolver), ⟲R4 (M1 = evidence only; the §4 order wins), ⟲R5 (combinations scoped to PAGED_READ), ⟲R6 (orderingKeySpec closed schema). Package/decision round (owner, 2026-07-24 late): ⟲R7 (complete-package two-SHA structure), plus three recorded decisions — package policy (b) with a build-only authorization boundary; B1-observability NOT opened early; B2 re-cut now as Draft **#4591**, superseding #4580. Qualification-authenticity round (owner, 2026-07-24, round 3): ⟲B (the six §3.0 boundaries). Boundary-review round (owner, 2026-07-24, round 4): ⟲B2 — authority-substrate gate replaces the self-contradictory "latent only" wording; `canonicalObjectVersion` = first-party contract version, drift belongs elsewhere; `systemContentKey` freeze material completed; §4 becomes the single authoritative order and is un-ratified until re-approved. ⟲Codex marks the doc-charter absorption. **⟲B2-self** marks defects in **this revision's own earlier drafts**, corrected in place and tagged rather than silently fixed, so a reader can see which sentences have already been wrong once. Provenance is mixed and is **not** claimed as self-review throughout: the GIP-D0 retraction, the Gate boundary-test restatement and the three SQL Server outcomes came from the **owner's precheck** on the intermediate head; the rest came from adversarial review passes and from self-review.
+Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲P1-b (probe ≠ paged execution), ⟲P2-a (frozen combinations / no silent downgrade), ⟲P2-b (latent vs telemetry), ⟲P3-a (sealed snapshot not the sole exit). Codex-review absorptions (2026-07-24) are marked ⟲C1 (M0 exact-SHA package policy — BLOCKING), ⟲C2 (inventory-zero coverage map), ⟲C3 (#4580 re-cut + typed 422 as merge condition), ⟲C4 (orderBy = fail-fast, not stable pagination), ⟲C5 (per-capability routing, not per-brand). Owner ratify-review absorptions (2026-07-24, round 2) are marked ⟲R1 (exact-SHA exits: two-proof-only + freeze the new SHA), ⟲R2 (deep-immutable resolution, not provenance-only), ⟲R3 (full-tuple resolver), ⟲R4 (M1 = evidence only; the §4 order wins), ⟲R5 (combinations scoped to PAGED_READ), ⟲R6 (orderingKeySpec closed schema). Package/decision round (owner, 2026-07-24 late): ⟲R7 (complete-package two-SHA structure), plus three recorded decisions — package policy (b) with a build-only authorization boundary; B1-observability NOT opened early; B2 re-cut now as Draft **#4591**, superseding #4580. Qualification-authenticity round (owner, 2026-07-24, round 3): ⟲B (the six §3.0 boundaries). Boundary-review round (owner, 2026-07-24, round 4): ⟲B2 — authority-substrate gate replaces the self-contradictory "latent only" wording; `canonicalObjectVersion` = first-party contract version, drift belongs elsewhere; `systemContentKey` freeze material completed; §4 becomes the single authoritative order and is un-ratified until re-approved. ⟲Codex marks the doc-charter absorption. **⟲OD** marks the **owner decisions ruled 2026-07-25** — the four in the §4.0 roster, plus the approved narrow widening of GIP-D0 §9.2. **⟲B2-self** marks defects in **this revision's own earlier drafts**, corrected in place and tagged rather than silently fixed, so a reader can see which sentences have already been wrong once. Provenance is mixed and is **not** claimed as self-review throughout: the GIP-D0 retraction, the Gate boundary-test restatement and the three SQL Server outcomes came from the **owner's precheck** on the intermediate head; the rest came from adversarial review passes and from self-review.
 
 **Upstream contracts this ledger defers to** (⟲B2-self added — their absence is how an implementation artefact
 came to be quoted here as "the ratified formula"): **`GIP-D0` general integration platform design lock**
@@ -37,9 +37,14 @@ and this ledger is the thing to fix.
 harness, read-only qualification spike*. The authority-substrate gate below permits two items in **none** of
 the three: the **live approved-config validator** change and the **bounded core-backend statement seam**. The
 gate is owner-dated **2026-07-24**, one day after the lock, so this is read as a deliberate **widening of
-GIP-D0 §9.2 for those two items only**. On everything else — and on **all contract material**, including
-`systemContentKey` — the lock wins unchanged. **This widening is part of what re-ratifying §4 approves; it is
-called out here rather than left to be inferred from a date.**
+GIP-D0 §9.2. **⟲OD APPROVED by the owner, 2026-07-25, at exactly this scope — unlocked:**
+1. **config v2 additive validation / persistence**;
+2. the **internal authority substrate**;
+3. the **restricted statement seam**, reachable from **fixture / first-party engine** only.
+
+**Still forbidden under the widening, unchanged:** the **request surface**, the **scheduler**, any **runtime
+consumer**, **arming**, **deployment**, **rollout**. On everything else — and on **all contract material**,
+including `systemContentKey` — the lock wins unchanged.
 
 **Doc charter** ⟲Codex: this document is an **execution index + evidence ledger**. Authoritative contracts live in code and their own frozen design docs — referenced here by symbol + SHA, never copied — so this file cannot drift into another competing fact source. Model task cards derived from it must carry **symbol + exact head + acceptance predicate**, not bare line numbers.
 
@@ -185,8 +190,12 @@ Three deviations, and the middle one is the one that matters:
   reads `username` and `acctId`/`accountSet` from `credentials` (`adapters/k3-wise-webapi-adapter.cjs`
   L1555-L1557), the HTTP adapter reads `username`/`password` from `credentials`
   (`adapters/http-adapter.cjs` L131), and that envelope is what `credential-store.cjs` encrypts. So "derive
-  the ratified identity" and "never decrypt" **cannot both hold today**; the narrow rule that replaces the
-  flat one is an owner call, not an implementer's.
+  the ratified identity" and "never decrypt" **cannot both hold today**. ⟲OD **Ruled (α):** decrypt only
+  inside the `credential-store` boundary, briefly, for connector-certified principal/scope material;
+  domain-separated HMAC / canonicalise immediately; discard the plaintext; never let a secret or a principal
+  in the clear reach evidence, logs or errors. Rotation with an unchanged principal and scope leaves
+  `systemContentKey` **unchanged**; a changed principal or permission scope **forces lineage rebuild and
+  re-qualification**.
 
 **The redo implements the ratified formula.** So the material below is not a new spec; it is GIP-D0 §6:
 
@@ -215,8 +224,10 @@ repointed through an undeclared key would keep its identity, which is the realiz
 Two mandatory conditions, and they are the reason #4596 over-corrected into hashing everything:
 1. **A per-connector-kind certified identity declaration** — for each `kind`, which stored keys carry endpoint
    and principal. First-party and versioned, like the canonical object contract of B-3.
-2. **Fail closed on an undeclared kind.** A system whose kind has no declaration is **refused**, never
-   best-guessed, never hashed over a partial selection.
+2. **Fail closed on an undeclared kind** — ⟲OD ruled (β): the connector-kind registry is **first-party and
+   CLOSED**, existing aliases are **mapped explicitly**, an unknown kind fails closed for GIP binding with
+   **`SYSTEM_IDENTITY_KIND_UNCERTIFIED`**, the registry is **never auto-extended from customer free strings**,
+   and **legacy paths keep working** — the refusal scopes to GIP binding, not to what already functions.
 3. ⟲B2-self **`authTenantScopeKey` needs the same treatment and currently has none.** The formula has four
    hashed terms; `kind` is on the record and the declaration above covers endpoint and principal — but
    `authTenantScopeKey` has **no stated source, no extraction rule and no fail-closed rule**, and the
@@ -307,14 +318,16 @@ restricted to four HTTP read modes (L19), and `ALLOWED_CONFIG_KEYS` (L52-L58) ca
 all** — and the resolver binds exactly this plane (`getForRuntime`). So the approved-config plane admits no
 SQL source today, which also means B1b's certified SQL builders are **unreachable from it**.
 
-**Owner decision required — a scope question, not an implementation detail:**
-- **(a)** name and build the artefact that supplies per-system **source column names**, inside step 1.4; or
+**⟲OD RULED (owner, 2026-07-25) — v1 = (c).** The three branches were:
+- **(a)** name and build the artefact that supplies per-system **source column names**, inside step 1.4;
 - **(b′)** extend the approved-config plane to admit a **SQL-shaped source class** — itself a gated change to
-  a live validator, larger than step 1.1; or
-- **(c)** accept that B1a's executor probes **HTTP-shaped sources only**, and record that the SQL probe
-  builders stay unreachable from the approved plane until (a) or (b′) lands.
+  a live validator, larger than step 1.1;
+- **(c)** ✅ **CHOSEN** — B1a admits **connector-owned, NAMED, CERTIFIED HTTP probe actions only**; the **SQL
+  builders stay unreachable**, which is the accepted v1 outcome rather than a gap to route around.
 
-Until one is chosen, step 1.4 is **not** startable, and §4 says so rather than implying otherwise.
+Explicitly refused for v1, so neither can be reached for on schedule pressure: **widening `approved-config`
+to a SQL-shaped class**, and **inventing a source-column artefact**. The SQL path is deferred to a later
+**(b′) + B1c** step behind **its own gate**.
 
 **Owner-set redo order for B1a** (as given; ⟲B2-self the second item's "no credential decryption" is now
 known **unsatisfiable as stated** — see §4 step 1.2 decision (α) — and is carried here verbatim only because
@@ -401,6 +414,24 @@ Sealed export is the **preferred** exit for the bridge / big-data / non-paginata
 
 ## 4. Slice order — ⟲B2 PENDING RE-RATIFICATION; this section is the SINGLE authoritative order
 
+### 4.0 ⟲OD Decision roster — ALL FOUR, ruled 2026-07-25
+
+⟲B2-self This roster exists because an earlier revision listed **three** blocking decisions in its summaries
+while the body carried a **fourth** (the canonical contract registry) as an inline "open" note — so the
+roster, not the text, was the defect. Every decision that gates a step is listed here, and any future one is
+added here first.
+
+| # | decision | ruling | lands in |
+|---|---|---|---|
+| **(α)** | identity read vs credential decryption | **(i)** — bounded decryption **inside the `credential-store` boundary**, brief, for **connector-certified** principal/scope only; **domain-separated HMAC / canonicalise immediately, discard plaintext**; secrets and principal plaintext **never** in evidence, logs or errors. Rotation with unchanged principal+scope ⇒ `systemContentKey` unchanged; changed principal **or** permission scope ⇒ **rebuild lineage and re-qualify** | §4 step 1.2, Gate bullets 2 and 4 |
+| **(β)** | connector-`kind` vocabulary | **first-party CLOSED registry**; existing aliases **explicitly mapped**; unknown kind ⇒ fail closed for GIP binding with **`SYSTEM_IDENTITY_KIND_UNCERTIFIED`**; **never** auto-extended from customer free strings; **legacy paths keep working** | §4 step 1.2, §3.0 B-2 |
+| **(γ)** | canonical object contract registry | **first-party only**; immutable registration by **`contractId` + `version`**, versions **append-only**; **no auto-synthesis from customer config**; unregistered ⇒ values-free **`CANONICAL_OBJECT_CONTRACT_UNREGISTERED`**; **inventory + backfill existing references BEFORE activation** | §4 step 1.3, §3.0 B-3 |
+| **(δ)** | B-6 source-column translation scope | **v1 = (c)** — connector-owned, **named, certified HTTP probe actions only**; **SQL builders stay unreachable**; **no** SQL-shaped widening of `approved-config` and **no** invented source-column artefact; SQL path deferred to **(b′) + B1c** behind its own gate | §4 step 1.4, §3.0 B-6 |
+
+**Consequence: steps 1.2, 1.3 and 1.4 are no longer NOT STARTABLE.** What still gates item 1 is
+re-ratification of this section, nothing else.
+
+
 **The previous order was ratified BEFORE §3.0 and is superseded.** It described B1a as *latent* and let B1b
 register *certified* strategies directly — both now false. It is **un-ratified until the owner re-approves
 this section**. Precedence rule, stated once and covering the whole document so two orders cannot coexist:
@@ -443,38 +474,58 @@ preconditions rather than re-hosted.
       by test in the same PR; do not leave the two vocabularies unremarked in one config body.
    2. **system identity read** — purpose-built, lossless, implementing the **ratified GIP-D0 §6 formula**
       (§3.0 B-2) plus the per-connector-kind certified identity declaration and its fail-closed refusal for an
-      undeclared kind. ⟲B2-self **NOT STARTABLE until the owner resolves the two blockers below** — the same
-      force as B-6's (a)/(b); neither is an implementation detail:
-      - **(α) "no credential decryption" and the ratified formula are not jointly satisfiable for any shipped
-        connector kind.** `authPrincipalKey` / `authTenantScopeKey` do **not** live in `config`; they live in
-        the **AES-256-GCM credential envelope** — K3 WISE WebAPI takes `username` and `acctId`/`accountSet`
-        from `credentials` only (`adapters/k3-wise-webapi-adapter.cjs` L1555-L1557), the HTTP adapter takes
-        `username`/`password` from `credentials` (`adapters/http-adapter.cjs` L131), and `credential-store.cjs`
-        names exactly this content. So either **(i)** the identity read is authorized to **decrypt only to
-        extract the declared principal/scope keys**, never retaining or logging the secret — in which case the
-        flat "no credential decryption" bullet is deleted from both this step and the Gate and replaced by
-        that narrower rule — or **(ii)** the principal material is first migrated out of the credential
-        envelope into non-secret identity fields, which is its own gated change.
-      - **(β) the per-kind declaration has step 1.3's unbindability problem, and it is worse.** `kind` is a
+      undeclared kind. **⟲OD Both blockers are now RULED (owner, 2026-07-25); this step is STARTABLE.**
+      - **(α) RULED — option (i): bounded decryption inside the credential-store boundary.** The problem it
+        answers: `authPrincipalKey` / `authTenantScopeKey` do **not** live in `config` for any shipped
+        connector kind — they are in the **AES-256-GCM credential envelope** (K3 WISE WebAPI takes `username`
+        and `acctId`/`accountSet` from `credentials`, `adapters/k3-wise-webapi-adapter.cjs` L1555-L1557; the
+        HTTP adapter takes `username`/`password` from `credentials`, `adapters/http-adapter.cjs` L131). The
+        ruled design:
+        - decrypt **only within the `credential-store` boundary**, and only **briefly**, to extract the
+          **connector-certified** principal / scope material;
+        - **immediately** apply a **domain-separated HMAC / canonicalisation**, then **discard the plaintext**;
+        - **secrets and principal plaintext must never enter evidence, logs, or errors** — this is a
+          fail-closed rule, not a code-review preference, and belongs in the same negative-control class as the
+          values-free evidence guarantees elsewhere in this design;
+        - **rotation semantics, which are the observable contract:** key rotated, principal and permission
+          scope unchanged ⇒ `systemContentKey` **unchanged**. Principal **or** permission scope changed ⇒
+          lineage **must be rebuilt and the binding re-qualified**. Both directions want a test.
+      - **(β) RULED — a first-party CLOSED connector-kind registry.** The problem it answers: `kind` is a
         free-form `requiredString` with **no vocabulary anywhere** (`external-systems.cjs` L91 — contrast
-        `VALID_ROLES` / `VALID_STATUSES`, which are enumerated and exported) and is **immutable after
-        creation** (L253-L254). Every stored system therefore carries an arbitrary operator-supplied kind string,
-        and "refuse an undeclared kind" makes **all of them unbindable** until a declaration exists. Same
-        three answers required as for 1.3: who authors a declaration, what a miss returns (**named closed
-        reason**), and the inventory + migration for the kind strings already in
-        `integration_external_systems`;
+        `VALID_ROLES` / `VALID_STATUSES`, enumerated and exported) and is **immutable after creation**
+        (L253-L254), so every stored system carries an arbitrary operator-supplied string. The ruled design:
+        - the registry is **first-party and closed**; **existing aliases must be mapped EXPLICITLY**;
+        - an unknown kind **fails closed for GIP binding** with **`SYSTEM_IDENTITY_KIND_UNCERTIFIED`**;
+        - the registry may **never be auto-extended from customer free strings**;
+        - and it **must not disturb the existing usability of legacy paths** — the fail-closed applies to GIP
+          binding, not to what already works. That last clause is the one an implementer is most likely to
+          break, so it wants an explicit negative control: a system whose kind is uncertified still works on
+          its pre-GIP path while being refused a GIP binding.
    3. **first-party canonical object contract registry** + version lookup (**B-3**) — no locally invented
-      version. ⟲B2-self **Open, and it must be closed before this step starts:** who registers a canonical
-      object contract, what admits one, and what a **lookup miss** does. A lookup-only version needs a
-      registered contract for every bindable `objectKey`; today every approved config derives one, so after
-      the redo an unregistered object becomes **unbindable**. The miss must be a **named closed reason**, and
-      the migration for currently-bindable configs must be stated, not discovered;
+      version. **⟲OD RULED (owner, 2026-07-25) — this was the FOURTH open decision**, and ⟲B2-self an earlier
+      revision listed it as open here while omitting it from the decision roster, so it read as a note rather
+      than a blocker. The ruled design:
+      - **first-party only.** Contracts are registered **immutably** by **`contractId` + `version`**; versions
+        are **append-only** — a registered version is never edited;
+      - **no auto-synthesis from customer config** — the failure mode this closes is precisely B-3's
+        "invented locally";
+      - an unregistered object ⇒ **values-free `CANONICAL_OBJECT_CONTRACT_UNREGISTERED`**;
+      - **inventory and backfill existing references BEFORE activation** — today every approved config derives
+        a version, so without the backfill an unregistered object silently becomes unbindable at cutover;
    4. **server-bound source executor** — handle and field set derived from the resolution, first-party
       statement builders admitted by **module-private identity** (**B-4**), restricted statement seam
       (including the bounded core-backend seam of §3.2), plus **certified source-column translation** for
-      `orderingKeySpec` (**B-1**, **B-6**). ⟲B2-self **NOT STARTABLE until the owner picks (a) or (b) in
-      §3.0 B-6** — the translation's input artefact, a per-system source column mapping, **does not exist**,
-      and for an HTTP-shaped read-source config neither side of `fieldMap` is a SQL column at all;
+      `orderingKeySpec` (**B-1**, **B-6**). **⟲OD RULED (owner, 2026-07-25) — B-6 v1 = option (c);** ⟲B2-self this
+      line previously said "picks (a) or (b)", a **stale label** against the authoritative three branches
+      (a)/(b′)/(c). The ruling, and its consequences stated plainly:
+      - B1a admits **connector-owned, NAMED, CERTIFIED HTTP probe actions only**;
+      - **SQL builders stay unreachable** — that is the accepted v1 outcome, not a gap to work around;
+      - **do NOT** widen `approved-config` to a SQL-shaped source class to make schedule, and **do NOT**
+        invent a source-column artefact. Both are explicitly refused for v1;
+      - the SQL path is deferred to a later **(b′) + B1c** step behind **its own gate**.
+      So the non-existent per-system source-column mapping is no longer a blocker: v1 does not need it, because
+      v1 does not reach a SQL source. The translation requirement of B-6 applies within the certified HTTP
+      probe-action surface;
    5. **remove or privatise the legacy `probe()` entry point** — ⟲B2-self this closes **B-1**'s first
       residual (the caller-supplied tuple / `keyColumns` path). It is **not** B-4's closure; B-4 is closed by
       1.4's builder identity and by step 3. An earlier revision tagged this (B-4) in two places;
@@ -512,8 +563,8 @@ preconditions rather than re-hosted.
      - **positive control:** a probe executed **through the server-bound executor against the harness
        source** still qualifies.
      - ⟲B2-self **Read this before re-ratifying:** the last two controls run **through step 1.4**, which is
-       itself **NOT STARTABLE** until B-6's (a)/(b′)/(c) is chosen — so item 1 is acceptable only after that
-       decision, and the first two controls **alone are not sufficient** (residual 2 inverts the moment
+       scoped by B-6's ⟲OD ruling to the **certified HTTP probe-action surface** (v1 = (c)) — so these controls
+       are exercised there, not against a SQL source, and the first two controls **alone are not sufficient** (residual 2 inverts the moment
        `query` leaves the input allowlist, which measures that a step was performed, not that evidence came
        from the bound system).
 2. **B1b capability spike — REAL MySQL and SQL Server, before any certification.** Empirical only, on the
@@ -590,6 +641,15 @@ preflight, the flag-ON window and #4437 closure from everything this document sc
 - ⟲B2 **`canonicalObjectVersion` is a first-party contract version.** Do not attempt to make it witness the
   external source's schema; drift belongs to source-catalog evidence / BindingQualification / field-mapping
   proof (§3.0 B-3). A derivation that is a pure function of the other tuple fields adds nothing.
+- ⟲OD **Three ruled fail-closed reasons are now part of the contract, values-free:**
+  `SYSTEM_IDENTITY_KIND_UNCERTIFIED` (unknown connector kind, GIP binding only — legacy paths keep working)
+  and `CANONICAL_OBJECT_CONTRACT_UNREGISTERED` (unregistered object). Both are **closed reasons**, not
+  generic errors, and neither may carry an identifier or a value. The third rule has no token because it is a
+  prohibition: under (α), a **secret or a principal in the clear must never reach evidence, a log or an
+  error** — decrypt inside the `credential-store` boundary, HMAC/canonicalise immediately, discard.
+- ⟲OD **Rotation is an observable contract, so test both directions:** key rotated with principal and
+  permission scope unchanged ⇒ `systemContentKey` **unchanged**; principal **or** permission scope changed ⇒
+  lineage **rebuilt** and the binding **re-qualified**.
 - ⟲B2-self **`systemContentKey`'s contract is `GIP-D0` §6, NOT `deriveSystemContentKey` as shipped in
   #4596.** The ratified formula is `hash(kind + endpoint identity + authPrincipalKey + authTenantScopeKey)`;
   the shipped code hashes the whole `config` plus `role` and the raw ids, which is a **deviation**. Do not
