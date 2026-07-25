@@ -430,11 +430,33 @@ async function testConfigV2OrderingKeySpecAndActionProfileVersion() {
   assert.notEqual(variant.version, saved.version, 'an orderingKeySpec-only change must mint a NEW version, not collapse onto the existing one')
   assert.equal(db.tables[CONFIG_TABLE].length, 2, 'two distinct orderingKeySpec bodies must be two distinct rows')
 
+  // (iii) — added in the fix pass for PR #4601: a body differing ONLY in actionProfileVersion (orderingKeySpec
+  // held IDENTICAL to `withBoth`) must ALSO mint a different content_key/version. Without this, contentKeyFor
+  // could drop actionProfileVersion from its hash entirely and (i)+(ii) above would not notice — (i) only
+  // proves actionProfileVersion SURVIVES persistence, and (ii) only pins orderingKeySpec's participation.
+  // Adversarial mutation probe (reviewer, re-verified in the fix pass): editing contentKeyFor to
+  // `const { version, actionProfileVersion, ...content } = normalizedConfig` left BOTH suites green before
+  // this case existed.
+  const actionProfileVariant = await store.saveVersion({
+    ...SCOPE,
+    config: validConfig({
+      orderingKeySpec: [{ fieldId: DISTINCTIVE.fieldTarget, direction: 'ASC' }], // identical to withBoth
+      actionProfileVersion: 'erp.material_single_record.v2', // ONLY this differs from withBoth
+    }),
+    actor: 'consultant_1',
+  })
+  assert.equal(actionProfileVariant.reused, false, 'a body differing only in actionProfileVersion must NOT be treated as a reuse')
+  assert.notEqual(actionProfileVariant.contentKey, saved.contentKey, 'actionProfileVersion must participate in the content key')
+  assert.notEqual(actionProfileVariant.version, saved.version, 'an actionProfileVersion-only change must mint a NEW version, not collapse onto the existing one')
+  assert.equal(db.tables[CONFIG_TABLE].length, 3, 'three distinct bodies (base, orderingKeySpec variant, actionProfileVersion variant) must be three distinct rows')
+
   // Sanity control: the SAME body saved again is still correctly reused — this predicate is about
-  // orderingKeySpec PARTICIPATING in the content key, not about breaking idempotency generally.
+  // orderingKeySpec/actionProfileVersion PARTICIPATING in the content key, not about breaking idempotency
+  // generally.
   const repeat = await store.saveVersion({ ...SCOPE, config: withBoth, actor: 'consultant_2' })
   assert.equal(repeat.reused, true)
   assert.equal(repeat.id, saved.id)
+  assert.equal(db.tables[CONFIG_TABLE].length, 3, 'the repeat save of the original body is a no-op on the config table')
 }
 
 async function testContentKeyHelperIsStable() {

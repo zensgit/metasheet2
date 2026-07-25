@@ -223,14 +223,24 @@ assert.ok(codes(validateReadSourceConfig(orderingBase(
   [{ source: 'FQty', target: 'qty' }],
   [{ fieldId: 'qty', direction: 'ASC' }, { fieldId: 'qty', direction: 'DESC' }],
 ))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'), 'duplicate fieldIds must be rejected')
-// canonical fieldIds only — never raw SQL, expressions, or aliases.
+// canonical fieldIds only — never raw SQL, expressions, or aliases. Reason EXCLUSIVITY, not mere
+// inclusion of the coarse READ_SOURCE_ORDERING_KEY_SPEC_INVALID code: every orderingKeySpec violation
+// (invalid shape, unresolved fieldId, invalid direction, ...) shares that SAME code, so a code-only
+// assertion stays green even if the `isBoundedIdentifier` guard below is deleted — a different rule in
+// this same block (the fieldMapTargets resolution check) also fires on these inputs (none of them equals
+// the lone fieldMap target 'qty') and pushes the SAME code under reason `field_id_unresolved` instead.
+// Asserting the reason SET is exactly ['field_id_invalid'] is what actually pins this guard as load-bearing.
 for (const badFieldId of ['qty; DROP TABLE x', 'qty AS q', 'qty + 1', 'a.b.c()', 'qty OR 1=1', '', 'has space']) {
-  assert.ok(
-    codes(validateReadSourceConfig(orderingBase(
-      [{ source: 'FQty', target: 'qty' }],
-      [{ fieldId: badFieldId, direction: 'ASC' }],
-    ))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'),
-    `orderingKeySpec must reject raw-SQL/expression-shaped fieldId: ${JSON.stringify(badFieldId)}`,
+  const res = validateReadSourceConfig(orderingBase(
+    [{ source: 'FQty', target: 'qty' }],
+    [{ fieldId: badFieldId, direction: 'ASC' }],
+  ))
+  const orderingReasons = res.errors.filter((e) => e.field === 'orderingKeySpec').map((e) => e.reason)
+  assert.deepEqual(
+    orderingReasons,
+    ['field_id_invalid'],
+    `orderingKeySpec must reject raw-SQL/expression-shaped fieldId with EXACTLY reason field_id_invalid ` +
+    `(not some other rule catching it instead): ${JSON.stringify(badFieldId)} => ${JSON.stringify(res.errors)}`,
   )
 }
 // direction must be ASC/DESC, UPPERCASE-strict.
