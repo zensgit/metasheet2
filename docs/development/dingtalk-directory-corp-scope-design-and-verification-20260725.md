@@ -126,10 +126,11 @@ Phase A must retain these discriminating controls:
 | legacy unbind scope | blank/different-corp identity aborts without severing the link | same-corp identity is deleted |
 | match snapshot serialization | concurrent identity writer blocks until sync's link decision commits | later duplicate is reconciled as ambiguous |
 | corp token grammar | embedded ASCII/Unicode whitespace rejects | ordinary DingTalk corp token succeeds |
+| admission fixture/runtime parity | authoritative account with NULL corp rolls back the admission savepoint | same-corp authoritative account admits |
 
 Local exact-worktree verification:
 
-- focused unit suites: 36/36;
+- focused unit suites: 43/43;
 - focused real-PostgreSQL 15 suites: 55/55;
 - required real-DB wiring and values-free contracts: 82/82;
 - TypeScript: `tsc --noEmit` clean;
