@@ -300,6 +300,7 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
     const scratchName = `ms2_w4c0_e1_${RUN}`
     let adminPool: Pool
     let scratchPool: Pool
+    let scratchKyselyPool: Pool
     let scratchDb: Kysely<unknown>
     // Captured legacy bytes for the upgrade-preservation assertion.
     let legacyJobsBefore: string[] = []
@@ -314,8 +315,9 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
       const scratchUrl = new URL(dbUrl as string)
       scratchUrl.pathname = `/${scratchName}`
       scratchPool = new Pool({ connectionString: scratchUrl.toString() })
+      scratchKyselyPool = new Pool({ connectionString: scratchUrl.toString() })
       scratchDb = new Kysely<unknown>({
-        dialect: new PostgresDialect({ pool: new Pool({ connectionString: scratchUrl.toString() }) }),
+        dialect: new PostgresDialect({ pool: scratchKyselyPool }),
       })
       // Minimal legacy replicas: exactly the columns the migration DDL (ALTER/FK/unique)
       // and its triggers reference. The behavior matrix runs against the REAL schema on
@@ -375,6 +377,13 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
     }, 60000)
 
     afterAll(async () => {
+      // Teardown-scoped FATAL absorber (CI flake root-caused on PR #4607): pool.end()
+      // resolves when the client-side sockets close, but a backend whose server-side
+      // teardown races that close is then killed by WITH (FORCE) and emits an async
+      // 57P01 FATAL on the already-"ended" pool — vitest counts that unhandled 'error'
+      // event and exits 1 with all tests green. Handlers are attached ONLY here, at
+      // teardown start, so a FATAL during the tests themselves still fails loudly.
+      for (const p of [scratchPool, scratchKyselyPool, adminPool]) p?.on('error', () => undefined)
       await scratchDb?.destroy()
       await scratchPool?.end()
       await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
