@@ -1,6 +1,6 @@
 # Attendance Issue #4556 W4C-0 Identity-Proof Amendment
 
-> Status: **PROPOSED**
+> Status: **RATIFIED**
 >
 > Date: 2026-07-25
 >
@@ -12,10 +12,21 @@
 > Scope: W4C-0 identity parsing, derivation, persistence, and advisory-key
 > construction only.
 >
-> Runtime posture: **PAUSED** until this amendment is merged as PROPOSED and
-> the owner RATIFYs its exact merged SHA. This amendment authorizes no caller
-> cutover, flag enablement, deployment, production access, customer data, or
-> issue closure.
+> Ratified object: merged document
+> `3fa1ae3421744fcec9a18c4f87153281c59ec6b2` on 2026-07-25;
+> `OD-W4C-43=(a)`. Ratification record: PR #4595 comments
+> c-5077319936 (delegated RATIFY, transparent form) and c-5077323797
+> (SHA erratum — the binding object string is the one above). Delegation
+> basis and the owner's recall rights are recorded in PR #4588
+> c-5077308277; any later, more specific owner boundary statement takes
+> effect immediately and an owner reversal is executed errata-style.
+>
+> Runtime posture: W4C-0 is **UNPAUSED** by that ratification, strictly per
+> section 4 steps 3-5 (discard/rework the frozen experiment; one fresh branch
+> from then-current main; independent adversarial review zero P1/P2 before
+> landing). This amendment still authorizes no caller cutover, flag
+> enablement, deployment, production access, customer data, staging soak,
+> W5/W6 runtime, or issue closure.
 
 ## 0. Why this amendment exists
 
@@ -285,9 +296,9 @@ W4C-0 cannot pass until all of these are independently mutation-proven:
 
 ## 3. Decision
 
-| Decision | Option | Recommendation |
-| --- | --- | --- |
-| `OD-W4C-43` durable identity-source proof | (a) closed verified-identity factory plus persisted reconstruction tuple and exact source matrix; (b) retain scalar-only identity and validate UUID version only; (c) use process-local hidden provenance | **(a)** |
+| Decision | Option | Recommendation | RATIFIED decision |
+| --- | --- | --- | --- |
+| `OD-W4C-43` durable identity-source proof | (a) closed verified-identity factory plus persisted reconstruction tuple and exact source matrix; (b) retain scalar-only identity and validate UUID version only; (c) use process-local hidden provenance | **(a)** | **(a)** (2026-07-25, record above) |
 
 Option `(a)` preserves the already RATIFIED advisory-key bytes while making
 their admission proof durable and testable. Option `(b)` cannot distinguish
@@ -296,7 +307,9 @@ UUIDv5 namespaces. Option `(c)` fails across queue and database boundaries.
 ## 4. Execution sequence
 
 1. Merge this document as PROPOSED with no runtime code.
-2. Owner RATIFYs the exact merged SHA and chooses `OD-W4C-43`.
+2. Owner RATIFYs the exact merged SHA and chooses `OD-W4C-43`. **Completed
+   2026-07-25 for `3fa1ae3421744fcec9a18c4f87153281c59ec6b2`, OD-W4C-43=(a)
+   (delegated record + erratum, see header).**
 3. Discard or rework the frozen experimental implementation against this
    amendment.
 4. Implement the identity factory, durable proof fields, constraints,
