@@ -61,6 +61,74 @@ Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲
 
 ## 3. B1 design (REVISED — owner findings absorbed)
 
+### 3.0 ⟲B — B1a IS REDONE: six boundaries the first implementation did not meet
+
+**Status of the first B1a attempt (#4596 `774bdb5e6`, #4597 `d0313feec`): HELD, to be redone.** Owner review
+found four P1s and two P2s. Every one is verified — three of them by me re-running the reviewer's probe and,
+in one case, finding the defect to be *wider* than reported. The slice's own stated goal — *forgery is
+inexpressible by construction* — was **not met**. These boundaries are now part of the design, not notes on
+an implementation.
+
+**B-1 · A qualification must prove the evidence came from the bound system.**
+The first attempt minted and verified a qualification from a **caller-supplied `query` function that never
+touched any external system** (its own suite does this at `gip-approved-binding-resolver.test.cjs`
+L740-L772, and at L807-L840 one fabricated answer satisfies **two resolutions bound to different systems**).
+This was recorded as an accepted "residual". That grading was wrong: **latency does not make an untrue
+qualification trustworthy** — a qualification that verifies against evidence never observed on the bound
+system is a false qualification whether or not anything consumes it yet. Required boundary: the source
+handle is **derived from the resolution's system record by a server-bound source executor**; no caller may
+supply the query path. This is a *precondition* of B1a, not a follow-up to it.
+
+**B-2 · System identity comes from a dedicated lossless identity read — not from hashing the config.**
+The first attempt hashed the whole system config (`lib/gip-approved-binding-resolver.cjs` L153-L169). The
+identity that matters is **endpoint + auth principal + scope**, read by a purpose-built lossless identity
+read. That read must **not decrypt credentials** — the first attempt obtained decrypted credentials through
+the adapter API and then discarded them, an unnecessarily wide permission surface for an identity derivation.
+
+**B-3 · `canonicalObjectVersion` comes from a first-party canonical object contract registry.**
+The first attempt derived it from `systemContentKey + objectKey + fieldMap`, and the code itself admits
+(L232-L252) that it **cannot detect source-side schema drift**. A "canonical object version" that cannot
+witness the object's schema is not one; it must not be invented locally.
+
+**B-4 · A probe SQL denylist is NOT a security boundary.**
+`createProbeStrategyRegistry()` accepts an arbitrary `buildTotalOrderProbeSql`, so SQL-text inspection is the
+wrong control surface. Verified — the owner supplied one bypass, and re-running it I found two more of the
+same class, all passing the hardened guard while the un-concatenated control is correctly blocked:
+```
+PASSES   SELECT * FROM dblink('conn', 'DE' || 'LETE FROM x') AS t(x int)
+PASSES   SELECT * FROM dblink('c', 'DR'||'OP TABLE x') AS t(x int)
+PASSES   SELECT * FROM dblink('c', chr(68)||chr(69)||'LETE FROM x') AS t(x int)
+BLOCKED  SELECT * FROM dblink('c', 'DELETE FROM x') AS t(x int)          <- control
+```
+String concatenation defeats the token list; `chr()` defeats it with no literal keyword at all. The
+7-constructs-to-0 result reported for B1b therefore measures resistance to **accidents, not construction**.
+Required boundary: **only first-party builders registered by module-private identity**, or a **restricted
+structured query constructor**. The denylist may remain as defense-in-depth; it may never be cited as the
+boundary.
+
+**B-5 · "Certified" requires a VERIFIED guarantee, not an honest label.**
+B1b registered a SQL Server strategy whose own token reads
+`no_single_statement_snapshot_under_default_read_committed` — and it still mints a candidate (verified).
+Naming the absence of a guarantee does not fail closed; under the engine default it must **refuse
+certification**. MySQL's token names three conditions (InnoDB, autocommit, isolation ≥ READ COMMITTED) and
+the code checks **none** — they must be established **empirically on the same connection**. B1b's
+certification gate does not open until a **real MySQL / SQL Server capability spike** passes.
+
+**B-6 · Two namespace/closure gaps.** ⟲P2 `orderingKeySpec` `fieldId`s are canonical TARGET fields (the
+resolver says so at L102-L120) but were passed straight to the SQL builder — a **certified source-column
+translation** is required. ⟲P2 The production approved-config allowlist does not accept `orderingKeySpec` or
+`actionProfileVersion`, so the hermetic suite never exercised the real **save → approve → re-read → qualify**
+loop; B1a is not provable until a real **config v2** carries these fields.
+
+**Owner-set redo order for B1a:** real config v2 → system identity read with no credential decryption →
+first-party canonical contract version → server-bound source executor with field translation → remove or
+privatise the legacy `probe()` entry point.
+
+**Consequence for this line's status:** the earlier conclusion that *"the remaining critical path is owner
+decisions, not engineering"* is **withdrawn** — there is real qualification-authenticity implementation work
+remaining, and it is the largest unbuilt item on the line. The on-prem M0 track (complete RC-A package build
++ bounded approved config) is independent of B1a/B1b and may proceed in parallel.
+
 ### 3.1 ⟲P1-a — the certificate holds the REQUIREMENT; the config holds the FIELDS
 
 The ratified certificate model already carries **`orderingKeyRequirement`** (contracts §certificate fields) — a capability-level *requirement*, never the customer's concrete columns. The concrete **`orderingKeySpec`** (ordered field list + directions) belongs to the **approved config version** (customer/binding-scoped, immutable per version). rev‑1 of this design put `orderingKeyFields` in the certificate — wrong layer; withdrawn.
