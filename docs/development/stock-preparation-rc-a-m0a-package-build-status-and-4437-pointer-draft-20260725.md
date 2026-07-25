@@ -398,27 +398,30 @@ earlier draft — see the erratum immediately below), with the introducing commi
 git rev-parse HEAD:scripts/ops/multitable-onprem-package-verify.sh
 # 89ec733a41af25bee9d7f02f608fefcbefbbd9c1
 ```
-Introduced at commit `bd6f8eb51a3eb66972089b60ddde752131b50dd4` on this branch as rebased onto `origin/main`
-tip `d75d3b828` (the introducing **commit** SHA is rebase-unstable and will change again on any future
-rebase of this branch). **This is a tooling identity, not a deployed-artifact identity — it must never be
-conflated into `serviceRuntimeSha`** (still `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, unchanged) **or
-presented as part of what run `30148584851` itself produced.**
+Introduced at commit `76417a0ceaefaff85433bf3b4df9327e61c9175f` on this branch as rebased onto `origin/main`
+tip `aebac4f8bef344b3ff3443ee045439c789a569a1` (this section's final, required pre-push rebase — the
+introducing **commit** SHA is rebase-unstable and has already changed once since it was first recorded here;
+it will change again on any future rebase of this branch). **This is a tooling identity, not a
+deployed-artifact identity — it must never be conflated into `serviceRuntimeSha`** (still
+`7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, unchanged) **or presented as part of what run `30148584851`
+itself produced.**
 
 **Erratum (review #4604):** an earlier version of this section recorded blob `2e64b9d66…` and claimed it was
 "stable across this fix pass's own later commits" — that claim was **false**, and was falsified by this very
-fix pass's own comment-only edit to the script (commit `480720aff`, whose own diff header reads
-`index 2e64b9d66..b2f5ff716`), which changed the blob without the sentence being revisited. A
-comment-stripped diff of the two blobs is **identical**, so the PASS recorded in this section was never
+fix pass's own comment-only edit to the script (commit `dbfd25643724eeb0477bdf89c040fadc8317c7af`, whose own
+diff header reads `index 2e64b9d66..b2f5ff716`), which changed the blob without the sentence being revisited.
+A comment-stripped diff of the two blobs is **identical**, so the PASS recorded in this section was never
 behaviourally wrong — only the recorded tool *identity* was stale, the same class of slip this branch already
-fixed once at `31151fc90`. (Both `480720aff` and `31151fc90` are **pre-rebase commit SHAs**, cited here only
-as the historical record of when each fix landed in this fix pass — like `bd6f8eb51` above, they are
-rebase-unstable and will shift once this branch is rebased onto `origin/main`; the **blob** SHAs
-`2e64b9d66…`/`b2f5ff716…` they refer to are content hashes and remain valid identities regardless of any
-future rebase.) The blob SHA recorded above is a content hash of the script as it exists at this document's
-own final commit; blobs (unlike commit SHAs) do not shift on a content-preserving rebase, but it was
-re-confirmed rather than assumed once this branch was rebased onto `origin/main` before pushing. It is
-**not** asserted to be stable against any future *content* change to the script — if the script changes
-again after this fix pass, this line goes stale again and must be re-derived, not assumed correct.
+fixed once at `593e66efd5835780843a59fe693185eb9fa10963`. (Both of those are **post-rebase commit SHAs**,
+current as of this section's own final pre-push rebase onto `origin/main` tip `aebac4f8b…` above — like the
+introducing commit above, they are rebase-unstable and will shift again on any future rebase of this branch;
+the **blob** SHAs `2e64b9d66…`/`b2f5ff716…` they refer to are content hashes and remain valid identities
+regardless of any rebase.) The blob SHA recorded above is a content hash of the script as it exists at this
+document's own final commit; blobs (unlike commit SHAs) do not shift on a content-preserving rebase, and it
+was re-confirmed (not assumed) after this branch's final pre-push rebase — same value, `89ec733a4…`, before
+and after. It is **not** asserted to be stable against any future *content* change to the script — if the
+script changes again after this fix pass, this line goes stale again and must be re-derived, not assumed
+correct.
 
 **What was executed — a real, full run of the updated tool against A1's real, already-built artifact bytes**
 (not the sourced-function fixture test above; not a rebuild; `serviceRuntimeSha` does not move). Commands
