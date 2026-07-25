@@ -40,9 +40,13 @@
 // rotated, principal and permission scope unchanged => systemContentKey
 // UNCHANGED (true simply because the secret is never a hash input). This was
 // verified load-bearing, not just claimed (review round 4): this module's
-// on-disk source was mutated in place — folding the connection secret into
-// computeSystemContentKey's material (the exact #4596-class defect) — then
-// the REAL test file's rotationSemanticsBothDirections was run as-is (not a
+// on-disk source was mutated in place — folding `credentialCiphertext` (the
+// value that differs between the before/after-rotation calls in
+// rotationSemanticsBothDirections's own fixture — a proxy for "the
+// connection secret rotated", not the decrypted password itself) into
+// computeSystemContentKey's material (the exact #4596-class defect: a
+// rotation-varying value becoming part of the hash input) — then the REAL
+// test file's rotationSemanticsBothDirections was run as-is (not a
 // stand-in), reds the "rotation-unchanged" assertion specifically. Reverted
 // from a pre-mutation backup and diff-verified byte-identical immediately
 // after; the mutated state was never committed. The command + output
