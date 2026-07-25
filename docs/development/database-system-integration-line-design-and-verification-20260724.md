@@ -8,7 +8,11 @@
 > - **additive** `orderingKeySpec` / `actionProfileVersion` acceptance in the approved-config validator — closed rejection on shape, and **no behaviour change for any config that omits them**;
 > - a purpose-built **system identity read** implementing the ratified GIP-D0 §6 formula (B-2). ⟲OD The flat "does not decrypt credentials" wording is withdrawn as unsatisfiable — the auth principal and scope live in the **encrypted credential envelope**, not in `config` — and is **replaced by the ruled rule (owner decision (α), 2026-07-25)**: decrypt **only inside the `credential-store` boundary**, only **briefly**, only to extract **connector-certified** principal/scope material; **domain-separated HMAC / canonicalise immediately, then discard the plaintext**; **secrets and principal plaintext never enter evidence, logs or errors**. Full text and the rotation semantics at §4 step 1.2;
 > - a **first-party canonical object contract registry** and its version lookup (B-3);
-> - a **server-bound source executor** — resolution-derived handle, first-party statement builders, restricted statement seam — plus certified source-column translation (B-1, B-4, B-6). ⟲B2-self This bullet **includes the bounded core-backend statement seam** of §3.2 (not request-reachable, accepts only strategy-minted statements); it is named here because every other bullet is plugin-layer, and a second-package production change permitted only by implication is the very thing owner finding P1-1 was raised about. ⟲B2-self **Credential and connection scope, stated rather than left silent:** this executor unavoidably needs connection material. ⟲OD Under this gate it may derive and hold a handle **under decision (α)'s bounded rule** — same boundary, same immediate-HMAC-and-discard, same never-into-evidence constraint as the identity read, since the "harness / fixture source" clause bounds *where it executes*, not *what it decrypts to build the handle* — and may execute **only against a harness / fixture source, or a first-party engine instance**; **any connection to a live customer system is outside this gate** and is its own ops-gated step (⟲B2-self *not* §4 step 2, which an earlier revision named by default — that step runs against first-party engine instances and never claimed customer connection);
+> - a **server-bound source executor** — resolution-derived handle, first-party statement builders, restricted statement seam — plus certified source-column translation (B-1, B-4, B-6). ⟲B2-self This bullet **includes the bounded core-backend statement seam** of §3.2 (not request-reachable, accepts only strategy-minted statements); it is named here because every other bullet is plugin-layer, and a second-package production change permitted only by implication is the very thing owner finding P1-1 was raised about. ⟲B2-self **Credential and connection scope, stated rather than left silent:** this executor unavoidably needs connection material. ⟲OD **TWO MATERIALS, TWO RULES — an earlier draft applied the identity rule to both, which no implementer could satisfy** (you cannot simultaneously "discard the secret" and "complete an authenticated connection"):
+>   - **identity material** (principal / scope, for `systemContentKey`) → decision (α): decrypt inside the `credential-store` boundary, **domain-separated HMAC / canonicalise immediately, discard the plaintext**. HMAC applies **here and only here**;
+>   - **authentication secret** (for actually connecting) → **consumed inside the boundary by a `credential-store` / connector-owned factory**, which returns an **opaque handle / execution closure**. The secret is **never returned to, held by, or reachable from the executor**; the executor holds only the opaque handle. HMAC is **not** applicable — a hashed secret cannot authenticate.
+>
+>   Both share the same never-into-evidence-logs-or-errors constraint. Execution is **only against a harness / fixture source, or a first-party engine instance**; **any connection to a live customer system is outside this gate** and is its own ops-gated step (⟲B2-self *not* §4 step 2, which an earlier revision named by default — that step runs against first-party engine instances and never claimed customer connection);
 > - **removal or privatisation** of the legacy `probe()` entry point — ⟲B2-self this closes **B-1**'s first residual (the caller-supplied tuple / `keyColumns` path), **not B-4**; B-4 is closed by **bullet 4's module-private builder identity and by §4 step 3** — ⟲B2-self naming step 3 alone (an earlier draft) reads as putting builder identity outside this gate, which bullet 4 contradicts;
 > - the previously-designed B1a internals that are **not** request-reachable and are unchanged by ⟲B: full-tuple resolver (**minus** `canonicalObjectVersion`, which now comes from bullet 3's registry), deep-immutable resolution, `PAGED_READ_LEGAL_COMBINATIONS`, closed errors, hermetic harness (§4 step 1, "Retained") — **plus** §3.4's counter and handshake **contract shapes**, hermetic tests only, **no wiring**. ⟲B2-self This bullet exists because withdrawing the "latent contract + harness" clause withdrew the only sentence that authorized these artefacts, while §4 and §3.4 still schedule them — a regression this revision introduced, not an inherited one.
 >
@@ -42,9 +46,13 @@ GIP-D0 §9.2. **⟲OD APPROVED by the owner, 2026-07-25, at exactly this scope �
 2. the **internal authority substrate**;
 3. the **restricted statement seam**, reachable from **fixture / first-party engine** only.
 
-**Still forbidden under the widening, unchanged:** the **request surface**, the **scheduler**, any **runtime
-consumer**, **arming**, **deployment**, **rollout**. On everything else — and on **all contract material**,
-including `systemContentKey` — the lock wins unchanged.
+**Still forbidden under the widening:** ⟲OD **any NEW request surface or other request-reachable behaviour,
+with exactly one exception — validation and persistence of the new fields on the EXISTING draft/save path**
+(item 1 above; the Gate's boundary test states it identically). An earlier draft wrote "the request surface"
+as an unconditional prohibition while item 1 unlocks a change on that very path — the same self-contradiction
+the boundary test was rewritten to remove, repeated one section away. Also still forbidden, without
+exception: the **scheduler**, any **runtime consumer**, **arming**, **deployment**, **rollout**. On everything
+else — and on **all contract material**, including `systemContentKey` — the lock wins unchanged.
 
 **Doc charter** ⟲Codex: this document is an **execution index + evidence ledger**. Authoritative contracts live in code and their own frozen design docs — referenced here by symbol + SHA, never copied — so this file cannot drift into another competing fact source. Model task cards derived from it must carry **symbol + exact head + acceptance predicate**, not bare line numbers.
 
@@ -195,7 +203,10 @@ Three deviations, and the middle one is the one that matters:
   domain-separated HMAC / canonicalise immediately; discard the plaintext; never let a secret or a principal
   in the clear reach evidence, logs or errors. Rotation with an unchanged principal and scope leaves
   `systemContentKey` **unchanged**; a changed principal or permission scope **forces lineage rebuild and
-  re-qualification**.
+  re-qualification**. ⟲OD **Scope of that rule: identity material only.** The **connection secret** is
+  consumed inside the boundary by a **connector-owned factory** returning an **opaque handle / execution
+  closure**, never exposed to the executor — HMAC-and-discard is meaningless for it, since a hashed secret
+  cannot authenticate.
 
 **The redo implements the ratified formula.** So the material below is not a new spec; it is GIP-D0 §6:
 
@@ -423,7 +434,7 @@ added here first.
 
 | # | decision | ruling | lands in |
 |---|---|---|---|
-| **(α)** | identity read vs credential decryption | **(i)** — bounded decryption **inside the `credential-store` boundary**, brief, for **connector-certified** principal/scope only; **domain-separated HMAC / canonicalise immediately, discard plaintext**; secrets and principal plaintext **never** in evidence, logs or errors. Rotation with unchanged principal+scope ⇒ `systemContentKey` unchanged; changed principal **or** permission scope ⇒ **rebuild lineage and re-qualify** | §4 step 1.2, Gate bullets 2 and 4 |
+| **(α)** | identity read vs credential decryption | **(i)** — **two materials, two rules.** *Identity material* (principal/scope): bounded decryption **inside the `credential-store` boundary**, **domain-separated HMAC / canonicalise immediately, discard plaintext**. *Authentication secret*: **consumed inside the boundary by a connector-owned factory returning an opaque handle / execution closure**, never reachable from the executor — **HMAC does not apply**. Shared: neither may reach evidence, logs or errors. Rotation with unchanged principal+scope ⇒ `systemContentKey` unchanged; changed principal **or** permission scope ⇒ **rebuild lineage and re-qualify** | §4 steps 1.2 / 1.4, Gate bullets 2 and 4, §3.0 B-2 |
 | **(β)** | connector-`kind` vocabulary | **first-party CLOSED registry**; existing aliases **explicitly mapped**; unknown kind ⇒ fail closed for GIP binding with **`SYSTEM_IDENTITY_KIND_UNCERTIFIED`**; **never** auto-extended from customer free strings; **legacy paths keep working** | §4 step 1.2, §3.0 B-2 |
 | **(γ)** | canonical object contract registry | **first-party only**; immutable registration by **`contractId` + `version`**, versions **append-only**; **no auto-synthesis from customer config**; unregistered ⇒ values-free **`CANONICAL_OBJECT_CONTRACT_UNREGISTERED`**; **inventory + backfill existing references BEFORE activation** | §4 step 1.3, §3.0 B-3 |
 | **(δ)** | B-6 source-column translation scope | **v1 = (c)** — connector-owned, **named, certified HTTP probe actions only**; **SQL builders stay unreachable**; **no** SQL-shaped widening of `approved-config` and **no** invented source-column artefact; SQL path deferred to **(b′) + B1c** behind its own gate | §4 step 1.4, §3.0 B-6 |
@@ -490,6 +501,13 @@ preconditions rather than re-hosted.
         - **rotation semantics, which are the observable contract:** key rotated, principal and permission
           scope unchanged ⇒ `systemContentKey` **unchanged**. Principal **or** permission scope changed ⇒
           lineage **must be rebuilt and the binding re-qualified**. Both directions want a test.
+        - ⟲OD **This rule governs IDENTITY MATERIAL ONLY.** The **authentication secret** used to actually
+          connect is a different material with a different rule: it is **consumed inside the boundary by a
+          `credential-store` / connector-owned factory** that returns an **opaque handle / execution
+          closure**, and it is **never returned to, held by, or reachable from** the executor (step 1.4).
+          **HMAC is not applicable to it** — a hashed secret cannot authenticate, so an implementer told to
+          "HMAC and discard" the connection credential could not both discard it and connect. Only the
+          never-into-evidence-logs-or-errors constraint is shared by both materials.
       - **(β) RULED — a first-party CLOSED connector-kind registry.** The problem it answers: `kind` is a
         free-form `requiredString` with **no vocabulary anywhere** (`external-systems.cjs` L91 — contrast
         `VALID_ROLES` / `VALID_STATUSES`, enumerated and exported) and is **immutable after creation**
@@ -646,7 +664,12 @@ preflight, the flag-ON window and #4437 closure from everything this document sc
   and `CANONICAL_OBJECT_CONTRACT_UNREGISTERED` (unregistered object). Both are **closed reasons**, not
   generic errors, and neither may carry an identifier or a value. The third rule has no token because it is a
   prohibition: under (α), a **secret or a principal in the clear must never reach evidence, a log or an
-  error** — decrypt inside the `credential-store` boundary, HMAC/canonicalise immediately, discard.
+  error**.
+- ⟲OD **Do not apply one credential rule to two materials.** *Identity material* → decrypt inside the
+  `credential-store` boundary, HMAC/canonicalise immediately, discard. *Connection secret* → consumed inside
+  the boundary by a **connector-owned factory** that hands back an **opaque handle / execution closure**;
+  the executor never sees it and **must not** try to HMAC it. Conflating the two produces an instruction no
+  implementation can satisfy — discard the secret *and* complete an authenticated connection.
 - ⟲OD **Rotation is an observable contract, so test both directions:** key rotated with principal and
   permission scope unchanged ⇒ `systemContentKey` **unchanged**; principal **or** permission scope changed ⇒
   lineage **rebuilt** and the binding **re-qualified**.
