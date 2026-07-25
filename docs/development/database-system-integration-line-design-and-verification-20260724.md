@@ -157,7 +157,10 @@ scope changes ⇒ re-verify and produce new lineage); and **`actionProfileVersio
 pinned separately in `roleBindings[]`).
 
 **WHAT #4596 ACTUALLY BUILT — a deviation from that lock, not an instance of it** (`deriveSystemContentKey`,
-`lib/gip-approved-binding-resolver.cjs` L153-L169 @ `774bdb5e6`):
+`lib/gip-approved-binding-resolver.cjs` **L552-L581**, hashed `material` object at L571-L579, @ `774bdb5e6`
+— ⟲B2-self an earlier revision cited L153-L169, which is the `// D2.` **design comment** restating the
+formula in prose; the charter asks for symbol + head, and this was the one citation whose symbol and line
+range pointed at different things):
 
 ```
 { domain tag, systemId, tenantId, workspaceId, kind, role, config }      // `config` enters WHOLE
@@ -194,13 +197,15 @@ Three deviations, and the middle one is the one that matters:
 | stable **`authPrincipalKey`** | the principal's identity — never its secret |
 | **`authTenantScopeKey`** | the authenticated principal's **tenant / permission domain** — not our internal `tenantId`/`workspaceId` |
 
-| EXCLUDED | why (per the lock) |
-|---|---|
-| object / filter / data-selection scope | carried by **`configContentKey`**; including it makes a config edit look like a system repoint |
-| `secretVersionId`, credential material | security evidence + runtime re-verification only; a key rotation must **not** rebuild the business baseline |
-| `actionProfileVersion` | pinned separately in `roleBindings[]`; upgrading the read implementation must not read as "the external system changed" |
-| `role`, raw `systemId` / `tenantId` / `workspaceId` | ⟲B2-self not in the ratified formula; `role` is an admission/capability re-verification item, and binding/config already pin the system record. Adding them = a new **amendment**, not a completion |
-| `name`, `status`, `capabilities`, `lastTestedAt`, `lastError` | mutable label and operational state; `status` is an **admission gate**, not identity |
+⟲B2-self **EXCLUDED, split by WHERE THE EXCLUSION COMES FROM** — an earlier revision headed this table *"why (per the lock)"*, attributing to GIP-D0 two rows it does not contain. Verified: the lock has **zero** occurrences of `capabilities` / `lastTestedAt`, and its only `role*` tokens are `roleBindingFingerprint` / `roleBindings` / `roleId` / `roleType` — **scenario** roles, a different concept from the external-system `role` field. Same mis-attribution class as the previous two, so provenance is now on every row:
+
+| EXCLUDED | source | why |
+|---|---|---|
+| object / filter / data-selection scope | **GIP-D0 §6** | carried by **`configContentKey`**; including it makes a config edit look like a system repoint |
+| `secretVersionId`, credential material | **GIP-D0 §6** | security evidence + runtime re-verification only; a key rotation must **not** rebuild the business baseline |
+| `actionProfileVersion` | **GIP-D0 §6** | pinned separately in `roleBindings[]`; upgrading the read implementation must not read as "the external system changed" |
+| `role`, raw `systemId` / `tenantId` / `workspaceId` | **owner ruling, round-4 precheck** — *not* the lock | absent from the ratified formula; `role` is an admission/capability re-verification item, and binding/config already pin the system record. Adding them = a new **amendment**, not a completion |
+| `name`, `status`, `capabilities`, `lastTestedAt`, `lastError` | **#4596's own D2 comment** (L162-L166), retained as sound — *not* the lock | mutable label and operational state; `status` is an **admission gate**, not identity |
 
 **The implementation obligation the narrow formula carries — and it is real.** "Endpoint identity" and
 "`authPrincipalKey`" must be *extracted* from the stored system record, and the config has **no schema**:
@@ -211,7 +216,14 @@ Two mandatory conditions, and they are the reason #4596 over-corrected into hash
 1. **A per-connector-kind certified identity declaration** — for each `kind`, which stored keys carry endpoint
    and principal. First-party and versioned, like the canonical object contract of B-3.
 2. **Fail closed on an undeclared kind.** A system whose kind has no declaration is **refused**, never
-   best-guessed, never hashed over a partial selection. Losslessness stays enforced at the read: the record is
+   best-guessed, never hashed over a partial selection.
+3. ⟲B2-self **`authTenantScopeKey` needs the same treatment and currently has none.** The formula has four
+   hashed terms; `kind` is on the record and the declaration above covers endpoint and principal — but
+   `authTenantScopeKey` has **no stated source, no extraction rule and no fail-closed rule**, and the
+   upstream lock does not supply one either (GIP-D0 §6 names it in the formula and in the boundary paragraph
+   but never says where it is read from). For the connector class B1b/B1c target it may sit in the same
+   encrypted envelope as the principal. It must be declared per kind and fail closed exactly like the other
+   two, or the redo ships a formula one term of which is unsourced. Losslessness stays enforced at the read: the record is
    the **stored** one, never a sanitized projection — `assertLosslessSystemIdentityConfig`'s refusals are
    retained, since hashing `sanitizeIntegrationPayload`'s output was a **realized** forgery reproduced in five
    classes, three of them key-name-independent truncation.
@@ -287,10 +299,22 @@ absent for this config shape**: a `fieldMap.source` is a **dotted HTTP response 
 `target` is a cleansing-zone column id (`'material_code'`), while the approved-config plane is HTTP-shaped
 (`readPath` / `readMethod` / `containerPaths` are the allowlisted keys) and the probe emits **SQL identifiers**
 against `objectKey` — so for an HTTP-shaped config **neither side of `fieldMap` is a SQL column**.
-**Owner decision required, and it is a scope question, not an implementation detail:** either (a) name the
-artefact that supplies per-system source column names and build it inside step 1.4, or (b) scope the
-server-bound executor to **SQL-shaped sources only** for B1a and split the translation into its own gated
-step. Until one is chosen, step 1.4 is **not** startable, and §4 says so rather than implying otherwise.
+⟲B2-self **And the obvious escape hatch is STRUCTURALLY EMPTY — an earlier revision offered it anyway.**
+"Scope the executor to SQL-shaped sources only" scopes it to the **empty set**: every valid approved
+read-source config is HTTP-shaped **by construction** — `readMethod ∈ {GET, POST}` and `readPath` are
+validated **unconditionally, with no mode exemption** (`read-source-config.cjs` L166-L167), `mode` is
+restricted to four HTTP read modes (L19), and `ALLOWED_CONFIG_KEYS` (L52-L58) carries **no SQL-source key at
+all** — and the resolver binds exactly this plane (`getForRuntime`). So the approved-config plane admits no
+SQL source today, which also means B1b's certified SQL builders are **unreachable from it**.
+
+**Owner decision required — a scope question, not an implementation detail:**
+- **(a)** name and build the artefact that supplies per-system **source column names**, inside step 1.4; or
+- **(b′)** extend the approved-config plane to admit a **SQL-shaped source class** — itself a gated change to
+  a live validator, larger than step 1.1; or
+- **(c)** accept that B1a's executor probes **HTTP-shaped sources only**, and record that the SQL probe
+  builders stay unreachable from the approved plane until (a) or (b′) lands.
+
+Until one is chosen, step 1.4 is **not** startable, and §4 says so rather than implying otherwise.
 
 **Owner-set redo order for B1a** (as given; ⟲B2-self the second item's "no credential decryption" is now
 known **unsatisfiable as stated** — see §4 step 1.2 decision (α) — and is carried here verbatim only because
@@ -314,8 +338,11 @@ further first-party source: `canonicalObjectVersion` is LOOKED UP from the canon
 (§3.0 B-3), never derived here.** The pre-⟲B formulation ("and from nothing else") reinstated exactly the
 locally-invented derivation B-3 withdraws, in a paragraph §4 endorses as retained; the registry is a fourth
 **server-side** source and is still never caller-suppliable, which is the property that clause existed to
-protect. Apart from that field: from those records and nothing else. Binding only three fields (rev‑2's `{objectKey, orderingKeySpec, configContentKey}`) was insufficient: **any** digest input left caller-supplied re-opens the forgery as "config A + system-or-profile B". Requirements:
-  - at resolution time, re-verify the version is STILL approved — **and still within the caller's tenant and scope** — through the existing **`getForRuntime()`** path (`readSourceConfigStore.getForRuntime`, called with scoped input; throws `NOT_APPROVED` for a non-approved version — approval, tenancy and scope are re-checked at resolution time, never assumed from the id);
+protect. ⟲B2-self **And after B-2 there is a FIFTH:** `systemContentKey` is no longer a pure derivation from
+the system record either — it is a lookup against the **per-connector-kind identity declaration** registry
+(§3.0 B-2). Both registries are first-party, versioned and server-side; neither is caller-suppliable. Apart
+from those two fields: from those records and nothing else. Binding only three fields (rev‑2's `{objectKey, orderingKeySpec, configContentKey}`) was insufficient: **any** digest input left caller-supplied re-opens the forgery as "config A + system-or-profile B". Requirements:
+  - at resolution time, re-verify the version is STILL approved — **and still within the caller's tenant and scope** — through the existing **`getForRuntime()`** path (`readSourceConfigStore.getForRuntime`, called with scoped input; throws `ReadSourceConfigNotApprovedError` for a non-approved version — ⟲B2-self an earlier revision wrote a bare `NOT_APPROVED` token, which does not exist in the module — approval, tenancy and scope are re-checked at resolution time, never assumed from the id);
   - the server **recomputes `configContentKey` from the immutable version body and compares** — it never blindly trusts a stored column;
   - **both probe and verify** re-enter through the resolver — no cached caller-side tuple is honoured;
   - callers cannot override **any** field of the tuple.
@@ -352,7 +379,7 @@ Consequences, stated as scope:
 
 `MONOTONIC_VERSION_PIN` is deliberately **unmapped for `PAGED_READ`** in v1: a version pin *detects* drift; it does not make pages mutually consistent — abort-on-drift is a weaker, different contract that would need its own ratification before appearing here. ⟲R5 It **remains legal where already ratified in other modes** — specifically, the ratified `CHANGE_FEED + MONOTONIC_VERSION_PIN + DURABLE_TOKEN` combination is untouched. **Mandated harness negative-control pair:** the existing `CHANGE_FEED` combination still certifies, while an out-of-table `PAGED_READ` combination is refused.
 
-Any other `PAGED_READ` combination ⇒ **closed rejection at certification time** (e.g. `PAGED_READ_COMBINATION_UNSUPPORTED`). **Never silently downgrade to `BOUNDED_READ`**: the profile is refused; a caller that wants bounded semantics certifies a separate bounded profile (the `bridge.bounded_read.v2` pattern — one door per capability).
+Any other `PAGED_READ` combination ⇒ **closed rejection at certification time** — ⟲B2-self reusing the rule tokens the contracts module **already ships**, `PAGED_READ_REQUIRES_CONSISTENCY_PROOF` and `PAGED_READ_LEGAL_COMBINATION` (`gip-profile-certification-contracts.cjs`); an earlier revision invented a third name (`PAGED_READ_COMBINATION_UNSUPPORTED`), which invites exactly the drift this table exists to prevent. **Never silently downgrade to `BOUNDED_READ`**: the profile is refused; a caller that wants bounded semantics certifies a separate bounded profile (the `bridge.bounded_read.v2` pattern — one door per capability).
 
 ### 3.4 ⟲P2-b — contracts may be latent; counters cannot
 
@@ -377,11 +404,19 @@ Sealed export is the **preferred** exit for the bridge / big-data / non-paginata
 **The previous order was ratified BEFORE §3.0 and is superseded.** It described B1a as *latent* and let B1b
 register *certified* strategies directly — both now false. It is **un-ratified until the owner re-approves
 this section**. Precedence rule, stated once and covering the whole document so two orders cannot coexist:
-**§1 records landed facts only and schedules nothing; all sequencing and scope — including B2's
-preconditions — is §4's.** Where §1, §2 or §3.x implies a different sequencing or scope, **§4 wins**.
+**all sequencing and scope — including B2's preconditions — is §4's.** Where **any other section,
+including §5, §6 and the Gate**, implies a different sequencing or scope, **§4 wins**. ⟲B2-self The earlier
+form enumerated only §1/§2/§3.x, so a §4↔§6 conflict had no tiebreak while the rule advertised itself as
+covering the document. Two honest caveats rather than an overclaim: **§1 is a record and should schedule
+nothing** — where it still does (the §1 P3 follow-up note), that is a defect in §1, not a competing order;
+and §4 **imports** two gates it does not itself schedule a producer for — the agent/protocol-version preflight
+and the `stock-prep:read/operate` permission split — both of which live in §2 M1 and are named here as
+preconditions rather than re-hosted.
 
-1. **B1a (REDO)** — the authority substrate, in the owner-set order, each step landing behind the
-   authority-substrate gate:
+1. **B1a (REDO)** — the authority substrate. Substeps 1.1-1.5 are the **owner-set order verbatim**;
+   ⟲B2-self **1.6 is added by this revision** (it traces to round-1 ⟲P2-b, not to the owner's instruction) and
+   is flagged so re-ratification is not asked to approve an addition under the owner's own label. Each step
+   lands behind the authority-substrate gate:
    1. **real config v2** — `orderingKeySpec` (closed schema, §3.1⟲R6) + `actionProfileVersion` accepted by
       the approved-config validator **and carried through `normalizeReadSourceConfig` into the stored body**,
       additively; the existing test that asserts today's rejection **flips in
@@ -474,6 +509,11 @@ preconditions — is §4's.** Where §1, §2 or §3.x implies a different sequen
        only that an argument was removed;
      - **positive control:** a probe executed **through the server-bound executor against the harness
        source** still qualifies.
+     - ⟲B2-self **Read this before re-ratifying:** the last two controls run **through step 1.4**, which is
+       itself **NOT STARTABLE** until B-6's (a)/(b′)/(c) is chosen — so item 1 is acceptable only after that
+       decision, and the first two controls **alone are not sufficient** (residual 2 inverts the moment
+       `query` leaves the input allowlist, which measures that a step was performed, not that evidence came
+       from the bound system).
 2. **B1b capability spike — REAL MySQL and SQL Server, before any certification.** Empirical only, on the
    **same connection**; mints **no certification** and registers **no strategy**. ⟲B2-self **Runs against
    FIRST-PARTY engine instances only.** Everything this step establishes is engine capability, which a
@@ -569,4 +609,6 @@ authorizing either). On the request path it permits **validation and persistence
 and nothing else**; qualification execution, external-source reads, new side effects and new routes stay
 forbidden from any request or scheduled run. Every later slice re-enters its own gate. **§4 is itself pending
 re-ratification** — until the owner re-approves it, nothing after **B1a (§4 item 1)** is scheduled by this
-document, other than the parallel **M0-A** track.
+document, other than the parallel on-prem track — ⟲B2-self **both phases of it, M0-A *and* the ops-gated
+M0-B**. Naming M0-A alone here would re-commit the exact fault §4's M0 note was added to prevent: deleting
+the preflight, the flag-ON window and #4437 closure from everything the document schedules.
