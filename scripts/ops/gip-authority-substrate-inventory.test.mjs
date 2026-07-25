@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs'
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, statSync, readlinkSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,6 +12,8 @@ import {
   EXTERNAL_SYSTEM_STATUSES,
   READ_SOURCE_CONFIG_STATUSES,
   assertReadOnlyAllowlist,
+  isSafeNonNegativeInteger,
+  INVALID_COUNT_REASON,
   probeSchema,
   buildPlan,
   bucketByRegistry,
@@ -24,8 +26,10 @@ import {
   RESIDUAL_NOTES,
   shouldWritePrivateArtifact,
   buildPrivateArtifactContent,
+  writePrivateArtifact,
   buildReport,
   buildDryRunReport,
+  renderHumanSummary,
   parseArgs,
   REPO_ROOT,
   DEFAULT_PRIVATE_OUTPUT_DIR,
@@ -387,6 +391,144 @@ describe('bucketByRegistry', () => {
     assert.equal(counts.totalRows, 0)
     assert.equal(counts.registeredDistinctCount, 0)
     assert.equal(counts.unregisteredDistinctCount, 0)
+  })
+
+  test("returns { status: 'ok', counts, detail } on success — status is always present, never absent from a good result", () => {
+    const result = bucketByRegistry([{ kind: 'a', n: 1 }], [], { valueKey: 'kind' })
+    assert.equal(result.status, 'ok')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isSafeNonNegativeInteger — #4603 owner-review P1(1): `Number(value) || 0` used to turn a
+// missing, malformed, or non-finite count into a silent ZERO — the single most dangerous wrong
+// answer for a precondition probe ("0 unregistered" is exactly the green light Wave 2 would
+// consume). Every listed adversarial input must be rejected; a genuine 0 is the positive control
+// proving the predicate does not just reject everything.
+// ---------------------------------------------------------------------------
+
+describe('isSafeNonNegativeInteger — strict accept: non-negative safe integers only', () => {
+  const REJECT = [
+    ['undefined', undefined],
+    ['null', null],
+    ["''", ''],
+    ["'abc'", 'abc'],
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['-Infinity', -Infinity],
+    ['-1', -1],
+    ['1.5', 1.5],
+    ['2**53 (one past MAX_SAFE_INTEGER — not representable exactly, must not be trusted)', 2 ** 53],
+    ["'3' (a numeric STRING — real int4 rows come back as a JS number already; do not coerce)", '3'],
+    ['true', true],
+    ['[]', []],
+    ['{}', {}],
+  ]
+  for (const [label, value] of REJECT) {
+    test(`rejects ${label}`, () => {
+      assert.equal(isSafeNonNegativeInteger(value), false)
+    })
+  }
+
+  test('POSITIVE CONTROL: accepts a genuine 0 — proves the predicate is not merely "reject everything"', () => {
+    assert.equal(isSafeNonNegativeInteger(0), true)
+  })
+
+  test('accepts ordinary positive safe integers', () => {
+    assert.equal(isSafeNonNegativeInteger(1), true)
+    assert.equal(isSafeNonNegativeInteger(42), true)
+    assert.equal(isSafeNonNegativeInteger(Number.MAX_SAFE_INTEGER), true)
+  })
+})
+
+describe('bucketByRegistry — fails CLOSED (never defaults to 0) on an anomalous row count', () => {
+  const BAD_COUNTS = [undefined, null, '', 'abc', NaN, Infinity, -1, 1.5, 2 ** 53]
+  for (const bad of BAD_COUNTS) {
+    test(`row count ${JSON.stringify(bad)} -> { status: 'invalid_count' }, never a silently-zeroed row`, () => {
+      const result = bucketByRegistry([{ kind: 'a', n: bad }], [], { valueKey: 'kind' })
+      assert.equal(result.status, 'invalid_count')
+      assert.equal(result.reason, INVALID_COUNT_REASON)
+      assert.equal(result.counts, undefined, 'an invalid result must not also carry a usable counts object')
+    })
+  }
+
+  test('a genuine 0 count is still expressible — the positive control at the bucketing layer, not just the predicate layer', () => {
+    const result = bucketByRegistry([{ kind: 'a', n: 0 }], [], { valueKey: 'kind' })
+    assert.equal(result.status, 'ok')
+    assert.equal(result.counts.totalRows, 0)
+    assert.equal(result.counts.unregisteredDistinctCount, 1)
+  })
+
+  test('one bad row among otherwise-good rows invalidates the WHOLE bucket (no partial "mostly trustworthy" counts)', () => {
+    const result = bucketByRegistry(
+      [{ kind: 'a', n: 3 }, { kind: 'b', n: undefined }, { kind: 'c', n: 2 }],
+      [],
+      { valueKey: 'kind' },
+    )
+    assert.equal(result.status, 'invalid_count')
+  })
+})
+
+describe('executeKindInventoryPlan / executeObjectKeyInventoryPlan: an invalid row count is UNAVAILABLE -> INCONCLUSIVE, never a silent 0', () => {
+  test('β allStatuses count anomalous -> whole kindInventory unavailable, verdict INCONCLUSIVE (through buildReport end to end)', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({
+      schema,
+      counts: {
+        ...ZERO_COUNTS,
+        'count.external_system_kinds_all': [{ kind: 'x', n: undefined }],
+        'count.external_system_kinds_active': [{ kind: 'x', n: 1 }],
+      },
+    })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assert.equal(report.coverage.connectorKindInventory.status, 'unavailable')
+    assert.equal(report.coverage.connectorKindInventory.reason, INVALID_COUNT_REASON)
+    assert.equal(report.verdicts.connectorKind.verdict, 'INCONCLUSIVE')
+  })
+
+  test('γ approved-status count anomalous -> whole canonicalObjectKeyInventory unavailable, verdict INCONCLUSIVE (through buildReport end to end)', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({
+      schema,
+      counts: {
+        ...ZERO_COUNTS,
+        'count.read_source_config_objects_by_status': [{ object: 'material', status: 'approved', n: NaN }],
+      },
+    })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assert.equal(report.coverage.canonicalObjectKeyInventory.status, 'unavailable')
+    assert.equal(report.coverage.canonicalObjectKeyInventory.reason, INVALID_COUNT_REASON)
+    assert.equal(report.verdicts.canonicalObjectKey.verdict, 'INCONCLUSIVE')
+  })
+
+  test("γ divergence count anomalous -> divergence sub-field unavailable, verdict INCONCLUSIVE (byStatus itself stays 'ok')", async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({
+      schema,
+      counts: {
+        ...ZERO_COUNTS,
+        'count.read_source_config_object_config_divergence': [{ n: '0' }], // numeric STRING, not a number
+      },
+    })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assert.equal(report.coverage.canonicalObjectKeyInventory.status, 'ok')
+    assert.equal(report.coverage.canonicalObjectKeyInventory.objectVsConfigObjectDivergence.status, 'unavailable')
+    assert.equal(report.coverage.canonicalObjectKeyInventory.objectVsConfigObjectDivergence.reason, INVALID_COUNT_REASON)
+    assert.equal(report.verdicts.canonicalObjectKey.verdict, 'INCONCLUSIVE')
+  })
+
+  test('γ divergence query returning zero rows (never happens for a real COUNT(*), but must not default to 0 if it did) -> unavailable, INCONCLUSIVE', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({
+      schema,
+      counts: {
+        ...ZERO_COUNTS,
+        'count.read_source_config_object_config_divergence': [],
+      },
+    })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assert.equal(report.coverage.canonicalObjectKeyInventory.objectVsConfigObjectDivergence.status, 'unavailable')
+    assert.equal(report.verdicts.canonicalObjectKey.verdict, 'INCONCLUSIVE')
   })
 })
 
@@ -917,6 +1059,301 @@ describe('values-free public output (sentinel injection)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// CLOSED VALUE DOMAIN — #4603 owner-review P2(a). The exact-key-set walk above
+// (assertPublicReportKeySetsExactly) proves every KEY in the report is from the closed set the
+// source can produce, but says nothing about VALUES: `covers`/`blindSpot` are hardcoded object-
+// literal strings inside buildReport() — not derived from any row, not covered by the
+// sentinel-substring scan (which only checks strings that flow THROUGH the row-count pipeline).
+// Replace one with an arbitrary raw string and every existing test, including the key-set walk,
+// stays green, because nothing ever checks what that field actually SAYS. Verified directly
+// against 18f503bf0 — see the PR body / commit message for the two pasted mutation-probe runs.
+//
+// The check: collect every STRING leaf of a full report, normalize embedded digit runs to a
+// single '#' (every dynamic component this module ever interpolates into a sentence is a
+// bucketByRegistry-validated non-negative safe integer — never raw DB content; see
+// isSafeNonNegativeInteger), and assert the resulting SET equals a hand-frozen expected array,
+// one per fixture scenario. Set EQUALITY (not membership) means a substitution, a removal, or any
+// new unauthored prose all fail the same way: a mismatch. Every NUMBER leaf is independently
+// asserted to be a safe non-negative integer, and every BOOLEAN leaf is enumerated by position.
+//
+// The expected arrays below were captured by running buildReport() once against the FIXED source
+// (see the PR body for the capture command) and are pasted here as FROZEN literals — not
+// re-derived at test time — so a later source mutation (accidental or adversarial) diverges from
+// this independent frozen copy instead of being validated against itself.
+// ---------------------------------------------------------------------------
+
+function normalizeDigits(s) {
+  return s.replace(/\d+/g, '#')
+}
+
+function collectLeavesByType(node, out) {
+  if (node === null || node === undefined) return
+  if (Array.isArray(node)) {
+    for (const v of node) collectLeavesByType(v, out)
+    return
+  }
+  if (typeof node === 'object') {
+    for (const k of Object.keys(node)) collectLeavesByType(node[k], out)
+    return
+  }
+  if (typeof node === 'string') out.strings.push(node)
+  else if (typeof node === 'number') out.numbers.push(node)
+  else if (typeof node === 'boolean') out.booleans.push(node)
+  else throw new Error(`unexpected leaf type ${typeof node}: ${JSON.stringify(node)}`)
+}
+
+// Every number leaf anywhere in the report must be a non-negative safe integer — the same
+// discipline isSafeNonNegativeInteger() enforces at the row-count boundary, re-asserted here at
+// the OUTPUT boundary so a bug anywhere in between (not just at ingestion) is still caught.
+function assertClosedValueDomain(report, expectedNormalizedStrings) {
+  const out = { strings: [], numbers: [], booleans: [] }
+  collectLeavesByType(report, out)
+  for (const n of out.numbers) {
+    assert.ok(
+      Number.isSafeInteger(n) && n >= 0,
+      `number leaf ${n} is not a non-negative safe integer — every number in public output must come from a validated count`,
+    )
+  }
+  const normalized = [...new Set(out.strings.map(normalizeDigits))].sort()
+  assert.deepEqual(normalized, [...expectedNormalizedStrings].sort())
+}
+
+const EXPECTED_NOTHING_OWED = [
+  '# distinct kind string(s) observed across integration_external_systems, all already in the (currently #-entry) known registry',
+  '# distinct objectKey(s) referenced by approved read-source configs, all already in the (currently #-entry) known registry',
+  '#-#-#T#:#:#.#Z',
+  "A second objectKey reference class exists in the same database: integration_write_target_configs.object (migration #, External-API WRITE self-service W#). This inventory does NOT probe it. Reason: the ledger's decision (γ) scope (§# step #.#, §#.# B-#) is the READ-side qualification-input tuple's objectKey, and the task this script was built for is scoped to that tuple; the write-target config table is a separate, config-time-only surface (no dry-run/apply/runtime route per its migration header) that decision (γ)'s registry may also need to cover eventually, but that is a follow-up inventory scope decision, not an oversight in this one. A canonical object referenced ONLY by a write-target config (never by a read-source config) is invisible to this report.",
+  "Both KNOWN_CERTIFIED_CONNECTOR_KINDS and KNOWN_CANONICAL_OBJECT_KEYS are empty. Neither decision (β) nor decision (γ) has produced a first-party registry yet, so today every distinct value observed is reported as unregistered — that is the correct, honest state, not a defect. This inventory exists to produce the raw list a human uses to populate those registries; it never populates them itself.",
+  'CANONICAL_OBJECT_BACKFILL_NOT_REQUIRED_WITHIN_COVERAGE',
+  'CONNECTOR_KIND_MAPPING_NOT_REQUIRED_WITHIN_COVERAGE',
+  'DB rows only, in the ONE connected database, at the moment queried. Says nothing about kinds referenced only in code/fixtures, or about a different deployment/database this run was not pointed at.',
+  'DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here. Also deliberately out of scope: integration_write_target_configs.object (migration #) — a second objectKey reference class in the same database this report never queries; see residualNotes.',
+  'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  'a zero known-registry size makes this trivially true today — see residualNotes',
+  'both',
+  "computeObjectKeyVerdict() is scoped to status='approved' only, matching the task's literal scope ('approved read-source configs'). draft/retired counts are still reported under byStatus for completeness, but a draft config can be approved after this inventory runs — decision (γ)'s own 'before activation' framing means the approved-only headline can understate the eventual backfill list; re-run before activation, not once.",
+  "distinct integration_external_systems.kind strings and their row counts — the raw material for decision (β)'s explicit alias map and migration list. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  'draft_and_retired_object_keys_excluded_from_the_headline_verdict',
+  'integration_write_target_configs_object_deliberately_out_of_scope',
+  'known_registries_empty_by_design',
+  'no_customer_deployment_connection',
+  'ok',
+  'report',
+  'skipped_by_flag',
+]
+
+const EXPECTED_SOMETHING_OWED = [
+  '# of # distinct kind string(s) are not in the known registry (size #) — an explicit alias map / migration decision (β) is needed before these can bind under GIP',
+  '# of # distinct objectKey(s) referenced by approved configs are not in the known registry (size #) — inventory + backfill of these is required BEFORE activation per decision (γ)',
+  '#-#-#T#:#:#.#Z',
+  "A second objectKey reference class exists in the same database: integration_write_target_configs.object (migration #, External-API WRITE self-service W#). This inventory does NOT probe it. Reason: the ledger's decision (γ) scope (§# step #.#, §#.# B-#) is the READ-side qualification-input tuple's objectKey, and the task this script was built for is scoped to that tuple; the write-target config table is a separate, config-time-only surface (no dry-run/apply/runtime route per its migration header) that decision (γ)'s registry may also need to cover eventually, but that is a follow-up inventory scope decision, not an oversight in this one. A canonical object referenced ONLY by a write-target config (never by a read-source config) is invisible to this report.",
+  "Both KNOWN_CERTIFIED_CONNECTOR_KINDS and KNOWN_CANONICAL_OBJECT_KEYS are empty. Neither decision (β) nor decision (γ) has produced a first-party registry yet, so today every distinct value observed is reported as unregistered — that is the correct, honest state, not a defect. This inventory exists to produce the raw list a human uses to populate those registries; it never populates them itself.",
+  'CANONICAL_OBJECT_BACKFILL_REQUIRED',
+  'CONNECTOR_KIND_MAPPING_REQUIRED',
+  'DB rows only, in the ONE connected database, at the moment queried. Says nothing about kinds referenced only in code/fixtures, or about a different deployment/database this run was not pointed at.',
+  'DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here. Also deliberately out of scope: integration_write_target_configs.object (migration #) — a second objectKey reference class in the same database this report never queries; see residualNotes.',
+  'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  'both',
+  "computeObjectKeyVerdict() is scoped to status='approved' only, matching the task's literal scope ('approved read-source configs'). draft/retired counts are still reported under byStatus for completeness, but a draft config can be approved after this inventory runs — decision (γ)'s own 'before activation' framing means the approved-only headline can understate the eventual backfill list; re-run before activation, not once.",
+  "distinct integration_external_systems.kind strings and their row counts — the raw material for decision (β)'s explicit alias map and migration list. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  'draft_and_retired_object_keys_excluded_from_the_headline_verdict',
+  'incomplete_owed_disabled',
+  'integration_write_target_configs_object_deliberately_out_of_scope',
+  'known_registries_empty_by_design',
+  'no_customer_deployment_connection',
+  'ok',
+  'raw kind strings are in the private artefact, if one was written — see privateArtifact',
+  'raw objectKey strings are in the private artefact, if one was written — see privateArtifact',
+  'report',
+]
+
+const EXPECTED_UNAVAILABLE_AND_NOT_RUN = [
+  '# of # distinct kind string(s) are not in the known registry (size #) — an explicit alias map / migration decision (β) is needed before these can bind under GIP',
+  '#-#-#T#:#:#.#Z',
+  "A second objectKey reference class exists in the same database: integration_write_target_configs.object (migration #, External-API WRITE self-service W#). This inventory does NOT probe it. Reason: the ledger's decision (γ) scope (§# step #.#, §#.# B-#) is the READ-side qualification-input tuple's objectKey, and the task this script was built for is scoped to that tuple; the write-target config table is a separate, config-time-only surface (no dry-run/apply/runtime route per its migration header) that decision (γ)'s registry may also need to cover eventually, but that is a follow-up inventory scope decision, not an oversight in this one. A canonical object referenced ONLY by a write-target config (never by a read-source config) is invisible to this report.",
+  "Both KNOWN_CERTIFIED_CONNECTOR_KINDS and KNOWN_CANONICAL_OBJECT_KEYS are empty. Neither decision (β) nor decision (γ) has produced a first-party registry yet, so today every distinct value observed is reported as unregistered — that is the correct, honest state, not a defect. This inventory exists to produce the raw list a human uses to populate those registries; it never populates them itself.",
+  'CONNECTOR_KIND_MAPPING_REQUIRED',
+  'DB rows only, in the ONE connected database, at the moment queried. Says nothing about kinds referenced only in code/fixtures, or about a different deployment/database this run was not pointed at.',
+  'DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here. Also deliberately out of scope: integration_write_target_configs.object (migration #) — a second objectKey reference class in the same database this report never queries; see residualNotes.',
+  'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  'beta',
+  "computeObjectKeyVerdict() is scoped to status='approved' only, matching the task's literal scope ('approved read-source configs'). draft/retired counts are still reported under byStatus for completeness, but a draft config can be approved after this inventory runs — decision (γ)'s own 'before activation' framing means the approved-only headline can understate the eventual backfill list; re-run before activation, not once.",
+  "distinct integration_external_systems.kind strings and their row counts — the raw material for decision (β)'s explicit alias map and migration list. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  'draft_and_retired_object_keys_excluded_from_the_headline_verdict',
+  'incomplete_owed_disabled',
+  "integration_external_systems.status column not found (probed via information_schema.tables/.columns, table_schema='public', as the DATABASE_URL role — a non-public search_path or missing SELECT/USAGE privileges reports the same as a genuinely absent object) — cannot separate active-only from all-statuses",
+  'integration_write_target_configs_object_deliberately_out_of_scope',
+  'known_registries_empty_by_design',
+  'no_customer_deployment_connection',
+  'not_run',
+  'ok',
+  'raw kind strings are in the private artefact, if one was written — see privateArtifact',
+  'report',
+  'unavailable',
+]
+
+const EXPECTED_DIVERGENCE_POSITIVE = [
+  '# distinct kind string(s) observed across integration_external_systems, all already in the (currently #-entry) known registry',
+  "# row(s) have integration_read_source_configs.object disagreeing with config->>'object' — a backfill/mapping decision built from the object column alone would be unreliable for those rows until the divergence is resolved",
+  '#-#-#T#:#:#.#Z',
+  "A second objectKey reference class exists in the same database: integration_write_target_configs.object (migration #, External-API WRITE self-service W#). This inventory does NOT probe it. Reason: the ledger's decision (γ) scope (§# step #.#, §#.# B-#) is the READ-side qualification-input tuple's objectKey, and the task this script was built for is scoped to that tuple; the write-target config table is a separate, config-time-only surface (no dry-run/apply/runtime route per its migration header) that decision (γ)'s registry may also need to cover eventually, but that is a follow-up inventory scope decision, not an oversight in this one. A canonical object referenced ONLY by a write-target config (never by a read-source config) is invisible to this report.",
+  "Both KNOWN_CERTIFIED_CONNECTOR_KINDS and KNOWN_CANONICAL_OBJECT_KEYS are empty. Neither decision (β) nor decision (γ) has produced a first-party registry yet, so today every distinct value observed is reported as unregistered — that is the correct, honest state, not a defect. This inventory exists to produce the raw list a human uses to populate those registries; it never populates them itself.",
+  'CONNECTOR_KIND_MAPPING_NOT_REQUIRED_WITHIN_COVERAGE',
+  'DB rows only, in the ONE connected database, at the moment queried. Says nothing about kinds referenced only in code/fixtures, or about a different deployment/database this run was not pointed at.',
+  'DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here. Also deliberately out of scope: integration_write_target_configs.object (migration #) — a second objectKey reference class in the same database this report never queries; see residualNotes.',
+  'INCONCLUSIVE',
+  'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  'a zero known-registry size makes this trivially true today — see residualNotes',
+  'both',
+  "computeObjectKeyVerdict() is scoped to status='approved' only, matching the task's literal scope ('approved read-source configs'). draft/retired counts are still reported under byStatus for completeness, but a draft config can be approved after this inventory runs — decision (γ)'s own 'before activation' framing means the approved-only headline can understate the eventual backfill list; re-run before activation, not once.",
+  "distinct integration_external_systems.kind strings and their row counts — the raw material for decision (β)'s explicit alias map and migration list. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  'draft_and_retired_object_keys_excluded_from_the_headline_verdict',
+  'integration_write_target_configs_object_deliberately_out_of_scope',
+  'known_registries_empty_by_design',
+  'no_customer_deployment_connection',
+  'ok',
+  'report',
+  'skipped_by_flag',
+  'this is reported regardless of registeredness — see coverage.canonicalObjectKeyInventory.objectVsConfigObjectDivergence',
+]
+
+const EXPECTED_UNEXPECTED_STATUS = [
+  '# distinct kind string(s) observed across integration_external_systems, all already in the (currently #-entry) known registry',
+  "# distinct objectKey(s) referenced by read-source config row(s) in an out-of-vocabulary (unexpected) status — a verdict scoped to 'approved' cannot be trusted while rows exist outside the known draft/approved/retired status vocabulary",
+  '#-#-#T#:#:#.#Z',
+  "A second objectKey reference class exists in the same database: integration_write_target_configs.object (migration #, External-API WRITE self-service W#). This inventory does NOT probe it. Reason: the ledger's decision (γ) scope (§# step #.#, §#.# B-#) is the READ-side qualification-input tuple's objectKey, and the task this script was built for is scoped to that tuple; the write-target config table is a separate, config-time-only surface (no dry-run/apply/runtime route per its migration header) that decision (γ)'s registry may also need to cover eventually, but that is a follow-up inventory scope decision, not an oversight in this one. A canonical object referenced ONLY by a write-target config (never by a read-source config) is invisible to this report.",
+  "Both KNOWN_CERTIFIED_CONNECTOR_KINDS and KNOWN_CANONICAL_OBJECT_KEYS are empty. Neither decision (β) nor decision (γ) has produced a first-party registry yet, so today every distinct value observed is reported as unregistered — that is the correct, honest state, not a defect. This inventory exists to produce the raw list a human uses to populate those registries; it never populates them itself.",
+  'CONNECTOR_KIND_MAPPING_NOT_REQUIRED_WITHIN_COVERAGE',
+  'DB rows only, in the ONE connected database, at the moment queried. Says nothing about kinds referenced only in code/fixtures, or about a different deployment/database this run was not pointed at.',
+  'DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here. Also deliberately out of scope: integration_write_target_configs.object (migration #) — a second objectKey reference class in the same database this report never queries; see residualNotes.',
+  'INCONCLUSIVE',
+  'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  'a zero known-registry size makes this trivially true today — see residualNotes',
+  'both',
+  "computeObjectKeyVerdict() is scoped to status='approved' only, matching the task's literal scope ('approved read-source configs'). draft/retired counts are still reported under byStatus for completeness, but a draft config can be approved after this inventory runs — decision (γ)'s own 'before activation' framing means the approved-only headline can understate the eventual backfill list; re-run before activation, not once.",
+  "distinct integration_external_systems.kind strings and their row counts — the raw material for decision (β)'s explicit alias map and migration list. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  'draft_and_retired_object_keys_excluded_from_the_headline_verdict',
+  'incomplete_owed_disabled',
+  'integration_write_target_configs_object_deliberately_out_of_scope',
+  'known_registries_empty_by_design',
+  'no_customer_deployment_connection',
+  'ok',
+  'report',
+  'this is reported regardless of registeredness — see coverage.canonicalObjectKeyInventory.byStatus.unexpected',
+]
+
+const EXPECTED_MISSING_TABLES = [
+  '#-#-#T#:#:#.#Z',
+  "A second objectKey reference class exists in the same database: integration_write_target_configs.object (migration #, External-API WRITE self-service W#). This inventory does NOT probe it. Reason: the ledger's decision (γ) scope (§# step #.#, §#.# B-#) is the READ-side qualification-input tuple's objectKey, and the task this script was built for is scoped to that tuple; the write-target config table is a separate, config-time-only surface (no dry-run/apply/runtime route per its migration header) that decision (γ)'s registry may also need to cover eventually, but that is a follow-up inventory scope decision, not an oversight in this one. A canonical object referenced ONLY by a write-target config (never by a read-source config) is invisible to this report.",
+  "Both KNOWN_CERTIFIED_CONNECTOR_KINDS and KNOWN_CANONICAL_OBJECT_KEYS are empty. Neither decision (β) nor decision (γ) has produced a first-party registry yet, so today every distinct value observed is reported as unregistered — that is the correct, honest state, not a defect. This inventory exists to produce the raw list a human uses to populate those registries; it never populates them itself.",
+  'DB rows only, in the ONE connected database, at the moment queried. Says nothing about kinds referenced only in code/fixtures, or about a different deployment/database this run was not pointed at.',
+  'DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here. Also deliberately out of scope: integration_write_target_configs.object (migration #) — a second objectKey reference class in the same database this report never queries; see residualNotes.',
+  'INCONCLUSIVE',
+  'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  'both',
+  "computeObjectKeyVerdict() is scoped to status='approved' only, matching the task's literal scope ('approved read-source configs'). draft/retired counts are still reported under byStatus for completeness, but a draft config can be approved after this inventory runs — decision (γ)'s own 'before activation' framing means the approved-only headline can understate the eventual backfill list; re-run before activation, not once.",
+  'coverage is partial — the all-statuses kind count is UNAVAILABLE',
+  'coverage is partial — the approved-status objectKey count is UNAVAILABLE',
+  "distinct integration_external_systems.kind strings and their row counts — the raw material for decision (β)'s explicit alias map and migration list. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+  'draft_and_retired_object_keys_excluded_from_the_headline_verdict',
+  'integration_write_target_configs_object_deliberately_out_of_scope',
+  'known_registries_empty_by_design',
+  'no_customer_deployment_connection',
+  'report',
+  'skipped_by_flag',
+  "table integration_external_systems not found (probed via information_schema.tables/.columns, table_schema='public', as the DATABASE_URL role — a non-public search_path or missing SELECT/USAGE privileges reports the same as a genuinely absent object)",
+  "table integration_read_source_configs not found (probed via information_schema.tables/.columns, table_schema='public', as the DATABASE_URL role — a non-public search_path or missing SELECT/USAGE privileges reports the same as a genuinely absent object)",
+  'unavailable',
+]
+
+describe('CLOSED VALUE DOMAIN — every public leaf is a safe non-negative integer or a string from a hand-frozen closed set (#4603 P2(a))', () => {
+  test('report top-level key set is EXACTLY {generatedAt, mode, probe, coverage, verdicts, residualNotes, privateArtifact} — was previously unconstrained', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assert.deepEqual(
+      Object.keys(report).sort(),
+      ['coverage', 'generatedAt', 'mode', 'privateArtifact', 'probe', 'residualNotes', 'verdicts'],
+    )
+  })
+
+  test('report.residualNotes is referentially IDENTICAL to the exported RESIDUAL_NOTES — the strongest possible pin on that section, stronger than any content re-derivation', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assert.equal(report.residualNotes, RESIDUAL_NOTES)
+  })
+
+  test('scenario: nothing owed (zero rows both probes) — closed value domain holds', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assertClosedValueDomain(report, EXPECTED_NOTHING_OWED)
+  })
+
+  test('scenario: something owed (REQUIRED verdicts both probes, numeric interpolation exercised) — closed value domain holds', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({
+      schema,
+      counts: {
+        'count.external_system_kinds_all': [{ kind: 'SENTINEL_KIND', n: 1 }, { kind: 'another-unseen-kind', n: 2 }],
+        'count.external_system_kinds_active': [{ kind: 'SENTINEL_KIND', n: 1 }],
+        'count.read_source_config_objects_by_status': [
+          { object: 'SENTINEL_OBJECT', status: 'approved', n: 1 },
+          { object: 'yet-another-object', status: 'draft', n: 1 },
+        ],
+        'count.read_source_config_object_config_divergence': [{ n: 0 }],
+      },
+    })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assertClosedValueDomain(report, EXPECTED_SOMETHING_OWED)
+  })
+
+  test('scenario: unavailable column + --probe beta (not_run branch) — closed value domain holds', async () => {
+    const schema = cloneSchema({ integration_external_systems: { exists: true, columns: ['id', 'kind'] } })
+    const exec = createFakeExec({
+      schema,
+      counts: { 'count.external_system_kinds_all': [{ kind: 'erp:k3-wise-webapi', n: 1 }] },
+    })
+    const report = await buildReport({ exec, probe: 'beta', noPrivateOut: true })
+    assertClosedValueDomain(report, EXPECTED_UNAVAILABLE_AND_NOT_RUN)
+  })
+
+  test('scenario: objectVsConfigObjectDivergence > 0 (INCONCLUSIVE, exercises the R11/R12 reason templates) — closed value domain holds', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({ schema, counts: { ...ZERO_COUNTS, 'count.read_source_config_object_config_divergence': [{ n: 3 }] } })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assertClosedValueDomain(report, EXPECTED_DIVERGENCE_POSITIVE)
+  })
+
+  test('scenario: an out-of-vocabulary (unexpected) status bucket is populated (INCONCLUSIVE, exercises the R14/R15 reason templates) — closed value domain holds', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({
+      schema,
+      counts: { ...ZERO_COUNTS, 'count.read_source_config_objects_by_status': [{ object: 'material', status: 'some_future_status', n: 2 }] },
+    })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assertClosedValueDomain(report, EXPECTED_UNEXPECTED_STATUS)
+  })
+
+  test('scenario: both tables missing (top-level UNAVAILABLE for both probes) — closed value domain holds', async () => {
+    const schema = cloneSchema({
+      integration_external_systems: { exists: false, columns: [] },
+      integration_read_source_configs: { exists: false, columns: [] },
+    })
+    const exec = createFakeExec({ schema, counts: {} })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assertClosedValueDomain(report, EXPECTED_MISSING_TABLES)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Private artefact — fail-closed write behaviour
 // ---------------------------------------------------------------------------
 
@@ -975,6 +1412,11 @@ describe('private artefact write behaviour', () => {
         (err) => {
           assert.match(err.message, /could not be written/)
           assert.doesNotMatch(err.message, /SENTINEL_SHOULD_NOT_APPEAR_IN_ERROR/)
+          // (b) ruling: no err.message, no path.relative(...) of a real target, no stack — the
+          // thrown message must be a fixed, closed-enum-shaped sentence, not filesystem detail.
+          assert.doesNotMatch(err.message, /blocker/)
+          assert.doesNotMatch(err.message, /ENOTDIR|ENOENT|EACCES/)
+          assert.doesNotMatch(err.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
           return true
         },
       )
@@ -994,12 +1436,25 @@ describe('private artefact write behaviour', () => {
 
       const report = await buildReport({ exec, privateOutPath })
       assert.equal(report.privateArtifact.status, 'write_failed_but_nothing_owed')
+      // (b) ruling: closed enum only — a reason CODE, never the raw fs err.message and never the
+      // attempted target path (both could carry filesystem/OS detail this report must not surface).
+      assert.equal(report.privateArtifact.reasonCode, 'FILESYSTEM_WRITE_ERROR')
+      assert.deepEqual(Object.keys(report.privateArtifact).sort(), ['consumableByWave2', 'reasonCode', 'status'])
+      assert.equal(report.privateArtifact.consumableByWave2, true)
+      const serialized = JSON.stringify(report.privateArtifact)
+      assert.doesNotMatch(serialized, /blocker/)
+      assert.doesNotMatch(serialized, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test('--no-private-out skips the write entirely, even when something is owed', async () => {
+  // Pins the NEW fail-closed behaviour for #4603 owner-review P1(2): --no-private-out used to
+  // report bare 'skipped_by_flag' even when a private artefact was genuinely owed (unregistered
+  // kind/objectKey values existed) — a silent SUCCESS that a downstream Wave 2 gate could consume
+  // as "nothing to map". This test formerly pinned that fail-open behaviour; it now pins the
+  // fail-closed replacement — updated, not deleted, per the ruling.
+  test('--no-private-out with something OWED: explicit INCOMPLETE status, not a bare skip — not consumable by Wave 2', async () => {
     const schema = cloneSchema()
     const exec = createFakeExec({
       schema,
@@ -1011,7 +1466,50 @@ describe('private artefact write behaviour', () => {
       },
     })
     const report = await buildReport({ exec, noPrivateOut: true })
+    assert.equal(report.privateArtifact.status, 'incomplete_owed_disabled')
+    assert.equal(report.privateArtifact.consumableByWave2, false)
+    assert.deepEqual(Object.keys(report.privateArtifact).sort(), ['consumableByWave2', 'status'])
+  })
+
+  // The complementary branch: nothing owed + --no-private-out is a genuinely fine, complete run —
+  // must NOT be downgraded to 'incomplete_owed_disabled' just because the flag was passed.
+  test('--no-private-out with NOTHING owed: plain skipped_by_flag, consumable', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+    const report = await buildReport({ exec, noPrivateOut: true })
     assert.equal(report.privateArtifact.status, 'skipped_by_flag')
+    assert.equal(report.privateArtifact.consumableByWave2, true)
+  })
+
+  test("a 'written' privateArtifact carries no real filesystem path — closed status/flag only", async () => {
+    const dir = scratchDir()
+    try {
+      const schema = cloneSchema()
+      const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+      const privateOutPath = path.join(dir, 'private.json')
+      const report = await buildReport({ exec, privateOutPath })
+      assert.equal(report.privateArtifact.status, 'written')
+      assert.equal(report.privateArtifact.consumableByWave2, true)
+      assert.deepEqual(Object.keys(report.privateArtifact).sort(), ['consumableByWave2', 'status'])
+      assert.doesNotMatch(JSON.stringify(report.privateArtifact), /private\.json/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("renderHumanSummary's private-artefact line carries only the closed status token, never a real path (P2(b): stdout is public/committed output)", async () => {
+    const dir = scratchDir()
+    try {
+      const schema = cloneSchema()
+      const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+      const privateOutPath = path.join(dir, 'a-directory-name-that-must-not-leak.json')
+      const report = await buildReport({ exec, privateOutPath })
+      const summary = renderHumanSummary(report)
+      assert.match(summary, /private artefact: written/)
+      assert.doesNotMatch(summary, /a-directory-name-that-must-not-leak/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test('buildPrivateArtifactContent carries the raw detail (this is the ONLY function permitted to)', () => {
@@ -1031,6 +1529,77 @@ describe('private artefact write behaviour', () => {
     assert.deepEqual(content.connectorKinds.allStatuses, bucketed.detail)
     assert.deepEqual(content.objectKeys.approved, objBucketed.detail)
     assert.match(content.warning, /Never commit/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// writePrivateArtifact — #4603 owner-review P2(c): EXCLUSIVE CREATE ONLY. The default `writeFileSync`
+// flag ('w') follows a symlink at the target path and truncates/overwrites an existing regular
+// file; `mode: 0o600` only constrains permissions on a file THIS call creates, it does not tighten
+// an already-existing target. All three refusals below are proven directly at the writePrivateArtifact
+// unit, plus the clean-create positive control that proves the guard does not just reject everything.
+// ---------------------------------------------------------------------------
+
+describe('writePrivateArtifact — exclusive create; refuses a symlink and refuses an existing target', () => {
+  function scratchDir() {
+    return mkdtempSync(path.join(tmpdir(), 'gip-authority-inventory-wpa-test-'))
+  }
+
+  test('POSITIVE CONTROL: clean create succeeds — new file, correct content, mode 0o600', () => {
+    const dir = scratchDir()
+    try {
+      const target = path.join(dir, 'sub', 'private.json')
+      writePrivateArtifact(target, { hello: 'world' })
+      const written = JSON.parse(readFileSync(target, 'utf8'))
+      assert.deepEqual(written, { hello: 'world' })
+      const mode = statSync(target).mode & 0o777
+      assert.equal(mode, 0o600)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('REFUSAL 1: an existing regular file at the target is refused — throws, and its content is untouched (no overwrite)', () => {
+    const dir = scratchDir()
+    try {
+      const target = path.join(dir, 'private.json')
+      writeFileSync(target, 'PRE-EXISTING CONTENT — must survive')
+      assert.throws(() => writePrivateArtifact(target, { should: 'never land' }))
+      assert.equal(readFileSync(target, 'utf8'), 'PRE-EXISTING CONTENT — must survive')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('REFUSAL 2: a DANGLING symlink at the target (points at a nonexistent path) is refused — throws, symlink left unchanged, target never created', () => {
+    const dir = scratchDir()
+    try {
+      const target = path.join(dir, 'private.json')
+      const nonexistentDest = path.join(dir, 'this-path-does-not-exist.json')
+      symlinkSync(nonexistentDest, target)
+      assert.throws(() => writePrivateArtifact(target, { should: 'never land' }))
+      // The symlink node itself must be untouched — writeFileSync's default 'w' flag would have
+      // CREATED nonexistentDest and written through the dangling link; O_EXCL must refuse before that.
+      assert.equal(readlinkSync(target), nonexistentDest)
+      assert.throws(() => statSync(nonexistentDest)) // still does not exist — nothing was created through the link
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('REFUSAL 3: a symlink at the target pointing at a REAL file is refused — throws, and the pointed-to file is unmodified (proves the write never followed the link)', () => {
+    const dir = scratchDir()
+    try {
+      const target = path.join(dir, 'private.json')
+      const realFile = path.join(dir, 'some-other-real-file.json')
+      writeFileSync(realFile, 'REAL FILE CONTENT — must survive, must never be overwritten via the symlink')
+      symlinkSync(realFile, target)
+      assert.throws(() => writePrivateArtifact(target, { should: 'never land' }))
+      assert.equal(readFileSync(realFile, 'utf8'), 'REAL FILE CONTENT — must survive, must never be overwritten via the symlink')
+      assert.equal(readlinkSync(target), realFile)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

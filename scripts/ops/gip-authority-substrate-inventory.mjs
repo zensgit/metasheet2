@@ -81,9 +81,11 @@
  *
  * Exit codes:
  *   0  ran successfully (a MAPPING_REQUIRED / BACKFILL_REQUIRED verdict is information, not failure)
- *   1  unexpected runtime/DB error, OR the private artefact was owed (unregistered/unmapped count
- *      > 0) but could not be written — fails closed rather than reporting aggregate-only success
- *      while silently dropping the raw detail a human needs to act on it
+ *   1  unexpected runtime/DB error; OR the private artefact was owed (unregistered/unmapped count
+ *      > 0) but could not be written; OR it was owed but --no-private-out disabled the write
+ *      (report.privateArtifact.consumableByWave2 === false) — all three fail closed rather than
+ *      reporting aggregate-only success while silently dropping the raw detail a human needs to
+ *      act on it, or letting a caller read "ran successfully" as "this run is a complete inventory"
  *   2  required input missing (DATABASE_URL absent outside --dry-run)
  */
 
@@ -160,6 +162,28 @@ const QUERY_ALLOWLIST = Object.freeze({
       "rows where the object column and config->>'object' disagree — a values-free integrity check; a non-zero result means some backfill/mapping decision fed only by the object column would miss rows whose stored config JSON disagrees with it. IS DISTINCT FROM (not <>) is deliberate: a row whose config JSON carries no 'object' key at all has config->>'object' = NULL, and IS DISTINCT FROM (unlike <>) treats object <> NULL as true rather than UNKNOWN per the SQL standard's IS DISTINCT FROM semantics — a missing key in config counts as a divergence, not a silent pass. A prior session in this PR reported exercising this against a seeded row with no 'object' key on an ephemeral local Postgres instance that was discarded afterward with no transcript captured — see PR body's caveat on that claim; this fix pass did not have a live Postgres runtime available to reproduce it independently, so treat the missing-key behaviour as following from the documented SQL semantics of IS DISTINCT FROM, not as an independently-reproduced live-DB proof.",
   },
 })
+
+// A row count is only ever trustworthy if it is a non-negative SAFE integer. `Number(x) || 0`
+// (the prior shape of this predicate) turns undefined/null/''/'abc'/NaN into a silent 0 — the
+// single most dangerous wrong answer for a precondition probe, because "0 unregistered" is
+// exactly the green light a downstream gate would consume. Fail closed instead: anything that is
+// not a genuinely-observed non-negative safe integer must make the surrounding coverage
+// UNAVAILABLE (-> INCONCLUSIVE at the verdict layer), never silently read as zero.
+//
+// `typeof value === 'number'` is correct against the real driver, not merely convenient in tests:
+// every allowlisted count query casts with `count(*)::int` (int4), and node-postgres parses int4
+// results to native JS numbers. An accidental switch to a bigint-returning cast (int8/count with
+// no cast) would come back from `pg` as a STRING — and this predicate correctly fails that closed
+// too, rather than coercing it.
+function isSafeNonNegativeInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+// Fixed, values-free reason used whenever a row count fails the safe-integer check above. Never
+// interpolates the observed value, the row index, or which row — those could themselves be, or be
+// derived from, database content; the fact that this happened is the entire actionable signal.
+const INVALID_COUNT_REASON =
+  'a row count value returned by the connected database was not a non-negative safe integer — treated as INCONCLUSIVE, never defaulted to zero'
 
 function assertReadOnlyAllowlist(allowlist) {
   for (const [tag, entry] of Object.entries(allowlist)) {
@@ -297,6 +321,10 @@ function buildPlan(schema, { probe = 'both' } = {}) {
 // the counts. writePrivateArtifact() is the only place `detail` may land.
 // ---------------------------------------------------------------------------
 
+// Returns EITHER { status: 'ok', counts, detail } OR { status: 'invalid_count', reason } — never
+// a throw a caller could swallow, and never counts built from a coerced/defaulted bad value. A
+// single anomalous row count invalidates the whole bucket rather than silently zeroing just that
+// row: a partial "mostly trustworthy" count is exactly the shape a human skims past.
 function bucketByRegistry(rows, knownSet, { valueKey, countKey = 'n' }) {
   const known = new Set(knownSet)
   let registeredDistinct = 0
@@ -307,7 +335,11 @@ function bucketByRegistry(rows, knownSet, { valueKey, countKey = 'n' }) {
   const detail = []
   for (const row of rows) {
     const value = row[valueKey]
-    const n = Number(row[countKey]) || 0
+    const rawCount = row[countKey]
+    if (!isSafeNonNegativeInteger(rawCount)) {
+      return { status: 'invalid_count', reason: INVALID_COUNT_REASON }
+    }
+    const n = rawCount
     totalRows += n
     const isKnown = known.has(value)
     if (isKnown) {
@@ -320,6 +352,7 @@ function bucketByRegistry(rows, knownSet, { valueKey, countKey = 'n' }) {
     detail.push({ value, count: n, registered: isKnown })
   }
   return {
+    status: 'ok',
     counts: {
       distinctCount: rows.length,
       totalRows,
@@ -343,6 +376,9 @@ async function executeKindInventoryPlan(exec, plan) {
 
   const allRes = await runQuery(exec, plan.allStatuses.tag, plan.allStatuses.params)
   const all = bucketByRegistry(allRes.rows, KNOWN_CERTIFIED_CONNECTOR_KINDS, { valueKey: 'kind' })
+  // allStatuses is what the verdict is computed from (see computeKindVerdict) — an invalid count
+  // there invalidates the whole probe, not just this sub-field, the same way a missing table does.
+  if (all.status !== 'ok') return { status: 'unavailable', reason: all.reason }
 
   let active
   if (plan.activeOnly.status !== 'ok') {
@@ -350,7 +386,9 @@ async function executeKindInventoryPlan(exec, plan) {
   } else {
     const activeRes = await runQuery(exec, plan.activeOnly.tag, plan.activeOnly.params)
     const bucketed = bucketByRegistry(activeRes.rows, KNOWN_CERTIFIED_CONNECTOR_KINDS, { valueKey: 'kind' })
-    active = { status: 'ok', counts: bucketed.counts, detail: bucketed.detail }
+    active = bucketed.status === 'ok'
+      ? { status: 'ok', counts: bucketed.counts, detail: bucketed.detail }
+      : { status: 'unavailable', reason: bucketed.reason }
   }
 
   return {
@@ -383,6 +421,9 @@ async function executeObjectKeyInventoryPlan(exec, plan) {
   const byStatus = {}
   for (const key of ['draft', 'approved', 'retired', 'unexpected']) {
     const bucketed = bucketByRegistry(split[key], KNOWN_CANONICAL_OBJECT_KEYS, { valueKey: 'object' })
+    // An invalid count in ANY status bucket invalidates the whole probe (computeObjectKeyVerdict
+    // reads approved/unexpected together; a partial trustworthy read is not a safe read).
+    if (bucketed.status !== 'ok') return { status: 'unavailable', reason: bucketed.reason }
     byStatus[key] = { status: 'ok', counts: bucketed.counts, detail: bucketed.detail }
   }
 
@@ -391,7 +432,12 @@ async function executeObjectKeyInventoryPlan(exec, plan) {
     divergence = { status: 'unavailable', reason: plan.divergence.reason }
   } else {
     const { rows } = await runQuery(exec, plan.divergence.tag, plan.divergence.params)
-    divergence = { status: 'ok', count: rows.length ? Number(rows[0].n) || 0 : 0 }
+    // A COUNT(*) query always returns exactly one row; anything else (zero or several) is itself
+    // an anomaly, not just the value inside it — fail closed rather than defaulting to 0.
+    const rawCount = rows.length === 1 ? rows[0].n : undefined
+    divergence = isSafeNonNegativeInteger(rawCount)
+      ? { status: 'ok', count: rawCount }
+      : { status: 'unavailable', reason: INVALID_COUNT_REASON }
   }
 
   return { status: 'ok', byStatus, divergence }
@@ -634,9 +680,16 @@ function buildPrivateArtifactContent(coverage, { generatedAt }) {
   }
 }
 
+// EXCLUSIVE CREATE ONLY. `flag: 'wx'` is O_CREAT|O_EXCL|O_WRONLY: per POSIX, open() with O_EXCL
+// fails EEXIST if the path already names ANYTHING — a regular file, OR a symlink node, even a
+// DANGLING one whose target does not exist — without ever following that symlink to write through
+// it. This closes both refusals atomically (no separate "check then write" race): never overwrite
+// an existing target, never follow a symlink at the target path. `mode: 0o600` only constrains the
+// permissions of a file THIS call creates; it cannot and does not retroactively tighten a
+// pre-existing target, which is exactly why exclusivity (not just the mode) is the real guard.
 function writePrivateArtifact(filePath, content) {
   mkdirSync(path.dirname(filePath), { recursive: true })
-  writeFileSync(filePath, JSON.stringify(content, null, 2) + '\n', { mode: 0o600 })
+  writeFileSync(filePath, JSON.stringify(content, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
 }
 
 function defaultPrivateOutputPath(repoRoot, generatedAt) {
@@ -669,29 +722,51 @@ async function buildReport({ exec, repoRoot = REPO_ROOT, probe = 'both', private
   const kindVerdict = coverage.kindInventory.status === 'not_run' ? null : computeKindVerdict(publicKindSummary)
   const objectKeyVerdict = coverage.objectKeyInventory.status === 'not_run' ? null : computeObjectKeyVerdict(publicObjectKeySummary)
 
-  let privateArtifact = { status: 'not_attempted' }
-  if (!noPrivateOut) {
-    const owed = shouldWritePrivateArtifact(coverage)
+  // Computed unconditionally — needed BOTH to decide whether a disabled write is fail-closed
+  // (below) and, unchanged from before, to decide whether a write failure is fail-closed.
+  const owed = shouldWritePrivateArtifact(coverage)
+
+  let privateArtifact
+  if (noPrivateOut) {
+    // A private artefact is the ONLY place raw kind/objectKey detail can go (see the header's
+    // OUTPUT DISCIPLINE section). If one is owed (unregistered/unmapped values exist) and the
+    // operator disabled the write, this run is NOT a complete inventory: the raw list a human
+    // needs to author the (β)/(γ) decisions never landed anywhere. Say so structurally —
+    // `consumableByWave2: false` — rather than reporting the same bare 'skipped_by_flag' a
+    // genuinely-nothing-owed run gets; main() also turns this into a non-zero exit code (see the
+    // header's Exit codes list) so a caller relying on exit status alone still fails closed.
+    privateArtifact = owed
+      ? { status: 'incomplete_owed_disabled', consumableByWave2: false }
+      : { status: 'skipped_by_flag', consumableByWave2: true }
+  } else {
+    // Deterministic default target: DEFAULT_PRIVATE_OUTPUT_DIR + this report's own `generatedAt`
+    // (see defaultPrivateOutputPath()) — an operator who did not pass --private-out can always
+    // reconstruct a 'written' artefact's location from those two already-public values. The real
+    // filesystem path is never echoed into privateArtifact itself: report.privateArtifact is
+    // public/committed output (stdout, --json, the human summary — see the header's OUTPUT
+    // DISCIPLINE section), and an operator-supplied --private-out path is untrusted input that
+    // could itself carry a customer directory name or hostname, so it must never round-trip back
+    // out through a channel this file promises is values-free.
     const targetPath = privateOutPath || defaultPrivateOutputPath(repoRoot, generatedAt)
     try {
       const content = buildPrivateArtifactContent(coverage, { generatedAt })
       writePrivateArtifact(targetPath, content)
-      privateArtifact = { status: 'written', path: path.relative(repoRoot, targetPath) }
+      privateArtifact = { status: 'written', consumableByWave2: true }
     } catch (err) {
       if (owed) {
-        // Fail closed: raw detail existed and needed a home; the write failed. The error itself
-        // must stay values-free — never interpolate the raw content, only the path attempted.
+        // Fail closed: raw detail existed and needed a home; the write failed. The thrown message
+        // stays values-free too — never interpolate the target path or the underlying err.message,
+        // either of which can carry filesystem/OS detail (a customer directory name, a hostname)
+        // that has no business in anything that could end up in a log or a PR body.
         throw new Error(
-          `gip-authority-substrate-inventory: unregistered kind/objectKey values exist but the private artefact could not be written (target: ${path.relative(repoRoot, targetPath)}): ${err instanceof Error ? err.message : String(err)}`,
+          'gip-authority-substrate-inventory: unregistered kind/objectKey values exist but the private artefact could not be written — refusing to report aggregate-only success while silently dropping the raw detail a human needs to act on it',
         )
       }
       // Nothing was owed (every observed value already matches the known registry, or there was
       // nothing to observe) — a write failure here is a filesystem nuisance, not a lost decision
-      // input. Report it, do not fail the run.
-      privateArtifact = { status: 'write_failed_but_nothing_owed', path: path.relative(repoRoot, targetPath), reason: err instanceof Error ? err.message : String(err) }
+      // input. Report it via a closed reason CODE only — never err.message or the target path.
+      privateArtifact = { status: 'write_failed_but_nothing_owed', consumableByWave2: true, reasonCode: 'FILESYSTEM_WRITE_ERROR' }
     }
-  } else {
-    privateArtifact = { status: 'skipped_by_flag' }
   }
 
   return {
@@ -807,7 +882,11 @@ function renderHumanSummary(report) {
     lines.push(`  verdict: ${report.verdicts.canonicalObjectKey.verdict}`)
   }
   lines.push('')
-  lines.push(`private artefact: ${report.privateArtifact.status}${report.privateArtifact.path ? ` (${report.privateArtifact.path})` : ''}`)
+  // No real filesystem path is ever printed here — see the (b) ruling above writePrivateArtifact()
+  // in the source: an operator-supplied --private-out path is untrusted input, and this line is
+  // public/committed output. An operator who used the default location can reconstruct it from
+  // DEFAULT_PRIVATE_OUTPUT_DIR + this report's own generatedAt (see defaultPrivateOutputPath()).
+  lines.push(`private artefact: ${report.privateArtifact.status}`)
   lines.push('')
   lines.push('residual notes:')
   for (const n of report.residualNotes) lines.push(`  - [${n.id}] ${n.description}`)
@@ -953,6 +1032,12 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       process.stdout.write(renderHumanSummary(report))
       process.stdout.write('\n' + JSON.stringify(report, null, 2) + '\n')
     }
+    // The report is still printed above even in this case — a caller reading stdout gets the full
+    // explanation — but the run must not be mistakable for a complete inventory by exit code alone
+    // (see the header's Exit codes list and the ruling on ~L672 in the PR that added this check).
+    if (report.privateArtifact.consumableByWave2 === false) {
+      return 1
+    }
     return 0
   } catch (err) {
     process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -977,6 +1062,8 @@ export {
   EXTERNAL_SYSTEM_STATUSES,
   READ_SOURCE_CONFIG_STATUSES,
   assertReadOnlyAllowlist,
+  isSafeNonNegativeInteger,
+  INVALID_COUNT_REASON,
   runQuery,
   tableExists,
   probeColumns,
@@ -993,6 +1080,7 @@ export {
   RESIDUAL_NOTES,
   shouldWritePrivateArtifact,
   buildPrivateArtifactContent,
+  writePrivateArtifact,
   defaultPrivateOutputPath,
   buildReport,
   buildDryRunReport,
