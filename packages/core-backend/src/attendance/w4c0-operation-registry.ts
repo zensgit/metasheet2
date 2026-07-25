@@ -642,6 +642,27 @@ export async function attendanceResultOperationPreflightV1(
     return { kind: 'replay', responses: lockedClassification.responses }
   }
 
+  // Section 8.2 step 2 (P07/P08): after the operation rows, lock and re-read the
+  // V1 operational-job reservation for this batch tuple. A W4C-0 synchronous
+  // caller has no worker adapter that could execute-and-terminalize a reserved
+  // job, so ANY existing reservation is closed conflict/remediation here —
+  // exactly one side reserves the tuple, and the waiter that re-reads under the
+  // class-`10` locks fails with zero conflicting DML (section 12.1). The
+  // `(queued, all-new)` admit-for-execution branch (resolved posture equal to
+  // the frozen `accepted_write_posture`) belongs to the P07 cutover slice.
+  if (plan.batch !== null && (plan.entrypoint === 'import_batch' || plan.entrypoint === 'integration_batch')) {
+    const reservedJob = await trx.query(
+      `SELECT 1 FROM attendance_import_jobs
+        WHERE org_id = $1 AND w4_entrypoint = $2 AND w4_batch_command_id = $3::uuid
+          AND w4_contract_version IS NOT NULL
+        FOR UPDATE`,
+      [plan.orgKey, plan.entrypoint, plan.batch.batchCommandId],
+    )
+    if (reservedJob.rows.length > 0) {
+      conflict('ATTENDANCE_OPERATION_BATCH_CONFLICT')
+    }
+  }
+
   // All-new: claim batch first (FK), then item rows in stable key order.
   if (batchIdentity && plan.batch) {
     await insertClaimedBatchRow(trx, org, batchIdentity, auth, plan.batch)
