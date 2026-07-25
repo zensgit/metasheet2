@@ -515,3 +515,165 @@ after those operation rows」）FOR UPDATE 重读 V1 job reservation；存在任
     eligible、ORG_ENQ_FREEZE 终态 suspended、两个 worker org 的 shadow 行）、
     operation/batch/job/attendance_records fixture 行。**`ms2_w4c0_e3fresh` 保留给
     门审复跑**（753/753 证据现场；复跑整步须重建库，理由同未竟 43）。
+
+---
+
+## Stage F — mutation self-check + PR (DONE, no net code diff — commit is this handoff + PR only)
+
+授权来源：taskbook §2 Stage F + advisor 三条房规（多道门互掩护/fixture 自然形状/正控）+
+advisor 给的四条 mechanics 提醒（harness mutation 不算证据；SQL guard mutation 要让 DDL
+真的重新生效；三桶账本 RAN/NOT RUN/NOT APPLICABLE；PR 前重新核对 main 未漂移）。
+
+### 0. 起手核实
+
+- `git fetch origin main && git rev-list --count HEAD..origin/main` = 0，`..HEAD` = 9 —— main
+  未漂移，本分支仍是 fresh-main 的 9 个提交（Stage A-E3 + 两条 ratify/amendment doc + 一条
+  integration doc，见 `git log --oneline`）。§12 串行合同持续满足。
+- Stage A-E3 的既有测试全部先重跑一遍确认起点绿：unit 60/60、六个 w4c0 db 文件 59/59
+  （ms2_w4c0）、collector 12/12 —— 与各阶段 handoff 记录的数字一致，说明本阶段开工前状态
+  未被并行会话污染。
+
+### 1. Mutation 记账 —— RAN（先 commit 后 mutate、精确路径 `git checkout -- <file>` 还原，
+   每条都给 flip set 而非计数；SQL 侧一律核实是「结构真的改了」而非「测试自己的 harness 改了」）
+
+**桶 A — 身份/advisory 层（`src/attendance/w4c0-identity.ts`，覆盖修订 §2 门 3/4/5/6/8）**
+
+| # | 变异 | Flip set（unit=60 题 / 相关 DB 套件） | 还原核验 |
+|---|---|---|---|
+| M1 | `OPERATION_KEY_PREFIX` 尾字节 v1→v2 | 3 red: golden 三 namespace、uppercase-UUID 一致性、final-key 排序/去重；57 green | `git diff --stat`=空 + 单测 37/37 |
+| M2 | class-`10`/class-`11` 前缀位互换 | 同上 3 red / 57 green（金标同时钉了 class 位与数值） | 同上 |
+| M3 | `toSortedUniqueSignedKeys` 去掉 `Map` 去重 | 2 red: 排序/去重用例、强制同键碰撞用例；58 green（金标不受影响，纯排序值不变） | 同上 |
+| M4 | `requireOperationWitness` 去掉 WeakSet membership 检查 | 1 red: gate-4 forgery 用例（唯一断这条的用例）；59 green | 同上 |
+| M5 | `mintOrgWitness` 去掉 `default`×posture 门 | 2 red: default×shadow 拒绝腿、DB-reload 拒绝腿；58 green，且 `accepts default under legacy_projection_only` 正控保持绿（证明门是排他的，不是共因失败） | 同上 |
+| M6 | rehydrator `derived_item` 分支去掉 drift 比较 | 1 red（E2 db）: gate 5 逐字段 drift 矩阵；9 green | `npx vitest run` E2 10/10 |
+| M8 | deadline 从「入口一次」改成「每 key 重置」 | 1 red（E3）: `multi-key helper deadline`；**+1 cascading**（见 §2 房规记录）；其余 9 green | E3 单跑 11/11 |
+| M9 | 去掉 acquisition 后的第二次预算检查 | 1 red（E3）: `helper-origin budget expiry`；同款 cascading；其余 9 green | E3 单跑 11/11 |
+| M10(即任务书 M12) | 去掉 acquisition 前的预算检查 | 1 red（E3，isolated `-t` 复核）: 同一用例 `issued()` 断言从 0 变非 0——证明「零 SQL」腿不是空转 | 同上 |
+| M11 | 成功路径末尾去掉 `lock_timeout` 恢复 | 1 red（unit）: 排序/去重用例里内嵌的恢复值断言；DB 套件 19/19 不受影响（该断言只在 unit mock trx 里查 SQL 调用序列） | 单测 37/37 |
+| M13 | `productionMonotonicNow` 换成 `Date.now()`（wall-clock） | **0 red** —— 真空变异，见 §3 | 无需还原（属发现） |
+
+**桶 B — deferred 约束（迁移文件；`up()` 是 `CREATE TABLE IF NOT EXISTS` 但函数体用
+`CREATE OR REPLACE FUNCTION`，故触发器函数体的编辑会被 E1/E2 自身 `beforeAll` 里的
+`up(mainMigrationDb)` 自动重新落到 ms2_w4c0——已验证；表级 CHECK 约束不会，需要 psql 手工
+`DROP/ADD CONSTRAINT` 并手工核验字节级还原，见桶 D）**
+
+| # | 变异 | Flip set | 还原核验 |
+|---|---|---|---|
+| M14 | `attendance_w4_batches_claimed_commit_guard` + `attendance_w4_operation_items_commit_guard` 的 `<>` 弱化为 `<`（超额子项不再拒） | 1 red（E1）: `completed-batch item-count guard rejects incomplete AND extra children...`；19 green | 迁移文件 `git checkout --`，E1 重跑 20/20，且 psql 直查两个函数体确认字面回到 `<>` |
+| M15 | `attendance_w4_calculation_children_commit_guard` + `attendance_w4_segment_children_commit_guard` 同款弱化 | 1 red（E1）: `two-sided segment count guard...`；19 green | 同上，20/20 |
+| — | `SET CONSTRAINTS trg_aro_claimed_commit_guard IMMEDIATE` 单事务探针（不改 DDL，纯 session 级） | INSERT 本身立刻报 `W4C0_CLAIMED_COMMIT`（默认 deferred 模式下同一 INSERT 会成功，只有 COMMIT 才报——smoke 测试已证）——证明该约束真的是 deferred 而非「反正最终都会拒绝」 | 事务内 `ROLLBACK`，零持久状态变化 |
+
+**桶 C — registry 层（`src/attendance/w4c0-operation-registry.ts`）**
+
+| # | 变异 | Flip set | 还原核验 |
+|---|---|---|---|
+| M16 | `reserveAttendanceImportJobW4V1` 里去掉 class-`10` 锁获取 | 1 red（E3）: `P07 enqueue vs synchronous caller...`；**+1 cascading**；其余 17 green | E3+registry 19/19 |
+| M17 | `operationRowCongruent` 去掉 `command_fingerprint` 比较 | 1 red（registry db）: `shadow single command: claim+seal -> commit -> zero-DML congruent replay; payload/actor drift 409s`；28 green | registry+E3+E2 29/29 |
+
+**桶 D — DB CHECK/触发器（迁移文件 + 一次 psql 直接 `ALTER TABLE`，因为表级 CHECK 不受
+`CREATE TABLE IF NOT EXISTS` 的 idempotent `up()` 保护）**
+
+| # | 变异 | Flip set | 还原核验 |
+|---|---|---|---|
+| M18 | `trg_aij_w4_guard` 冻结字段列表去掉 `w4_accepted_write_posture` | 1 red（E1）: `P07 frozen fields: every identity/posture/vector field refuses UPDATE including null->1 promotion...`；19 green | 迁移文件还原，E1 20/20 |
+| M19 | pointer 触发器去掉「pointer target 必须 authoritative completed/reversed」检查 | 1 red（E1）: `pointer gates: authoritative set_active positive...`；26 green | 迁移文件还原，E1+smoke 27/27 |
+| M20 | psql `ALTER TABLE attendance_result_operations DROP CONSTRAINT chk_aro_derived_identity`（直接改活库，不经迁移文件——验证「表级 CHECK 不会被 up() 自动重置」这一 mechanics 本身） | 3 red: E2 gate2（六路 cross-namespace masquerade）、E2 gate3（tuple 突变矩阵）、smoke 自己的负例；14 green | psql `ADD CONSTRAINT`（同字面，`pg_get_constraintdef` 逐字核对）；**发现并清理了 2 条被本变异污染进库的行**（该窗口内两条 masquerade INSERT 因约束缺失而落库成功，`ALTER TABLE ... DISABLE/ENABLE TRIGGER trg_..._deny_delete` 临时开洞删除后再合上，append-only 面板复位）；三文件复跑 37/37 |
+
+**桶 E — collector（`scripts/attendance/w4c0-dml-inventory/*.cjs`，纯静态分析，风险最低）**
+
+| # | 变异 | Flip set | 还原核验 |
+|---|---|---|---|
+| M21a | `table-classification.cjs` 删除 `attendance_record_segments` 的 `w4_canonical` 映射 | **0 red** —— 真空变异，见 §3（该表当前无任何运行时写点） | `git checkout --` |
+| M21b | 同文件删除 `attendance_result_operations` 的映射（该表被 `w4c0-operation-registry.ts` 真实写入） | 2 red: `exact-head HEAD scan...`、`positive control: raw COPY into a W4 authoritative (canonical) table...`；10 green（含另外 5 个 positive control） | `git checkout --`，12/12 |
+| M22 | `collector.cjs` 的 `SQL_RESERVED_NON_TABLE_WORDS` 删除 `'SET'` | **0 red** —— 真空变异，见 §3 | `git checkout --` |
+
+Stage D 自身既有的两条 mutation（P01 claim 认领删除、`isCanonicalBoundaryPath` 恒 true——
+commit `d6e6e5200` 已记录，各自 2 red/10 green 含全部 positive control）本阶段未重跑，直接
+引用其证据链，不重复计入桶 E。
+
+### 2. 两条测试基础设施发现（非生产代码缺陷，如实记录）
+
+- **E3 套件内失败断言会遗留一次跨用例的资源占用**：M8/M9/M16 三次变异都观察到「目标用例
+  red + 文件顺序上紧邻的下一个用例也 red（伴随异常耗时，如 5459ms/8042ms）」。用
+  `-t` 单独重跑该「下一个用例」（变异仍在场）——**始终绿**，证明它不是被变异语义牵连，而是
+  前一个用例的失败路径（`expect` 抛出）跳过了某个 client 释放/事务收尾步骤，留下一把锁或
+  一个连接直到下一个测试碰上超时。全新库（`ms2_w4c0_e3fresh`）单次整跑不受影响（已在
+  Stage E3 完成项证实 753/753、59/59 files）。**建议后续片给 E3 补一个 `afterEach` 级别的
+  连接/锁清理兜底**，但这不是 Stage F 判定为需要立即修的生产缺陷——纯测试基础设施韧性问题。
+- 每次都通过「还原变异 + 单独重跑该级联用例」以及「还原后跑整份 E3 文件」两步确认：级联
+  红色不会在变异被还原后残留（E3 baseline 每次都精确回到 11/11）。
+
+### 3. 三桶账本
+
+**RAN**（§1 全部表格 15 条变异 + 桶 A 内 1 条纯事务级 `SET CONSTRAINTS` 探针 + Stage D 既有
+2 条 = 共 18 条，全部先 commit 后 mutate，`git checkout -- <精确文件>` 或 psql
+`ADD/DROP CONSTRAINT`（逐字核对）还原，每条都给出 flip set 而非计数）。
+
+**真空变异（跑了，但零翻红——如实记录为发现而非「已证明」）**：
+- M13（wall-clock）：生产 `monotonicNow()` 用 `performance.now()`（真单调），但没有任何测试
+  注入真实的挂钟回拨/跳变场景去区分它与 `Date.now()`——两者在一次正常测试运行内前进方式
+  几乎相同。这是「结构上正确但没有专门测试」的窄口径缺口，非契约违反。
+- M21a（`attendance_record_segments` 映射删除）：该表目前在 W4C-0 范围内零写点（segment/
+  calculation 写手要到 W4C-1+ 计算器落地才存在），故其 `w4_canonical` 分类当前是「占位」，
+  collector 看不到任何触发它的站点。等 later slice 真正写这张表时才会变成可判别的门。
+- M22（`SET` 保留字删除）：没有任何测试断言「baseline 重生成后不出现幽灵 `SET` 表调试」——
+  这是测试矩阵的一个真实空白（collector 测试只查 unclaimed/unclassified/outsideBoundary
+  三个零容忍计数，不查「幽灵表名」这一类）。**呈裁/待补点**：若门审要求，需要给 collector
+  测试加一条「baseline manifest 不含任何值为 SQL 保留字的表名」断言。
+
+**未测但有专门测试点名过、找不到对应正控/负控（真实覆盖缺口，非「没空跑」）**：
+- M7（SQL-error-swallow）：锁 §12.1 明确点名「swallowing the helper's SQL error fails its
+  own cross-connection leg」，但翻遍 unit/E1/E2/E3 都没有一条测试构造「acquisition 之外的
+  SQL 抛一个非 55P03 错误，断言它原样传播、不被吞」。`isLockNotAvailable` 的 catch 块目前
+  只在 `code==='55P03'` 时才 remap，其它错误 `throw error` 原样抛——代码读起来是对的，
+  但没有专门测试钉死这条。**呈裁/待补点**：建议 Stage E 补丁或 W4C-1 补一条 mock-trx 测试。
+
+**NOT APPLICABLE — W4C-0 无实现面（不是「没时间」，是「代码还不存在」，advisor 提醒过不能
+静默塞进「未跑」桶）**：
+- rollback-closure eligibility 谓词（锁 §12.1「closure of a batch with any frozen target
+  preimage...returns 409...removing each eligibility predicate fails its own leg」）——
+  handoff 未竟 #45：W4C-0 只交付表 + 不可变性，closure service 不存在。
+- retryable-job scan 逐条合法转移（handoff #53）——transition writer 不在本片。
+- 「all five lock users import `acquireAttendanceCalculationRolloutLock`」——W4C-0 里只有
+  resolver 一个读者，source/rollback/transition/closure 四个写手要到后续片才存在，无法构造
+  「mutating any one caller」的跨调用方变异。
+- 「every first-claiming command / every target writer」caller-side 变异——W4C-0 零生产
+  caller（design-intent），没有多样化调用点可供逐个变异。
+- P07 `(queued, all-completed)` admit-for-execution 分支、suspended 下已排队 job 的
+  idempotent-retention 服务行为（handoff #52/#57）——worker adapter 不在本片。
+- E3 leg 6/8/10 的 worker/enqueue/transition **驱动代码本身**：这些是测试 harness 里手写的
+  「模拟生产调用序列」的 helper 函数，不是生产代码。对它们做「moving terminalization
+  before/after the source transaction」类变异只会让测试自己的 harness 断言翻红，不构成
+  对生产代码的判别性证据（advisor 提醒的边界，也是 handoff #54 原文）——Stage F 没有伪造
+  这类「变异」。
+
+### 4. 全量回归（Stage F 独立实跑，fresh DB，非复用脏库）
+
+- `git fetch origin main && git rev-list --count HEAD..origin/main` = 0（PR 前二次核实，main
+  仍是 `b5ff168e9`，未漂移）。
+- 全新库 `ms2_w4c0_stagef`（`createdb` → `MIGRATION_EXCLUDE` 同 CI → `pnpm db:migrate`，
+  含本迁移在内全链成功）→ **CI 同构 attendance 步整段（59 files）→ 753/753 passed**（60.6s），
+  与 E3 阶段的 `ms2_w4c0_e3fresh` 证据数字一致，零回归。
+- `npx tsc --noEmit`（core-backend）→ exit 0。
+- `node --check` 全部 6 个 Stage D `.cjs` + collector 测试 `.mjs` → 全部 OK（此前各阶段未显式跑过
+  这一步，taskbook §3 点名要求，本阶段补齐）。
+- unit 两文件 → 60/60（零改写）。
+- collector 测试 → 12/12（零改写）。
+- 六个 w4c0 db 文件在 `ms2_w4c0`（保留库，含各阶段累积 fixture）→ 59/59，与 E3 记录一致——
+  证明本阶段全部 mutate/restore 循环零残留污染（除桶 D/M20 主动发现并清理的 2 条被变异污染
+  的行外，其余全部 mutate-then-restore 都是纯内存/事务级，未持久化任何变化）。
+- `git status --short` / `git diff --stat` 全程回到空——**Stage F 对源码零净改动**；本阶段
+  唯一的持久化产物是这份 handoff 更新（下一次 commit）。
+- YAML parse OK（`.github/workflows/plugin-tests.yml`，未改动，纯核对）。
+- 既有测试零改写：本阶段没有编辑任何 `.test.ts`/`.db.test.ts`/`.test.mjs` 文件（每次变异都
+  是产品代码/迁移文件/collector 模块，还原后 git diff 为空）。
+
+### 5. 主动薄弱环节声明（诚实偏离/两读呈裁清单——供 PR body 引用，不在此展开重复各阶段
+   已有的未竟条目）
+
+- M7 SQL-error-swallow：真实覆盖缺口（见 §3），非契约违反，建议后续补测。
+- M13/M22：真空变异，标志两个「结构对但没有专门断言」的窄口径盲区。
+- E3 级联失败（§2）：测试基础设施韧性问题，不影响生产代码正确性判定，但建议补
+  `afterEach` 清理。
+- Stage A-E 已有的呈裁点（handoff 条目 13/14/21/22/23/24/25/27/36/44/45/47/52/55 等）在
+  PR body 单独列出一张 owner-decision 表，不在本节重复。
