@@ -915,6 +915,7 @@ jobs:
             tests/integration/attendance-decision-trace-w5-0.db.test.ts \
             tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
             tests/integration/attendance-work-date-resolver-w2.db.test.ts \
+            tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
