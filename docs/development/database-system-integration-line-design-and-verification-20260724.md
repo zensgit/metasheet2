@@ -26,7 +26,7 @@
 
 This is the line's single design-and-verification document (owner directive: consolidate closeout facts into one MD; stop letting working memos drift). It absorbs and supersedes the session working memos (`/tmp/gip-decision-memo-20260724.md`, `/tmp/b1-paged-read-certification-design-20260724.md` rev‑1) and the retired ad-hoc inventory SQL (NO-GO; §5).
 
-Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲P1-b (probe ≠ paged execution), ⟲P2-a (frozen combinations / no silent downgrade), ⟲P2-b (latent vs telemetry), ⟲P3-a (sealed snapshot not the sole exit). Codex-review absorptions (2026-07-24) are marked ⟲C1 (M0 exact-SHA package policy — BLOCKING), ⟲C2 (inventory-zero coverage map), ⟲C3 (#4580 re-cut + typed 422 as merge condition), ⟲C4 (orderBy = fail-fast, not stable pagination), ⟲C5 (per-capability routing, not per-brand). Owner ratify-review absorptions (2026-07-24, round 2) are marked ⟲R1 (exact-SHA exits: two-proof-only + freeze the new SHA), ⟲R2 (deep-immutable resolution, not provenance-only), ⟲R3 (full-tuple resolver), ⟲R4 (M1 = evidence only; the §4 order wins), ⟲R5 (combinations scoped to PAGED_READ), ⟲R6 (orderingKeySpec closed schema). Package/decision round (owner, 2026-07-24 late): ⟲R7 (complete-package two-SHA structure), plus three recorded decisions — package policy (b) with a build-only authorization boundary; B1-observability NOT opened early; B2 re-cut now as Draft **#4591**, superseding #4580. Qualification-authenticity round (owner, 2026-07-24, round 3): ⟲B (the six §3.0 boundaries). Boundary-review round (owner, 2026-07-24, round 4): ⟲B2 — authority-substrate gate replaces the self-contradictory "latent only" wording; `canonicalObjectVersion` = first-party contract version, drift belongs elsewhere; `systemContentKey` freeze material completed; §4 becomes the single authoritative order, **re-ratified by the owner 2026-07-25 @ `a7c562d34`**. ⟲Codex marks the doc-charter absorption. **⟲OD** marks the **owner decisions ruled 2026-07-25** — the four in the §4.0 roster, plus the approved narrow widening of GIP-D0 §9.2. **⟲B2-self** marks defects in **this revision's own earlier drafts**, corrected in place and tagged rather than silently fixed, so a reader can see which sentences have already been wrong once. Provenance is mixed and is **not** claimed as self-review throughout: the GIP-D0 retraction, the Gate boundary-test restatement and the three SQL Server outcomes came from the **owner's precheck** on the intermediate head; the rest came from adversarial review passes and from self-review.
+Owner-review absorption markers used below: ⟲P1-a (ordering-key layering), ⟲P1-b (probe ≠ paged execution), ⟲P2-a (frozen combinations / no silent downgrade), ⟲P2-b (latent vs telemetry), ⟲P3-a (sealed snapshot not the sole exit). Codex-review absorptions (2026-07-24) are marked ⟲C1 (M0 exact-SHA package policy — BLOCKING), ⟲C2 (inventory-zero coverage map), ⟲C3 (#4580 re-cut + typed 422 as merge condition), ⟲C4 (orderBy = fail-fast, not stable pagination), ⟲C5 (per-capability routing, not per-brand). Owner ratify-review absorptions (2026-07-24, round 2) are marked ⟲R1 (exact-SHA exits: two-proof-only + freeze the new SHA), ⟲R2 (deep-immutable resolution, not provenance-only), ⟲R3 (full-tuple resolver), ⟲R4 (M1 = evidence only; the §4 order wins), ⟲R5 (combinations scoped to PAGED_READ), ⟲R6 (orderingKeySpec closed schema). Package/decision round (owner, 2026-07-24 late): ⟲R7 (complete-package two-SHA structure), plus three recorded decisions — package policy (b) with a build-only authorization boundary; B1-observability NOT opened early; B2 re-cut now as Draft **#4591**, superseding #4580. Qualification-authenticity round (owner, 2026-07-24, round 3): ⟲B (the six §3.0 boundaries). Boundary-review round (owner, 2026-07-24, round 4): ⟲B2 — authority-substrate gate replaces the self-contradictory "latent only" wording; `canonicalObjectVersion` = first-party contract version, drift belongs elsewhere; `systemContentKey` freeze material completed; §4 becomes the single authoritative order, **re-ratified by the owner 2026-07-25 @ `a7c562d34`**. ⟲Codex marks the doc-charter absorption. **⟲OD2** marks the **post-ratification amendments ruled by the owner on 2026-07-25** (§4 step 1.1's characterisation-test wording; the M0-A loopback check). **⟲OD** marks the **owner decisions ruled 2026-07-25** — the four in the §4.0 roster, plus the approved narrow widening of GIP-D0 §9.2. **⟲B2-self** marks defects in **this revision's own earlier drafts**, corrected in place and tagged rather than silently fixed, so a reader can see which sentences have already been wrong once. Provenance is mixed and is **not** claimed as self-review throughout: the GIP-D0 retraction, the Gate boundary-test restatement and the three SQL Server outcomes came from the **owner's precheck** on the intermediate head; the rest came from adversarial review passes and from self-review.
 
 **Upstream contracts this ledger defers to** (⟲B2-self added — their absence is how an implementation artefact
 came to be quoted here as "the ratified formula"): **`GIP-D0` general integration platform design lock**
@@ -439,6 +439,14 @@ added here first.
 | **(γ)** | canonical object contract registry | **first-party only**; immutable registration by **`contractId` + `version`**, versions **append-only**; **no auto-synthesis from customer config**; unregistered ⇒ values-free **`CANONICAL_OBJECT_CONTRACT_UNREGISTERED`**; **inventory + backfill existing references BEFORE activation** | §4 step 1.3, §3.0 B-3 |
 | **(δ)** | B-6 source-column translation scope | **v1 = (c)** — connector-owned, **named, certified HTTP probe actions only**; **SQL builders stay unreachable**; **no** SQL-shaped widening of `approved-config` and **no** invented source-column artefact; SQL path deferred to **(b′) + B1c** behind its own gate | §4 step 1.4, §3.0 B-6 |
 
+**⟲OD2 An inventory TOOL is not an inventory RESULT — the roster's (β)/(γ) inputs are still absent.** The
+probe tooling built for those decisions runs its CI against a **fake executor with no real database**, so it
+establishes only that the tool behaves; it produces **no** alias map and **no** backfill list. Owner ruling:
+**B1a-2 may build the empty registries and the fail-closed substrate now**, but the concrete **(β) alias map**
+and **(γ) canonical-contract backfill list** must wait for a **privately-authorized real inventory run** —
+which is separately ops-gated (§4 step 1.2/1.3, and the read-only authorization noted in §2 M1). Do not let a
+green tool suite read as a completed inventory.
+
 **Consequence: steps 1.2, 1.3 and 1.4 are no longer NOT STARTABLE.** What still gates item 1 is
 re-ratification of this section, nothing else.
 
@@ -460,9 +468,16 @@ preconditions rather than re-hosted.
    lands behind the authority-substrate gate:
    1. **real config v2** — `orderingKeySpec` (closed schema, §3.1⟲R6) + `actionProfileVersion` accepted by
       the approved-config validator **and carried through `normalizeReadSourceConfig` into the stored body**,
-      additively; the existing test that asserts today's rejection **flips in
-      the same PR**, and configs omitting the fields are unaffected.
-      ⟲B2-self **Acceptance predicate, because an allowlist-only change satisfies the flipped assertion while
+      additively; and configs omitting the fields are unaffected.
+      **⟲OD2 AMENDED (owner, 2026-07-25).** This clause previously read *"the existing test that asserts
+      today's rejection **flips in the same PR**"*. **There is no such test**, and the error is the ledger's
+      own: `gip-approved-binding-resolver.cjs` and the suite that asserted that rejection behaviourally exist
+      only in the now-CLOSED **#4596**, never on `main` — a **held-PR artefact written into the ratified text
+      as if it were a fact about `main`**, the same class the ledger documents at §3.0 B-2 and §5. Verified at
+      `402f04982`: no test in the read-source-config validator or store names either key. **Ruled replacement:
+      add a NAMED pre-change-RED / post-change-GREEN characterisation test, and RETAIN the pre-existing generic
+      unknown-key negative control.** Do not describe this as flipping an existing test.
+      ⟲B2-self **Acceptance predicate, because an allowlist-only change satisfies mere acceptance while
       dropping the fields** — `normalizeReadSourceConfig` (`read-source-config.cjs` L277-L304 @ `774bdb5e6`)
       copies key by key, so a key merely allowlisted never reaches storage, and `contentKeyFor` hashes that
       projection. Both required: **(i)** save a body carrying both fields, re-read the stored row, assert both
@@ -626,9 +641,24 @@ snapshot feasibility spike) — nothing in it is scheduled here, and it enters o
 **Parallel and unblocked by all of the above: the on-prem M0 track, in TWO phases** — ⟲B2-self named as two,
 because an earlier version listed only the first, and since §4 wins on scope that silently deleted the
 preflight, the flag-ON window and #4437 closure from everything this document schedules:
-- **M0-A (authorized now):** build and verify the complete RC-A package at the owner-chosen SHA, regenerate
-  manifest / SHA256 / provenance / loopback verification, revise the #4437 pointer, and prepare the bounded
+- **M0-A (authorized now):** build and verify the complete RC-A package at the owner-chosen SHA (**⟲OD2 ruled: `7bf2bd7a1`** — not current main, to avoid enlarging the runtime change surface), regenerate
+  manifest / SHA256 / provenance / **loopback verification**, revise the #4437 pointer, and prepare the bounded
   approved config. **Not** deployment, **not** flag-ON.
+- **⟲OD2 The "loopback verification" output was a SPECIFICATION GAP, and the owner ruled it CLOSED BY BUILDING
+  THE CHECK — not by amending the contract away.** Verified: `scripts/ops/multitable-onprem-package-verify.sh`
+  records **four** checks (checksum / required-content / deployability-contract / no-github-links) and performs
+  **no** loopback check, while attendance's equivalent verifier does. Ruled design: **port attendance's rule —
+  the frontend bundle must not embed a loopback `VITE_API_URL` / base** — with **positive AND negative
+  fixtures** (a bundle that embeds a loopback value MUST fail; without the negative fixture the check is
+  unfalsifiable) and a **fifth reported field**. The check may be executed by the **current standalone
+  verification tool against `7bf2bd7a1`'s artifacts**, recorded under a **separate `verificationToolSha`** —
+  **never conflated into `serviceRuntimeSha`**, which is the exact conflation ⟲R7 exists to prevent. Owner's
+  own inspection of run **30148584851**'s A1 artifacts found the forbidden pattern **absent**, so this is
+  expected to be completing the proof, not changing service code; a real embedded loopback value would be a
+  different and far larger problem and must be escalated, not fixed in place.
+- **⟲OD2 A1 vs M0-A, stated so the verdicts cannot drift:** build + verify executed at `7bf2bd7a1` with
+  `publish_release=false` (run 30148584851) is **A1 PASS**. **M0-A remains open** pending the loopback check
+  above and the owner-only **A2** publish/freeze act.
 - **M0-B (ops-gated, its own authorization):** controlled deploy of the new service package → flag-OFF health
   verification → bounded-config flag-OFF preflight (`SHORT_PAGE`) → one C-stage flag-ON window → 11-item PASS
   ⇒ closes #4437 as a bounded-subset mechanism acceptance.
