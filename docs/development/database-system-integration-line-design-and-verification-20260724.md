@@ -18,7 +18,7 @@
 > - **PERMITTED on the existing draft/save path:** validation and persistence of the **new fields only**. Nothing else about that path changes.
 > - **FORBIDDEN, reachable from a request or a scheduled run:** any **qualification execution**; any **read of an external source**; any **new side effect**; any **new route**.
 >
-> The approved-config validator is request-reachable — `POST /api/integration/read-source-configs` → `read-source-config-store.cjs` L212 `saveVersion` → `read-source-config.cjs` L139 `ALLOWED_CONFIG_KEYS` (`http-routes.cjs` L21, all @ `774bdb5e6`) — and §4 step 1.1 is the **only** in-gate item that touches it.
+> The approved-config validator is request-reachable — `POST /api/integration/read-source-configs` (`http-routes.cjs` L21) → `read-source-config-store.cjs` L205 `saveVersion` → L212 `validateReadSourceConfig` → `read-source-config.cjs` L139 `ALLOWED_CONFIG_KEYS` — and §4 step 1.1 is the **only** in-gate item that touches it. ⟲B2-self **Two enforcement points, not one:** the allowlist decides *acceptance*; `normalizeReadSourceConfig` (`read-source-config.cjs` L277-L304) decides *persistence* — it is an explicit **key-by-key projection** returning `Object.freeze(out)`, and the store persists and hashes **that** projection (`read-source-config-store.cjs` L216-L217, L244). **Allowlisting alone accepts the fields and silently discards them.** (All @ `774bdb5e6`.)
 
 This is the line's single design-and-verification document (owner directive: consolidate closeout facts into one MD; stop letting working memos drift). It absorbs and supersedes the session working memos (`/tmp/gip-decision-memo-20260724.md`, `/tmp/b1-paged-read-certification-design-20260724.md` rev‑1) and the retired ad-hoc inventory SQL (NO-GO; §5).
 
@@ -361,8 +361,20 @@ preconditions — is §4's.** Where §1, §2 or §3.x implies a different sequen
 1. **B1a (REDO)** — the authority substrate, in the owner-set order, each step landing behind the
    authority-substrate gate:
    1. **real config v2** — `orderingKeySpec` (closed schema, §3.1⟲R6) + `actionProfileVersion` accepted by
-      the approved-config validator, additively; the existing test that asserts today's rejection **flips in
-      the same PR**, and configs omitting the fields are unaffected. ⟲B2-self **Record the direction-case
+      the approved-config validator **and carried through `normalizeReadSourceConfig` into the stored body**,
+      additively; the existing test that asserts today's rejection **flips in
+      the same PR**, and configs omitting the fields are unaffected.
+      ⟲B2-self **Acceptance predicate, because an allowlist-only change satisfies the flipped assertion while
+      dropping the fields** — `normalizeReadSourceConfig` (`read-source-config.cjs` L277-L304 @ `774bdb5e6`)
+      copies key by key, so a key merely allowlisted never reaches storage, and `contentKeyFor` hashes that
+      projection. Both required: **(i)** save a body carrying both fields, re-read the stored row, assert both
+      survive into `config`; **(ii)** assert two bodies in the same family differing **only** in
+      `orderingKeySpec` mint **different** `content_key`s and different versions — otherwise they collapse and
+      the idempotent-save path (`read-source-config-store.cjs` L231-L233) returns the *older* version, i.e.
+      `configContentKey` silently stops pinning ordering behaviour, which is the property §3.1 and the
+      qualification digest both rest on. Without (i) and (ii) the step ships green and B-6's real
+      **save → approve → re-read → qualify** loop stays unproven while looking proven.
+      ⟲B2-self **Record the direction-case
       decision here, because this step is where the code says it belongs:** the same validator already carries
       a LOWERCASE vocabulary — `RESOLVER_SORT_DIRECTIONS = ['asc','desc']` for `resolverSortDirection`
       (`read-source-config.cjs` L27 @ `774bdb5e6`) — while ⟲R6 freezes `orderingKeySpec.direction` as
@@ -479,6 +491,9 @@ preflight, the flag-ON window and #4437 closure from everything this document sc
   is rejected **at save time today**, and the B1a suite asserts that rejection *behaviourally*. Adding the
   keys is **additive only** — closed rejection on shape, no behaviour change for configs that omit them —
   and the assertion that pins today's rejection must be **flipped in the same PR**, never deleted.
+  ⟲B2-self **The allowlist is the REJECTION gate; `normalizeReadSourceConfig` (L277-L304) is the PERSISTENCE
+  gate, and `contentKeyFor` runs on its output.** Add the keys in **both** places, or the save succeeds with
+  the fields absent from storage **and** from the content key — and the flipped assertion goes green anyway.
 - ⟲B2 **`canonicalObjectVersion` is a first-party contract version.** Do not attempt to make it witness the
   external source's schema; drift belongs to source-catalog evidence / BindingQualification / field-mapping
   proof (§3.0 B-3). A derivation that is a pure function of the other tuple fields adds nothing.
@@ -496,9 +511,10 @@ external write-back / D2 / W3 / G1 work (frozen), or rollout.
 
 ⟲B2 Approval unlocks the **B1a authority-substrate gate** as defined verbatim in **Gate** at the head of this
 document — **not** "latent contract + harness only", which is withdrawn. That gate permits the **six** bounded
-internal changes of §4 item 1 (⟲B2-self *six*, not five: the sixth covers the retained resolver / combinations
-/ closed errors / harness and the counter-and-handshake shapes, which the withdrawn clause had been the only
-thing authorizing). On the request path it permits **validation and persistence of the two new config fields
+internal changes of §4 item 1 (⟲B2-self *six*, not five: substep **1.6** freezes the counter-and-handshake
+shapes, while §4 item 1's separate **"Retained"** bullet carries the resolver / combinations / closed errors /
+harness — the Gate's sixth permitted bullet covers **both**, and the withdrawn clause had been the only thing
+authorizing either). On the request path it permits **validation and persistence of the two new config fields
 and nothing else**; qualification execution, external-source reads, new side effects and new routes stay
 forbidden from any request or scheduled run. Every later slice re-enters its own gate. **§4 is itself pending
 re-ratification** — until the owner re-approves it, nothing after **B1a (§4 item 1)** is scheduled by this
