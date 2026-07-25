@@ -602,6 +602,21 @@ function buildHostileForeignError(sentinel, impersonatedReason) {
   return err
 }
 
+// The `cause` check below is NOT redundant with `message`: fail()'s current
+// implementation (`throw new GipSystemIdentityError(reason, message,
+// details)`) never touches `.cause` at all, so a mutation that ONLY forwards
+// the foreign error's message/details (the realistic P1 shape this file
+// fixes) leaves `.cause` untouched — that mutation alone would NOT red this
+// specific assertion. Verified this line is independently load-bearing
+// against a DIFFERENT, also-realistic mutation — "helpfully" preserving the
+// foreign error as `.cause` for debugging while still emitting the fixed
+// reason/message/details (`try { fail(...) } catch (wrapped) { wrapped.cause
+// = error; throw wrapped }` at each site) — which reds ONLY the cause
+// assertion here, leaving message/details/stack green: isolated scratch-probe
+// output for both sites is recorded in the PR body. `String(error)` IS
+// redundant with `message` under every mutation tried so far (default
+// Error#toString is `${name}: ${message}`) — kept as a second, cheap
+// confirmation, not claimed as independently discriminating.
 function assertNoSurfaceLeaksSentinel(error, sentinel, label) {
   assert.ok(!String(error.message).includes(sentinel), `${label}: message must not carry the sentinel`)
   assert.ok(!JSON.stringify(error.details).includes(sentinel), `${label}: details (including nested fields) must not carry the sentinel`)
