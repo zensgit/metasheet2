@@ -38,12 +38,16 @@
 //
 // Rotation semantics (the observable contract, ledger §4.0 row α): key
 // rotated, principal and permission scope unchanged => systemContentKey
-// UNCHANGED (true simply because the secret is never a hash input — proven,
-// not just claimed, by the mutation probe in the test file: temporarily
-// folding the secret into the hash material reds the "rotation-unchanged"
-// case). Principal OR tenant scope changed => systemContentKey changes,
-// forcing lineage rebuild + re-qualification upstream (a later slice's job;
-// this module only guarantees the key itself moves).
+// UNCHANGED (true simply because the secret is never a hash input). This was
+// verified load-bearing, not just claimed: a manual mutation pass temporarily
+// folded the connection secret into computeSystemContentKey's material (the
+// exact #4596-class defect) and reran the test suite, which reds the
+// "rotation-unchanged" case in rotationSemanticsBothDirections — the patch
+// was reverted (never committed); the command + output are recorded in PR
+// #4610, not in this file or the test file. Principal OR tenant scope
+// changed => systemContentKey changes, forcing lineage rebuild +
+// re-qualification upstream (a later slice's job; this module only
+// guarantees the key itself moves).
 
 const crypto = require('node:crypto')
 const { stableCanonicalStringify, CanonicalDomainError } = require('./gip-canonical-json.cjs')
@@ -93,9 +97,10 @@ function isPlainObject(value) {
 // redacted/truncated field would be invisible to the hash. This guard detects
 // the FIVE marker shapes that function's redaction/truncation can leave behind
 // and refuses closed if any appear anywhere in the value handed to this
-// module — it is real-code detection, not a comment, and the mutation
-// probe in the test file removes it and shows the "sanitized config is
-// refused" case red.
+// module — it is real-code detection, not a comment; a manual mutation pass
+// neutered this guard and confirmed the "sanitized config is refused" cases
+// in losslessnessGuardCoversAllFiveMarkerClasses go red (patch reverted,
+// never committed — command + output recorded in PR #4610).
 //   1. the literal sensitive-key redaction marker '[redacted]'
 //   2. a string truncated with the '...[truncated]' suffix (key-independent)
 //   3. the '[max-depth]' marker (key-independent)
@@ -108,7 +113,14 @@ const CIRCULAR_MARKER = '[circular]'
 const MAX_SANITIZATION_SCAN_DEPTH = 64
 
 function containsSanitizationMarker(value, depth) {
-  if (depth > MAX_SANITIZATION_SCAN_DEPTH) return false
+  // FAIL CLOSED at the depth cap: this is a values-free losslessness guard,
+  // so "could not finish inspecting" must never answer "clean" — material
+  // nested past this depth is not a legitimate identity-material shape
+  // anyway, and a permissive `false` here would be a hole in a fail-closed
+  // guard (the same class as an empty-references array silently reading as
+  // "inventory complete"). `config` has no upstream depth bound on the path
+  // to this function, so an attacker-nested value is constructible.
+  if (depth > MAX_SANITIZATION_SCAN_DEPTH) return true
   if (typeof value === 'string') {
     return (
       value === REDACTED_MARKER

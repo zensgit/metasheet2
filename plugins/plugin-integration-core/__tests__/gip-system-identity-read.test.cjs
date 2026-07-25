@@ -15,7 +15,6 @@ const crypto = require('node:crypto')
 
 const {
   deriveSystemContentKey,
-  computeSystemContentKey,
   GipSystemIdentityError,
   SYSTEM_IDENTITY_ERROR_REASONS,
   IDENTITY_HMAC_DOMAINS,
@@ -24,7 +23,6 @@ const {
 
 const {
   createConnectorKindRegistry,
-  GipConnectorKindRegistryError,
 } = require(path.join(__dirname, '..', 'lib', 'gip-connector-kind-registry.cjs'))
 
 const HMAC_KEY = crypto.randomBytes(32)
@@ -198,35 +196,17 @@ async function rotationSemanticsBothDirections() {
   assert.notEqual(before.systemContentKey, afterScopeChange.systemContentKey, 'a changed tenant/permission scope must force the key to change')
 }
 
-// ---------------------------------------------------------------------------
-// (4b) MUTATION-LOAD-BEARING DEMONSTRATION for the rotation-unchanged
-// direction. A test that "the secret never moves the key" passes trivially
-// under any correct implementation and ALSO under a subtly-wrong one, unless
-// something in the suite can distinguish them. This function builds the
-// PLAUSIBLE WRONG implementation (the #4596-class defect: fold the raw secret
-// into the hash material) side-by-side and proves it fails the very
-// same equality the real test above relies on — i.e. the assertion in (4) is
-// falsifiable, not vacuous. (The authoritative confirmation is the manual
-// neuter-and-rerun pass against the real module, pasted in the PR body; this
-// is the automated, permanent half of that proof.)
-// ---------------------------------------------------------------------------
-function rotationInvariantIsFalsifiable() {
-  const { stableCanonicalStringify } = require(path.join(__dirname, '..', 'lib', 'gip-canonical-json.cjs'))
-  function wronglyIncludesSecret({ kind, endpointIdentity, authPrincipalKey, authTenantScopeKey, secret }) {
-    return crypto.createHash('sha256').update(stableCanonicalStringify({ kind, endpointIdentity, authPrincipalKey, authTenantScopeKey, secret })).digest('hex')
-  }
-  const shared = { kind: 'k', endpointIdentity: 'e', authPrincipalKey: 'p', authTenantScopeKey: 's' }
-  const rotatedOnly1 = wronglyIncludesSecret({ ...shared, secret: 'old-secret' })
-  const rotatedOnly2 = wronglyIncludesSecret({ ...shared, secret: 'BRAND-NEW-DIFFERENT-SECRET' })
-  assert.notEqual(rotatedOnly1, rotatedOnly2, 'the plausible-wrong (#4596-class) implementation DOES fail rotation-unchanged — proving the real assertion in (4) is discriminating, not vacuous')
-
-  // And the real, correct computeSystemContentKey (no secret parameter exists
-  // to even pass) is unaffected by the same two secret values — restated at
-  // the unit level, independent of decryption plumbing.
-  const correct1 = computeSystemContentKey({ ...shared })
-  const correct2 = computeSystemContentKey({ ...shared })
-  assert.equal(correct1, correct2, 'computeSystemContentKey has no secret input at all — sanity check')
-}
+// Note on rotation-invariant load-bearingness: a test asserting "the secret
+// never moves the key" (in (4) above) passes trivially under any correct
+// implementation, so it needs a discriminating check that a subtly-wrong
+// implementation would fail it. That check was performed as a MANUAL mutation
+// pass against the real module — folding the connection secret into
+// computeSystemContentKey's material (the #4596-class defect) and rerunning
+// this suite, which reds rotationSemanticsBothDirections's rotation-unchanged
+// case — not as a permanent function in this file (an earlier draft of this
+// file carried a decorative in-file demonstration that tested a hand-rolled
+// stand-in function rather than this module; removed as misleading). The
+// mutation command + output are recorded in PR #4610, not here.
 
 // ---------------------------------------------------------------------------
 // (5) Domain separation — a swap of principal/scope must NOT collide.
@@ -254,7 +234,6 @@ async function domainSeparationPreventsSwapCollision() {
 // resolving through the canonical kind, given identical config/credentials.
 // ---------------------------------------------------------------------------
 async function aliasResolvesToSameKey() {
-  const registry = harnessRegistry({ /* not used, replaced below with aliases */ })
   const aliasedRegistry = createConnectorKindRegistry([{
     kind: 'test:harness',
     aliases: ['legacy:harness'],
@@ -267,7 +246,6 @@ async function aliasResolvesToSameKey() {
   const byCanonical = await deriveSystemContentKey({ system: { kind: 'test:harness', config }, credentialCiphertext: 'ct1', credentialStore: store, registry: aliasedRegistry, hmacKey: HMAC_KEY })
   const byAlias = await deriveSystemContentKey({ system: { kind: 'legacy:harness', config }, credentialCiphertext: 'ct1', credentialStore: store, registry: aliasedRegistry, hmacKey: HMAC_KEY })
   assert.equal(byCanonical.systemContentKey, byAlias.systemContentKey, 'an explicit alias must resolve to the identical key as its canonical kind')
-  void registry
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +291,25 @@ async function losslessnessGuardCoversAllFiveMarkerClasses() {
   const benign = { baseUrl: 'https://erp.example.internal', note: 'this field is not redacted at all' }
   const ok = await deriveSystemContentKey({ system: { kind: 'test:harness', config: benign }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY })
   assert.match(ok.systemContentKey, /^[0-9a-f]{64}$/, 'a benign config containing but not equal to the marker text must succeed')
+
+  // (6.) DEPTH-CAP FAIL-CLOSED — a values-free guard that "gives up" scanning
+  // past its depth cap must refuse, never silently answer "clean". This is
+  // constructible (config is arbitrary operator JSON with no upstream depth
+  // bound), so it is tested directly rather than only asserted in a comment.
+  // A shallow benign value (the positive control just above, and the whole
+  // sanitizedConfigs battery, all well under the cap) already proves the cap
+  // is not reached in the ordinary case.
+  function buildDeeplyNestedObject(depth, leafValue) {
+    let value = leafValue
+    for (let level = 0; level < depth; level += 1) value = { nested: value }
+    return value
+  }
+  const deepButNoMarkerAnywhere = { baseUrl: 'https://erp.example.internal', deepField: buildDeeplyNestedObject(70, 'benign-leaf-value-no-marker-here') }
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: { kind: 'test:harness', config: deepButNoMarkerAnywhere }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
+    'a config nested past the scan depth cap must refuse (fail closed at the cap, never "clean")',
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +428,6 @@ async function inputValidationFailsClosed() {
     'SYSTEM_IDENTITY_INPUT_INVALID',
   ].sort())
   assert.ok(Object.isFrozen(SYSTEM_IDENTITY_ERROR_REASONS))
-  void GipConnectorKindRegistryError
 }
 
 async function main() {
@@ -439,7 +435,6 @@ async function main() {
   await eachIncludedTermMovesTheKey()
   await excludedTermsDoNotMoveTheKey()
   await rotationSemanticsBothDirections()
-  rotationInvariantIsFalsifiable()
   await domainSeparationPreventsSwapCollision()
   await aliasResolvesToSameKey()
   await uncertifiedKindFailsClosed()
