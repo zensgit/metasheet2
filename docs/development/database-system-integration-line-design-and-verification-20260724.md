@@ -6,9 +6,9 @@
 
 > **B1a AUTHORITY-SUBSTRATE gate — PERMITTED, bounded:**
 > - **additive** `orderingKeySpec` / `actionProfileVersion` acceptance in the approved-config validator — closed rejection on shape, and **no behaviour change for any config that omits them**;
-> - a purpose-built **system identity read** that does **not** decrypt credentials (B-2);
+> - a purpose-built **system identity read** implementing the ratified GIP-D0 §6 formula (B-2). ⟲B2-self **The flat "does not decrypt credentials" wording is WITHDRAWN as unsatisfiable:** for every shipped connector kind the auth principal and scope live in the **encrypted credential envelope**, not in `config`, so that rule and the ratified formula cannot both hold. Which rule replaces it is **owner decision (α) at §4 step 1.2**, and this bullet does not authorize either answer until it is taken;
 > - a **first-party canonical object contract registry** and its version lookup (B-3);
-> - a **server-bound source executor** — resolution-derived handle, first-party statement builders, restricted statement seam — plus certified source-column translation (B-1, B-4, B-6). ⟲B2-self This bullet **includes the bounded core-backend statement seam** of §3.2 (not request-reachable, accepts only strategy-minted statements); it is named here because every other bullet is plugin-layer, and a second-package production change permitted only by implication is the very thing owner finding P1-1 was raised about. ⟲B2-self **Credential and connection scope, stated rather than left silent:** this executor unavoidably needs connection material, so the "no credential decryption" line above governs the *identity read* and cannot govern the executor. Under this gate the executor may derive and hold a handle and may execute **only against a harness / fixture source**; **any connection to a live customer system is outside this gate** and belongs to §4 step 2's real-DB capability spike;
+> - a **server-bound source executor** — resolution-derived handle, first-party statement builders, restricted statement seam — plus certified source-column translation (B-1, B-4, B-6). ⟲B2-self This bullet **includes the bounded core-backend statement seam** of §3.2 (not request-reachable, accepts only strategy-minted statements); it is named here because every other bullet is plugin-layer, and a second-package production change permitted only by implication is the very thing owner finding P1-1 was raised about. ⟲B2-self **Credential and connection scope, stated rather than left silent:** this executor unavoidably needs connection material. Under this gate it may derive and hold a handle and may execute **only against a harness / fixture source**; **any connection to a live customer system is outside this gate** and is its own ops-gated step (⟲B2-self *not* §4 step 2, which an earlier revision named by default — that step runs against first-party engine instances and never claimed customer connection);
 > - **removal or privatisation** of the legacy `probe()` entry point — ⟲B2-self this closes **B-1**'s first residual (the caller-supplied tuple / `keyColumns` path), **not B-4**; B-4 is closed in §4 step 3 by admitting builders on module-private identity;
 > - the previously-designed B1a internals that are **not** request-reachable and are unchanged by ⟲B: full-tuple resolver (**minus** `canonicalObjectVersion`, which now comes from bullet 3's registry), deep-immutable resolution, `PAGED_READ_LEGAL_COMBINATIONS`, closed errors, hermetic harness (§4 step 1, "Retained") — **plus** §3.4's counter and handshake **contract shapes**, hermetic tests only, **no wiring**. ⟲B2-self This bullet exists because withdrawing the "latent contract + harness" clause withdrew the only sentence that authorized these artefacts, while §4 and §3.4 still schedule them — a regression this revision introduced, not an inherited one.
 >
@@ -31,6 +31,15 @@ came to be quoted here as "the ratified formula"): **`GIP-D0` general integratio
 system-vs-config identity split; and the ratified certification contracts in
 `gip-profile-certification-contracts.cjs`. Where this ledger and an upstream lock disagree, **the lock wins**
 and this ledger is the thing to fix.
+
+⟲B2-self **One declared exception, because otherwise that rule refuses this document's own gate.** GIP-D0 is
+**RATIFIED NARROW**: §9.2 / §10 unlock implementation of exactly three things — *profile schema, compliance
+harness, read-only qualification spike*. The authority-substrate gate below permits two items in **none** of
+the three: the **live approved-config validator** change and the **bounded core-backend statement seam**. The
+gate is owner-dated **2026-07-24**, one day after the lock, so this is read as a deliberate **widening of
+GIP-D0 §9.2 for those two items only**. On everything else — and on **all contract material**, including
+`systemContentKey` — the lock wins unchanged. **This widening is part of what re-ratifying §4 approves; it is
+called out here rather than left to be inferred from a date.**
 
 **Doc charter** ⟲Codex: this document is an **execution index + evidence ledger**. Authoritative contracts live in code and their own frozen design docs — referenced here by symbol + SHA, never copied — so this file cannot drift into another competing fact source. Model task cards derived from it must carry **symbol + exact head + acceptance predicate**, not bare line numbers.
 
@@ -167,7 +176,14 @@ Three deviations, and the middle one is the one that matters:
   re-verification item, and the binding + config already pin which system record is in play. If they are ever
   wanted, that is a **new amendment requiring its own ratification**, never a "completion".
 - it obtains **decrypted credentials** through the adapter read only to discard them at the boundary — an
-  unnecessarily wide permission surface for an identity derivation.
+  unnecessarily wide permission surface for an identity derivation. ⟲B2-self **But note what the ratified
+  formula then requires**, because the two facts together are decision (α) at §4 step 1.2: `authPrincipalKey`
+  and `authTenantScopeKey` are **not in `config`** for any shipped connector kind — the K3 WISE WebAPI adapter
+  reads `username` and `acctId`/`accountSet` from `credentials` (`adapters/k3-wise-webapi-adapter.cjs`
+  L1555-L1557), the HTTP adapter reads `username`/`password` from `credentials`
+  (`adapters/http-adapter.cjs` L131), and that envelope is what `credential-store.cjs` encrypts. So "derive
+  the ratified identity" and "never decrypt" **cannot both hold today**; the narrow rule that replaces the
+  flat one is an owner call, not an implementer's.
 
 **The redo implements the ratified formula.** So the material below is not a new spec; it is GIP-D0 §6:
 
@@ -222,7 +238,10 @@ whatsoever. It must be looked up from the first-party canonical object contract 
 wrong control surface. Verified — the owner supplied one bypass, and re-running it I found two more of the
 same class. ⟲B2 Attribution, so this block is reproducible rather than asserted: guard =
 `__internals.assertReadOnlySql` in `lib/gip-binding-qualification-spike.cjs` **@ `d0313feec`** (B1b lane),
-whose token list is `RATIFIED_WRITE_TOKEN_PATTERN` + five dialect patterns.
+whose guard is **two ratified patterns** (`RATIFIED_WRITE_TOKEN_PATTERN`, `RATIFIED_ROW_LOCK_CLAUSE_PATTERN`)
+plus **four dialect patterns**, exposed as `__internals.readOnlyGuardPatterns` (⟲B2-self an earlier revision
+wrote "one + five" — the total is six either way, so the tabulated result is unaffected, but a block sold as
+reproducible must name the artefact correctly).
 ```
 control-pass  SELECT 1                                                  <- positive control: the guard is
                                                                            not a blanket refuser
@@ -273,7 +292,10 @@ artefact that supplies per-system source column names and build it inside step 1
 server-bound executor to **SQL-shaped sources only** for B1a and split the translation into its own gated
 step. Until one is chosen, step 1.4 is **not** startable, and §4 says so rather than implying otherwise.
 
-**Owner-set redo order for B1a:** real config v2 → system identity read with no credential decryption →
+**Owner-set redo order for B1a** (as given; ⟲B2-self the second item's "no credential decryption" is now
+known **unsatisfiable as stated** — see §4 step 1.2 decision (α) — and is carried here verbatim only because
+this line records the owner's instruction, not the resolved design): real config v2 → system identity read
+with no credential decryption →
 first-party canonical contract version → server-bound source executor with field translation → remove or
 privatise the legacy `probe()` entry point. ⟲B2 It is transcribed into **§4 step 1**, which is the single
 authoritative order; if this line and §4 ever disagree, **§4 wins**.
@@ -384,9 +406,28 @@ preconditions — is §4's.** Where §1, §2 or §3.x implies a different sequen
       read-time normalizer would let two textually different approved bodies (different `configContentKey`s,
       different digests) behave identically, and the content key would stop pinning behaviour. Pin the choice
       by test in the same PR; do not leave the two vocabularies unremarked in one config body.
-   2. **system identity read** — purpose-built, lossless, **no credential decryption**, implementing the
-      **ratified GIP-D0 §6 formula** (§3.0 B-2) plus the per-connector-kind certified identity declaration and
-      its fail-closed refusal for an undeclared kind;
+   2. **system identity read** — purpose-built, lossless, implementing the **ratified GIP-D0 §6 formula**
+      (§3.0 B-2) plus the per-connector-kind certified identity declaration and its fail-closed refusal for an
+      undeclared kind. ⟲B2-self **NOT STARTABLE until the owner resolves the two blockers below** — the same
+      force as B-6's (a)/(b); neither is an implementation detail:
+      - **(α) "no credential decryption" and the ratified formula are not jointly satisfiable for any shipped
+        connector kind.** `authPrincipalKey` / `authTenantScopeKey` do **not** live in `config`; they live in
+        the **AES-256-GCM credential envelope** — K3 WISE WebAPI takes `username` and `acctId`/`accountSet`
+        from `credentials` only (`adapters/k3-wise-webapi-adapter.cjs` L1555-L1557), the HTTP adapter takes
+        `username`/`password` from `credentials` (`adapters/http-adapter.cjs` L131), and `credential-store.cjs`
+        names exactly this content. So either **(i)** the identity read is authorized to **decrypt only to
+        extract the declared principal/scope keys**, never retaining or logging the secret — in which case the
+        flat "no credential decryption" bullet is deleted from both this step and the Gate and replaced by
+        that narrower rule — or **(ii)** the principal material is first migrated out of the credential
+        envelope into non-secret identity fields, which is its own gated change.
+      - **(β) the per-kind declaration has step 1.3's unbindability problem, and it is worse.** `kind` is a
+        free-form `requiredString` with **no vocabulary anywhere** (`external-systems.cjs` L91 — contrast
+        `VALID_ROLES` / `VALID_STATUSES`, which are enumerated and exported) and is **immutable after
+        creation** (L255). Every stored system therefore carries an arbitrary operator-supplied kind string,
+        and "refuse an undeclared kind" makes **all of them unbindable** until a declaration exists. Same
+        three answers required as for 1.3: who authors a declaration, what a miss returns (**named closed
+        reason**), and the inventory + migration for the kind strings already in
+        `integration_external_systems`;
    3. **first-party canonical object contract registry** + version lookup (**B-3**) — no locally invented
       version. ⟲B2-self **Open, and it must be closed before this step starts:** who registers a canonical
       object contract, what admits one, and what a **lookup miss** does. A lookup-only version needs a
@@ -416,10 +457,15 @@ preconditions — is §4's.** Where §1, §2 or §3.x implies a different sequen
      a check, i.e. *detection*, which B-1 explicitly rejects in favour of inexpressibility. Residual 2, by
      contrast, inverts the moment `query` leaves the resolution-bound input allowlist — so on its own it only
      measures "step 1.4 was performed":
-     - **residual 1** (`ratifiedPathRemainsAnOpenConstruction`, L752-L805 @ `774bdb5e6`): `probe()` **absent
-       from the module's exports**, pinned by a test that reds if it is ever re-exported — the case is
-       **RETIRED as inexpressible**, not "refused". If it is privatised rather than removed, a **named closed
-       reason** instead;
+     - **residual 1** (`ratifiedPathRemainsAnOpenConstruction`, L752-L805 @ `774bdb5e6`): ⟲B2-self an earlier
+       wording said *"`probe()` absent from the module's exports"* — that assertion **passes today** and is
+       therefore **vacuous**: `probe` is not a module export at all, it is a method on the frozen object
+       returned by `createBindingQualificationProber` (`gip-binding-qualification-spike.cjs` L360-L371), which
+       is exactly how the residual test reaches it. Bind the predicate to the surface the entry point actually
+       lives on: **assert the EXACT key set of that frozen prober object** — `probeFromResolution` and nothing
+       that accepts a caller-supplied tuple — so a re-addition **under any name** reds. The case is then
+       **RETIRED as inexpressible**, not "refused". If the entry point is privatised rather than removed, a
+       **named closed reason** instead;
      - **residual 2** (`callerSuppliedQueryRemainsAnOpenConstruction`, L813-L847 @ `774bdb5e6`): a
        caller-supplied `query`/handle is refused with a **named closed reason**;
      - **NEW negative control, which is the one that actually carries B-1:** two resolutions bound to
@@ -429,7 +475,12 @@ preconditions — is §4's.** Where §1, §2 or §3.x implies a different sequen
      - **positive control:** a probe executed **through the server-bound executor against the harness
        source** still qualifies.
 2. **B1b capability spike — REAL MySQL and SQL Server, before any certification.** Empirical only, on the
-   **same connection**; mints **no certification** and registers **no strategy**. ⟲B2 This step did not exist
+   **same connection**; mints **no certification** and registers **no strategy**. ⟲B2-self **Runs against
+   FIRST-PARTY engine instances only.** Everything this step establishes is engine capability, which a
+   first-party instance proves; connecting to **any customer system** is a **separate ops-gated step** with
+   its own scope, consent, credential handling and read-only assertion — treated like M0-B, and **not**
+   ratified by re-ratifying §4. An earlier revision's Gate parked live-customer connection "in step 2", which
+   this step never claimed and does not bound. ⟲B2 This step did not exist
    in the ratified order and is the reason B1b shipped a strategy whose own token names the **absence** of a
    guarantee (**B-5**).
    - **MySQL:** InnoDB, autocommit, isolation ≥ READ COMMITTED — all three established empirically, not named
