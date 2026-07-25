@@ -2,10 +2,11 @@
 
 Lane: **LANE C — M0-A** (per `docs/development/database-system-integration-line-design-and-verification-20260724.md`,
 §2 M0-A / §4 "Parallel and unblocked" M0-A track, ⟲C1/⟲R1/⟲R7). Authorized: build + verify the COMPLETE
-on-prem deployment package at the owner-chosen main SHA, regenerate manifest/SHA256/provenance/(disputed —
-see §6) loopback verification, prepare (not post) the #4437 pointer revision. Not authorized: deployment,
-flag-ON, connecting to any host, editing #4437 itself, merging, pushing to main, and — per this fix pass —
-still not the release/freeze act (see §3 A2).
+on-prem deployment package at the owner-chosen main SHA, regenerate manifest/SHA256/provenance/loopback
+verification (built and run post-hoc/standalone this fix pass — owner-ruled, see §6/§3.1a; not yet part of
+the frozen package's own CI-produced verify output, a known forward gap §3.1a records), prepare (not post)
+the #4437 pointer revision. Not authorized: deployment, flag-ON, connecting to any host, editing #4437
+itself, merging, pushing to main, and — per this fix pass — still not the release/freeze act (see §3 A2).
 
 **Scope note:** the ledger's §2 M0-A paragraph also names "prepare the bounded approved config" as part of
 M0-A. This document's Lane-C task list does not include that item, and it is **not** addressed here — do not
@@ -23,12 +24,30 @@ branch/tag, not a bare SHA) with the *publish/freeze act* (owner-only). This ses
 the reviewer's read against the current workflow file and then **ran the authorized build+verify half for
 real** — see §3 A1 for the run and §2.4/§6 below for what the "no fabrication" claim now covers.
 
-## Status: build + verify (A1) is DONE and PASSED. Residual blocker is narrow: only the owner's publish/freeze act (A2).
+## Verdict: A1 PASS. This is a component verdict, not "M0-A PASS" — see below for exactly what remains open.
 
-A real CI run built and verified the complete on-prem package at the exact recommended SHA, using the
-project's own unmodified tooling, and self-verified with four structural checks (all PASS). No release was
-published. No checksum was hand-typed or fabricated — the checksums recorded below are read verbatim from the
-run's own `SHA256SUMS` output. §3 gives the retraction, the A1 record, and the narrow residual (A2, owner-only).
+**A1 PASS** — build + verify executed, run `30148584851`, `publish_release=false`. A real CI run built and
+verified the complete on-prem package at the exact recommended SHA, using the project's own unmodified
+tooling at that commit, and self-verified with four structural checks (all PASS). No release was published.
+No checksum was hand-typed or fabricated — the checksums recorded below are read verbatim from the run's own
+`SHA256SUMS` output.
+
+**M0-A is still open**, pending two separate things — do not read "A1 PASS" as "M0-A PASS":
+
+- **(i) the ledger's loopback-verification deliverable, as produced by the canonical pipeline.** This fix
+  pass builds the check (§6) and runs it **post-hoc, standalone**, against A1's real artifact bytes — PASS
+  (§3.1a) — but that is corroborating evidence from a tool run outside the CI pipeline, at a commit newer
+  than `7bf2bd7a1`, recorded under its own `verificationToolSha` (§3.1a). It is **not** the same claim as "the
+  frozen package's own CI-produced verify output includes a loopback check" — run `30148584851`'s own
+  `verify.json` is immutable and still shows four checks (§3.1). §3.1a also records a known forward gap: a
+  future A2 dispatch at the pinned ref (`build/m0a-rca-7bf2bd7a1`, still targeting source commit `7bf2bd7a1`)
+  will check out the **old**, four-check verify script, not this fix pass's five-check version — so A2's own
+  `verify.json` will also be four checks unless the owner separately revisits the ref/tooling situation. That
+  is not resolved here.
+- **(ii) the owner-only A2 publish/freeze act** (§3.2) — unchanged from before this fix pass.
+
+§3 gives the retraction, the A1 record, the loopback-check build + post-hoc execution (§3.1a), and the narrow
+residual (A2, owner-only, §3.2).
 
 ---
 
@@ -93,13 +112,28 @@ now reads **12**, not 11. The count was accurate when first drafted; it is a mov
 advancing. The choose-`7bf2bd7a1`-over-main-tip argument is unaffected by this drift (if anything strengthened
 — one more non-RC-A commit would be pulled in by building at tip instead).
 
-Also verified: the build tooling itself is byte-identical between the recommended SHA and current main —
+**Dated snapshot, now stale as of this fix pass's own commit (see note below):** at original draft time, the
+build tooling itself was byte-identical between the recommended SHA and current main —
 ```
 git log --oneline 7bf2bd7a1..origin/main -- .github/workflows/multitable-onprem-package-build.yml \
   scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
 ```
-returns nothing, so "build at `7bf2bd7a1`" and "build at current main" would use the identical build/verify
-scripts — only the source snapshot differs.
+returned nothing at draft time, so "build at `7bf2bd7a1`" and "build at current main" would have used
+identical build/verify scripts then — only the source snapshot differed.
+
+**This is no longer true as of this same-day fix pass.** §6/§3.1a add a loopback check to
+`scripts/ops/multitable-onprem-package-verify.sh` on this branch — a real, intentional change to the verify
+script, landed at a commit newer than `7bf2bd7a1` and not yet on `origin/main`. Re-running the same command at
+this fix pass's HEAD:
+```
+git log --oneline 7bf2bd7a1..HEAD -- .github/workflows/multitable-onprem-package-build.yml \
+  scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+```
+now returns exactly one commit — this fix pass's own loopback-check commit. The build workflow and build
+script remain untouched; only the verify script differs, and only by this fix pass's own addition. This does
+not change the §2.2 recommendation (still build at `7bf2bd7a1`, not current main) — it only means the
+"identical tooling" claim is a point-in-time snapshot, not a standing invariant, and the record must say so
+rather than imply it holds indefinitely.
 
 ### 2.3 `clientHelperSha` — identified and proven blob-identical (this is the reusable half of the two-SHA split)
 
@@ -239,15 +273,27 @@ Downloaded the real artifact read-only (`gh run download 30148584851`) — not h
   is a **new build**, with a new `ciRunId`/`builtAt`/archive bytes, therefore a **different** `.tgz`/`.zip`
   SHA256 than the four values above. Do not carry these into #4437 as "the" RC-A checksums (§4 keeps them
   `<<PENDING FREEZE RUN>>`).
-- **In-archive `BUILD_PROVENANCE.json`** (extracted from the `.tgz`, not the external sidecar):
+- **In-archive `BUILD_PROVENANCE.json`** (extracted from the `.tgz`, not the external sidecar — **read in
+  full, not excerpted**, per this fix pass's re-extraction and read of the same archive; the prior draft
+  showed only a partial field set here without marking it as an excerpt, while the sibling manifest block
+  below was correctly marked "read in full" — corrected):
   ```json
-  { "schema": "metasheet-onprem-build-provenance/v1", "gitCommit": "7bf2bd7a1f8cdf54cca83a733fcd89afb076848b",
+  { "schema": "metasheet-onprem-build-provenance/v1",
+    "packageName": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725",
+    "version": "2.5.0", "tag": "m0a-rca-20260725",
+    "gitCommit": "7bf2bd7a1f8cdf54cca83a733fcd89afb076848b",
     "gitCommitShort": "7bf2bd7a1f8c", "gitRef": "build/m0a-rca-7bf2bd7a1", "sourceIsOnOriginMain": "unknown",
-    "ciRunId": "30148584851", "ciRunAttempt": "1", "builtAt": "2026-07-25T07:04:39Z" }
+    "ciRunId": "30148584851", "ciRunAttempt": "1", "builtAt": "2026-07-25T07:04:39Z",
+    "fixMarkers": { "issue1912": {
+      "title": "K3 WISE M1 Material Save-only backend fix",
+      "adapter": "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs",
+      "marker": "material-k3wise-customer-profile-v1", "embedded": true } } }
   ```
   `gitCommit` = `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` — **exact match to `expected_sha`, CONFIRMED from
   the checksummed bytes, not the external sidecar.** Unlike `builtAt`/`ciRunId`, `gitCommit` is derived from
   `git rev-parse HEAD` at the pinned commit and will be the same in A2 provided A2 also targets `7bf2bd7a1`.
+  `fixMarkers.issue1912.embedded: true` corroborates §2.4/§2.3's marker findings from the same archive this
+  fix pass independently re-extracted (see §3.1a).
 - **Verify reports** (both archives, `ok: true`):
   ```json
   "checks": [
@@ -291,6 +337,112 @@ Downloaded the real artifact read-only (`gh run download 30148584851`) — not h
   available to deploy"; nothing here is a publicly-addressable checksummed asset until A2 runs.
 - If the owner's A2 act slips past the retention window, A1 must be re-run (cheap — no code changed, same
   `expected_sha`, same ref) before A2, since A2's own build supersedes A1's bytes anyway.
+
+### 3.1a Loopback verification — built, then run post-hoc/standalone against A1's real artifact (this fix pass)
+
+**Owner ruling on §6's escalation (below): build the real check — option 2, not option 1.** This fix pass
+adds `verify_no_loopback_frontend_config()` to `scripts/ops/multitable-onprem-package-verify.sh`, porting
+`scripts/ops/attendance-onprem-package-verify.sh`'s existing loopback rule
+(`VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)"` against `apps/web/dist`) — same pattern, same target.
+Wired unconditionally (not gated behind an env var, matching attendance's rule) into the main verify flow, and
+reported as a fifth `"loopback"` field in both the JSON and Markdown reports. New focused test
+(`scripts/ops/multitable-onprem-package-verify-loopback.test.sh`, sourced-function style matching the sibling
+`multitable-onprem-package-verify.provenance.test.sh`) covers one positive fixture and three negatives —
+`VITE_API_URL`+`127.0.0.1`, `VITE_API_BASE`+`localhost` (opposite corners of the alternation), and
+`apps/web/dist` missing entirely (closes a vacuous-pass hole: `search_extended_regex` returns non-zero/no-match
+against a target directory that does not exist, which would otherwise silently report PASS on a package
+missing its frontend bundle). Like the sibling provenance test, it is **not wired into any CI workflow** —
+run manually; the doc does not imply CI coverage it does not have.
+
+**`verificationToolSha`** — the exact tool used below. Recorded as the **blob** SHA of the script (the
+load-bearing identity: stable across this fix pass's own later commits, e.g. this document's), with the
+introducing commit also recorded for provenance:
+```
+git rev-parse HEAD:scripts/ops/multitable-onprem-package-verify.sh
+# 2e64b9d6639fa9e250cb06003adcdd41604560a8
+```
+Introduced at commit `542ca93b73cd20bbbadb3aece7c1d448581c55a6` on this branch (rebased onto `origin/main`
+tip `d4dc12d8a`). **This is a tooling identity, not a deployed-artifact identity — it must never be conflated
+into `serviceRuntimeSha`** (still `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, unchanged) **or presented as
+part of what run `30148584851` itself produced.**
+
+**What was executed — a real, full run of the updated tool against A1's real, already-built artifact bytes**
+(not the sourced-function fixture test above; not a rebuild; `serviceRuntimeSha` does not move). Commands and
+real, unedited output:
+
+1. Re-downloaded (read-only) the same Actions artifact §3.1 already recorded:
+   ```
+   gh run download 30148584851 --repo zensgit/metasheet2 -D .
+   ```
+   Local recompute reproduces the exact `SHA256SUMS` line already in §3.1 — same bytes, no re-fetch drift:
+   ```
+   $ shasum -a 256 metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+   759adcc3cbb6f677f2c6aea92224df83085d1afb1424c1759d980b98abd07f4d  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+   ```
+2. Ran the **full** updated `multitable-onprem-package-verify.sh` (all checks, not just the new function in
+   isolation) against that real `.tgz`, with `VERIFY_REPORT_JSON` set:
+   ```
+   $ VERIFY_REPORT_JSON=<local>/posthoc-verify.json bash scripts/ops/multitable-onprem-package-verify.sh <local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+   metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz: OK
+   [multitable-onprem-package-verify] Package verify OK
+   [multitable-onprem-package-verify]   package: <local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+   [multitable-onprem-package-verify]   root: <extracted temp dir>
+   [multitable-onprem-package-verify]   verify_report_json: <local>/posthoc-verify.json
+   EXIT=0
+   ```
+   `posthoc-verify.json`, real, unedited content:
+   ```json
+   {
+     "ok": true,
+     "packageFile": "<local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz",
+     "packageName": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725",
+     "archiveType": "tgz",
+     "packageRootInArchive": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725",
+     "extractMode": "temporary",
+     "extractRoot": null,
+     "checks": [
+       { "name": "checksum", "status": "PASS" },
+       { "name": "required-content", "status": "PASS", "requiredCount": 128 },
+       { "name": "deployability-contract", "status": "PASS", "artifactKind": "deployable-onprem-app-package",
+         "deployMode": "fresh-extract-or-existing-root-apply", "directReplaceSafe": false, "nodeModulesBundled": false },
+       { "name": "no-github-links", "status": "PASS" },
+       { "name": "loopback", "status": "PASS" }
+     ],
+     "generatedAt": "2026-07-25T14:06:55Z"
+   }
+   ```
+   Five checks, all PASS — the four-check report becomes five. `requiredCount=128` matches §3.1's original A1
+   run exactly — no unrelated drift in the required-file inventory between the original CI run and this
+   post-hoc pass.
+3. Independently corroborated outside the script, by direct extraction and grep against the real
+   `apps/web/dist` inside the archive (122 files under `apps/web/dist`):
+   ```
+   $ tar -xzf metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz -C <extract-dir>
+   $ grep -rIE 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' <extract-dir>/.../apps/web/dist
+   # (no output)
+   $ echo "grep exit=$?"
+   grep exit=1
+   ```
+   Zero matches, independently of the new check function. Matches the owner's own finding (review #4604): the
+   current artifact does not hit the forbidden pattern. This is the expected outcome the owner's ruling was
+   scoped to — **completing the proof, not changing service code** — and that is what happened; no
+   runtime/service code changed, only the verify tool.
+
+**Explicit non-conflation, stated plainly (this is the exact thing ⟲R7 exists to prevent):** run
+`30148584851`'s own `verify.json`, the one packaged inside the CI-produced Actions artifact, is **immutable
+and still shows four checks** (§3.1) — it was produced by the verify script as it existed at commit
+`7bf2bd7a1`, before this fix pass's check existed. The fifth check above ran **after the fact, standalone,
+at `verificationToolSha`**, against the same archive bytes. It is corroborating evidence, not a retroactive
+edit of the run's own artifact, and must be cited as such — not as "run 30148584851 produced five checks."
+
+**Known forward gap, not resolved here:** the workflow's `workflow_dispatch` checks out the *ref* it is given
+(`build/m0a-rca-7bf2bd7a1`, pinned to source commit `7bf2bd7a1`) — including whatever version of
+`multitable-onprem-package-verify.sh` exists **at that commit**, not on this feature branch. A future A2
+dispatch at that same ref will therefore still run the **old, four-check** verify script and produce a
+**four**-check `verify.json` of its own, not five — unless the owner separately decides to move the build ref
+forward (which `docs/development/database-system-integration-line-design-and-verification-20260724.md`'s
+"Build SHA stays `7bf2bd7a1`... do not enlarge the runtime change surface" ruling weighs against, and this
+document does not decide). This gap is recorded, not closed.
 
 ### 3.2 A2 — publish/freeze, `publish_release=true` (OWNER-ONLY — NOT inside M0-A's authorization)
 
@@ -353,6 +505,13 @@ guessing or by copying A1's run-scoped checksums; they must come from A2's own `
 >   - `stock-preparation-prep-line-extended-smoke.mjs` → `912f3ef75c4487dbdd946486d4cb7374f1c3ea1eb126c3b68381ad11963f0049`
 >   These already match `HELPER_CONTENT_SHA256` in `scripts/ops/stock-preparation-rca-abort-provenance.mjs` —
 >   **no code change is required for the client half of this revision.**
+> - **Loopback verification** (not a third deployed-artifact SHA — a tooling-run result; see §3.1a for the
+>   full record, kept separate here on purpose): PASS, via a post-hoc/standalone run of the updated verify
+>   tool (`verificationToolSha` = `2e64b9d6639fa9e250cb06003adcdd41604560a8`, the script blob) against A1's
+>   real artifact. **This did not come from run `30148584851`'s own `verify.json`** (that artifact is
+>   immutable and still shows four checks) and will not come from a future A2 run at the pinned ref either,
+>   unless the ref/tooling question is separately revisited (§3.1a forward gap) — do not post this line to
+>   #4437 as if it were part of A2's own build output.
 > - **Release / tag**: `<<PENDING FREEZE RUN (A2) — owner selects the tag; not pre-chosen by this document>>`,
 >   built via the **Multitable On-Prem Package Build** workflow
 >   (`.github/workflows/multitable-onprem-package-build.yml`, `publish_release=true`) — stock-prep ships as a
@@ -408,45 +567,57 @@ guessing or by copying A1's run-scoped checksums; they must come from A2's own `
 - It is: an investigation record; a real, passing CI build+verify (A1, run 30148584851) at the exact
   recommended commit, watched to completion and checked against its own downloaded outputs (not hand-typed);
   a CONFIRMED `serviceRuntimeSha`/`gitCommit` read-back; the mechanically-verified `clientHelperSha` half
-  (unchanged from the original investigation, no rebuild needed); a draft the operator/owner can lift into
-  #4437 once A2 (§3.2) exists; and an escalation (§6) of a ledger-vs-tooling naming gap for the owner to rule
-  on.
+  (unchanged from the original investigation, no rebuild needed); a real loopback-verification check, built
+  per owner ruling (§6) and run post-hoc/standalone against A1's real artifact bytes at a recorded, separate
+  `verificationToolSha` (§3.1a), PASS, corroborated by an independent direct grep; a draft the operator/owner
+  can lift into #4437 once A2 (§3.2) exists.
 - It is not: a published release, a permanent/addressable checksummed artifact (A1's Actions artifact expires
-  ~2026-08-08, §3.1), the owner's freeze act, or an edit to #4437 itself. Nothing here was posted to the
+  ~2026-08-08, §3.1), the owner's freeze act, an edit to #4437 itself, or an edit to the RATIFIED ledger
+  (§6's ruling is recorded here, not written into the ledger's own text). Nothing here was posted to the
   issue. A1's `.tgz`/`.zip` SHA256 values are recorded as run-scoped evidence only and must not be read as
-  "the" RC-A checksums — those come from A2.
+  "the" RC-A checksums — those come from A2. The post-hoc loopback PASS (§3.1a) is not the same claim as "run
+  30148584851's own `verify.json` has five checks" — that artifact is immutable and still has four (§3.1); a
+  future A2 dispatch at the pinned ref will also still emit four unless the ref/tooling question is
+  separately revisited (§3.1a's forward gap, not resolved here). **A1 PASS is not M0-A PASS** — M0-A remains
+  open pending A2 regardless.
 
-## 6. Escalation to the owner — RATIFIED ledger names a check the verify tooling does not have
+## 6. Owner ruling on the escalation — build the check (option 2), not amend the ledger (option 1)
 
-**This is a specification gap, not a bug this document can fix, and not something it rules on.**
+**This section previously escalated a specification gap and left it unresolved for the owner to rule on. The
+owner has now ruled (review #4604 P1): "BUILD THE REAL CHECK, DO NOT DELETE THE CONTRACT." This section
+records that ruling and what this fix pass did to satisfy it. It still does not edit the RATIFIED ledger —
+the ledger's own text is unchanged; this section only records that its "loopback verification" phrase now has
+a real, falsifiable check backing it, per the mechanics in §3.1a.**
 
 The RATIFIED ledger (`docs/development/database-system-integration-line-design-and-verification-20260724.md`)
-names "loopback verification" as part of M0-A's authorized/expected output in two places:
+names "loopback verification" as part of M0-A's authorized/expected output in two places (unchanged, quoted
+verbatim, not edited by this document):
 
 - §4, the M0-A bullet itself: *"regenerate manifest / SHA256 / provenance / **loopback verification**, revise
   the #4437 pointer..."*
 - §2 ⟲R7: *"regenerate manifest + SHA256 + provenance + **loopback verification**; revise #4437..."*
 
-The actual verify tooling this build produces output through, `scripts/ops/multitable-onprem-package-verify.sh`,
-runs exactly **four** checks — confirmed from this session's own A1 `verify.json` output (§3.1):
-`checksum`, `required-content`, `deployability-contract`, `no-github-links`. None is named or behaves as a
-loopback check. Confirmed by direct grep against the current script, not inference:
+Before this fix pass, `scripts/ops/multitable-onprem-package-verify.sh` ran exactly **four** checks —
+confirmed from the original A1 `verify.json` output (§3.1): `checksum`, `required-content`,
+`deployability-contract`, `no-github-links`. None was named or behaved as a loopback check, confirmed by
+direct grep at that point in history:
 ```
 grep -n "loopback" scripts/ops/multitable-onprem-package-verify.sh
-# (zero hits)
+# (zero hits, before this fix pass)
 grep -n "loopback" scripts/ops/attendance-onprem-package-verify.sh
 # 321:  die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
 ```
-Attendance's on-prem verify script has exactly this kind of check (fails the build if the frontend bundle
-embeds a loopback `VITE_API_URL`); multitable's does not. So either:
+Attendance's on-prem verify script already had exactly this kind of check (fails the build if the frontend
+bundle embeds a loopback `VITE_API_URL`); multitable's did not.
 
-1. **the ledger's phrase should be amended** to name the four checks that actually exist (`checksum` /
-   `required-content` / `deployability-contract` / `no-github-links`), because "loopback verification" was
-   never built for the multitable path and the ledger's authorization language should describe what M0-A's
-   output actually is, or
-2. **a loopback check must be built** into `multitable-onprem-package-verify.sh` (mirroring attendance's
-   pattern) before M0-A's output can honestly be described as including it.
+**Owner's ruling bounded the expected work:** they had already downloaded and inspected run `30148584851`'s
+A1 artifacts and found the current artifacts do **not** hit the forbidden pattern — so this was expected to
+be *completing the proof, not changing service code*. §3.1a confirms exactly that: the check was built
+(reusing attendance's rule verbatim, same pattern/target), the real artifact was independently re-checked and
+found clean by both the new check and a direct grep outside it, and no runtime/service code changed. Had the
+real artifact instead hit the pattern, this document would stop and report rather than reconcile — it did
+not need to.
 
-Both are owner decisions. This document does not choose between them and does not edit the RATIFIED ledger.
-It records that A1's real, passing verify run covered four checks — not five, not "loopback" — so whoever
-reads M0-A's ledger line against A1's actual output does not silently assume a check ran that did not.
+Residual, recorded not resolved: §3.1a's forward gap (a future A2 dispatch at the pinned ref will still emit
+a four-check `verify.json` unless the ref/tooling question is separately revisited) remains open, and this
+document does not decide it.
