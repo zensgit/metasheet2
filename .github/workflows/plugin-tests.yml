@@ -917,6 +917,7 @@ jobs:
             tests/integration/attendance-work-date-resolver-w2.db.test.ts \
             tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
             tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts \
+            tests/integration/attendance-w4c0-operation-registry.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

@@ -25,6 +25,12 @@
  * offending input bytes.
  */
 import crypto from 'node:crypto'
+import { performance } from 'node:perf_hooks'
+import {
+  AttendanceW4OperationError,
+  W4_ADVISORY_HELPER_WAIT_MS,
+  W4_TRANSACTION_LOCK_TIMEOUT_MS,
+} from './w4c0-operation-contract'
 
 // ---------------------------------------------------------------------------
 // Branded scalar types (lock section 4.1; amendment section 1).
@@ -649,6 +655,39 @@ function mintOperationWitness(
   return witness
 }
 
+export interface AttendanceOperationCandidateIdentityV1 {
+  readonly kind: AttendanceOperationIdentityKindV1
+  readonly entrypoint: AttendanceSourceEntrypointV1
+  readonly sourceKind: AttendanceOperationIdentitySourceKindV1
+  readonly operationId: string
+  readonly ordinal: string | null
+}
+
+/**
+ * PRE-LOCK candidate derivation (lock 7.1: "The worker's pre-lock job read may derive
+ * candidate identities but confers no authority"). Strict-parses the same closed source
+ * tuple as the factory and returns ONLY scalar candidate bytes: no witness is minted, no
+ * posture is claimed, and no advisory builder or acquisition helper accepts this result.
+ * The Stage C boundary uses it solely for the section 8.2 step-1 non-locking replay read.
+ */
+export function deriveAttendanceOperationCandidateIdentityV1(source: unknown): AttendanceOperationCandidateIdentityV1 {
+  if (typeof source !== 'object' || source === null) fail('W4C0_SOURCE_PROOF_INPUT_INVALID')
+  const sourceKindRaw = Object.getOwnPropertyDescriptor(source, 'sourceKind')?.value
+  if (typeof sourceKindRaw !== 'string' || !Object.prototype.hasOwnProperty.call(ATTENDANCE_OPERATION_SOURCE_MATRIX_V1, sourceKindRaw)) {
+    fail('W4C0_SOURCE_KIND_INVALID')
+  }
+  const sourceKind = sourceKindRaw as AttendanceOperationIdentitySourceKindV1
+  const row = ATTENDANCE_OPERATION_SOURCE_MATRIX_V1[sourceKind]
+  const tuple = normalizeSourceTuple(sourceKind, source)
+  return Object.freeze({
+    kind: row.kind,
+    entrypoint: row.entrypoint,
+    sourceKind,
+    operationId: tuple.operationId,
+    ordinal: tuple.ordinal,
+  })
+}
+
 /**
  * The closed verified-operation-identity factory — the ONLY constructor accepted by
  * `buildAttendanceResultOperationAdvisoryKey`. It strict-parses org witness, kind,
@@ -920,15 +959,96 @@ export function buildAttendanceCalculationTargetAdvisoryKey(identity: VerifiedAt
 }
 
 // ---------------------------------------------------------------------------
-// Acquisition helpers (lock sections 8.2 / 9) — the only lock-taking seams.
-// No try-lock, no swallowed error, no timeout-to-continue, no row-lock fallback:
-// any SQL failure propagates and aborts the whole transaction.
+// Acquisition helpers (lock sections 7.1 / 8.2 / 9) — the only lock-taking seams.
+// No try-lock, no swallowed non-timeout error, no timeout-to-continue, no
+// row-lock fallback: any SQL failure other than the helper's OWN acquisition
+// 55P03 propagates and aborts the whole transaction.
+//
+// Deadline protocol (lock section 7.1): each helper call enforces ONE
+// helper-wide monotonic deadline, not one fresh timeout per key. At entry the
+// monotonic clock fixes `deadline = now + W4_ADVISORY_HELPER_WAIT_MS`. Before
+// each final-key query the helper computes the positive integer remaining
+// milliseconds, applies it via transaction-local
+// `set_config('lock_timeout', ..., true)`, acquires exactly that key, and
+// checks the same deadline again. Expiry before a query or after the final
+// acquisition throws the helper's typed busy error (the caller rolls the
+// transaction back). On successful completion the helper restores
+// W4_TRANSACTION_LOCK_TIMEOUT_MS.
 // ---------------------------------------------------------------------------
+
+type MonotonicClock = () => number
+
+function productionMonotonicNow(): number {
+  return performance.now()
+}
+
+// Module-private test clock: the ONLY clock seam (section 7.1). Production
+// construction cannot inject it — the setter fail-closes outside a test runtime.
+let monotonicClockSeam: MonotonicClock | null = null
+
+export function __setAttendanceW4MonotonicClockForTests(seam: MonotonicClock | null): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    fail('W4C0_CLOCK_SEAM_FORBIDDEN')
+  }
+  monotonicClockSeam = seam
+}
+
+function monotonicNow(): number {
+  return (monotonicClockSeam ?? productionMonotonicNow)()
+}
+
+function isLockNotAvailable(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === '55P03'
+  )
+}
+
+function busyError(lockClass: 'rollout' | 'operation' | 'target'): AttendanceW4OperationError {
+  const code =
+    lockClass === 'rollout'
+      ? 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY'
+      : lockClass === 'operation'
+        ? 'ATTENDANCE_OPERATION_IN_PROGRESS'
+        : 'ATTENDANCE_CALCULATION_TARGET_BUSY'
+  return new AttendanceW4OperationError(code, lockClass)
+}
+
+/**
+ * Section 7.1 helper-wide deadline acquisition over pre-built final signed keys.
+ * Only the helper's OWN acquisition-query 55P03 (or its own budget expiry) maps
+ * to the closed busy error; every other SQL error propagates unchanged, and a
+ * timeout from any other statement is never relabeled as lock contention.
+ */
+async function acquireKeysWithDeadline(
+  trx: AttendanceW4TransactionClientV1,
+  lockClass: 'rollout' | 'operation' | 'target',
+  acquisitionSql: string,
+  keys: readonly bigint[],
+): Promise<void> {
+  const deadline = monotonicNow() + W4_ADVISORY_HELPER_WAIT_MS
+  for (const key of keys) {
+    const remaining = Math.ceil(deadline - monotonicNow())
+    if (remaining <= 0) throw busyError(lockClass)
+    await trx.query("SELECT set_config('lock_timeout', $1, true)", [String(remaining)])
+    try {
+      await trx.query(acquisitionSql, [key.toString()])
+    } catch (error) {
+      if (isLockNotAvailable(error)) throw busyError(lockClass)
+      throw error
+    }
+    if (monotonicNow() > deadline) throw busyError(lockClass)
+  }
+  await trx.query("SELECT set_config('lock_timeout', $1, true)", [String(W4_TRANSACTION_LOCK_TIMEOUT_MS)])
+}
 
 /**
  * The ONLY place allowed to select pg_advisory_xact_lock_shared versus
  * pg_advisory_xact_lock for the org rollout key. Source, rollback, transition, and closure
  * all import this helper (later slices); there is no copied namespace or local hash.
+ * Its own budget/acquisition timeout maps to values-free
+ * `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` after the caller rolls back.
  */
 export async function acquireAttendanceCalculationRolloutLock(
   trx: AttendanceW4TransactionClientV1,
@@ -937,11 +1057,11 @@ export async function acquireAttendanceCalculationRolloutLock(
 ): Promise<void> {
   if (mode !== 'shared' && mode !== 'exclusive') fail('W4C0_LOCK_MODE_INVALID')
   const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
-  if (mode === 'shared') {
-    await trx.query('SELECT pg_advisory_xact_lock_shared($1::bigint)', [key.toString()])
-  } else {
-    await trx.query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
-  }
+  const acquisitionSql =
+    mode === 'shared'
+      ? 'SELECT pg_advisory_xact_lock_shared($1::bigint)'
+      : 'SELECT pg_advisory_xact_lock($1::bigint)'
+  await acquireKeysWithDeadline(trx, 'rollout', acquisitionSql, [key])
 }
 
 function toSortedUniqueSignedKeys(keys: readonly bigint[]): bigint[] {
@@ -957,6 +1077,8 @@ function toSortedUniqueSignedKeys(keys: readonly bigint[]): bigint[] {
  * Canonicalizes (witness-checks) identities, derives final signed keys, de-duplicates by
  * final key, sorts them numerically, and obtains exclusive transaction advisory locks in
  * that order. Two identities colliding to one final key require one acquisition.
+ * Its own budget/acquisition timeout maps to values-free
+ * `409 ATTENDANCE_OPERATION_IN_PROGRESS` after the caller rolls back.
  */
 export async function acquireAttendanceResultOperationLocks(
   trx: AttendanceW4TransactionClientV1,
@@ -964,19 +1086,52 @@ export async function acquireAttendanceResultOperationLocks(
 ): Promise<void> {
   if (!Array.isArray(identities)) fail('W4C0_IDENTITY_LIST_INVALID')
   const keys = identities.map((identity) => buildAttendanceResultOperationAdvisoryKey(identity))
-  for (const key of toSortedUniqueSignedKeys(keys)) {
-    await trx.query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
-  }
+  await acquireKeysWithDeadline(
+    trx,
+    'operation',
+    'SELECT pg_advisory_xact_lock($1::bigint)',
+    toSortedUniqueSignedKeys(keys),
+  )
 }
 
-/** Same protocol for class-`11` calculation-target keys. */
+/**
+ * Same protocol for class-`11` calculation-target keys. Its own budget/acquisition
+ * timeout maps to values-free `503 ATTENDANCE_CALCULATION_TARGET_BUSY` after the
+ * caller rolls back.
+ */
 export async function acquireAttendanceCalculationTargetLocks(
   trx: AttendanceW4TransactionClientV1,
   identities: readonly VerifiedAttendanceCalculationTargetIdentityV1[],
 ): Promise<void> {
   if (!Array.isArray(identities)) fail('W4C0_IDENTITY_LIST_INVALID')
   const keys = identities.map((identity) => buildAttendanceCalculationTargetAdvisoryKey(identity))
-  for (const key of toSortedUniqueSignedKeys(keys)) {
-    await trx.query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
-  }
+  await acquireKeysWithDeadline(
+    trx,
+    'target',
+    'SELECT pg_advisory_xact_lock($1::bigint)',
+    toSortedUniqueSignedKeys(keys),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Witness verifiers for the Stage C registry/service layer. Read-only checks —
+// they mint nothing; membership in the module-private WeakSets remains the only
+// proof, so a JSON clone/spread/prototype lookalike is rejected here exactly as
+// it is by the key builders.
+// ---------------------------------------------------------------------------
+
+export function requireVerifiedAttendanceOrgIdentityV1(org: unknown): VerifiedAttendanceOrgIdentityV1 {
+  return requireOrgWitness(org)
+}
+
+export function requireVerifiedAttendanceOperationIdentityV1(
+  identity: unknown,
+): VerifiedAttendanceOperationIdentityV1 {
+  return requireOperationWitness(identity)
+}
+
+export function requireVerifiedAttendanceCalculationTargetIdentityV1(
+  identity: unknown,
+): VerifiedAttendanceCalculationTargetIdentityV1 {
+  return requireTargetWitness(identity)
 }
