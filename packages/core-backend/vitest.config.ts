@@ -480,6 +480,19 @@ export default defineConfig({
       // wired whole-file into the attendance real-DB step in plugin-tests.yml
       // (two-point wiring).
       'tests/integration/attendance-w4c0-operation-registry.db.test.ts',
+      // #4556 W4C-0 Stage E1: full section 12.1 DB-gate matrix (migration lifecycle on a
+      // scratch database, immutability refusal surface, transaction-bound deferred
+      // constraints, pointer/lineage gates, P07 job gates + two-connection reservation
+      // backstop). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green
+      // it; wired whole-file into the attendance real-DB step in plugin-tests.yml
+      // (two-point wiring).
+      'tests/integration/attendance-w4c0-db-gates-e1.db.test.ts',
+      // #4556 W4C-0 Stage E2: amendment section 2 identity-gate matrix (default/posture
+      // reload doors, cross-namespace masquerade matrix, durable rehydration drift,
+      // pre-lock/post-lock isolation) against real Postgres. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the
+      // attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

@@ -1444,6 +1444,49 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       FOR EACH ROW EXECUTE FUNCTION attendance_w4_batches_claimed_commit_guard()
   `.execute(db)
 
+  // Item-side mirror of the completed-batch count guard (Stage E1 hardening; sections
+  // 7.1/12.1 "deferred parent-and-child triggers reject incomplete or extra direct
+  // children at commit"): a LATER extra item inserted against an already-completed batch
+  // only fires an item-side trigger — the batch-side guard above cannot see it. During a
+  // normal claim->seal transaction the batch is completed by commit time and the count
+  // matches, so the guard is invisible to the service flow.
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4_operation_items_commit_guard()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $fn$
+    DECLARE
+      batch RECORD;
+      attached integer;
+    BEGIN
+      IF NEW.batch_command_id IS NULL THEN
+        RETURN NULL;
+      END IF;
+      SELECT state, item_count INTO batch FROM attendance_result_operation_batches
+      WHERE org_id = NEW.org_id AND entrypoint = NEW.entrypoint AND batch_command_id = NEW.batch_command_id;
+      IF NOT FOUND THEN
+        RETURN NULL; -- the immediate composite FK already rejects a missing batch
+      END IF;
+      IF batch.state = 'completed' THEN
+        SELECT count(*) INTO attached FROM attendance_result_operations
+        WHERE org_id = NEW.org_id AND entrypoint = NEW.entrypoint AND batch_command_id = NEW.batch_command_id;
+        IF attached <> batch.item_count THEN
+          RAISE EXCEPTION 'W4C0_BATCH_ITEMS: completed batch item count mismatch on %', TG_TABLE_NAME;
+        END IF;
+      END IF;
+      RETURN NULL;
+    END;
+    $fn$
+  `.execute(db)
+
+  await sql`DROP TRIGGER IF EXISTS trg_aro_items_commit_guard ON attendance_result_operations`.execute(db)
+  await sql`
+    CREATE CONSTRAINT TRIGGER trg_aro_items_commit_guard
+      AFTER INSERT ON attendance_result_operations
+      DEFERRABLE INITIALLY DEFERRED
+      FOR EACH ROW EXECUTE FUNCTION attendance_w4_operation_items_commit_guard()
+  `.execute(db)
+
   // Outbox: identity/payload immutable; only closed pending -> delivered transitions and
   // retry bookkeeping may change; delivered rows are terminal; no DELETE/TRUNCATE.
   await sql`
@@ -1598,6 +1641,32 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     $do$
   `.execute(db)
 
+  // Amendment 1.2 boundary hardening (Stage E2): the exact ASCII default org key can
+  // never persist a W4-enabled accepted write posture. "default with shadow or
+  // authoritative fails before operation or source DML" — enforced at the DB boundary
+  // too, so a raw writer bypassing the verified-identity factory still fails closed.
+  await sql`
+    DO $do$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_arob_default_org_posture') THEN
+        ALTER TABLE attendance_result_operation_batches ADD CONSTRAINT chk_arob_default_org_posture
+          CHECK (org_id <> 'default' OR accepted_write_posture = 'legacy_projection_only');
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_aro_default_org_posture') THEN
+        ALTER TABLE attendance_result_operations ADD CONSTRAINT chk_aro_default_org_posture
+          CHECK (org_id <> 'default' OR accepted_write_posture = 'legacy_projection_only');
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_aij_w4_default_org_posture') THEN
+        ALTER TABLE attendance_import_jobs ADD CONSTRAINT chk_aij_w4_default_org_posture
+          CHECK (
+            w4_accepted_write_posture IS NULL OR org_id <> 'default' OR
+            w4_accepted_write_posture = 'legacy_projection_only'
+          );
+      END IF;
+    END
+    $do$
+  `.execute(db)
+
   // The V1 reservation partial unique backstop (section 7.1) — never the expected
   // control path; class-10 advisory locks serialize first claims.
   await sql`
@@ -1717,6 +1786,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     'chk_aij_w4_set_fp',
     'chk_aij_w4_proof_vector',
     'chk_aij_w4_exec_reason',
+    'chk_aij_w4_default_org_posture',
   ]
   for (const name of jobConstraints) {
     await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS ${sql.raw(name)}`.execute(db)
@@ -1757,6 +1827,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
 
   const functions = [
     'attendance_w4_import_jobs_w4_guard()',
+    'attendance_w4_operation_items_commit_guard()',
     'attendance_w4_outbox_update_guard()',
     'attendance_w4_batches_claimed_commit_guard()',
     'attendance_w4_operations_claimed_commit_guard()',
