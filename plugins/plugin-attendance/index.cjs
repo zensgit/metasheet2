@@ -22532,6 +22532,40 @@ module.exports = {
       }
     }
 
+    // W4C-2 (#4556 lock §12.2 last sentence; #4607 gate handover P3-4): default-rule and
+    // shift timezone WRITES must pass the single strict W4 IANA validator
+    // (`validateAttendanceIanaTimezoneV1`, host-provided via the least-privilege
+    // `attendanceW4SegmentCalculation` port — same posture as approvalAssigneeResolver:
+    // the plugin never copies the validator, one source, no drift). A persisted invalid
+    // zone must never become a future calculation input, so a timezone-carrying write
+    // FAILS CLOSED when the port is absent instead of falling back to the looser local
+    // Intl probe (which accepts offset forms like "+05:00"). Reads and writes that do
+    // not carry a timezone value are untouched.
+    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
+    // Returns true when it has already written the response (invalid zone / port missing); callers must return.
+    const respondUnlessStrictIanaTimezoneWrite = (res, zone, fieldName = 'timezone') => {
+      if (zone === undefined || zone === null) return false
+      const port = attendanceW4SegmentCalculationPort
+      if (!port || typeof port.validateIanaTimezone !== 'function') {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_TIMEZONE_VALIDATOR_UNAVAILABLE', message: 'Strict timezone validation service unavailable' },
+        })
+        return true
+      }
+      try {
+        port.validateIanaTimezone(zone)
+        return false
+      } catch (_error) {
+        // Values-free: the submitted zone is never echoed back.
+        res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: `${fieldName} must be a valid IANA time zone` },
+        })
+        return true
+      }
+    }
+
     // T3-2: register the working-day calendar provider (adapter) the approval SLA path consults through
     // the WorkdayCalendarPort. This is the ONLY approval↔attendance coupling — approval never reads
     // attendance_* tables; it calls resolve(orgId, asOf) and receives a snapshot day-mask. The adapter
@@ -33483,6 +33517,13 @@ module.exports = {
           return
         }
 
+        // W4C-2 (#4607 P3-4): a default-rule timezone WRITE goes through the strict W4
+        // IANA validator (offset forms, whitespace, non-IANA strings all fail closed).
+        if (parsed.data.timezone !== undefined
+            && respondUnlessStrictIanaTimezoneWrite(res, parsed.data.timezone)) {
+          return
+        }
+
         const orgId = getOrgId(req)
         try {
           const rule = await db.transaction(async (trx) => {
@@ -41063,6 +41104,12 @@ module.exports = {
           return
         }
 
+        // W4C-2 (#4607 P3-4): shift timezone WRITES use the same single strict W4 IANA validator.
+        if (parsed.data.timezone !== undefined
+            && respondUnlessStrictIanaTimezoneWrite(res, parsed.data.timezone)) {
+          return
+        }
+
         const orgId = getOrgId(req)
 
         try {
@@ -41091,6 +41138,12 @@ module.exports = {
         const parsed = shiftUpdateSchema.safeParse(normalizeShiftPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        // W4C-2 (#4607 P3-4): shift timezone WRITES use the same single strict W4 IANA validator.
+        if (parsed.data.timezone !== undefined
+            && respondUnlessStrictIanaTimezoneWrite(res, parsed.data.timezone)) {
           return
         }
 
