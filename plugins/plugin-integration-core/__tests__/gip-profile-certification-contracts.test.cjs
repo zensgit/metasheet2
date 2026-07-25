@@ -373,6 +373,21 @@ function publicHelperAgreesWithInternalPattern() {
     overLength.length > 128 && __internals.PROFILE_ID_PATTERN.test(overLength) && !isValidProfileId(overLength),
     'table must include an id that is pattern-valid but rejected ONLY by the 128-char bound',
   )
+  // Trim-semantics asymmetry (pinned, not just asserted in prose above the function definition):
+  // isValidProfileId is deliberately UNTRIMMED — a padded id must be rejected here even though its
+  // trimmed form would match PROFILE_ID_PATTERN.
+  const padded = ' fixture.paged_read.v1 '
+  assert.equal(isValidProfileId(padded), false, 'isValidProfileId is untrimmed: a padded id must be rejected')
+  // Contrast with the PRE-EXISTING, UNCHANGED-by-this-PR behaviour of normalizeCertifiedReadActionProfile:
+  // it trims via nonBlankString BEFORE testing length/pattern, so the SAME padded string is accepted
+  // there. This is not a new decision introduced by isValidProfileId — it documents an asymmetry that
+  // already existed between this module's two profileId entry points, so isValidProfileId is not
+  // expected to (and must not silently start to) match normalizeCertifiedReadActionProfile's trimming.
+  assert.equal(
+    normalizeCertifiedReadActionProfile(fixtureProfile({ profileId: padded })).profileId,
+    'fixture.paged_read.v1',
+    'normalizeCertifiedReadActionProfile trims via nonBlankString before testing — it accepts what isValidProfileId (untrimmed) rejects',
+  )
 }
 
 function main() {

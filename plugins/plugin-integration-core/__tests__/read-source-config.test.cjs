@@ -186,7 +186,8 @@ assert.equal(validateReadSourceConfig(null).errors[0].code, 'READ_SOURCE_CONFIG_
 // `READ_SOURCE_UNEXPECTED_FIELD` / `READ_SOURCE_ORDERING_KEY_SPEC_INVALID` /
 // `READ_SOURCE_ACTION_PROFILE_VERSION_INVALID` absent from the error-code vocabulary (those codes don't
 // exist yet either) — captured verbatim in the PR description as the pre-change red run. The PRE-EXISTING
-// generic `nefariousKey` case at line 127 is a separate, already-passing negative control and is
+// generic standalone `nefariousKey` unexpected-field assertion above (before this block) is a separate,
+// already-passing negative control and is
 // RETAINED unchanged (8b below shows the widening this PR adds is exactly two keys, not "anything goes").
 
 // 8a. Well-shaped orderingKeySpec + actionProfileVersion together must be ACCEPTED and survive normalization.
