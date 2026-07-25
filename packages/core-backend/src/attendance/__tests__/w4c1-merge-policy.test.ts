@@ -133,6 +133,34 @@ describe('applyAttendanceInOutMergePolicyPureV1 (exact legacy branch lift)', () 
     ).toEqual({ changed: false, nextFirstInAtMs: T(1), nextLastOutAtMs: null })
   })
 
+  it('represented-by-event un-protection is OBSERVABLE: dropping protection falls back to earliest INTERNAL, not the protected value (gate P2-1)', () => {
+    // Gate finding P2-1: the leg above cannot observe its own claim — protected value, record
+    // value, and the only event all sit at T(1), so deleting the representedByEvent judgement
+    // produces a byte-identical output (changed:false either way). This fixture makes the
+    // judgement load-bearing: the protected value T(4) IS represented by an internal event, so
+    // protection must drop and the earliest-INTERNAL branch must win with T(2) — NOT keep T(4)
+    // (which is what `return previousValueMs` unconditionally would produce), and NOT the
+    // outdoor T(0) (internalWinsOnIn). Mirrors legacy protectedRecordTime returning null when
+    // the value is event-represented (plugins/plugin-attendance/index.cjs:19303-19308).
+    expect(
+      applyAttendanceInOutMergePolicyPureV1(
+        baseInput({
+          internalWinsOnIn: true,
+          externalWinsOnOut: false,
+          recordFirstInAtMs: T(0),
+          recordLastOutAtMs: null,
+          protectedRecordFirstInAtMs: T(4),
+          protectedRecordLastOutAtMs: null,
+          events: [
+            { eventType: 'check_in', source: 'outdoor_approval', occurredAtMs: T(0) },
+            { eventType: 'check_in', source: 'manual', occurredAtMs: T(2) },
+            { eventType: 'check_in', source: 'manual', occurredAtMs: T(4) },
+          ],
+        }),
+      ),
+    ).toEqual({ changed: true, nextFirstInAtMs: T(2), nextLastOutAtMs: null })
+  })
+
   it('externalWinsOnOut picks the LATEST OUTDOOR check-out when internal and outdoor check-outs coexist (asymmetry)', () => {
     // The internal check-out (10:30) is later than every outdoor check-out,
     // but this side's legacy branch protects the latest OUTDOOR punch (10:00).

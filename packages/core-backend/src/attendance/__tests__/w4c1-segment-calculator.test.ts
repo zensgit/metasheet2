@@ -409,6 +409,24 @@ describe('calculateAttendanceSegmentsV1 — statuses, aggregation, rounding, tie
     expect(result.dailyProjection?.status).toBe('late_early')
   })
 
+  it('rule 2 partial OUTRANKS rule 3 late_early when both apply on one day (lock 6.3 ordered rules — gate P2-2)', () => {
+    // Gate finding P2-2: no existing leg observes the ORDER of §6.3 rules 2 and 3 — every
+    // partial fixture is late/early-free and every late_early fixture is missing-free, so
+    // swapping the two else-if branches left 126/126 green. This day has BOTH: seg0 is
+    // late_early (in 09:12, out 11:50) and seg1 is missing_check_in (only a check-out) with
+    // no excusing fact. The ordered rule set says an unexcused missing boundary makes the day
+    // `partial` — the state that drives makeup-punch flows — never `late_early`.
+    const result = run({
+      evidence: [
+        punch('ev-in-1', 'check_in', sh('09:12')),
+        punch('ev-out-1', 'check_out', sh('11:50')),
+        punch('ev-out-2', 'check_out', sh('17:00')),
+      ],
+    })
+    expect(result.segments.map((s) => s.status)).toEqual(['late_early', 'missing_check_in'])
+    expect(result.dailyProjection?.status).toBe('partial')
+  })
+
   it('late plus early ACROSS segments also aggregates to late_early (lock 6.3 rule 3)', () => {
     const result = run({
       evidence: [
