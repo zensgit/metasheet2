@@ -7,14 +7,27 @@
 // systemId/tenantId/workspaceId, the connection secret) provably do not move
 // the key — plus the decision-(α) boundary properties: brief decryption,
 // immediate domain-separated HMAC, discard, and "never into evidence, logs or
-// errors" (a sentinel-sweep test, not a bare claim); and, from the review
-// round 2 three-lens adversarial pass (P1-a/P1-b/P2-a/P2-b/P3-a): the
-// losslessness guard is sourced from the REAL sanitizer (not a hand-listed
-// copy), a forged public-class error cannot exfiltrate plaintext through
-// either catch site, computeSystemContentKey is not independently reachable,
-// an endpoint identity cannot smuggle an embedded credential past rotation
-// semantics, and a non-plain-object config is refused rather than silently
-// substituted.
+// errors" (a sentinel-sweep test, not a bare claim); from the review round 2
+// three-lens adversarial pass (P1-a/P1-b/P2-a/P2-b/P3-a): the losslessness
+// guard is sourced from the REAL sanitizer (not a hand-listed copy),
+// computeSystemContentKey is not independently reachable, an endpoint
+// identity cannot smuggle an embedded credential past rotation semantics,
+// and a non-plain-object config is refused rather than silently substituted;
+// and from review round 3 (round 2's P1-b fix reversed, not hardened): round
+// 2's WeakSet "brand" is gone from the module entirely, so there is no longer
+// ANY exemption for a foreign error to survive under — every error crossing
+// either catch site (runExtractor's, and credentialStore.decrypt's) is
+// unconditionally discarded and relabeled, proven here against the MOST
+// hostile foreign error constructible (sentinel in message, deeply-nested
+// details, cause, AND stack, impersonating a wrong-for-the-site reason
+// token); `__internals` no longer exports `fail`, and its own key set is now
+// pinned (not just the module's top-level exports); an untrusted/duck-typed
+// `registry` argument is refused as this module's own error class, not a
+// sibling class forwarded verbatim; and the two non-discriminating tests the
+// review round 3 pass found (a "branding exclusivity" control that only
+// demonstrated the exfiltration channel, and an endpoint-credential
+// "counterfactual" that held even with the boundary guard entirely absent)
+// are removed.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -519,13 +532,11 @@ async function sentinelNeverLeaksAcrossAnyPath() {
   assert.ok(!JSON.stringify(wrappedResult).includes(SENTINEL))
 
   // (f) P1-b: a declaration constructs a REAL, public-class
-  // GipSystemIdentityError itself (not this module's own fail()) and throws
-  // it from an extractor — reachable at the runExtractor catch site. Prior to
-  // the fix, `error instanceof GipSystemIdentityError` was true for this too
-  // (the class is a public export a declaration can import and construct),
-  // so it was rethrown VERBATIM, carrying the sentinel straight out. Fixed:
-  // provenance (branding), not class, decides the exemption — this FOREIGN
-  // error must be discarded and relabeled with the generic catch-all reason.
+  // GipSystemIdentityError itself and throws it from an extractor — reachable
+  // at the runExtractor catch site. This class of construction was the
+  // review round 2 defect (an `instanceof` check alone let it through); round
+  // 3 removed the entire brand/exemption mechanism, so this is now just one
+  // instance of "any foreign throw is discarded", not a special case.
   const forgingExtractorRegistry = createConnectorKindRegistry([{
     kind: 'test:forged-error-extractor',
     extractEndpointIdentity: (config) => config.baseUrl,
@@ -537,7 +548,7 @@ async function sentinelNeverLeaksAcrossAnyPath() {
   const errF = await rejectsAsync(
     () => deriveSystemContentKey({ system: { kind: 'test:forged-error-extractor', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: forgingExtractorRegistry, hmacKey: HMAC_KEY }),
     'SYSTEM_IDENTITY_MATERIAL_MISSING',
-    'a FOREIGN (unbranded) GipSystemIdentityError thrown by an extractor must be discarded, not rethrown verbatim, even though it IS an instance of the public class',
+    'a foreign GipSystemIdentityError thrown by an extractor must be discarded, not rethrown verbatim, even though it IS an instance of the public class',
   )
   assert.ok(!(errF.message + JSON.stringify(errF.details)).includes(SENTINEL), 'the forged error message/details must not leak through runExtractor')
   assert.notEqual(errF.reason, 'SYSTEM_IDENTITY_KIND_UNCERTIFIED', 'the forged reason token must not survive either — it must be replaced by the catch-all reason')
@@ -553,29 +564,83 @@ async function sentinelNeverLeaksAcrossAnyPath() {
   const errG = await rejectsAsync(
     () => deriveSystemContentKey({ system, credentialCiphertext: 'ct', credentialStore: forgingStore, registry, hmacKey: HMAC_KEY }),
     'SYSTEM_IDENTITY_DECRYPTION_FAILED',
-    'a FOREIGN (unbranded) GipSystemIdentityError thrown by credentialStore.decrypt must be discarded, not rethrown verbatim',
+    'a foreign GipSystemIdentityError thrown by credentialStore.decrypt must be discarded, not rethrown verbatim',
   )
   assert.ok(!(errG.message + JSON.stringify(errG.details)).includes(SENTINEL), 'the forged error message/details must not leak through the decrypt() catch site')
   assert.notEqual(errG.reason, 'SYSTEM_IDENTITY_KIND_UNCERTIFIED')
+}
 
-  // (h) EXCLUSIVITY CONTROL (the "doors cover for each other" trap): branding
-  // must not become a NEW hole where the catch-all swallows a genuinely
-  // internal, correctly-branded fail() and relabels it. Simulates a
-  // (hypothetical, future) internal check inside runExtractor's try by having
-  // the declaration itself call this module's OWN __internals.fail — which
-  // DOES get branded — and asserts it survives with ITS OWN reason, not
-  // MATERIAL_MISSING.
-  const internalFailRegistry = createConnectorKindRegistry([{
-    kind: 'test:internal-fail',
+// ---------------------------------------------------------------------------
+// (10b) P1-b, review round 3: round 2's WeakSet "brand" — and the
+// __internals.fail() exemption it depended on — are gone entirely (see the
+// module's fail()-adjacent comment for the full account of why the brand
+// itself was the exfiltration channel). There is no longer ANY exemption for
+// a foreign error to survive under, branded or not, so the discriminating
+// test here is not "can a forged brand get through" (unconstructable now —
+// __internals no longer exports fail()) but "can the MOST HOSTILE foreign
+// error constructible survive, via ANY surface". Each cell throws a genuine
+// `new GipSystemIdentityError(...)` instance (so a class check alone would
+// still misfire) carrying the sentinel in `message`, in DEEPLY NESTED
+// `details`, in a `.cause`, and in an overridden `.stack`, and impersonating
+// a WRONG-for-this-site reason token (one that belongs to a different guard
+// entirely) — then asserts every one of those surfaces is absent from the
+// emitted error, AND that `reason` is EXACTLY the catch site's own
+// contracted token, never the impersonated one (the reason-vocabulary
+// discipline the review also asked for).
+// ---------------------------------------------------------------------------
+function buildHostileForeignError(sentinel, impersonatedReason) {
+  const err = new GipSystemIdentityError(
+    impersonatedReason,
+    `looks legitimate but carries ${sentinel} in the message`,
+    { level1: { level2: { level3: { leaked: sentinel } } } },
+  )
+  err.cause = new Error(`cause chain also carries ${sentinel}`)
+  Object.defineProperty(err, 'stack', {
+    value: `GipSystemIdentityError: forged\n    at hostile (${sentinel}-in-stack.js:1:1)`,
+    configurable: true,
+  })
+  return err
+}
+
+function assertNoSurfaceLeaksSentinel(error, sentinel, label) {
+  assert.ok(!String(error.message).includes(sentinel), `${label}: message must not carry the sentinel`)
+  assert.ok(!JSON.stringify(error.details).includes(sentinel), `${label}: details (including nested fields) must not carry the sentinel`)
+  assert.ok(!String(error.stack).includes(sentinel), `${label}: stack must not carry the sentinel`)
+  assert.ok(!String(error.cause || '').includes(sentinel), `${label}: cause must not carry the sentinel`)
+  assert.ok(!String(error).includes(sentinel), `${label}: String(error) must not carry the sentinel`)
+}
+
+async function hostileForeignErrorCannotEscapeEitherCatchSite() {
+  const SENTINEL = 'SENTINEL-HOSTILE-FOREIGN-ERROR-7c2e9b'
+  const registry = harnessRegistry()
+  const system = { kind: 'test:harness', config: { baseUrl: 'https://erp.example.internal' } }
+  const store = fakeCredentialStore({ ct: envelope({ username: 'alice', password: 'p', acctId: 'tenantX' }) })
+
+  // Site 1: runExtractor's catch (wraps `fn(arg)`). Impersonates
+  // SYSTEM_IDENTITY_KIND_UNCERTIFIED — a reason that belongs to a completely
+  // different guard, never to this catch site.
+  const hostileExtractorRegistry = createConnectorKindRegistry([{
+    kind: 'test:hostile-extractor',
     extractEndpointIdentity: (config) => config.baseUrl,
-    extractAuthPrincipal: () => { __internals.fail('SYSTEM_IDENTITY_INPUT_INVALID', 'deliberately internal, must not be relabeled', {}) },
+    extractAuthPrincipal: () => { throw buildHostileForeignError(SENTINEL, 'SYSTEM_IDENTITY_KIND_UNCERTIFIED') },
     extractAuthTenantScope: (creds) => creds.acctId,
   }])
-  await rejectsAsync(
-    () => deriveSystemContentKey({ system: { kind: 'test:internal-fail', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: internalFailRegistry, hmacKey: HMAC_KEY }),
-    'SYSTEM_IDENTITY_INPUT_INVALID',
-    'a BRANDED internal fail() thrown inside runExtractor must propagate with its OWN reason, never get relabeled by the catch-all',
+  const errExtractor = await rejectsAsync(
+    () => deriveSystemContentKey({ system: { kind: 'test:hostile-extractor', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct', credentialStore: store, registry: hostileExtractorRegistry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_MATERIAL_MISSING',
+    'the most hostile foreign error constructible must still be discarded at the runExtractor catch site, and relabeled with ONLY that site\'s own reason',
   )
+  assertNoSurfaceLeaksSentinel(errExtractor, SENTINEL, 'runExtractor catch site')
+
+  // Site 2: credentialStore.decrypt's catch. Impersonates
+  // SYSTEM_IDENTITY_INPUT_INVALID — again, a reason that belongs elsewhere.
+  const hostileStore = { async decrypt() { throw buildHostileForeignError(SENTINEL, 'SYSTEM_IDENTITY_INPUT_INVALID') } }
+  const errDecrypt = await rejectsAsync(
+    () => deriveSystemContentKey({ system, credentialCiphertext: 'ct', credentialStore: hostileStore, registry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_DECRYPTION_FAILED',
+    'the most hostile foreign error constructible must still be discarded at the credentialStore.decrypt catch site, and relabeled with ONLY that site\'s own reason',
+  )
+  assertNoSurfaceLeaksSentinel(errDecrypt, SENTINEL, 'credentialStore.decrypt catch site')
 }
 
 // ---------------------------------------------------------------------------
@@ -632,34 +697,17 @@ async function endpointIdentityCredentialBoundaryClosesDsnRotationHole() {
   const ok = await deriveSystemContentKey({ system: benignDsn, credentialCiphertext: 'ct1', credentialStore: store, registry: dsnRegistry, hmacKey: HMAC_KEY })
   assert.match(ok.systemContentKey, /^[0-9a-f]{64}$/, 'a DSN with no embedded credential must be accepted')
 
-  // COUNTERFACTUAL PROOF — reconstructs, via the internals directly (not the
-  // real guarded pipeline), exactly what the pre-fix vulnerability was: if
-  // the raw DSN string (untouched by the new boundary check) were allowed
-  // through as endpointIdentity, the two rotated variants — same principal,
-  // same tenant scope, ONLY the embedded password differing — would produce
-  // DIFFERENT systemContentKeys, i.e. secret rotation alone moving the key.
-  // This is the concrete violation of decision (α)'s ruled rotation contract
-  // that P2-b's fix (the assertEndpointIdentityHasNoEmbeddedCredential call)
-  // prevents by refusing such an endpoint identity outright.
-  const fixedPrincipalHmac = __internals.domainSeparatedHmac(HMAC_KEY, IDENTITY_HMAC_DOMAINS.PRINCIPAL, 'svc')
-  const fixedTenantScopeHmac = __internals.domainSeparatedHmac(HMAC_KEY, IDENTITY_HMAC_DOMAINS.TENANT_SCOPE, 'tenantX')
-  const keyIfEndpointGuardDidNotExist_before = __internals.computeSystemContentKey({
-    kind: 'test:dsn-harness',
-    endpointIdentity: beforeRotation.config.dsn,
-    authPrincipalKey: fixedPrincipalHmac,
-    authTenantScopeKey: fixedTenantScopeHmac,
-  })
-  const keyIfEndpointGuardDidNotExist_after = __internals.computeSystemContentKey({
-    kind: 'test:dsn-harness',
-    endpointIdentity: afterRotation.config.dsn,
-    authPrincipalKey: fixedPrincipalHmac,
-    authTenantScopeKey: fixedTenantScopeHmac,
-  })
-  assert.notEqual(
-    keyIfEndpointGuardDidNotExist_before,
-    keyIfEndpointGuardDidNotExist_after,
-    'COUNTERFACTUAL: with the boundary absent, an endpoint identity carrying the embedded DSN password would let systemContentKey MOVE on secret rotation alone — exactly the ruled-contract violation the boundary check prevents by refusing both variants instead',
-  )
+  // NOTE (review round 3): a "counterfactual" cell previously lived here,
+  // calling __internals.computeSystemContentKey DIRECTLY with the two raw
+  // (unguarded) DSNs as endpointIdentity and asserting the two digests
+  // differ. Removed as non-discriminating: computeSystemContentKey never
+  // calls assertEndpointIdentityHasNoEmbeddedCredential at all (it is a pure
+  // hash-of-material function), so that assertion is just "hashing two
+  // different strings produces two different digests" — true of any correct
+  // hash function regardless of whether the boundary guard above exists,
+  // is disabled, or is deleted entirely. It could not have failed for the
+  // reason it was placed under. The two rejectsAsync calls above (both
+  // variants refused via the REAL guarded pipeline) are the actual proof.
 }
 
 // ---------------------------------------------------------------------------
@@ -692,6 +740,27 @@ function exactPublicExportKeySet() {
     'the module must expose no public route to a systemContentKey other than the gated deriveSystemContentKey',
   )
   assert.equal(typeof __internals.computeSystemContentKey, 'function', 'computeSystemContentKey must still be reachable for internal/testing use via __internals')
+
+  // P2 FIX (review round 3): the check above only ever pinned the TOP-LEVEL
+  // keys — "__internals" was one of them, but nothing pinned WHICH keys live
+  // INSIDE it, so a future addition under __internals (any name, e.g. a
+  // reintroduced `fail`) reds nothing here. Pin __internals's own key set
+  // too. `fail` must be ABSENT — round 3's whole point is that exporting it
+  // was the exfiltration channel; keeping it out is exactly what a future
+  // regression here would catch.
+  assert.deepEqual(
+    Object.keys(__internals).sort(),
+    [
+      'assertEndpointIdentityHasNoEmbeddedCredential',
+      'assertLosslessIdentityMaterial',
+      'computeSystemContentKey',
+      'containsSanitizationMarker',
+      'domainSeparatedHmac',
+      'parseCredentialEnvelope',
+      'runExtractor',
+    ],
+    '__internals must expose exactly this key set — in particular, `fail` must never be re-added (see the round-3 fix note above fail() in the module)',
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -708,6 +777,16 @@ async function inputValidationFailsClosed() {
   await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: {}, registry, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'credentialStore without decrypt()')
   await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: Buffer.alloc(16) }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'hmacKey too short')
   await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: 'not-a-buffer' }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'hmacKey not a buffer')
+
+  // (advisor-informed re-review, round 3): a duck-typed object that is NOT
+  // the frozen result of createConnectorKindRegistry must be refused as
+  // SYSTEM_IDENTITY_INPUT_INVALID — a GipSystemIdentityError, like every
+  // other guard in this file — never surface as the sibling
+  // GipConnectorKindRegistryError the prior `throw error` verbatim-forwarded
+  // for any non-UNCERTIFIED reason (see the fix note on this catch site in
+  // the module).
+  await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry: { resolve: () => null, size: () => 0 }, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'untrusted/duck-typed registry object')
+  await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry: null, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'null registry')
 
   assert.deepEqual([...SYSTEM_IDENTITY_ERROR_REASONS].sort(), [
     'SYSTEM_IDENTITY_DECRYPTION_FAILED',
@@ -732,6 +811,7 @@ async function main() {
   await sanitizedProjectionCollisionCannotMintAKey()
   await materialMissingFailsClosed()
   await sentinelNeverLeaksAcrossAnyPath()
+  await hostileForeignErrorCannotEscapeEitherCatchSite()
   await endpointIdentityCredentialBoundaryClosesDsnRotationHole()
   await nonPlainObjectConfigFailsClosed()
   exactPublicExportKeySet()

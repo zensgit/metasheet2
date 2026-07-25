@@ -76,22 +76,34 @@ class GipSystemIdentityError extends Error {
   }
 }
 
-// P1-b FIX (review round 2): `instanceof GipSystemIdentityError` is not proof
-// an error came from THIS module's own fail() — the class is a public export
-// (necessarily so: callers need to recognize this module's errors), so a
-// connector declaration or a credential store can construct one directly,
-// carrying whatever plaintext it likes, and the two `instanceof` rethrow
-// checks below would have forwarded it verbatim. Provenance is tracked by
-// OBJECT IDENTITY instead — a module-private WeakSet populated ONLY inside
-// fail() itself — the same unforgeable pattern the registries in this
-// package use for registry trust. A caller cannot add its own error object to
-// this WeakSet from outside the module; only fail() can.
-const BRANDED_BY_THIS_MODULE = new WeakSet()
-
-function isOwnFailure(error) {
-  return error instanceof GipSystemIdentityError && BRANDED_BY_THIS_MODULE.has(error)
-}
-
+// P1-b FIX (review round 3 — round 2's fix REVERSED, not hardened). Round 2
+// replaced `instanceof GipSystemIdentityError` with a module-private WeakSet
+// "brand", reasoning only fail() could add to it. That reasoning was false in
+// a way narrowing the export surface cannot repair: fail() itself was
+// exported at __internals.fail, so the very actor this module must not trust
+// — a connector declaration's extractor, reached through runExtractor's
+// `fn(arg)` call, or an injected credentialStore.decrypt — could require()
+// this module and call `__internals.fail(reason, attackerMessage,
+// attackerDetails)` from inside its own callback, producing a GENUINELY
+// branded error (fail() is the real function; the brand it applies is real)
+// carrying arbitrary message/details. The two `isOwnFailure` rethrow branches
+// then forwarded it VERBATIM — the bar rose (a bare `new
+// GipSystemIdentityError(...)` no longer worked) but the hole moved, it did
+// not close. Trimming which internals were exported would not have fixed it
+// either: __internals.runExtractor and __internals.assertLosslessIdentityMaterial
+// both call fail() with a caller-supplied `field` string landing in both
+// `message` and `details.field` — an attacker-reachable route to a branded,
+// attacker-text-carrying error that never touches __internals.fail directly.
+//
+// The actual fix is not a stronger brand: it is recognizing that BOTH catch
+// sites below wrap ONLY a foreign call (`fn(arg)`, and
+// `credentialStore.decrypt`) — this module's own code never runs inside
+// either try, so a module-internal fail() can never legitimately need to
+// survive either catch. There is nothing for a brand to preserve. Every error
+// crossing either catch is therefore discarded unconditionally and replaced
+// by a fixed, module-authored error carrying no foreign text at all — see
+// runExtractor and the credentialStore.decrypt call site below. `fail` is no
+// longer exported at all (see module.exports).
 function fail(reason, message, details = {}) {
   if (!ERROR_REASON_SET.has(reason)) {
     throw new Error(
@@ -99,9 +111,7 @@ function fail(reason, message, details = {}) {
         + '(add it to the frozen SYSTEM_IDENTITY_ERROR_REASONS vocabulary)',
     )
   }
-  const error = new GipSystemIdentityError(reason, message, details)
-  BRANDED_BY_THIS_MODULE.add(error)
-  throw error
+  throw new GipSystemIdentityError(reason, message, details)
 }
 
 function isPlainObject(value) {
@@ -143,6 +153,30 @@ function isPlainObject(value) {
 //   - '[N more items truncated]' — array-length truncation sentinel element
 //   - the top-level truncation envelope shape { payloadTruncated: true, ... }
 //     (structural, not textual — checked separately below, not by the regex)
+//
+// P3 SCOPE NOTE (review round 3): this guard can only ever detect the
+// TEXTUAL/STRUCTURAL markers listed above — it is handed a single value and
+// never a before/after pair, so it structurally cannot detect a lossy
+// transform that leaves NO marker at all. payload-redaction.cjs's own
+// sanitizePayloadValue has exactly two such marker-free operations: (1) a key
+// in UNSAFE_PAYLOAD_KEYS (`__proto__`/`constructor`/`prototype`) is dropped
+// with a bare `continue` — no replacement value, no token, the key simply
+// does not appear in the output; (2) a non-plain-object value (e.g. a `Date`)
+// falls through to `Object.entries(value)`, which is typically empty for
+// such a value, so it silently walks to `{}`. Three genuinely different
+// stored configs that differ ONLY in a dropped/emptied field can sanitize to
+// a byte-identical projection this guard has no marker to catch. NOT rated
+// P1: the dropped/emptied field itself cannot simultaneously be the
+// string-typed `endpointIdentity` requiredHashInput demands (a dropped key
+// reads as `undefined`, an emptied Date-shaped value reads as `{}`, neither
+// is a non-empty string), so a plausible declaration still hits
+// SYSTEM_IDENTITY_MATERIAL_MISSING downstream. But the module-header claim
+// this guard exists for ("the record is the STORED one, never a sanitized
+// projection") is a PROVENANCE claim; what this guard actually proves is
+// MARKER ABSENCE, a narrower thing — read it as that, not as general
+// anti-tampering. (Not fixed here: touching sanitizePayloadValue's shared
+// behavior is out of scope for this LATENT slice and would affect every
+// other consumer of payload-redaction.cjs, not just this guard.)
 const MAX_SANITIZATION_SCAN_DEPTH = 64
 
 function containsSanitizationMarker(value, depth) {
@@ -266,18 +300,19 @@ function runExtractor(fn, arg, field) {
   let result
   try {
     result = fn(arg)
-  } catch (error) {
-    // A guard elsewhere in THIS module (e.g. a nested fail()) must propagate
-    // unchanged, never get relabeled by this catch-all — otherwise this
-    // catch-all would cover for a more specific guard's exact reason token
-    // (the "doors cover for each other" trap). Anything else — including a
-    // GipSystemIdentityError the DECLARATION constructed itself (this class
-    // is a public export; `instanceof` alone is forgeable by any caller) — is
-    // deliberately discarded entirely: it may originate from a declaration
-    // this module does not control and could embed the very plaintext this
-    // function exists to protect. isOwnFailure() checks PROVENANCE (branded
-    // by this module's own fail()), not merely the class.
-    if (isOwnFailure(error)) throw error
+  } catch {
+    // FIX (review round 3): this try wraps ONLY `fn(arg)` — the per-kind
+    // declaration's own extractor function. This module's own code never
+    // executes inside that call, so there is no legitimate scenario in which
+    // this catch needs to preserve anything about the original error: no
+    // module-internal fail() can ever land here. Every foreign throw —
+    // whatever class it is, whatever reason/message/details/stack it
+    // carries, even a genuine GipSystemIdentityError the declaration
+    // constructed or obtained by calling this module's own (former)
+    // __internals.fail — is unconditionally discarded and replaced by this
+    // fixed, values-free reason. (Round 2's `isOwnFailure` provenance
+    // exemption, removed here, was itself the exfiltration channel this
+    // round closes — see the note above fail() for the full account.)
     fail('SYSTEM_IDENTITY_MATERIAL_MISSING', `declared ${field} extraction threw`, { field })
   }
   if (typeof result !== 'string' || result.trim() === '') {
@@ -340,10 +375,27 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
   try {
     declaration = resolveCertifiedConnectorKind(registry, system.kind)
   } catch (error) {
+    // FIX (review round 3, advisor-informed re-review): this used to `throw
+    // error` verbatim for any reason other than SYSTEM_IDENTITY_KIND_UNCERTIFIED
+    // — including CONNECTOR_KIND_DECLARATION_INVALID from an untrusted
+    // `registry` argument, which surfaced as a GipConnectorKindRegistryError,
+    // NOT this module's GipSystemIdentityError, breaking the "every error
+    // deriveSystemContentKey throws is a GipSystemIdentityError" contract
+    // every other guard in this file upholds. assertTrustedRegistry's own
+    // message/details are fixed constants (values-free already), so this was
+    // a contract-consistency defect on its own, not a leak — but
+    // gip-connector-kind-registry.cjs and gip-canonical-object-contract-registry.cjs
+    // no longer export their registry-trust WeakSets (P2 fix, review round
+    // 3): if they still did, a duck-typed forged registry could pass
+    // assertTrustedRegistry and make `registry.resolve` itself
+    // attacker-controlled, and this `throw error` would forward whatever it
+    // threw verbatim — the exact P1-b shape, one level up. Closed on both
+    // counts: every non-UNCERTIFIED failure here is relabeled with this
+    // module's own fixed, values-free reason, never forwarded.
     if (error instanceof GipConnectorKindRegistryError && error.reason === 'SYSTEM_IDENTITY_KIND_UNCERTIFIED') {
       fail('SYSTEM_IDENTITY_KIND_UNCERTIFIED', 'connector kind is not certified for GIP binding', {})
     }
-    throw error
+    fail('SYSTEM_IDENTITY_INPUT_INVALID', 'registry must be a trusted connector-kind registry (from createConnectorKindRegistry)', { field: 'registry' })
   }
 
   // P3-a FIX (review round 2): a non-plain-object system.config used to
@@ -375,6 +427,21 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
   // credential-shape detection (scrubSecretStringValue) rather than a second,
   // hand-rolled pattern set — if scrubbing changes the string at all, it
   // contained a credential-shaped substring and is refused, values-free.
+  //
+  // P3 DIRECTION NOTE (review round 3): "rotation contract satisfied" here
+  // means something WEAKER than decision (α)'s ruled "systemContentKey
+  // UNCHANGED across a secret-only rotation". For a declaration whose
+  // extractEndpointIdentity returns a credential-embedded DSN, this boundary
+  // refuses BOTH the before- and after-rotation variant — no key is ever
+  // minted for either — so the invariant holds only because there is nothing
+  // to compare, not because the formula computed the same digest twice. The
+  // UNCHANGED outcome the ledger actually rules on is achieved by the NORMAL
+  // path instead: a well-formed, credential-free endpointIdentity, where only
+  // the separately supplied credential rotates (see
+  // rotationSemanticsBothDirections in the test file — that is where
+  // "unchanged" is genuinely demonstrated). Recorded here so "rotation
+  // contract satisfied" is not read as the stronger claim for this
+  // refused-DSN case.
   assertEndpointIdentityHasNoEmbeddedCredential(endpointIdentity)
 
   // ---- credential-store boundary starts: brief decrypt, immediate HMAC,
@@ -387,8 +454,13 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
   try {
     try {
       plaintext = await credentialStore.decrypt(credentialCiphertext)
-    } catch (error) {
-      if (isOwnFailure(error)) throw error
+    } catch {
+      // FIX (review round 3): same discipline as runExtractor above —
+      // credentialStore.decrypt is an injected, foreign dependency; this
+      // module's own code never runs inside this try, so nothing legitimate
+      // can ever need to survive this catch. Every foreign throw is
+      // unconditionally discarded and replaced by this fixed reason,
+      // regardless of what reason/message/details/stack it carried.
       fail('SYSTEM_IDENTITY_DECRYPTION_FAILED', 'credential decryption failed', {})
     }
     const credentials = parseCredentialEnvelope(plaintext)
@@ -427,16 +499,27 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
 // whatever string a caller hands it, raw or HMAC'd, no way to tell). The
 // module's only PUBLIC route to a systemContentKey must be the gated
 // deriveSystemContentKey above; computeSystemContentKey moves to
-// __internals, which the exact-export-key-set test below pins so a future
-// re-export (under any name) reds — the same technique the registries in
-// this package use to pin their own structural closure.
+// __internals.
+//
+// P2 FIX (review round 3): the exact-export-key-set test used to pin only
+// the TOP-LEVEL export keys — "__internals" itself was one pinned key, but
+// nothing pinned WHICH keys live inside it, so adding a key under
+// __internals (any name) reds nothing. `__internals`'s own key set is now
+// pinned too (exactPublicExportKeySet in the test file), and `fail` was
+// removed from it entirely (see the note above fail() itself) rather than
+// merely narrowed — exporting fail() at all was round 2's exfiltration
+// channel's root cause, and neither `runExtractor` nor
+// `assertLosslessIdentityMaterial` (still exported, for internal/testing
+// use) can reach it either: both only ever call fail() with fixed reason
+// tokens and a caller-controlled `field` LABEL, never with plaintext
+// identity/credential material — a materially different exposure than the
+// removed brand-forging path.
 module.exports = {
   deriveSystemContentKey,
   GipSystemIdentityError,
   SYSTEM_IDENTITY_ERROR_REASONS,
   IDENTITY_HMAC_DOMAINS,
   __internals: {
-    fail,
     domainSeparatedHmac,
     containsSanitizationMarker,
     assertLosslessIdentityMaterial,

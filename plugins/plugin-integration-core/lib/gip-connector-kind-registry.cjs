@@ -132,6 +132,14 @@ function normalizeDeclaration(entry) {
 // TRUST is OBJECT IDENTITY (module-private WeakSet), the same unforgeable
 // pattern as gip-binding-qualification-spike.cjs's trustedProbeStrategyRegistries
 // — a duck-typed object with the right-looking public shape is not a member.
+// P2 FIX (review round 3): this WeakSet is NOT re-exported via __internals
+// (unlike an earlier shape of this file) — gip-binding-qualification-spike.cjs
+// does not export its own equivalent either, and this module now matches
+// that precedent exactly rather than merely citing it. Exporting it would
+// have let ANY caller with require() access do
+// `__internals.trustedConnectorKindRegistries.add(fakeRegistry)`, turning a
+// duck-typed forgery into something assertTrustedRegistry accepts — the
+// "unforgeable" claim above is true only because this stays private.
 const trustedConnectorKindRegistries = new WeakSet()
 
 // Builds a CLOSED registry from a fixed, first-party entry list. `entries` MAY
@@ -215,6 +223,5 @@ module.exports = {
     fail,
     normalizeDeclaration,
     requiredIdentityToken,
-    trustedConnectorKindRegistries,
   },
 }

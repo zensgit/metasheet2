@@ -106,6 +106,18 @@ function requiredIdentityToken(value, field) {
 
 // TRUST is OBJECT IDENTITY (module-private WeakSet) — same unforgeable pattern
 // as the probe-strategy and connector-kind registries.
+// P2 FIX (review round 3): this WeakSet is NOT re-exported via __internals —
+// matches gip-binding-qualification-spike.cjs's precedent (it does not
+// export its own trustedProbeStrategyRegistries either) and
+// gip-connector-kind-registry.cjs's sibling fix in this same round.
+// Exporting it would have let ANY require()-holding caller do
+// `__internals.trustedContractRegistries.add(fakeRegistry)`, turning a
+// duck-typed forgery into something assertTrustedRegistry accepts — after
+// which `registry.lookup(...)` above becomes attacker-controlled and could
+// throw arbitrary text straight out of resolveCanonicalObjectContractVersion
+// / assertCanonicalObjectContractRegistryActivationReady (neither wraps that
+// call in a discarding catch) — "unforgeable" above is true only because
+// this stays private.
 const trustedContractRegistries = new WeakSet()
 
 function assertTrustedRegistry(registry) {
@@ -279,7 +291,6 @@ module.exports = {
     fail,
     requiredIdentityToken,
     hasControlCharacter,
-    trustedContractRegistries,
     normalizeContractEntry,
   },
 }
