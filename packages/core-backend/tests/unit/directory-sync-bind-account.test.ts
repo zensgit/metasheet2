@@ -845,6 +845,7 @@ describe('bindDirectoryAccount', () => {
     expect(String(conflictIdentityCall?.[0])).toContain('$3::text IS NOT NULL')
     expect(String(conflictIdentityCall?.[0])).toContain('provider_union_id = $3::text')
     expect(String(conflictIdentityCall?.[0])).toContain('$6::text IS NOT NULL')
+    expect(String(conflictIdentityCall?.[0])).toContain('external_key = $7::text')
     expect(String(conflictLinkCall?.[0])).toContain('l.directory_account_id <> $3::uuid')
     expect(String(linkCall?.[0])).toContain('VALUES ($1::uuid, $2::text')
     expect(clientQuery).not.toHaveBeenCalledWith(
@@ -976,8 +977,19 @@ describe('bindDirectoryAccount', () => {
       ['dingtalk', 'user-1', 'admin-1'],
     )
     expect(clientQuery).toHaveBeenCalledWith(
-      expect.stringContaining('DELETE FROM user_external_identities'),
-      ['dingtalk', 'user-1', 'dingcorp:open-1'],
+      expect.stringContaining('provider_union_id'),
+      [
+        'dingtalk',
+        'user-1',
+        'dingcorp:open-1',
+        'dingcorp',
+        'union-1',
+        'dingcorp',
+        'open-1',
+        'dingcorp',
+        'union-1',
+        'dingcorp',
+      ],
     )
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO directory_account_links'),

@@ -19,6 +19,10 @@ The matching layer had a second, independent issue: openId and unionId maps were
 but the raw `external_key` fallback was not. Relaxing only the database index would therefore
 replace a visible sync failure with a possible cross-enterprise auto-link.
 
+The manual bind path exposed a third leg: a corp-scoped directory account with only a unionId
+still generated a raw `user_external_identities.external_key`. A corp-A legacy identity could
+therefore block a legitimate corp-B bind before the scoped unionId comparison ran.
+
 ## 2. Locked invariants
 
 1. Account-key uniqueness is `(provider, corp_id, external_key)`.
@@ -28,7 +32,12 @@ replace a visible sync failure with a possible cross-enterprise auto-link.
 5. openId and unionId matching remain corp-scoped.
 6. Apply and preview use the same scoped map semantics.
 7. Same-corp and both-NULL legacy matching remain supported.
-8. No runtime flag, automatic sync, deprovision policy, deployment, or production data is changed.
+8. A corp-scoped bound identity always stores `corpId:(openId || unionId)` while NULL-corp legacy
+   identities retain the raw provider id.
+9. Bind conflict checks and unbind cleanup compare generated, openId, and unionId identities
+   within the same corp.
+10. No runtime flag, automatic sync, deprovision policy, deployment, or production data is
+    changed.
 
 ## 3. Migration
 
@@ -65,23 +74,30 @@ used by openId and unionId. The change is applied at all matching state transiti
 The last item also requires corp equality before either the generated external key or the legacy
 raw fallback can match.
 
+The bind path now follows the same composite-key contract already used by web OAuth: when a corp
+is present, the identity key is `corpId:(openId || unionId)`. This keeps the existing global
+identity-key index collision-free across enterprises without weakening its uniqueness. The
+conflict query still checks provider unionId/openId within corp, and unbind checks all three
+corp-scoped representations so legacy raw rows remain removable.
+
 ## 5. RED-before and verification
 
-Before the product change, the revised real-DB suite produced three discriminating failures:
+Before the product change, the revised real-DB suite produced four discriminating failures:
 
 | Probe | Old result |
 | --- | --- |
 | Equal key inserted under two corp scopes | old global unique index rejected corp B |
 | Two real syncs with equal unionId | corp B sync transaction rolled back |
 | Corp-B account versus corp-A raw identity | account was linked to corp-A local user |
+| Corp-B manual bind versus corp-A legacy raw identity | bind was rejected as already bound |
 
 Positive controls stayed green: distinct keys coexisted and a same-corp raw identity linked.
 
 After the fix:
 
-- real-DB directory cluster: 33/33;
-- related directory unit cluster: 36/36;
-- full backend unit suite: 459 files, 6357/6357;
+- real-DB directory cluster: 34/34; extended with the bind/unbind membership lifecycle: 43/43;
+- related directory/auth unit cluster: 50/50;
+- full backend unit suite: 542 files, 7458/7458;
 - real-DB CI wiring and values-free contracts: 82/82;
 - TypeScript: `tsc --noEmit` clean;
 - migration upgrade/replay, NULL-scope uniqueness, and data-incompatible downgrade protection pass;
@@ -93,6 +109,8 @@ Discriminating mutations:
    cross-corp test.
 2. Restoring global `(provider, external_key)` uniqueness reds the upgrade coexistence and
    downgrade-safety tests.
+3. Restoring raw unionId identity keys for corp-scoped binds, or removing the corp predicate
+   from the legacy raw-key bind conflict, independently reds the cross-corp bind test.
 
 ## 6. Deliberate non-goals
 

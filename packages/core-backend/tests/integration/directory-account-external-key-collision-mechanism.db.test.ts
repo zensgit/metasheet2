@@ -37,7 +37,12 @@ import {
   down as corpScopeDown,
   up as corpScopeUp,
 } from '../../src/db/migrations/zzzz20260725120000_scope_directory_account_external_key_by_corp'
-import { createDirectoryIntegration, syncDirectoryIntegration } from '../../src/directory/directory-sync'
+import {
+  bindDirectoryAccount,
+  createDirectoryIntegration,
+  syncDirectoryIntegration,
+  unbindDirectoryAccount,
+} from '../../src/directory/directory-sync'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -105,6 +110,16 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
       [integrationId]
     )
     return rows.rows
+  }
+
+  async function accountId(integrationId: string): Promise<string> {
+    const rows = await query<{ id: string }>(
+      `SELECT id FROM directory_accounts WHERE integration_id = $1`,
+      [integrationId],
+    )
+    const id = rows.rows[0]?.id
+    if (!id) throw new Error('expected one directory account')
+    return id
   }
 
   /** Values-free local-directory write probe: count of department rows for one integration. */
@@ -245,6 +260,84 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
       local_user_id: null,
       link_status: 'unmatched',
       match_strategy: 'none',
+    }])
+  })
+
+  it('allows a corp-B account sharing a legacy raw unionId to bind a different local user', async () => {
+    const corpAUserId = `t2g-bind-a-${TS}`
+    const corpBUserId = `t2g-bind-b-${TS}`
+    cleanupUserIds.push(corpAUserId, corpBUserId)
+    await query(
+      `INSERT INTO users (id, email, password_hash)
+       VALUES ($1, $2, 'x'), ($3, $4, 'x')`,
+      [
+        corpAUserId,
+        `${corpAUserId}@example.test`,
+        corpBUserId,
+        `${corpBUserId}@example.test`,
+      ],
+    )
+
+    const sharedKey = `t2g-bind-shared-${TS}`
+    await query(
+      `INSERT INTO user_external_identities (
+         provider, external_key, corp_id, local_user_id, profile
+       ) VALUES ('dingtalk', $1, $2, $3, '{}'::jsonb)`,
+      [sharedKey, corpIdForTag('bind-a'), corpAUserId],
+    )
+
+    const corpB = await seedIntegration('bind-b')
+    activeTenant = {
+      unionId: sharedKey,
+      userId: `t2g-bind-b-user-${TS}`,
+      name: 'Corp B Bind Target',
+    }
+    expect((await syncDirectoryIntegration(corpB, `t2g-admin-${TS}`)).run.status).toBe('completed')
+
+    const corpBAccountId = await accountId(corpB)
+    await expect(bindDirectoryAccount(
+      corpBAccountId,
+      {
+        localUserRef: corpBUserId,
+        adminUserId: `t2g-admin-${TS}`,
+        enableDingTalkGrant: false,
+      },
+    )).resolves.toBeTruthy()
+
+    const identities = await query<{ external_key: string; corp_id: string; local_user_id: string }>(
+      `SELECT external_key, corp_id, local_user_id
+         FROM user_external_identities
+        WHERE local_user_id = ANY($1::text[])
+        ORDER BY local_user_id`,
+      [[corpAUserId, corpBUserId]],
+    )
+    expect(identities.rows).toEqual([
+      {
+        external_key: sharedKey,
+        corp_id: corpIdForTag('bind-a'),
+        local_user_id: corpAUserId,
+      },
+      {
+        external_key: `${corpIdForTag('bind-b')}:${sharedKey}`,
+        corp_id: corpIdForTag('bind-b'),
+        local_user_id: corpBUserId,
+      },
+    ])
+
+    await unbindDirectoryAccount(corpBAccountId, {
+      adminUserId: `t2g-admin-${TS}`,
+      disableDingTalkGrant: false,
+    })
+    const identitiesAfterUnbind = await query<{ corp_id: string; local_user_id: string }>(
+      `SELECT corp_id, local_user_id
+         FROM user_external_identities
+        WHERE local_user_id = ANY($1::text[])
+        ORDER BY local_user_id`,
+      [[corpAUserId, corpBUserId]],
+    )
+    expect(identitiesAfterUnbind.rows).toEqual([{
+      corp_id: corpIdForTag('bind-a'),
+      local_user_id: corpAUserId,
     }])
   })
 

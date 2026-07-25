@@ -2035,12 +2035,10 @@ function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, ope
   const normalizedCorpId = normalizeText(corpId)
   const normalizedOpenId = normalizeText(openId)
   const normalizedUnionId = normalizeText(unionId)
+  const primaryId = normalizedOpenId || normalizedUnionId
 
-  if (normalizedCorpId && normalizedOpenId) {
-    return `${normalizedCorpId}:${normalizedOpenId}`
-  }
-
-  return normalizedUnionId || normalizedOpenId
+  if (!primaryId) return ''
+  return normalizedCorpId ? `${normalizedCorpId}:${primaryId}` : primaryId
 }
 
 function assertDirectoryAccountCanEnableDingTalkGrant(
@@ -5446,12 +5444,21 @@ async function applyDirectoryAccountBindInTransaction(
      WHERE provider = $1::text
        AND local_user_id <> $5::text
        AND (
-         external_key = $2::text
+         (external_key = $2::text AND corp_id IS NOT DISTINCT FROM $4::text)
          OR ($3::text IS NOT NULL AND provider_union_id = $3::text AND corp_id IS NOT DISTINCT FROM $4::text)
          OR ($6::text IS NOT NULL AND provider_open_id = $6::text AND corp_id IS NOT DISTINCT FROM $4::text)
-     )
+         OR (external_key = $7::text AND corp_id IS NOT DISTINCT FROM $4::text)
+       )
      LIMIT 1`,
-    [account.provider, identityExternalKey, account.union_id, account.corp_id, localUser.id, account.open_id],
+    [
+      account.provider,
+      identityExternalKey,
+      account.union_id,
+      account.corp_id,
+      localUser.id,
+      account.open_id,
+      account.external_key,
+    ],
   )
   if (conflictingIdentityResult.rows.length > 0) {
     throw new Error('DingTalk account is already bound to another local user')
@@ -6462,20 +6469,34 @@ export async function unbindDirectoryAccount(
         'provider = $1',
         'local_user_id = $2',
       ]
+      const identityMatchClauses: string[] = []
 
       if (identityExternalKey) {
-        deleteIdentityParams.push(identityExternalKey)
-        deleteIdentityClauses.push(`external_key = $${deleteIdentityParams.length}`)
-      } else if (normalizeText(account.open_id)) {
+        deleteIdentityParams.push(identityExternalKey, account.corp_id)
+        identityMatchClauses.push(
+          `(external_key = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+        )
+      }
+      if (normalizeText(account.external_key) && account.external_key !== identityExternalKey) {
+        deleteIdentityParams.push(account.external_key, account.corp_id)
+        identityMatchClauses.push(
+          `(external_key = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+        )
+      }
+      if (normalizeText(account.open_id)) {
         deleteIdentityParams.push(account.open_id, account.corp_id)
-        deleteIdentityClauses.push(
+        identityMatchClauses.push(
           `(provider_open_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
         )
-      } else if (normalizeText(account.union_id)) {
+      }
+      if (normalizeText(account.union_id)) {
         deleteIdentityParams.push(account.union_id, account.corp_id)
-        deleteIdentityClauses.push(
+        identityMatchClauses.push(
           `(provider_union_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
         )
+      }
+      if (identityMatchClauses.length > 0) {
+        deleteIdentityClauses.push(`(${identityMatchClauses.join(' OR ')})`)
       }
 
       if (deleteIdentityClauses.length > 2) {
