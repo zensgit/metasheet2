@@ -2,18 +2,33 @@
 
 Lane: **LANE C — M0-A** (per `docs/development/database-system-integration-line-design-and-verification-20260724.md`,
 §2 M0-A / §4 "Parallel and unblocked" M0-A track, ⟲C1/⟲R1/⟲R7). Authorized: build + verify the COMPLETE
-on-prem deployment package at the owner-chosen main SHA, regenerate manifest/SHA256/provenance/loopback
-verification, prepare (not post) the #4437 pointer revision. Not authorized: deployment, flag-ON, connecting
-to any host, editing #4437 itself, merging, pushing to main.
+on-prem deployment package at the owner-chosen main SHA, regenerate manifest/SHA256/provenance/(disputed —
+see §6) loopback verification, prepare (not post) the #4437 pointer revision. Not authorized: deployment,
+flag-ON, connecting to any host, editing #4437 itself, merging, pushing to main, and — per this fix pass —
+still not the release/freeze act (see §3 A2).
 
 **Scope note:** the ledger's §2 M0-A paragraph also names "prepare the bounded approved config" as part of
-M0-A. This document's Lane-C task list (the four numbered "Your job" items given to this run) does not include
-that item, and it is **not** addressed here — do not read this document as a complete M0-A closeout.
+M0-A. This document's Lane-C task list does not include that item, and it is **not** addressed here — do not
+read this document as a complete M0-A closeout.
 
-## Status: BLOCKED on the build itself. Investigation, blob-identity proof, and the pointer draft are DONE.
+## FIX PASS (2026-07-25, same day): the prior "BLOCKED" verdict below was WRONG on its primary reason. Retracted in §3.
 
-No package was built. No release was published. No fabricated checksum was produced. §3 below gives the
-exact blocker and what a human needs to run.
+**What changed:** an adversarial reviewer proved that `.github/workflows/multitable-onprem-package-build.yml`
+runs the build (`Build on-prem package`) and verify steps, and uploads the CI artifact, **unconditionally** —
+only the `Publish GitHub Release` step (and one echo line in the step summary) are gated behind
+`inputs.publish_release == 'true'`. The build+verify half this lane is authorized for was executable all
+along; the original document's "(b) PRIMARY = freeze act blocks everything" reasoning conflated the *ref
+prerequisite* (minting a ref at the desired commit, needed only because `workflow_dispatch` takes a
+branch/tag, not a bare SHA) with the *publish/freeze act* (owner-only). This session independently confirmed
+the reviewer's read against the current workflow file and then **ran the authorized build+verify half for
+real** — see §3 A1 for the run and §2.4/§6 below for what the "no fabrication" claim now covers.
+
+## Status: build + verify (A1) is DONE and PASSED. Residual blocker is narrow: only the owner's publish/freeze act (A2).
+
+A real CI run built and verified the complete on-prem package at the exact recommended SHA, using the
+project's own unmodified tooling, and self-verified with four structural checks (all PASS). No release was
+published. No checksum was hand-typed or fabricated — the checksums recorded below are read verbatim from the
+run's own `SHA256SUMS` output. §3 gives the retraction, the A1 record, and the narrow residual (A2, owner-only).
 
 ---
 
@@ -32,8 +47,9 @@ builder:
   `metasheet-multitable-onprem-v2.5.0-rc-a-20260717-d87e086fd.*` (`.tgz`, `.zip`, `.json`, bootstrap `.ps1`/`.bat`,
   `SHA256SUMS`, `*.verify.json`/`.md`) — the exact output shape the multitable workflow produces.
 - `gh run list --repo zensgit/metasheet2 --workflow=multitable-onprem-package-build.yml` shows a `success` run
-  at `headSha=d87e086fd1218b4cfb150177d43f2c52904b1d6d`, created `2026-07-17T06:16:54Z`, matching the release's
-  `generatedAt`/`gitSha` exactly.
+  at `headSha=d87e086fd1218b4cfb150177d43f2c52904b1d6d`, created `2026-07-17T06:16:54Z`. Its `gitSha` matches
+  the release's exactly; `generatedAt` does **not** match exactly (corrected in §2.4 — it falls inside the
+  run's time window, which is the actual mechanic, not an exact-timestamp match).
 - The package's own metadata (`metasheet-multitable-onprem-v2.5.0-rc-a-20260717-d87e086fd.json`, downloaded
   read-only for this investigation): `"includedPlugins": ["plugin-attendance", "plugin-integration-core"]`,
   `"productMode": "platform"` — the platform+plugin bundle, confirming ⟲R7's claim directly: the sidecar ZIP
@@ -58,13 +74,21 @@ current `origin/main` (`402f04982`).
 ```
 git log --oneline 7bf2bd7a1..origin/main
 ```
-gives the 11 commits between the recommended SHA and current main tip: `#4590` (this ledger doc, doc-only),
-three attendance W4/W5 commits (`#4595/#4592/#4588/#4585/#4586/#4584/#4576`), two directory-deprovision
-commits (`#4577/#4575`), and **`#4583`** — `fix(data-source): enforce the A5 row bound in MySQLAdapter + pin
-the SQL-adapter roster` — a **runtime data-source change**. Building at current main tip (instead of `7bf2bd7a1`)
-would silently pull `#4583` into the RC-A package for no RC-A benefit, which is exactly the "enlarging the
-runtime change surface" the ledger's recommendation warns against. I found no reason to deviate from `7bf2bd7a1`
-and did not choose a different SHA.
+gave the 11 commits between the recommended SHA and main tip at original draft time (main tip then =
+`402f04982`): `#4590` (this ledger doc, doc-only), **seven** attendance W4/W5 commits
+(`#4595/#4592/#4588/#4585/#4586/#4584/#4576` — the original draft undercounted this as "three" while
+listing all seven PR numbers; corrected here), two directory-deprovision commits (`#4577/#4575`), and
+**`#4583`** — `fix(data-source): enforce the A5 row bound in MySQLAdapter + pin the SQL-adapter roster` — a
+**runtime data-source change**. Building at current main tip (instead of `7bf2bd7a1`) would silently pull
+`#4583` into the RC-A package for no RC-A benefit, which is exactly the "enlarging the runtime change surface"
+the ledger's recommendation warns against. I found no reason to deviate from `7bf2bd7a1` and did not choose a
+different SHA.
+
+**Drift note (fix pass, re-run same day):** `origin/main` has since advanced one more commit — tip is now
+`b5ff168e9` (`#4600`, doc-only, committed `2026-07-25T06:51:44Z`), so `git rev-list --count 7bf2bd7a1..origin/main`
+now reads **12**, not 11. The count was accurate when first drafted; it is a moving target because main keeps
+advancing. The choose-`7bf2bd7a1`-over-main-tip argument is unaffected by this drift (if anything strengthened
+— one more non-RC-A commit would be pulled in by building at tip instead).
 
 Also verified: the build tooling itself is byte-identical between the recommended SHA and current main —
 ```
@@ -122,96 +146,162 @@ and `7bf2bd7a1`, so the helper content hash may carry over") and gives the exact
     `checksum` PASS, `required-content` PASS (`requiredCount: 128`), `deployability-contract` PASS, `no-github-links`
     PASS — this is what `multitable-onprem-package-verify.sh` actually runs: a local/offline structural
     verification of the produced archive (checksum + required-file inventory + deployability-contract shape +
-    no leaked GitHub URLs). **Mapping this to the ledger's phrase "loopback verification" is my inference, not
-    a confirmed match** — I searched `multitable-onprem-package-verify.sh` for a `loopback`-named check (the
-    kind attendance's `attendance-onprem-package-verify.sh` has, which fails if the built frontend bundle
-    embeds a loopback `VITE_API_URL`) and found none; multitable's verify script has no such check. If the
-    ledger's "loopback verification" instead means a live loopback HTTP probe against a running instance (the
-    pattern `stock-preparation-rca-c-window-runner-development-verification-20260722.md` uses), that is a
-    runtime/host action and belongs to M0-B's "flag-OFF health verification," not to this build-only step —
-    it was not run here either way.
+    no leaked GitHub URLs). **There is no `loopback`-named check in this script — confirmed by grep, zero
+    hits.** This is now escalated as a specification gap against the RATIFIED ledger rather than silently
+    inferred; see §6. It is not resolved here and this document does not rule on it.
   - `SHA256SUMS` — four checksummed files: `.tgz`, `.zip`, both first-hop bootstrap scripts.
+  - **Corrected timestamp mechanic (fix pass):** the 07-17 sidecar's `generatedAt` (`2026-07-17T06:18:40Z`,
+    downloaded read-only: `gh release download stock-prep-onprem-rc-a-20260717-d87e086fd --pattern "*.json"`)
+    is **not** an exact match to the triggering run's `createdAt` (`2026-07-17T06:16:54Z`, from
+    `gh run view 29559593867 --json headSha,createdAt,updatedAt`) — it falls **inside** that run's window
+    (`createdAt` 06:16:54Z → `updatedAt` 06:18:59Z), ~1m46s after start, consistent with build duration. Only
+    `gitSha` (`d87e086fd1218b4cfb150177d43f2c52904b1d6d`) matches exactly. This session's own A1 run (§3)
+    independently reproduces the identical mechanic: manifest `generatedAt` `2026-07-25T07:04:41Z` falls
+    inside run 30148584851's window (`createdAt` 07:02:23Z → `updatedAt` 07:04:56Z), and its `gitSha` matches
+    the dispatch input exactly. Two independent instances of "manifest timestamp lands inside the run window,
+    gitSha matches exactly" is the actual, stronger claim — not the false "matches exactly" the original draft
+    made for `generatedAt`.
 
-## 3. Blocker — exact, plain
+## 3. RETRACTION, then A1 record, then the narrow residual (A2)
 
-The package build itself **cannot be executed under this lane's authority in this environment.** The primary
-reason is (b); (a) is corroborating and independently verified.
+### 3.0 Retraction — what this section previously claimed, and why it was wrong
 
-**(b) — PRIMARY: reaching `7bf2bd7a1` for a real build requires an action this lane is not authorized to take,
-and the verified precedent confirms there is no lighter-weight path left.** Checked the actual mechanics of
-how the frozen `d87e086fd` package was produced, rather than assuming:
+The original draft said, verbatim: *"(b) — PRIMARY: reaching `7bf2bd7a1` for a real build requires an action
+this lane is not authorized to take... Both [Option A and Option B] are the owner's freeze act in substance."*
+That framing is **withdrawn**. It conflated two different things:
+
+1. minting a **ref** at the exact historical commit `7bf2bd7a1` (needed only because GitHub's
+   `workflow_dispatch` takes a branch/tag `ref`, not a bare SHA — a mechanical prerequisite, not a decision
+   about product state), with
+2. the **freeze act** — publishing a GitHub Release that makes a specific build the addressable, checksummed,
+   permanent RC-A artifact #4437 points at.
+
+The mechanical refutation, read directly from the current workflow file
+(`.github/workflows/multitable-onprem-package-build.yml`): the `if:` gate
+`${{ inputs.publish_release == 'true' }}` appears **once**, on the `Publish GitHub Release` step (currently
+line 135), plus one conditional echo inside `Step summary` (line 201) that only prints the release tag when
+`publish_release=true`. `Build on-prem package` (line 81, includes the verify calls) and
+`Upload package artifacts` (line 173) carry **no** `if:` — they run unconditionally. This session's own run
+(§3.1 below) confirms it empirically, not just by reading the YAML: the job step list shows every build/verify/
+upload step `✓` and `Publish GitHub Release` skipped (`-`), exactly as the ungated/gated split predicts.
+
+**(a) was not refuted — it was satisfied, not by this session.** The old draft was right that no ref existed
+at `7bf2bd7a1` at the time it checked (`git tag --points-at` / `git branch -r --points-at` both empty). By the
+time this fix pass started, a branch ref did exist:
 ```
-gh run view 29559593867 --repo zensgit/metasheet2 --json headBranch,event,workflowName,headSha
-# {"event":"workflow_dispatch","headBranch":"main","headSha":"d87e086fd1218b...","workflowName":"Multitable On-Prem Package Build"}
-git log -1 --format="%H %cI" d87e086fd
-# d87e086fd1218b... 2026-07-17T05:52:47Z   (run dispatched 2026-07-17T06:16:54Z, same-day)
-git cat-file -t stock-prep-onprem-rc-a-20260717-d87e086fd
-# commit   (lightweight — consistent with gh release create minting it, not a hand-annotated freeze tag)
+git ls-remote origin refs/heads/build/m0a-rca-7bf2bd7a1
+# 7bf2bd7a1f8cdf54cca83a733fcd89afb076848b   refs/heads/build/m0a-rca-7bf2bd7a1
 ```
-The precedent process was: dispatch `multitable-onprem-package-build.yml` with `ref=main` **at the moment
-`main`'s tip was the desired commit**, with `expected_sha` pinned to that same commit as a fail-closed check;
-`gh release create` then mints the release tag from that exact state. **That window has passed for `7bf2bd7a1`**
-— `origin/main` has since advanced 11 commits past it (§2.1/§2.2), so `ref=main` today would build the wrong
-commit and `expected_sha` would correctly refuse it. Reaching `7bf2bd7a1` now requires either minting a new
-ref at that exact historical commit (§3 Option A — a **new pattern**, not the precedent process, since the
-precedent never needed a standalone tag) or checking it out directly on a matching local toolchain (§3 Option
-B). Both are the owner's freeze act in substance — ⟲R1 exit (b) is explicit: "the owner formally revises
-#4437 — publish, checksum, and **FREEZE** a new RC-A exact-SHA." This lane's authorization is "build and
-verify… prepare the #4437 pointer," not deploy, not flag-ON, and — per the lane's own doubt-is-the-answer
-discipline — not silently performing the adjacent owner-gated freeze step either. I did not create a ref at
-`7bf2bd7a1` and did not dispatch the workflow.
+— confirming (a)'s prerequisite (a ref must exist for `workflow_dispatch` to reach that commit) and confirming
+it was satisfied by construction. This session did not create that ref and cannot attest who did; the ruling
+that ref creation is a build prerequisite rather than the freeze act itself comes from this fix pass's
+direction, not from a finding made here.
 
-**(a) — corroborating, not independently verified this session.** `git tag --points-at 7bf2bd7a1` and
-`git branch -r --points-at 7bf2bd7a1` both return empty, so no ref currently exists at that SHA. I understand
-GitHub's `workflow_dispatch` API to require a branch-or-tag `ref` rather than accepting a bare commit SHA,
-which would make this a second, independent blocker on top of (b) — but I have not verified that constraint
-against GitHub's API/docs this session, so it should be read as understood-but-unconfirmed, not as an asserted
-fact. (b) alone is sufficient to block the build regardless of whether (a) also holds.
+**Corrected boundary:** M0-A's authorized build+verify half required only a ref to exist at the target
+commit — already true — not the freeze act. The freeze act (owner-only, §3.2/A2) is a separate, later,
+narrower thing: publishing the Release that makes one specific build the permanent, addressable RC-A artifact.
 
-**A local build in this sandbox is also disqualified**, independent of (a)/(b): the workflow pins Node 20 +
-pnpm exactly `9.15.9` on `ubuntu-latest` (the build script's own `PACKAGE_PNPM_VERSION="9.15.9"`, with an
-explicit comment that release lockfile compatibility depends on that exact pin). This environment runs
-Node `v25.9.0` / pnpm `10.33.0` on darwin. A package built here would not be the artifact the CI pipeline
-would produce, and hand-computing/publishing its SHA256 as "the RC-A checksum" would repeat the exact
-fabricated/self-certified-provenance failure mode this line exists to close (the frozen `d87e086fd` package's
-own defect is a **locally fabricated** `metadata.limit` rather than an echo-verified one — #4573's whole point;
-see also the `-ExpectedGitSha` in-archive-only binding in §2.4, which exists specifically to distrust
-externally-asserted provenance). I did not attempt a local build.
+### 3.1 A1 — build + verify, `publish_release=false` (Lane C authority; ALREADY RUN)
 
-**What a human needs to run** (either option; both are outside this lane's authority):
+Dispatched (by the fix-pass direction, prior to this session) and watched to completion by this session:
+```
+gh run view 30148584851 --json status,conclusion,headSha,headBranch,createdAt,updatedAt,workflowName
+# {"conclusion":"success","createdAt":"2026-07-25T07:02:23Z","headBranch":"build/m0a-rca-7bf2bd7a1",
+#  "headSha":"7bf2bd7a1f8cdf54cca83a733fcd89afb076848b","status":"completed",
+#  "updatedAt":"2026-07-25T07:04:56Z","workflowName":"Multitable On-Prem Package Build"}
+```
+`headSha` matches `expected_sha=7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` exactly. Job steps
+(`gh run view 30148584851 --job=89654954864`):
+```
+✓ Set up job          ✓ Build web/backend dist         ✓ Upload package artifacts
+✓ Checkout             ✓ Build on-prem package          ✓ Step summary
+✓ Verify expected SHA  ✓ Bind build SHA into metadata    (+ Post-* / Complete job, all ✓)
+✓ Setup pnpm/Node.js   - Publish GitHub Release   ← skipped, confirms publish_release=false
+✓ Install deps
+```
+Downloaded the real artifact read-only (`gh run download 30148584851`) — not hand-typed:
 
-- **Option A — CI, a NEW scaffold pattern (not the precedent process; see §3(b)).** The precedent (dispatch at
-  `ref=main` the moment main's tip is the desired commit) is unavailable now that main has advanced past
-  `7bf2bd7a1`. A human/owner with tag-push rights would instead create a tag at exactly
-  `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` (e.g. `stock-prep-onprem-rc-a-build-7bf2bd7a1`), then:
+- **`SHA256SUMS`** (this A1 run's own output):
   ```
-  gh workflow run multitable-onprem-package-build.yml --repo zensgit/metasheet2 \
-    --ref stock-prep-onprem-rc-a-build-7bf2bd7a1 \
-    -f expected_sha=7bf2bd7a1f8cdf54cca83a733fcd89afb076848b \
-    -f publish_release=true \
-    -f release_tag=stock-prep-onprem-rc-a-20260725-7bf2bd7a1 \
-    -f release_name="Stock-prep on-prem RC-A (7bf2bd7a1)"
+  759adcc3cbb6f677f2c6aea92224df83085d1afb1424c1759d980b98abd07f4d  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+  880e9f47b2f887cb752176fa2c6eb45cb04008fa285aae0265647544a16e92c4  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.zip
+  25197ba31dcc5638c63eb79e4928e4db6b0fcdc715aae799f7672d70119d0056  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725-deploy-bootstrap.ps1
+  75261b3f3b3a161e6c586d95ee4110a740454957c3c55cb0cd5e742839a176d5  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725-deploy-bootstrap.bat
   ```
-  This reuses the exact tooling that produced the frozen `d87e086fd` package and self-verifies inside the run
-  (`expected_sha` gate + `multitable-onprem-package-verify.sh` + the post-build `pnpm install --frozen-lockfile`
-  dependency preflight).
-- **Option B — local, matching toolchain.** On a host that can pin Node 20 + pnpm `9.15.9` (matching
-  `PACKAGE_PNPM_VERSION`) — e.g. via `corepack`/`nvm` on an ubuntu-like machine — checkout `7bf2bd7a1`, run
-  `pnpm install --frozen-lockfile`, `pnpm --filter @metasheet/web build`, `pnpm --filter @metasheet/core-backend build`,
-  then `INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/multitable-onprem-package-build.sh` followed by
-  `scripts/ops/multitable-onprem-package-verify.sh` on both the `.tgz` and `.zip` outputs.
+  **These four checksums are A1-run-scoped evidence that the build+verify half executed and self-verified —
+  they are NOT the checksums the eventual A2 freeze run will produce.** `BUILD_PROVENANCE.json` (packaged
+  *inside* the checksummed archive) embeds `builtAt` (`date -u` at build time) and `ciRunId`
+  (`$GITHUB_RUN_ID`) — both per-run values baked into the archive bytes before hashing
+  (`scripts/ops/multitable-onprem-package-build.sh` lines ~508-510). A fresh `publish_release=true` dispatch
+  is a **new build**, with a new `ciRunId`/`builtAt`/archive bytes, therefore a **different** `.tgz`/`.zip`
+  SHA256 than the four values above. Do not carry these into #4437 as "the" RC-A checksums (§4 keeps them
+  `<<PENDING FREEZE RUN>>`).
+- **In-archive `BUILD_PROVENANCE.json`** (extracted from the `.tgz`, not the external sidecar):
+  ```json
+  { "schema": "metasheet-onprem-build-provenance/v1", "gitCommit": "7bf2bd7a1f8cdf54cca83a733fcd89afb076848b",
+    "gitCommitShort": "7bf2bd7a1f8c", "gitRef": "build/m0a-rca-7bf2bd7a1", "sourceIsOnOriginMain": "unknown",
+    "ciRunId": "30148584851", "ciRunAttempt": "1", "builtAt": "2026-07-25T07:04:39Z" }
+  ```
+  `gitCommit` = `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` — **exact match to `expected_sha`, CONFIRMED from
+  the checksummed bytes, not the external sidecar.** Unlike `builtAt`/`ciRunId`, `gitCommit` is derived from
+  `git rev-parse HEAD` at the pinned commit and will be the same in A2 provided A2 also targets `7bf2bd7a1`.
+- **Verify reports** (both archives, `ok: true`):
+  ```json
+  "checks": [
+    {"name":"checksum","status":"PASS"},
+    {"name":"required-content","status":"PASS","requiredCount":128},
+    {"name":"deployability-contract","status":"PASS","artifactKind":"deployable-onprem-app-package",
+     "deployMode":"fresh-extract-or-existing-root-apply","directReplaceSafe":false,"nodeModulesBundled":false},
+    {"name":"no-github-links","status":"PASS"}
+  ]
+  ```
+  Four checks, all PASS. No `loopback`-named check ran (see §6 — this is a ledger-vs-tooling spec gap, not an
+  A1 defect).
 
-Either way, once the archive exists, `serviceRuntimeSha` = the in-archive `BUILD_PROVENANCE.json.gitCommit`
-(expected `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`), and the manifest / `SHA256SUMS` / `*.verify.json` /
-`*.verify.md` are generated as a byproduct of the build — none of them should be hand-typed.
+**Two constraints the "done" framing must carry, or it misleads:**
+
+- **The Actions artifact (`multitable-onprem-package-30148584851-1`) is not a release.** It is unfrozen,
+  privately-scoped to this run, and has `retention-days: 14` set in the workflow — it expires around
+  **2026-08-08** (14 days from `createdAt` 2026-07-25T07:02:23Z). "Build+verify done" does not mean "package
+  available to deploy"; nothing here is a publicly-addressable checksummed asset until A2 runs.
+- If the owner's A2 act slips past the retention window, A1 must be re-run (cheap — no code changed, same
+  `expected_sha`, same ref) before A2, since A2's own build supersedes A1's bytes anyway.
+
+### 3.2 A2 — publish/freeze, `publish_release=true` (OWNER-ONLY — NOT inside M0-A's authorization)
+
+This is the one remaining blocked step, and it is a narrow one: an owner (or someone the owner delegates to)
+re-dispatches the same workflow, on a ref at the same commit, with `publish_release=true`. This performs the
+actual freeze — `gh release create`/`upload` inside the gated step — which is the ⟲R1 exit (b) act ("the
+owner formally revises #4437 — publish, checksum, and **FREEZE** a new RC-A exact-SHA"), not a Lane-C action.
+This document does not perform it, and does not choose the release tag on the owner's behalf:
+
+```
+gh workflow run multitable-onprem-package-build.yml --repo zensgit/metasheet2 \
+  --ref <a ref at 7bf2bd7a1f8cdf54cca83a733fcd89afb076848b — e.g. build/m0a-rca-7bf2bd7a1, already exists> \
+  -f expected_sha=7bf2bd7a1f8cdf54cca83a733fcd89afb076848b \
+  -f publish_release=true \
+  -f release_tag=<OWNER TO CHOOSE — not pre-selected by this document> \
+  -f release_name=<optional>
+```
+Once A2 completes, §4's `<<PENDING FREEZE RUN>>` fields (release tag, `.tgz`/`.zip` SHA256) get filled from
+that run's own `SHA256SUMS` and release assets — the same way A1's were, never hand-typed. `serviceRuntimeSha`
+does not change (same commit, same in-archive `gitCommit`); only the archive bytes/checksums and the release
+tag are new.
+
+**A local build in this sandbox remains disqualified**, independent of A1/A2: the workflow pins Node 20 +
+pnpm exactly `9.15.9` on `ubuntu-latest`. This environment runs Node `v25.9.0` / pnpm `10.33.0` on darwin — a
+locally-built package would not be the artifact the CI pipeline produces, and publishing its hand-computed
+SHA256 as "the RC-A checksum" would repeat the exact fabricated/self-certified-provenance failure mode this
+line exists to close. Not attempted.
 
 ---
 
 ## 4. Draft — #4437 execution pointer v3 (NOT POSTED)
 
-Everything below is a draft only. It is not posted to #4437. Fields the build in §3 has not yet produced are
-marked `<<PENDING BUILD>>` — do not fill them by guessing; they come from the archive's own
-`BUILD_PROVENANCE.json` and `SHA256SUMS` once §3's build runs.
+Everything below is a draft only. It is not posted to #4437. `gitCommit` is now CONFIRMED (§3.1, A1, stable
+across rebuilds of the same commit). Fields that only A2's own freeze run can produce (release tag, `.tgz`/
+`.zip` SHA256 — **not reusable from A1**, see §3.1) are marked `<<PENDING FREEZE RUN>>` — do not fill them by
+guessing or by copying A1's run-scoped checksums; they must come from A2's own `SHA256SUMS` and release assets.
 
 > **Execution pointer v3 (DATE-OF-ACTUAL-BUILD — draft). Supersedes execution pointer v2.**
 > Records the package's `serviceRuntimeSha` and `clientHelperSha` **separately** (per
@@ -227,9 +317,10 @@ marked `<<PENDING BUILD>>` — do not fill them by guessing; they come from the 
 >   that field cannot be trusted alone; see `stock-preparation-onprem-acceptance.ps1`'s `-ExpectedGitSha`
 >   comment). Build commit: `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` (`bridge.bounded_read.v2`, PR #4573 —
 >   closes the pre-hardening fabricated-`metadata.limit` gap the frozen `d87e086fd` package carries; P1a
->   applied-limit echo-verification, P1b `.v2` qualification lineage). `<<PENDING BUILD: release tag, `.tgz`/`.zip`
->   SHA256 from `SHA256SUMS`, in-archive `BUILD_PROVENANCE.json.gitCommit` read-back confirming
->   `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`>>`
+>   applied-limit echo-verification, P1b `.v2` qualification lineage). In-archive `BUILD_PROVENANCE.json.gitCommit`
+>   read-back **CONFIRMED** (A1, run 30148584851) = `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, exact match.
+>   `<<PENDING FREEZE RUN (A2): release tag, `.tgz`/`.zip` SHA256 from A2's own `SHA256SUMS` — A1's checksums
+>   are run-scoped and will NOT match A2's, see §3.1>>`
 > - **`clientHelperSha`** (the two exact-SHA smoke harnesses the abort-provenance diagnostic and the sidecar
 >   wrapper import) — **unchanged, carried over from the frozen `d87e086fd` package**, independently verified
 >   blob-identical at `d87e086fd`, `7bf2bd7a1`, and current `main`:
@@ -237,13 +328,15 @@ marked `<<PENDING BUILD>>` — do not fill them by guessing; they come from the 
 >   - `stock-preparation-prep-line-extended-smoke.mjs` → `912f3ef75c4487dbdd946486d4cb7374f1c3ea1eb126c3b68381ad11963f0049`
 >   These already match `HELPER_CONTENT_SHA256` in `scripts/ops/stock-preparation-rca-abort-provenance.mjs` —
 >   **no code change is required for the client half of this revision.**
-> - **Release / tag**: `<<PENDING BUILD — e.g. stock-prep-onprem-rc-a-20260725-7bf2bd7a1>>`, built via the
->   **Multitable On-Prem Package Build** workflow (`.github/workflows/multitable-onprem-package-build.yml`) —
->   stock-prep ships as a plugin inside the multitable on-prem platform bundle; there is no stock-prep-specific
->   package build. `expected_sha=7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` must be set at dispatch time so the
->   build fails closed on an uncertain checkout; in-archive `BUILD_PROVENANCE.gitCommit` must equal the same
->   value (40-hex, read back from the checksummed bytes); `.tgz`/`.zip` checksums must verify against
->   `SHA256SUMS`.
+> - **Release / tag**: `<<PENDING FREEZE RUN (A2) — owner selects the tag; not pre-chosen by this document>>`,
+>   built via the **Multitable On-Prem Package Build** workflow
+>   (`.github/workflows/multitable-onprem-package-build.yml`, `publish_release=true`) — stock-prep ships as a
+>   plugin inside the multitable on-prem platform bundle; there is no stock-prep-specific package build.
+>   `expected_sha=7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` must be set at dispatch time so the build fails
+>   closed on an uncertain checkout (as A1's did, successfully); in-archive `BUILD_PROVENANCE.gitCommit` must
+>   equal the same value; `.tgz`/`.zip` checksums must verify against A2's own `SHA256SUMS` — A1's build+verify
+>   already proves the pipeline mechanics work end-to-end at this exact commit (§3.1); A2 is a re-run of the
+>   identical, already-proven mechanics with one flag flipped.
 >
 > ### What did NOT change from the frozen `d87e086fd` package
 > - Both RC-A smoke helper client scripts (content-identical; `clientHelperSha` above).
@@ -274,7 +367,7 @@ marked `<<PENDING BUILD>>` — do not fill them by guessing; they come from the 
 >
 > | v2 occurrence | governed by in v3 | value |
 > |---|---|---|
-> | "Exact source SHA" heading + in-archive `BUILD_PROVENANCE.gitCommit` validation | `serviceRuntimeSha` | `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` (`<<PENDING BUILD>>` for read-back confirmation) |
+> | "Exact source SHA" heading + in-archive `BUILD_PROVENANCE.gitCommit` validation | `serviceRuntimeSha` | `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` (read-back **CONFIRMED** via A1, run 30148584851 — §3.1) |
 > | Step 1 "Deploy the RC-A exact-SHA package to the isolated entity machine" | `serviceRuntimeSha` | same |
 > | Step 2 "detached local worktree at exact SHA `d87e086fd…`" + `git rev-parse HEAD` check | client checkout SHA (its own field, **not** renamed to either of the two above) | **stays** `d87e086fd1218b4cfb150177d43f2c52904b1d6d` — see "What did NOT change" |
 > | Step 2 v3.1 erratum "two exact-`d87e086fd` helpers" from sidecar v2 (no-Git path) | `clientHelperSha` | the two content hashes in "Package" above — already SHA-independent verification (byte comparison), so this path needs no wording change beyond noting the values now also equal the `7bf2bd7a1` bytes |
@@ -287,7 +380,48 @@ marked `<<PENDING BUILD>>` — do not fill them by guessing; they come from the 
 
 ## 5. What this document is and is not
 
-- It is: an investigation record + a draft the operator/owner can lift into #4437 once §3's build exists, plus
-  the mechanically-verified `clientHelperSha` half that needs no rebuild.
-- It is not: a built package, a published release, a real `serviceRuntimeSha`, or an edit to #4437 itself.
-  Nothing here was posted to the issue.
+- It is: an investigation record; a real, passing CI build+verify (A1, run 30148584851) at the exact
+  recommended commit, watched to completion and checked against its own downloaded outputs (not hand-typed);
+  a CONFIRMED `serviceRuntimeSha`/`gitCommit` read-back; the mechanically-verified `clientHelperSha` half
+  (unchanged from the original investigation, no rebuild needed); a draft the operator/owner can lift into
+  #4437 once A2 (§3.2) exists; and an escalation (§6) of a ledger-vs-tooling naming gap for the owner to rule
+  on.
+- It is not: a published release, a permanent/addressable checksummed artifact (A1's Actions artifact expires
+  ~2026-08-08, §3.1), the owner's freeze act, or an edit to #4437 itself. Nothing here was posted to the
+  issue. A1's `.tgz`/`.zip` SHA256 values are recorded as run-scoped evidence only and must not be read as
+  "the" RC-A checksums — those come from A2.
+
+## 6. Escalation to the owner — RATIFIED ledger names a check the verify tooling does not have
+
+**This is a specification gap, not a bug this document can fix, and not something it rules on.**
+
+The RATIFIED ledger (`docs/development/database-system-integration-line-design-and-verification-20260724.md`)
+names "loopback verification" as part of M0-A's authorized/expected output in two places:
+
+- §4, the M0-A bullet itself: *"regenerate manifest / SHA256 / provenance / **loopback verification**, revise
+  the #4437 pointer..."*
+- §2 ⟲R7: *"regenerate manifest + SHA256 + provenance + **loopback verification**; revise #4437..."*
+
+The actual verify tooling this build produces output through, `scripts/ops/multitable-onprem-package-verify.sh`,
+runs exactly **four** checks — confirmed from this session's own A1 `verify.json` output (§3.1):
+`checksum`, `required-content`, `deployability-contract`, `no-github-links`. None is named or behaves as a
+loopback check. Confirmed by direct grep against the current script, not inference:
+```
+grep -n "loopback" scripts/ops/multitable-onprem-package-verify.sh
+# (zero hits)
+grep -n "loopback" scripts/ops/attendance-onprem-package-verify.sh
+# 321:  die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
+```
+Attendance's on-prem verify script has exactly this kind of check (fails the build if the frontend bundle
+embeds a loopback `VITE_API_URL`); multitable's does not. So either:
+
+1. **the ledger's phrase should be amended** to name the four checks that actually exist (`checksum` /
+   `required-content` / `deployability-contract` / `no-github-links`), because "loopback verification" was
+   never built for the multitable path and the ledger's authorization language should describe what M0-A's
+   output actually is, or
+2. **a loopback check must be built** into `multitable-onprem-package-verify.sh` (mirroring attendance's
+   pattern) before M0-A's output can honestly be described as including it.
+
+Both are owner decisions. This document does not choose between them and does not edit the RATIFIED ledger.
+It records that A1's real, passing verify run covered four checks — not five, not "loopback" — so whoever
+reads M0-A's ledger line against A1's actual output does not silently assume a check ran that did not.
