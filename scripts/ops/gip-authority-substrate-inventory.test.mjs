@@ -1344,7 +1344,24 @@ describe('CLOSED VALUE DOMAIN — every public leaf is a safe non-negative integ
     )
   })
 
-  test('report.residualNotes is referentially IDENTICAL to the exported RESIDUAL_NOTES — the strongest possible pin on that section, stronger than any content re-derivation', async () => {
+  // report.residualNotes === RESIDUAL_NOTES pins OBJECT IDENTITY only — that buildReport() passes
+  // the frozen array through unchanged (no copy/re-derivation). It does NOT pin note CONTENT: a
+  // wording change to a note keeps the same object reference, so this assertion alone stays green.
+  // Content is pinned separately by the 8 CLOSED VALUE DOMAIN scenario tests below, via
+  // assertClosedValueDomain's hand-frozen EXPECTED_* string lists, which hardcode every
+  // residual-note description and red on any change to a note's non-numeric text.
+  // Mutation-confirmed (#4603 P2): inverting the meaning of the "no_customer_deployment_connection"
+  // note (still non-numeric text) left this identity assertion green while all 8 scenario tests
+  // below went red — proving the pin described above.
+  // Residual gap, not closed by any test in this file: assertClosedValueDomain digit-normalizes
+  // every string (s.replace(/\d+/g, '#')) before comparing, so a DIGITS-ONLY edit to a residual
+  // note — e.g. "migration 064" to "migration 164", or "§4 step 1.3, §3.0 B-3" to "§9 step 9.9,
+  // §9.0 B-9" (a wrong ledger citation) — normalizes identically and is invisible to all 8 scenario
+  // tests AND this identity test. The separate 'RESIDUAL_NOTES' describe block below catches the
+  // migration-064 digits specifically (a literal, non-normalized regex match), but nothing in this
+  // file checks the §4 step 1.3 / §3.0 B-3 ledger-section digits — mutation-confirmed: that edit
+  // alone (section digits only, migration number untouched) leaves all 127 tests in this file green.
+  test('report.residualNotes is referentially IDENTICAL to the exported RESIDUAL_NOTES — pins object identity, not note content (see comment above)', async () => {
     const schema = cloneSchema()
     const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
     const report = await buildReport({ exec, noPrivateOut: true })
