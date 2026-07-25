@@ -99,6 +99,9 @@ import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, F
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
+// W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
+// `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
+import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2022,6 +2025,18 @@ export class MetaSheetServer {
         // description; every other plugin gets undefined and the consumer's fail-closed path.
         approvalAssigneeResolver:
           manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
+        // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4
+        // segment-calculation port. Least-privilege like approvalAssigneeResolver —
+        // only plugin-attendance receives it; every other plugin gets undefined and the
+        // consumer's fail-closed path. `validateIanaTimezone` is the ONE strict IANA
+        // validator (`w4c1-strict-time`); the plugin never re-implements it, so
+        // default-rule/shift timezone writes and the calculator share a single source.
+        attendanceW4SegmentCalculation:
+          manifest.name === 'plugin-attendance'
+            ? {
+                validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+              }
+            : undefined,
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
