@@ -361,10 +361,12 @@ introducing commit also recorded for provenance:
 git rev-parse HEAD:scripts/ops/multitable-onprem-package-verify.sh
 # 2e64b9d6639fa9e250cb06003adcdd41604560a8
 ```
-Introduced at commit `542ca93b73cd20bbbadb3aece7c1d448581c55a6` on this branch (rebased onto `origin/main`
-tip `d4dc12d8a`). **This is a tooling identity, not a deployed-artifact identity — it must never be conflated
-into `serviceRuntimeSha`** (still `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, unchanged) **or presented as
-part of what run `30148584851` itself produced.**
+Introduced at commit `bd6f8eb51a3eb66972089b60ddde752131b50dd4` on this branch as rebased onto `origin/main`
+tip `d75d3b828` (the introducing **commit** SHA is rebase-unstable and will change again on any future
+rebase of this branch; the **blob** SHA above is the load-bearing identity precisely because it is not).
+**This is a tooling identity, not a deployed-artifact identity — it must never be conflated into
+`serviceRuntimeSha`** (still `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, unchanged) **or presented as part of
+what run `30148584851` itself produced.**
 
 **What was executed — a real, full run of the updated tool against A1's real, already-built artifact bytes**
 (not the sourced-function fixture test above; not a rebuild; `serviceRuntimeSha` does not move). Commands and
