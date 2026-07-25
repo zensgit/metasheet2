@@ -35,12 +35,20 @@ replace a visible sync failure with a possible cross-enterprise auto-link.
 Migration:
 `zzzz20260725120000_scope_directory_account_external_key_by_corp`
 
-`up()` creates `idx_directory_accounts_provider_corp_external_key` first, using PostgreSQL
-`NULLS NOT DISTINCT`, and only then drops the legacy index. Existing data satisfying global
-uniqueness necessarily satisfies the new index.
+`up()` creates two PostgreSQL 14-compatible partial unique indexes before dropping the legacy
+index:
 
-`down()` recreates the legacy global index before removing the scoped index. Once legitimate
-cross-corp duplicates exist, downgrade fails loudly and leaves the scoped protection in place.
+- `idx_directory_accounts_provider_corp_external_key` guards non-NULL corp rows on
+  `(provider, corp_id, external_key)`;
+- `idx_directory_accounts_provider_null_corp_external_key` guards NULL-corp legacy rows on
+  `(provider, external_key)`.
+
+Together they preserve NULL-as-one-scope behavior without relying on PostgreSQL 15
+`NULLS NOT DISTINCT`. Existing data satisfying global uniqueness necessarily satisfies both
+replacement indexes.
+
+`down()` recreates the legacy global index before removing either scoped index. Once legitimate
+cross-corp duplicates exist, downgrade fails loudly and leaves both scoped protections in place.
 It never silently deletes or rewrites directory data.
 
 ## 4. Matching changes

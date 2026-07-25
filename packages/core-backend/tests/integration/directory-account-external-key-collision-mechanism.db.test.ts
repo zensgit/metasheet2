@@ -7,8 +7,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 // Corp-scoped DingTalk directory identity isolation.
 //
 // DingTalk can return the same provider-level identity key in multiple enterprises. Directory
-// accounts therefore key uniqueness on (provider, corp_id, external_key), while matching a legacy
-// raw external_key must require the same corp. This suite proves both halves through the real sync
+// accounts therefore key uniqueness on (provider, corp_id, external_key), with a separate
+// NULL-corp partial index preserving legacy global uniqueness. Matching a legacy raw external_key
+// must also require the same corp. This suite proves both halves through the real sync
 // orchestration: equal keys coexist across corps, still collide within one corp, and a raw identity
 // from corp A can never auto-link an account pulled from corp B.
 //
@@ -342,6 +343,7 @@ describeIfDatabase('directory account external-key corp-scope upgrade migration 
       await corpScopeUp(db)
       await corpScopeUp(db)
       expect(await indexNames(db)).toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_null_corp_external_key')
       expect(await indexNames(db)).not.toContain('idx_directory_accounts_provider_external_key')
 
       await expect(sql`
@@ -360,7 +362,7 @@ describeIfDatabase('directory account external-key corp-scope upgrade migration 
       await expect(sql`
         INSERT INTO directory_accounts(provider, corp_id, external_key)
         VALUES ('dingtalk', NULL, 'legacy-global')
-      `.execute(db)).rejects.toThrow(/idx_directory_accounts_provider_corp_external_key/)
+      `.execute(db)).rejects.toThrow(/idx_directory_accounts_provider_null_corp_external_key/)
     })
   })
 
@@ -376,6 +378,7 @@ describeIfDatabase('directory account external-key corp-scope upgrade migration 
 
       await expect(corpScopeDown(db)).rejects.toThrow(/idx_directory_accounts_provider_external_key/)
       expect(await indexNames(db)).toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_null_corp_external_key')
     })
   })
 })
