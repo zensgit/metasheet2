@@ -1209,3 +1209,109 @@ describe('calculateAttendanceSegmentsV1 — frozen context and closed ingress', 
     },
   )
 })
+
+// ---------------------------------------------------------------------------
+// W4C-2 first-batch hardening legs (#4607 gate handover P3-1 / P3-2 / P3-5).
+// These ride the W4C-2 slice by explicit gate-review instruction; fixtures are
+// the review's own pre-verified discriminating shapes (head green/mutation red).
+// ---------------------------------------------------------------------------
+
+describe('calculateAttendanceSegmentsV1 — W4C-2 hardening legs (#4607 handover)', () => {
+  it('P3-2: a HALF-paired segment (check_in only) with bounded approved overtime contributes zero worked and zero overtime minutes; the day is partial', () => {
+    // seg0 has only a check_in; the bounded OT interval extends past seg0's
+    // planned end. A mutation that counts the OT span on a single-sided
+    // segment (gate M39) fabricates minutes here and flips this leg.
+    const result = run({
+      evidence: [punch('half-in-0', 'check_in', sh('09:00'))],
+      approvedFacts: [overtimeFact('req-ot-half', sh('12:00'), sh('12:30'), 30)],
+    })
+    expect(result.outcome).toBe('completed')
+    expect(result.outcomeReasonCode).toBe('calculated')
+    expect(result.segments.map((s) => [s.status, s.workedMinutes, s.overtimeExtensionMinutes])).toEqual([
+      ['missing_check_out', 0, 0],
+      ['missing_both', 0, 0],
+    ])
+    expect(result.dailyProjection).toEqual({
+      firstInAt: shIso(9, 0),
+      lastOutAt: null,
+      workedMinutes: 0,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      status: 'partial',
+      timezone: 'Asia/Shanghai',
+      workDate: '2026-07-01',
+      meta: { severe_late_count: 0, severe_late_minutes: 0, absence_late_count: 0 },
+    })
+  })
+
+  it('P3-1: raw 470 daily worked rounds ONCE to 465 under the frozen step 15 — exclusive against every realistic mutation target', () => {
+    // Raw segment minutes 164 + 306 = 470. Correct behavior (single daily
+    // floor at the FROZEN roundingMinutes=15) gives 465. Every named
+    // alternative lands elsewhere:
+    //   - reread legacy default step 30            -> 450
+    //   - reread step 10 / step 5 / no rounding    -> 470
+    //   - per-segment rounding at 15 (150 + 300)   -> 450
+    const context = makeContext({ segments: [seg(0, '09:00', '12:00'), seg(1, '13:00', '19:00')] })
+    const result = run({
+      context,
+      evidence: [
+        punch('r470-in-0', 'check_in', sh('09:16')),
+        punch('r470-out-0', 'check_out', sh('12:00')),
+        punch('r470-in-1', 'check_in', sh('13:54')),
+        punch('r470-out-1', 'check_out', sh('19:00')),
+      ],
+    })
+    expect(result.outcome).toBe('completed')
+    expect(result.segments.map((s) => [s.status, s.workedMinutes, s.lateMinutes, s.earlyLeaveMinutes])).toEqual([
+      ['late', 164, 11, 0],
+      ['late', 306, 49, 0],
+    ])
+    expect(result.dailyProjection).toEqual({
+      firstInAt: shIso(9, 16),
+      lastOutAt: shIso(19, 0),
+      workedMinutes: 465,
+      lateMinutes: 60,
+      earlyLeaveMinutes: 0,
+      status: 'late',
+      timezone: 'Asia/Shanghai',
+      workDate: '2026-07-01',
+      meta: { severe_late_count: 1, severe_late_minutes: 60, absence_late_count: 0 },
+    })
+  })
+
+  it('P3-5: positive control — contract-valid instances of the negative-only union variants complete (scheduled_absence evidence, outdoor_punch fact, import/outdoor punch sources, non-null holidayKind)', () => {
+    // If the calculator's exact-key arrays drifted one character from the
+    // w4c0-write-boundary-types unions, these CONTRACT-VALID instances would
+    // fail closed as input_schema_invalid and the leave/outdoor/import named
+    // paths would silently go review-only. tsc checks the contract side; the
+    // run checks the calculator side.
+    const context = makeContext({ holidayKind: 'company_special_workday' })
+    const evidence: AttendanceEvidenceV1[] = [
+      { kind: 'punch', ref: 'imported-in', direction: 'check_in', occurredAt: sh('09:00'), source: 'import' },
+      { kind: 'punch', ref: 'outdoor-out', direction: 'check_out', occurredAt: sh('12:00'), source: 'outdoor_approval' },
+      { kind: 'punch', ref: 'ev-in-2', direction: 'check_in', occurredAt: sh('13:00'), source: 'attendance_event' },
+      { kind: 'approved_adjustment', ref: 'adj-out-2', direction: 'check_out', occurredAt: sh('18:00'), source: 'correction' },
+      { kind: 'scheduled_absence', ref: 'sched-run-1' },
+    ]
+    const facts: ApprovedAttendanceFactV1[] = [
+      {
+        kind: 'outdoor_punch',
+        requestId: 'req-outdoor',
+        requestSnapshotVersion: 2,
+        requestSnapshotFingerprint: 'b'.repeat(64),
+        approvalVersion: 4,
+        approvalRecordId: '202',
+        direction: 'check_out',
+        occurredAt: sh('12:00'),
+      },
+    ]
+    const result = run({ context, evidence, approvedFacts: facts })
+    expect(result.outcomeReasonCode).not.toBe('input_schema_invalid')
+    expect(result.outcome).toBe('completed')
+    expect(result.segments.map((s) => [s.status, s.workedMinutes])).toEqual([
+      ['normal', 180],
+      ['normal', 300],
+    ])
+    expect(result.dailyProjection?.workedMinutes).toBe(480)
+  })
+})

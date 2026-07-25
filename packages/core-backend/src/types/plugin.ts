@@ -1102,6 +1102,21 @@ export interface PluginServices {
       | { status: 'unimplemented' }
     >
   }
+  /**
+   * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
+   * least-privilege W4 segment-calculation port. Same posture as
+   * `approvalAssigneeResolver`: core-backend is the PROVIDER, ONLY
+   * plugin-attendance receives it; every other plugin gets undefined and the
+   * consumer fail-closes. `validateIanaTimezone` is the single strict W4 IANA
+   * validator (`w4c1-strict-time.validateAttendanceIanaTimezoneV1`) — it
+   * throws on non-IANA input (offset forms, whitespace, unknown zones) and
+   * returns the zone unchanged otherwise. Default-rule and shift timezone
+   * WRITE routes must consult it so a persisted invalid zone can never become
+   * a future W4 calculation input; the plugin never copies the validator.
+   */
+  attendanceW4SegmentCalculation?: {
+    validateIanaTimezone(zone: unknown): string
+  }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService

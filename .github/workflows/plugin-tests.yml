@@ -951,6 +951,7 @@ jobs:
             tests/integration/attendance-w4c0-db-gates-e1.db.test.ts \
             tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts \
             tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts \
+            tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
