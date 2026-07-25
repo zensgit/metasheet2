@@ -1,13 +1,18 @@
 'use strict'
 
 // gip-canonical-object-contract-registry.cjs — plain node test, hermetic.
-// Proves: the shipped default registry is empty; registration is append-only
-// (a version, once registered, can never be edited or replaced — not even
-// with identical content); an unregistered lookup fails closed by name and
-// does NOT auto-vivify an entry; and the activation gate refuses to report
-// "ready" both when no inventory has been supplied AND when one has been
-// supplied but leaves references unbacked — with a positive control proving
-// the gate is not merely all-refusing.
+// Proves: the shipped default registry is empty; entries are supplied ONLY
+// at construction (P3-b, review round 2 — no register()/add() verb exists
+// anywhere on a built registry, under any name, mirroring
+// gip-connector-kind-registry.cjs's already-audited structural shape);
+// duplicate (contractId, version) within one entries array is refused, even
+// with byte-identical content (append-only immutability, now proven at
+// construction time rather than across repeated runtime calls); an
+// unregistered lookup fails closed by name and does NOT auto-vivify an
+// entry; and the activation gate refuses to report "ready" both when no
+// inventory has been supplied AND when one has been supplied but leaves
+// references unbacked — with a positive control proving the gate is not
+// merely all-refusing.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -42,57 +47,77 @@ function defaultRegistryIsEmpty() {
 }
 
 // ---------------------------------------------------------------------------
-// (2) Structural shape: register/lookup/size ONLY — exact key set, same
+// (2) STRUCTURAL shape (P3-b fix): lookup/size ONLY — exact key set, on BOTH
+// a freshly constructed registry AND the exported singleton itself, the same
 // technique as the connector-kind registry and the qualification prober's
-// residual-1 predicate.
+// residual-1 predicate. No register/add/set verb exists anywhere, under any
+// name — this is what makes the registry closed STRUCTURALLY, not just by a
+// comment's claim (the defect this review round closed: the prior shape
+// exposed .register() on the frozen singleton, reachable by any importer at
+// any time).
 // ---------------------------------------------------------------------------
 function exactKeySet() {
-  const registry = createCanonicalObjectContractRegistry()
-  assert.deepEqual(Object.keys(registry).sort(), ['lookup', 'register', 'size'])
+  const registry = createCanonicalObjectContractRegistry([])
+  assert.deepEqual(Object.keys(registry).sort(), ['lookup', 'size'], 'a freshly built registry must expose exactly lookup()/size()')
   assert.ok(Object.isFrozen(registry))
+
+  // The SHIPPED SINGLETON specifically — not merely "some registry built by
+  // the factory" — must also carry no register verb. This is the exact gap
+  // the review named: any future module importing CANONICAL_OBJECT_CONTRACT_REGISTRY
+  // could otherwise call .register() on it directly, at runtime, from
+  // anywhere, entirely bypassing the "separately-reviewed amendment" process.
+  assert.deepEqual(Object.keys(CANONICAL_OBJECT_CONTRACT_REGISTRY).sort(), ['lookup', 'size'])
+  assert.equal(typeof CANONICAL_OBJECT_CONTRACT_REGISTRY.register, 'undefined', 'the shipped singleton must not carry a register verb under any name')
 }
 
 // ---------------------------------------------------------------------------
-// (3) Positive control: register then lookup succeeds and round-trips.
+// (3) Positive control: entries supplied at construction round-trip through
+// lookup.
 // ---------------------------------------------------------------------------
-function positiveControlRegisterAndLookup() {
-  const registry = createCanonicalObjectContractRegistry()
-  const registered = registry.register({ contractId: 'bom_line', version: 'v1', fields: { materialCode: true } })
-  assert.equal(registered.contractId, 'bom_line')
-  assert.equal(registered.version, 'v1')
-  assert.deepEqual(registered.fields, { materialCode: true })
-  assert.ok(Object.isFrozen(registered))
-  assert.ok(Object.isFrozen(registered.fields))
-
+function positiveControlConstructAndLookup() {
+  const registry = createCanonicalObjectContractRegistry([
+    { contractId: 'bom_line', version: 'v1', fields: { materialCode: true } },
+  ])
   const found = resolveCanonicalObjectContractVersion(registry, 'bom_line', 'v1')
-  assert.equal(found, registered)
+  assert.equal(found.contractId, 'bom_line')
+  assert.equal(found.version, 'v1')
+  assert.deepEqual(found.fields, { materialCode: true })
+  assert.ok(Object.isFrozen(found))
+  assert.ok(Object.isFrozen(found.fields))
 }
 
 // ---------------------------------------------------------------------------
-// (4) Append-only: re-registering the SAME (contractId, version) is refused,
-// even with byte-identical fields — re-registration itself is the defect.
-// A DIFFERENT version for the same contractId is a legal, separate append.
+// (4) Append-only immutability: two entries for the SAME (contractId,
+// version) within one entries array are refused — even with byte-identical
+// fields — re-declaration itself is the defect, not just a duplicate. A
+// DIFFERENT version for the same contractId is a legal, separate append.
 // ---------------------------------------------------------------------------
 function appendOnlyImmutability() {
-  const registry = createCanonicalObjectContractRegistry()
-  registry.register({ contractId: 'bom_line', version: 'v1', fields: { materialCode: true } })
-
   rejects(
-    () => registry.register({ contractId: 'bom_line', version: 'v1', fields: { materialCode: true } }),
+    () => createCanonicalObjectContractRegistry([
+      { contractId: 'bom_line', version: 'v1', fields: { materialCode: true } },
+      { contractId: 'bom_line', version: 'v1', fields: { materialCode: true } },
+    ]),
     'CANONICAL_OBJECT_CONTRACT_VERSION_IMMUTABLE',
-    're-registering the identical (contractId, version) must be refused',
+    'duplicate (contractId, version) within one entries array must be refused',
   )
   rejects(
-    () => registry.register({ contractId: 'bom_line', version: 'v1', fields: { materialCode: false } }),
+    () => createCanonicalObjectContractRegistry([
+      { contractId: 'bom_line', version: 'v1', fields: { materialCode: true } },
+      { contractId: 'bom_line', version: 'v1', fields: { materialCode: false } },
+    ]),
     'CANONICAL_OBJECT_CONTRACT_VERSION_IMMUTABLE',
-    're-registering the same version with DIFFERENT fields must still be refused (never edited)',
+    'duplicate (contractId, version) with DIFFERENT fields must still be refused (never edited)',
   )
 
   // v2 for the same contractId is a legal, separate append — v1 stays intact.
-  registry.register({ contractId: 'bom_line', version: 'v2', fields: { materialCode: true, uom: true } })
+  const registry = createCanonicalObjectContractRegistry([
+    { contractId: 'bom_line', version: 'v1', fields: { materialCode: true } },
+    { contractId: 'bom_line', version: 'v2', fields: { materialCode: true, uom: true } },
+  ])
   assert.equal(registry.size(), 2)
   const v1Still = resolveCanonicalObjectContractVersion(registry, 'bom_line', 'v1')
-  assert.deepEqual(v1Still.fields, { materialCode: true }, 'v1 must remain exactly as first registered')
+  assert.deepEqual(v1Still.fields, { materialCode: true }, 'v1 must remain exactly as first declared')
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +126,7 @@ function appendOnlyImmutability() {
 // lookup never silently creates an entry on first miss.
 // ---------------------------------------------------------------------------
 function noAutoVivification() {
-  const registry = createCanonicalObjectContractRegistry()
+  const registry = createCanonicalObjectContractRegistry([])
   const before = registry.size()
   rejects(() => resolveCanonicalObjectContractVersion(registry, 'ghost', 'v1'), 'CANONICAL_OBJECT_CONTRACT_UNREGISTERED', 'first miss')
   rejects(() => resolveCanonicalObjectContractVersion(registry, 'ghost', 'v1'), 'CANONICAL_OBJECT_CONTRACT_UNREGISTERED', 'second miss')
@@ -109,19 +134,20 @@ function noAutoVivification() {
 }
 
 // ---------------------------------------------------------------------------
-// (6) Malformed registrations refused.
+// (6) Malformed entries refused at construction time.
 // ---------------------------------------------------------------------------
-function malformedRegistrationsRefused() {
-  const registry = createCanonicalObjectContractRegistry()
-  rejects(() => registry.register({ contractId: '', version: 'v1', fields: { a: true } }), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'empty contractId')
-  rejects(() => registry.register({ contractId: 'bom_line', version: '', fields: { a: true } }), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'empty version')
-  rejects(() => registry.register({ contractId: 'bom_line', version: 'v1', fields: {} }), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'empty fields object')
-  rejects(() => registry.register({ contractId: 'bom_line', version: 'v1', fields: null }), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'null fields')
-  rejects(() => registry.register({ contractId: 'bom_line', version: 'v1', fields: ['not', 'an', 'object'] }), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'array fields')
+function malformedEntriesRefused() {
+  rejects(() => createCanonicalObjectContractRegistry([{ contractId: '', version: 'v1', fields: { a: true } }]), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'empty contractId')
+  rejects(() => createCanonicalObjectContractRegistry([{ contractId: 'bom_line', version: '', fields: { a: true } }]), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'empty version')
+  rejects(() => createCanonicalObjectContractRegistry([{ contractId: 'bom_line', version: 'v1', fields: {} }]), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'empty fields object')
+  rejects(() => createCanonicalObjectContractRegistry([{ contractId: 'bom_line', version: 'v1', fields: null }]), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'null fields')
+  rejects(() => createCanonicalObjectContractRegistry([{ contractId: 'bom_line', version: 'v1', fields: ['not', 'an', 'object'] }]), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'array fields')
+  rejects(() => createCanonicalObjectContractRegistry('not-an-array'), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'entries must be an array')
+  rejects(() => createCanonicalObjectContractRegistry([42]), 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'a non-plain-object entry must be refused')
   rejects(
     () => resolveCanonicalObjectContractVersion({ lookup: () => null, register: () => {}, size: () => 0 }, 'bom_line', 'v1'),
     'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
-    'a duck-typed non-trusted registry must be refused',
+    'a duck-typed non-trusted registry must be refused, even one that ADDS BACK a register() to look legitimate',
   )
 }
 
@@ -131,8 +157,9 @@ function malformedRegistrationsRefused() {
 // found nothing". Three states, all tested, with a genuine positive control.
 // ---------------------------------------------------------------------------
 function activationGateThreeStates() {
-  const registry = createCanonicalObjectContractRegistry()
-  registry.register({ contractId: 'bom_line', version: 'v1', fields: { materialCode: true } })
+  const registry = createCanonicalObjectContractRegistry([
+    { contractId: 'bom_line', version: 'v1', fields: { materialCode: true } },
+  ])
 
   // (a) no inventoryStatus at all, even with an empty references array —
   // must NOT read as "clean" / "ready".
@@ -201,10 +228,10 @@ function frozenVocabularyIsExhaustive() {
 function main() {
   defaultRegistryIsEmpty()
   exactKeySet()
-  positiveControlRegisterAndLookup()
+  positiveControlConstructAndLookup()
   appendOnlyImmutability()
   noAutoVivification()
-  malformedRegistrationsRefused()
+  malformedEntriesRefused()
   activationGateThreeStates()
   frozenVocabularyIsExhaustive()
   console.log('gip-canonical-object-contract-registry.test.cjs OK')

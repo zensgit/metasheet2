@@ -55,6 +55,7 @@ const {
   resolveCertifiedConnectorKind,
   GipConnectorKindRegistryError,
 } = require('./gip-connector-kind-registry.cjs')
+const { SANITIZATION_MARKER_PATTERN, scrubSecretStringValue } = require('./payload-redaction.cjs')
 
 const SYSTEM_IDENTITY_ERROR_REASONS = Object.freeze([
   'SYSTEM_IDENTITY_KIND_UNCERTIFIED',
@@ -62,6 +63,7 @@ const SYSTEM_IDENTITY_ERROR_REASONS = Object.freeze([
   'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
   'SYSTEM_IDENTITY_MATERIAL_MISSING',
   'SYSTEM_IDENTITY_DECRYPTION_FAILED',
+  'SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE',
 ])
 const ERROR_REASON_SET = new Set(SYSTEM_IDENTITY_ERROR_REASONS)
 
@@ -74,6 +76,22 @@ class GipSystemIdentityError extends Error {
   }
 }
 
+// P1-b FIX (review round 2): `instanceof GipSystemIdentityError` is not proof
+// an error came from THIS module's own fail() — the class is a public export
+// (necessarily so: callers need to recognize this module's errors), so a
+// connector declaration or a credential store can construct one directly,
+// carrying whatever plaintext it likes, and the two `instanceof` rethrow
+// checks below would have forwarded it verbatim. Provenance is tracked by
+// OBJECT IDENTITY instead — a module-private WeakSet populated ONLY inside
+// fail() itself — the same unforgeable pattern the registries in this
+// package use for registry trust. A caller cannot add its own error object to
+// this WeakSet from outside the module; only fail() can.
+const BRANDED_BY_THIS_MODULE = new WeakSet()
+
+function isOwnFailure(error) {
+  return error instanceof GipSystemIdentityError && BRANDED_BY_THIS_MODULE.has(error)
+}
+
 function fail(reason, message, details = {}) {
   if (!ERROR_REASON_SET.has(reason)) {
     throw new Error(
@@ -81,7 +99,9 @@ function fail(reason, message, details = {}) {
         + '(add it to the frozen SYSTEM_IDENTITY_ERROR_REASONS vocabulary)',
     )
   }
-  throw new GipSystemIdentityError(reason, message, details)
+  const error = new GipSystemIdentityError(reason, message, details)
+  BRANDED_BY_THIS_MODULE.add(error)
+  throw error
 }
 
 function isPlainObject(value) {
@@ -94,22 +114,35 @@ function isPlainObject(value) {
 // config through sanitizeIntegrationPayload (payload-redaction.cjs) before
 // handing it to a caller; hashing THAT output was a realized forgery class in
 // the prior (HELD, non-ratified) attempt — a config edit that only changed a
-// redacted/truncated field would be invisible to the hash. This guard detects
-// the FIVE marker shapes that function's redaction/truncation can leave behind
-// and refuses closed if any appear anywhere in the value handed to this
-// module — it is real-code detection, not a comment; a manual mutation pass
-// neutered this guard and confirmed the "sanitized config is refused" cases
-// in losslessnessGuardCoversAllFiveMarkerClasses go red (patch reverted,
-// never committed — command + output recorded in PR #4610).
-//   1. the literal sensitive-key redaction marker '[redacted]'
-//   2. a string truncated with the '...[truncated]' suffix (key-independent)
-//   3. the '[max-depth]' marker (key-independent)
-//   4. the '[circular]' marker (key-independent)
-//   5. the top-level truncation envelope shape { payloadTruncated: true, ... }
-const REDACTED_MARKER = '[redacted]'
-const TRUNCATION_SUFFIX = '...[truncated]'
-const MAX_DEPTH_MARKER = '[max-depth]'
-const CIRCULAR_MARKER = '[circular]'
+// redacted/truncated field would be invisible to the hash, and two GENUINELY
+// DIFFERENT configs (e.g. a DSN differing only in its embedded password) can
+// sanitize down to a BYTE-IDENTICAL projection, colliding on one
+// systemContentKey (proven directly by the collision test in the test file).
+//
+// P1-a FIX (review round 2): the marker detection below is NOT a hand-listed
+// copy of payload-redaction.cjs's marker strings — it imports
+// SANITIZATION_MARKER_PATTERN from that module directly, the single source
+// that module's OWN redaction/truncation logic defines, so this guard cannot
+// silently drift out of sync with it the next time a pattern there changes.
+// It is also SUBSTRING containment, not exact equality: several of
+// payload-redaction's value-scrub replacements splice a marker into the
+// MIDDLE of a larger string (e.g. a DSN's userinfo, or a `key=value` pair),
+// so an exact `value === '[redacted]'` check — the prior implementation —
+// would silently miss every one of those embedded cases. Detects every
+// marker shape sanitizeIntegrationPayload can leave behind, real-code
+// detection, not a comment; a manual mutation pass reverting this to the
+// exact-equality, hand-listed form and confirming the sanitizer-derived
+// battery in losslessnessGuardIsSourcedFromTheRealSanitizer goes red (patch
+// reverted, never committed) is recorded in PR #4610 — see that test for the
+// concrete failing cases.
+//   - '[redacted]', '[redacted-jwt]', '[redacted-secret-id]' — key- and
+//     value-based redaction, anywhere in the string (substring, not whole-
+//     value equality)
+//   - '...[truncated]' — string-length truncation suffix
+//   - '[max-depth]' / '[circular]' — depth-cap / circular-reference markers
+//   - '[N more items truncated]' — array-length truncation sentinel element
+//   - the top-level truncation envelope shape { payloadTruncated: true, ... }
+//     (structural, not textual — checked separately below, not by the regex)
 const MAX_SANITIZATION_SCAN_DEPTH = 64
 
 function containsSanitizationMarker(value, depth) {
@@ -122,12 +155,7 @@ function containsSanitizationMarker(value, depth) {
   // to this function, so an attacker-nested value is constructible.
   if (depth > MAX_SANITIZATION_SCAN_DEPTH) return true
   if (typeof value === 'string') {
-    return (
-      value === REDACTED_MARKER
-      || value === MAX_DEPTH_MARKER
-      || value === CIRCULAR_MARKER
-      || value.endsWith(TRUNCATION_SUFFIX)
-    )
+    return SANITIZATION_MARKER_PATTERN.test(value)
   }
   if (Array.isArray(value)) {
     return value.some((item) => containsSanitizationMarker(item, depth + 1))
@@ -142,6 +170,23 @@ function containsSanitizationMarker(value, depth) {
 function assertLosslessIdentityMaterial(value, field) {
   if (containsSanitizationMarker(value, 0)) {
     fail('SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS', `${field} must be the stored record, never a sanitized/redacted projection`, { field })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint-identity credential-shape boundary (P2-b, review round 2).
+// gip-connector-kind-registry.cjs's registration check only proves the three
+// per-kind extractors EXIST (typeof === 'function') — it says nothing about
+// what they RETURN. Reuses payload-redaction.cjs's OWN value-based secret
+// scrubber (the SAME regex set the sanitizer uses, not a second hand-rolled
+// copy): if scrubbing the extracted endpointIdentity changes it at all, a
+// credential-shaped substring was embedded in it (URL userinfo, a
+// `password=`/`token=`/... key=value param, a Bearer/Basic header, a JWT, or
+// a SEC-prefixed opaque secret id) and it is refused, closed, values-free —
+// the message never echoes the endpoint string or which pattern matched.
+function assertEndpointIdentityHasNoEmbeddedCredential(endpointIdentity) {
+  if (scrubSecretStringValue(endpointIdentity) !== endpointIdentity) {
+    fail('SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE', 'endpointIdentity must not contain embedded credential material', { field: 'endpointIdentity' })
   }
 }
 
@@ -225,12 +270,14 @@ function runExtractor(fn, arg, field) {
     // A guard elsewhere in THIS module (e.g. a nested fail()) must propagate
     // unchanged, never get relabeled by this catch-all — otherwise this
     // catch-all would cover for a more specific guard's exact reason token
-    // (the "doors cover for each other" trap). Anything else — including
-    // whatever the declaration's own error message says — is deliberately
-    // discarded entirely: it may originate from a declaration this module
-    // does not control and could embed the very plaintext this function
-    // exists to protect.
-    if (error instanceof GipSystemIdentityError) throw error
+    // (the "doors cover for each other" trap). Anything else — including a
+    // GipSystemIdentityError the DECLARATION constructed itself (this class
+    // is a public export; `instanceof` alone is forgeable by any caller) — is
+    // deliberately discarded entirely: it may originate from a declaration
+    // this module does not control and could embed the very plaintext this
+    // function exists to protect. isOwnFailure() checks PROVENANCE (branded
+    // by this module's own fail()), not merely the class.
+    if (isOwnFailure(error)) throw error
     fail('SYSTEM_IDENTITY_MATERIAL_MISSING', `declared ${field} extraction threw`, { field })
   }
   if (typeof result !== 'string' || result.trim() === '') {
@@ -299,9 +346,36 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
     throw error
   }
 
-  const config = isPlainObject(system.config) ? system.config : {}
+  // P3-a FIX (review round 2): a non-plain-object system.config used to
+  // silently substitute {} (the `Number(x) || 0` class of bug) and the
+  // losslessness scan then inspected the SUBSTITUTE, never the real value —
+  // permissive-by-coincidence (everything still got refused downstream via
+  // MATERIAL_MISSING once the substitute's empty config produced no
+  // endpointIdentity), but the branch itself was unexercised and wrong. A
+  // non-plain-object config is refused outright, never quietly replaced.
+  if (!isPlainObject(system.config)) {
+    fail('SYSTEM_IDENTITY_INPUT_INVALID', 'system.config must be a plain object', { field: 'config' })
+  }
+  const config = system.config
   assertLosslessIdentityMaterial(config, 'config')
   const endpointIdentity = runExtractor(declaration.extractEndpointIdentity, config, 'endpointIdentity')
+  // P2-b FIX (review round 2): registration only checks that the three
+  // per-kind extractors EXIST (typeof === 'function'), never what they
+  // RETURN. Nothing upstream of this point forbids a declaration's
+  // extractEndpointIdentity from returning a DSN/connection-string shape with
+  // the credential embedded in it (`user:pass@host`, or a `key=value`
+  // credential param) — the single most common shape for a
+  // connectionString/jdbcUrl-class connector. If that were allowed through,
+  // rotating ONLY the embedded password would move systemContentKey, in
+  // direct violation of decision (α)'s ruled rotation contract ("secret
+  // rotation alone must leave systemContentKey unchanged") — because the
+  // secret would be riding inside the term the formula treats as endpoint
+  // identity, never inside the (correctly excluded) secret material itself.
+  // Constrained AT THE BOUNDARY, reusing payload-redaction.cjs's OWN
+  // credential-shape detection (scrubSecretStringValue) rather than a second,
+  // hand-rolled pattern set — if scrubbing changes the string at all, it
+  // contained a credential-shaped substring and is refused, values-free.
+  assertEndpointIdentityHasNoEmbeddedCredential(endpointIdentity)
 
   // ---- credential-store boundary starts: brief decrypt, immediate HMAC,
   // discard. Everything inside this async block is unreachable from the
@@ -314,7 +388,7 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
     try {
       plaintext = await credentialStore.decrypt(credentialCiphertext)
     } catch (error) {
-      if (error instanceof GipSystemIdentityError) throw error
+      if (isOwnFailure(error)) throw error
       fail('SYSTEM_IDENTITY_DECRYPTION_FAILED', 'credential decryption failed', {})
     }
     const credentials = parseCredentialEnvelope(plaintext)
@@ -346,9 +420,18 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
   return Object.freeze({ systemContentKey, kind: declaration.kind })
 }
 
+// P2-a FIX (review round 2): computeSystemContentKey used to be a TOP-LEVEL
+// public export — a bypass of BOTH the kind-certification gate (it takes a
+// raw `kind` string, never resolved through resolveCertifiedConnectorKind)
+// AND the HMAC boundary (it takes authPrincipalKey/authTenantScopeKey as
+// whatever string a caller hands it, raw or HMAC'd, no way to tell). The
+// module's only PUBLIC route to a systemContentKey must be the gated
+// deriveSystemContentKey above; computeSystemContentKey moves to
+// __internals, which the exact-export-key-set test below pins so a future
+// re-export (under any name) reds — the same technique the registries in
+// this package use to pin their own structural closure.
 module.exports = {
   deriveSystemContentKey,
-  computeSystemContentKey,
   GipSystemIdentityError,
   SYSTEM_IDENTITY_ERROR_REASONS,
   IDENTITY_HMAC_DOMAINS,
@@ -357,6 +440,8 @@ module.exports = {
     domainSeparatedHmac,
     containsSanitizationMarker,
     assertLosslessIdentityMaterial,
+    assertEndpointIdentityHasNoEmbeddedCredential,
+    computeSystemContentKey,
     parseCredentialEnvelope,
     runExtractor,
   },

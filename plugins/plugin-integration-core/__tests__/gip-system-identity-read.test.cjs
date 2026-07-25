@@ -7,7 +7,14 @@
 // systemId/tenantId/workspaceId, the connection secret) provably do not move
 // the key — plus the decision-(α) boundary properties: brief decryption,
 // immediate domain-separated HMAC, discard, and "never into evidence, logs or
-// errors" (a sentinel-sweep test, not a bare claim).
+// errors" (a sentinel-sweep test, not a bare claim); and, from the review
+// round 2 three-lens adversarial pass (P1-a/P1-b/P2-a/P2-b/P3-a): the
+// losslessness guard is sourced from the REAL sanitizer (not a hand-listed
+// copy), a forged public-class error cannot exfiltrate plaintext through
+// either catch site, computeSystemContentKey is not independently reachable,
+// an endpoint identity cannot smuggle an embedded credential past rotation
+// semantics, and a non-plain-object config is refused rather than silently
+// substituted.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -24,6 +31,10 @@ const {
 const {
   createConnectorKindRegistry,
 } = require(path.join(__dirname, '..', 'lib', 'gip-connector-kind-registry.cjs'))
+
+const {
+  sanitizeIntegrationPayload,
+} = require(path.join(__dirname, '..', 'lib', 'payload-redaction.cjs'))
 
 const HMAC_KEY = crypto.randomBytes(32)
 
@@ -262,43 +273,103 @@ async function uncertifiedKindFailsClosed() {
 }
 
 // ---------------------------------------------------------------------------
-// (8) Fail-closed: losslessness — a sanitized/redacted config must be refused,
-// in each of the five marker classes, plus a POSITIVE control that a normal,
-// non-sanitized config with benign-looking-but-not-matching text passes.
+// (8) Fail-closed: losslessness — SOURCED FROM THE REAL SANITIZER (P1-a fix,
+// review round 2). Every fixture below is produced by running a realistic
+// stored config through sanitizeIntegrationPayload itself (payload-
+// redaction.cjs), not hand-typed marker strings — so this test cannot drift
+// out of sync with what that function actually emits. Plus a genuine
+// COLLISION test proving the realized forgery the guard exists to prevent,
+// and a positive control proving the guard is not merely all-refusing.
 // ---------------------------------------------------------------------------
-async function losslessnessGuardCoversAllFiveMarkerClasses() {
+async function losslessnessGuardIsSourcedFromTheRealSanitizer() {
   const registry = harnessRegistry()
   const store = fakeCredentialStore({ ct1: envelope({ username: 'alice', password: 'p1', acctId: 'tenantX' }) })
 
-  const sanitizedConfigs = [
-    { baseUrl: '[redacted]' }, // 1. literal sensitive-key redaction marker
-    { baseUrl: 'https://erp.exampl...[truncated]' }, // 2. truncation suffix
-    { baseUrl: '[max-depth]' }, // 3. max-depth marker
-    { baseUrl: '[circular]' }, // 4. circular marker
-    { nested: { payloadTruncated: true, originalBytes: 999, preview: {} } }, // 5. truncation envelope shape
-  ]
-  for (const config of sanitizedConfigs) {
+  async function mustRefuse(config, label) {
     await rejectsAsync(
       () => deriveSystemContentKey({ system: { kind: 'test:harness', config }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }),
       'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
-      `a config carrying marker class ${JSON.stringify(config)} must be refused`,
+      `a config sanitized by ${label} must be refused`,
     )
   }
 
-  // POSITIVE CONTROL — a benign config that merely CONTAINS the word
-  // "redacted" as a substring, not the exact sentinel, must NOT be refused
-  // (an over-eager substring guard would be a different, also-wrong bug).
+  // Each fixture: a REALISTIC raw config, run through the REAL sanitizer,
+  // whose OUTPUT (not a hand-typed stand-in) is what gets fed to
+  // deriveSystemContentKey. Covers every marker shape sanitizeIntegrationPayload
+  // can produce, including markers embedded as a SUBSTRING inside a larger
+  // string (the exact class the prior exact-equality guard missed).
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'https://erp.example.internal', password: 'hunter2' }),
+    'key-based redaction (whole-value "[redacted]")',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'postgres://svc:P@ssw0rd@erp-db.internal:5432/erp' }),
+    'URL-userinfo value-scrub (embedded "[redacted]" substring, not whole-value)',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'https://erp.example.internal?token=abcXYZ123; note' }),
+    'key=value value-scrub (embedded "[redacted]" substring)',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'Authorization: Bearer abcdefgh12345678' }),
+    'Bearer value-scrub (embedded "[redacted]" substring)',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: `Basic ${Buffer.from('alice:secret123').toString('base64')}` }),
+    'Basic value-scrub (embedded "[redacted]" substring)',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U' }),
+    '"[redacted-jwt]" value-scrub',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'SEC1234567890AB' }),
+    '"[redacted-secret-id]" value-scrub',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'https://erp.example.internal', blob: 'x'.repeat(2100) }, { maxStringLength: 2000 }),
+    'string-length truncation suffix ("...[truncated]")',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'https://erp.example.internal', list: Array.from({ length: 60 }, (_, i) => i) }, { maxArrayItems: 50 }),
+    'array-length truncation sentinel element ("[N more items truncated]")',
+  )
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'https://erp.example.internal', nested: { a: { b: { c: { d: 'leaf' } } } } }, { maxDepth: 3 }),
+    '"[max-depth]" marker',
+  )
+  {
+    const circ = {}
+    circ.self = circ
+    await mustRefuse(
+      sanitizeIntegrationPayload({ baseUrl: 'https://erp.example.internal', nested: circ }),
+      '"[circular]" marker',
+    )
+  }
+  await mustRefuse(
+    sanitizeIntegrationPayload({ baseUrl: 'https://erp.example.internal', big: 'z'.repeat(50000) }, { maxBytes: 20 }),
+    'top-level truncation envelope ({ payloadTruncated: true, ... }, incl. preview:"[omitted]")',
+  )
+
+  // POSITIVE CONTROLS — a real losslessness guard must not be all-refusing.
+  // (a) benign config with no marker anywhere.
   const benign = { baseUrl: 'https://erp.example.internal', note: 'this field is not redacted at all' }
   const ok = await deriveSystemContentKey({ system: { kind: 'test:harness', config: benign }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY })
   assert.match(ok.systemContentKey, /^[0-9a-f]{64}$/, 'a benign config containing but not equal to the marker text must succeed')
 
-  // (6.) DEPTH-CAP FAIL-CLOSED — a values-free guard that "gives up" scanning
-  // past its depth cap must refuse, never silently answer "clean". This is
+  // (b) THE STRENGTHENING, MADE VISIBLE: a config whose marker is embedded as
+  // a substring (not the whole value) would have PASSED under the prior
+  // exact-equality guard (`value === '[redacted]'` is false for a string that
+  // merely CONTAINS it) but MUST be refused under the fixed substring guard.
+  await mustRefuse(
+    { baseUrl: 'https://erp.example.internal/[redacted]/other-path' },
+    'a marker embedded as a substring (would have passed the OLD exact-equality guard)',
+  )
+
+  // DEPTH-CAP FAIL-CLOSED — a values-free guard that "gives up" scanning past
+  // its depth cap must refuse, never silently answer "clean". This is
   // constructible (config is arbitrary operator JSON with no upstream depth
   // bound), so it is tested directly rather than only asserted in a comment.
-  // A shallow benign value (the positive control just above, and the whole
-  // sanitizedConfigs battery, all well under the cap) already proves the cap
-  // is not reached in the ordinary case.
   function buildDeeplyNestedObject(depth, leafValue) {
     let value = leafValue
     for (let level = 0; level < depth; level += 1) value = { nested: value }
@@ -309,6 +380,45 @@ async function losslessnessGuardCoversAllFiveMarkerClasses() {
     () => deriveSystemContentKey({ system: { kind: 'test:harness', config: deepButNoMarkerAnywhere }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }),
     'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
     'a config nested past the scan depth cap must refuse (fail closed at the cap, never "clean")',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (8b) COLLISION TEST (P1-a, explicit review requirement #3): two configs
+// with GENUINELY DIFFERENT endpoints (different embedded DSN passwords) that
+// sanitize down to a BYTE-IDENTICAL projection must NOT both mint a key —
+// this is the realized forgery §3.0 B-2 exists to prevent. Proves (a) the
+// collision premise is real (both sanitize identically), and (b) neither
+// mints a key (both refused) — collision is structurally impossible, not
+// merely "didn't happen to occur in this run".
+// ---------------------------------------------------------------------------
+async function sanitizedProjectionCollisionCannotMintAKey() {
+  const registry = createConnectorKindRegistry([{
+    kind: 'test:dsn-harness',
+    extractEndpointIdentity: (config) => config.hint,
+    extractAuthPrincipal: (creds) => creds.username,
+    extractAuthTenantScope: (creds) => creds.acctId,
+  }])
+  const store = fakeCredentialStore({ ct1: envelope({ username: 'svc', password: 'p', acctId: 'tenantX' }) })
+
+  const rawA = { hint: 'jdbc:postgres://svc:PASSWORD-AAA-DIFFERENT@erp-db.internal:5432/erp' }
+  const rawB = { hint: 'jdbc:postgres://svc:PASSWORD-BBB-DIFFERENT@erp-db.internal:5432/erp' }
+  assert.notEqual(rawA.hint, rawB.hint, 'the two RAW endpoints must be genuinely different (different embedded password)')
+
+  const sanitizedA = sanitizeIntegrationPayload(rawA)
+  const sanitizedB = sanitizeIntegrationPayload(rawB)
+  assert.equal(sanitizedA.hint, sanitizedB.hint, 'PREMISE: two genuinely different endpoints must sanitize to a BYTE-IDENTICAL projection (the collision the guard must prevent)')
+
+  // Neither sanitized projection may mint a key.
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: { kind: 'test:dsn-harness', config: sanitizedA }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
+    'sanitized projection A must be refused, never accepted as if it were the stored record',
+  )
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: { kind: 'test:dsn-harness', config: sanitizedB }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
+    'sanitized projection B must be refused, never accepted as if it were the stored record',
   )
 }
 
@@ -336,7 +446,7 @@ async function materialMissingFailsClosed() {
     extractAuthTenantScope: (creds) => creds.acctId,
   }])
   await rejectsAsync(
-    () => deriveSystemContentKey({ system: { kind: 'test:no-principal', config: { baseUrl: 'x' } }, credentialCiphertext: 'ct1', credentialStore: store, registry: registryMissingPrincipal, hmacKey: HMAC_KEY }),
+    () => deriveSystemContentKey({ system: { kind: 'test:no-principal', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct1', credentialStore: store, registry: registryMissingPrincipal, hmacKey: HMAC_KEY }),
     'SYSTEM_IDENTITY_MATERIAL_MISSING',
     'a declared principal extractor returning an empty string must fail closed',
   )
@@ -345,7 +455,10 @@ async function materialMissingFailsClosed() {
 // ---------------------------------------------------------------------------
 // (10) SENTINEL SWEEP — automated proof of "never into evidence, logs, or
 // errors", across every reachable fail path including a MALICIOUS declaration
-// that tries to smuggle plaintext out through its own thrown error.
+// that tries to smuggle plaintext out through its own thrown error, AND
+// (P1-b, review round 2) a FORGED public-class error at BOTH catch sites,
+// plus an exclusivity control proving branding does not swallow a genuinely
+// internal fail()'s own reason.
 // ---------------------------------------------------------------------------
 async function sentinelNeverLeaksAcrossAnyPath() {
   const SENTINEL = 'SENTINEL-PLAINTEXT-MUST-NOT-LEAK-9f3a1c'
@@ -376,9 +489,10 @@ async function sentinelNeverLeaksAcrossAnyPath() {
   )
   assert.ok(!(errB.message + JSON.stringify(errB.details)).includes(SENTINEL))
 
-  // (d) a MALICIOUS/buggy declaration whose extractor throws an error that
-  // embeds the plaintext credential value — the catch-all in runExtractor
-  // must discard the original error entirely, never forward its message.
+  // (d) a MALICIOUS/buggy declaration whose extractor throws an ORDINARY
+  // Error that embeds the plaintext credential value — the catch-all in
+  // runExtractor must discard the original error entirely, never forward its
+  // message.
   const maliciousRegistry = createConnectorKindRegistry([{
     kind: 'test:malicious',
     extractEndpointIdentity: (config) => config.baseUrl,
@@ -386,9 +500,9 @@ async function sentinelNeverLeaksAcrossAnyPath() {
     extractAuthTenantScope: (creds) => creds.acctId,
   }])
   const errC = await rejectsAsync(
-    () => deriveSystemContentKey({ system: { kind: 'test:malicious', config: { baseUrl: 'x' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: maliciousRegistry, hmacKey: HMAC_KEY }),
+    () => deriveSystemContentKey({ system: { kind: 'test:malicious', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: maliciousRegistry, hmacKey: HMAC_KEY }),
     'SYSTEM_IDENTITY_MATERIAL_MISSING',
-    'a declaration whose extractor throws must fail closed without forwarding its message',
+    'a declaration whose extractor throws an ordinary Error must fail closed without forwarding its message',
   )
   assert.ok(!(errC.message + JSON.stringify(errC.details)).includes(SENTINEL), 'a malicious declaration must not be able to smuggle plaintext out through its own error')
 
@@ -401,17 +515,192 @@ async function sentinelNeverLeaksAcrossAnyPath() {
     extractAuthPrincipal: (creds) => creds.username,
     extractAuthTenantScope: (creds) => creds.acctId,
   }])
-  const wrappedResult = await deriveSystemContentKey({ system: { kind: 'test:wrapping', config: { baseUrl: 'x' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: wrappingRegistry, hmacKey: HMAC_KEY })
+  const wrappedResult = await deriveSystemContentKey({ system: { kind: 'test:wrapping', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: wrappingRegistry, hmacKey: HMAC_KEY })
   assert.ok(!JSON.stringify(wrappedResult).includes(SENTINEL))
+
+  // (f) P1-b: a declaration constructs a REAL, public-class
+  // GipSystemIdentityError itself (not this module's own fail()) and throws
+  // it from an extractor — reachable at the runExtractor catch site. Prior to
+  // the fix, `error instanceof GipSystemIdentityError` was true for this too
+  // (the class is a public export a declaration can import and construct),
+  // so it was rethrown VERBATIM, carrying the sentinel straight out. Fixed:
+  // provenance (branding), not class, decides the exemption — this FOREIGN
+  // error must be discarded and relabeled with the generic catch-all reason.
+  const forgingExtractorRegistry = createConnectorKindRegistry([{
+    kind: 'test:forged-error-extractor',
+    extractEndpointIdentity: (config) => config.baseUrl,
+    extractAuthPrincipal: (creds) => {
+      throw new GipSystemIdentityError('SYSTEM_IDENTITY_KIND_UNCERTIFIED', `principal=${creds.username} secret=${creds.password} sentinel=${SENTINEL}`, { leaked: SENTINEL })
+    },
+    extractAuthTenantScope: (creds) => creds.acctId,
+  }])
+  const errF = await rejectsAsync(
+    () => deriveSystemContentKey({ system: { kind: 'test:forged-error-extractor', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: forgingExtractorRegistry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_MATERIAL_MISSING',
+    'a FOREIGN (unbranded) GipSystemIdentityError thrown by an extractor must be discarded, not rethrown verbatim, even though it IS an instance of the public class',
+  )
+  assert.ok(!(errF.message + JSON.stringify(errF.details)).includes(SENTINEL), 'the forged error message/details must not leak through runExtractor')
+  assert.notEqual(errF.reason, 'SYSTEM_IDENTITY_KIND_UNCERTIFIED', 'the forged reason token must not survive either — it must be replaced by the catch-all reason')
+
+  // (g) P1-b: the SAME forged-class attack at the SECOND catch site —
+  // credentialStore.decrypt() itself constructs and throws a public-class
+  // GipSystemIdentityError carrying the sentinel.
+  const forgingStore = {
+    async decrypt() {
+      throw new GipSystemIdentityError('SYSTEM_IDENTITY_KIND_UNCERTIFIED', `leaked=${SENTINEL}`, { leaked: SENTINEL })
+    },
+  }
+  const errG = await rejectsAsync(
+    () => deriveSystemContentKey({ system, credentialCiphertext: 'ct', credentialStore: forgingStore, registry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_DECRYPTION_FAILED',
+    'a FOREIGN (unbranded) GipSystemIdentityError thrown by credentialStore.decrypt must be discarded, not rethrown verbatim',
+  )
+  assert.ok(!(errG.message + JSON.stringify(errG.details)).includes(SENTINEL), 'the forged error message/details must not leak through the decrypt() catch site')
+  assert.notEqual(errG.reason, 'SYSTEM_IDENTITY_KIND_UNCERTIFIED')
+
+  // (h) EXCLUSIVITY CONTROL (the "doors cover for each other" trap): branding
+  // must not become a NEW hole where the catch-all swallows a genuinely
+  // internal, correctly-branded fail() and relabels it. Simulates a
+  // (hypothetical, future) internal check inside runExtractor's try by having
+  // the declaration itself call this module's OWN __internals.fail — which
+  // DOES get branded — and asserts it survives with ITS OWN reason, not
+  // MATERIAL_MISSING.
+  const internalFailRegistry = createConnectorKindRegistry([{
+    kind: 'test:internal-fail',
+    extractEndpointIdentity: (config) => config.baseUrl,
+    extractAuthPrincipal: () => { __internals.fail('SYSTEM_IDENTITY_INPUT_INVALID', 'deliberately internal, must not be relabeled', {}) },
+    extractAuthTenantScope: (creds) => creds.acctId,
+  }])
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: { kind: 'test:internal-fail', config: { baseUrl: 'https://erp.example.internal' } }, credentialCiphertext: 'ct', credentialStore: leakyStore, registry: internalFailRegistry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_INPUT_INVALID',
+    'a BRANDED internal fail() thrown inside runExtractor must propagate with its OWN reason, never get relabeled by the catch-all',
+  )
 }
 
 // ---------------------------------------------------------------------------
-// (11) Input validation / vocabulary discipline.
+// (11) P2-b: endpoint-identity credential-shape boundary. A declared
+// extractEndpointIdentity returning a DSN with embedded userinfo credentials
+// must be refused — closing the hole where rotating ONLY the embedded
+// password would move systemContentKey (violating decision (α)'s ruled
+// rotation contract), because registration only ever checked that the
+// extractor EXISTS, never what it RETURNS.
+// ---------------------------------------------------------------------------
+async function endpointIdentityCredentialBoundaryClosesDsnRotationHole() {
+  const dsnRegistry = createConnectorKindRegistry([{
+    kind: 'test:dsn-harness',
+    extractEndpointIdentity: (config) => config.dsn,
+    extractAuthPrincipal: (creds) => creds.username,
+    extractAuthTenantScope: (creds) => creds.acctId,
+  }])
+  const store = fakeCredentialStore({ ct1: envelope({ username: 'svc', password: 'irrelevant', acctId: 'tenantX' }) })
+
+  const beforeRotation = { kind: 'test:dsn-harness', config: { dsn: 'postgres://svc:OLD-PASSWORD-AAA@erp-db.internal:5432/erp' } }
+  const afterRotation = { kind: 'test:dsn-harness', config: { dsn: 'postgres://svc:NEW-PASSWORD-BBB@erp-db.internal:5432/erp' } }
+  assert.notEqual(beforeRotation.config.dsn, afterRotation.config.dsn, 'the two DSNs must differ only in the embedded password')
+
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: beforeRotation, credentialCiphertext: 'ct1', credentialStore: store, registry: dsnRegistry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE',
+    'an endpoint identity carrying embedded URL-userinfo credentials must be refused (before rotation)',
+  )
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: afterRotation, credentialCiphertext: 'ct1', credentialStore: store, registry: dsnRegistry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE',
+    'an endpoint identity carrying embedded URL-userinfo credentials must be refused (after rotation) — neither variant ever mints a key, so rotation cannot move one',
+  )
+
+  // key=value credential-param DSN shape (ODBC/SQL Server style) — the other
+  // named "single most common shape" in the review.
+  const kvBefore = { kind: 'test:dsn-harness', config: { dsn: 'Server=erp-db;Database=erp;password=OLD-PASSWORD-AAA;' } }
+  const kvAfter = { kind: 'test:dsn-harness', config: { dsn: 'Server=erp-db;Database=erp;password=NEW-PASSWORD-BBB;' } }
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: kvBefore, credentialCiphertext: 'ct1', credentialStore: store, registry: dsnRegistry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE',
+    'a key=value credential-shaped endpoint identity must be refused (before rotation)',
+  )
+  await rejectsAsync(
+    () => deriveSystemContentKey({ system: kvAfter, credentialCiphertext: 'ct1', credentialStore: store, registry: dsnRegistry, hmacKey: HMAC_KEY }),
+    'SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE',
+    'a key=value credential-shaped endpoint identity must be refused (after rotation)',
+  )
+
+  // POSITIVE CONTROL — a benign DSN-LOOKING string with NO embedded
+  // credential (no userinfo, no credential key=value) must succeed, proving
+  // the boundary is not merely all-refusing.
+  const benignDsn = { kind: 'test:dsn-harness', config: { dsn: 'postgres://erp-db.internal:5432/erp' } }
+  const ok = await deriveSystemContentKey({ system: benignDsn, credentialCiphertext: 'ct1', credentialStore: store, registry: dsnRegistry, hmacKey: HMAC_KEY })
+  assert.match(ok.systemContentKey, /^[0-9a-f]{64}$/, 'a DSN with no embedded credential must be accepted')
+
+  // COUNTERFACTUAL PROOF — reconstructs, via the internals directly (not the
+  // real guarded pipeline), exactly what the pre-fix vulnerability was: if
+  // the raw DSN string (untouched by the new boundary check) were allowed
+  // through as endpointIdentity, the two rotated variants — same principal,
+  // same tenant scope, ONLY the embedded password differing — would produce
+  // DIFFERENT systemContentKeys, i.e. secret rotation alone moving the key.
+  // This is the concrete violation of decision (α)'s ruled rotation contract
+  // that P2-b's fix (the assertEndpointIdentityHasNoEmbeddedCredential call)
+  // prevents by refusing such an endpoint identity outright.
+  const fixedPrincipalHmac = __internals.domainSeparatedHmac(HMAC_KEY, IDENTITY_HMAC_DOMAINS.PRINCIPAL, 'svc')
+  const fixedTenantScopeHmac = __internals.domainSeparatedHmac(HMAC_KEY, IDENTITY_HMAC_DOMAINS.TENANT_SCOPE, 'tenantX')
+  const keyIfEndpointGuardDidNotExist_before = __internals.computeSystemContentKey({
+    kind: 'test:dsn-harness',
+    endpointIdentity: beforeRotation.config.dsn,
+    authPrincipalKey: fixedPrincipalHmac,
+    authTenantScopeKey: fixedTenantScopeHmac,
+  })
+  const keyIfEndpointGuardDidNotExist_after = __internals.computeSystemContentKey({
+    kind: 'test:dsn-harness',
+    endpointIdentity: afterRotation.config.dsn,
+    authPrincipalKey: fixedPrincipalHmac,
+    authTenantScopeKey: fixedTenantScopeHmac,
+  })
+  assert.notEqual(
+    keyIfEndpointGuardDidNotExist_before,
+    keyIfEndpointGuardDidNotExist_after,
+    'COUNTERFACTUAL: with the boundary absent, an endpoint identity carrying the embedded DSN password would let systemContentKey MOVE on secret rotation alone — exactly the ruled-contract violation the boundary check prevents by refusing both variants instead',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (12) P3-a: a non-plain-object system.config is refused, never silently
+// substituted with {} (the `Number(x) || 0` class of bug).
+// ---------------------------------------------------------------------------
+async function nonPlainObjectConfigFailsClosed() {
+  const registry = harnessRegistry()
+  const store = fakeCredentialStore({ ct1: envelope({ username: 'alice', password: 'p1', acctId: 'tenantX' }) })
+  for (const badConfig of ['not-an-object', 42, true, null, undefined, ['array', 'not', 'object']]) {
+    await rejectsAsync(
+      () => deriveSystemContentKey({ system: { kind: 'test:harness', config: badConfig }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }),
+      'SYSTEM_IDENTITY_INPUT_INVALID',
+      `a non-plain-object system.config (${JSON.stringify(badConfig)}) must be refused, never silently substituted with {}`,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (13) P2-a: computeSystemContentKey is NOT independently reachable — the
+// module's exact PUBLIC export key set is pinned, the same technique the
+// registries in this package use to pin their own structural closure, so a
+// future re-export (under any name) reds.
+// ---------------------------------------------------------------------------
+function exactPublicExportKeySet() {
+  const moduleExports = require(path.join(__dirname, '..', 'lib', 'gip-system-identity-read.cjs'))
+  assert.deepEqual(
+    Object.keys(moduleExports).sort(),
+    ['GipSystemIdentityError', 'IDENTITY_HMAC_DOMAINS', 'SYSTEM_IDENTITY_ERROR_REASONS', '__internals', 'deriveSystemContentKey'],
+    'the module must expose no public route to a systemContentKey other than the gated deriveSystemContentKey',
+  )
+  assert.equal(typeof __internals.computeSystemContentKey, 'function', 'computeSystemContentKey must still be reachable for internal/testing use via __internals')
+}
+
+// ---------------------------------------------------------------------------
+// (14) Input validation / vocabulary discipline.
 // ---------------------------------------------------------------------------
 async function inputValidationFailsClosed() {
   const registry = harnessRegistry()
   const store = fakeCredentialStore({ ct1: envelope({ username: 'a', password: 'p', acctId: 't' }) })
-  const system = { kind: 'test:harness', config: { baseUrl: 'x' } }
+  const system = { kind: 'test:harness', config: { baseUrl: 'https://erp.example.internal' } }
 
   await rejectsAsync(() => deriveSystemContentKey({ system: null, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'null system')
   await rejectsAsync(() => deriveSystemContentKey({ system: { config: {} }, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'missing kind')
@@ -422,6 +711,7 @@ async function inputValidationFailsClosed() {
 
   assert.deepEqual([...SYSTEM_IDENTITY_ERROR_REASONS].sort(), [
     'SYSTEM_IDENTITY_DECRYPTION_FAILED',
+    'SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE',
     'SYSTEM_IDENTITY_KIND_UNCERTIFIED',
     'SYSTEM_IDENTITY_MATERIAL_MISSING',
     'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
@@ -438,9 +728,13 @@ async function main() {
   await domainSeparationPreventsSwapCollision()
   await aliasResolvesToSameKey()
   await uncertifiedKindFailsClosed()
-  await losslessnessGuardCoversAllFiveMarkerClasses()
+  await losslessnessGuardIsSourcedFromTheRealSanitizer()
+  await sanitizedProjectionCollisionCannotMintAKey()
   await materialMissingFailsClosed()
   await sentinelNeverLeaksAcrossAnyPath()
+  await endpointIdentityCredentialBoundaryClosesDsnRotationHole()
+  await nonPlainObjectConfigFailsClosed()
+  exactPublicExportKeySet()
   await inputValidationFailsClosed()
   console.log('gip-system-identity-read.test.cjs OK')
 }

@@ -19,11 +19,21 @@
 //   - first-party only; contracts registered IMMUTABLY by contractId+version;
 //     versions APPEND-ONLY — a registered version is never edited or replaced;
 //   - NO auto-synthesis from customer config — the failure mode this closes
-//     is exactly B-3's "invented locally". Structural, not conventional: the
-//     only way an entry ever exists in a registry instance is a caller
-//     explicitly invoking register() with an explicit fields object; nothing
-//     in this module reads a customer config, a fieldMap, or any external
-//     input, and no function derives a version from another field;
+//     is exactly B-3's "invented locally". STRUCTURAL, not conventional (P3-b
+//     fix, review round 2 — the prior shape here was FALSE to this comment:
+//     `register` sat on the frozen singleton itself, reachable by ANY module
+//     holding the import, at ANY time during a running process, which is
+//     exactly the runtime-customer-synthesis mode this decision closes — see
+//     the git history of this file for the shape that comment was written
+//     against). The fix mirrors gip-connector-kind-registry.cjs's already-
+//     audited pattern exactly: entries are supplied ONLY as a fixed array to
+//     createCanonicalObjectContractRegistry(entries) at construction time;
+//     the returned frozen object exposes ONLY lookup()/size() — there is no
+//     register/add/set verb anywhere on it, under any name, pinned by the
+//     exact-key-set test. "Append" now means a future, separately-reviewed
+//     amendment edits THIS FILE's own CANONICAL_OBJECT_CONTRACT_REGISTRY
+//     literal entries array (a real code change, a real review) — never a
+//     runtime call from anywhere else in the process;
 //   - unregistered => values-free CANONICAL_OBJECT_CONTRACT_UNREGISTERED;
 //   - inventory + backfill of existing references BEFORE activation — see
 //     assertCanonicalObjectContractRegistryActivationReady below. Per the
@@ -38,7 +48,7 @@
 //
 // This module SHIPS its default registry EMPTY: no contract has been
 // registered by anyone yet. Only a future, separately-reviewed amendment may
-// call register() on it.
+// extend the literal entries array passed to createCanonicalObjectContractRegistry below.
 
 const CANONICAL_OBJECT_CONTRACT_ERROR_REASONS = Object.freeze([
   'CANONICAL_OBJECT_CONTRACT_UNREGISTERED',
@@ -104,49 +114,64 @@ function assertTrustedRegistry(registry) {
   }
 }
 
-// Builds an EMPTY, mutable-by-register()-only registry instance. `fields` is
-// validated only for shape here (a non-empty plain object) — GIP-D0 §4's
-// field-level requirement vocabulary (ALL_ROWS_REQUIRED / NON_EMPTY_WHEN_PRESENT
-// / OPTIONAL, standardization rules, closed-vocabulary mapping, identity-key
+// Normalizes and validates ONE contract-version entry. `fields` is validated
+// only for shape here (a non-empty plain object) — GIP-D0 §4's field-level
+// requirement vocabulary (ALL_ROWS_REQUIRED / NON_EMPTY_WHEN_PRESENT /
+// OPTIONAL, standardization rules, closed-vocabulary mapping, identity-key
 // uniqueness) is a further specification this registry's mechanics do not
 // build — out of scope for step 1.3, which is the identity+version+lookup+
 // activation-gate mechanism, not the field-contract content model.
-function createCanonicalObjectContractRegistry() {
+function normalizeContractEntry(entry) {
+  if (!isPlainObject(entry)) {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'a contract registration must be a plain object', {})
+  }
+  const contractId = requiredIdentityToken(entry.contractId, 'contractId')
+  const version = requiredIdentityToken(entry.version, 'version')
+  if (!isPlainObject(entry.fields) || Object.keys(entry.fields).length === 0) {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must be a non-empty plain object', { field: 'fields' })
+  }
+  // Own, frozen copy — the registry's internal state can never be mutated
+  // through a reference the caller kept to the object it passed in.
+  return Object.freeze({
+    contractId,
+    version,
+    fields: Object.freeze({ ...entry.fields }),
+  })
+}
+
+// Builds a CLOSED registry from a fixed, first-party entries array — the
+// SAME structural shape as gip-connector-kind-registry.cjs's
+// createConnectorKindRegistry (P3-b fix, review round 2). `entries` MAY be
+// empty (and the shipped default below IS empty). Every entry is validated
+// and inserted HERE, at construction, and never again: the returned object
+// exposes no verb that could add, edit, or replace an entry after this
+// function returns — "append-only" now means a caller passes a LONGER
+// entries array to a NEW call of this function (a source-level, reviewed
+// change), never a runtime method call against an already-built registry.
+function createCanonicalObjectContractRegistry(entries) {
+  if (!Array.isArray(entries)) {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'entries must be an array', { field: 'entries' })
+  }
   // Two-level Map (contractId -> version -> frozen entry) rather than a
   // single joined string key — no separator character is needed at all, so
   // there is no join-collision surface between (contractId, version) pairs
   // to reason about.
   const byContractId = new Map()
-
-  function register(entry) {
-    if (!isPlainObject(entry)) {
-      fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'a contract registration must be a plain object', {})
-    }
-    const contractId = requiredIdentityToken(entry.contractId, 'contractId')
-    const version = requiredIdentityToken(entry.version, 'version')
-    if (!isPlainObject(entry.fields) || Object.keys(entry.fields).length === 0) {
-      fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must be a non-empty plain object', { field: 'fields' })
-    }
-    let versions = byContractId.get(contractId)
-    if (versions && versions.has(version)) {
-      // Append-only: a registered version is NEVER edited or replaced, even
-      // with byte-identical content — re-registering the same (contractId,
-      // version) is itself the defect this refuses, not just a duplicate.
+  for (const raw of entries) {
+    const normalized = normalizeContractEntry(raw)
+    let versions = byContractId.get(normalized.contractId)
+    if (versions && versions.has(normalized.version)) {
+      // Immutable: a version is NEVER edited or replaced, even with
+      // byte-identical content — re-declaring the same (contractId, version)
+      // within one entries array is itself the defect this refuses, not
+      // just a duplicate.
       fail('CANONICAL_OBJECT_CONTRACT_VERSION_IMMUTABLE', 'a registered contract version cannot be re-registered or edited', { field: 'version' })
     }
-    // Own, frozen copy — the registry's internal state can never be mutated
-    // through a reference the caller kept to the object it passed in.
-    const frozen = Object.freeze({
-      contractId,
-      version,
-      fields: Object.freeze({ ...entry.fields }),
-    })
     if (!versions) {
       versions = new Map()
-      byContractId.set(contractId, versions)
+      byContractId.set(normalized.contractId, versions)
     }
-    versions.set(version, frozen)
-    return frozen
+    versions.set(normalized.version, normalized)
   }
 
   function lookup(contractId, version) {
@@ -158,11 +183,11 @@ function createCanonicalObjectContractRegistry() {
   }
 
   // Frozen object exposes EXACTLY these keys — pinned by the exact-key-set
-  // test the same way the qualification prober's residual-1 predicate is
-  // pinned, so a future change cannot quietly add a synthesize/auto-register
+  // test the same way the qualification prober's residual-1 predicate (and
+  // the connector-kind registry's own resolve()/size() pin) are pinned, so a
+  // future change cannot quietly add a synthesize/register/auto-register
   // verb under a different name.
   const registry = Object.freeze({
-    register,
     lookup,
     size() {
       let total = 0
@@ -186,11 +211,12 @@ function resolveCanonicalObjectContractVersion(registry, contractId, version) {
 }
 
 // The first-party registry itself — SHIPS EMPTY. Only a future, separately-
-// reviewed amendment may call .register() on it (owner decision γ requires the
-// backfill/reference inventory to come from a privately-authorized real run
-// that has not happened — #4609's ⟲OD2 amendment: an inventory TOOL is not an
-// inventory RESULT).
-const CANONICAL_OBJECT_CONTRACT_REGISTRY = createCanonicalObjectContractRegistry()
+// reviewed amendment may extend this literal entries array (owner decision γ
+// requires the backfill/reference inventory to come from a
+// privately-authorized real run that has not happened — #4609's ⟲OD2
+// amendment: an inventory TOOL is not an inventory RESULT). There is no
+// runtime register() call that could add to this instance once built.
+const CANONICAL_OBJECT_CONTRACT_REGISTRY = createCanonicalObjectContractRegistry([])
 
 // ---------------------------------------------------------------------------
 // Activation gate (owner decision γ: "inventory and backfill existing
@@ -254,5 +280,6 @@ module.exports = {
     requiredIdentityToken,
     hasControlCharacter,
     trustedContractRegistries,
+    normalizeContractEntry,
   },
 }
