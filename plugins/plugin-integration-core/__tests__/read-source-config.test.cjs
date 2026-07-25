@@ -172,6 +172,138 @@ assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), resolverRu
 assert.deepEqual(validateReadSourceConfig({ valid: false }).errors[0].code, 'READ_SOURCE_UNEXPECTED_FIELD')
 assert.equal(validateReadSourceConfig(null).errors[0].code, 'READ_SOURCE_CONFIG_NOT_OBJECT')
 
+// --- 8. B1a §4 step 1.1 — config v2: orderingKeySpec + actionProfileVersion (additive, closed schema) ---
+// Ledger: docs/development/database-system-integration-line-design-and-verification-20260724.md §4 step
+// 1.1, §3.1⟲R6. Both fields are OPTIONAL — omitting them must not change behaviour (every mode's
+// baseValid() above omits both and passes unaffected; 8c below asserts it explicitly).
+//
+// THE FLIP: no test on main names either key before this PR (verified by tree-wide grep at `402f04982`) —
+// the "existing test that asserts today's rejection" the ledger points at does not exist as a named case;
+// the generic `nefariousKey` case at line 127 is the only prior guard and stays in place (8b below shows the
+// widening is exactly two keys, not "anything goes"). This block IS the flip: before the lib change below,
+// every assertion in 8a-8f that expects `valid === true` instead red with `READ_SOURCE_UNEXPECTED_FIELD` /
+// `READ_SOURCE_ORDERING_KEY_SPEC_INVALID` / `READ_SOURCE_ACTION_PROFILE_VERSION_INVALID` absent from the
+// error-code vocabulary (those codes don't exist yet either) — captured verbatim in the PR description as
+// the red run.
+
+// 8a. Well-shaped orderingKeySpec + actionProfileVersion together must be ACCEPTED and survive normalization.
+{
+  const withBoth = validateReadSourceConfig({
+    ...baseValid('single_record'),
+    fieldMap: [{ source: 'FQty', target: 'qty_col' }],
+    orderingKeySpec: [{ fieldId: 'qty_col', direction: 'ASC' }],
+    actionProfileVersion: 'erp.material_single_record.v1',
+  })
+  assert.equal(withBoth.valid, true, `well-shaped orderingKeySpec + actionProfileVersion must be ACCEPTED: ${JSON.stringify(withBoth.errors)}`)
+  assert.deepEqual(withBoth.normalized.orderingKeySpec, [{ fieldId: 'qty_col', direction: 'ASC' }])
+  assert.equal(withBoth.normalized.actionProfileVersion, 'erp.material_single_record.v1')
+  assert.ok(Object.isFrozen(withBoth.normalized.orderingKeySpec), 'orderingKeySpec array must be frozen')
+  assert.ok(Object.isFrozen(withBoth.normalized.orderingKeySpec[0]), 'orderingKeySpec entries must be frozen')
+}
+
+// 8b. Narrow widening — an UNLISTED key alongside these two still rejects (the allowlist grew by exactly
+// two keys, not "anything goes").
+assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), orderingSomethingElse: 'x' })).includes('READ_SOURCE_UNEXPECTED_FIELD'))
+
+// 8c. Omitting both fields is unaffected — the normalized output carries neither key when absent.
+{
+  const omitted = validateReadSourceConfig(baseValid('list_page'))
+  assert.equal(omitted.valid, true)
+  assert.ok(!('orderingKeySpec' in omitted.normalized), 'orderingKeySpec must be absent when omitted from input')
+  assert.ok(!('actionProfileVersion' in omitted.normalized), 'actionProfileVersion must be absent when omitted from input')
+}
+
+// 8d. orderingKeySpec closed schema (⟲R6).
+const orderingBase = (fieldMap, spec) => ({ ...baseValid('single_record'), fieldMap, orderingKeySpec: spec })
+// non-empty array required.
+assert.ok(codes(validateReadSourceConfig(orderingBase([{ source: 'FQty', target: 'qty' }], []))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'))
+assert.ok(codes(validateReadSourceConfig(orderingBase([{ source: 'FQty', target: 'qty' }], 'qty'))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'))
+// duplicate fieldIds rejected.
+assert.ok(codes(validateReadSourceConfig(orderingBase(
+  [{ source: 'FQty', target: 'qty' }],
+  [{ fieldId: 'qty', direction: 'ASC' }, { fieldId: 'qty', direction: 'DESC' }],
+))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'), 'duplicate fieldIds must be rejected')
+// canonical fieldIds only — never raw SQL, expressions, or aliases.
+for (const badFieldId of ['qty; DROP TABLE x', 'qty AS q', 'qty + 1', 'a.b.c()', 'qty OR 1=1', '', 'has space']) {
+  assert.ok(
+    codes(validateReadSourceConfig(orderingBase(
+      [{ source: 'FQty', target: 'qty' }],
+      [{ fieldId: badFieldId, direction: 'ASC' }],
+    ))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'),
+    `orderingKeySpec must reject raw-SQL/expression-shaped fieldId: ${JSON.stringify(badFieldId)}`,
+  )
+}
+// direction must be ASC/DESC, UPPERCASE-strict.
+for (const badDirection of ['asc', 'desc', 'Ascending', 'ASCENDING', '', 'up']) {
+  assert.ok(
+    codes(validateReadSourceConfig(orderingBase(
+      [{ source: 'FQty', target: 'qty' }],
+      [{ fieldId: 'qty', direction: badDirection }],
+    ))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'),
+    `orderingKeySpec.direction must reject non-uppercase/unknown: ${JSON.stringify(badDirection)}`,
+  )
+}
+for (const okDirection of ['ASC', 'DESC']) {
+  assert.equal(validateReadSourceConfig(orderingBase(
+    [{ source: 'FQty', target: 'qty' }],
+    [{ fieldId: 'qty', direction: okDirection }],
+  )).valid, true, `orderingKeySpec.direction must accept ${okDirection}`)
+}
+// every fieldId must resolve through the SAME config version's fieldMap targets — unresolvable ⇒ rejection.
+assert.ok(codes(validateReadSourceConfig(orderingBase(
+  [{ source: 'FQty', target: 'qty' }],
+  [{ fieldId: 'not_a_target', direction: 'ASC' }],
+))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'), 'a fieldId with no matching fieldMap target must be rejected')
+// orderingKeySpec present with NO fieldMap at all ⇒ every fieldId is unresolvable ⇒ rejection. Deliberate:
+// no "skip the resolution check when fieldMap is absent" escape hatch.
+{
+  const cfg = baseValid('list_page') // list_page's baseValid carries no fieldMap
+  assert.equal(cfg.fieldMap, undefined)
+  const res = validateReadSourceConfig({ ...cfg, orderingKeySpec: [{ fieldId: 'anything', direction: 'ASC' }] })
+  assert.ok(
+    codes(res).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'),
+    'orderingKeySpec without a fieldMap to resolve against must be rejected, not silently skipped',
+  )
+}
+// NULLability is deliberately NOT a schema check — there is no such key on an entry. An attempted extra key
+// (e.g. a "nullable" flag) is rejected as an unrecognised entry shape, the same way fieldMap's {source,
+// target}-only shape rejects a third key — not as a NULL-specific rule.
+assert.ok(codes(validateReadSourceConfig(orderingBase(
+  [{ source: 'FQty', target: 'qty' }],
+  [{ fieldId: 'qty', direction: 'ASC', nullable: false }],
+))).includes('READ_SOURCE_ORDERING_KEY_SPEC_INVALID'), 'an entry carrying any key beyond fieldId/direction must be rejected')
+
+// 8e. Direction-case decision is RATIFIED and PINNED both ways (owner ruling: keep the two vocabularies
+// separate, never unified by a read-time normalizer). resolverSortDirection stays lowercase-only;
+// orderingKeySpec.direction stays uppercase-only — each direction of the split is asserted so a future
+// one-sided normalizer would red here.
+assert.equal(
+  validateReadSourceConfig(resolver({ resolverRule: 'first_when_sorted', multiplicityRuleField: 'FDate', resolverSortDirection: 'ASC' })).valid,
+  false, 'resolverSortDirection must stay LOWERCASE-only — uppercase ASC must still be rejected',
+)
+assert.equal(
+  validateReadSourceConfig(resolver({ resolverRule: 'first_when_sorted', multiplicityRuleField: 'FDate', resolverSortDirection: 'asc' })).valid,
+  true, 'resolverSortDirection lowercase must keep working',
+)
+assert.equal(
+  validateReadSourceConfig(orderingBase([{ source: 'FQty', target: 'qty' }], [{ fieldId: 'qty', direction: 'asc' }])).valid,
+  false, 'orderingKeySpec.direction must stay UPPERCASE-only — lowercase asc must be rejected',
+)
+assert.equal(
+  validateReadSourceConfig(orderingBase([{ source: 'FQty', target: 'qty' }], [{ fieldId: 'qty', direction: 'ASC' }])).valid,
+  true, 'orderingKeySpec.direction uppercase must keep working',
+)
+
+// 8f. actionProfileVersion validates against the SAME PROFILE_ID_PATTERN vocabulary as GIP certification
+// (imported from gip-profile-certification-contracts.cjs, never duplicated, so the two cannot drift).
+for (const bad of ['NotLowercase.action.v1', 'no_dot_at_all', 'missing.version.token', 'trailing.dot.v1.', 'a.b.v0', '.leading.v1', `${'a'.repeat(130)}.b.v1`]) {
+  assert.ok(
+    codes(validateReadSourceConfig({ ...baseValid('list_page'), actionProfileVersion: bad })).includes('READ_SOURCE_ACTION_PROFILE_VERSION_INVALID'),
+    `actionProfileVersion must reject ${JSON.stringify(bad)}`,
+  )
+}
+assert.equal(validateReadSourceConfig({ ...baseValid('list_page'), actionProfileVersion: 'erp.material_list.v3' }).valid, true)
+
 // --- 7. Values-free errors (leak-bait): a secret-shaped value + a hostile endpoint must NOT appear in errors ---
 const leaky = {
   ...baseValid('list_page'),
