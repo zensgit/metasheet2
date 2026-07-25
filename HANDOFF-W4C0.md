@@ -398,3 +398,120 @@ vitest.config.ts exclude 注释块）：
 51. E2 会向 ms2_w4c0 的 rollout state 表新增每 run 两个随机 org 的 shadow/eligible 行
     （append-only 设计内残留）；E2 门1 正控会在 'default' org registry 留一条
     legacy_projection_only completed 行（同属设计内）。CI 新库无此累积。
+
+---
+
+## Stage E3 — 并发 gates（DONE, commit `c7367e088`）
+
+### 完成项与落点
+
+**新真库测试文件 `packages/core-backend/tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts`
+（11 用例；两点接线：plugin-tests.yml attendance 步紧跟 E2 行 + vitest.config.ts exclude；
+套件内自证腿）** — §12.1 点名的 dual-connection 腿全部构造**真并发**（双/三连接、
+waiter 先经 pg_locks `granted=false` 证明真阻塞、双 commit 序都跑；
+[[feedback_toctou_needs_constructed_race]]）：
+
+1. 单命令双连接 first claim：holder 预算内 seal+commit → waiter 解锁后 replay
+   同一 stored response；全程恰一行 effect、waiter 零 DML；
+2. all-new batch 双连接 first claim：waiter replay 已提交 order vector；恰一 batch 行
+   + 一套 item 行；
+3. holder 超 waiter 预算（clock seam 把 waiter 预算压到 10ms 真 lock_timeout）→
+   values-free 409 `ATTENDANCE_OPERATION_IN_PROGRESS`（message=code，无 55P03/23505
+   泄漏）、零额外 DML；holder 随后提交，同 waiter 重试 → replay stored response；
+4. multi-key deadline：blocker1 占第一 final key（真释放 ~300ms，模拟钟记 3000ms<5000）、
+   blocker2 占第二 key（remaining=2000ms 真超时）→ 一个 helper 预算内的同一 closed
+   busy code；blockers 释放后复跑成功且 lock_timeout 恢复 '5s'。「单预算 vs per-key
+   重置」判别靠 elapsed 窗（协议 ~2.3s，落 [1500,4500)；per-key 重置 ≈5.3s 会翻红）；
+5. helper 自身预算两处检查点（下一 query 前耗尽 → **零 SQL**（counting-trx 断言 issued=0）；
+   最后一次 acquisition 后耗尽）都映射到与 55P03 腿相同的 closed code；
+6. null-version legacy worker：shared 锁下 source effect（attendance_records INSERT）+
+   terminal status 单事务；第三连接 mid-flight probe 证「terminal-without-effect 任何
+   快照不可见」；transition 双连接真等待（pg_locks），worker 提交后 exclusive 下看到
+   terminal+effect 成对；rollback 腿 → nonterminal + 零 effect；
+7. rollout shared/exclusive 双向：null-ID legacy source 持 shared → transition 真等待、
+   提交后在 exclusive 下 re-evaluate（resolver 读 legacy）再落 transition；反向
+   transition 持 exclusive 落 shadow → source 的 preflight 在 shared 处真阻塞，释放后
+   claim 冻结**新** posture（行内 accepted_write_posture='shadow'，非 pre-lock 的 legacy）；
+8. P07 enqueue vs rollout transition 双序：enqueue-first（shared 从 resolve 持到 job
+   insert 提交；transition 真等待，mid-flight 零 job 可见，exclusive 下 scan 看到
+   queued+frozen 'shadow'）；transition-first（eligible→authoritative 在 exclusive 下
+   提交；enqueue 在 shared 处真阻塞，释放后 job 冻结 'authoritative' —— 若 posture
+   在锁前读会冻 'shadow'，判别成立）；suspension 子腿（authoritative→suspended 提交后
+   waiter resolver→blocked、org factory 拒 mint `W4C0_ORG_POSTURE_BLOCKED`、零 job 行）；
+9. P07 enqueue vs 同步调用双 commit 序：sync-first（enqueue 在 class-10 真阻塞，sync
+   seal+commit 后 enqueue 锁下重读 → 409 batch conflict、零 job 行、恰 2 个 sync
+   operation 行）；enqueue-first（sync preflight 在 class-10 真阻塞，enqueue 提交后
+   sync 锁下重读 → 409、零 operation/batch 行、恰 1 个 job）——「exactly one side
+   reserves the tuple」两个方向都成立；
+10. incomplete stable-ID operation vs rollout transition：claimed 未提交时 transition
+    在 class-00 exclusive 排队，claim seal+commit 后 transition 完成 shadow→eligible ——
+    全程无 40P01/重试耗尽；
+11. 两点接线自证腿。
+
+**registry 加固（`w4c0-operation-registry.ts` ~L644-L664，enqueue-first 竞态腿的必要
+实现面）**：preflight 对 import_batch/integration_batch 的 batch envelope 在 class-10
+锁下重读 operation 行**之后**（§8.2 步 2 字面「lock and re-read the operational job
+after those operation rows」）FOR UPDATE 重读 V1 job reservation；存在任何 reservation
+→ closed 409 `ATTENDANCE_OPERATION_BATCH_CONFLICT`（W4C-0 preflight 无 worker adapter
+可执行并 terminalize 被保留的 job，fail-closed）。
+
+另：E3 文件对 rollout state 的 UPDATE 不带 `updated_at`（该表列名为 `changed_at`
+且仅 INSERT default —— 初稿笔误已修）。
+
+### 实跑实数（Stage E3，本地 PG 15.17）
+
+- E3 单文件（ms2_w4c0）：`DATABASE_URL=… ATTENDANCE_TEST_DATABASE_URL=…
+  npx vitest run --config vitest.integration.config.ts
+  tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts` → **11/11 passed**
+  （修完列名笔误后首跑即绿，3.09s）。
+- 六个 w4c0 db 文件同跑（ms2_w4c0）→ **59/59 passed**（smoke 7 + parity 3 +
+  registry 8 + E1 20 + E2 10 + E3 11）。
+- w4c0 unit 两文件 → **60/60 passed**（零改写，registry 加固不影响 unit 面）。
+- `npx tsc --noEmit`（core-backend）→ exit 0。
+- **CI 同构 attendance 步全量（59 files，含 E3 后的 workflow 实际清单）在全新 CI 形库
+  `ms2_w4c0_e3fresh`（fresh CREATE DATABASE → 全链 db:migrate with CI
+  MIGRATION_EXCLUDE → 单次整步）→ 59/59 files, 753/753 tests passed（61.7s）。**
+  日志里的红色 durable-startup 错误行是该套件的注入故障预期输出，用例全绿。
+- plugin-tests.yml YAML parse OK。既有测试零改写（本阶段新增 1 测试文件 + registry
+  加固 21 行 + 两点接线行）。
+
+### 未竟 / 两读（Stage F 必读，禁静默跳过）
+
+52. **preflight job-reservation recheck 的语义是本阶段 fail-closed 裁量**：任何存在的
+    V1 reservation 一律 409。§8.2 的 `(queued, all-new)` admit-for-execution 分支
+    （resolved posture == frozen `accepted_write_posture` 才执行、否则只落 job 锁下的
+    posture-conflict failure）与 §8.2 步 1 的「P07/P08 replay 还须 congruent completed
+    job row」都**未实现**（import batch 的 all-completed replay 目前不查 job）——
+    属 P07 worker cutover 片；PR 诚实偏离节需列出，两读呈裁。
+53. **leg 8 enqueue-first 的「transition blocks if its normalized accepted_write_posture
+    would differ」的 DECISION 逻辑未测**：transition writer（§9 效验条件 4-8）不在
+    W4C-0（Stage B 未竟 15 不变）。E3 证明的是 scan 的锁序+可见性（transition 必须等
+    shared 释放、之后必然看得到 committed retryable job 及其 frozen posture）。
+54. **leg 6-8 的 worker/enqueue/transition 驱动代码是协议 harness**（W4C-0 零 caller
+    cutover；生产 worker/transition writer 属后续片）——锁等待/原子性/可见性断言是真
+    双连接证据，但「生产代码遵守该协议」的接线证据归 cutover 片。§12.1 对应 gate 的
+    「moving terminalization before/after the source transaction … fails」类 mutation
+    在 harness 形态下只能 mutate 测试自身，Stage F mutation 轮应声明此边界而非伪造。
+55. **leg 4 的单预算判别是时序断言**（elapsed ∈ [1500,4500) ms）：极慢 CI 理论上可
+    flaky（真实约 2.3s±抖动）。若门审要求非时序判别，可用 clock-seam 记录
+    `set_config('lock_timeout',…)` 值序列（5000→2000）改为形状断言——目前该形状断言
+    的等价物在 Stage C registry db 测（deadline 协议 set_config 交错腿）已有单 key 版。
+56. **Stage F mutation 轮点名腿（§12.1 逐字，E3 建好judgment面）**：removing the
+    canonical operation-identity advisory lock / locking only the batch or only its
+    items / changing one identity tuple / moving acquisition after INSERT / broadly
+    relabeling another 55P03（→ leg 1-3 各自红）；resetting the deadline per key /
+    omitting either budget check / using wall-clock / failing to restore lock_timeout /
+    exposing the test clock to production（→ leg 4-5 各自红；最后一条已有 unit 腿）；
+    removing either rollout acquisition（→ leg 7 红）；reading posture before shared
+    lock / releasing shared before insert commit（→ leg 8 红）；removing class-10 only
+    from enqueue / checking reservations before that lock（→ leg 9 红）；moving either
+    operation lock ahead of the shared rollout lock（→ leg 10 红）。先 commit 后
+    mutate、精确路径还原（不要 `git checkout -- .`）。
+57. **suspended P07 对「已存在 job」的 execution-reason 分支无 service 面**（E3
+    suspension 腿证的是新 enqueue 被 factory 拒 + 零 job 行；「已 queued job 在
+    suspended 下 idempotent 保持 queued + 落 SEGMENT_CALCULATION_SUSPENDED」的表级
+    CHECK 在 E1，有 service 行为归 P07 cutover 片）。
+58. E3 残留（共享 ms2_w4c0，设计内）：per-run 随机 org 的 rollout 行（ORG_CLAIM 终态
+    eligible、ORG_ENQ_FREEZE 终态 suspended、两个 worker org 的 shadow 行）、
+    operation/batch/job/attendance_records fixture 行。**`ms2_w4c0_e3fresh` 保留给
+    门审复跑**（753/753 证据现场；复跑整步须重建库，理由同未竟 43）。
