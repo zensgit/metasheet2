@@ -130,7 +130,7 @@ function scrubSecretStringValue(value) {
 // (truncateSanitizedPayload) is a structural, not textual, marker — callers
 // must check `value.payloadTruncated === true` themselves; it is not a string
 // and so cannot live in this regex.
-const SANITIZATION_MARKER_PATTERN = /\[redacted(?:-jwt|-secret-id)?\]|\[max-depth\]|\[circular\]|\.\.\.\[truncated\]|\[\d+ more items truncated\]/
+const SANITIZATION_MARKER_PATTERN = Object.freeze(/\[redacted(?:-jwt|-secret-id)?\]|\[max-depth\]|\[circular\]|\.\.\.\[truncated\]|\[\d+ more items truncated\]/)
 
 function jsonByteLength(value) {
   try {
