@@ -351,8 +351,38 @@ reported as a fifth `"loopback"` field in both the JSON and Markdown reports. Ne
 `VITE_API_URL`+`127.0.0.1`, `VITE_API_BASE`+`localhost` (opposite corners of the alternation), and
 `apps/web/dist` missing entirely (closes a vacuous-pass hole: `search_extended_regex` returns non-zero/no-match
 against a target directory that does not exist, which would otherwise silently report PASS on a package
-missing its frontend bundle). Like the sibling provenance test, it is **not wired into any CI workflow** —
-run manually; the doc does not imply CI coverage it does not have.
+missing its frontend bundle).
+
+**Hardening (review #4604 P2 — two findings, both addressed within the file's existing conventions):**
+1. The report's `"loopback"` row was a hardcoded `"status": "PASS"` literal — printed even if the check were
+   never invoked. Replaced with a derived `loopback_status` variable (default `"SKIPPED"`, set to `"PASS"` by
+   `verify_no_loopback_frontend_config()` itself only on a successful run) and wired that variable into both
+   the JSON and Markdown report emission. The focused test gained a fifth case that greps the main script body
+   for the literal top-level call site (distinct from the `function ... () {` definition, which survives a
+   call-site deletion) — deleting the call site now reds this test (verified: 4 passed/1 failed) instead of
+   staying green at 4/4. **This pin is itself only as strong as item 2 below**: it fires when
+   `multitable-onprem-package-verify-loopback.test.sh` is run, and per item 2 nothing runs that file
+   automatically — the pin protects a manual run from a silent regression, it does not by itself make a
+   dropped call site fail any automated check.
+2. Neither this focused test nor its sibling `multitable-onprem-package-verify.provenance.test.sh` has any
+   automated caller (no workflow, no package script, no glob runner) — this is **pre-existing convention**,
+   not something this fix pass introduced or regressed. The underlying *check* does run in CI: nothing was
+   silently going untested — `multitable-onprem-package-build.yml` invokes
+   `scripts/ops/multitable-onprem-package-verify.sh` directly against both the `.tgz` and `.zip` outputs
+   (L101/L104), so the loopback check itself executes on every real package build. What is **not** CI-covered
+   is the *focused fixture test* — its exposure is that it can rot unnoticed (e.g. a future edit to the
+   function silently breaking one of the four fixture cases would not fail CI). **Disclosed here rather than
+   wired into a caller**: wiring would mean either adding a `pull_request`-triggered job for a check-family
+   that does not have one **today**, or adding a step to `multitable-onprem-package-build.yml`, which is
+   `workflow_dispatch`-only and would not run on ordinary PR iteration anyway — both are broader
+   infra/convention changes than this fix pass's scope, and singling out only these two `.test.sh` files (this
+   fix pass separately confirmed the same is true of at least two sibling `.test.mjs` contract tests against
+   this same script — `multitable-onprem-package-verify-k3-helper-contract.test.mjs` and
+   `bridge-agent-driver-smoke-contract.test.mjs`, neither referenced by any workflow or package script either)
+   would be an arbitrary, partial fix to a repo-wide pattern rather than a considered one. Run manually:
+   `bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh` and
+   `bash scripts/ops/multitable-onprem-package-verify.provenance.test.sh`; the doc does not imply CI coverage
+   for either that it does not have.
 
 **Scope limitation, stated plainly:** the ported pattern is reused **verbatim** per the owner's ruling
 ("reuse attendance's rule") and is not changed here. The fixtures prove the rule is falsifiable *as specified*
@@ -361,19 +391,34 @@ web bundler can or does ever emit that shape in practice (whether it can was not
 this fix pass; §3.1a's direct grep against the real artifact only shows this particular build does not
 contain it today).
 
-**`verificationToolSha`** — the exact tool used below. Recorded as the **blob** SHA of the script (the
-load-bearing identity: stable across this fix pass's own later commits, e.g. this document's), with the
-introducing commit also recorded for provenance:
+**`verificationToolSha`** — the exact tool used below. Recorded as the **blob** SHA of the script content at
+this document's own final commit in this fix pass, re-derived AFTER that commit (not carried forward from an
+earlier draft — see the erratum immediately below), with the introducing commit also recorded for provenance:
 ```
 git rev-parse HEAD:scripts/ops/multitable-onprem-package-verify.sh
-# 2e64b9d6639fa9e250cb06003adcdd41604560a8
+# 89ec733a41af25bee9d7f02f608fefcbefbbd9c1
 ```
 Introduced at commit `bd6f8eb51a3eb66972089b60ddde752131b50dd4` on this branch as rebased onto `origin/main`
 tip `d75d3b828` (the introducing **commit** SHA is rebase-unstable and will change again on any future
-rebase of this branch; the **blob** SHA above is the load-bearing identity precisely because it is not).
-**This is a tooling identity, not a deployed-artifact identity — it must never be conflated into
-`serviceRuntimeSha`** (still `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, unchanged) **or presented as part of
-what run `30148584851` itself produced.**
+rebase of this branch). **This is a tooling identity, not a deployed-artifact identity — it must never be
+conflated into `serviceRuntimeSha`** (still `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, unchanged) **or
+presented as part of what run `30148584851` itself produced.**
+
+**Erratum (review #4604):** an earlier version of this section recorded blob `2e64b9d66…` and claimed it was
+"stable across this fix pass's own later commits" — that claim was **false**, and was falsified by this very
+fix pass's own comment-only edit to the script (commit `480720aff`, whose own diff header reads
+`index 2e64b9d66..b2f5ff716`), which changed the blob without the sentence being revisited. A
+comment-stripped diff of the two blobs is **identical**, so the PASS recorded in this section was never
+behaviourally wrong — only the recorded tool *identity* was stale, the same class of slip this branch already
+fixed once at `31151fc90`. (Both `480720aff` and `31151fc90` are **pre-rebase commit SHAs**, cited here only
+as the historical record of when each fix landed in this fix pass — like `bd6f8eb51` above, they are
+rebase-unstable and will shift once this branch is rebased onto `origin/main`; the **blob** SHAs
+`2e64b9d66…`/`b2f5ff716…` they refer to are content hashes and remain valid identities regardless of any
+future rebase.) The blob SHA recorded above is a content hash of the script as it exists at this document's
+own final commit; blobs (unlike commit SHAs) do not shift on a content-preserving rebase, but it was
+re-confirmed rather than assumed once this branch was rebased onto `origin/main` before pushing. It is
+**not** asserted to be stable against any future *content* change to the script — if the script changes
+again after this fix pass, this line goes stale again and must be re-derived, not assumed correct.
 
 **What was executed — a real, full run of the updated tool against A1's real, already-built artifact bytes**
 (not the sourced-function fixture test above; not a rebuild; `serviceRuntimeSha` does not move). Commands
@@ -455,6 +500,56 @@ abbreviated to `<local>`:
    current artifact does not hit the forbidden pattern. This is the expected outcome the owner's ruling was
    scoped to — **completing the proof, not changing service code** — and that is what happened; no
    runtime/service code changed, only the verify tool.
+4. **Re-ran a third time after this fix pass's own P2 hardening** (§3.1a "Hardening" above —
+   `loopback_status` derived variable + call-site pin), against the same real artifact bytes, on the file the
+   artifact's own checksum still confirms unchanged (`shasum -a 256` reproduces the identical
+   `759adcc3…07f4d` line from step 1 again). Unlike steps 1-3, this one was run **directly** in this session
+   (no wrapper script needed here — that earlier constraint was specific to the session that ran steps 1-3),
+   with real absolute paths, abbreviated below to `<local>` the same way as elsewhere in this document:
+   ```
+   $ VERIFY_REPORT_JSON=<local>/posthoc-verify-3.json VERIFY_REPORT_MD=<local>/posthoc-verify-3.md \
+     bash scripts/ops/multitable-onprem-package-verify.sh <local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+   metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz: OK
+   [multitable-onprem-package-verify] Package verify OK
+   [multitable-onprem-package-verify]   package: <local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+   [multitable-onprem-package-verify]   root: <extracted temp dir>
+   [multitable-onprem-package-verify]   verify_report_json: <local>/posthoc-verify-3.json
+   [multitable-onprem-package-verify]   verify_report_md: <local>/posthoc-verify-3.md
+   EXIT=0
+   ```
+   `posthoc-verify-3.json`'s `checks` array, real content (the full file also carries the same
+   `packageFile`/`packageName`/`archiveType`/`packageRootInArchive`/`extractMode`/`extractRoot` fields as
+   `posthoc-verify-2.json` above, omitted here since only the `checks` array and `generatedAt` are new
+   information) — identical shape/values to `posthoc-verify-2.json` above (`requiredCount=128`, all five
+   checks `PASS`, including `loopback` now via the derived `loopback_status` variable rather than the prior
+   literal), only `generatedAt` differs:
+   ```json
+   {
+     "checks": [
+       { "name": "checksum", "status": "PASS" },
+       { "name": "required-content", "status": "PASS", "requiredCount": 128 },
+       { "name": "deployability-contract", "status": "PASS", "artifactKind": "deployable-onprem-app-package",
+         "deployMode": "fresh-extract-or-existing-root-apply", "directReplaceSafe": false, "nodeModulesBundled": false },
+       { "name": "no-github-links", "status": "PASS" },
+       { "name": "loopback", "status": "PASS" }
+     ],
+     "generatedAt": "2026-07-25T15:11:16Z"
+   }
+   ```
+   `posthoc-verify-3.md`'s `## Checks` section (both report formats exercised again, matching step 2's point
+   that CI itself produces both): identical five-line content to `posthoc-verify-2.md`'s `## Checks` section
+   above, byte-for-byte, since `loopback_status` resolves to `"PASS"` on a successful run either way.
+
+   This is the run that corresponds to the `verificationToolSha` recorded above
+   (`89ec733a41af25bee9d7f02f608fefcbefbbd9c1`). `posthoc-verify-2` above was run against the prior,
+   now-superseded blob (`b2f5ff716…`, comment-only diff from the one before it) and is kept in this document
+   as its own historical record — not deleted or silently overwritten — because the P2 hardening changed how
+   the `"loopback"` row is *derived* (a real code change, unlike the comment-only edit the erratum above
+   describes), not what result a successful run against this artifact reports. The call-site pin added in
+   Hardening item 1 only fires when `multitable-onprem-package-verify-loopback.test.sh` is itself run (it is
+   not wired into any automated caller, per Hardening item 2 above) — it does not run as part of this or any
+   other real verify invocation, which is why this step re-runs the full verify script directly rather than
+   relying on the pin for behavioral proof.
 
 **Explicit non-conflation, stated plainly (this is the exact thing ⟲R7 exists to prevent):** run
 `30148584851`'s own `verify.json`, the one packaged inside the CI-produced Actions artifact, is **immutable
@@ -535,7 +630,8 @@ guessing or by copying A1's run-scoped checksums; they must come from A2's own `
 >   **no code change is required for the client half of this revision.**
 > - **Loopback verification** (not a third deployed-artifact SHA — a tooling-run result; see §3.1a for the
 >   full record, kept separate here on purpose): PASS, via a post-hoc/standalone run of the updated verify
->   tool (`verificationToolSha` = `2e64b9d6639fa9e250cb06003adcdd41604560a8`, the script blob) against A1's
+>   tool (`verificationToolSha` = `89ec733a41af25bee9d7f02f608fefcbefbbd9c1`, the script blob at this
+>   document's final commit — see §3.1a's erratum for the prior stale value) against A1's
 >   real artifact. **This did not come from run `30148584851`'s own `verify.json`** (that artifact is
 >   immutable and still shows four checks) and will not come from a future A2 run at the pinned ref either,
 >   unless the ref/tooling question is separately revisited (§3.1a forward gap) — do not post this line to

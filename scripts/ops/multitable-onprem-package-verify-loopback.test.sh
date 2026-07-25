@@ -7,6 +7,9 @@
 # only, via its direct-execution guard) and exercises the function directly against
 # synthesized apps/web/dist fixtures. No real on-prem package is required.
 #
+# Also pins the main-flow call site itself (review #4604 P2), not just the function's
+# in-isolation logic — see the wiring check below.
+#
 #   bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
 set -uo pipefail
 
@@ -61,6 +64,20 @@ run_case "loopback VITE_API_BASE + localhost rejected" "embeds loopback VITE_API
 # (no match) on a target directory that does not exist, which would otherwise let this
 # case silently PASS instead of failing loud — the vacuous-pass hole this test closes.
 run_case "apps/web/dist missing entirely rejected" "apps/web/dist missing" "${TMP}/no_web_dist" verify_no_loopback_frontend_config
+
+# Wiring pin (review #4604 P2): the four cases above call verify_no_loopback_frontend_config
+# directly, which proves the function's own logic but nothing about whether the main verify
+# flow actually invokes it — deleting the call site (main flow, ~L1052) would leave this exact
+# suite at 4/4 green. Grep for the literal top-level call (distinct from the `function
+# verify_no_loopback_frontend_config() {` definition, which survives a call-site deletion) so
+# removing the wiring reds this test instead of staying silently green.
+if grep -qE '^\s*verify_no_loopback_frontend_config "\$pkg_root"\s*$' "$VERIFY"; then
+  echo "  PASS: loopback check is wired into the main verify flow (call site present)"
+  pass=$((pass+1))
+else
+  echo "  FAIL: loopback check call site not found in the main verify flow — the function is defined but not invoked"
+  fail=$((fail+1))
+fi
 
 echo
 echo "RESULT: ${pass} passed, ${fail} failed"

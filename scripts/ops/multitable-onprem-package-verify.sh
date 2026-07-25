@@ -12,6 +12,10 @@ list_file=""
 pkg_name=""
 pkg_root=""
 archive_type="unknown"
+# Derived (not hardcoded) — set by verify_no_loopback_frontend_config() itself on a
+# successful run; stays "SKIPPED" if that function's call site is ever removed from
+# the main flow below, so write_optional_report cannot report a check that never ran.
+loopback_status="SKIPPED"
 
 function die() {
   echo "[multitable-onprem-package-verify] ERROR: $*" >&2
@@ -663,7 +667,7 @@ function write_optional_report() {
       '    },' \
       '    {' \
       '      "name": "loopback",' \
-      '      "status": "PASS"' \
+      "      \"status\": \"${loopback_status}\"" \
       '    }' \
       '  ],' \
       "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
@@ -693,7 +697,11 @@ function write_optional_report() {
       echo "- Required content: \`PASS\` (${#required[@]} paths)"
       echo "- Deployability contract: \`PASS\` (deployable-onprem-app-package, directReplaceSafe=false, nodeModulesBundled=false)"
       echo "- No GitHub links in delivery docs: \`${link_status}\`"
-      echo "- Loopback frontend config: \`PASS\` (no loopback VITE_API_URL/BASE embedded in apps/web/dist)"
+      if [[ "$loopback_status" == "PASS" ]]; then
+        echo "- Loopback frontend config: \`PASS\` (no loopback VITE_API_URL/BASE embedded in apps/web/dist)"
+      else
+        echo "- Loopback frontend config: \`${loopback_status}\`"
+      fi
     } > "$report_md_tmp"
     mv "$report_md_tmp" "$VERIFY_REPORT_MD"
   fi
@@ -753,6 +761,8 @@ function verify_no_loopback_frontend_config() {
   if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "$web_dist"; then
     die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
   fi
+
+  loopback_status="PASS"
 }
 
 function verify_sha() {
