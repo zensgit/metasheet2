@@ -4,11 +4,15 @@
  *
  * TWO READ-ONLY, values-free inventory probes feeding two of the four §4.0 owner decisions in
  * docs/development/database-system-integration-line-design-and-verification-20260724.md
- * ("the ledger"). This is a NEW, separate carrier — the ledger's owner ruling was explicit that
- * scripts/ops/data-source-exposure-inventory.mjs (#4594) must NOT be expanded or reused as the
- * carrier for this work, so nothing here imports from or depends on that script; the
- * schema-probe-first / values-free QUERY_ALLOWLIST pattern is independently re-implemented,
- * because that is the pattern being reused, not the file.
+ * ("the ledger"). This is a NEW, separate carrier — per the owner's task-brief ruling (NOT recorded
+ * in the ledger; the ledger's §4.0/§3.0 sections define the four decisions this work feeds but say
+ * nothing about a carrier for this script), scripts/ops/data-source-exposure-inventory.mjs (#4594)
+ * must NOT be expanded or reused as the carrier for this work, so nothing here imports from or
+ * depends on that script; the schema-probe-first / values-free QUERY_ALLOWLIST pattern is
+ * independently re-implemented, because that is the pattern being reused, not the file. Also note:
+ * #4594's script/test/workflow files live only on branch `claude/data-source-exposure-inventory-
+ * 20260724` (PR #4594) — they are NOT in this tree, NOT on main, and this file makes no claim that
+ * they are.
  *
  * ---------------------------------------------------------------------------------------------
  * (β) CONNECTOR-KIND PROBE — integration_external_systems.kind
@@ -63,7 +67,7 @@
  * JSON report, never into a log line, never into a PR body.
  *
  * ---------------------------------------------------------------------------------------------
- * SCOPE (ledger owner ruling, quoted in the task brief)
+ * SCOPE (from the ledger's Gate — see the ledger's "B1a AUTHORITY-SUBSTRATE gate" wording)
  * ---------------------------------------------------------------------------------------------
  * Building and testing this tool is inside the B1a AUTHORITY-SUBSTRATE gate (bounded internal
  * work, no new request surface, no runtime consumer). CONNECTING IT TO A CUSTOMER DEPLOYMENT is a
@@ -125,7 +129,8 @@ const DEFAULT_PRIVATE_OUTPUT_DIR = 'artifacts/gip-authority-inventory'
 // QUERY_ALLOWLIST — the ONLY SQL statements this script will ever execute.
 // Every statement is SELECT-only; assertReadOnlyAllowlist() enforces that
 // structurally at module load (same guard shape as #4594's, independently
-// implemented per the ledger's carrier ruling).
+// implemented per the owner's task-brief carrier ruling — see the header
+// comment above; that ruling is not recorded in the ledger).
 // ---------------------------------------------------------------------------
 
 const QUERY_ALLOWLIST = Object.freeze({
@@ -152,7 +157,7 @@ const QUERY_ALLOWLIST = Object.freeze({
   'count.read_source_config_object_config_divergence': {
     sql: `SELECT count(*)::int AS n FROM integration_read_source_configs WHERE object IS DISTINCT FROM (config ->> 'object')`,
     describe:
-      "rows where the object column and config->>'object' disagree — a values-free integrity check; a non-zero result means some backfill/mapping decision fed only by the object column would miss rows whose stored config JSON disagrees with it. IS DISTINCT FROM (not <>) is deliberate: a row whose config JSON carries no 'object' key at all has config->>'object' = NULL, and IS DISTINCT FROM (unlike <>) treats object <> NULL as true rather than UNKNOWN — a missing key in config counts as a divergence, not a silent pass. Verified live against a seeded row with no 'object' key in migration verification (see PR body).",
+      "rows where the object column and config->>'object' disagree — a values-free integrity check; a non-zero result means some backfill/mapping decision fed only by the object column would miss rows whose stored config JSON disagrees with it. IS DISTINCT FROM (not <>) is deliberate: a row whose config JSON carries no 'object' key at all has config->>'object' = NULL, and IS DISTINCT FROM (unlike <>) treats object <> NULL as true rather than UNKNOWN per the SQL standard's IS DISTINCT FROM semantics — a missing key in config counts as a divergence, not a silent pass. A prior session in this PR reported exercising this against a seeded row with no 'object' key on an ephemeral local Postgres instance that was discarded afterward with no transcript captured — see PR body's caveat on that claim; this fix pass did not have a live Postgres runtime available to reproduce it independently, so treat the missing-key behaviour as following from the documented SQL semantics of IS DISTINCT FROM, not as an independently-reproduced live-DB proof.",
   },
 })
 
@@ -511,6 +516,32 @@ function computeObjectKeyVerdict(publicObjectKeySummary) {
       ],
     }
   }
+  // `unexpected` is where splitRowsByStatus() fail-closes any row whose status is outside the
+  // CHECK-constraint vocabulary (draft/approved/retired) — see splitRowsByStatus(). The CHECK
+  // constraint should make this bucket always empty, but a report must never assume its own gate
+  // held: if it observes distinct objectKeys sitting in an out-of-vocabulary status, that is
+  // exactly the "unregistered objectKeys coexisting with a NOT_REQUIRED verdict" shape the
+  // divergence check above exists to prevent — a human reading NOT_REQUIRED must not be told
+  // "nothing to map" while rows outside the known status vocabulary are sitting unaccounted for.
+  const unexpected = publicObjectKeySummary.byStatus.unexpected
+  if (!unexpected || unexpected.status !== 'ok') {
+    return {
+      verdict: 'INCONCLUSIVE',
+      reasons: [
+        'coverage is partial — the unexpected-status objectKey count is UNAVAILABLE',
+        unexpected ? unexpected.reason : 'byStatus.unexpected field missing from summary',
+      ],
+    }
+  }
+  if (unexpected.distinctCount > 0) {
+    return {
+      verdict: 'INCONCLUSIVE',
+      reasons: [
+        `${unexpected.distinctCount} distinct objectKey(s) referenced by read-source config row(s) in an out-of-vocabulary (unexpected) status — a verdict scoped to 'approved' cannot be trusted while rows exist outside the known draft/approved/retired status vocabulary`,
+        'this is reported regardless of registeredness — see coverage.canonicalObjectKeyInventory.byStatus.unexpected',
+      ],
+    }
+  }
   const approved = publicObjectKeySummary.byStatus.approved
   if (approved.unregisteredDistinctCount === 0) {
     return {
@@ -550,6 +581,11 @@ const RESIDUAL_NOTES = Object.freeze([
     id: 'no_customer_deployment_connection',
     description:
       'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  },
+  {
+    id: 'integration_write_target_configs_object_deliberately_out_of_scope',
+    description:
+      "A second objectKey reference class exists in the same database: integration_write_target_configs.object (migration 064, External-API WRITE self-service W1). This inventory does NOT probe it. Reason: the ledger's decision (γ) scope (§4 step 1.3, §3.0 B-3) is the READ-side qualification-input tuple's objectKey, and the task this script was built for is scoped to that tuple; the write-target config table is a separate, config-time-only surface (no dry-run/apply/runtime route per its migration header) that decision (γ)'s registry may also need to cover eventually, but that is a follow-up inventory scope decision, not an oversight in this one. A canonical object referenced ONLY by a write-target config (never by a read-source config) is invisible to this report.",
   },
 ])
 
@@ -674,7 +710,7 @@ async function buildReport({ exec, repoRoot = REPO_ROOT, probe = 'both', private
         covers:
           "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
         blindSpot:
-          "DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here.",
+          "DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here. Also deliberately out of scope: integration_write_target_configs.object (migration 064) — a second objectKey reference class in the same database this report never queries; see residualNotes.",
         ...publicObjectKeySummary,
       },
     },
@@ -691,11 +727,12 @@ async function buildReport({ exec, repoRoot = REPO_ROOT, probe = 'both', private
 // Dry-run / plan mode
 // ---------------------------------------------------------------------------
 
-async function buildDryRunReport({ exec, repoRoot = REPO_ROOT } = {}) {
+async function buildDryRunReport({ exec, repoRoot = REPO_ROOT, probe = 'both' } = {}) {
   if (!exec) {
     return {
       generatedAt: new Date().toISOString(),
       mode: 'dry-run-static',
+      probe,
       note: 'No query executor / DATABASE_URL supplied — schema was not probed. This lists every allowlisted query; see buildPlan() in the script source for exact resolution rules.',
       allowlist: Object.fromEntries(Object.entries(QUERY_ALLOWLIST).map(([tag, e]) => [tag, { describe: e.describe, sql: e.sql }])),
       knownRegistrySizes: {
@@ -705,11 +742,18 @@ async function buildDryRunReport({ exec, repoRoot = REPO_ROOT } = {}) {
       residualNotes: RESIDUAL_NOTES,
     }
   }
-  const schema = await probeSchema(exec)
-  const plan = buildPlan(schema)
+  // `probe` scopes the dry-run's schema probe exactly the same way buildReport() scopes report
+  // mode's schema probe — see the identically-worded comment above buildReport()'s `probeSchema`
+  // call. Without this, `--probe beta --dry-run` would still name/probe
+  // integration_read_source_configs, which is exactly the drift `--probe beta` (report mode)
+  // promises never happens, and the PR's "schema probe included" scoping claim would be false in
+  // dry-run mode specifically.
+  const schema = await probeSchema(exec, tableSpecsForProbe(probe))
+  const plan = buildPlan(schema, { probe })
   return {
     generatedAt: new Date().toISOString(),
     mode: 'dry-run',
+    probe,
     note: 'Schema WAS probed (read-only information_schema queries). No aggregate/count query below was executed — this is exactly what report mode would run next.',
     schema,
     plan,
@@ -873,7 +917,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     let executor = null
     try {
       if (databaseUrl) executor = await createPgExecutor(databaseUrl)
-      const report = await buildDryRunReport({ exec: executor ? executor.exec : null })
+      const report = await buildDryRunReport({ exec: executor ? executor.exec : null, probe: opts.probe })
       if (opts.json) {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n')
       } else {

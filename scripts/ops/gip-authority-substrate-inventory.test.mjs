@@ -246,8 +246,20 @@ describe('schema-drift guard (reads real migration SQL from disk)', () => {
     assert.deepEqual(vocab, [...EXTERNAL_SYSTEM_STATUSES].sort())
   })
 
-  test('integration_read_source_configs.object is TEXT NOT NULL — this IS the column the ledger calls objectKey', () => {
-    assert.match(migration062, /object\s+TEXT NOT NULL/)
+  // Line-anchored, same shape as the `kind` guard above (M8-proof): a loose
+  // `/object\s+TEXT NOT NULL/` match over the WHOLE FILE is satisfied by a
+  // rename to `canonical_object` — that identifier still CONTAINS the
+  // substring "object" immediately followed by "        TEXT NOT NULL", so a
+  // non-anchored regex cannot tell "the object column" from "a column whose
+  // name happens to end in object". Anchoring the match to line-start (after
+  // only whitespace) closes that hole: "canonical_object" does not begin a
+  // line with the literal token "object".
+  test('integration_read_source_configs.object is TEXT NOT NULL — this IS the column the ledger calls objectKey (line-anchored: a rename to e.g. `canonical_object` must NOT satisfy this via the trailing "object" substring)', () => {
+    const objectLine = migration062.split('\n').find((l) => /^\s*object\s+TEXT NOT NULL/.test(l))
+    assert.ok(
+      objectLine,
+      'expected an `object TEXT NOT NULL` column declaration in migration 062, anchored at line start — a substring match (e.g. against `canonical_object`) does not count',
+    )
   })
 
   test('integration_read_source_configs.status CHECK vocabulary matches READ_SOURCE_CONFIG_STATUSES exactly', () => {
@@ -257,8 +269,29 @@ describe('schema-drift guard (reads real migration SQL from disk)', () => {
     assert.deepEqual(vocab, [...READ_SOURCE_CONFIG_STATUSES].sort())
   })
 
-  test('integration_read_source_configs has both a unique index and the store keys the identical-content family on `object` (confirms `object`, not some other column, is the durable key this probe should read)', () => {
-    assert.match(migration062, /uniq_integration_read_source_configs_content[\s\S]*?object/)
+  // Word-boundary anchored (not just line-anchored, because this column sits
+  // mid-line in a comma-separated index column list — `system_id, object,
+  // mode` — so a naive substring match against `canonical_object` would pass
+  // exactly the same way the old declaration test did). `\bobject\b` fails to
+  // match inside `canonical_object`: the character immediately before the
+  // trailing "object" is `_`, a word character, so there is no `\b` boundary
+  // there — the regex engine cannot find a standalone "object" token. The
+  // clause is extracted by literal marker + terminating `;`, not a
+  // paren-counting regex, because the column list also contains
+  // `COALESCE(workspace_id, '')`, whose internal comma/paren would otherwise
+  // truncate a naive `\(([^)]*)\)` capture at the wrong `)`.
+  test('integration_read_source_configs has both a unique index and the store keys the identical-content family on the standalone `object` column (word-boundary anchored: a rename to e.g. `canonical_object` must NOT satisfy this)', () => {
+    const marker = 'uniq_integration_read_source_configs_content'
+    const start = migration062.indexOf(marker)
+    assert.ok(start !== -1, `expected to find "${marker}" in migration 062`)
+    const end = migration062.indexOf(';', start)
+    assert.ok(end !== -1, `expected a terminating ";" after "${marker}"`)
+    const clause = migration062.slice(start, end + 1)
+    assert.match(
+      clause,
+      /\bobject\b/,
+      `expected a standalone "object" column reference in the ${marker} index clause, got: ${JSON.stringify(clause)}`,
+    )
   })
 })
 
@@ -623,7 +656,166 @@ describe('computeObjectKeyVerdict', () => {
     const v = computeObjectKeyVerdict(summary)
     assert.equal(v.verdict, 'INCONCLUSIVE')
   })
+
+  // splitRowsByStatus() fail-closes any row whose status is outside draft/approved/retired into
+  // `unexpected` rather than dropping or merging it (see splitRowsByStatus tests above). Without
+  // this check, a NOT_REQUIRED verdict could coexist with unregistered objectKeys sitting in an
+  // unexpected status — exactly the "verdict alongside a known coverage defect" shape the
+  // divergence check exists to prevent, just for a different coverage gap. Deliberately
+  // constructed so the approved bucket ALONE and the divergence check ALONE would both say
+  // "nothing wrong" (empty approved bucket, divergence count 0) — the unexpected bucket must be
+  // the only thing flipping it, not a confound.
+  test('INCONCLUSIVE when the unexpected-status bucket has any distinct objectKey, even though the approved bucket alone would say NOT_REQUIRED and divergence alone would say clean', () => {
+    const empty = bucketByRegistry([], [], { valueKey: 'object' }).counts
+    const unexpectedBucketed = bucketByRegistry([{ object: 'material', n: 2 }], [], { valueKey: 'object' })
+    const summary = buildPublicObjectKeySummary({
+      status: 'ok',
+      byStatus: {
+        draft: { counts: empty, detail: [] },
+        approved: { counts: empty, detail: [] },
+        retired: { counts: empty, detail: [] },
+        unexpected: { counts: unexpectedBucketed.counts, detail: unexpectedBucketed.detail },
+      },
+      divergence: { status: 'ok', count: 0 },
+    })
+    const v = computeObjectKeyVerdict(summary)
+    assert.equal(v.verdict, 'INCONCLUSIVE')
+    assert.ok(v.reasons.some((r) => r.includes('out-of-vocabulary')))
+  })
+
+  test('INCONCLUSIVE when the unexpected-status bucket has a distinct objectKey, even though the approved bucket alone would say REQUIRED (unexpected reason still surfaces, not silently dropped behind the mapping-required reason)', () => {
+    const approvedBucketed = bucketByRegistry([{ object: 'material', n: 1 }], [], { valueKey: 'object' })
+    const unexpectedBucketed = bucketByRegistry([{ object: 'other-thing', n: 1 }], [], { valueKey: 'object' })
+    const empty = bucketByRegistry([], [], { valueKey: 'object' }).counts
+    const summary = buildPublicObjectKeySummary({
+      status: 'ok',
+      byStatus: {
+        draft: { counts: empty, detail: [] },
+        approved: { counts: approvedBucketed.counts, detail: approvedBucketed.detail },
+        retired: { counts: empty, detail: [] },
+        unexpected: { counts: unexpectedBucketed.counts, detail: unexpectedBucketed.detail },
+      },
+      divergence: { status: 'ok', count: 0 },
+    })
+    const v = computeObjectKeyVerdict(summary)
+    assert.equal(v.verdict, 'INCONCLUSIVE')
+  })
 })
+
+// ---------------------------------------------------------------------------
+// EXACT KEY-SET assertion — a raw observed value can escape a plain
+// sentinel-substring scan two different ways: (a) as a STRING VALUE (the
+// sentinel-injection test below catches this), or (b) as an OBJECT KEY. A
+// walk that does `for (const v of Object.values(node)) walk(v)` never once
+// inspects `Object.keys(node)` — so a bug that keyed a bucket BY the
+// observed kind/objectKey string (instead of by one of the fixed enum
+// tokens this module actually uses: draft/approved/retired/unexpected,
+// allStatuses/activeOnly, etc.) would sail through a values-walk undetected,
+// because the walk never visits the key that carries the leak, only values
+// nested under it. This asserts the key-set property DIRECTLY: at every
+// level of coverage/verdicts/residualNotes, the object's key set is EXACTLY
+// the fixed, closed set the source is structurally capable of producing —
+// never a superset, so an unexpected key (a leaked raw value used as a key)
+// fails loudly instead of silently passing a values-only scan.
+// ---------------------------------------------------------------------------
+
+const COUNTS_KEYS = [
+  'status',
+  'distinctCount',
+  'totalRows',
+  'knownRegistrySize',
+  'registeredDistinctCount',
+  'unregisteredDistinctCount',
+  'registeredRowCount',
+  'unregisteredRowCount',
+]
+
+function assertKeysExactly(obj, allowedKeys, ctx) {
+  assert.ok(
+    obj && typeof obj === 'object' && !Array.isArray(obj),
+    `${ctx}: expected a plain object, got ${JSON.stringify(obj)}`,
+  )
+  const actual = Object.keys(obj).sort()
+  const expected = [...allowedKeys].sort()
+  assert.deepEqual(
+    actual,
+    expected,
+    `${ctx}: key set mismatch — got ${JSON.stringify(actual)}, expected exactly ${JSON.stringify(expected)}`,
+  )
+}
+
+function assertBucketKeysExactly(bucket, ctx) {
+  if (bucket.status === 'ok') {
+    assertKeysExactly(bucket, COUNTS_KEYS, ctx)
+  } else {
+    assertKeysExactly(bucket, ['status', 'reason'], ctx)
+  }
+}
+
+// Walks the ACTUAL public report structure (not a hand-authored stand-in)
+// and asserts, at every level, the exact key set. Covers every status
+// branch (ok / unavailable / not_run) each field can take.
+function assertPublicReportKeySetsExactly(report) {
+  assertKeysExactly(report.coverage, ['connectorKindInventory', 'canonicalObjectKeyInventory'], 'report.coverage')
+
+  const ck = report.coverage.connectorKindInventory
+  if (ck.status === 'not_run') {
+    assertKeysExactly(ck, ['covers', 'blindSpot', 'status'], 'coverage.connectorKindInventory (not_run)')
+  } else if (ck.status !== 'ok') {
+    assertKeysExactly(ck, ['covers', 'blindSpot', 'status', 'reason'], 'coverage.connectorKindInventory (unavailable)')
+  } else {
+    assertKeysExactly(
+      ck,
+      ['covers', 'blindSpot', 'status', 'allStatuses', 'activeOnly'],
+      'coverage.connectorKindInventory (ok)',
+    )
+    assertBucketKeysExactly(ck.allStatuses, 'coverage.connectorKindInventory.allStatuses')
+    assertBucketKeysExactly(ck.activeOnly, 'coverage.connectorKindInventory.activeOnly')
+  }
+
+  const okInv = report.coverage.canonicalObjectKeyInventory
+  if (okInv.status === 'not_run') {
+    assertKeysExactly(okInv, ['covers', 'blindSpot', 'status'], 'coverage.canonicalObjectKeyInventory (not_run)')
+  } else if (okInv.status !== 'ok') {
+    assertKeysExactly(
+      okInv,
+      ['covers', 'blindSpot', 'status', 'reason'],
+      'coverage.canonicalObjectKeyInventory (unavailable)',
+    )
+  } else {
+    assertKeysExactly(
+      okInv,
+      ['covers', 'blindSpot', 'status', 'byStatus', 'objectVsConfigObjectDivergence'],
+      'coverage.canonicalObjectKeyInventory (ok)',
+    )
+    assertKeysExactly(
+      okInv.byStatus,
+      ['draft', 'approved', 'retired', 'unexpected'],
+      'coverage.canonicalObjectKeyInventory.byStatus',
+    )
+    for (const key of ['draft', 'approved', 'retired', 'unexpected']) {
+      assertBucketKeysExactly(okInv.byStatus[key], `coverage.canonicalObjectKeyInventory.byStatus.${key}`)
+    }
+    const div = okInv.objectVsConfigObjectDivergence
+    if (div.status === 'ok') assertKeysExactly(div, ['status', 'count'], 'objectVsConfigObjectDivergence (ok)')
+    else assertKeysExactly(div, ['status', 'reason'], 'objectVsConfigObjectDivergence (unavailable)')
+  }
+
+  assertKeysExactly(report.verdicts, ['connectorKind', 'canonicalObjectKey'], 'report.verdicts')
+  for (const vk of ['connectorKind', 'canonicalObjectKey']) {
+    const v = report.verdicts[vk]
+    if (v !== null) {
+      assertKeysExactly(v, ['verdict', 'reasons'], `report.verdicts.${vk}`)
+      assert.ok(Array.isArray(v.reasons), `report.verdicts.${vk}.reasons must be an array`)
+      for (const r of v.reasons) assert.equal(typeof r, 'string', `report.verdicts.${vk}.reasons[] must be strings`)
+    }
+  }
+
+  assert.ok(Array.isArray(report.residualNotes), 'report.residualNotes must be an array')
+  for (const note of report.residualNotes) {
+    assertKeysExactly(note, ['id', 'description'], 'report.residualNotes[]')
+  }
+}
 
 // ---------------------------------------------------------------------------
 // VALUES-FREE PUBLIC OUTPUT — the load-bearing test. Injects sentinel raw
@@ -678,7 +870,7 @@ describe('values-free public output (sentinel injection)', () => {
     }
   })
 
-  test('recursive structural check: every value in coverage/verdicts/residualNotes is either a number, a boolean, or drawn from a small closed set of authored strings — walked mechanically, not spot-checked', async () => {
+  test('EXACT key-set check: coverage/verdicts/residualNotes carry exactly the fixed, authored key set at every level — not merely "no sentinel substring in a value" (a raw value used AS A KEY would pass a values-only scan; this catches that class directly)', async () => {
     const dir = scratchDir()
     try {
       const schema = cloneSchema()
@@ -697,29 +889,30 @@ describe('values-free public output (sentinel injection)', () => {
       const privateOutPath = path.join(dir, 'private.json')
       const report = await buildReport({ exec, privateOutPath })
 
-      // Collect every string leaf reachable from coverage/verdicts/residualNotes
-      // (deliberately EXCLUDING privateArtifact.path, which legitimately names a
-      // file path chosen by the operator/test, not a database value).
-      const leaves = []
-      function walk(node) {
-        if (node == null) return
-        if (typeof node === 'string') { leaves.push(node); return }
-        if (Array.isArray(node)) { node.forEach(walk); return }
-        if (typeof node === 'object') { for (const v of Object.values(node)) walk(v); return }
-      }
-      walk(report.coverage)
-      walk(report.verdicts)
-      walk(report.residualNotes)
-
-      for (const leaf of leaves) {
-        assert.ok(
-          !leaf.includes(SENTINEL_KIND) && !leaf.includes(SENTINEL_OBJECT),
-          `string leaf unexpectedly carries a sentinel raw value: ${JSON.stringify(leaf)}`,
-        )
-      }
+      // The exact-key-set walk subsumes the old sentinel-substring scan for
+      // any leak reachable as a plain string VALUE too — deepEqual on a
+      // key set diverges the instant an unexpected property name (including
+      // one equal to a sentinel) appears anywhere in this shape.
+      assertPublicReportKeySetsExactly(report)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  test('EXACT key-set check holds across the unavailable and not_run branches too (missing column / --probe scoping), not just the all-ok happy path', async () => {
+    // unavailable: integration_external_systems.status column absent -> activeOnly UNAVAILABLE,
+    // and canonicalObjectKeyInventory entirely not_run via --probe beta.
+    const schema = cloneSchema({ integration_external_systems: { exists: true, columns: ['id', 'kind'] } })
+    const exec = createFakeExec({
+      schema,
+      counts: {
+        'count.external_system_kinds_all': [{ kind: 'erp:k3-wise-webapi', n: 1 }],
+      },
+    })
+    const report = await buildReport({ exec, probe: 'beta', noPrivateOut: true })
+    assert.equal(report.coverage.connectorKindInventory.activeOnly.status, 'unavailable')
+    assert.equal(report.coverage.canonicalObjectKeyInventory.status, 'not_run')
+    assertPublicReportKeySetsExactly(report)
   })
 })
 
@@ -851,6 +1044,24 @@ describe('RESIDUAL_NOTES', () => {
     assert.ok(RESIDUAL_NOTES.some((n) => n.id === 'known_registries_empty_by_design'))
     assert.ok(RESIDUAL_NOTES.some((n) => n.id === 'no_customer_deployment_connection'))
   })
+
+  // γ's ledger scope is the READ-side qualification-input tuple's objectKey
+  // (integration_read_source_configs.object, migration 062). A second objectKey reference class —
+  // integration_write_target_configs.object (migration 064) — exists in the same database and this
+  // script never queries it. That must be a stated, findable residual note, not a silent gap.
+  test('states the integration_write_target_configs.object (migration 064) out-of-scope caveat, naming both the table and the migration', () => {
+    const note = RESIDUAL_NOTES.find((n) => n.id === 'integration_write_target_configs_object_deliberately_out_of_scope')
+    assert.ok(note, 'expected a RESIDUAL_NOTES entry documenting integration_write_target_configs.object as out of scope')
+    assert.match(note.description, /integration_write_target_configs/)
+    assert.match(note.description, /migration 064/)
+  })
+
+  test('the γ coverage blindSpot string also names integration_write_target_configs.object as out of scope (not just buried in residualNotes)', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+    const report = await buildReport({ exec, noPrivateOut: true })
+    assert.match(report.coverage.canonicalObjectKeyInventory.blindSpot, /integration_write_target_configs/)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -962,9 +1173,49 @@ describe('buildDryRunReport', () => {
     const exec = createFakeExec({ schema, counts: {} }, calls)
     const report = await buildDryRunReport({ exec })
     assert.equal(report.mode, 'dry-run')
+    assert.equal(report.probe, 'both')
     assert.equal(report.plan.kindInventory.status, 'ok')
     // Only schema-probe tags were called — no count.* tag.
     assert.ok(calls.every((c) => c.tag.startsWith('probe.')))
+  })
+
+  // `--probe` must scope `--dry-run` the same way it scopes report mode — otherwise a PR claiming
+  // "under --probe beta, no query naming integration_read_source_configs is ever issued — schema
+  // probe included" is false specifically in dry-run mode, where buildDryRunReport() used to always
+  // probe the FULL TABLE_SPECS regardless of the requested probe.
+  test('probe=beta scopes the DRY-RUN schema probe too: zero information_schema calls name integration_read_source_configs, and the objectKeyInventory plan is not_run', async () => {
+    const schema = cloneSchema()
+    const calls = []
+    const exec = createFakeExec({ schema, counts: {} }, calls)
+    const report = await buildDryRunReport({ exec, probe: 'beta' })
+    assert.equal(report.probe, 'beta')
+    assert.equal(report.plan.kindInventory.status, 'ok')
+    assert.equal(report.plan.objectKeyInventory.status, 'not_run')
+    const readSourceConfigCalls = calls.filter((c) => c.params && c.params[0] === 'integration_read_source_configs')
+    assert.deepEqual(readSourceConfigCalls, [])
+  })
+
+  test('probe=gamma scopes the DRY-RUN schema probe too: zero information_schema calls name integration_external_systems, and the kindInventory plan is not_run', async () => {
+    const schema = cloneSchema()
+    const calls = []
+    const exec = createFakeExec({ schema, counts: {} }, calls)
+    const report = await buildDryRunReport({ exec, probe: 'gamma' })
+    assert.equal(report.probe, 'gamma')
+    assert.equal(report.plan.objectKeyInventory.status, 'ok')
+    assert.equal(report.plan.kindInventory.status, 'not_run')
+    const externalSystemCalls = calls.filter((c) => c.params && c.params[0] === 'integration_external_systems')
+    assert.deepEqual(externalSystemCalls, [])
+  })
+
+  test('no executor + probe supplied: the static (no-DB) report still records the requested probe, even though nothing was probed', async () => {
+    const report = await buildDryRunReport({ exec: null, probe: 'beta' })
+    assert.equal(report.mode, 'dry-run-static')
+    assert.equal(report.probe, 'beta')
+  })
+
+  test('probe defaults to \'both\' when not supplied', async () => {
+    const report = await buildDryRunReport({ exec: null })
+    assert.equal(report.probe, 'both')
   })
 })
 

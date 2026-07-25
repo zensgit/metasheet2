@@ -5,8 +5,10 @@ name: GIP Authority-Substrate Inventory (β/γ probes)
 # docs/development/database-system-integration-line-design-and-verification-20260724.md §4.0.
 # No database: the script's tests inject a fake query executor (see
 # scripts/ops/gip-authority-substrate-inventory.test.mjs). Follows the same shape as the
-# `contract` job in multitable-permission-lists-postdeploy-smoke.yml / the sibling
-# data-source-exposure-inventory.yml pattern: checkout + setup-node only, `node --test` directly.
+# `contract` job in multitable-permission-lists-postdeploy-smoke.yml (on main), and the same
+# pattern as data-source-exposure-inventory.yml (#4594) — that workflow is NOT in this tree; it
+# lives only on branch claude/data-source-exposure-inventory-20260724, not on main: checkout +
+# setup-node only, `node --test` directly.
 
 on:
   pull_request:
