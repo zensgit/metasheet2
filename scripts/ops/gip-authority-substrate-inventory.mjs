@@ -1,0 +1,960 @@
+#!/usr/bin/env node
+/**
+ * gip-authority-substrate-inventory.mjs
+ *
+ * TWO READ-ONLY, values-free inventory probes feeding two of the four §4.0 owner decisions in
+ * docs/development/database-system-integration-line-design-and-verification-20260724.md
+ * ("the ledger"). This is a NEW, separate carrier — the ledger's owner ruling was explicit that
+ * scripts/ops/data-source-exposure-inventory.mjs (#4594) must NOT be expanded or reused as the
+ * carrier for this work, so nothing here imports from or depends on that script; the
+ * schema-probe-first / values-free QUERY_ALLOWLIST pattern is independently re-implemented,
+ * because that is the pattern being reused, not the file.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * (β) CONNECTOR-KIND PROBE — integration_external_systems.kind
+ * ---------------------------------------------------------------------------------------------
+ * Purpose, and nothing beyond it: produce the distinct-kind-string list and per-string row counts
+ * a HUMAN uses to author the explicit alias map and migration list for decision (β)'s first-party
+ * CLOSED connector-kind registry (ledger §4.0 row β, §4 step 1.2, §3.0 B-2). `kind` is a free-form
+ * `requiredString` with no vocabulary anywhere today (external-systems.cjs L91; migration 057's
+ * column comment lists illustrative EXAMPLES only, not an enum — there is no CHECK constraint on
+ * this column, unlike `status`).
+ *
+ * FORBIDDEN, enforced structurally below, not just by convention: this probe NEVER auto-expands or
+ * auto-populates KNOWN_CERTIFIED_CONNECTOR_KINDS from what it observes. That constant is frozen at
+ * module load and is the ONLY thing this script ever compares an observed kind string against; the
+ * probe has no code path that writes to it. It stays empty until a human, acting on decision (β),
+ * edits this file in a follow-up change — never as a side effect of running the inventory.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * (γ) OBJECT-KEY PROBE — integration_read_source_configs.object
+ * ---------------------------------------------------------------------------------------------
+ * Purpose, and nothing beyond it: produce the distinct-objectKey list and per-key row counts a
+ * HUMAN uses to author the missing-reference list and backfill list for decision (γ)'s first-party
+ * canonical object contract registry (ledger §4.0 row γ, §4 step 1.3, §3.0 B-3).
+ *
+ * Terminology note, stated once because it is load-bearing and easy to get wrong: the ledger's
+ * qualification-input tuple names this field `objectKey` (§3.1, §4 step 1). No column literally
+ * named `objectKey` exists on main. The stored column is `integration_read_source_configs.object`
+ * (migration 062 L28: `object TEXT NOT NULL`; both unique indexes key on it; the store's
+ * `saveVersion` writes it from `normalized.object`, which is `read-source-config.cjs`'s validated
+ * `object` field). This probe queries THAT column and reports it as the objectKey inventory the
+ * task asked for — the mapping is asserted by a schema-drift test below, not merely commented.
+ *
+ * FORBIDDEN, enforced the same way as β: KNOWN_CANONICAL_OBJECT_KEYS is frozen, empty, and never
+ * written to by this script. Canonical contracts must come from first-party frozen definitions
+ * (decision γ ruling) — this inventory never generates, synthesises, or seeds one from what it
+ * observes in a customer's approved configs.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * OUTPUT DISCIPLINE (owner ruling, quoted in the task brief)
+ * ---------------------------------------------------------------------------------------------
+ * Public/committed output (stdout, --json, the human summary): AGGREGATE COUNTS ONLY. The public
+ * report object is built exclusively from: fixed status/verdict enum tokens, fixed label strings
+ * authored in this file, and integers. It is structurally incapable of holding an observed kind or
+ * objectKey string — see buildPublicKindSummary()/buildPublicObjectKeySummary() below, which never
+ * receive the raw per-value rows, only the two counts already reduced from them. This is proven
+ * by test (a sentinel value injected through the fake executor must not appear anywhere in
+ * JSON.stringify(publicReport)) rather than merely asserted.
+ *
+ * Raw values (the actual kind / objectKey strings, with their row counts) go ONLY into a private,
+ * gitignored local artefact file — see writePrivateArtifact() / DEFAULT_PRIVATE_OUTPUT_DIR — never
+ * into this script's stdout in non-JSON mode beyond the artefact PATH, never into the committed
+ * JSON report, never into a log line, never into a PR body.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * SCOPE (ledger owner ruling, quoted in the task brief)
+ * ---------------------------------------------------------------------------------------------
+ * Building and testing this tool is inside the B1a AUTHORITY-SUBSTRATE gate (bounded internal
+ * work, no new request surface, no runtime consumer). CONNECTING IT TO A CUSTOMER DEPLOYMENT is a
+ * separate, ops-gated read-only authorization this task does not carry — see main()'s DATABASE_URL
+ * requirement and the PR body for the explicit statement that no such run has happened.
+ *
+ * Usage:
+ *   DATABASE_URL=postgres://… node scripts/ops/gip-authority-substrate-inventory.mjs \
+ *     [--probe beta|gamma|both] [--private-out <path> | --no-private-out] [--json]
+ *   node scripts/ops/gip-authority-substrate-inventory.mjs --dry-run   # no DB required
+ *
+ * Exit codes:
+ *   0  ran successfully (a MAPPING_REQUIRED / BACKFILL_REQUIRED verdict is information, not failure)
+ *   1  unexpected runtime/DB error, OR the private artefact was owed (unregistered/unmapped count
+ *      > 0) but could not be written — fails closed rather than reporting aggregate-only success
+ *      while silently dropping the raw detail a human needs to act on it
+ *   2  required input missing (DATABASE_URL absent outside --dry-run)
+ */
+
+import { writeFileSync, mkdirSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __filename = fileURLToPath(import.meta.url)
+const REPO_ROOT = path.resolve(path.dirname(__filename), '../..')
+
+// ---------------------------------------------------------------------------
+// Frozen registries — see the FORBIDDEN paragraphs above. Empty until a human
+// edits this file under decision (β) / decision (γ). No function in this
+// module writes to either constant; the mutation-immunity tests below prove
+// that, rather than trusting the comment.
+// ---------------------------------------------------------------------------
+
+// Decision (β): first-party CLOSED connector-kind registry. NOT populated by this script. Do not
+// seed this from any single shipped example (e.g. a GIP *profile* `connectorKind` such as
+// `bridge:legacy-sql-readonly` in gip-bridge-bounded-read-profile.cjs) — that is a DIFFERENT field
+// (a certified read-action-profile's connector kind) from `integration_external_systems.kind`
+// (an operator-supplied external-system registration kind), and conflating them would be exactly
+// the "false certification via wrong artefact" class this ledger has been burned by before (§3.0
+// B-2's retraction). Leave empty; only the owner's decision (β) may add entries here.
+const KNOWN_CERTIFIED_CONNECTOR_KINDS = Object.freeze([])
+
+// Decision (γ): first-party canonical object contract registry, keyed by the object identifiers
+// this probe observes in `integration_read_source_configs.object`. NOT populated by this script.
+// Only the owner's decision (γ) — first-party frozen definitions — may add entries here.
+const KNOWN_CANONICAL_OBJECT_KEYS = Object.freeze([])
+
+// CHECK constraint on integration_external_systems.status (migration 057).
+const EXTERNAL_SYSTEM_STATUSES = Object.freeze(['active', 'inactive', 'error'])
+// CHECK constraint on integration_read_source_configs.status (migration 062).
+const READ_SOURCE_CONFIG_STATUSES = Object.freeze(['draft', 'approved', 'retired'])
+
+const SCHEMA_PROBE_CAVEAT =
+  "probed via information_schema.tables/.columns, table_schema='public', as the DATABASE_URL role — a non-public search_path or missing SELECT/USAGE privileges reports the same as a genuinely absent object"
+
+const DEFAULT_PRIVATE_OUTPUT_DIR = 'artifacts/gip-authority-inventory'
+
+// ---------------------------------------------------------------------------
+// QUERY_ALLOWLIST — the ONLY SQL statements this script will ever execute.
+// Every statement is SELECT-only; assertReadOnlyAllowlist() enforces that
+// structurally at module load (same guard shape as #4594's, independently
+// implemented per the ledger's carrier ruling).
+// ---------------------------------------------------------------------------
+
+const QUERY_ALLOWLIST = Object.freeze({
+  'probe.table_exists': {
+    sql: `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1 LIMIT 1`,
+    describe: 'schema probe: does table $1 exist',
+  },
+  'probe.columns': {
+    sql: `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
+    describe: 'schema probe: which columns exist on table $1',
+  },
+  'count.external_system_kinds_all': {
+    sql: `SELECT kind, count(*)::int AS n FROM integration_external_systems GROUP BY kind`,
+    describe: 'all integration_external_systems rows (any status), grouped by kind',
+  },
+  'count.external_system_kinds_active': {
+    sql: `SELECT kind, count(*)::int AS n FROM integration_external_systems WHERE status = 'active' GROUP BY kind`,
+    describe: "active-only integration_external_systems rows, grouped by kind",
+  },
+  'count.read_source_config_objects_by_status': {
+    sql: `SELECT object, status, count(*)::int AS n FROM integration_read_source_configs GROUP BY object, status`,
+    describe: 'integration_read_source_configs rows grouped by (object, status) — covers draft/approved/retired in one pass',
+  },
+  'count.read_source_config_object_config_divergence': {
+    sql: `SELECT count(*)::int AS n FROM integration_read_source_configs WHERE object IS DISTINCT FROM (config ->> 'object')`,
+    describe:
+      "rows where the object column and config->>'object' disagree — a values-free integrity check; a non-zero result means some backfill/mapping decision fed only by the object column would miss rows whose stored config JSON disagrees with it. IS DISTINCT FROM (not <>) is deliberate: a row whose config JSON carries no 'object' key at all has config->>'object' = NULL, and IS DISTINCT FROM (unlike <>) treats object <> NULL as true rather than UNKNOWN — a missing key in config counts as a divergence, not a silent pass. Verified live against a seeded row with no 'object' key in migration verification (see PR body).",
+  },
+})
+
+function assertReadOnlyAllowlist(allowlist) {
+  for (const [tag, entry] of Object.entries(allowlist)) {
+    if (!/^\s*SELECT\b/i.test(entry.sql)) {
+      throw new Error(
+        `gip-authority-substrate-inventory: QUERY_ALLOWLIST entry "${tag}" is not a SELECT statement — refusing to load a non-read-only query.`,
+      )
+    }
+    const trimmed = entry.sql.trim()
+    const withoutTrailingSemicolon = trimmed.endsWith(';') ? trimmed.slice(0, -1) : trimmed
+    if (withoutTrailingSemicolon.includes(';')) {
+      throw new Error(
+        `gip-authority-substrate-inventory: QUERY_ALLOWLIST entry "${tag}" contains a non-trailing semicolon — refusing to load a possible multi-statement query.`,
+      )
+    }
+  }
+}
+assertReadOnlyAllowlist(QUERY_ALLOWLIST)
+
+async function runQuery(exec, tag, params = []) {
+  const entry = QUERY_ALLOWLIST[tag]
+  if (!entry) {
+    throw new Error(`gip-authority-substrate-inventory: query tag not on allowlist: ${tag}`)
+  }
+  return exec(entry.sql, params)
+}
+
+// ---------------------------------------------------------------------------
+// Schema probing
+// ---------------------------------------------------------------------------
+
+const TABLE_SPECS = Object.freeze({
+  integration_external_systems: ['id', 'kind', 'status'],
+  integration_read_source_configs: ['id', 'object', 'status', 'config'],
+})
+
+// Which TABLE_SPECS entries a given --probe value needs. "Strictly separated purposes" is enforced
+// HERE, not only at the count-query layer: under --probe beta, integration_read_source_configs is
+// never even schema-probed (no information_schema.tables/.columns call naming it) — a scoped run
+// makes literally zero round-trips that mention the other probe's table, full stop.
+function tableSpecsForProbe(probe) {
+  if (probe === 'beta') {
+    return { integration_external_systems: TABLE_SPECS.integration_external_systems }
+  }
+  if (probe === 'gamma') {
+    return { integration_read_source_configs: TABLE_SPECS.integration_read_source_configs }
+  }
+  return TABLE_SPECS
+}
+
+async function tableExists(exec, tableName) {
+  const { rows } = await runQuery(exec, 'probe.table_exists', [tableName])
+  return rows.length > 0
+}
+
+async function probeColumns(exec, tableName, wantedColumns) {
+  const { rows } = await runQuery(exec, 'probe.columns', [tableName])
+  const present = new Set(rows.map((r) => r.column_name))
+  const result = {}
+  for (const col of wantedColumns) result[col] = present.has(col)
+  return result
+}
+
+async function probeSchema(exec, tableSpecs = TABLE_SPECS) {
+  const schema = {}
+  for (const [table, cols] of Object.entries(tableSpecs)) {
+    const exists = await tableExists(exec, table)
+    const columns = exists
+      ? await probeColumns(exec, table, cols)
+      : Object.fromEntries(cols.map((c) => [c, false]))
+    schema[table] = { exists, columns }
+  }
+  return schema
+}
+
+// ---------------------------------------------------------------------------
+// Plan builder — pure function of schema. Decides OK vs UNAVAILABLE; never
+// emits a query against an unverified column.
+// ---------------------------------------------------------------------------
+
+function planKindInventory(schema) {
+  const t = schema.integration_external_systems
+  if (!t.exists) {
+    return { status: 'unavailable', reason: `table integration_external_systems not found (${SCHEMA_PROBE_CAVEAT})` }
+  }
+  if (!t.columns.kind) {
+    return { status: 'unavailable', reason: `integration_external_systems.kind column not found (${SCHEMA_PROBE_CAVEAT})` }
+  }
+  const allStatuses = { status: 'ok', tag: 'count.external_system_kinds_all', params: [] }
+  const activeOnly = t.columns.status
+    ? { status: 'ok', tag: 'count.external_system_kinds_active', params: [] }
+    : { status: 'unavailable', reason: `integration_external_systems.status column not found (${SCHEMA_PROBE_CAVEAT}) — cannot separate active-only from all-statuses` }
+  return { status: 'ok', allStatuses, activeOnly }
+}
+
+function planObjectKeyInventory(schema) {
+  const t = schema.integration_read_source_configs
+  if (!t.exists) {
+    return { status: 'unavailable', reason: `table integration_read_source_configs not found (${SCHEMA_PROBE_CAVEAT})` }
+  }
+  const missing = ['object', 'status'].filter((c) => !t.columns[c])
+  if (missing.length) {
+    return {
+      status: 'unavailable',
+      reason: `integration_read_source_configs missing column(s): ${missing.join(', ')} (${SCHEMA_PROBE_CAVEAT})`,
+    }
+  }
+  const byStatus = { status: 'ok', tag: 'count.read_source_config_objects_by_status', params: [] }
+  const divergence = t.columns.config
+    ? { status: 'ok', tag: 'count.read_source_config_object_config_divergence', params: [] }
+    : { status: 'unavailable', reason: `integration_read_source_configs.config column not found (${SCHEMA_PROBE_CAVEAT}) — cannot compute the object vs config->>'object' divergence check` }
+  return { status: 'ok', byStatus, divergence }
+}
+
+// `probe` scopes WHICH plans get built, not just which summaries get rendered — a plan of
+// { status: 'not_run' } short-circuits executeKindInventoryPlan/executeObjectKeyInventoryPlan
+// below BEFORE any query is issued. This is what makes "strictly separated purposes" true at the
+// query and private-artefact layer, not just in the printed summary: `--probe beta` must never
+// query integration_read_source_configs, and must never write a γ objectKey value anywhere,
+// private artefact included.
+function buildPlan(schema, { probe = 'both' } = {}) {
+  const runBeta = probe === 'both' || probe === 'beta'
+  const runGamma = probe === 'both' || probe === 'gamma'
+  return {
+    kindInventory: runBeta ? planKindInventory(schema) : { status: 'not_run' },
+    objectKeyInventory: runGamma ? planObjectKeyInventory(schema) : { status: 'not_run' },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bucketing — the values-free chokepoint. Every function below reduces raw
+// (value, n) rows into TWO integers (registered / unregistered) plus totals.
+// The raw rows themselves are returned SEPARATELY as `detail`, and callers
+// that assemble the PUBLIC report must never forward `detail` into it — only
+// the counts. writePrivateArtifact() is the only place `detail` may land.
+// ---------------------------------------------------------------------------
+
+function bucketByRegistry(rows, knownSet, { valueKey, countKey = 'n' }) {
+  const known = new Set(knownSet)
+  let registeredDistinct = 0
+  let unregisteredDistinct = 0
+  let registeredRows = 0
+  let unregisteredRows = 0
+  let totalRows = 0
+  const detail = []
+  for (const row of rows) {
+    const value = row[valueKey]
+    const n = Number(row[countKey]) || 0
+    totalRows += n
+    const isKnown = known.has(value)
+    if (isKnown) {
+      registeredDistinct += 1
+      registeredRows += n
+    } else {
+      unregisteredDistinct += 1
+      unregisteredRows += n
+    }
+    detail.push({ value, count: n, registered: isKnown })
+  }
+  return {
+    counts: {
+      distinctCount: rows.length,
+      totalRows,
+      knownRegistrySize: known.size,
+      registeredDistinctCount: registeredDistinct,
+      unregisteredDistinctCount: unregisteredDistinct,
+      registeredRowCount: registeredRows,
+      unregisteredRowCount: unregisteredRows,
+    },
+    detail,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plan execution
+// ---------------------------------------------------------------------------
+
+async function executeKindInventoryPlan(exec, plan) {
+  if (plan.status === 'not_run') return { status: 'not_run' }
+  if (plan.status !== 'ok') return { status: 'unavailable', reason: plan.reason }
+
+  const allRes = await runQuery(exec, plan.allStatuses.tag, plan.allStatuses.params)
+  const all = bucketByRegistry(allRes.rows, KNOWN_CERTIFIED_CONNECTOR_KINDS, { valueKey: 'kind' })
+
+  let active
+  if (plan.activeOnly.status !== 'ok') {
+    active = { status: 'unavailable', reason: plan.activeOnly.reason }
+  } else {
+    const activeRes = await runQuery(exec, plan.activeOnly.tag, plan.activeOnly.params)
+    const bucketed = bucketByRegistry(activeRes.rows, KNOWN_CERTIFIED_CONNECTOR_KINDS, { valueKey: 'kind' })
+    active = { status: 'ok', counts: bucketed.counts, detail: bucketed.detail }
+  }
+
+  return {
+    status: 'ok',
+    allStatuses: { status: 'ok', counts: all.counts, detail: all.detail },
+    activeOnly: active,
+  }
+}
+
+// Splits one (object,status,n) row set into the three closed status buckets. Any status value NOT
+// in READ_SOURCE_CONFIG_STATUSES is fail-closed into its own 'unexpected' group rather than
+// silently dropped or merged into an existing bucket — the CHECK constraint should make this
+// group always empty, but a report must never assume its own gate held.
+function splitRowsByStatus(rows) {
+  const byStatus = { draft: [], approved: [], retired: [], unexpected: [] }
+  for (const row of rows) {
+    const bucket = READ_SOURCE_CONFIG_STATUSES.includes(row.status) ? row.status : 'unexpected'
+    byStatus[bucket].push(row)
+  }
+  return byStatus
+}
+
+async function executeObjectKeyInventoryPlan(exec, plan) {
+  if (plan.status === 'not_run') return { status: 'not_run' }
+  if (plan.status !== 'ok') return { status: 'unavailable', reason: plan.reason }
+
+  const res = await runQuery(exec, plan.byStatus.tag, plan.byStatus.params)
+  const split = splitRowsByStatus(res.rows)
+
+  const byStatus = {}
+  for (const key of ['draft', 'approved', 'retired', 'unexpected']) {
+    const bucketed = bucketByRegistry(split[key], KNOWN_CANONICAL_OBJECT_KEYS, { valueKey: 'object' })
+    byStatus[key] = { status: 'ok', counts: bucketed.counts, detail: bucketed.detail }
+  }
+
+  let divergence
+  if (plan.divergence.status !== 'ok') {
+    divergence = { status: 'unavailable', reason: plan.divergence.reason }
+  } else {
+    const { rows } = await runQuery(exec, plan.divergence.tag, plan.divergence.params)
+    divergence = { status: 'ok', count: rows.length ? Number(rows[0].n) || 0 : 0 }
+  }
+
+  return { status: 'ok', byStatus, divergence }
+}
+
+async function executePlan(exec, plan) {
+  const [kindInventory, objectKeyInventory] = await Promise.all([
+    executeKindInventoryPlan(exec, plan.kindInventory),
+    executeObjectKeyInventoryPlan(exec, plan.objectKeyInventory),
+  ])
+  return { kindInventory, objectKeyInventory }
+}
+
+// ---------------------------------------------------------------------------
+// PUBLIC report assembly — receives ONLY `.counts` objects (integers + fixed
+// keys), never `.detail` (which carries the raw kind/objectKey strings). This
+// is the structural boundary the values-free test below is written against.
+// ---------------------------------------------------------------------------
+
+function buildPublicKindSummary(kindInventory) {
+  if (kindInventory.status === 'not_run') {
+    return { status: 'not_run' }
+  }
+  if (kindInventory.status !== 'ok') {
+    return { status: 'unavailable', reason: kindInventory.reason }
+  }
+  const out = { status: 'ok' }
+  out.allStatuses = kindInventory.allStatuses.status === 'ok'
+    ? { status: 'ok', ...kindInventory.allStatuses.counts }
+    : { status: 'unavailable', reason: kindInventory.allStatuses.reason }
+  out.activeOnly = kindInventory.activeOnly.status === 'ok'
+    ? { status: 'ok', ...kindInventory.activeOnly.counts }
+    : { status: 'unavailable', reason: kindInventory.activeOnly.reason }
+  return out
+}
+
+function buildPublicObjectKeySummary(objectKeyInventory) {
+  if (objectKeyInventory.status === 'not_run') {
+    return { status: 'not_run' }
+  }
+  if (objectKeyInventory.status !== 'ok') {
+    return { status: 'unavailable', reason: objectKeyInventory.reason }
+  }
+  const out = { status: 'ok', byStatus: {} }
+  for (const key of ['draft', 'approved', 'retired', 'unexpected']) {
+    out.byStatus[key] = { status: 'ok', ...objectKeyInventory.byStatus[key].counts }
+  }
+  out.objectVsConfigObjectDivergence = objectKeyInventory.divergence
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Verdicts — kept SEPARATE per probe (β and γ have strictly separated
+// purposes; a blended verdict would let one probe's signal stand in for the
+// other's). Each has three reachable outcomes; any UNAVAILABLE coverage
+// forces INCONCLUSIVE — never a silent "0" read as "nothing to map".
+// ---------------------------------------------------------------------------
+
+function computeKindVerdict(publicKindSummary) {
+  if (publicKindSummary.status !== 'ok' || publicKindSummary.allStatuses.status !== 'ok') {
+    return {
+      verdict: 'INCONCLUSIVE',
+      reasons: [
+        'coverage is partial — the all-statuses kind count is UNAVAILABLE',
+        publicKindSummary.status !== 'ok' ? publicKindSummary.reason : publicKindSummary.allStatuses.reason,
+      ],
+    }
+  }
+  const { unregisteredDistinctCount, distinctKindCount } = {
+    unregisteredDistinctCount: publicKindSummary.allStatuses.unregisteredDistinctCount,
+    distinctKindCount: publicKindSummary.allStatuses.distinctCount,
+  }
+  if (unregisteredDistinctCount === 0) {
+    return {
+      verdict: 'CONNECTOR_KIND_MAPPING_NOT_REQUIRED_WITHIN_COVERAGE',
+      reasons: [
+        `${distinctKindCount} distinct kind string(s) observed across integration_external_systems, all already in the (currently ${KNOWN_CERTIFIED_CONNECTOR_KINDS.length}-entry) known registry`,
+        'a zero known-registry size makes this trivially true today — see residualNotes',
+      ],
+    }
+  }
+  return {
+    verdict: 'CONNECTOR_KIND_MAPPING_REQUIRED',
+    reasons: [
+      `${unregisteredDistinctCount} of ${distinctKindCount} distinct kind string(s) are not in the known registry (size ${KNOWN_CERTIFIED_CONNECTOR_KINDS.length}) — an explicit alias map / migration decision (β) is needed before these can bind under GIP`,
+      'raw kind strings are in the private artefact, if one was written — see privateArtifact',
+    ],
+  }
+}
+
+function computeObjectKeyVerdict(publicObjectKeySummary) {
+  if (publicObjectKeySummary.status !== 'ok' || publicObjectKeySummary.byStatus.approved.status !== 'ok') {
+    return {
+      verdict: 'INCONCLUSIVE',
+      reasons: [
+        'coverage is partial — the approved-status objectKey count is UNAVAILABLE',
+        publicObjectKeySummary.status !== 'ok' ? publicObjectKeySummary.reason : publicObjectKeySummary.byStatus.approved.reason,
+      ],
+    }
+  }
+  const divergence = publicObjectKeySummary.objectVsConfigObjectDivergence
+  if (!divergence || divergence.status !== 'ok') {
+    return {
+      verdict: 'INCONCLUSIVE',
+      reasons: [
+        'coverage is partial — the object vs config->>\'object\' divergence check is UNAVAILABLE',
+        divergence ? divergence.reason : 'divergence field missing from summary',
+      ],
+    }
+  }
+  // A non-zero divergence means the `object` column — the field the backfill list above was
+  // built from — disagrees with the config's own stored objectKey for at least one row. A
+  // NOT_REQUIRED verdict built only from `object` would then be silently wrong for the disagreeing
+  // rows: the backfill list a human builds from this report would miss whatever objectKey the
+  // config JSON actually references. Fail closed rather than let that pass as "nothing to do".
+  if (divergence.count > 0) {
+    return {
+      verdict: 'INCONCLUSIVE',
+      reasons: [
+        `${divergence.count} row(s) have integration_read_source_configs.object disagreeing with config->>'object' — a backfill/mapping decision built from the object column alone would be unreliable for those rows until the divergence is resolved`,
+        'this is reported regardless of registeredness — see coverage.canonicalObjectKeyInventory.objectVsConfigObjectDivergence',
+      ],
+    }
+  }
+  const approved = publicObjectKeySummary.byStatus.approved
+  if (approved.unregisteredDistinctCount === 0) {
+    return {
+      verdict: 'CANONICAL_OBJECT_BACKFILL_NOT_REQUIRED_WITHIN_COVERAGE',
+      reasons: [
+        `${approved.distinctCount} distinct objectKey(s) referenced by approved read-source configs, all already in the (currently ${KNOWN_CANONICAL_OBJECT_KEYS.length}-entry) known registry`,
+        'a zero known-registry size makes this trivially true today — see residualNotes',
+      ],
+    }
+  }
+  return {
+    verdict: 'CANONICAL_OBJECT_BACKFILL_REQUIRED',
+    reasons: [
+      `${approved.unregisteredDistinctCount} of ${approved.distinctCount} distinct objectKey(s) referenced by approved configs are not in the known registry (size ${KNOWN_CANONICAL_OBJECT_KEYS.length}) — inventory + backfill of these is required BEFORE activation per decision (γ)`,
+      'raw objectKey strings are in the private artefact, if one was written — see privateArtifact',
+    ],
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Residual notes — always present; a zero elsewhere must never read as proof
+// of zero live risk.
+// ---------------------------------------------------------------------------
+
+const RESIDUAL_NOTES = Object.freeze([
+  {
+    id: 'known_registries_empty_by_design',
+    description:
+      'Both KNOWN_CERTIFIED_CONNECTOR_KINDS and KNOWN_CANONICAL_OBJECT_KEYS are empty. Neither decision (β) nor decision (γ) has produced a first-party registry yet, so today every distinct value observed is reported as unregistered — that is the correct, honest state, not a defect. This inventory exists to produce the raw list a human uses to populate those registries; it never populates them itself.',
+  },
+  {
+    id: 'draft_and_retired_object_keys_excluded_from_the_headline_verdict',
+    description:
+      "computeObjectKeyVerdict() is scoped to status='approved' only, matching the task's literal scope ('approved read-source configs'). draft/retired counts are still reported under byStatus for completeness, but a draft config can be approved after this inventory runs — decision (γ)'s own 'before activation' framing means the approved-only headline can understate the eventual backfill list; re-run before activation, not once.",
+  },
+  {
+    id: 'no_customer_deployment_connection',
+    description:
+      'This script has only ever been run against a hermetic fake executor (tests) and, if noted in the PR, a local/CI fixture database — never a customer deployment. Connecting to one is a separate ops-gated read-only authorization this task does not carry.',
+  },
+])
+
+// ---------------------------------------------------------------------------
+// Private artefact — the ONLY place raw kind/objectKey strings are ever
+// written. Fails CLOSED: if there is at least one unregistered/unmapped item
+// and the artefact cannot be written, buildReport()/main() treat that as a
+// hard error rather than completing with an aggregate-only success that
+// silently drops the one thing a human needs to act on it.
+// ---------------------------------------------------------------------------
+
+function shouldWritePrivateArtifact(coverage) {
+  const kindUnregistered =
+    coverage.kindInventory.status === 'ok' &&
+    coverage.kindInventory.allStatuses.status === 'ok' &&
+    coverage.kindInventory.allStatuses.counts.unregisteredDistinctCount > 0
+  const objectUnregistered =
+    coverage.objectKeyInventory.status === 'ok' &&
+    ['draft', 'approved', 'retired', 'unexpected'].some(
+      (k) => coverage.objectKeyInventory.byStatus[k].counts.unregisteredDistinctCount > 0,
+    )
+  return kindUnregistered || objectUnregistered
+}
+
+function buildPrivateArtifactContent(coverage, { generatedAt }) {
+  return {
+    generatedAt,
+    warning:
+      'PRIVATE ARTEFACT — contains raw connector kind / objectKey strings observed in this deployment. Never commit, never paste into a PR body or issue, never log. Local operator use only, for authoring the decision (β) alias map and the decision (γ) backfill list.',
+    connectorKinds: {
+      allStatuses: coverage.kindInventory.status === 'ok' ? coverage.kindInventory.allStatuses.detail ?? [] : [],
+      activeOnly:
+        coverage.kindInventory.status === 'ok' && coverage.kindInventory.activeOnly.status === 'ok'
+          ? coverage.kindInventory.activeOnly.detail
+          : [],
+    },
+    objectKeys:
+      coverage.objectKeyInventory.status === 'ok'
+        ? {
+            draft: coverage.objectKeyInventory.byStatus.draft.detail,
+            approved: coverage.objectKeyInventory.byStatus.approved.detail,
+            retired: coverage.objectKeyInventory.byStatus.retired.detail,
+            unexpected: coverage.objectKeyInventory.byStatus.unexpected.detail,
+          }
+        : {},
+  }
+}
+
+function writePrivateArtifact(filePath, content) {
+  mkdirSync(path.dirname(filePath), { recursive: true })
+  writeFileSync(filePath, JSON.stringify(content, null, 2) + '\n', { mode: 0o600 })
+}
+
+function defaultPrivateOutputPath(repoRoot, generatedAt) {
+  const stamp = generatedAt.replace(/[:.]/g, '-')
+  return path.join(repoRoot, DEFAULT_PRIVATE_OUTPUT_DIR, `gip-authority-inventory-${stamp}.json`)
+}
+
+// ---------------------------------------------------------------------------
+// Report assembly
+// ---------------------------------------------------------------------------
+
+async function buildReport({ exec, repoRoot = REPO_ROOT, probe = 'both', privateOutPath, noPrivateOut = false } = {}) {
+  const generatedAt = new Date().toISOString()
+  // `probe` scopes the SCHEMA PROBE itself, not just the count queries: under --probe beta,
+  // integration_read_source_configs is never named in an information_schema.tables/.columns call
+  // either — see tableSpecsForProbe().
+  const schema = await probeSchema(exec, tableSpecsForProbe(probe))
+  // `probe` is threaded into buildPlan(), not applied after the fact: an un-requested probe's plan
+  // is { status: 'not_run' } BEFORE executePlan runs, so executeKindInventoryPlan /
+  // executeObjectKeyInventoryPlan short-circuit and never issue that probe's query at all — under
+  // `--probe beta`, integration_read_source_configs is never touched, and no γ objectKey value can
+  // reach coverage, the public summary, or the private artefact (see shouldWritePrivateArtifact /
+  // buildPrivateArtifactContent, both driven off this same `coverage`).
+  const plan = buildPlan(schema, { probe })
+  const coverage = await executePlan(exec, plan)
+
+  const publicKindSummary = buildPublicKindSummary(coverage.kindInventory)
+  const publicObjectKeySummary = buildPublicObjectKeySummary(coverage.objectKeyInventory)
+
+  const kindVerdict = coverage.kindInventory.status === 'not_run' ? null : computeKindVerdict(publicKindSummary)
+  const objectKeyVerdict = coverage.objectKeyInventory.status === 'not_run' ? null : computeObjectKeyVerdict(publicObjectKeySummary)
+
+  let privateArtifact = { status: 'not_attempted' }
+  if (!noPrivateOut) {
+    const owed = shouldWritePrivateArtifact(coverage)
+    const targetPath = privateOutPath || defaultPrivateOutputPath(repoRoot, generatedAt)
+    try {
+      const content = buildPrivateArtifactContent(coverage, { generatedAt })
+      writePrivateArtifact(targetPath, content)
+      privateArtifact = { status: 'written', path: path.relative(repoRoot, targetPath) }
+    } catch (err) {
+      if (owed) {
+        // Fail closed: raw detail existed and needed a home; the write failed. The error itself
+        // must stay values-free — never interpolate the raw content, only the path attempted.
+        throw new Error(
+          `gip-authority-substrate-inventory: unregistered kind/objectKey values exist but the private artefact could not be written (target: ${path.relative(repoRoot, targetPath)}): ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+      // Nothing was owed (every observed value already matches the known registry, or there was
+      // nothing to observe) — a write failure here is a filesystem nuisance, not a lost decision
+      // input. Report it, do not fail the run.
+      privateArtifact = { status: 'write_failed_but_nothing_owed', path: path.relative(repoRoot, targetPath), reason: err instanceof Error ? err.message : String(err) }
+    }
+  } else {
+    privateArtifact = { status: 'skipped_by_flag' }
+  }
+
+  return {
+    generatedAt,
+    mode: 'report',
+    probe,
+    coverage: {
+      connectorKindInventory: {
+        covers:
+          "distinct integration_external_systems.kind strings and their row counts — the raw material for decision (β)'s explicit alias map and migration list. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+        blindSpot:
+          'DB rows only, in the ONE connected database, at the moment queried. Says nothing about kinds referenced only in code/fixtures, or about a different deployment/database this run was not pointed at.',
+        ...publicKindSummary,
+      },
+      canonicalObjectKeyInventory: {
+        covers:
+          "distinct integration_read_source_configs.object values (the ledger's `objectKey` tuple term) referenced by configs, split by status — the raw material for decision (γ)'s missing-reference and backfill lists. The count queries are UNSCOPED: every tenant and workspace visible in the connected database, not one tenant.",
+        blindSpot:
+          "DB rows only, in the ONE connected database. A canonical object referenced by a still-in-development (never-saved) config, or by a config in a DIFFERENT database this run was not pointed at, is invisible here.",
+        ...publicObjectKeySummary,
+      },
+    },
+    verdicts: {
+      connectorKind: kindVerdict,
+      canonicalObjectKey: objectKeyVerdict,
+    },
+    residualNotes: RESIDUAL_NOTES,
+    privateArtifact,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dry-run / plan mode
+// ---------------------------------------------------------------------------
+
+async function buildDryRunReport({ exec, repoRoot = REPO_ROOT } = {}) {
+  if (!exec) {
+    return {
+      generatedAt: new Date().toISOString(),
+      mode: 'dry-run-static',
+      note: 'No query executor / DATABASE_URL supplied — schema was not probed. This lists every allowlisted query; see buildPlan() in the script source for exact resolution rules.',
+      allowlist: Object.fromEntries(Object.entries(QUERY_ALLOWLIST).map(([tag, e]) => [tag, { describe: e.describe, sql: e.sql }])),
+      knownRegistrySizes: {
+        connectorKind: KNOWN_CERTIFIED_CONNECTOR_KINDS.length,
+        canonicalObjectKey: KNOWN_CANONICAL_OBJECT_KEYS.length,
+      },
+      residualNotes: RESIDUAL_NOTES,
+    }
+  }
+  const schema = await probeSchema(exec)
+  const plan = buildPlan(schema)
+  return {
+    generatedAt: new Date().toISOString(),
+    mode: 'dry-run',
+    note: 'Schema WAS probed (read-only information_schema queries). No aggregate/count query below was executed — this is exactly what report mode would run next.',
+    schema,
+    plan,
+    knownRegistrySizes: {
+      connectorKind: KNOWN_CERTIFIED_CONNECTOR_KINDS.length,
+      canonicalObjectKey: KNOWN_CANONICAL_OBJECT_KEYS.length,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function renderHumanSummary(report) {
+  const lines = []
+  lines.push(`gip-authority-substrate-inventory — mode=${report.mode} probe=${report.probe ?? '(n/a)'} generatedAt=${report.generatedAt}`)
+  if (report.mode !== 'report') {
+    lines.push(report.note)
+    return lines.join('\n') + '\n'
+  }
+  const ck = report.coverage.connectorKindInventory
+  const ok = report.coverage.canonicalObjectKeyInventory
+  lines.push('')
+  lines.push('(β) connector-kind inventory:')
+  if (ck.status === 'ok') {
+    lines.push(`  all-statuses:  ${ck.allStatuses.status}${ck.allStatuses.status === 'ok' ? ` distinct=${ck.allStatuses.distinctCount} registered=${ck.allStatuses.registeredDistinctCount} unregistered=${ck.allStatuses.unregisteredDistinctCount}` : ` (${ck.allStatuses.reason})`}`)
+    lines.push(`  active-only:   ${ck.activeOnly.status}${ck.activeOnly.status === 'ok' ? ` distinct=${ck.activeOnly.distinctCount} registered=${ck.activeOnly.registeredDistinctCount} unregistered=${ck.activeOnly.unregisteredDistinctCount}` : ` (${ck.activeOnly.reason})`}`)
+  } else if (ck.status !== 'not_run') {
+    lines.push(`  UNAVAILABLE (${ck.reason})`)
+  } else {
+    lines.push('  not run (--probe gamma)')
+  }
+  if (report.verdicts.connectorKind) {
+    lines.push(`  verdict: ${report.verdicts.connectorKind.verdict}`)
+  }
+  lines.push('')
+  lines.push('(γ) canonical-objectKey inventory (integration_read_source_configs.object):')
+  if (ok.status === 'ok') {
+    for (const key of ['draft', 'approved', 'retired', 'unexpected']) {
+      const s = ok.byStatus[key]
+      lines.push(`  ${key.padEnd(10)}: distinct=${s.distinctCount} registered=${s.registeredDistinctCount} unregistered=${s.unregisteredDistinctCount}`)
+    }
+    lines.push(`  object vs config->>'object' divergence: ${ok.objectVsConfigObjectDivergence.status}${ok.objectVsConfigObjectDivergence.status === 'ok' ? ` count=${ok.objectVsConfigObjectDivergence.count}` : ` (${ok.objectVsConfigObjectDivergence.reason})`}`)
+  } else if (ok.status !== 'not_run') {
+    lines.push(`  UNAVAILABLE (${ok.reason})`)
+  } else {
+    lines.push('  not run (--probe beta)')
+  }
+  if (report.verdicts.canonicalObjectKey) {
+    lines.push(`  verdict: ${report.verdicts.canonicalObjectKey.verdict}`)
+  }
+  lines.push('')
+  lines.push(`private artefact: ${report.privateArtifact.status}${report.privateArtifact.path ? ` (${report.privateArtifact.path})` : ''}`)
+  lines.push('')
+  lines.push('residual notes:')
+  for (const n of report.residualNotes) lines.push(`  - [${n.id}] ${n.description}`)
+  return lines.join('\n') + '\n'
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const opts = { dryRun: false, json: false, help: false, probe: 'both', privateOutPath: undefined, noPrivateOut: false }
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]
+    switch (a) {
+      case '--dry-run':
+      case '--plan':
+        opts.dryRun = true
+        break
+      case '--probe': {
+        const next = argv[++i]
+        if (!['beta', 'gamma', 'both'].includes(next)) {
+          throw new Error(`--probe must be one of beta|gamma|both, got: ${next}`)
+        }
+        opts.probe = next
+        break
+      }
+      case '--private-out':
+        opts.privateOutPath = argv[++i]
+        if (!opts.privateOutPath) throw new Error('--private-out requires a path argument')
+        break
+      case '--no-private-out':
+        opts.noPrivateOut = true
+        break
+      case '--json':
+        opts.json = true
+        break
+      case '--help':
+      case '-h':
+        opts.help = true
+        break
+      default:
+        throw new Error(`unknown argument: ${a}`)
+    }
+  }
+  if (opts.privateOutPath && opts.noPrivateOut) {
+    throw new Error('--private-out and --no-private-out are mutually exclusive')
+  }
+  return opts
+}
+
+function printHelp() {
+  process.stdout.write(
+    [
+      'gip-authority-substrate-inventory.mjs — two values-free, schema-probing inventory probes:',
+      '  (β) integration_external_systems.kind distinct-value inventory',
+      "  (γ) integration_read_source_configs.object (the ledger's objectKey) distinct-value inventory",
+      '',
+      'Usage:',
+      '  DATABASE_URL=postgres://… node scripts/ops/gip-authority-substrate-inventory.mjs \\',
+      '    [--probe beta|gamma|both] [--private-out <path> | --no-private-out] [--json]',
+      '  node scripts/ops/gip-authority-substrate-inventory.mjs --dry-run',
+      '',
+      'Options:',
+      '  --probe beta|gamma|both   Which probe(s) to run. Default both.',
+      '  --private-out <path>      Where to write the RAW-VALUE private artefact. Default:',
+      `                            ${DEFAULT_PRIVATE_OUTPUT_DIR}/gip-authority-inventory-<timestamp>.json (gitignored).`,
+      '  --no-private-out          Skip writing the private artefact entirely (aggregate-only run).',
+      '  --dry-run, --plan         Print the query plan without executing counts.',
+      '  --json                    Print only the machine-readable JSON report.',
+      '  --help                    Show this help.',
+      '',
+      'This script never connects to a customer deployment on its own — DATABASE_URL is supplied by',
+      'the operator, and running it against one is a separate ops read-only authorization.',
+      '',
+    ].join('\n'),
+  )
+}
+
+async function createPgExecutor(databaseUrl) {
+  // Lazy import: `pg` must never be required at module load, or a hermetic `node --test` CI job
+  // with no `node_modules` fails at import time before a single test runs.
+  const { default: pg } = await import('pg')
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 2 })
+  return {
+    exec: (sql, params) => pool.query(sql, params),
+    close: () => pool.end(),
+  }
+}
+
+async function main(argv = process.argv.slice(2), env = process.env) {
+  let opts
+  try {
+    opts = parseArgs(argv)
+  } catch (err) {
+    process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${err.message}\n`)
+    return 1
+  }
+  if (opts.help) {
+    printHelp()
+    return 0
+  }
+
+  const databaseUrl = (env.DATABASE_URL || '').trim()
+
+  if (opts.dryRun) {
+    let executor = null
+    try {
+      if (databaseUrl) executor = await createPgExecutor(databaseUrl)
+      const report = await buildDryRunReport({ exec: executor ? executor.exec : null })
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+      } else {
+        process.stdout.write(renderHumanSummary(report))
+        process.stdout.write('\n' + JSON.stringify(report, null, 2) + '\n')
+      }
+      return 0
+    } catch (err) {
+      process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    } finally {
+      if (executor) await executor.close()
+    }
+  }
+
+  if (!databaseUrl) {
+    process.stderr.write('[gip-authority-substrate-inventory] ERROR: DATABASE_URL is required outside --dry-run\n')
+    return 2
+  }
+
+  let executor
+  try {
+    executor = await createPgExecutor(databaseUrl)
+    const report = await buildReport({
+      exec: executor.exec,
+      probe: opts.probe,
+      privateOutPath: opts.privateOutPath ? path.resolve(process.cwd(), opts.privateOutPath) : undefined,
+      noPrivateOut: opts.noPrivateOut,
+    })
+    if (opts.json) {
+      process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+    } else {
+      process.stdout.write(renderHumanSummary(report))
+      process.stdout.write('\n' + JSON.stringify(report, null, 2) + '\n')
+    }
+    return 0
+  } catch (err) {
+    process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  } finally {
+    if (executor) await executor.close()
+  }
+}
+
+const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : null
+const isEntry = entryPath && entryPath === fileURLToPath(import.meta.url)
+if (isEntry) {
+  main().then((code) => {
+    process.exitCode = code
+  })
+}
+
+export {
+  QUERY_ALLOWLIST,
+  KNOWN_CERTIFIED_CONNECTOR_KINDS,
+  KNOWN_CANONICAL_OBJECT_KEYS,
+  EXTERNAL_SYSTEM_STATUSES,
+  READ_SOURCE_CONFIG_STATUSES,
+  assertReadOnlyAllowlist,
+  runQuery,
+  tableExists,
+  probeColumns,
+  probeSchema,
+  tableSpecsForProbe,
+  buildPlan,
+  bucketByRegistry,
+  splitRowsByStatus,
+  executePlan,
+  buildPublicKindSummary,
+  buildPublicObjectKeySummary,
+  computeKindVerdict,
+  computeObjectKeyVerdict,
+  RESIDUAL_NOTES,
+  shouldWritePrivateArtifact,
+  buildPrivateArtifactContent,
+  defaultPrivateOutputPath,
+  buildReport,
+  buildDryRunReport,
+  renderHumanSummary,
+  parseArgs,
+  main,
+  REPO_ROOT,
+  DEFAULT_PRIVATE_OUTPUT_DIR,
+}

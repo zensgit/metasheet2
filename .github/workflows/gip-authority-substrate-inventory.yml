@@ -1,0 +1,47 @@
+name: GIP Authority-Substrate Inventory (β/γ probes)
+
+# Hermetic contract test for the two read-only, values-free inventory probes that feed decisions
+# (β) connector-kind registry and (γ) canonical object contract registry — see
+# docs/development/database-system-integration-line-design-and-verification-20260724.md §4.0.
+# No database: the script's tests inject a fake query executor (see
+# scripts/ops/gip-authority-substrate-inventory.test.mjs). Follows the same shape as the
+# `contract` job in multitable-permission-lists-postdeploy-smoke.yml / the sibling
+# data-source-exposure-inventory.yml pattern: checkout + setup-node only, `node --test` directly.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gip-authority-substrate-inventory.yml'
+      - 'scripts/ops/gip-authority-substrate-inventory.mjs'
+      - 'scripts/ops/gip-authority-substrate-inventory.test.mjs'
+      # The schema-drift guard test reads these migrations directly off disk and asserts the
+      # kind/status/object column facts this script depends on — listed here so a PR that drifts
+      # either migration re-runs this check, instead of a later, unrelated PR going red.
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
+      - 'packages/core-backend/migrations/062_create_integration_read_source_configs.sql'
+      - '.gitignore'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gip-authority-substrate-inventory.yml'
+      - 'scripts/ops/gip-authority-substrate-inventory.mjs'
+      - 'scripts/ops/gip-authority-substrate-inventory.test.mjs'
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
+      - 'packages/core-backend/migrations/062_create_integration_read_source_configs.sql'
+      - '.gitignore'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: authority-substrate inventory contract (values-free, schema-probe-first)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic inventory tests (fake executor, no DB)
+        run: node --test scripts/ops/gip-authority-substrate-inventory.test.mjs
