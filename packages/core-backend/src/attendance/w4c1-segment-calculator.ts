@@ -837,18 +837,15 @@ export function calculateAttendanceSegmentsV1(
     facts.supersededEvidenceRefs.has(item.ref),
   )
 
-  // 7. Every effective timed evidence item must lie inside the frozen
-  // attribution window (lock 5.3; OD-W4C-18). It is retained in the immutable
-  // snapshot by the caller; here the whole calculation becomes review.
-  for (const item of effective) {
-    if (item.occurredAtMs < windows.attribution.s || item.occurredAtMs > windows.attribution.e) {
-      return review('evidence_outside_attribution_window')
-    }
-  }
-
-  // 8. Directional matching. The calculator NEVER collapses duplicates to
-  // earliest/latest (W4C-R2): a second candidate in one directional cell is
-  // review; duplicates in both directions escalate to ambiguous.
+  // 7./8. Window containment plus directional matching in ONE door (lock 5.3;
+  // OD-W4C-18): every effective timed evidence item must lie inside the frozen
+  // attribution window and match exactly one directional cell — the cells are
+  // clipped to that window, so a null cell match IS the out-of-window review.
+  // The item is retained in the immutable snapshot by the caller; here the
+  // whole calculation becomes review and never extends the work span. The
+  // calculator NEVER collapses duplicates to earliest/latest (W4C-R2): a
+  // second candidate in one directional cell is review; duplicates in both
+  // directions escalate to ambiguous.
   const inCells = buildDirectionCells(starts, windows.attribution)
   const outCells = buildDirectionCells(ends, windows.attribution)
   const inMatches = new Map<number, TimedEvidenceMs[]>()

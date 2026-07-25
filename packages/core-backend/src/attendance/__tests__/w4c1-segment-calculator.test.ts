@@ -531,6 +531,22 @@ describe('calculateAttendanceSegmentsV1 — statuses, aggregation, rounding, tie
       absence_late_count: 0,
     })
 
+    const betweenFrozenAndLegacyDefault = run({
+      evidence: [
+        punch('ev-in-1', 'check_in', sh('10:20')),
+        punch('ev-out-1', 'check_out', sh('12:01')),
+        ...seg1Normal,
+      ],
+    })
+    // Late 75: below the FROZEN absence threshold 90 (a legacy-default 60
+    // reread would wrongly count an absence-tier day).
+    expect(betweenFrozenAndLegacyDefault.dailyProjection?.lateMinutes).toBe(75)
+    expect(betweenFrozenAndLegacyDefault.dailyProjection?.meta).toEqual({
+      severe_late_count: 1,
+      severe_late_minutes: 75,
+      absence_late_count: 0,
+    })
+
     const absenceTier = run({
       evidence: [
         punch('ev-in-1', 'check_in', sh('10:40')),
