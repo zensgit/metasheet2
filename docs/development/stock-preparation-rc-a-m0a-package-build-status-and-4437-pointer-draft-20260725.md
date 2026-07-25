@@ -38,7 +38,8 @@ run's own `SHA256SUMS` output. §3 gives the retraction, the A1 record, and the 
 inside the multitable on-prem platform bundle, so "the complete on-prem deployment package" for RC-A is the
 **Multitable On-Prem Package Build** workflow:
 `.github/workflows/multitable-onprem-package-build.yml` → `scripts/ops/multitable-onprem-package-build.sh`
-(packaging) → `scripts/ops/multitable-onprem-package-verify.sh` (loopback/structural verification).
+(packaging) → `scripts/ops/multitable-onprem-package-verify.sh` (structural verification — four checks, see
+§2.4/§3.1; the ledger's "loopback verification" phrasing is escalated, not confirmed, in §6).
 
 Evidence this — not `scripts/ops/build-stock-preparation-rca-window-sidecar.mjs` — is the real RC-A package
 builder:
@@ -65,10 +66,12 @@ git rev-parse stock-prep-onprem-rc-a-20260717-d87e086fd   # d87e086fd1218b4cfb15
 git merge-base --is-ancestor 7bf2bd7a1 stock-prep-onprem-rc-a-20260717-d87e086fd   # NOT an ancestor
 git merge-base --is-ancestor stock-prep-onprem-rc-a-20260717-d87e086fd 7bf2bd7a1   # IS an ancestor
 git merge-base --is-ancestor 7bf2bd7a1 origin/main                                  # IS an ancestor
-git rev-list --count 7bf2bd7a1..origin/main                                         # 11
+git rev-list --count 7bf2bd7a1..origin/main                                         # 11 at original draft time
 ```
 Confirms the ledger's framing: `d87e086fd` (frozen RC-A) < `7bf2bd7a1` (`bridge.bounded_read.v2`, #4573) <
-current `origin/main` (`402f04982`).
+main tip at original draft time (`402f04982`). **Both the count and the tip named here are draft-time
+snapshots, not live values — see §2.2's drift note: as of this fix pass, `origin/main` tip is `b5ff168e9`
+and the count is 12. The ancestry claims themselves (predates/reachable) do not change with main's tip.**
 
 ### 2.2 The recommended build SHA `7bf2bd7a1` keeps the change surface small — verified, not assumed
 ```
@@ -257,6 +260,28 @@ Downloaded the real artifact read-only (`gh run download 30148584851`) — not h
   ```
   Four checks, all PASS. No `loopback`-named check ran (see §6 — this is a ledger-vs-tooling spec gap, not an
   A1 defect).
+- **External sidecar manifest** (`metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.json`, read in full,
+  not excerpted):
+  ```json
+  { "name": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725", "version": "2.5.0", "tag": "m0a-rca-20260725",
+    "artifactKind": "deployable-onprem-app-package", "deployMode": "fresh-extract-or-existing-root-apply",
+    "directReplaceSafe": false, "nodeModulesBundled": false, "pnpmVersion": "9.15.9",
+    "dependencyPreflight": "staging-full-install-before-live-overlay", "dependencyFailureRollback": true,
+    "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
+    "windowsFirstHopBootstrap": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725-deploy-bootstrap.ps1",
+    "windowsFirstHopBootstrapWrapper": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725-deploy-bootstrap.bat",
+    "windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT", "windowsDefaultStagingRoot": "C:\\ms-tmp",
+    "attendanceOnly": false, "productMode": "platform",
+    "includedPlugins": ["plugin-attendance", "plugin-integration-core"],
+    "archive": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz",
+    "archiveZip": "metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.zip", "checksumFile": "SHA256SUMS",
+    "generatedAt": "2026-07-25T07:04:41Z", "gitSha": "7bf2bd7a1f8cdf54cca83a733fcd89afb076848b" }
+  ```
+  `productMode: "platform"` + `includedPlugins: [plugin-attendance, plugin-integration-core]` is the A1-side
+  confirmation, now at `7bf2bd7a1` (not just at the frozen `d87e086fd`, §1), that this is the platform+plugin
+  bundle ⟲R7 means by "the package" — not the sidecar. `gitSha` here (the external, workflow-appended field)
+  also matches `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, but per §2.4's `-ExpectedGitSha` note this field is
+  informational only — the trust anchor is the in-archive `BUILD_PROVENANCE.json.gitCommit` above.
 
 **Two constraints the "done" framing must carry, or it misleads:**
 
