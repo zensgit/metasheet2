@@ -384,6 +384,9 @@ async function resolveOperatorLocalUser(
             COALESCE(u.name, u.id) AS local_user_name,
             u.is_active AS local_user_active
        FROM directory_accounts a
+       JOIN directory_integrations i
+         ON i.id = a.integration_id
+        AND i.provider = 'dingtalk'
        JOIN directory_account_links l
          ON l.directory_account_id = a.id
         AND l.link_status = 'linked'
@@ -392,7 +395,9 @@ async function resolveOperatorLocalUser(
       WHERE a.provider = 'dingtalk'
         AND a.external_user_id = $1
         AND a.is_active = TRUE
-        AND a.integration_id = $2::uuid`,
+        AND a.integration_id = $2::uuid
+        AND NULLIF(BTRIM(a.corp_id), '') IS NOT NULL
+        AND NULLIF(BTRIM(a.corp_id), '') = NULLIF(BTRIM(i.corp_id), '')`,
     [operatorDingTalkUserId, integrationId],
   )
   const rows = result.rows as Array<{ local_user_id: string; local_user_name: string | null; local_user_active: boolean }>

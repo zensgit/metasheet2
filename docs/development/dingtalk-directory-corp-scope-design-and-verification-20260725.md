@@ -1,6 +1,6 @@
 # DingTalk directory corp-scope design and verification
 
-Status: REVIEW-READY
+Status: PHASE-A REVIEW-READY / PHASE-B REQUIRED
 
 Date: 2026-07-25
 
@@ -10,128 +10,138 @@ Deployment: not performed
 
 ## 1. Problem
 
-`directory_accounts.external_key` stores the provider value (`unionId || openId || userId`).
-That value can be equal in two DingTalk enterprises. The old unique index covered only
-`(provider, external_key)`, so the second enterprise's account insert aborted the whole sync
-transaction.
+`directory_accounts.external_key` stores a provider value such as `unionId`. The same value may
+appear in more than one DingTalk enterprise. The legacy database contract is globally unique on
+`(provider, external_key)`, while older workers also matched raw external identities without
+including the enterprise.
 
-The matching layer had a second, independent issue: openId and unionId maps were corp-scoped,
-but the raw `external_key` fallback was not. Relaxing only the database index would therefore
-replace a visible sync failure with a possible cross-enterprise auto-link.
+Relaxing the index and changing the matcher in one deployment is unsafe: a still-running old
+worker can observe the newly admitted cross-corp duplicate and link it to the wrong local user.
+The fix is therefore an expand/contract sequence, not one combined migration.
 
-The manual bind path exposed a third leg: a corp-scoped directory account with only a unionId
-still generated a raw `user_external_identities.external_key`. A corp-A legacy identity could
-therefore block a legitimate corp-B bind before the scoped unionId comparison ran.
+Independent review also found three legacy-data hazards:
 
-## 2. Locked invariants
+1. an integration with an empty corp could be changed through the generic update path without
+   atomically retagging child accounts;
+2. approval-card operator resolution pinned the integration but did not verify that the linked
+   account corp still matched its parent integration;
+3. duplicate same-corp unionId/openId identity rows were loaded with last-row-wins semantics.
 
-1. Account-key uniqueness is `(provider, corp_id, external_key)`.
-2. Two NULL-corp legacy rows still treat NULL as one scope and cannot duplicate a key.
-3. The stored provider value remains raw; `corp_id` is the separate scope column.
-4. Raw external-key matching requires equal normalized corp scope.
-5. openId and unionId matching remain corp-scoped.
-6. Apply and preview use the same scoped map semantics.
-7. Same-corp and both-NULL legacy matching remain supported.
-8. A corp-scoped bound identity always stores `corpId:(openId || unionId)` while NULL-corp legacy
-   identities retain the raw provider id.
-9. Bind conflict checks and unbind cleanup compare generated, openId, and unionId identities
-   within the same corp.
-10. No runtime flag, automatic sync, deprovision policy, deployment, or production data is
-    changed.
+## 2. Deployment lock
 
-## 3. Migration
+### Phase A: matcher and callback hardening
 
-Migration:
-`zzzz20260725120000_scope_directory_account_external_key_by_corp`
+Phase A keeps the legacy global account-key index unchanged. It must be merged, deployed, and
+present on every worker before Phase B is eligible to deploy.
 
-`up()` creates two PostgreSQL 14-compatible partial unique indexes before dropping the legacy
-index:
+Locked behavior:
 
-- `idx_directory_accounts_provider_corp_external_key` guards non-NULL corp rows on
-  `(provider, corp_id, external_key)`;
-- `idx_directory_accounts_provider_null_corp_external_key` guards NULL-corp legacy rows on
-  `(provider, external_key)`.
+1. raw external key, unionId, and openId matching use an injective normalized tuple key;
+2. duplicate same-scope identities resolve as ambiguous and never auto-link;
+3. apply, same-batch admission, preview, and admin-review matching share the same semantics;
+4. bind and unbind compare normalized corp scope, treating NULL/blank/whitespace as one legacy
+   scope;
+5. sync refreshes an existing account corp from its immutable parent integration;
+6. the generic integration update cannot set, clear, or change corp, including an empty legacy
+   value;
+7. approval callbacks require a nonblank account corp equal to the pinned integration corp;
+8. no deployment, automatic sync, deprovision, flag, or user-creation behavior changes.
 
-Together they preserve NULL-as-one-scope behavior without relying on PostgreSQL 15
-`NULLS NOT DISTINCT`. Existing data satisfying global uniqueness necessarily satisfies both
-replacement indexes.
+### Phase B: schema expansion
 
-`down()` recreates the legacy global index before removing either scoped index. Once legitimate
-cross-corp duplicates exist, downgrade fails loudly and leaves both scoped protections in place.
-It never silently deletes or rewrites directory data.
+Phase B is a separate stacked PR and deployment. It may merge only after Phase A review, and it
+may deploy only after Phase A is deployed and all pre-Phase-A workers have drained.
 
-## 4. Matching changes
+Its required contract is:
 
-The directory matching map now keys raw identities with the same corp-scoped key builder already
-used by openId and unionId. The change is applied at all matching state transitions:
+1. canonicalize/backfill child account corp from the authoritative parent integration;
+2. fail closed when a child has no nonblank authoritative parent corp;
+3. enforce canonical corp shape on directory accounts and external identities;
+4. add corp-scoped account and unionId/openId uniqueness before removing the legacy account
+   protection;
+5. structurally verify every pre-existing named index rather than trusting `IF NOT EXISTS`;
+6. retain protection on incompatible rollback;
+7. prove upgrade, replay, compatible down, incompatible down, drifted-index refusal, and
+   PostgreSQL 14 compatibility against a real database.
 
-- initial identity-map load;
-- real sync matching;
-- same-batch auto-admission map updates;
-- preview sentinel map updates;
-- admin review recommendation conflict checks.
+## 3. Phase A implementation
 
-The last item also requires corp equality before either the generated external key or the legacy
-raw fallback can match.
+The in-memory scope key is `JSON.stringify([normalizedCorpId || null, normalizedProviderId])`.
+Delimiter concatenation is not injective because `('a:b', 'c')` and `('a', 'b:c')` collide.
 
-The bind path now follows the same composite-key contract already used by web OAuth: when a corp
-is present, the identity key is `corpId:(openId || unionId)`. This keeps the existing global
-identity-key index collision-free across enterprises without weakening its uniqueness. The
-conflict query still checks provider unionId/openId within corp, and unbind checks all three
-corp-scoped representations so legacy raw rows remain removable.
+Each identity map has a corresponding ambiguity set. A second different local user claiming the
+same scoped external key, unionId, or openId removes the key from the unique map and marks it
+ambiguous. Resolution checks ambiguity before any match.
 
-## 5. RED-before and verification
+The sync upsert sets `corp_id = EXCLUDED.corp_id`, repairing historical child drift from the
+already-immutable integration config. Generic integration editing remains fail closed; it is not
+a repair transaction and cannot safely coordinate with a concurrent sync.
 
-Before the product change, the revised real-DB suite produced four discriminating failures:
+The approval-card callback joins the pinned `directory_integrations` row and requires:
 
-| Probe | Old result |
-| --- | --- |
-| Equal key inserted under two corp scopes | old global unique index rejected corp B |
-| Two real syncs with equal unionId | corp B sync transaction rolled back |
-| Corp-B account versus corp-A raw identity | account was linked to corp-A local user |
-| Corp-B manual bind versus corp-A legacy raw identity | bind was rejected as already bound |
+```text
+normalized(account.corp_id) is nonblank
+and normalized(account.corp_id) = normalized(integration.corp_id)
+```
 
-Positive controls stayed green: distinct keys coexisted and a same-corp raw identity linked.
+A drifted linked account therefore resolves as unlinked and cannot approve.
 
-After the fix:
+## 4. Verification ledger
 
-- real-DB directory cluster: 34/34; extended with the bind/unbind membership lifecycle: 43/43;
-- related directory/auth unit cluster: 50/50;
-- full backend unit suite: 542 files, 7458/7458;
-- real-DB CI wiring and values-free contracts: 82/82;
+Phase A must retain these discriminating controls:
+
+| Guard | Negative control | Positive control |
+| --- | --- | --- |
+| raw identity corp scope | corp-B account never links corp-A raw identity | same-corp raw identity links |
+| injective tuple key | delimiter-containing corp/provider pair does not collide | equal normalized tuple matches |
+| duplicate identity ambiguity | two local users with one same-corp unionId produce no link | one identity links |
+| child corp repair | blank account corp becomes parent integration corp on sync | ordinary sync still completes |
+| immutable tenant | empty/set, set/change, and set/clear generic edits reject | same-corp resend succeeds |
+| callback corp pin | drifted linked account cannot act | same-corp linked account acts |
+| bind/unbind scope | corp-A legacy identity does not block or get deleted by corp B | same-corp lifecycle succeeds |
+
+Local exact-worktree verification:
+
+- focused unit suites: 33/33;
+- focused real-PostgreSQL 15 suites: 47/47;
+- required real-DB wiring and values-free contracts: 82/82;
 - TypeScript: `tsc --noEmit` clean;
-- migration upgrade/replay, NULL-scope uniqueness, and data-incompatible downgrade protection pass;
-- `git diff --check` passes.
+- `git diff --check` clean.
 
-Discriminating mutations:
+Six discriminating mutations were killed:
 
-1. Restoring raw unscoped matching reds both the real-sync cross-corp test and the review-helper
-   cross-corp test.
-2. Restoring global `(provider, external_key)` uniqueness reds the upgrade coexistence and
-   downgrade-safety tests.
-3. Restoring raw unionId identity keys for corp-scoped binds, or removing the corp predicate
-   from the legacy raw-key bind conflict, independently reds the cross-corp bind test.
+1. neutering duplicate-provider-identity ambiguity changed `ambiguous` to `none`;
+2. restoring delimiter concatenation made two different corp/provider tuples match;
+3. removing callback account/integration corp equality let a drifted account approve;
+4. removing sync-time corp refresh left the historical account corp blank;
+5. reopening empty-to-set generic integration edits completed the forbidden update;
+6. removing normalized corp comparison let a whitespace-drifted same-corp identity bind a second
+   local user.
 
-## 6. Deliberate non-goals
+Required CI is a separate head-scoped gate and is not claimed here until the pushed Phase A head
+settles.
 
-- No staging or production deployment.
-- No flag enablement.
-- No automatic directory sync or deprovision enablement.
-- No creation of a new MetaSheet user.
-- No change to the separate policy that currently prevents one local user from holding multiple
-  linked DingTalk directory accounts. If UAT requires simultaneous old-corp and new-corp links for
-  one local user, that policy needs an owner decision and a separate design/test slice.
-- No rewrite of historical two-corp gate documents; they remain evidence of the old failure.
+## 5. Non-goals and owner gates
 
-## 7. Post-merge UAT gate
+- Phase A does not allow equal account keys across enterprises; Phase B owns that schema change.
+- Neither phase is a staging or production deployment authorization.
+- Automatic directory sync and deprovision remain disabled.
+- No new MetaSheet user is created.
+- The separate policy limiting one local user to one linked DingTalk account is unchanged.
+- The persisted DingTalk identity external-key encoding remains compatible with existing OAuth
+  rows. The in-memory wrong-match collision is fixed here; any future persisted-key version is a
+  separate compatibility migration.
+- Staging UAT and runtime enablement remain owner gates.
 
-After review, merge, and an explicitly authorized staging deployment:
+## 6. Required order
 
-1. apply the migration and verify the new index exists;
-2. run one manual sync for the target integration;
-3. verify the sync commits its departments and accounts without enabling schedules or deprovision;
-4. bind the target account to the existing MetaSheet user through the approved admin path;
-5. send a fresh approval card and verify its callback resolves within the same corp;
-6. keep all unrelated runtime flags unchanged.
+1. review and merge Phase A;
+2. deploy Phase A with no flag changes;
+3. prove all old workers drained;
+4. review and merge Phase B;
+5. deploy Phase B in a controlled migration window;
+6. run the post-fix two-corp staging UAT;
+7. bind only the explicitly authorized DingTalk account to the existing MetaSheet user;
+8. verify a fresh approval-card callback stays within the same corp.
 
-The code and database proof in this PR do not substitute for that staging UAT.
+The Phase A code and database tests do not substitute for steps 2-8.

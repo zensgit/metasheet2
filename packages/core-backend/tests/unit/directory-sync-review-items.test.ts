@@ -14,6 +14,7 @@ import {
   __directorySyncInternalsForTests,
   getDirectoryReviewItem,
   listDirectoryReviewItems,
+  resolveDirectoryIdentityMatch,
 } from '../../src/directory/directory-sync'
 
 const { doesExternalIdentityMatchAccount } = __directorySyncInternalsForTests
@@ -59,6 +60,48 @@ describe('directory review identity corp scope', () => {
       external_key: 'legacy-key',
       union_id: 'legacy-key',
     })).toBe(true)
+  })
+
+  it('does not collide delimiter-containing corp and provider ids', () => {
+    expect(doesExternalIdentityMatchAccount({
+      local_user_id: 'user-a',
+      external_key: 'unrelated',
+      provider_union_id: null,
+      provider_open_id: 'c',
+      corp_id: 'a:b',
+    }, {
+      corp_id: 'a',
+      external_key: 'unrelated',
+      open_id: 'b:c',
+      union_id: null,
+    })).toBe(false)
+  })
+
+  it('returns ambiguous before matching a duplicate corp-scoped provider identity', () => {
+    const ambiguousUnionKey = JSON.stringify(['corp-a', 'duplicate-union'])
+    expect(resolveDirectoryIdentityMatch(
+      {
+        corpId: 'corp-a',
+        externalKey: 'duplicate-union',
+        unionId: 'duplicate-union',
+        openId: null,
+        email: null,
+        mobile: null,
+      },
+      null,
+      {
+        scopedExternalIdentityMap: new Map(),
+        scopedUnionIdentityMap: new Map(),
+        scopedOpenIdentityMap: new Map(),
+        ambiguousScopedExternalIdentityKeys: new Set(),
+        ambiguousScopedUnionIdentityKeys: new Set([ambiguousUnionKey]),
+        ambiguousScopedOpenIdentityKeys: new Set(),
+        emailMap: new Map(),
+        mobileMap: new Map(),
+        ambiguousEmailKeys: new Set(),
+        ambiguousMobileKeys: new Set(),
+      },
+    )).toEqual({ matched: 'ambiguous' })
   })
 })
 

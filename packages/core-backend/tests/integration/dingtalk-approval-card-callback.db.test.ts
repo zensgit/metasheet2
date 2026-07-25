@@ -52,6 +52,7 @@ const DD_INACTIVE = `dd_cb_inactive_${TS}` // → INACTIVE user (corp A)
 const DD_GHOST = `dd_cb_ghost_${TS}` // linked nowhere
 const DD_DUP = `dd_cb_dup_${TS}` // corp A → APPROVER, corp B → REQUESTER (ambiguity probe)
 const DD_OP_B = `dd_cb_op_b_${TS}` // → APPROVER (corp B, stored-secret chain)
+const DD_CORP_DRIFT = `dd_cb_corp_drift_${TS}`
 
 const SECRET = `cb-env-secret-${TS}`
 const STORED_SECRET_A = `cb-stored-secret-a-${TS}`
@@ -135,14 +136,20 @@ async function cardState(deliveryId: string): Promise<string> {
   return (result.rows[0] as { card_state: string }).card_state
 }
 
-async function linkAccount(accountId: string, integrationId: string, externalUserId: string, localUserId: string): Promise<void> {
-  // This fixture omits corp_id, so NULL-corp rows retain global uniqueness under the corp-scoped
-  // index. The key is not part of B-3 resolution (external_user_id + integration), hence a suffix.
+async function linkAccount(
+  accountId: string,
+  integrationId: string,
+  externalUserId: string,
+  localUserId: string,
+  corpId = integrationId === INTEGRATION_A ? CORP_A : CORP_B,
+): Promise<void> {
+  // Production operator resolution now requires account corp to agree with its parent integration.
+  // A dedicated negative below overrides this value to prove fail-closed behavior on historical drift.
   await q(
-    `INSERT INTO directory_accounts (id, integration_id, provider, external_user_id, external_key, name, is_active)
-     VALUES ($1, $2, 'dingtalk', $3, $4, 'B3 Callback Fixture', TRUE)
-     ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
-    [accountId, integrationId, externalUserId, `${externalUserId}#${accountId.slice(0, 8)}`],
+    `INSERT INTO directory_accounts (id, integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+     VALUES ($1, $2, 'dingtalk', $3, $4, $5, 'B3 Callback Fixture', TRUE)
+     ON CONFLICT (id) DO UPDATE SET corp_id = EXCLUDED.corp_id, is_active = TRUE`,
+    [accountId, integrationId, corpId, externalUserId, `${externalUserId}#${accountId.slice(0, 8)}`],
   )
   await q(
     `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status)
@@ -158,6 +165,7 @@ const ACCOUNTS = {
   dupA: randomUUID(),
   dupB: randomUUID(),
   opB: randomUUID(),
+  corpDrift: randomUUID(),
 }
 
 describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
@@ -199,6 +207,7 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     await linkAccount(ACCOUNTS.dupA, INTEGRATION_A, DD_DUP, APPROVER)
     await linkAccount(ACCOUNTS.dupB, INTEGRATION_B, DD_DUP, REQUESTER)
     await linkAccount(ACCOUNTS.opB, INTEGRATION_B, DD_OP_B, APPROVER)
+    await linkAccount(ACCOUNTS.corpDrift, INTEGRATION_A, DD_CORP_DRIFT, APPROVER, CORP_B)
 
     approvals = new ApprovalProductService()
     deps.approvals = approvals
@@ -363,6 +372,20 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     const ghost = randomUUID()
     const result = await executeDingTalkApprovalCardCallback(deps, payloadFor(ghost, DD_OP))
     expect(result).toEqual({ outcome: 'delivery_not_found', outTrackId: ghost })
+  })
+
+  test('account/integration corp drift fails closed before a linked operator can act', async () => {
+    const instanceId = await newInstance()
+    const deliveryId = await newSentDelivery(instanceId, INTEGRATION_A)
+
+    const result = await executeDingTalkApprovalCardCallback(
+      deps,
+      payloadFor(deliveryId, DD_CORP_DRIFT, {}, 'approve', CORP_A),
+    )
+
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'unlinked' })
+    expect(await approveRecordCount(instanceId)).toBe(0)
+    expect(await cardState(deliveryId)).toBe('sent')
   })
 
   test('DT-R2 identity pinning: unpinned rows refuse OUTRIGHT (owner gate); the pinned corp resolves cleanly', async () => {

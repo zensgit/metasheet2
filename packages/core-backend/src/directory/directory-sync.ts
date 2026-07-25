@@ -1212,6 +1212,9 @@ export type DirectoryIdentityMatchMaps = {
   scopedExternalIdentityMap: Map<string, string>
   scopedUnionIdentityMap: Map<string, string>
   scopedOpenIdentityMap: Map<string, string>
+  ambiguousScopedExternalIdentityKeys: Set<string>
+  ambiguousScopedUnionIdentityKeys: Set<string>
+  ambiguousScopedOpenIdentityKeys: Set<string>
   emailMap: Map<string, string>
   mobileMap: Map<string, string>
   ambiguousEmailKeys: Set<string>
@@ -1248,6 +1251,16 @@ export function resolveDirectoryIdentityMatch(
   const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
   const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
   const scopedExternalIdentityKey = buildScopedIdentityKey(account.corpId, account.externalKey)
+  const hasAmbiguousExternalIdentity = (
+    (scopedExternalIdentityKey !== null
+      && maps.ambiguousScopedExternalIdentityKeys.has(scopedExternalIdentityKey))
+    || (scopedOpenIdentityKey !== null
+      && maps.ambiguousScopedOpenIdentityKeys.has(scopedOpenIdentityKey))
+    || (scopedUnionIdentityKey !== null
+      && maps.ambiguousScopedUnionIdentityKeys.has(scopedUnionIdentityKey))
+  )
+  if (hasAmbiguousExternalIdentity) return { matched: 'ambiguous' }
+
   const externalIdentityUserId = (scopedExternalIdentityKey
     ? maps.scopedExternalIdentityMap.get(scopedExternalIdentityKey)
     : undefined)
@@ -2028,7 +2041,8 @@ function buildScopedIdentityKey(corpId: string | null | undefined, providerId: s
   const normalizedProviderId = normalizeText(providerId)
   if (!normalizedProviderId) return null
   const normalizedCorpId = normalizeText(corpId)
-  return normalizedCorpId ? `${normalizedCorpId}:${normalizedProviderId}` : `global:${normalizedProviderId}`
+  // Delimiter concatenation is not injective: ('a:b', 'c') and ('a', 'b:c') collide.
+  return JSON.stringify([normalizedCorpId || null, normalizedProviderId])
 }
 
 function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, openId: string | null | undefined, unionId: string | null | undefined): string {
@@ -2102,6 +2116,22 @@ function buildRecommendationStatus(
     code,
     message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
   }
+}
+
+function addScopedIdentityCandidate(
+  uniqueMap: Map<string, string>,
+  ambiguousKeys: Set<string>,
+  key: string | null,
+  localUserId: string,
+): void {
+  if (!key || ambiguousKeys.has(key)) return
+  const existingUserId = uniqueMap.get(key)
+  if (existingUserId && existingUserId !== localUserId) {
+    uniqueMap.delete(key)
+    ambiguousKeys.add(key)
+    return
+  }
+  uniqueMap.set(key, localUserId)
 }
 
 function doesExternalIdentityMatchAccount(
@@ -2672,13 +2702,13 @@ export async function updateDirectoryIntegration(
   // integration; a genuine organization change must go through the org-transfer workflow. There is
   // deliberately NO production escape hatch.
   //
-  // Initial set (current empty → a value) and same-corp resend pass through. `normalized.corpId` cannot
-  // be empty here — normalizeIntegrationInput throws 'corpId is required' earlier — so a "clear" is
-  // already unreachable.
+  // A legacy empty corp cannot be repaired through this generic update either. Existing child
+  // accounts retain their old corp value, and a concurrent first sync can create one after any
+  // pre-update probe. Delete/recreate or use a dedicated transactional repair workflow.
   const currentCorpId = normalizeText(current.corp_id)
-  if (currentCorpId !== '' && normalized.corpId !== currentCorpId) {
+  if (normalized.corpId !== currentCorpId) {
     throw new DirectoryTenantChangeBlockedError(
-      `corp_id is immutable once set on directory integration ${integrationId} (currently "${currentCorpId}", attempted "${normalized.corpId}"): changing it via a generic integration edit would make the next sync mass-deactivate the previous organization's accounts and departments. To correct a mis-entered corp_id before the first sync, delete and recreate the integration; to move to a different organization, use the org-transfer workflow.`,
+      `corp_id is immutable on directory integration ${integrationId}: a generic integration edit cannot set, clear, or change the tenant. Delete and recreate an empty legacy integration, or use the dedicated org-transfer workflow.`,
     )
   }
 
@@ -3302,13 +3332,28 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
   const scopedExternalIdentityMap = new Map<string, string>()
   const scopedUnionIdentityMap = new Map<string, string>()
   const scopedOpenIdentityMap = new Map<string, string>()
+  const ambiguousScopedExternalIdentityKeys = new Set<string>()
+  const ambiguousScopedUnionIdentityKeys = new Set<string>()
+  const ambiguousScopedOpenIdentityKeys = new Set<string>()
   for (const row of externalIdentities.rows) {
-    const externalKey = buildScopedIdentityKey(row.corp_id, row.external_key)
-    if (externalKey) scopedExternalIdentityMap.set(externalKey, row.local_user_id)
-    const unionKey = buildScopedIdentityKey(row.corp_id, row.provider_union_id)
-    if (unionKey) scopedUnionIdentityMap.set(unionKey, row.local_user_id)
-    const openKey = buildScopedIdentityKey(row.corp_id, row.provider_open_id)
-    if (openKey) scopedOpenIdentityMap.set(openKey, row.local_user_id)
+    addScopedIdentityCandidate(
+      scopedExternalIdentityMap,
+      ambiguousScopedExternalIdentityKeys,
+      buildScopedIdentityKey(row.corp_id, row.external_key),
+      row.local_user_id,
+    )
+    addScopedIdentityCandidate(
+      scopedUnionIdentityMap,
+      ambiguousScopedUnionIdentityKeys,
+      buildScopedIdentityKey(row.corp_id, row.provider_union_id),
+      row.local_user_id,
+    )
+    addScopedIdentityCandidate(
+      scopedOpenIdentityMap,
+      ambiguousScopedOpenIdentityKeys,
+      buildScopedIdentityKey(row.corp_id, row.provider_open_id),
+      row.local_user_id,
+    )
   }
 
   const emailMatches = buildUniqueLocalUserMatchMap(
@@ -3324,6 +3369,9 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
     scopedExternalIdentityMap,
     scopedUnionIdentityMap,
     scopedOpenIdentityMap,
+    ambiguousScopedExternalIdentityKeys,
+    ambiguousScopedUnionIdentityKeys,
+    ambiguousScopedOpenIdentityKeys,
     emailMap: emailMatches.uniqueMap,
     mobileMap: mobileMatches.uniqueMap,
     ambiguousEmailKeys: emailMatches.ambiguousKeys,
@@ -3750,6 +3798,7 @@ export async function syncDirectoryIntegration(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, $15::jsonb, $16, NOW(), NOW())
            ON CONFLICT (integration_id, external_user_id)
            DO UPDATE SET
+             corp_id = EXCLUDED.corp_id,
              union_id = EXCLUDED.union_id,
              open_id = EXCLUDED.open_id,
              external_key = EXCLUDED.external_key,
@@ -3871,6 +3920,9 @@ export async function syncDirectoryIntegration(
         scopedExternalIdentityMap,
         scopedUnionIdentityMap,
         scopedOpenIdentityMap,
+        ambiguousScopedExternalIdentityKeys,
+        ambiguousScopedUnionIdentityKeys,
+        ambiguousScopedOpenIdentityKeys,
         emailMap,
         mobileMap,
         ambiguousEmailKeys,
@@ -3917,7 +3969,18 @@ export async function syncDirectoryIntegration(
             mobile: account.mobile,
           },
           existing,
-          { scopedExternalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap, ambiguousEmailKeys, ambiguousMobileKeys },
+          {
+            scopedExternalIdentityMap,
+            scopedUnionIdentityMap,
+            scopedOpenIdentityMap,
+            ambiguousScopedExternalIdentityKeys,
+            ambiguousScopedUnionIdentityKeys,
+            ambiguousScopedOpenIdentityKeys,
+            emailMap,
+            mobileMap,
+            ambiguousEmailKeys,
+            ambiguousMobileKeys,
+          },
         )
 
         if (identityMatch.matched !== 'already_linked') {
@@ -4054,13 +4117,26 @@ export async function syncDirectoryIntegration(
                 if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
                 if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
                 const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
-                if (scopedExternalIdentityKey) {
-                  scopedExternalIdentityMap.set(scopedExternalIdentityKey, created.userId)
-                }
+                addScopedIdentityCandidate(
+                  scopedExternalIdentityMap,
+                  ambiguousScopedExternalIdentityKeys,
+                  scopedExternalIdentityKey,
+                  created.userId,
+                )
                 const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-                if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
+                addScopedIdentityCandidate(
+                  scopedOpenIdentityMap,
+                  ambiguousScopedOpenIdentityKeys,
+                  scopedOpenIdentityKey,
+                  created.userId,
+                )
                 const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-                if (scopedUnionIdentityKey) scopedUnionIdentityMap.set(scopedUnionIdentityKey, created.userId)
+                addScopedIdentityCandidate(
+                  scopedUnionIdentityMap,
+                  ambiguousScopedUnionIdentityKeys,
+                  scopedUnionIdentityKey,
+                  created.userId,
+                )
               } catch (error) {
                 autoAdmissionFailedCount += 1
                 logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
@@ -4602,16 +4678,26 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
         identityMatchMaps.ambiguousMobileKeys.delete(mobileKey)
       }
       const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
-      if (scopedExternalIdentityKey) {
-        identityMatchMaps.scopedExternalIdentityMap.set(
-          scopedExternalIdentityKey,
-          PREVIEW_ADMIT_SENTINEL_USER_ID,
-        )
-      }
+      addScopedIdentityCandidate(
+        identityMatchMaps.scopedExternalIdentityMap,
+        identityMatchMaps.ambiguousScopedExternalIdentityKeys,
+        scopedExternalIdentityKey,
+        PREVIEW_ADMIT_SENTINEL_USER_ID,
+      )
       const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-      if (scopedOpenIdentityKey) identityMatchMaps.scopedOpenIdentityMap.set(scopedOpenIdentityKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      addScopedIdentityCandidate(
+        identityMatchMaps.scopedOpenIdentityMap,
+        identityMatchMaps.ambiguousScopedOpenIdentityKeys,
+        scopedOpenIdentityKey,
+        PREVIEW_ADMIT_SENTINEL_USER_ID,
+      )
       const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-      if (scopedUnionIdentityKey) identityMatchMaps.scopedUnionIdentityMap.set(scopedUnionIdentityKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      addScopedIdentityCandidate(
+        identityMatchMaps.scopedUnionIdentityMap,
+        identityMatchMaps.ambiguousScopedUnionIdentityKeys,
+        scopedUnionIdentityKey,
+        PREVIEW_ADMIT_SENTINEL_USER_ID,
+      )
     } else if (eligibility.missingEmail) {
       autoAdmissionSkippedMissingEmailCount += 1
     }
@@ -5444,10 +5530,16 @@ async function applyDirectoryAccountBindInTransaction(
      WHERE provider = $1::text
        AND local_user_id <> $5::text
        AND (
-         (external_key = $2::text AND corp_id IS NOT DISTINCT FROM $4::text)
-         OR ($3::text IS NOT NULL AND provider_union_id = $3::text AND corp_id IS NOT DISTINCT FROM $4::text)
-         OR ($6::text IS NOT NULL AND provider_open_id = $6::text AND corp_id IS NOT DISTINCT FROM $4::text)
-         OR (external_key = $7::text AND corp_id IS NOT DISTINCT FROM $4::text)
+         (external_key = $2::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
+         OR ($3::text IS NOT NULL
+           AND provider_union_id = $3::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
+         OR ($6::text IS NOT NULL
+           AND provider_open_id = $6::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
+         OR (external_key = $7::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
        )
      LIMIT 1`,
     [
@@ -6474,25 +6566,29 @@ export async function unbindDirectoryAccount(
       if (identityExternalKey) {
         deleteIdentityParams.push(identityExternalKey, account.corp_id)
         identityMatchClauses.push(
-          `(external_key = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+          `(external_key = $${deleteIdentityParams.length - 1}
+            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
         )
       }
       if (normalizeText(account.external_key) && account.external_key !== identityExternalKey) {
         deleteIdentityParams.push(account.external_key, account.corp_id)
         identityMatchClauses.push(
-          `(external_key = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+          `(external_key = $${deleteIdentityParams.length - 1}
+            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
         )
       }
       if (normalizeText(account.open_id)) {
         deleteIdentityParams.push(account.open_id, account.corp_id)
         identityMatchClauses.push(
-          `(provider_open_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+          `(provider_open_id = $${deleteIdentityParams.length - 1}
+            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
         )
       }
       if (normalizeText(account.union_id)) {
         deleteIdentityParams.push(account.union_id, account.corp_id)
         identityMatchClauses.push(
-          `(provider_union_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+          `(provider_union_id = $${deleteIdentityParams.length - 1}
+            AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($${deleteIdentityParams.length}::text), ''))`,
         )
       }
       if (identityMatchClauses.length > 0) {
