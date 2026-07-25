@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto'
+
+import { Kysely, PostgresDialect, sql } from 'kysely'
+import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Pool } from 'pg'
 
@@ -28,6 +32,10 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 }))
 
 import { query } from '../../src/db/pg'
+import {
+  down as corpScopeDown,
+  up as corpScopeUp,
+} from '../../src/db/migrations/zzzz20260725130000_expand_directory_identity_corp_scope'
 import {
   bindDirectoryAccount,
   createDirectoryIntegration,
@@ -641,5 +649,438 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
       link_status: 'linked',
       match_strategy: 'external_identity',
     }])
+  })
+})
+
+describeIfDatabase('directory corp-scope Phase B migration (isolated real DB)', () => {
+  const dbUrl = process.env.DATABASE_URL!
+
+  async function withLegacySchema(
+    run: (db: Kysely<unknown>) => Promise<void>,
+  ): Promise<void> {
+    const adminPool = new Pool({ connectionString: dbUrl })
+    const schema = `dtcorp_${randomUUID().replace(/-/g, '')}`
+    await adminPool.query(`CREATE SCHEMA "${schema}"`)
+    const testPool = new Pool({
+      connectionString: dbUrl,
+      options: `-c search_path=${schema}`,
+    })
+    const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: testPool }) })
+    try {
+      await sql`
+        CREATE TABLE directory_integrations (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider text NOT NULL DEFAULT 'dingtalk',
+          corp_id text NOT NULL
+        )
+      `.execute(db)
+      await sql`
+        CREATE TABLE directory_accounts (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          integration_id uuid NOT NULL REFERENCES directory_integrations(id),
+          provider text NOT NULL,
+          corp_id text,
+          external_key text NOT NULL
+        )
+      `.execute(db)
+      await sql`
+        CREATE TABLE user_external_identities (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider text NOT NULL,
+          external_key text NOT NULL,
+          provider_union_id text,
+          provider_open_id text,
+          corp_id text
+        )
+      `.execute(db)
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_external_key
+        ON directory_accounts(provider, external_key)
+      `.execute(db)
+      await run(db)
+    } finally {
+      await db.destroy()
+      await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      await adminPool.end()
+    }
+  }
+
+  async function indexNames(db: Kysely<unknown>): Promise<string[]> {
+    const result = await sql<{ indexname: string }>`
+      SELECT indexname
+        FROM pg_indexes
+       WHERE schemaname = current_schema()
+       ORDER BY indexname
+    `.execute(db)
+    return result.rows.map((row) => row.indexname)
+  }
+
+  async function constraintNames(db: Kysely<unknown>): Promise<string[]> {
+    const result = await sql<{ conname: string }>`
+      SELECT constraint_row.conname
+        FROM pg_constraint constraint_row
+        JOIN pg_class table_rel ON table_rel.oid = constraint_row.conrelid
+        JOIN pg_namespace namespace ON namespace.oid = table_rel.relnamespace
+       WHERE namespace.nspname = current_schema()
+         AND constraint_row.contype = 'c'
+       ORDER BY constraint_row.conname
+    `.execute(db)
+    return result.rows.map((row) => row.conname)
+  }
+
+  async function runUp(db: Kysely<unknown>): Promise<void> {
+    await db.transaction().execute(
+      (trx) => corpScopeUp(trx as unknown as Kysely<unknown>),
+    )
+  }
+
+  async function runDown(db: Kysely<unknown>): Promise<void> {
+    await db.transaction().execute(
+      (trx) => corpScopeDown(trx as unknown as Kysely<unknown>),
+    )
+  }
+
+  it('up canonicalizes corp data, installs every scoped guard, permits cross-corp keys, and replays', async () => {
+    await withLegacySchema(async (db) => {
+      const integrationA = randomUUID()
+      const integrationB = randomUUID()
+      await sql`
+        INSERT INTO directory_integrations(id, corp_id)
+        VALUES (${integrationA}, ' corp-a '), (${integrationB}, 'corp-b')
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationA}, 'dingtalk', '', 'shared')
+      `.execute(db)
+      await sql`
+        INSERT INTO user_external_identities(
+          provider, external_key, provider_union_id, provider_open_id, corp_id
+        ) VALUES
+          ('dingtalk', 'identity-a', 'union-a', 'open-a', ' corp-a '),
+          ('dingtalk', 'identity-legacy', 'union-legacy', 'open-legacy', '   ')
+      `.execute(db)
+
+      await runUp(db)
+      await runUp(db)
+
+      expect(await indexNames(db)).toEqual(expect.arrayContaining([
+        'idx_directory_accounts_provider_corp_external_key',
+        'idx_directory_accounts_provider_null_corp_external_key',
+        'idx_user_external_identities_provider_corp_union',
+        'idx_user_external_identities_provider_null_corp_union',
+        'idx_user_external_identities_provider_corp_open',
+        'idx_user_external_identities_provider_null_corp_open',
+      ]))
+      expect(await indexNames(db)).not.toContain('idx_directory_accounts_provider_external_key')
+      expect(await constraintNames(db)).toEqual(expect.arrayContaining([
+        'directory_integrations_corp_id_canonical',
+        'directory_accounts_corp_id_canonical',
+        'user_external_identities_corp_id_canonical',
+      ]))
+
+      const integrationCorps = await sql<{ corp_id: string }>`
+        SELECT corp_id FROM directory_integrations ORDER BY corp_id
+      `.execute(db)
+      expect(integrationCorps.rows).toEqual([{ corp_id: 'corp-a' }, { corp_id: 'corp-b' }])
+      const accountCorp = await sql<{ corp_id: string }>`
+        SELECT corp_id FROM directory_accounts WHERE external_key = 'shared'
+      `.execute(db)
+      expect(accountCorp.rows).toEqual([{ corp_id: 'corp-a' }])
+      const identityCorps = await sql<{ corp_id: string | null }>`
+        SELECT corp_id FROM user_external_identities ORDER BY external_key
+      `.execute(db)
+      expect(identityCorps.rows).toEqual([{ corp_id: 'corp-a' }, { corp_id: null }])
+
+      await expect(sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationB}, 'dingtalk', 'corp-b', 'shared')
+      `.execute(db)).resolves.toBeTruthy()
+      await expect(sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationA}, 'dingtalk', 'corp-a', 'shared')
+      `.execute(db)).rejects.toThrow(/idx_directory_accounts_provider_corp_external_key/)
+      await expect(sql`
+        INSERT INTO user_external_identities(
+          provider, external_key, provider_union_id, corp_id
+        ) VALUES ('dingtalk', 'identity-duplicate', 'union-a', 'corp-a')
+      `.execute(db)).rejects.toThrow(/idx_user_external_identities_provider_corp_union/)
+      await expect(sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationB}, 'dingtalk', ' corp-b ', 'bad-corp-shape')
+      `.execute(db)).rejects.toThrow(/directory_accounts_corp_id_canonical/)
+      await expect(sql`
+        INSERT INTO user_external_identities(provider, external_key, corp_id)
+        VALUES ('dingtalk', 'bad-identity-corp-shape', '   ')
+      `.execute(db)).rejects.toThrow(/user_external_identities_corp_id_canonical/)
+      for (const [suffix, invalidCorp] of [
+        ['tab', '\t'],
+        ['newline', '\n'],
+        ['nbsp', '\u00a0'],
+        ['em-space', '\u2003'],
+        ['bom', '\ufeff'],
+      ]) {
+        await expect(sql`
+          INSERT INTO user_external_identities(provider, external_key, corp_id)
+          VALUES ('dingtalk', ${`bad-identity-${suffix}`}, ${invalidCorp})
+        `.execute(db)).rejects.toThrow(/user_external_identities_corp_id_canonical/)
+      }
+      await expect(sql`
+        INSERT INTO user_external_identities(provider, external_key, corp_id)
+        VALUES ('dingtalk', 'null-identity-corp', NULL)
+      `.execute(db)).resolves.toBeTruthy()
+    })
+  })
+
+  it('up fails closed and rolls back every change when a parent integration corp is blank', async () => {
+    await withLegacySchema(async (db) => {
+      const integrationId = randomUUID()
+      await sql`INSERT INTO directory_integrations(id, corp_id) VALUES (${integrationId}, '')`.execute(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationId}, 'dingtalk', NULL, 'legacy')
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(/integration scope is non-canonical/)
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await indexNames(db)).not.toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_accounts_corp_id_canonical')
+    })
+  })
+
+  it('up rejects account/provider drift instead of silently adopting the parent corp', async () => {
+    await withLegacySchema(async (db) => {
+      const integrationId = randomUUID()
+      await sql`
+        INSERT INTO directory_integrations(id, provider, corp_id)
+        VALUES (${integrationId}, 'dingtalk', 'corp-a')
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationId}, 'other-provider', NULL, 'legacy')
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(/account parent scope is inconsistent/)
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_integrations_corp_id_canonical')
+    })
+  })
+
+  it('up rejects duplicate same-scope union identities without dropping the legacy account guard', async () => {
+    await withLegacySchema(async (db) => {
+      await sql`
+        INSERT INTO user_external_identities(
+          provider, external_key, provider_union_id, corp_id
+        ) VALUES
+          ('dingtalk', 'identity-a', 'duplicate-union', 'corp-a'),
+          ('dingtalk', 'identity-b', 'duplicate-union', 'corp-a')
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(/idx_user_external_identities_provider_corp_union/)
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await indexNames(db)).not.toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_accounts_corp_id_canonical')
+    })
+  })
+
+  it('up rejects a same-name wrong-definition replacement index and keeps the legacy guard', async () => {
+    await withLegacySchema(async (db) => {
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_corp_external_key
+        ON directory_accounts(provider, external_key)
+        WHERE corp_id IS NOT NULL
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(
+        /index drift: idx_directory_accounts_provider_corp_external_key/,
+      )
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_accounts_corp_id_canonical')
+    })
+  })
+
+  it('up rejects a same-name expression replacement index that only appears to have the right keys', async () => {
+    await withLegacySchema(async (db) => {
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_corp_external_key
+        ON directory_accounts(provider, corp_id, external_key, ((id::text)))
+        WHERE corp_id IS NOT NULL
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(
+        /index drift: idx_directory_accounts_provider_corp_external_key/,
+      )
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_integrations_corp_id_canonical')
+    })
+  })
+
+  it('up rejects a partially applied no-legacy state instead of treating it as a replay', async () => {
+    await withLegacySchema(async (db) => {
+      await sql`DROP INDEX idx_directory_accounts_provider_external_key`.execute(db)
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_corp_external_key
+        ON directory_accounts(provider, corp_id, external_key)
+        WHERE corp_id IS NOT NULL
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(
+        /index drift: idx_directory_accounts_provider_null_corp_external_key/,
+      )
+      expect(await indexNames(db)).toEqual(expect.arrayContaining([
+        'idx_directory_accounts_provider_corp_external_key',
+      ]))
+      expect(await indexNames(db)).not.toContain(
+        'idx_directory_accounts_provider_null_corp_external_key',
+      )
+      expect(await constraintNames(db)).not.toContain('directory_accounts_corp_id_canonical')
+    })
+  })
+
+  it('compatible down restores the global guard first and replays', async () => {
+    await withLegacySchema(async (db) => {
+      const integrationId = randomUUID()
+      await sql`INSERT INTO directory_integrations(id, corp_id) VALUES (${integrationId}, 'corp-a')`.execute(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationId}, 'dingtalk', 'corp-a', 'one')
+      `.execute(db)
+
+      await runUp(db)
+      const canonicalBeforeDown = await sql<{ corp_id: string }>`
+        SELECT corp_id FROM directory_integrations WHERE id = ${integrationId}
+      `.execute(db)
+      await runDown(db)
+      await runDown(db)
+
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await indexNames(db)).not.toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_accounts_corp_id_canonical')
+      expect(await constraintNames(db)).not.toContain('directory_integrations_corp_id_canonical')
+      const canonicalAfterDown = await sql<{ corp_id: string }>`
+        SELECT corp_id FROM directory_integrations WHERE id = ${integrationId}
+      `.execute(db)
+      expect(canonicalAfterDown.rows).toEqual(canonicalBeforeDown.rows)
+    })
+  })
+
+  it('incompatible down preserves all scoped protections', async () => {
+    await withLegacySchema(async (db) => {
+      const integrationA = randomUUID()
+      const integrationB = randomUUID()
+      await sql`
+        INSERT INTO directory_integrations(id, corp_id)
+        VALUES (${integrationA}, 'corp-a'), (${integrationB}, 'corp-b')
+      `.execute(db)
+      await runUp(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES
+          (${integrationA}, 'dingtalk', 'corp-a', 'shared'),
+          (${integrationB}, 'dingtalk', 'corp-b', 'shared')
+      `.execute(db)
+
+      await expect(runDown(db)).rejects.toThrow(/idx_directory_accounts_provider_external_key/)
+      expect(await indexNames(db)).toEqual(expect.arrayContaining([
+        'idx_directory_accounts_provider_corp_external_key',
+        'idx_user_external_identities_provider_corp_union',
+      ]))
+      expect(await constraintNames(db)).toContain('directory_accounts_corp_id_canonical')
+    })
+  })
+
+  it('down rejects a same-name wrong legacy index and leaves scoped protections intact', async () => {
+    await withLegacySchema(async (db) => {
+      await runUp(db)
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_external_key
+        ON directory_accounts(external_key)
+      `.execute(db)
+
+      await expect(runDown(db)).rejects.toThrow(
+        /index drift: idx_directory_accounts_provider_external_key/,
+      )
+      expect(await indexNames(db)).toEqual(expect.arrayContaining([
+        'idx_directory_accounts_provider_external_key',
+        'idx_directory_accounts_provider_corp_external_key',
+        'idx_user_external_identities_provider_corp_union',
+      ]))
+      expect(await constraintNames(db)).toContain('directory_accounts_corp_id_canonical')
+    })
+  })
+
+  it('down rejects a same-name expression legacy index and leaves scoped protections intact', async () => {
+    await withLegacySchema(async (db) => {
+      await runUp(db)
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_external_key
+        ON directory_accounts(provider, external_key, ((id::text)))
+      `.execute(db)
+
+      await expect(runDown(db)).rejects.toThrow(
+        /index drift: idx_directory_accounts_provider_external_key/,
+      )
+      expect(await indexNames(db)).toEqual(expect.arrayContaining([
+        'idx_directory_accounts_provider_external_key',
+        'idx_directory_accounts_provider_corp_external_key',
+        'idx_user_external_identities_provider_corp_union',
+      ]))
+      expect(await constraintNames(db)).toContain('directory_integrations_corp_id_canonical')
+    })
+  })
+
+  it('restores caller transaction timeouts after successful up and down', async () => {
+    await withLegacySchema(async (db) => {
+      await db.transaction().execute(async (trx) => {
+        await sql`SELECT set_config('lock_timeout', '37s', true)`.execute(trx)
+        await sql`SELECT set_config('statement_timeout', '41s', true)`.execute(trx)
+        await corpScopeUp(trx as unknown as Kysely<unknown>)
+        const afterUp = await sql<{ lock_timeout: string; statement_timeout: string }>`
+          SELECT
+            current_setting('lock_timeout') AS lock_timeout,
+            current_setting('statement_timeout') AS statement_timeout
+        `.execute(trx)
+        expect(afterUp.rows).toEqual([{ lock_timeout: '37s', statement_timeout: '41s' }])
+
+        await corpScopeDown(trx as unknown as Kysely<unknown>)
+        const afterDown = await sql<{ lock_timeout: string; statement_timeout: string }>`
+          SELECT
+            current_setting('lock_timeout') AS lock_timeout,
+            current_setting('statement_timeout') AS statement_timeout
+        `.execute(trx)
+        expect(afterDown.rows).toEqual([{ lock_timeout: '37s', statement_timeout: '41s' }])
+      })
+    })
+  })
+
+  it('bounds lock waiting and rolls back without dropping the legacy guard', async () => {
+    await withLegacySchema(async (db) => {
+      const schemaResult = await sql<{ schema_name: string }>`
+        SELECT current_schema() AS schema_name
+      `.execute(db)
+      const schemaName = schemaResult.rows[0].schema_name
+      const blockerPool = new Pool({
+        connectionString: dbUrl,
+        options: `-c search_path=${schemaName}`,
+      })
+      const blocker = await blockerPool.connect()
+      try {
+        await blocker.query('BEGIN')
+        await blocker.query('LOCK TABLE directory_accounts IN ACCESS EXCLUSIVE MODE')
+        const startedAt = Date.now()
+        await expect(runUp(db)).rejects.toThrow(/lock timeout|canceling statement due to lock timeout/i)
+        const elapsedMs = Date.now() - startedAt
+        expect(elapsedMs).toBeGreaterThanOrEqual(4_000)
+        expect(elapsedMs).toBeLessThan(10_000)
+      } finally {
+        await blocker.query('ROLLBACK')
+        blocker.release()
+        await blockerPool.end()
+      }
+
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await indexNames(db)).not.toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_integrations_corp_id_canonical')
+    })
   })
 })
