@@ -1,28 +1,16 @@
+import { randomUUID } from 'node:crypto'
+
+import { Kysely, PostgresDialect, sql } from 'kysely'
+import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
-// T2-Gate EVIDENCE TOOLING (§3.4) — the DB-LEVEL half of the two-corp coexistence question.
+// Corp-scoped DingTalk directory identity isolation.
 //
-// §3.4's open question is staging-gated: only two REAL DingTalk corps can show whether the
-// provider hands the same person the same provider-level identity (unionId) in both corps. What
-// this suite proves — permanently, in CI — is the MECHANISM that makes that question load-bearing:
-//
-//   1. `directory_accounts` is UNIQUE on (provider, external_key)
-//      [idx_directory_accounts_provider_external_key], and
-//   2. the sync derives external_key WITHOUT corp scoping — `unionId || openId || userId`
-//      (directory-sync.ts account upsert) — and
-//   3. the account upsert loop has NO per-account savepoint, so a cross-corp collision does not
-//      skip one account: it aborts the whole apply transaction and the SECOND corp's sync run
-//      FAILS wholesale — including department rows upserted earlier in the same apply (not just
-//      accounts).
-//
-// Together: IF staging shows equal unionIds across corps, coexistence is impossible today and the
-// collision signature is a failed corp-B sync run whose closed classifications are
-// duplicate_key_detected + expected_constraint_detected (idx_directory_accounts_provider_external_key)
-// — which is exactly what the staging runbook
-// (canonical-org-t2-gate-two-corp-staging-runbook-20260717.md) tells ops to record (never raw
-// error_message / err-head — PostgreSQL duplicate-key text can embed the real external_key), and
-// what T2.5's tenant-scoped key migration would fix. If staging shows distinct unionIds, the
-// contrast leg here (distinct keys coexist, both syncs complete) is the shape ops should observe.
+// DingTalk can return the same provider-level identity key in multiple enterprises. Directory
+// accounts therefore key uniqueness on (provider, corp_id, external_key), while matching a legacy
+// raw external_key must require the same corp. This suite proves both halves through the real sync
+// orchestration: equal keys coexist across corps, still collide within one corp, and a raw identity
+// from corp A can never auto-link an account pulled from corp B.
 //
 // DATABASE_URL-gated (describeIfDatabase): excluded from the no-DB vitest job so it cannot
 // skip-green, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml
@@ -44,6 +32,10 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 }))
 
 import { query } from '../../src/db/pg'
+import {
+  down as corpScopeDown,
+  up as corpScopeUp,
+} from '../../src/db/migrations/zzzz20260725120000_scope_directory_account_external_key_by_corp'
 import { createDirectoryIntegration, syncDirectoryIntegration } from '../../src/directory/directory-sync'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -53,8 +45,9 @@ const TS = Date.now()
 type MockTenant = { unionId?: string; openId?: string; userId: string; name: string }
 let activeTenant: MockTenant | null = null
 
-describeIfDatabase('T2-Gate evidence — directory_accounts (provider, external_key) collision mechanism (real sync, mocked pull)', () => {
+describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pull)', () => {
   const cleanupIntegrationIds: string[] = []
+  const cleanupUserIds: string[] = []
 
   beforeAll(() => {
     clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('t2g-token')
@@ -84,12 +77,19 @@ describeIfDatabase('T2-Gate evidence — directory_accounts (provider, external_
 
   afterAll(async () => {
     for (const id of cleanupIntegrationIds.splice(0)) await query(`DELETE FROM directory_integrations WHERE id = $1`, [id])
+    if (cleanupUserIds.length > 0) {
+      await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [cleanupUserIds])
+      await query(`DELETE FROM user_external_identities WHERE local_user_id = ANY($1::text[])`, [cleanupUserIds])
+      await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [cleanupUserIds])
+    }
   })
 
-  async function seedIntegration(tag: string): Promise<string> {
+  const corpIdForTag = (tag: string) => `t2g-corp-${tag}-${TS}`
+
+  async function seedIntegration(tag: string, corpId = corpIdForTag(tag)): Promise<string> {
     const integration = await createDirectoryIntegration({
       name: `t2g-${tag}-${TS}`,
-      corpId: `t2g-corp-${tag}-${TS}`,
+      corpId,
       appKey: `t2g-appkey-${tag}-${TS}`,
       appSecret: 't2g-secret',
       admissionMode: 'manual_only',
@@ -119,51 +119,57 @@ describeIfDatabase('T2-Gate evidence — directory_accounts (provider, external_
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  it('pins the schema mechanism: same (provider, external_key) across two integrations is UNINSERTABLE — distinct keys coexist', async () => {
+  it('scopes account-key uniqueness by corp: equal keys across corps coexist, same-corp duplicates fail', async () => {
     const a = await seedIntegration('probe-a')
     const b = await seedIntegration('probe-b')
+    const bSameCorp = await seedIntegration('probe-b-sibling', corpIdForTag('probe-b'))
     const sharedKey = `t2g-shared-${TS}`
 
     await query(
-      `INSERT INTO directory_accounts (integration_id, provider, external_user_id, external_key, name, is_active, raw)
-       VALUES ($1, 'dingtalk', $2, $3, 'Probe A', true, '{}'::jsonb)`,
-      [a, `t2g-probe-a-${TS}`, sharedKey]
+      `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, external_key, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $3, $4, 'Probe A', true, '{}'::jsonb)`,
+      [a, corpIdForTag('probe-a'), `t2g-probe-a-${TS}`, sharedKey]
     )
-    // positive-coexistence control FIRST: a distinct key under B inserts fine
     await query(
-      `INSERT INTO directory_accounts (integration_id, provider, external_user_id, external_key, name, is_active, raw)
-       VALUES ($1, 'dingtalk', $2, $3, 'Probe B distinct', true, '{}'::jsonb)`,
-      [b, `t2g-probe-b1-${TS}`, `t2g-distinct-${TS}`]
+      `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, external_key, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $3, $4, 'Probe B same key', true, '{}'::jsonb)`,
+      [b, corpIdForTag('probe-b'), `t2g-probe-b-${TS}`, sharedKey]
     )
-    // the collision: same key under B — 23505 on the exact closed constraint name the runbook
-    // classifies via expected_constraint_detected (never raw error text in operator evidence)
+    const coexist = await query<{ corp_id: string }>(
+      `SELECT corp_id FROM directory_accounts WHERE external_key = $1 ORDER BY corp_id`,
+      [sharedKey],
+    )
+    expect(coexist.rows.map((row) => row.corp_id)).toEqual(
+      [corpIdForTag('probe-a'), corpIdForTag('probe-b')].sort(),
+    )
+
     let caught: { code?: string; constraint?: string } | null = null
     try {
       await query(
-        `INSERT INTO directory_accounts (integration_id, provider, external_user_id, external_key, name, is_active, raw)
-         VALUES ($1, 'dingtalk', $2, $3, 'Probe B colliding', true, '{}'::jsonb)`,
-        [b, `t2g-probe-b2-${TS}`, sharedKey]
+        `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, external_key, name, is_active, raw)
+         VALUES ($1, 'dingtalk', $2, $3, $4, 'Probe B duplicate', true, '{}'::jsonb)`,
+        [bSameCorp, corpIdForTag('probe-b'), `t2g-probe-b2-${TS}`, sharedKey]
       )
     } catch (error) {
       caught = error as { code?: string; constraint?: string }
     }
-    expect(caught, 'colliding INSERT unexpectedly succeeded').not.toBeNull()
+    expect(caught, 'same-corp duplicate unexpectedly succeeded').not.toBeNull()
     expect(caught?.code).toBe('23505')
-    expect(caught?.constraint).toBe('idx_directory_accounts_provider_external_key')
+    expect(caught?.constraint).toBe('idx_directory_accounts_provider_corp_external_key')
   })
 
-  it('pins the derivation: the synced external_key is the BARE unionId — no corp scoping (the §3.4 precondition; T2.5 would change this)', async () => {
+  it('keeps the provider key raw while the uniqueness and matching layers carry corp scope', async () => {
     const a = await seedIntegration('derive')
     activeTenant = { unionId: `t2g-union-derive-${TS}`, openId: `t2g-open-derive-${TS}`, userId: `t2g-uid-derive-${TS}`, name: 'Derive' }
     const result = await syncDirectoryIntegration(a, `t2g-admin-${TS}`)
     expect(result.run.status).toBe('completed')
     const keys = await accountKeys(a)
     expect(keys).toHaveLength(1)
-    // bare unionId wins over openId/userId, and carries NO corp prefix
+    // The stored provider value stays raw; corp_id is the separate scope column.
     expect(keys[0].external_key).toBe(`t2g-union-derive-${TS}`)
   })
 
-  it('END-TO-END collision signature: the SECOND corp sync FAILS WHOLESALE when the overlapping person carries the same unionId', async () => {
+  it('END-TO-END: two corp syncs with the same bare unionId both complete and retain their own rows', async () => {
     const corpA = await seedIntegration('e2e-a')
     const corpB = await seedIntegration('e2e-b')
     const sharedUnion = `t2g-union-shared-${TS}`
@@ -173,61 +179,21 @@ describeIfDatabase('T2-Gate evidence — directory_accounts (provider, external_
     expect(first.run.status).toBe('completed')
     expect((await accountKeys(corpA)).map((r) => r.external_key)).toEqual([sharedUnion])
 
-    // same person, same unionId, DIFFERENT corp + different corp-local userId
+    // Same provider identity value, different corp-local user id and corp scope.
     activeTenant = { unionId: sharedUnion, userId: `t2g-uid-b-${TS}`, name: 'Overlap Person' }
-    let caught: unknown = null
-    try {
-      await syncDirectoryIntegration(corpB, `t2g-admin-${TS}`)
-    } catch (error) {
-      caught = error
-    }
-    // no per-account savepoint in the upsert loop: the whole apply aborts — corp B's run FAILS
-    expect(caught, 'corp-B sync unexpectedly completed despite the shared unionId').not.toBeNull()
-    // Closed constraint name only — do not assert/print full SQL error text (can embed external_key).
-    const thrown = caught as { code?: string; constraint?: string; message?: string }
-    const constraintHit =
-      thrown.constraint === 'idx_directory_accounts_provider_external_key' ||
-      (typeof thrown.message === 'string' &&
-        thrown.message.includes('idx_directory_accounts_provider_external_key'))
-    expect(constraintHit, 'thrown failure must name the closed unique-index constraint').toBe(true)
+    const second = await syncDirectoryIntegration(corpB, `t2g-admin-${TS}`)
+    expect(second.run.status).toBe('completed')
 
-    // corp B got NOTHING (whole apply transaction rolled back) — not only accounts.
-    // Departments are upserted BEFORE the colliding account; a regression that catches the
-    // 23505, marks the run failed, but commits the already-upserted d100 department would still
-    // pass an accounts-only empty check. Pin zero directory_departments for corp B.
-    expect(await accountKeys(corpB)).toHaveLength(0)
-    expect(
-      await departmentCount(corpB),
-      'corp-B directory_departments must be empty after wholesale collision rollback (dept upsert precedes account collision)',
-    ).toBe(0)
-    // Positive control: corp A still holds its synced department + account (untouched).
     expect((await accountKeys(corpA)).map((r) => r.external_key)).toEqual([sharedUnion])
+    expect((await accountKeys(corpB)).map((r) => r.external_key)).toEqual([sharedUnion])
     expect(
       await departmentCount(corpA),
-      'corp-A directory_departments positive control: successful first sync must leave its dept row',
+      'corp-A successful sync must retain its department',
     ).toBeGreaterThan(0)
-
-    // Run-row evidence uses the same closed boolean classifications as the staging runbook —
-    // never SELECT/project raw error_message (PostgreSQL duplicate-key DETAIL can embed the key).
-    const run = await query<{
-      status: string
-      duplicate_key_detected: boolean
-      expected_constraint_detected: boolean
-    }>(
-      `SELECT status,
-              (error_message IS NOT NULL
-                AND position('duplicate key' in error_message) > 0) AS duplicate_key_detected,
-              (error_message IS NOT NULL
-                AND position('idx_directory_accounts_provider_external_key' in error_message) > 0)
-                AS expected_constraint_detected
-         FROM directory_sync_runs
-        WHERE integration_id = $1
-        ORDER BY started_at DESC LIMIT 1`,
-      [corpB]
-    )
-    expect(run.rows[0].status).toBe('failed')
-    expect(run.rows[0].duplicate_key_detected).toBe(true)
-    expect(run.rows[0].expected_constraint_detected).toBe(true)
+    expect(
+      await departmentCount(corpB),
+      'corp-B successful sync must retain its department',
+    ).toBeGreaterThan(0)
   })
 
   it('CONTRAST (what a collision-free staging proof would look like): distinct unionIds per corp — both syncs complete and coexist', async () => {
@@ -242,5 +208,174 @@ describeIfDatabase('T2-Gate evidence — directory_accounts (provider, external_
 
     expect((await accountKeys(corpA)).map((r) => r.external_key)).toEqual([`t2g-union-okA-${TS}`])
     expect((await accountKeys(corpB)).map((r) => r.external_key)).toEqual([`t2g-union-okB-${TS}`])
+  })
+
+  it('does not auto-link a corp-B account to a corp-A legacy raw external identity', async () => {
+    const identityUserId = `t2g-identity-a-${TS}`
+    cleanupUserIds.push(identityUserId)
+    await query(
+      `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x')`,
+      [identityUserId, `${identityUserId}@example.test`],
+    )
+    const sharedKey = `t2g-identity-shared-${TS}`
+    await query(
+      `INSERT INTO user_external_identities (
+         provider, external_key, corp_id, local_user_id, profile
+       ) VALUES ('dingtalk', $1, $2, $3, '{}'::jsonb)`,
+      [sharedKey, corpIdForTag('identity-a'), identityUserId],
+    )
+
+    const corpB = await seedIntegration('identity-b')
+    activeTenant = {
+      unionId: sharedKey,
+      userId: `t2g-identity-b-user-${TS}`,
+      name: 'Corp B Account',
+    }
+    expect((await syncDirectoryIntegration(corpB, `t2g-admin-${TS}`)).run.status).toBe('completed')
+
+    const link = await query<{ local_user_id: string | null; link_status: string; match_strategy: string | null }>(
+      `SELECT l.local_user_id, l.link_status, l.match_strategy
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+        WHERE a.integration_id = $1`,
+      [corpB],
+    )
+    expect(link.rows).toEqual([{
+      local_user_id: null,
+      link_status: 'unmatched',
+      match_strategy: 'none',
+    }])
+  })
+
+  it('still auto-links a legacy raw external identity when account and identity share the same corp', async () => {
+    const identityUserId = `t2g-identity-same-${TS}`
+    cleanupUserIds.push(identityUserId)
+    await query(
+      `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x')`,
+      [identityUserId, `${identityUserId}@example.test`],
+    )
+    const sharedKey = `t2g-identity-same-key-${TS}`
+    const corpId = corpIdForTag('identity-same')
+    await query(
+      `INSERT INTO user_external_identities (
+         provider, external_key, corp_id, local_user_id, profile
+       ) VALUES ('dingtalk', $1, $2, $3, '{}'::jsonb)`,
+      [sharedKey, corpId, identityUserId],
+    )
+
+    const integrationId = await seedIntegration('identity-same', corpId)
+    activeTenant = {
+      unionId: sharedKey,
+      userId: `t2g-identity-same-user-${TS}`,
+      name: 'Same Corp Account',
+    }
+    expect((await syncDirectoryIntegration(integrationId, `t2g-admin-${TS}`)).run.status).toBe('completed')
+
+    const link = await query<{ local_user_id: string | null; link_status: string; match_strategy: string | null }>(
+      `SELECT l.local_user_id, l.link_status, l.match_strategy
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+        WHERE a.integration_id = $1`,
+      [integrationId],
+    )
+    expect(link.rows).toEqual([{
+      local_user_id: identityUserId,
+      link_status: 'linked',
+      match_strategy: 'external_identity',
+    }])
+  })
+})
+
+describeIfDatabase('directory account external-key corp-scope upgrade migration (isolated real DB)', () => {
+  const dbUrl = process.env.DATABASE_URL!
+
+  async function withOldSchema(
+    run: (db: Kysely<unknown>) => Promise<void>,
+  ): Promise<void> {
+    const adminPool = new Pool({ connectionString: dbUrl })
+    const schema = `dtcorp_${randomUUID().replace(/-/g, '')}`
+    await adminPool.query(`CREATE SCHEMA "${schema}"`)
+    const testPool = new Pool({
+      connectionString: dbUrl,
+      options: `-c search_path=${schema}`,
+    })
+    const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: testPool }) })
+    try {
+      await sql`
+        CREATE TABLE directory_accounts (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider text NOT NULL,
+          corp_id text,
+          external_key text NOT NULL
+        )
+      `.execute(db)
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_external_key
+        ON directory_accounts(provider, external_key)
+      `.execute(db)
+      await run(db)
+    } finally {
+      await db.destroy()
+      await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      await adminPool.end()
+    }
+  }
+
+  async function indexNames(db: Kysely<unknown>): Promise<string[]> {
+    const result = await sql<{ indexname: string }>`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = current_schema()
+        AND tablename = 'directory_accounts'
+      ORDER BY indexname
+    `.execute(db)
+    return result.rows.map((row) => row.indexname)
+  }
+
+  it('upgrades old schema, permits cross-corp coexistence, rejects same/null-corp duplicates, and replays', async () => {
+    await withOldSchema(async (db) => {
+      await sql`
+        INSERT INTO directory_accounts(provider, corp_id, external_key)
+        VALUES ('dingtalk', 'corp-a', 'shared')
+      `.execute(db)
+
+      await corpScopeUp(db)
+      await corpScopeUp(db)
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_corp_external_key')
+      expect(await indexNames(db)).not.toContain('idx_directory_accounts_provider_external_key')
+
+      await expect(sql`
+        INSERT INTO directory_accounts(provider, corp_id, external_key)
+        VALUES ('dingtalk', 'corp-b', 'shared')
+      `.execute(db)).resolves.toBeTruthy()
+      await expect(sql`
+        INSERT INTO directory_accounts(provider, corp_id, external_key)
+        VALUES ('dingtalk', 'corp-a', 'shared')
+      `.execute(db)).rejects.toThrow(/idx_directory_accounts_provider_corp_external_key/)
+
+      await sql`
+        INSERT INTO directory_accounts(provider, corp_id, external_key)
+        VALUES ('dingtalk', NULL, 'legacy-global')
+      `.execute(db)
+      await expect(sql`
+        INSERT INTO directory_accounts(provider, corp_id, external_key)
+        VALUES ('dingtalk', NULL, 'legacy-global')
+      `.execute(db)).rejects.toThrow(/idx_directory_accounts_provider_corp_external_key/)
+    })
+  })
+
+  it('down refuses a data-incompatible rollback before removing the scoped protection', async () => {
+    await withOldSchema(async (db) => {
+      await corpScopeUp(db)
+      await sql`
+        INSERT INTO directory_accounts(provider, corp_id, external_key)
+        VALUES
+          ('dingtalk', 'corp-a', 'shared'),
+          ('dingtalk', 'corp-b', 'shared')
+      `.execute(db)
+
+      await expect(corpScopeDown(db)).rejects.toThrow(/idx_directory_accounts_provider_external_key/)
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_corp_external_key')
+    })
   })
 })

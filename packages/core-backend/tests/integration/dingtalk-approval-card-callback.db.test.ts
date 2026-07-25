@@ -136,9 +136,8 @@ async function cardState(deliveryId: string): Promise<string> {
 }
 
 async function linkAccount(accountId: string, integrationId: string, externalUserId: string, localUserId: string): Promise<void> {
-  // external_key is UNIQUE per provider (idx_directory_accounts_provider_external_key) and is NOT
-  // part of B-3 resolution (which matches external_user_id + integration), so it gets a per-row
-  // suffix — mirroring production where the key is corp-scoped while the corp userid may repeat.
+  // This fixture omits corp_id, so NULL-corp rows retain global uniqueness under the corp-scoped
+  // index. The key is not part of B-3 resolution (external_user_id + integration), hence a suffix.
   await q(
     `INSERT INTO directory_accounts (id, integration_id, provider, external_user_id, external_key, name, is_active)
      VALUES ($1, $2, 'dingtalk', $3, $4, 'B3 Callback Fixture', TRUE)

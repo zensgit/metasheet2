@@ -1209,7 +1209,7 @@ export type DirectoryIdentityExistingLink = {
 }
 
 export type DirectoryIdentityMatchMaps = {
-  externalIdentityMap: Map<string, string>
+  scopedExternalIdentityMap: Map<string, string>
   scopedUnionIdentityMap: Map<string, string>
   scopedOpenIdentityMap: Map<string, string>
   emailMap: Map<string, string>
@@ -1247,7 +1247,10 @@ export function resolveDirectoryIdentityMatch(
 
   const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
   const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
-  const externalIdentityUserId = maps.externalIdentityMap.get(account.externalKey)
+  const scopedExternalIdentityKey = buildScopedIdentityKey(account.corpId, account.externalKey)
+  const externalIdentityUserId = (scopedExternalIdentityKey
+    ? maps.scopedExternalIdentityMap.get(scopedExternalIdentityKey)
+    : undefined)
     || (scopedOpenIdentityKey ? maps.scopedOpenIdentityMap.get(scopedOpenIdentityKey) : undefined)
     || (scopedUnionIdentityKey ? maps.scopedUnionIdentityMap.get(scopedUnionIdentityKey) : undefined)
   if (externalIdentityUserId) {
@@ -2107,8 +2110,9 @@ function doesExternalIdentityMatchAccount(
   identity: DirectoryIdentityByUserRow,
   account: Pick<DirectoryReviewItemRow, 'corp_id' | 'external_key' | 'open_id' | 'union_id'>,
 ): boolean {
+  const sameCorpScope = normalizeText(identity.corp_id) === normalizeText(account.corp_id)
   const externalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
-  if (externalKey && identity.external_key === externalKey) return true
+  if (sameCorpScope && externalKey && identity.external_key === externalKey) return true
 
   const scopedOpenKey = buildScopedIdentityKey(account.corp_id, account.open_id)
   const identityOpenKey = buildScopedIdentityKey(identity.corp_id, identity.provider_open_id)
@@ -2118,7 +2122,9 @@ function doesExternalIdentityMatchAccount(
   const identityUnionKey = buildScopedIdentityKey(identity.corp_id, identity.provider_union_id)
   if (scopedUnionKey && identityUnionKey && scopedUnionKey === identityUnionKey) return true
 
-  return normalizeText(identity.external_key) !== '' && identity.external_key === normalizeText(account.external_key)
+  return sameCorpScope
+    && normalizeText(identity.external_key) !== ''
+    && identity.external_key === normalizeText(account.external_key)
 }
 
 async function loadDirectoryReviewRecommendations(
@@ -3295,9 +3301,12 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
       : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<LocalUserRow>>>),
   ])
 
+  const scopedExternalIdentityMap = new Map<string, string>()
   const scopedUnionIdentityMap = new Map<string, string>()
   const scopedOpenIdentityMap = new Map<string, string>()
   for (const row of externalIdentities.rows) {
+    const externalKey = buildScopedIdentityKey(row.corp_id, row.external_key)
+    if (externalKey) scopedExternalIdentityMap.set(externalKey, row.local_user_id)
     const unionKey = buildScopedIdentityKey(row.corp_id, row.provider_union_id)
     if (unionKey) scopedUnionIdentityMap.set(unionKey, row.local_user_id)
     const openKey = buildScopedIdentityKey(row.corp_id, row.provider_open_id)
@@ -3314,7 +3323,7 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
   )
 
   return {
-    externalIdentityMap: new Map(externalIdentities.rows.map((row) => [row.external_key, row.local_user_id])),
+    scopedExternalIdentityMap,
     scopedUnionIdentityMap,
     scopedOpenIdentityMap,
     emailMap: emailMatches.uniqueMap,
@@ -3861,7 +3870,7 @@ export async function syncDirectoryIntegration(
       })
 
       const {
-        externalIdentityMap,
+        scopedExternalIdentityMap,
         scopedUnionIdentityMap,
         scopedOpenIdentityMap,
         emailMap,
@@ -3910,7 +3919,7 @@ export async function syncDirectoryIntegration(
             mobile: account.mobile,
           },
           existing,
-          { externalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap, ambiguousEmailKeys, ambiguousMobileKeys },
+          { scopedExternalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap, ambiguousEmailKeys, ambiguousMobileKeys },
         )
 
         if (identityMatch.matched !== 'already_linked') {
@@ -4046,7 +4055,10 @@ export async function syncDirectoryIntegration(
                 if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
                 if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
                 if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
-                externalIdentityMap.set(account.external_key, created.userId)
+                const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
+                if (scopedExternalIdentityKey) {
+                  scopedExternalIdentityMap.set(scopedExternalIdentityKey, created.userId)
+                }
                 const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
                 if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
                 const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
@@ -4591,7 +4603,13 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
         identityMatchMaps.mobileMap.set(mobileKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
         identityMatchMaps.ambiguousMobileKeys.delete(mobileKey)
       }
-      identityMatchMaps.externalIdentityMap.set(account.external_key, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
+      if (scopedExternalIdentityKey) {
+        identityMatchMaps.scopedExternalIdentityMap.set(
+          scopedExternalIdentityKey,
+          PREVIEW_ADMIT_SENTINEL_USER_ID,
+        )
+      }
       const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
       if (scopedOpenIdentityKey) identityMatchMaps.scopedOpenIdentityMap.set(scopedOpenIdentityKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
       const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
@@ -5708,16 +5726,10 @@ async function createDirectoryAdmittedUserInTransaction(
   return { userId }
 }
 
-/**
- * DT-HARDEN-02: internals exposed only so the orphan-prevention invariant can be
- * asserted directly — "a grant that cannot be honored must throw BEFORE the users
- * row is inserted". The invariant is not observable through the exported surface
- * (the manual-admission path asserts earlier; the sync path now computes the grant
- * from openId presence), so without this seam a regression at the call site would
- * pass every test.
- */
+/** Narrow internal seams for invariants that are not independently observable at public APIs. */
 export const __directorySyncInternalsForTests = {
   createDirectoryAdmittedUserInTransaction,
+  doesExternalIdentityMatchAccount,
 }
 
 async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
