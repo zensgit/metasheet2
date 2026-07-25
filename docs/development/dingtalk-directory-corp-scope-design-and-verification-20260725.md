@@ -132,6 +132,7 @@ Local exact-worktree verification:
 
 - focused unit suites: 43/43;
 - focused real-PostgreSQL 15 suites: 55/55;
+- required attendance directory/user-org real-DB regressions: 14/14;
 - required real-DB wiring and values-free contracts: 82/82;
 - TypeScript: `tsc --noEmit` clean;
 - `git diff --check` clean.
