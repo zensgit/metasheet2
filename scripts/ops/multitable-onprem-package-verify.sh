@@ -734,11 +734,16 @@ function verify_no_github_links() {
 # VITE_API_URL/BASE (baked in at web-build time, pointing at 127.0.0.1/localhost) would
 # be wired to the CI runner's own loopback instead of the operator's configured API host
 # once deployed on-prem — the multitable on-prem path never had this check; attendance's
-# did. Unlike attendance's package (which always contains apps/web/dist because it is
-# the only frontend-bearing on-prem package), this function guards its own precondition
-# explicitly: `search_extended_regex` returns non-zero (no match) for a target directory
-# that does not exist at all, which would otherwise let a package missing apps/web/dist
-# silently report PASS instead of failing loud.
+# did. `search_extended_regex` returns non-zero (no match, not "checked and clean") for a
+# target directory that does not exist at all — verified: `grep -rIE ... /nonexistent` and
+# ripgrep's `rg` both return non-zero on a missing path. In this script's own full run, an
+# earlier required-content check already fails closed on a missing apps/web/dist (its
+# `apps/web/dist/index.html` entry), so the full pipeline is not exposed today; the explicit
+# `[[ -d ... ]] || die` below guards the function itself so calling it standalone (as the
+# focused test does, and as any future reordering might) cannot silently report PASS on a
+# package missing its frontend bundle. Attendance's script has the identical required-content
+# entry for apps/web/dist/index.html ahead of its own loopback check, for the same reason —
+# this is not a claim that attendance's script has a live, unguarded exposure.
 function verify_no_loopback_frontend_config() {
   local root="$1"
   local web_dist="${root}/apps/web/dist"

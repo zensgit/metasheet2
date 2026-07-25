@@ -354,6 +354,13 @@ against a target directory that does not exist, which would otherwise silently r
 missing its frontend bundle). Like the sibling provenance test, it is **not wired into any CI workflow** —
 run manually; the doc does not imply CI coverage it does not have.
 
+**Scope limitation, stated plainly:** the ported pattern is reused **verbatim** per the owner's ruling
+("reuse attendance's rule") and is not changed here. The fixtures prove the rule is falsifiable *as specified*
+— a bundle containing that exact literal string shape fails, a clean one passes — not that multitable's own
+web bundler can or does ever emit that shape in practice (whether it can was not independently established by
+this fix pass; §3.1a's direct grep against the real artifact only shows this particular build does not
+contain it today).
+
 **`verificationToolSha`** — the exact tool used below. Recorded as the **blob** SHA of the script (the
 load-bearing identity: stable across this fix pass's own later commits, e.g. this document's), with the
 introducing commit also recorded for provenance:
@@ -369,8 +376,12 @@ rebase of this branch; the **blob** SHA above is the load-bearing identity preci
 what run `30148584851` itself produced.**
 
 **What was executed — a real, full run of the updated tool against A1's real, already-built artifact bytes**
-(not the sourced-function fixture test above; not a rebuild; `serviceRuntimeSha` does not move). Commands and
-real, unedited output:
+(not the sourced-function fixture test above; not a rebuild; `serviceRuntimeSha` does not move). Commands
+below were run via a small wrapper script (the harness this session runs in refused the inline
+`VAR=... bash ...` form directly) — the wrapper only `cd`s and exports the two report-path env vars before
+calling the unmodified verify script with the real package path as its sole argument; the verify script's own
+behavior is exactly as it would be invoked directly. Output is real, with local absolute scratch paths
+abbreviated to `<local>`:
 
 1. Re-downloaded (read-only) the same Actions artifact §3.1 already recorded:
    ```
@@ -382,17 +393,22 @@ real, unedited output:
    759adcc3cbb6f677f2c6aea92224df83085d1afb1424c1759d980b98abd07f4d  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
    ```
 2. Ran the **full** updated `multitable-onprem-package-verify.sh` (all checks, not just the new function in
-   isolation) against that real `.tgz`, with `VERIFY_REPORT_JSON` set:
+   isolation) against that real `.tgz`, with **both** `VERIFY_REPORT_JSON` and `VERIFY_REPORT_MD` set — CI
+   itself exercises both report formats (the downloaded artifact's `verify/` directory contains both a
+   `.verify.json` and a `.verify.md` per archive), so both paths are checked here, not just the JSON one.
+   Equivalent invocation:
    ```
-   $ VERIFY_REPORT_JSON=<local>/posthoc-verify.json bash scripts/ops/multitable-onprem-package-verify.sh <local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
+   $ VERIFY_REPORT_JSON=<local>/posthoc-verify-2.json VERIFY_REPORT_MD=<local>/posthoc-verify-2.md \
+     bash scripts/ops/multitable-onprem-package-verify.sh <local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
    metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz: OK
    [multitable-onprem-package-verify] Package verify OK
    [multitable-onprem-package-verify]   package: <local>/metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725.tgz
    [multitable-onprem-package-verify]   root: <extracted temp dir>
-   [multitable-onprem-package-verify]   verify_report_json: <local>/posthoc-verify.json
+   [multitable-onprem-package-verify]   verify_report_json: <local>/posthoc-verify-2.json
+   [multitable-onprem-package-verify]   verify_report_md: <local>/posthoc-verify-2.md
    EXIT=0
    ```
-   `posthoc-verify.json`, real, unedited content:
+   `posthoc-verify-2.json`, real content (local absolute paths abbreviated to `<local>`):
    ```json
    {
      "ok": true,
@@ -410,12 +426,22 @@ real, unedited output:
        { "name": "no-github-links", "status": "PASS" },
        { "name": "loopback", "status": "PASS" }
      ],
-     "generatedAt": "2026-07-25T14:06:55Z"
+     "generatedAt": "2026-07-25T14:23:18Z"
    }
    ```
-   Five checks, all PASS — the four-check report becomes five. `requiredCount=128` matches §3.1's original A1
-   run exactly — no unrelated drift in the required-file inventory between the original CI run and this
-   post-hoc pass.
+   `posthoc-verify-2.md`'s `## Checks` section, real content:
+   ```markdown
+   ## Checks
+
+   - Checksum: `PASS`
+   - Required content: `PASS` (128 paths)
+   - Deployability contract: `PASS` (deployable-onprem-app-package, directReplaceSafe=false, nodeModulesBundled=false)
+   - No GitHub links in delivery docs: `PASS`
+   - Loopback frontend config: `PASS` (no loopback VITE_API_URL/BASE embedded in apps/web/dist)
+   ```
+   Five checks, all PASS, in **both** report formats — the four-check report becomes five in each.
+   `requiredCount=128` (JSON) / "128 paths" (MD) matches §3.1's original A1 run exactly — no unrelated drift
+   in the required-file inventory between the original CI run and this post-hoc pass.
 3. Independently corroborated outside the script, by direct extraction and grep against the real
    `apps/web/dist` inside the archive (122 files under `apps/web/dist`):
    ```
