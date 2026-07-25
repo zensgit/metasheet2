@@ -350,6 +350,16 @@ jobs:
             tests/unit/attendance-shift-segments-service.test.ts \
             --reporter=dot
 
+      # #4556 W4C-0 Stage D: section 8.4 source/effect/result mechanical bypass guard. A
+      # node:test (.test.mjs) file — invisible to both `pnpm --filter core-backend test` and
+      # vitest.config.ts's exclude list — so it must be named explicitly here or it silently
+      # never runs. Scans the exact-head worktree for new/renamed/unclassified attendance DML
+      # against the pinned e0defbe26 debt baseline and its curated P01-P28/X01-X05 entries, and
+      # re-proves the pinned baseline artifact is byte-reproducible from that ref.
+      - name: Run attendance W4C-0 Stage D §8.4 DML inventory collector
+        run: |
+          node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
+
       - name: Run linting
         if: matrix.node-version == '20.x'
         run: |
