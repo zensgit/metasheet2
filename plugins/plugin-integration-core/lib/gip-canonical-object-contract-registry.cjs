@@ -178,7 +178,22 @@ function normalizeContractEntry(entry) {
   }
   const contractId = requiredIdentityToken(entry.contractId, 'contractId')
   const version = requiredIdentityToken(entry.version, 'version')
-  if (!isPlainObject(entry.fields) || Object.keys(entry.fields).length === 0) {
+  // P3 FIX (owner HARD HOLD #4610 residual, round 6) — TOCTOU on entry.fields:
+  // this used to read `entry.fields` THREE separate times (the isPlainObject
+  // check, the Object.keys().length check, and deepCloneFrozenCanonical
+  // below) — fine for an ordinary data property, but a GETTER can return a
+  // DIFFERENT value on each read. A getter returning `{a:1}` on its first
+  // two reads and `{}` on its third passes the non-empty check using the
+  // first two reads and then clones the THIRD (empty) read — registering an
+  // EMPTY `fields` past the very guard meant to refuse it. Reading the
+  // property ONCE into a local closes the window: every check below and the
+  // clone all observe the identical value. (Immaterial on the one production
+  // path today — the shipped registry's entries are the in-file literal `[]`
+  // — but this is the entry point a future amendment would wire to an
+  // externally-sourced entries array, so the TOCTOU should not survive
+  // silently into that amendment.)
+  const rawFields = entry.fields
+  if (!isPlainObject(rawFields) || Object.keys(rawFields).length === 0) {
     fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must be a non-empty plain object', { field: 'fields' })
   }
   // P2 FIX (owner HARD HOLD #4610): `fields: Object.freeze({ ...entry.fields })`
@@ -195,7 +210,7 @@ function normalizeContractEntry(entry) {
   // caller retains can ever reach the registered copy.
   let fields
   try {
-    fields = deepCloneFrozenCanonical(entry.fields)
+    fields = deepCloneFrozenCanonical(rawFields)
   } catch (error) {
     if (error instanceof CanonicalDomainError) {
       fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must stay in the strict canonical JSON domain', { field: 'fields' })

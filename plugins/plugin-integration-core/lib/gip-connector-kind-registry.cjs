@@ -85,18 +85,49 @@ function requiredExtractorFunction(value, field) {
   return value
 }
 
+// P3 FIX (owner HARD HOLD #4610 residual, round 6): reads ONE property off
+// the caller-supplied, untrusted `entry` object. A plain data property never
+// throws on read; a hostile GETTER can — and unguarded, the raw foreign
+// error it throws (whatever class — TypeError, a bare Error, anything)
+// would escape this module VERBATIM, breaking normalizeDeclaration's own
+// contract that every error it throws is a GipConnectorKindRegistryError.
+// This is the SAME class of hole review round 3 closed at
+// gip-system-identity-read.cjs's foreign-call catch sites (runExtractor's
+// `fn(arg)`, credentialStore.decrypt) — this module's direct `entry.*`
+// property reads were left ASYMMETRIC with that fix until now. Every
+// foreign throw crossing this read is unconditionally discarded and
+// replaced with this module's own fixed, values-free reason — nothing
+// about the original error (class, message, stack) is ever preserved.
+// Scope, stated honestly: reachable only by an importer who builds their
+// OWN registry via the exported, UNTRUSTED createConnectorKindRegistry seam
+// and hands it a hostile declaration — the error surfaces back to that SAME
+// caller. The one production entries array (CERTIFIED_CONNECTOR_KIND_REGISTRY's
+// literal `[]` below) has zero entries, so this path is unexercised in
+// production today. Module-private — not exported, not under __internals
+// (the exact-key-set test below pins __internals to fail/normalizeDeclaration/
+// requiredIdentityToken only).
+function readDeclaredField(entry, field) {
+  try {
+    return entry[field]
+  } catch {
+    fail('CONNECTOR_KIND_DECLARATION_INVALID', `${field} could not be read from the declaration`, { field })
+  }
+}
+
 // Normalizes and validates ONE connector-kind declaration. Every field the
 // GIP-D0 §6 formula needs beyond `kind` itself (endpoint identity,
 // authPrincipalKey, authTenantScopeKey) must be a declared extractor — no
 // guessing, no fallback, no default (a guessing extraction is "silently blind",
-// ledger §3.0 B-2).
+// ledger §3.0 B-2). Every property read off `entry` below goes through
+// readDeclaredField — see its comment for why.
 function normalizeDeclaration(entry) {
   if (!isPlainObject(entry)) {
     fail('CONNECTOR_KIND_DECLARATION_INVALID', 'a connector-kind declaration must be a plain object', {})
   }
-  const kind = requiredIdentityToken(entry.kind, 'kind')
+  const kind = requiredIdentityToken(readDeclaredField(entry, 'kind'), 'kind')
 
-  const aliasesInput = entry.aliases === undefined ? [] : entry.aliases
+  const rawAliases = readDeclaredField(entry, 'aliases')
+  const aliasesInput = rawAliases === undefined ? [] : rawAliases
   if (!Array.isArray(aliasesInput)) {
     fail('CONNECTOR_KIND_DECLARATION_INVALID', 'aliases must be an array', { field: 'aliases' })
   }
@@ -113,12 +144,12 @@ function normalizeDeclaration(entry) {
     return alias
   })
 
-  const extractEndpointIdentity = requiredExtractorFunction(entry.extractEndpointIdentity, 'extractEndpointIdentity')
-  const extractAuthPrincipal = requiredExtractorFunction(entry.extractAuthPrincipal, 'extractAuthPrincipal')
+  const extractEndpointIdentity = requiredExtractorFunction(readDeclaredField(entry, 'extractEndpointIdentity'), 'extractEndpointIdentity')
+  const extractAuthPrincipal = requiredExtractorFunction(readDeclaredField(entry, 'extractAuthPrincipal'), 'extractAuthPrincipal')
   // step 1.2c: authTenantScopeKey gets the SAME treatment as endpoint/principal —
   // declared per kind, fail-closed if absent. A declaration missing this
   // extractor is invalid at registration time, not merely unsourced at read time.
-  const extractAuthTenantScope = requiredExtractorFunction(entry.extractAuthTenantScope, 'extractAuthTenantScope')
+  const extractAuthTenantScope = requiredExtractorFunction(readDeclaredField(entry, 'extractAuthTenantScope'), 'extractAuthTenantScope')
 
   return Object.freeze({
     kind,

@@ -219,6 +219,34 @@ function malformedDeclarationsRefused() {
 }
 
 // ---------------------------------------------------------------------------
+// (5b) P3 FIX (owner HARD HOLD #4610 residual, round 6): a hostile GETTER on
+// any declaration property read inside normalizeDeclaration must never
+// escape this module as a raw foreign error — it must be discarded and
+// replaced with GipConnectorKindRegistryError, the SAME contract every other
+// reachable throw in this module already honors. Covers all five direct
+// `entry.*` reads normalizeDeclaration performs (kind, aliases, and the
+// three extractors) — not just the three extractor properties, since the
+// same unguarded-read shape applied identically to kind/aliases.
+// ---------------------------------------------------------------------------
+function hostileGetterOnDeclarationFieldNeverEscapesRaw() {
+  for (const field of ['kind', 'aliases', 'extractEndpointIdentity', 'extractAuthPrincipal', 'extractAuthTenantScope']) {
+    const hostile = harnessDeclaration()
+    delete hostile[field]
+    Object.defineProperty(hostile, field, {
+      enumerable: true,
+      configurable: true,
+      get() { throw new TypeError(`hostile getter for ${field} — must never escape raw`) },
+    })
+    const caught = rejects(
+      () => createConnectorKindRegistry([hostile]),
+      'CONNECTOR_KIND_DECLARATION_INVALID',
+      `a hostile getter on ${field} must be discarded and converted to GipConnectorKindRegistryError, never escape as a raw foreign error`,
+    )
+    assert.equal(caught.details.field, field)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // (6) NEGATIVE CONTROL — the clause the ledger names as most likely to break:
 // a system whose kind is uncertified for GIP binding must still work,
 // unaffected, on its pre-GIP external-systems.cjs (legacy) path.
@@ -327,6 +355,7 @@ async function main() {
   explicitAliasResolves()
   forgedRegistryViaExportedFactoryIsRefused()
   missingExtractorsRefusedAtRegistration()
+  hostileGetterOnDeclarationFieldNeverEscapesRaw()
   malformedDeclarationsRefused()
   await legacyPathKeepsWorkingWhileGipBindingRefuses()
   internalsExactKeySet()

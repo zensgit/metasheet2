@@ -261,6 +261,37 @@ function nestedFieldsAreDeeplyFrozenAndOwned() {
 }
 
 // ---------------------------------------------------------------------------
+// (6b) P3 FIX (owner HARD HOLD #4610 residual, round 6) — TOCTOU on
+// entry.fields. Pre-fix, normalizeContractEntry read `entry.fields` THREE
+// times (isPlainObject check, Object.keys().length check,
+// deepCloneFrozenCanonical). A getter returning `{a:1}` on its first two
+// reads and `{}` on its third would pass the non-empty check on reads 1-2
+// and then register the EMPTY value read on read 3 — reproducing exactly
+// `{"contractId":"c","version":"v","fields":{}}`, an empty fields object
+// past the guard meant to refuse it. Reading the property ONCE into a local
+// closes the window. This test discriminates precisely: on the OLD
+// (unfixed) code, `reads` ends at 3 and the registered fields is `{}`; on
+// the FIXED code, `reads` ends at 1 and the registered fields is the SAME
+// non-empty value that passed validation.
+// ---------------------------------------------------------------------------
+function fieldsToctouGetterCannotBypassNonEmptyCheck() {
+  let reads = 0
+  const hostile = {
+    contractId: 'c',
+    version: 'v',
+    get fields() {
+      reads += 1
+      return reads <= 2 ? { a: 1 } : {}
+    },
+  }
+  const registry = createCanonicalObjectContractRegistry([hostile])
+  const registered = registry.lookup('c', 'v')
+  assert.ok(registered, 'sanity: entry must register — fields WAS non-empty on the single read that validation observed')
+  assert.deepEqual(registered.fields, { a: 1 }, 'registered fields must be the SAME non-empty value that was validated, never a later, different (empty) read of the same getter')
+  assert.equal(reads, 1, 'entry.fields must be read exactly ONCE — no TOCTOU window between validation and use')
+}
+
+// ---------------------------------------------------------------------------
 // (7) Activation gate — P1-3 FIX (owner HARD HOLD #4610). REPRODUCES THE
 // OWNER'S EXACT PROBE: a caller-supplied plain object
 // `{ inventoryStatus: 'COMPLETE', references: [] }` — exactly the shape and
@@ -405,6 +436,7 @@ function main() {
   noAutoVivification()
   malformedEntriesRefused()
   nestedFieldsAreDeeplyFrozenAndOwned()
+  fieldsToctouGetterCannotBypassNonEmptyCheck()
   activationGateRefusesCallerAssertedEvidence()
   activationReadinessMechanism()
   internalsExactKeySet()
