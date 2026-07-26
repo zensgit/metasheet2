@@ -79,13 +79,27 @@
  *     [--probe beta|gamma|both] [--private-out <path> | --no-private-out] [--json]
  *   node scripts/ops/gip-authority-substrate-inventory.mjs --dry-run   # no DB required
  *
- * Exit codes:
+ * Exit codes: exit 1 is reached by TWO DIFFERENT routes through main() — they share the exit code
+ * but not the code path, and neither leaks anything about the underlying failure (see the CLI
+ * error-reason discipline right below the "CLI" section heading, and the exit-code contract test
+ * describe block in the test file, which pins the second route directly by calling main()):
  *   0  ran successfully (a MAPPING_REQUIRED / BACKFILL_REQUIRED verdict is information, not failure)
- *   1  unexpected runtime/DB error; OR the private artefact was owed (unregistered/unmapped count
- *      > 0) but could not be written; OR it was owed but --no-private-out disabled the write
- *      (report.privateArtifact.consumableByWave2 === false) — all three fail closed rather than
- *      reporting aggregate-only success while silently dropping the raw detail a human needs to
- *      act on it, or letting a caller read "ran successfully" as "this run is a complete inventory"
+ *   1  route A — an exception escaped buildReport()/buildDryRunReport()/parseArgs() (an unexpected
+ *      runtime/DB error, OR the private artefact was owed — unregistered/unmapped count > 0 — but
+ *      the write itself failed). Caught by main()'s try/catch; stderr gets a closed
+ *      CLI_ERROR_REASON token (never the caught error's own .message), never returns to the
+ *      `if (consumableByWave2 === false)` check below at all.
+ *   1  route B — buildReport() returns NORMALLY but the private artefact was owed and
+ *      --no-private-out disabled the write (report.privateArtifact.consumableByWave2 === false,
+ *      checked explicitly in main(), ~L1107). The report is still printed to stdout in this case; only
+ *      the exit code fails closed, so a caller relying on exit status alone (not reading stdout)
+ *      still cannot mistake this for a complete inventory.
+ *   Both routes fail closed rather than reporting aggregate-only success while silently dropping
+ *   the raw detail a human needs to act on it, or letting a caller read "ran successfully" as "this
+ *   run is a complete inventory". A failure to close the Postgres pool AFTER either route already
+ *   determined its result (0/1/2) is swallowed silently by design (see safeClose()) — it never
+ *   changes the exit code and never produces separate stderr output; the pool-close outcome itself
+ *   is not signalled on any channel.
  *   2  required input missing (DATABASE_URL absent outside --dry-run)
  */
 
@@ -897,6 +911,54 @@ function renderHumanSummary(report) {
 // CLI
 // ---------------------------------------------------------------------------
 
+// stderr values-free discipline (#4603 P2(a)): the report object's CLOSED VALUE DOMAIN (see the
+// describe block of that name in the test file) was proven for stdout/--json in an earlier round,
+// but the owner's probe showed stderr was NOT covered — an unrecognized flag echoed the operator's
+// literal argv value verbatim, and a `pg` import failure echoed a foreign Error's .message, which
+// on a `Cannot find package 'pg'` MODULE_NOT_FOUND carries an absolute filesystem path. Every
+// string that can reach stderr from parseArgs()/main() below is now one of these fixed tokens —
+// authored here, never argv- or env-derived — and nothing else.
+const CLI_ERROR_REASON = Object.freeze({
+  UNKNOWN_ARGUMENT: 'UNKNOWN_ARGUMENT',
+  INVALID_PROBE_VALUE: 'INVALID_PROBE_VALUE',
+  MISSING_PRIVATE_OUT_PATH: 'MISSING_PRIVATE_OUT_PATH',
+  MUTUALLY_EXCLUSIVE_PRIVATE_OUT: 'MUTUALLY_EXCLUSIVE_PRIVATE_OUT',
+  DATABASE_URL_REQUIRED: 'DATABASE_URL_REQUIRED',
+  RUNTIME_FAILURE: 'RUNTIME_FAILURE',
+})
+// Membership set, not just "is it a CliArgError" — see closedCliErrorReason() below for why the
+// extra check matters.
+const CLI_REASON_VALUES = new Set(Object.values(CLI_ERROR_REASON))
+
+// The ONLY error type parseArgs() is allowed to throw. `.reason` is always one of the frozen
+// CLI_ERROR_REASON tokens above — never an interpolated argv value — enforced by construction at
+// every throw site below (no template literal ever appears in a `new CliArgError(...)` call).
+class CliArgError extends Error {
+  constructor(reason) {
+    super(reason)
+    this.name = 'CliArgError'
+    this.reason = reason
+  }
+}
+
+// Maps ANY error that could reach a stderr write site in main() to a CLOSED reason token. This is
+// deliberately NOT `err instanceof CliArgError ? err.message : RUNTIME_FAILURE` — that shape makes
+// closedness a convention (a future `throw new CliArgError(\`unknown argument: ${a}\`)` would
+// silently re-open the exact leak this fixes, and every test below would stay green because it
+// only checks the class, not the value). Instead this re-validates that `.reason` is actually a
+// member of the frozen CLI_ERROR_REASON set; anything else — a foreign Error's .message, a
+// CliArgError constructed with a non-token string, a TypeError, a `pg` MODULE_NOT_FOUND carrying an
+// absolute path, a Postgres connection error carrying a hostname — collapses to the single generic
+// RUNTIME_FAILURE token. Mutation-confirmed (#4603 P2(a)): reverting this to the
+// `err instanceof CliArgError ? err.message : RUNTIME_FAILURE` shape (while still constructing
+// CliArgError with fixed tokens everywhere) keeps every test in this file green — the coverage gap
+// is closed only by asserting membership, so a direct unit test on this function's own contract
+// (feeding it a CliArgError built from a non-token string) is what actually pins it; see
+// 'closedCliErrorReason' below in the test file.
+function closedCliErrorReason(err) {
+  return err instanceof CliArgError && CLI_REASON_VALUES.has(err.reason) ? err.reason : CLI_ERROR_REASON.RUNTIME_FAILURE
+}
+
 function parseArgs(argv) {
   const opts = { dryRun: false, json: false, help: false, probe: 'both', privateOutPath: undefined, noPrivateOut: false }
   for (let i = 0; i < argv.length; i += 1) {
@@ -909,14 +971,14 @@ function parseArgs(argv) {
       case '--probe': {
         const next = argv[++i]
         if (!['beta', 'gamma', 'both'].includes(next)) {
-          throw new Error(`--probe must be one of beta|gamma|both, got: ${next}`)
+          throw new CliArgError(CLI_ERROR_REASON.INVALID_PROBE_VALUE)
         }
         opts.probe = next
         break
       }
       case '--private-out':
         opts.privateOutPath = argv[++i]
-        if (!opts.privateOutPath) throw new Error('--private-out requires a path argument')
+        if (!opts.privateOutPath) throw new CliArgError(CLI_ERROR_REASON.MISSING_PRIVATE_OUT_PATH)
         break
       case '--no-private-out':
         opts.noPrivateOut = true
@@ -929,11 +991,11 @@ function parseArgs(argv) {
         opts.help = true
         break
       default:
-        throw new Error(`unknown argument: ${a}`)
+        throw new CliArgError(CLI_ERROR_REASON.UNKNOWN_ARGUMENT)
     }
   }
   if (opts.privateOutPath && opts.noPrivateOut) {
-    throw new Error('--private-out and --no-private-out are mutually exclusive')
+    throw new CliArgError(CLI_ERROR_REASON.MUTUALLY_EXCLUSIVE_PRIVATE_OUT)
   }
   return opts
 }
@@ -968,7 +1030,11 @@ function printHelp() {
 
 async function createPgExecutor(databaseUrl) {
   // Lazy import: `pg` must never be required at module load, or a hermetic `node --test` CI job
-  // with no `node_modules` fails at import time before a single test runs.
+  // with no `node_modules` fails at import time before a single test runs. This is also the exact
+  // failure the owner's #4603 P2(a) probe used: in that same hermetic environment `import('pg')`
+  // rejects with a MODULE_NOT_FOUND Error whose .message is
+  // `Cannot find package 'pg' imported from <absolute path>` — main() below must never let that
+  // .message reach stderr/stdout verbatim.
   const { default: pg } = await import('pg')
   const pool = new pg.Pool({ connectionString: databaseUrl, max: 2 })
   return {
@@ -977,12 +1043,27 @@ async function createPgExecutor(databaseUrl) {
   }
 }
 
-async function main(argv = process.argv.slice(2), env = process.env) {
+// A pool-close failure after the run already computed its own result (success OR a mapped failure)
+// must never override that result, and must never leak the underlying close error's .message — same
+// values-free discipline as everything else reaching stderr. Without this, a throw inside main()'s
+// `finally { await executor.close() }` would reject main()'s own returned promise from OUTSIDE every
+// try/catch above it, bypassing closedCliErrorReason() entirely and reaching the entry-point wrapper
+// (see isEntry below) as an unmapped rejection.
+async function safeClose(executor) {
+  if (!executor) return
+  try {
+    await executor.close()
+  } catch {
+    // intentionally silent — see comment above
+  }
+}
+
+async function main(argv = process.argv.slice(2), env = process.env, { createExecutor = createPgExecutor } = {}) {
   let opts
   try {
     opts = parseArgs(argv)
   } catch (err) {
-    process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${err.message}\n`)
+    process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${closedCliErrorReason(err)}\n`)
     return 1
   }
   if (opts.help) {
@@ -995,7 +1076,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   if (opts.dryRun) {
     let executor = null
     try {
-      if (databaseUrl) executor = await createPgExecutor(databaseUrl)
+      if (databaseUrl) executor = await createExecutor(databaseUrl)
       const report = await buildDryRunReport({ exec: executor ? executor.exec : null, probe: opts.probe })
       if (opts.json) {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n')
@@ -1005,21 +1086,21 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       }
       return 0
     } catch (err) {
-      process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${err instanceof Error ? err.message : String(err)}\n`)
+      process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${closedCliErrorReason(err)}\n`)
       return 1
     } finally {
-      if (executor) await executor.close()
+      await safeClose(executor)
     }
   }
 
   if (!databaseUrl) {
-    process.stderr.write('[gip-authority-substrate-inventory] ERROR: DATABASE_URL is required outside --dry-run\n')
+    process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${CLI_ERROR_REASON.DATABASE_URL_REQUIRED}\n`)
     return 2
   }
 
   let executor
   try {
-    executor = await createPgExecutor(databaseUrl)
+    executor = await createExecutor(databaseUrl)
     const report = await buildReport({
       exec: executor.exec,
       probe: opts.probe,
@@ -1035,24 +1116,39 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     // The report is still printed above even in this case — a caller reading stdout gets the full
     // explanation — but the run must not be mistakable for a complete inventory by exit code alone
     // (see the header's Exit codes list and the ruling on ~L672 in the PR that added this check).
+    // Exit-code contract test coverage (#4603 P2(b)): see the 'main() exit-code contract' describe
+    // block in the test file — this line was previously reachable by none of the 127 tests.
     if (report.privateArtifact.consumableByWave2 === false) {
       return 1
     }
     return 0
   } catch (err) {
-    process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${err instanceof Error ? err.message : String(err)}\n`)
+    process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${closedCliErrorReason(err)}\n`)
     return 1
   } finally {
-    if (executor) await executor.close()
+    await safeClose(executor)
   }
 }
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : null
 const isEntry = entryPath && entryPath === fileURLToPath(import.meta.url)
 if (isEntry) {
-  main().then((code) => {
-    process.exitCode = code
-  })
+  // Last-resort net, not the normal path: every branch inside main() already resolves to a mapped
+  // exit code via its own try/catch (see closedCliErrorReason() and safeClose() above). The reject
+  // handler here exists only in case something still escapes both — without it, Node prints the
+  // raw rejection (including any absolute path in its stack) straight to real stderr, and that
+  // print happens OUTSIDE main()'s own stderr writes, so nothing inside this file can intercept or
+  // redact it. Never interpolate the rejection reason here, for the same values-free discipline as
+  // every other stderr write in this file.
+  main().then(
+    (code) => {
+      process.exitCode = code
+    },
+    () => {
+      process.stderr.write(`[gip-authority-substrate-inventory] ERROR: ${CLI_ERROR_REASON.RUNTIME_FAILURE}\n`)
+      process.exitCode = 1
+    },
+  )
 }
 
 export {
@@ -1086,6 +1182,9 @@ export {
   buildDryRunReport,
   renderHumanSummary,
   parseArgs,
+  CLI_ERROR_REASON,
+  CliArgError,
+  closedCliErrorReason,
   main,
   REPO_ROOT,
   DEFAULT_PRIVATE_OUTPUT_DIR,

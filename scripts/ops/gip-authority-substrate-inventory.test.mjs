@@ -4,6 +4,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, statS
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 
 import {
   QUERY_ALLOWLIST,
@@ -31,6 +32,10 @@ import {
   buildDryRunReport,
   renderHumanSummary,
   parseArgs,
+  CLI_ERROR_REASON,
+  CliArgError,
+  closedCliErrorReason,
+  main,
   REPO_ROOT,
   DEFAULT_PRIVATE_OUTPUT_DIR,
 } from './gip-authority-substrate-inventory.mjs'
@@ -1920,24 +1925,246 @@ describe('parseArgs', () => {
     assert.equal(parseArgs(['--probe', 'beta']).probe, 'beta')
     assert.equal(parseArgs(['--probe', 'gamma']).probe, 'gamma')
     assert.equal(parseArgs(['--probe', 'both']).probe, 'both')
-    assert.throws(() => parseArgs(['--probe', 'delta']), /--probe must be one of/)
+    assert.throws(() => parseArgs(['--probe', 'delta']), new RegExp(CLI_ERROR_REASON.INVALID_PROBE_VALUE))
   })
 
   test('--private-out and --no-private-out are mutually exclusive', () => {
-    assert.throws(() => parseArgs(['--private-out', '/tmp/x.json', '--no-private-out']), /mutually exclusive/)
+    assert.throws(
+      () => parseArgs(['--private-out', '/tmp/x.json', '--no-private-out']),
+      new RegExp(CLI_ERROR_REASON.MUTUALLY_EXCLUSIVE_PRIVATE_OUT),
+    )
   })
 
   test('--private-out requires a path argument', () => {
-    assert.throws(() => parseArgs(['--private-out']), /requires a path argument/)
+    assert.throws(() => parseArgs(['--private-out']), new RegExp(CLI_ERROR_REASON.MISSING_PRIVATE_OUT_PATH))
   })
 
   test('unknown flag throws', () => {
-    assert.throws(() => parseArgs(['--nope']), /unknown argument/)
+    assert.throws(() => parseArgs(['--nope']), new RegExp(CLI_ERROR_REASON.UNKNOWN_ARGUMENT))
+  })
+
+  // #4603 P2(a) — parseArgs must never echo the operator's literal argv value into the thrown
+  // error's message, only the fixed CLOSED reason token. A sentinel proves this behaviourally
+  // rather than by re-reading the source: if the old `unknown argument: ${a}` shape ever came
+  // back, this would red on the sentinel appearing in err.message.
+  test('unknown flag error message never echoes the flag itself, even a sentinel-bearing one', () => {
+    const sentinel = 'SENTINEL_NEVER_ECHOED_ARGV_7f2c9a'
+    assert.throws(
+      () => parseArgs([`--${sentinel}`]),
+      (err) => {
+        assert.equal(err.message.includes(sentinel), false, 'sentinel leaked into parseArgs error message')
+        assert.equal(err.message, CLI_ERROR_REASON.UNKNOWN_ARGUMENT)
+        return true
+      },
+    )
   })
 
   test('--help sets help flag', () => {
     assert.equal(parseArgs(['--help']).help, true)
   })
+})
+
+// ---------------------------------------------------------------------------
+// closedCliErrorReason — pinned at the UNIT level, not just via its call
+// sites in main(). #4603 P2(a) review: an `err instanceof CliArgError ?
+// err.message : RUNTIME_FAILURE` shape (no membership check) would make every
+// test below pass while still re-opening the leak on a future regression
+// where some CliArgError throw site goes back to interpolating argv. These
+// tests exercise the function directly against inputs that a body-level
+// regression could produce but that none of the call-site tests below can
+// reach (the real parseArgs()/main() never construct these today).
+// ---------------------------------------------------------------------------
+
+describe('closedCliErrorReason — the mapping itself is pinned (#4603 P2(a))', () => {
+  test('a CliArgError built from a real CLI_ERROR_REASON token passes through unchanged', () => {
+    assert.equal(closedCliErrorReason(new CliArgError(CLI_ERROR_REASON.UNKNOWN_ARGUMENT)), CLI_ERROR_REASON.UNKNOWN_ARGUMENT)
+  })
+
+  test('a CliArgError built from a string OUTSIDE the frozen token set collapses to RUNTIME_FAILURE — this is the assertion an `instanceof`-only mapping (no membership check) cannot survive', () => {
+    const sentinel = 'SENTINEL_NOT_A_TOKEN_leaked-argv-value'
+    const err = new CliArgError(`unknown argument: --${sentinel}`)
+    const mapped = closedCliErrorReason(err)
+    assert.equal(mapped, CLI_ERROR_REASON.RUNTIME_FAILURE)
+    assert.equal(mapped.includes(sentinel), false)
+  })
+
+  test('a foreign (non-CliArgError) Error is never trusted by content match alone, even when its .message happens to equal a real token string', () => {
+    const foreign = new Error(CLI_ERROR_REASON.UNKNOWN_ARGUMENT)
+    assert.equal(closedCliErrorReason(foreign), CLI_ERROR_REASON.RUNTIME_FAILURE)
+  })
+
+  test('a real absolute-path-bearing foreign Error (MODULE_NOT_FOUND shape) collapses to RUNTIME_FAILURE and never echoes the path', () => {
+    const fakePath = '/Users/some-operator/secret-checkout-dir/scripts/ops/gip-authority-substrate-inventory.mjs'
+    const foreign = new Error(`Cannot find package 'pg' imported from ${fakePath}`)
+    const mapped = closedCliErrorReason(foreign)
+    assert.equal(mapped, CLI_ERROR_REASON.RUNTIME_FAILURE)
+    assert.equal(mapped.includes(fakePath), false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// stderr values-free discipline — REAL SUBPROCESS PROOF (#4603 P2(a))
+// ---------------------------------------------------------------------------
+// The owner's probe ran the actual CLI, not an in-process call to main(): an unrecognized flag's
+// literal argv text landed on real stderr, and a `pg` load failure's absolute path landed there
+// too. In-process interception of process.stderr.write would prove closedCliErrorReason() itself
+// works, but would NOT prove the entry-point wrapper at the bottom of the source (main().then(...))
+// actually routes through it, and structurally cannot observe anything that escapes main()'s own
+// promise — an unhandled rejection prints on the real stderr file descriptor, bypassing any
+// monkeypatch of process.stderr.write entirely (see safeClose() / the isEntry reject handler in the
+// source, both added in this same pass to close exactly that gap). These tests spawn the real
+// `node <script>` process and read its real stdout/stderr/exit code — no createExecutor injection
+// possible here, by design.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'ops', 'gip-authority-substrate-inventory.mjs')
+
+function countOccurrences(haystack, needle) {
+  if (!needle) return 0
+  let count = 0
+  let idx = 0
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    count += 1
+    idx += needle.length
+  }
+  return count
+}
+
+function runCliSubprocess(args, env) {
+  const result = spawnSync(process.execPath, [SCRIPT_PATH, ...args], { env, encoding: 'utf8', timeout: 10_000 })
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+describe('stderr values-free discipline — real subprocess (#4603 P2(a))', () => {
+  test('sentinel-bearing unknown flag: exit 1; stderr is non-empty (positive control — an implementation that prints nothing would also pass a bare zero-count check); sentinel appears in NEITHER stdout NOR stderr', () => {
+    const sentinel = 'SENTINEL_OPERATOR_SECRET_MARKER_c83fa1'
+    // Minimal explicit env: no ambient DATABASE_URL/etc. from the test runner's own environment can
+    // leak in and change which branch of main() this exercises.
+    const env = { PATH: process.env.PATH }
+    const res = runCliSubprocess([`--${sentinel}`], env)
+    assert.equal(res.status, 1)
+    assert.ok(res.stderr.length > 0, 'positive control failed: stderr was empty')
+    assert.equal(countOccurrences(res.stderr, sentinel), 0, `sentinel leaked into stderr: ${res.stderr}`)
+    assert.equal(countOccurrences(res.stdout, sentinel), 0, `sentinel leaked into stdout: ${res.stdout}`)
+    assert.equal(res.stderr.trim(), `[gip-authority-substrate-inventory] ERROR: ${CLI_ERROR_REASON.UNKNOWN_ARGUMENT}`)
+  })
+
+  test('forced `pg` driver-load failure: exit 1; stderr non-empty (positive control); the absolute path fragment PROVEN present in the raw import error is absent from both stdout and stderr', async () => {
+    // Positive control FIRST — prove the raw failure createPgExecutor() hits in this exact hermetic
+    // environment (no node_modules: the real CI workflow for this file — see
+    // .github/workflows/gip-authority-substrate-inventory.yml — checks out and runs `node --test`
+    // directly, no install step) really does carry an absolute path in its .message. If this
+    // control does not hold, the redaction assertions below would be vacuous — a probe that leaks
+    // nothing proves nothing.
+    let rawMessage = null
+    try {
+      await import('pg')
+    } catch (e) {
+      rawMessage = e.message
+    }
+    assert.ok(
+      rawMessage,
+      'control failed: `pg` imported successfully in this test environment — the driver-load-failure scenario below did not actually occur, so its redaction assertions would be vacuous',
+    )
+    assert.ok(rawMessage.includes(__dirname), `control failed: raw import error does not carry the expected absolute path fragment — got: ${rawMessage}`)
+
+    const env = { PATH: process.env.PATH, DATABASE_URL: 'postgres://sentinel-host-should-never-appear/db' }
+    const res = runCliSubprocess([], env)
+    assert.equal(res.status, 1)
+    assert.ok(res.stderr.length > 0, 'positive control failed: stderr was empty')
+    assert.equal(countOccurrences(res.stderr, __dirname), 0, `path fragment leaked into stderr: ${res.stderr}`)
+    assert.equal(countOccurrences(res.stdout, __dirname), 0, `path fragment leaked into stdout: ${res.stdout}`)
+    assert.equal(
+      countOccurrences(res.stderr, 'sentinel-host-should-never-appear'),
+      0,
+      `DATABASE_URL host leaked into stderr: ${res.stderr}`,
+    )
+    assert.equal(res.stderr.trim(), `[gip-authority-substrate-inventory] ERROR: ${CLI_ERROR_REASON.RUNTIME_FAILURE}`)
+  })
+
+  // --help is the one success-path (exit 0) public-output surface nothing else in this file
+  // exercises via a real process: printHelp() interpolates DEFAULT_PRIVATE_OUTPUT_DIR, a
+  // repo-relative constant, not an absolute path — but that is a claim about the source, and this
+  // repo's own doctrine is that claims about output need a real capture, not a re-read of the code.
+  test('--help: exit 0, and stdout never contains an absolute-path fragment', () => {
+    const env = { PATH: process.env.PATH }
+    const res = runCliSubprocess(['--help'], env)
+    assert.equal(res.status, 0)
+    assert.ok(res.stdout.length > 0)
+    assert.equal(countOccurrences(res.stdout, __dirname), 0, `path fragment leaked into --help stdout: ${res.stdout}`)
+    assert.equal(res.stderr, '')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// main() exit-code contract (#4603 P2(b)) — `consumableByWave2 === false ⇒
+// exit 1` (~L1038 in the source) gates Wave 2 consumption of this script's
+// output and, before this pass, was reachable by NONE of this file's tests
+// (none called main()). These call the REAL main() — the same function the
+// entry-point wrapper at the bottom of the source invokes — via the
+// injectable createExecutor seam added in this pass, so no real DATABASE_URL
+// or `pg` package is needed; the fake executor is the same createFakeExec
+// harness the buildReport()-level tests above already use.
+// ---------------------------------------------------------------------------
+
+async function withCapturedStdout(fn) {
+  const original = process.stdout.write.bind(process.stdout)
+  let buf = ''
+  process.stdout.write = (chunk) => {
+    buf += typeof chunk === 'string' ? chunk : chunk.toString()
+    return true
+  }
+  try {
+    const result = await fn()
+    return { result, stdout: buf }
+  } finally {
+    process.stdout.write = original
+  }
+}
+
+function fakeExecutorFactory(schema, counts) {
+  const exec = createFakeExec({ schema, counts })
+  return async () => ({ exec, close: async () => {} })
+}
+
+describe('main() exit-code contract (#4603 P2(b))', () => {
+  test('positive control: nothing owed ⇒ exit 0 (a success case must be provable too, not just the failure case)', async () => {
+    const schema = cloneSchema()
+    const createExecutor = fakeExecutorFactory(schema, ZERO_COUNTS)
+    const { result: code } = await withCapturedStdout(() =>
+      main(['--no-private-out'], { DATABASE_URL: 'postgres://fixture/db' }, { createExecutor }),
+    )
+    assert.equal(code, 0)
+  })
+
+  test('consumableByWave2 === false (something owed, --no-private-out disables the write) ⇒ exit 1 — the L1038 contract, previously untested by any of the 127 tests', async () => {
+    const schema = cloneSchema()
+    const counts = {
+      'count.external_system_kinds_all': [{ kind: 'unregistered-kind', n: 1 }],
+      'count.external_system_kinds_active': [{ kind: 'unregistered-kind', n: 1 }],
+      'count.read_source_config_objects_by_status': [],
+      'count.read_source_config_object_config_divergence': [{ n: 0 }],
+    }
+    const createExecutor = fakeExecutorFactory(schema, counts)
+    const { result: code } = await withCapturedStdout(() =>
+      main(['--no-private-out'], { DATABASE_URL: 'postgres://fixture/db' }, { createExecutor }),
+    )
+    assert.equal(code, 1)
+  })
+
+  test('DATABASE_URL missing outside --dry-run ⇒ exit 2 (documented in the header\'s Exit codes list, previously untested; needs no DB/executor)', async () => {
+    const { result: code } = await withCapturedStdout(() => main([], {}))
+    assert.equal(code, 2)
+  })
+
+  // Mutation-confirmed (#4603 P2(b)): flipping the source's `report.privateArtifact.consumableByWave2
+  // === false` to `=== true` at the L1038 exit-code check reds BOTH tests above that depend on it —
+  // the "consumableByWave2 === false ... ⇒ exit 1" test (now gets 0) and the "nothing owed ⇒ exit 0"
+  // positive control (now gets 1, since a true nothing-owed run's consumableByWave2 is also true and
+  // the inverted check fires on it) — while every other test in this file (all 127 pre-existing ones)
+  // stays green, because none of them called main(). Reverted after confirming red; not re-run here
+  // because this file has no automated mutation-testing harness, matching the existing
+  // "Mutation-confirmed (#4603 P2)" comment style used elsewhere in this file for the same reason.
 })
 
 // ---------------------------------------------------------------------------
