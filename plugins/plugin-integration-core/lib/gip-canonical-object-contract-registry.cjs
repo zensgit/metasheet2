@@ -584,25 +584,43 @@ function assertTrustedInventoryAttestation(inventoryReport) {
 // FUNCTION if the caller passes a duck-typed registry object (this function
 // takes no trust check on `registry` — that is the CALLER's job, per this
 // comment's own "ALREADY-TRUSTED" precondition — but "the caller is supposed
-// to have checked" does not stop a raw throw from a caller who didn't). The
-// `registry.lookup` catch re-throws unchanged when the caught error is
-// ALREADY a GipCanonicalObjectContractError — lookup()'s own internal
-// requiredIdentityToken validation legitimately throws that type for a
-// malformed contractId/version, and that branded throw must propagate as-is,
-// not be re-labeled as a `registry` failure.
+// to have checked" does not stop a raw throw from a caller who didn't).
+//
+// P1 FIX (adversarial residual after #4610 head): the round-7 catch used to
+// re-throw unchanged when the caught error was ALREADY a
+// GipCanonicalObjectContractError, reasoning that lookup()'s own
+// requiredIdentityToken validation legitimately throws that type. That
+// reasoning is the SAME brand-exemption class gip-system-identity-read.cjs
+// round 3 deleted entirely: GipCanonicalObjectContractError is a PUBLIC
+// constructor (exported on module.exports), so a hostile registry.lookup can
+// `throw new GipCanonicalObjectContractError(reason, attackerMessage,
+// attackerDetails)` — optionally with `.cause` chained — and the exemption
+// forwards attacker text VERBATIM (message/details/cause/stack). A TypeError
+// from the same lookup was already converted; the branded form was the hole
+// the TypeError-only probe missed. Fix: validate contractId/version HERE via
+// requiredIdentityToken (module-authored, values-free) BEFORE calling
+// lookup, then discard EVERY throw from lookup unconditionally and replace
+// it with this module's fixed reason. After pre-validation, a genuine
+// createCanonicalObjectContractRegistry lookup cannot throw for token shape
+// (its own requiredIdentityToken would accept the same values) — it only
+// returns found/null — so the "legitimate branded rethrow" case no longer
+// needs to cross this catch at all.
 function computeActivationReadiness(registry, references) {
   const referencesLength = readArrayLength(references, 'references')
   let backedCount = 0
   let unbackedCount = 0
   for (let index = 0; index < referencesLength; index += 1) {
     const reference = readArrayElement(references, index, 'references')
-    const contractId = readEntryField(reference, 'contractId')
-    const version = readEntryField(reference, 'version')
+    // Pre-validate BEFORE lookup so a malformed token fails with THIS
+    // module's own requiredIdentityToken error (field: contractId|version),
+    // never by rethrowing whatever registry.lookup chose to throw.
+    const contractId = requiredIdentityToken(readEntryField(reference, 'contractId'), 'contractId')
+    const version = requiredIdentityToken(readEntryField(reference, 'version'), 'version')
     let found
     try {
       found = registry.lookup(contractId, version)
-    } catch (error) {
-      if (error instanceof GipCanonicalObjectContractError) throw error
+    } catch {
+      // Unconditional discard — no brand exemption. See the P1 fix note above.
       fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'registry.lookup could not be evaluated', { field: 'registry' })
     }
     if (found) backedCount += 1
