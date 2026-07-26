@@ -27003,18 +27003,25 @@ module.exports = {
           // the extra read keeps the default-off deployment's per-request
           // DB cost byte-identical to before this change.
           let outerSourceDefinitionFingerprint = null
+          // O-5 probe (#4612 gate3 P2-1 round 3): hoisted out of the `if` block below
+          // (was block-scoped `const`) so the test-only pre-boundary seam a few lines
+          // down can pass the SAME raw resolution/context objects through to a test —
+          // no behavior change, pure scoping (still only ever assigned inside the same
+          // guarded block, still `null` under the identical conditions as before).
+          let outerResolution = null
+          let outerContext = null
           if (
             w4ComputeOuterSourceDefinitionFingerprint
             && String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
           ) {
-            const outerResolution = await resolveW4LiveCandidateInTransactionV1(db, {
+            outerResolution = await resolveW4LiveCandidateInTransactionV1(db, {
               orgId,
               userId,
               occurredAt: occurredAt.toISOString(),
               timezone: requestTimezone,
             })
             if (outerResolution && outerResolution.kind === 'resolved') {
-              const outerContext = await buildW4ShadowFrozenContextV1(db, {
+              outerContext = await buildW4ShadowFrozenContextV1(db, {
                 orgId,
                 userId,
                 workDate: outerResolution.workDate,
@@ -27242,8 +27249,18 @@ module.exports = {
           // module-level declaration and __setAttendanceW4LivePunchPreBoundarySeamForTests
           // above. Unset in production (and in every test that never installs it), this
           // is a plain no-op; the route's control flow is byte-identical either way.
+          // O-5 probe (#4612 gate3 P2-1 round 3): `outerResolution`/`outerContext` are
+          // ALSO passed through (additive field, ignored by every pre-existing seam
+          // callback that destructures only `{orgId, userId, workDate, timezone}` or
+          // takes no argument at all) — the exact raw values this route's outer
+          // source-definition-fingerprint computation above already used, so a test can
+          // reconstruct the RAW outer attribution value (via
+          // `__computeAttendanceOuterAttributionValueForTestsV1`) and diff it
+          // field-by-field against the freeze step's persisted `attribution_snapshot`.
           if (attendanceW4LivePunchPreBoundarySeamForTests) {
-            await attendanceW4LivePunchPreBoundarySeamForTests({ orgId, userId, workDate, timezone })
+            await attendanceW4LivePunchPreBoundarySeamForTests({
+              orgId, userId, workDate, timezone, outerResolution, outerContext,
+            })
           }
           const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
             orgId,
