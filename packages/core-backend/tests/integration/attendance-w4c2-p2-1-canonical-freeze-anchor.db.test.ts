@@ -378,6 +378,22 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(driftValue.shiftId).toBe(shadowShiftA)
     expect(driftValue.reasonCode).toBe('SINGLE_MATCHING_CANDIDATE')
     expect(driftValue.absoluteWindow).toEqual(refWinner.absoluteWindow)
+    // #4612 gate3 P2-1 self-report ④ closure (previously-retracted claim):
+    // `attributionWindow` precise ISO values were never asserted on this
+    // canonical/shadow branch. Pin them exactly, but WITHOUT hardcoding the
+    // ops-configurable tail minutes as a magic literal (mutation table item
+    // 12's own disclosed-gap note: "attributionWindow 端用『绝对端+冻结
+    // tail 自洽』断言，tail 源不锁死具体值") — derive the expected `endAt`
+    // from the ALSO-persisted, ALSO-asserted `absoluteWindow.endAt` and
+    // `attributionTailMinutes` fields instead of a bare number.
+    expect(Number.isInteger(driftValue.attributionTailMinutes) && driftValue.attributionTailMinutes >= 0).toBe(true)
+    expect(driftValue.extendedByApprovedOvertime).toBe(false)
+    expect(driftValue.attributionWindow.startAt).toBe(driftValue.absoluteWindow.startAt)
+    expect(driftValue.attributionWindow.endAt).toBe(
+      new Date(
+        new Date(driftValue.absoluteWindow.endAt).getTime() + driftValue.attributionTailMinutes * 60_000,
+      ).toISOString(),
+    )
     expect(driftCalcs[0].semantic_input_fingerprint).toMatch(/^[0-9a-f]{64}$/)
     // #4612 gate3 P2-1 self-report ⑥ closure: `source_definition_fingerprint`
     // must be sealed from the dedicated W4C-1 domain
