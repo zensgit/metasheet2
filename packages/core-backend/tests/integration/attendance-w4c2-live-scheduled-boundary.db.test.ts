@@ -232,13 +232,19 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     // P2-1 / P1 remediation (#4612 gate2) fixtures: one org, one published
     // shift bounded to a single calendar day (2026-07-19, UTC 20:00-23:00),
     // two users each individually assigned to it.
+    // P2-2 remediation (#4612 gate3): `late_grace_minutes`/`early_grace_minutes`
+    // are explicit zero (NOT the column default of 10, which coincidentally
+    // equals DEFAULT_RULE's own 10-minute grace) so the shift's own rule is
+    // deterministically DIFFERENT from `defaultRule` for any check-in/out
+    // pair with more than a few minutes' margin — the K-L/K-L2 mutation legs
+    // below depend on this to be non-vacuous.
     await insertLegacyRolloutRow(resolvedFixtureOrg)
     await insertActiveUser(plainResolvedUser, resolvedFixtureOrg)
     await insertActiveUser(driftResolvedUser, resolvedFixtureOrg)
     await pool.query(
       `INSERT INTO attendance_shifts
-         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days)
-       VALUES ($1, $2, 'W4C2-P1-Resolved', 'UTC', '20:00', '23:00', false, '[0,1,2,3,4,5,6]'::jsonb)`,
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days, late_grace_minutes, early_grace_minutes)
+       VALUES ($1, $2, 'W4C2-P1-Resolved', 'UTC', '20:00', '23:00', false, '[0,1,2,3,4,5,6]'::jsonb, 0, 0)`,
       [resolvedFixtureShift, resolvedFixtureOrg],
     )
     await pool.query(
@@ -405,10 +411,36 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     // tz drift" fixture — see assertLegacyPunchResponseGoldenShapeResolvedV1's
     // module comment for why both the response AND the frozen DB meta copy
     // are asserted.
+    //
+    // #4612 gate3 P2-2 remediation: a check-in-only fixture makes
+    // `computeMetrics` take its `!lastOutAt` short-circuit
+    // (`{workMinutes:0, lateMinutes:0, status:'partial'}` UNCONDITIONALLY,
+    // regardless of which `rule` object was used) — the gate's K-L/K-L2
+    // mutations proved this fixture shape gives the `rule: resolvedShift`
+    // projection (`index.cjs` `deriveLegacyLivePunchAttributionV1` return
+    // value) ZERO judging power: swapping it for `defaultRule`, or for an
+    // impossible-to-coincide 03:00-04:00/zero-grace rule, left the full
+    // suite green. A `check_out` closes the day so `computeMetrics` actually
+    // runs its rule-driven late/early-threshold arithmetic. The shift's own
+    // rule is `late_grace_minutes=0` (fixture setup above, explicit — NOT
+    // the column default of 10, which coincidentally equals DEFAULT_RULE's
+    // own grace); check-in is 6 minutes after the shift's 20:00 start, so
+    // only the ACTUAL (shift) rule reports it late — DEFAULT_RULE's 10-
+    // minute grace would swallow it (`lateMinutes: 0`, `status: 'normal'`).
+    // check-out lands exactly at the shift's 23:00 end so neither rule's
+    // early-leave threshold fires, isolating the discriminator to lateness.
     const token = await mintToken(plainResolvedUser, 'attendance:write')
-    const res = await punch(token, {
+    const checkin = await punch(token, {
       eventType: 'check_in',
-      occurredAt: '2026-07-19T22:00:00.000Z',
+      occurredAt: '2026-07-19T20:06:00.000Z',
+      timezone: 'UTC',
+      orgId: resolvedFixtureOrg,
+    })
+    expect(checkin.status).toBe(200)
+    expect(checkin.body?.ok).toBe(true)
+    const res = await punch(token, {
+      eventType: 'check_out',
+      occurredAt: '2026-07-19T23:00:00.000Z',
       timezone: 'UTC',
       orgId: resolvedFixtureOrg,
     })
@@ -416,11 +448,11 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect(res.body?.ok).toBe(true)
     assertLegacyPunchResponseGoldenShapeResolvedV1(res.body.data, {
       userId: plainResolvedUser,
-      status: 'partial',
-      workMinutes: 0,
-      lateMinutes: 0,
-      firstInAt: res.body.data.event.occurred_at,
-      lastOutAt: null,
+      status: 'late',
+      workMinutes: 170,
+      lateMinutes: 6,
+      firstInAt: checkin.body.data.event.occurred_at,
+      lastOutAt: res.body.data.event.occurred_at,
       calendarWorkDate: '2026-07-19',
       reasonCode: 'CURRENT_DAY_CONTAINING_SHIFT',
       shiftId: resolvedFixtureShift,
@@ -445,10 +477,27 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     // reasonCode (CURRENT_DAY_CONTAINING_SHIFT instead of
     // SINGLE_MATCHING_CANDIDATE), permanently frozen into DB evidence. This
     // leg pins the CORRECT (route-equivalent) values.
+    //
+    // #4612 gate3 P2-2 remediation: same rationale as the leg above — a
+    // check_out closes the day so `rule: resolvedShift` (shift, late_grace=0)
+    // vs `rule: defaultRule`/a mutated rule (K-L/K-L2) actually diverge in
+    // `record.late_minutes`/`.status`. The winning shift row/window is
+    // IDENTICAL to the leg above (UTC 20:00-23:00 on 2026-07-19) regardless
+    // of the client's tz-drift input — `nextTimezone` always persists the
+    // WINNING SHIFT's own rule timezone ('UTC'), so the same check-in/out
+    // instants produce the same late/work/status numbers here.
     const token = await mintToken(driftResolvedUser, 'attendance:write')
-    const res = await punch(token, {
+    const checkin = await punch(token, {
       eventType: 'check_in',
-      occurredAt: '2026-07-19T22:00:00.000Z',
+      occurredAt: '2026-07-19T20:06:00.000Z',
+      timezone: 'Asia/Tokyo',
+      orgId: resolvedFixtureOrg,
+    })
+    expect(checkin.status).toBe(200)
+    expect(checkin.body?.ok).toBe(true)
+    const res = await punch(token, {
+      eventType: 'check_out',
+      occurredAt: '2026-07-19T23:00:00.000Z',
       timezone: 'Asia/Tokyo',
       orgId: resolvedFixtureOrg,
     })
@@ -456,11 +505,11 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect(res.body?.ok).toBe(true)
     assertLegacyPunchResponseGoldenShapeResolvedV1(res.body.data, {
       userId: driftResolvedUser,
-      status: 'partial',
-      workMinutes: 0,
-      lateMinutes: 0,
-      firstInAt: res.body.data.event.occurred_at,
-      lastOutAt: null,
+      status: 'late',
+      workMinutes: 170,
+      lateMinutes: 6,
+      firstInAt: checkin.body.data.event.occurred_at,
+      lastOutAt: res.body.data.event.occurred_at,
       calendarWorkDate: '2026-07-20',
       reasonCode: 'SINGLE_MATCHING_CANDIDATE',
       shiftId: resolvedFixtureShift,
