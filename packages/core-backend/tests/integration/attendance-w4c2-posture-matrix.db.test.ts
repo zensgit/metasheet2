@@ -54,6 +54,7 @@ import net from 'net'
 import http from 'http'
 import { createHash, randomUUID } from 'crypto'
 import { Pool } from 'pg'
+import { assertLegacyPunchResponseGoldenShapeV1 } from '../utils/attendance-w4c2-golden-response'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -262,8 +263,24 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     const res = await punch(token, { eventType: 'check_in', occurredAt: OFFSETLESS, orgId: legacyOrg })
     expect(res.status).toBe(200)
     expect(res.body?.ok).toBe(true)
-    expect(Object.keys(res.body.data).sort()).toEqual(['event', 'record', 'workDateResolution'])
-    expect(res.body.data.event.user_id).toBe(legacyUser)
+    // P1-1 remediation (#4612 gate MK-2): recursive key-path pin + deterministic
+    // value assertions — the pre-remediation top-level-only key-set check let
+    // `delete record.status` / an added nested key / a nulled `workDateResolution`
+    // all pass 789/789 green (see attendance-w4c2-golden-response.ts module note).
+    // first_in_at is asserted against the punch's OWN occurred_at (a genuine
+    // cross-field invariant: a check_in's first_in_at mirrors its own event),
+    // not a hardcoded instant — OFFSETLESS resolves via server-local time, so a
+    // literal ISO value would be CI-runner-timezone-dependent and flaky.
+    assertLegacyPunchResponseGoldenShapeV1(res.body.data, {
+      userId: legacyUser,
+      status: 'partial',
+      workMinutes: 0,
+      lateMinutes: 0,
+      firstInAt: res.body.data.event.occurred_at,
+      lastOutAt: null,
+      workDateResolutionKind: 'unresolved',
+      workDateResolutionReasonCode: 'UNSCHEDULED_NO_SHIFT',
+    })
     expect(await eventCount(legacyUser)).toBe(1)
     expect(await recordCount(legacyUser)).toBe(1)
     expect((await operationRows(legacyOrg)).length).toBe(0)

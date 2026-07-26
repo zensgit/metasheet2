@@ -41,6 +41,7 @@ import {
   restoreAttendanceSettingsRow,
   type AttendanceSettingsRowSnapshot,
 } from '../utils/attendance-settings-row'
+import { assertLegacyPunchResponseGoldenShapeV1 } from '../utils/attendance-w4c2-golden-response'
 
 // Shared-DB isolation for the deployment-wide 'attendance.settings' row: the replay leg turns
 // the min-punch-interval throttle off (the throttle fires on the ROUTE before the registry
@@ -240,10 +241,20 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     const res = await punch(token, { eventType: 'check_in', occurredAt: '2026-07-20T01:00:00.000Z' })
     expect(res.status).toBe(200)
     expect(res.body?.ok).toBe(true)
-    // Exact legacy response shape: event + record + workDateResolution.
-    expect(Object.keys(res.body.data).sort()).toEqual(['event', 'record', 'workDateResolution'])
-    expect(res.body.data.event.user_id).toBe(legacyLiveUser)
-    expect(res.body.data.record.user_id).toBe(legacyLiveUser)
+    // P1-1 remediation (#4612 gate MK-2): recursive key-path pin + deterministic
+    // value assertions — see attendance-w4c2-golden-response.ts module note.
+    // first_in_at mirrors the punch's own occurred_at (genuine cross-field
+    // invariant, not a hardcoded instant).
+    assertLegacyPunchResponseGoldenShapeV1(res.body.data, {
+      userId: legacyLiveUser,
+      status: 'partial',
+      workMinutes: 0,
+      lateMinutes: 0,
+      firstInAt: res.body.data.event.occurred_at,
+      lastOutAt: null,
+      workDateResolutionKind: 'unresolved',
+      workDateResolutionReasonCode: 'UNSCHEDULED_NO_SHIFT',
+    })
 
     expect(await eventCount(legacyLiveUser)).toBe(1)
     expect(await recordCount(legacyLiveUser)).toBe(1)
