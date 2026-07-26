@@ -1,22 +1,27 @@
-# Database & System Integration Line — CLOSEOUT RECORD (2026-07-26)
+# Database & System Integration Line — CLOSEOUT RECORD (2026-07-26, revised 2026-07-26T14:46Z–15:00Z)
 
-**What this document is.** The consolidation the line never had: six-plus merged PRs, five open
-tickets, a ratified ledger with owner amendments, a real-engine capability spike, a four-decision
-roster and roughly ten rounds of adversarial findings — none of it previously readable in one
-place. An owner should be able to act on every open ticket from this record alone, without
-reconstructing a conversation.
+**Revision notice.** A gate review of the first cut of this record returned **HOLD** with 3 P1s
+and 1 P2. All four are corrected in §0 below, retraction-first — what was wrong is stated before
+the corrected figure replaces it. Read §0 before trusting any count elsewhere in this document.
+
+**What this document is.** The consolidation the line never had: six-plus merged PRs, **nine** open
+tickets (corrected in this revision — see §0), a ratified ledger with owner amendments, a
+real-engine capability spike, a four-decision roster and roughly ten rounds of adversarial
+findings — none of it previously readable in one place. An owner should be able to act on every
+open ticket from this record alone, without reconstructing a conversation.
 
 **What this document is not.** It is not the ledger and does not compete with it. The single
 authoritative design-and-verification document remains
 `docs/development/database-system-integration-line-design-and-verification-20260724.md`
-(“the ledger”; on `main` at blob `7b6931a9e6ceb24a5ef62051eb29176e08ecfea8`, verified
-`git rev-parse origin/main:<path>` 2026-07-26). Where this record and the ledger disagree, the
-ledger wins and this record is the thing to fix. This record adds **no** decisions, opens **no**
-gates, and authorizes nothing.
+(“the ledger”; on `main` at blob `7b6931a9e6ceb24a5ef62051eb29176e08ecfea8`, re-verified
+`git rev-parse origin/main:<path>` 2026-07-26 at this revision, unchanged). Where this record and
+the ledger disagree, the ledger wins and this record is the thing to fix. This record adds **no**
+decisions, opens **no** gates, and authorizes nothing.
 
 **Verification basis.** Every claim below was re-derived against the repo on 2026-07-26, not
 copied from prose: merge SHAs via `git log origin/main`; open-PR heads via
-`gh pr view <n> --json headRefOid`; CI verdicts read from the actual run logs. Basis:
+`gh pr view <n> --json headRefOid`; CI verdicts read from the actual run logs. Basis, re-confirmed
+at this revision:
 
 ```
 $ git rev-parse origin/main
@@ -25,7 +30,143 @@ $ git rev-parse origin/main
 
 Head-scoped discipline applies throughout: every verdict below is bound to the exact SHA it was
 taken at. If a branch has moved past the SHA cited here, the verdict must be re-derived, not
-carried forward.
+carried forward. **Two of the heads cited in the original cut of this record had already moved by
+the time of this revision** (#4610, #4591 — see §0); this is exactly the discipline in question,
+applied to this document itself.
+
+---
+
+## 0. CORRECTIONS TO THIS RECORD — gate returned HOLD, 3 P1 + 1 P2, all addressed here
+
+Retraction-first: each item states what was wrong before giving the corrected figure. Nothing
+below is a silent edit to the sections that follow.
+
+### [P1-1 — RETRACTED] "five open tickets" / "OPEN — five tickets" / "none dropped" were all false
+
+The intro (former line 4), the former §2 heading, and the former §6 heading each asserted a closed,
+five-item set. **Re-enumerated 2026-07-26 via `gh pr list --state open --limit 200`**, filtered to
+this line's branches/titles (`gip-`, `b1a`/`b1b`/`b1c`, `data-source`, `canonical-object`,
+`connector-kind`, `onprem-package-verify`) and then **cross-checked by hand across the full
+`#4580`–`#4622` number range** to catch anything the keyword filter would miss (it caught nothing
+extra; `#4617` matched the keyword filter on "b2" but is an unrelated attendance PR and is
+excluded).
+
+**Nine** open Draft PRs belong to this line, all based on `main`:
+
+```
+#4589  8471332fe9  BEHIND   13/13 SUCCESS
+#4591  b52a0b030b  BLOCKED  17/19 SUCCESS, 1 SKIPPED, test(20.x) IN_PROGRESS @ 2026-07-26T14:51Z
+#4593  15e71afe04  BEHIND   13/13 SUCCESS
+#4594  5c87f8091c  BEHIND   14/14 SUCCESS
+#4598  0900c96f90  BEHIND   13/13 SUCCESS
+#4610  c25b32ddf3  BLOCKED  12/13 SUCCESS, test(20.x) IN_PROGRESS @ 2026-07-26T14:51Z
+#4614  6b01ebb530  CLEAN    14/14 SUCCESS
+#4619  467ec6b319  CLEAN    13/13 SUCCESS
+#4620  7888ee7cc6  CLEAN    22/23 SUCCESS, 1 SKIPPED
+```
+
+**#4622 (this record) is not counted** — it is the record, not a ticket. Full rows for all nine,
+including what each is waiting on, are in the rewritten §2 below.
+
+**#4589, #4593 and #4594 were paused by the owner earlier**, which is why they fell out of prior
+status reports — **paused is not absent**, and that omission carried into this record's first cut,
+which is exactly the defect this document exists to fix.
+
+### [P1-2 — RETRACTED] §2's "Nothing else blocks it" for #4610 — and the picture has moved again since
+
+**The claim was false when written.** At the time of the gate review, **#4618** — a child PR based
+directly on #4610's own branch (`claude/gip-b1a-2-identity-registries-20260725`), not on `main` —
+was open and reported a **confirmed defect** in #4610, in its own words:
+
+> `__internals.computeActivationReadiness()` converted raw `registry.lookup()` failures but
+> rethrew every `GipCanonicalObjectContractError` unchanged. Because the error class is public, a
+> hostile lookup could forge arbitrary `reason`, `message`, `details`, `cause`, and `stack`; those
+> values escaped the module's stated closed error contract.
+
+Scoped honestly, in #4618's own words: **"The production activation gate was checked separately
+and rejects a hostile registry before this path. The defect is real but limited to the exported
+`__internals` mechanism at this LATENT head."** Neither inflated nor minimised.
+
+**Current state, re-verified at this revision (2026-07-26, 14:46–15:00 UTC):** #4618 is no longer open —
+`gh pr view 4618 --json state,mergedAt,mergeCommit` reports **`state: MERGED`**, `mergedAt:
+2026-07-26T14:37:35Z`, `mergeCommit.oid: c25b32ddf367098d01247374db766599c75e23bd` — merged into
+**#4610's own branch**, not into `main` (base `claude/gip-b1a-2-identity-registries-20260725`).
+That merge commit is now **#4610's own current head** (`gh pr view 4610 --json headRefOid` returns
+the identical SHA): **#4610 moved `09aece0d7` → `c25b32ddf3`.**
+
+The fix is confirmed landed, not merely claimed:
+- `git diff --stat 09aece0d7 c25b32ddf3` touches exactly three files: the canonical-object registry
+  module, its test, and #4618's own dev-verification doc — matching #4618's stated scope.
+- Reading the landed module at `c25b32ddf3`: the old `instanceof GipCanonicalObjectContractError`
+  brand-exemption rethrow inside `computeActivationReadiness` is gone, replaced by an unconditional
+  discard (`catch { fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', ...) }`, comment: `//
+  Unconditional discard — no brand exemption.`) — the exact repair #4618 describes.
+- It is genuinely **not on `main`**: `git merge-base --is-ancestor c25b32ddf367098d01247374db766599c75e23bd origin/main`
+  exits `1`. (Note: GitHub squash-merged #4618, so its own head `4b7fc373d` is not a graph-ancestor
+  of `c25b32ddf3` — the content diff above, not commit-graph ancestry, is the correct check for a
+  squash merge.)
+
+**So: §2's "Nothing else blocks it" is RETRACTED as stated** — an open child PR reporting a
+confirmed defect is precisely something that blocks a clean read of a HARD HOLD, and the original
+cut of this record said otherwise. **As of this revision the specific defect is fixed and folded
+into #4610's own head** — #4610 no longer needs to be "read together with #4618", because #4618's
+fix is now *part of* #4610. What #4610 still needs, unchanged, is the **owner decision** to lift
+the HARD HOLD and merge (or return findings) — but that decision now applies to `c25b32ddf3`, not
+to the previously-cited `09aece0d7`, and the CI/merge-state snapshot underneath it has also
+changed: `12/13 SUCCESS` with `test (20.x)` still `IN_PROGRESS` and `mergeStateStatus: BLOCKED`
+(not the previously-cited `14/14 SUCCESS; CLEAN`, which was bound to the old head). §2 is rewritten
+below with the new head. §6 residual 4 (`buildInventoryAttestation` has zero call sites) was
+re-verified against `c25b32ddf3` — still true, re-cited at the new head.
+
+**Also caught during this same re-verification pass (not separately gated, but the identical
+discipline applies): #4591's head moved too**, `436dc6a1c` → `b52a0b030b`, via a plain
+`Merge branch 'main' into claude/data-source-offset-ordering-b2-20260724` — confirmed content-free
+by `git diff --stat 436dc6a1cf b52a0b030b`, which shows only files newly added on `main` since
+#4591's branch point (e.g. `scripts/ops/gip-authority-substrate-inventory.mjs`,
+`scripts/ops/multitable-onprem-package-verify.sh`, W4C-0 test files) — zero changes to #4591's own
+adapter/guard files. **§2's "merge state BEHIND (expected)" and §6's former residual 13 ("#4591 is
+BEHIND `main` and will need a refresh") are both RETRACTED as current fact**: #4591 is no longer
+BEHIND (`mergeStateStatus: BLOCKED`, not a merge-conflict signal — `mergeable: MERGEABLE`); the
+refresh residual 13 warned about has already happened.
+
+### [P1-3 — REQUALIFIED] §3 item 6's "scripts/ops/ carries only the β/γ authority-substrate inventory" was false
+
+**Verified count:** `git ls-tree origin/main:scripts/ops | wc -l` → **367** (this is the top-level
+listing a reader gets from `ls scripts/ops`, and it is the number the gate cited). The recursive
+count, `git ls-tree -r --name-only origin/main -- scripts/ops | wc -l` → **385**, additionally
+counts the files inside the one subdirectory, `scripts/ops/__tests__/`. Either number contradicts
+"only" — `scripts/ops/` holds hundreds of attendance/dingtalk/stock-prep/data-source ops scripts
+with no relationship to this line.
+
+**The sharper problem:** this very document's own §1 row for #4604 cites
+`scripts/ops/multitable-onprem-package-verify.sh` — confirmed present at
+`git ls-tree origin/main:scripts/ops | grep multitable-onprem-package-verify.sh` → blob
+`89ec733a41af25bee9d7f02f608fefcbefbbd9c1` — a **second** `scripts/ops/` artifact contributed by
+this very line, contradicting "only" inside the same document.
+
+**What actually does not exist on `main` at `4be09076d`:** the specific per-deployment
+`/select`-caller inventory artefact the ledger specifies (DB counts **+** a per-deployment
+`/select` access-log analysis with a stated retention window **+** a static tree-wide enumeration
+of `manager.select`/`adapter.select` callers — a three-part artefact per the ledger, lines 90–91).
+No file matching that description appears anywhere in the 367-entry `scripts/ops/` listing on
+`main`. It exists only as **open Draft #4594** (`scripts/ops/data-source-exposure-inventory.mjs` +
+test + workflow, head `5c87f8091c`) — and even there only as a **partial** producer: #4594's file
+list is exactly those three files, covering the schema-probed **DB-count** third only; the
+per-deployment access-log analysis and the static caller enumeration are not part of this PR. §3
+item 6 is rewritten below to say precisely this, interlocked with #4594's new §2 row.
+
+### [P2-1 — ADDED] §6 gains an entry for #4620's own §10 disclosures, on par with #4614/#4610/#4591
+
+#4620's PR body §10 ("open items this PR does not decide") discloses, verbatim in substance: (i)
+only MySQL **8.0** is in the declared matrix — 5.7 and 8.4 are left open, and the isolation
+variable name is resolved from the declared version with no try-both; (ii) **M-4 is implemented and
+mutation-instrumented but kept non-load-bearing** — the `MYSQL_PRECONDITIONS_PROVEN` formula is
+`M-1 ∧ M-2 ∧ M-3` only, per the battery's own `(∧ M-4 if ratified)` and M-4's not-yet-ratified
+status; (iii) outcome-token naming is verbatim from the battery §3; (iv) the workflow ships both
+`workflow_dispatch` and a path-filtered `pull_request` trigger and was **not** added to required
+checks. See the new §6 entry 14 below, and the one-line pointer added to §5 pointing to it — the
+`open=true` verdict for `mysql::8.0::default` **stands**, but it is a **three-condition proof
+limited to MySQL 8.0**, and the owner is entitled to know that before ruling on §4 step 3.
 
 ---
 
@@ -65,18 +206,25 @@ promotion (#4614), no B2 enforcement (#4591), and no ⟲OD3 amendment (#4619)** 
 
 ---
 
-## 2. OPEN — five tickets, each actionable from this table
+## 2. OPEN — nine tickets (corrected; was wrongly reported as five — see §0), each actionable from this table
 
-Heads re-derived 2026-07-26 via `gh pr view <n> --json headRefOid`. All five are **Draft** by
-design. CI states are point-in-time at those heads.
+Heads re-derived 2026-07-26 (revision pass) via `gh pr view <n> --json headRefOid`. All nine are
+**Draft** by design, all based on `main`. CI states are point-in-time at those heads; two (#4591,
+#4610) had a matrix leg still `IN_PROGRESS` at capture — timestamped below rather than awaited, per
+this document's own head-scoped discipline. Sorted by PR number (the original cut used a thematic
+order; numeric order is what makes "nine, no more, no fewer" checkable at a glance).
 
 | PR | head SHA | CI @ head | what it contains | gate verdict | **waiting on — exactly** |
 |---|---|---|---|---|---|
-| **#4610** B1a-2 — identity read + registries | `09aece0d7` | 14/14 SUCCESS; merge state CLEAN | 3 **latent** modules in `plugins/plugin-integration-core/lib/`: `gip-connector-kind-registry.cjs` (β, ships **empty**, `SYSTEM_IDENTITY_KIND_UNCERTIFIED`), `gip-system-identity-read.cjs` (GIP-D0 §6 verbatim, decision α two-materials rule), `gip-canonical-object-contract-registry.cjs` (γ, ships **empty**, `CANONICAL_OBJECT_CONTRACT_UNREGISTERED`, activation refuses caller-asserted evidence). +2440/−2 across 8 files; zero runtime consumers proven by grep in the PR body | owner **HARD HOLD** (3 P1 + 1 P2) closed in round 5 (`8a39cb1de`, owner’s exact probes reproduced); rounds 6–10 closed further P3s/retractions. ⚠️ the PR **body documents rounds 1–6 only**; commits carry rounds 7, 8 and 10 (`89db68fd6`, `4022e5623`, `db28a16ed`, `c79576296`) — read the commit trail, not just the body | **Owner decision:** lift the HARD HOLD and merge (or return findings). Nothing else blocks it. Downstream: B1a-3 (steps 1.4–1.6) is explicitly held until this PR closes |
-| **#4614** integration-guard required-wiring | `6b01ebb53` | 14/14 SUCCESS; CLEAN | **wiring only, not promoted**: classifier + a 27-assertion wiring-contract test inside `plugin-tests.yml`’s `test:` job so that promoting `integration-guard` to a required context later cannot false-green. 9 commits; latest fix `3994073c3` (“round 10”: load-bearing empty-`relevant` test + self-covering NUL pin, mutation-verified both directions) | three documented review rounds (r3: 1 P1 — unpinned classifier `env:` block, universal false negative — 1 P2, 3 P3, all closed) plus later commit-level rounds; body’s top section is r3 — same body-staleness caveat as #4610 | **Owner decision + admin act:** whether to add `integration-guard` to `main`’s required status-check contexts (branch-protection change). The PR itself needs only a merge decision; promotion is a separate act it deliberately does not perform |
-| **#4619** ⟲OD3 ledger amendment | `467ec6b31` | 13/13 SUCCESS; CLEAN | **doc-only.** Four amendments: (1) Gate bullet 4 — core-backend statement seam removed from v1; (2) §3.2 seam ownership corrected; (3) §4 step 1.4 — seam **and** certified source-column translation removed (both travel with the SQL path, (b′)+B1c, own gate); (4) GIP-D0 §9.2 widening’s live scope narrows to the validator change alone — recorded so no item appears to vanish silently | resolves the (δ)-created contradiction: under v1=(c) the seam’s justification and consumer are both unreachable, so building it in 1.4 would land a second-package production surface with zero v1 consumers — the exact owner-P1-1 class | **Owner sign-off (ratification):** it amends RATIFIED text. Until signed, the ledger stands as amended by ⟲OD2 only, and step 1.4’s scope is formally the un-amended one |
-| **#4620** B1b capability spike harness | `7888ee7cc` | 18 SUCCESS + `test (18.x)` / `test (20.x)` still running at capture time (merge state BLOCKED on those); the spike workflow itself is green **on this head** (run `30204851861`-series; spike run `30204851845` success) | CI harness + probes for §4 step 2 against real, ephemeral, first-party **MySQL 8.0 + SQL Server 2019 + SQL Server 2022** service containers; 112/112 mutations; **evidence only** — mints no certification, registers no strategy, `gip-b1b-registry-unchanged.test.cjs` pins that the registry is untouched | four review rounds including an adversarial gate review (1 P1 — vacuous CP-1 comparison — + 5 P2 harness-honesty defects), all closed; **none of the five frozen cell outcomes changed** across rounds. Full verdicts: §5 below | **Owner decision, two-fold:** (a) merge the harness; (b) the §4 **step 3** per-cell certification-opening decision, for which this PR’s output is an *input* and never the act. Opened ahead of its §4 slot deliberately (zero dependency on B1a); it does not claim B1a is done |
-| **#4591** B2 enforcement | `436dc6a1c` | 19 SUCCESS + 1 SKIPPED; merge state **BEHIND** (expected — cut from an older `main`; strict checks will require a refresh at merge time) | exactly the owner-listed three: OFFSET-ordering fail-fast guard (`offset > 0` without `orderBy` ⇒ fail-closed, all three SQL adapters, registry-derived roster); typed closed **422** (`DataSourceOffsetOrderingError` / `DATA_SOURCE_OFFSET_ORDERING_REQUIRED`; generic errors still 500, pinned); deletion of MSSQL’s `ORDER BY (SELECT NULL)` fallback. Observability deliberately excluded (own gate) | 16/16 conformance; mutation-verified both ways (guard-neuter reds exactly the fail-closed cases; mapping-removal reds exactly the 422 case); full unit suite green; `tsc` clean | **Nothing in-ticket.** By §4 item 7 it merges **LAST**, after items 1–6 — so it waits on the *completion of the rest of the line*, then an owner merge decision. It is the only open PR whose merge changes runtime behaviour (fail-closed at page 2 on the shipped offset path), which is exactly why it is last and why migration precedes it |
+| **#4589** data-source pagination contract taskbook | `8471332fe9` | 13/13 SUCCESS; merge state BEHIND | **PAUSE/PROPOSED, doc-only.** D1–D8 lock: splits safe adapter hardening (H1) from caller-contract restoration (H2); resolves every PK column through the owner-scoped facade with the same order every page; bounds no-PK objects to single-page; rejects public positive-offset-without-order as exact 400s; requires `copyData` to append the full PK as a uniqueness suffix. Records the correction to the earlier #4580 GO (#4580 is CLOSED, superseded) | Codex traced connector→read-only facade→manager→all three SQL adapters and reproduced the page-1/page-2 break on #4580’s head; confirmed `getTableInfo` is owner-gated and exposes composite PKs; confirmed Postgres/MySQL/MSSQL accept structured multi-column `orderBy`; Kimi K3 independent read-only sweep stopped without file edits. No production query, merge, deploy, or activation performed | **Owner ratification:** sign off D1–D8, then authorize H1, then H2, build-then-HOLD only. **Paused by the owner earlier** — this is why it fell out of prior status reports (§0); paused is not absent |
+| **#4591** B2 enforcement | `b52a0b030b` (moved from `436dc6a1c` — pure sync-merge with `main`, zero content change, see §0) | 17/19 SUCCESS, 1 SKIPPED (`Strict E2E with Enhanced Gates`), `test (20.x)` `IN_PROGRESS` @ 2026-07-26T14:51Z; merge state **BLOCKED** (not a conflict — `mergeable: MERGEABLE`; the former **BEHIND** is RETRACTED, see §0) | exactly the owner-listed three, unchanged: OFFSET-ordering fail-fast guard (`offset > 0` without `orderBy` ⇒ fail-closed, all three SQL adapters, registry-derived roster); typed closed **422** (`DataSourceOffsetOrderingError` / `DATA_SOURCE_OFFSET_ORDERING_REQUIRED`; generic errors still 500, pinned); deletion of MSSQL’s `ORDER BY (SELECT NULL)` fallback. Observability deliberately excluded (own gate) | 16/16 conformance; mutation-verified both ways (guard-neuter reds exactly the fail-closed cases; mapping-removal reds exactly the 422 case); full unit suite green; `tsc` clean — all unaffected by the sync-merge (verified: `git diff --stat` between the old and new head shows only files newly added on `main`, none of #4591’s own adapter/guard files) | **Nothing in-ticket.** By §4 item 7 it merges **LAST**, after items 1–6 — so it waits on the *completion of the rest of the line*, then an owner merge decision. It is the only open PR whose merge changes runtime behaviour (fail-closed at page 2 on the shipped offset path), which is exactly why it is last and why migration precedes it |
+| **#4593** B1c page-sequence execution design | `15e71afe04` | 13/13 SUCCESS; merge state BEHIND | **PROPOSED, design-first, doc-only** — authorizes no runtime/arming/wiring. Specifies `PageSequenceExecutionContext`, both `PAGED_READ_LEGAL_COMBINATIONS` rows and what is explicitly NOT a consistency context, per-dialect certification duties (incl. SQL Server `ALLOW_SNAPSHOT_ISOLATION`, MySQL isolation level), 12 points marked "to be confirmed by spike." Corrects the ledger's earlier wrong claim that `copyData` was "the one in-tree multi-page reader" — records that a shipped `pipeline-runner.cjs` loop pages the SQL adapter by OFFSET with no `orderBy` today; the ledger (#4590) has been amended to match | Authored by Fable 5; adversarially reviewed by Opus 5 (3 P1 / 2 P2 / 4 P3), all fixed; independently re-verified by a separate Opus 5 pass, 12/12 CLOSED, 0 regressed | **Owner decision** to open B1c's own gate (§4 item 4) — nothing to build until then; this is a design lock only, and it is what the pending ⟲OD3 amendment (#4619) would route the deferred seam + source-column translation into. **Paused by the owner earlier** (§0) |
+| **#4594** data-source exposure inventory (ops tooling) | `5c87f8091c` | 14/14 SUCCESS; merge state BEHIND | Schema-probing, values-free replacement for the NO-GO ad-hoc SQL — every count query gated behind an `information_schema`-confirmed plan, `UNAVAILABLE` rather than a guess otherwise. **This is a candidate producer for §3 item 6's missing artefact, but only a partial one** — its file list is exactly the DB-count script + test + workflow; the per-deployment `/select` access-log analysis and the static `manager.select`/`adapter.select` caller enumeration the ledger also specifies are not part of this PR (see §0/§3 item 6) | Opus 5 adversarial review found 2 blocking findings (allowlist-corruption blind spot; `computeVerdict` could emit `…WITHIN_COVERAGE` with an `UNAVAILABLE` group), both fixed and re-proven; reviewer stood up a real PostgreSQL 15, ran migrations 057/060/062, and matched all 7 counts against `psql` ground truth; tests 53→89, all passing | **Owner merge decision**, then — per §3 item 6 — the **ops-authorized per-deployment run**, understanding it produces one-third of the ledger's specified inventory. **Paused by the owner earlier** (§0) |
+| **#4598** B1 automated dev/verification report | `0900c96f90` | 13/13 SUCCESS; merge state BEHIND | **Doc-only** companion to the ledger; records an automated build round's review findings (B1a hash-over-lossy-projection P1; a recursive-codec regression the fix introduced; B1b SQL-Server lock-class zero coverage P1; an unpinned MySQL snapshot claim P1 — all fixed) and two self-disclosed authoring errors. Its own table cross-references **#4596** and **#4597** as "Draft" B1a/B1b PRs — **both are now CLOSED, unmerged**, superseded by #4610 and #4620 respectively (verified: `gh pr view 4596/4597` → `state: CLOSED`, not `MERGED`) | n/a — record only, no independent review round of its own | **Owner merge decision** (doc-only, no runtime behaviour changes) |
+| **#4610** B1a-2 — identity read + registries | `c25b32ddf3` (moved from `09aece0d7` — folds in #4618's fix, see §0) | 12/13 SUCCESS, `test (20.x)` `IN_PROGRESS` @ 2026-07-26T14:51Z; merge state **BLOCKED** (not the previously-cited CLEAN, which was bound to the old head) | 3 **latent** modules in `plugins/plugin-integration-core/lib/`: `gip-connector-kind-registry.cjs` (β, ships **empty**), `gip-system-identity-read.cjs` (GIP-D0 §6 verbatim, decision α), `gip-canonical-object-contract-registry.cjs` (γ, ships **empty**, activation refuses caller-asserted evidence) — **plus #4618's squash-merged fix** closing the forgeable-error rethrow in `computeActivationReadiness` (see §0). Zero runtime consumers proven by grep | owner **HARD HOLD** (3 P1 + 1 P2) closed in round 5 (`8a39cb1de`); rounds 6–10 closed further P3s/retractions; **plus #4618's security fix**, merged 2026-07-26T14:37:35Z, independently converged on by Codex/Grok 4.5/Kimi K3. ⚠️ the PR **body documents rounds 1–6 only** — read the commit trail | **Owner decision:** lift the HARD HOLD and merge (or return findings) — now against `c25b32ddf3`. Nothing else blocks it (true again as of this revision — see §0 for why this needed re-checking, not assuming). Downstream: B1a-3 (steps 1.4–1.6) is explicitly held until this PR closes |
+| **#4614** integration-guard required-wiring | `6b01ebb530` | 14/14 SUCCESS; CLEAN | **wiring only, not promoted**: classifier + a 27-assertion wiring-contract test inside `plugin-tests.yml`’s `test:` job so that promoting `integration-guard` to a required context later cannot false-green. 9 commits; latest fix `3994073c3` (“round 10”: load-bearing empty-`relevant` test + self-covering NUL pin, mutation-verified both directions) | three documented review rounds (r3: 1 P1 — unpinned classifier `env:` block, universal false negative — 1 P2, 3 P3, all closed) plus later commit-level rounds; body’s top section is r3 — same body-staleness caveat as #4610 | **Owner decision + admin act:** whether to add `integration-guard` to `main`’s required status-check contexts (branch-protection change). The PR itself needs only a merge decision; promotion is a separate act it deliberately does not perform |
+| **#4619** ⟲OD3 ledger amendment | `467ec6b319` | 13/13 SUCCESS; CLEAN | **doc-only.** Four amendments: (1) Gate bullet 4 — core-backend statement seam removed from v1; (2) §3.2 seam ownership corrected; (3) §4 step 1.4 — seam **and** certified source-column translation removed (both travel with the SQL path, (b′)+B1c, own gate); (4) GIP-D0 §9.2 widening’s live scope narrows to the validator change alone — recorded so no item appears to vanish silently | resolves the (δ)-created contradiction: under v1=(c) the seam’s justification and consumer are both unreachable, so building it in 1.4 would land a second-package production surface with zero v1 consumers — the exact owner-P1-1 class | **Owner sign-off (ratification):** it amends RATIFIED text. Until signed, the ledger stands as amended by ⟲OD2 only, and step 1.4’s scope is formally the un-amended one |
+| **#4620** B1b capability spike harness | `7888ee7cc6` | 22/23 SUCCESS, 1 SKIPPED (`Strict E2E with Enhanced Gates`); merge state **CLEAN** (the previously-cited in-progress `test (18.x)`/`test (20.x)` legs have since finished) | CI harness + probes for §4 step 2 against real, ephemeral, first-party **MySQL 8.0 + SQL Server 2019 + SQL Server 2022** service containers; 112/112 mutations; **evidence only** — mints no certification, registers no strategy, `gip-b1b-registry-unchanged.test.cjs` pins that the registry is untouched. **Its own §10 discloses four scope limits — see the new §6 entry 14, and §0/P2-1** | four review rounds including an adversarial gate review (1 P1 — vacuous CP-1 comparison — + 5 P2 harness-honesty defects), all closed; **none of the five frozen cell outcomes changed** across rounds. Full verdicts: §5 below | **Owner decision, two-fold:** (a) merge the harness; (b) the §4 **step 3** per-cell certification-opening decision, for which this PR’s output is an *input* and never the act. Opened ahead of its §4 slot deliberately (zero dependency on B1a); it does not claim B1a is done |
 
 ---
 
@@ -100,8 +248,8 @@ that does not exist yet).
 | **3. B1b certification** | ⛔ **not started — correctly**: it “opens ONLY if step 2 passes” and opening it **is an owner act** | *Owner decision:* the §4 step 3 gate, per dialect and per capability posture. The evidence input exists (three cells `open=true`, two refused — §5); the gate-check computed it and, by construction, opened nothing |
 | **4. B1c** (cross-page snapshot/session executor) | ⛔ **not started** (design-first, own gate) | *Owner decision* to open its gate + *engineering*. If ⟲OD3 is signed, the deferred seam + source-column translation land here with (b′) |
 | **5. B1-observability** (counter + handshake **wiring**) | ⛔ **not started — by ruling**: owner decision recorded, NOT opened early | *Owner decision:* its own runtime gate, later. *Engineering precondition that has no producer yet:* the **agent/protocol-version certification-scoped preflight** (hard gate before this item and before any activation/arming) is **not built** — §4 imports it from §2 M1 but schedules no producer |
-| **6. Customer migration** | ⛔ **not started** | *Engineering:* the per-deployment `/select`-caller inventory script the ledger specifies **does not exist** (verified: `scripts/ops/` carries only the β/γ authority-substrate inventory, which is a different artefact). *Ops authorization:* per-deployment runs incl. access-log windows. The migration decision must state the runtime blind spot explicitly (no counter until item 5) |
-| **7. B2 merge (#4591)** | 🔄 code **complete**, PR open, **BEHIND** | blocked **by construction** on items 1–6 (owner-set order), then an *owner* merge decision. No in-ticket engineering. “Log-zero alone can never green-light enforcement” stands |
+| **6. Customer migration** | ⛔ **not started** | *Engineering:* the ledger's specified per-deployment inventory is a **three-part** artefact — DB counts + a per-deployment `/select` access-log analysis (stated retention window) + a static tree-wide enumeration of `manager.select`/`adapter.select` callers — and **none of the three exists on `main`** at `4be09076d` (corrected — the prior "scripts/ops/ carries only the β/γ authority-substrate inventory" was false on its face: `scripts/ops/` holds **367** top-level entries — `git ls-tree origin/main:scripts/ops \| wc -l` — including this very line's own `multitable-onprem-package-verify.sh` from #4604, blob `89ec733a41af25bee9d7f02f608fefcbefbbd9c1`; see §0/P1-3). The DB-count third has an **open, unmerged, paused** candidate producer: **#4594** (`scripts/ops/data-source-exposure-inventory.mjs`, head `5c87f8091c`) — a partial artefact, not the whole one, and not on `main` either way. *Ops authorization:* per-deployment runs incl. access-log windows, once the tooling exists. The migration decision must state the runtime blind spot explicitly (no counter until item 5) |
+| **7. B2 merge (#4591)** | 🔄 code **complete**, PR open, head `b52a0b030b` (no longer BEHIND — synced with `main`, zero content change; see §0) | blocked **by construction** on items 1–6 (owner-set order), then an *owner* merge decision. No in-ticket engineering. “Log-zero alone can never green-light enforcement” stands |
 
 **Parallel M0 track (on-prem, unblocked by all of the above):**
 
@@ -165,9 +313,14 @@ single-statement capability. Everything proven is **first-party engine capabilit
 system was connected, and that connection remains a separately ops-gated step this run does not
 touch.
 
+**Before ruling on `mysql::8.0::default`'s `open=true`, read §6 entry 14.** The verdict above
+stands, but it is a three-condition proof (`M-1 ∧ M-2 ∧ M-3`) limited to MySQL 8.0 — not the full
+`M-1 ∧ M-2 ∧ M-3 ∧ M-4` battery formula, and not any other MySQL version. A reader who stops here
+gets the unqualified version.
+
 ---
 
-## 6. KNOWN RESIDUALS — carried forward, none dropped
+## 6. KNOWN RESIDUALS — carried forward (revised: three items below were re-verified or added this pass — see §0)
 
 Behavioural residuals:
 
@@ -185,11 +338,14 @@ Behavioural residuals:
    inside `plugin-tests.yml`’s `test:` job cannot be pinned by the contract (a contract cannot
    assert a property of the step that runs it). ~15 sibling `*-ci-wiring.test.mjs` steps in the
    same shared job carry the same latent property.
-4. **#4610’s disclosed residuals:** `buildInventoryAttestation` has **zero call sites** — no real
-   inventory scanner exists, so the γ activation gate refuses every caller today (fail-closed,
-   but also unusable until the scanner is built); the package’s aggregate 105-script `npm test`
-   chain was not runnable in the review worktree (pre-existing environmental failure, reproduced
-   against the unmodified branch tip) — per-file `node` runs and CI stand in for it.
+4. **#4610’s disclosed residuals (re-verified at the current head `c25b32ddf3`, moved from
+   `09aece0d7` — see §0):** `buildInventoryAttestation` has **zero call sites** — `git grep -n
+   buildInventoryAttestation c25b32ddf3` shows only its own definition and comments describing the
+   absence, confirming this is still true after #4618's fix folded in; no real inventory scanner
+   exists, so the γ activation gate refuses every caller today (fail-closed, but also unusable
+   until the scanner is built); the package’s aggregate 105-script `npm test` chain was not
+   runnable in the review worktree (pre-existing environmental failure, reproduced against the
+   unmodified branch tip) — per-file `node` runs and CI stand in for it.
 5. **#4591’s pinned KNOWN LIMIT:** a limit-only **first page** with no `orderBy` stays legal —
    the guard fires from `offset > 0`; the first-page ordering contract closes in B1a+
    (`orderingKeySpec` from the approved config version), not in B2.
@@ -219,8 +375,22 @@ Claim-level residuals (honest even though no behaviour is wrong):
     CI states in §2 were captured at the listed heads (#4620 had two `test` matrix legs still
     running at capture). Re-derive before acting; do not cite this record as a substitute for
     `gh pr view --json headRefOid`.
-13. **#4591 is BEHIND `main`** and will need a refresh (strict required checks) at merge time —
-    expected for a merges-LAST PR, recorded so the BEHIND badge is not misread as a defect.
+13. **RETRACTED — #4591 is no longer BEHIND `main`.** This residual previously read "#4591 is
+    BEHIND `main` and will need a refresh (strict required checks) at merge time." That refresh has
+    already happened: #4591's head moved `436dc6a1c` → `b52a0b030b` via a content-free sync-merge
+    (verified in §0) and `mergeStateStatus` now reads `BLOCKED`, not `BEHIND`. Recorded here rather
+    than silently deleted, per this document's own retraction-first rule.
+14. **#4620's own disclosed residuals (§10 of its PR body), added this pass — see §0/P2-1:**
+    (i) the MySQL matrix declares exactly **8.0**; 5.7 and 8.4 are left open, and the isolation
+    variable name is resolved from the declared version with no try-both; (ii) **M-4 is
+    implemented and mutation-instrumented (CP-5's three controls all passed in CI) but kept
+    non-load-bearing** — `MYSQL_PRECONDITIONS_PROVEN` is `M-1 ∧ M-2 ∧ M-3` only, matching the
+    battery's own `(∧ M-4 if ratified)` and M-4's not-yet-ratified status; (iii) outcome-token
+    naming is used verbatim from the battery §3; (iv) the workflow ships both `workflow_dispatch`
+    and a path-filtered `pull_request` trigger and was **not** added to required checks — no
+    branch-protection change was made or attempted. Net: the §5 `mysql::8.0::default open=true`
+    verdict stands, but as a three-condition proof limited to one MySQL version — the owner is
+    entitled to that qualification before ruling on §4 step 3.
 
 ---
 
