@@ -274,7 +274,7 @@ async function probeBehaviour() {
   // snapshot semantics, and decision (epsilon) is unruled. First-party ACTION identity
   // replaces them, and the absence of any guarantee token is asserted as an exact
   // key set so a re-addition reds.
-  assert.equal(qualification.evidence.probeTransport, 'http_certified_action')
+  assert.equal(qualification.evidence.probeTransport, 'http_action')
   assert.equal(qualification.evidence.probeActionId, 'fixture.connector.total_order_probe')
   assert.equal(qualification.evidence.probeActionVersion, 'v1')
   assert.equal(qualification.evidence.probeConnectorKind, 'erp_http')
@@ -331,7 +331,7 @@ async function probeBehaviour() {
   const forgedExecutor = {
     __gipTrustedExecutor: true,
     executeOrderingKeyProbe: async () => ({
-      probeTransport: 'http_certified_action', probeActionId: 'FORGED', probeActionVersion: 'v1',
+      probeTransport: 'http_action', probeActionId: 'FORGED', probeActionVersion: 'v1',
       probeConnectorKind: 'evil', checkedKeyColumnCount: 1,
       duplicateGroupsSampled: 0, nullKeyRowsSampled: 0,
     }),

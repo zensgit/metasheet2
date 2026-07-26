@@ -32,6 +32,16 @@
 // prior attempt (#4596 @ 774bdb5e6 L843/L851) mint WeakSet-trusted resolutions from
 // two caller-supplied fakes.
 //
+// ⚠ SCOPE THE CLAIM HONESTLY. The two `createHarness*ForTests` constructors below are
+// PUBLIC and their products ARE attested into this module's authority WeakSets — so
+// "no public factory's products are trusted" is NOT unconditionally true here either.
+// They exist because BOTH certified authorities are unreachable at this head (RQ-2 /
+// RQ-3) and a control routed through `__internals` or an untrusted registry would make
+// this module's own provenance mutations undetectable. Containment today is LATENCY;
+// closing them is a precondition of any runtime wiring. What IS unconditional: the
+// resolution granter itself is unexported, and the exported export set is pinned by
+// exact key equality so no third seam can appear silently.
+//
 // -- ERROR DISCIPLINE ------------------------------------------------------
 // `fail(reason)` takes ONLY a reason from the frozen vocabulary — no `message`
 // parameter, no `details` parameter — so the V-9 channel (a foreign callback
