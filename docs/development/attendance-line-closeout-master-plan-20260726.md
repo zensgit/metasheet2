@@ -13,7 +13,17 @@
 > 本表由 **API 全量查询**生成（`gh pr list --state all --limit 200`，标题正则 `attendance|考勤|4556|W4C|W5-|Wave 5`，命中 **55** 张），**再逐张分类**——不是「列出我正在推进的票」。
 > **静默缺席不是本文档的做法**：任何命中该查询的票若未出现在本表，即为**缺陷**。
 > **本表两次因方法不闭合而被外部复核抓到**，如实留痕：①初版用「我在推进的票」⇒ 漏 #4584/#4585/#4586/#4608；②二版只**补上被发现的那四张**、方法未改 ⇒ 仍漏 **Wave 5 的四张 runtime PR**（#4557/#4562/#4564/#4576），而文档标题恰恰写着「vNext Wave 5 + …」。**「补上发现的」不等于闭集枚举**——本版改由查询驱动。
-> **状态新鲜度**：已合条目为不变的 merge SHA；在飞条目的 head **会因 rebase 变化**，本表在**每次合入前刷新**（免责声明不能替代刷新——此为外部复核点名的纪律）。本表状态锚定 **2026-07-26 本次刷新时刻**。
+> **状态新鲜度（此段本身被外部复核抓到过两次，故写成可自查的而非口号）**
+> - **已合条目**钉不变的 merge SHA，永不过期。
+> - **在飞条目**的 head 会因 rebase 变化；**本文自身那一行不钉 SHA**——它每次刷新后 head 必变，钉了必错。
+> - 「以 PR 现势为准」是纪律，**但不能替代合入前刷新**：本表已因此漂过两次（#4613 合入后仍写 Draft；#4582 合入后仍写 OPEN）。
+> - **读者不必依赖本快照判断在飞状态**，可自行复算闭集与现势：
+>   ```bash
+>   gh pr list --state all --limit 200 --json number,title,state,isDraft,headRefOid,mergeCommit \
+>     --jq '.[]|select(.title|test("attendance|考勤|4556|W4C|W5-|Wave 5";"i"))
+>            |"\(.number) \(.state) draft=\(.isDraft) \(.mergeCommit.oid // .headRefOid)"' | sort -n
+>   ```
+>   本表最近一次刷新时该查询命中 **55** 张，且「命中集 − 本文提及集 = 空」（机器验证）。
 
 ### 0.1 在关键路径上
 
@@ -23,7 +33,7 @@
 | **W5-7 前置小票（comp_time 参数化）** | #4562 MERGED | `ebe798d47c666ec32077e18ea7136ea9d457ed6d` | 已合 |
 | **W5-1 决策轨迹双面** | #4564 MERGED | `9d6ab3e1c3195ac40ee9bf37321da28920af2a29` | 已合 |
 | **W5-2 上下文帮助** | #4576 MERGED | `e10816380eb26d63b196ba076477b230804aaaee` | 已合 |
-| **Wave 5 收官验证 MD** | #4582 OPEN | head `809471035ab20317cb6eb05dbf975bcf237015ae` | Ready，CI 绿，等合（owner 已裁「合」） |
+| **Wave 5 收官验证 MD** | #4582 **MERGED** | `1f93c462f9202851c7223500314573ce2e5de6c4` | **已合 ⇒ vNext Wave 5 四片 + 收官 MD 全在 main，该线收官** |
 | W4 锁 PROPOSED 合入 | #4588 MERGED | `a3e5765727ca608e8c49c7a44a025e6e4aae5d40` | 已合 |
 | W4 锁 RATIFY 状态持久化 | #4592 MERGED | `d6ac495b947c0b42ed7bee66d9531fbe25a486ca` | 已合 |
 | W4C-0 identity 修订 | #4595 MERGED | `3fa1ae3421744fcec9a18c4f87153281c59ec6b2` | 已合（owner RATIFY 于 07-26，**不倒签**） |
@@ -33,7 +43,7 @@
 | **W4C-2 live/scheduled shadow** | #4612 OPEN | head `09f2e9b29c40ebd9d2d65b41fe7b8c87566733b7` | **Draft + ⛔HOLD**；fingerprint 半边未完成、P1-2 被 #4617 阻挡 |
 | **(b2) §7.1a amendment** | #4617 OPEN | head `ea10a66fd91c30e191f566d07689a910fc1c9c98` | **Draft/PROPOSED**；四镜审 **5 P1 / 4 P2 发现完成、修订未完成**；远端仍为原 head |
 | 授权 provenance 勘误 | #4613 **MERGED** | `df610db9ab6c403da6233a9c5dae2579941a6275` | **已合** |
-| W4 记录 + 计划（本文，**4 文件**） | #4615 OPEN | head `24e0a42d0133ff9b74baf06169f0e21a81d67e5b` | **Ready**，待合 |
+| W4 记录 + 计划（本文，**4 文件**） | #4615 OPEN | head 见 PR 现势（本文自身；每次刷新后 head 必变——**自指行不钉 SHA**，钉了必错） | **Ready**，待合 |
 
 ### 0.2 命中查询但**不在**关键路径（逐张标注理由，不静默省略）
 
