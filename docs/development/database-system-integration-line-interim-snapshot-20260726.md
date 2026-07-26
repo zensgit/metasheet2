@@ -1,4 +1,36 @@
-# Database & System Integration Line — CLOSEOUT RECORD (2026-07-26, revised 2026-07-26T14:46Z–15:00Z)
+# Database & System Integration Line — INTERIM SNAPSHOT (2026-07-26T15:27:35Z)
+
+> **⟲ RETITLED (owner, round 3). This is NOT a closeout record.** Earlier revisions called it one while
+> **ten line tickets are still open** — a closeout cannot be written while the line is open. It is a
+> **point-in-time snapshot**, it closes nothing by merging, and it **will be regenerated when the line
+> actually closes**. The retraction is recorded rather than the title silently changed.
+
+## 0.0 SAMPLING BASIS — one sampling, all of §2 drawn from it
+
+| | |
+|---|---|
+| `recordedAt` | `2026-07-26T15:27:35Z` |
+| `mainSha` | `ac05efa25fd0dfdae0779e7ae14a3a942a0c374e` |
+| open PRs in repo | **134** |
+| IN_LINE | **10** (this record, #4622, excluded) |
+| OUT_OF_LINE | **123** |
+| **UNCLASSIFIED** | **0** |
+
+**STALENESS RULE, machine-checkable:** this record is **stale the moment any new open PR appears or any
+listed `headRefOid` moves**. It does not degrade gracefully; re-sample before relying on it.
+Basis lineage: `4be09076d` → `df610db9a` → `ac05efa25fd0dfdae0779e7ae14a3a942a0c374e`.
+
+### 0.1 ENUMERATION METHOD — full set, then classify (⟲ replaces the method that failed twice)
+
+The previous method used a **keyword pre-filter** plus a hand cross-check **bounded at #4622**. It failed
+completeness **twice at two different edges**: first omitting five paused tickets, then omitting **#4623 —
+a PR this line's own work created**, unreachable by the keyword filter (`fix-integration-workbench-flaky`)
+and by the numeric bound. **Now: read every open PR, classify each IN_LINE / OUT_OF_LINE with a reason,
+assert zero UNCLASSIFIED.** Silent absence is not this document's practice.
+
+**#4623 `5684266` is the TENTH in-line ticket**, and it is a **declared prerequisite for promoting
+`integration-guard` to a required check** — the act #4614 prepares. An earlier revision listed the
+`IntegrationWorkbenchView` flake as a *standing residual with no producer* while #4623 sat open fixing it.
 
 **Revision notice.** A gate review of the first cut of this record returned **HOLD** with 3 P1s
 and 1 P2. All four are corrected in §0 below, retraction-first — what was wrong is stated before
@@ -20,7 +52,16 @@ decisions, opens **no** gates, and authorizes nothing.
 
 **Verification basis.** Every claim below was re-derived against the repo on 2026-07-26, not
 copied from prose: merge SHAs via `git log origin/main`; open-PR heads via
-`gh pr view <n> --json headRefOid`; CI verdicts read from the actual run logs. Basis, re-confirmed
+`gh pr view <n> --json headRefOid`; CI verdicts read from the actual run logs.
+
+> ⟲ **The previous basis line was KNOWN-stale and the knowledge was not recorded.** It pasted
+> `4be09076d` under "re-confirmed at this revision" while main had already advanced to `df610db9a`
+> (#4613, attendance doc-only) **six minutes before that commit** — a fact the author had in hand. The
+> delta was harmless (the ledger blob is byte-identical at both refs), but omitting a known basis change
+> from the one command offered to prove "re-derived, not copied from prose" is a claim stronger than its
+> evidence. Current basis is `ac05efa25`, sampled at `2026-07-26T15:27:35Z` together with every head in §2.
+
+Basis, re-confirmed
 at this revision:
 
 ```
@@ -127,14 +168,27 @@ by `git diff --stat 436dc6a1cf b52a0b030b`, which shows only files newly added o
 adapter/guard files. **§2's "merge state BEHIND (expected)" and §6's former residual 13 ("#4591 is
 BEHIND `main` and will need a refresh") are both RETRACTED as current fact**: #4591 is no longer
 BEHIND (`mergeStateStatus: BLOCKED`, not a merge-conflict signal — `mergeable: MERGEABLE`); the
-refresh residual 13 warned about has already happened.
+refresh residual 13 warned about has already happened **for that instance**.
+
+> ⟲ **WRONG OPERATION — the retraction of residual 13 is itself retracted.** Under **strict** required
+> checks, "must be synced to current main and have required checks re-run before merge" is **not a fact
+> about one moment — it RECURS every time main advances**. Retracting it converted a **permanent
+> structural invariant** into a cancelled claim. Correct form, and the form that stands:
+> **SNAPSHOT (perishable):** at `2026-07-26T15:27:35Z`, #4591 / #4610 / #4614 read `BEHIND`.
+> **STANDING INVARIANT (permanent):** *every ticket on this line must be re-synced and re-checked
+> immediately before merge, every time main advances. A green reading at an older head is never merge
+> evidence.* This applies to all ten in-line tickets, not only #4591.
 
 ### [P1-3 — REQUALIFIED] §3 item 6's "scripts/ops/ carries only the β/γ authority-substrate inventory" was false
 
 **Verified count:** `git ls-tree origin/main:scripts/ops | wc -l` → **367** (this is the top-level
 listing a reader gets from `ls scripts/ops`, and it is the number the gate cited). The recursive
 count, `git ls-tree -r --name-only origin/main -- scripts/ops | wc -l` → **385**, additionally
-counts the files inside the one subdirectory, `scripts/ops/__tests__/`. Either number contradicts
+counts the files inside **THREE** subdirectories — `__tests__`, `fixtures`, `yjs-client-validation`
+(6 + 14 + 1 = 21; 364 top-level blobs + 21 = 385, so the arithmetic reproduced anyway).
+⟲ An earlier revision of *this very correction* said "the one subdirectory" — a fresh false "only"
+inside the paragraph correcting a false "only". Verified: `git ls-tree <main>:scripts/ops | awk '$2=="tree"'`
+returns three trees. Either number contradicts
 "only" — `scripts/ops/` holds hundreds of attendance/dingtalk/stock-prep/data-source ops scripts
 with no relationship to this line.
 
@@ -206,7 +260,29 @@ promotion (#4614), no B2 enforcement (#4591), and no ⟲OD3 amendment (#4619)** 
 
 ---
 
-## 2. OPEN — nine tickets (corrected; was wrongly reported as five — see §0), each actionable from this table
+## 2. OPEN — **TEN** in-line tickets (⟲ was nine; #4623 was missing — see §0.1), all heads from the `2026-07-26T15:27:35Z` sampling
+
+| PR | head | base | why in line / what it waits on |
+|---|---|---|---|
+| **#4589** | `8471332fe` | `main` | data-source pagination contract taskbook — cites #4580 and the /select offset surface |
+| **#4591** | `b52a0b030` | `main` | B2 OFFSET-ordering guard — §4 item 7, merges LAST |
+| **#4593** | `15e71afe0` | `main` | B1c page-sequence execution design — §4 item 4 design ticket |
+| **#4594** | `5c87f8091` | `main` | schema-probing values-free exposure inventory — the in-repo replacement for the ledger §1 NO-GO SQL |
+| **#4598** | `0900c96f9` | `main` | B1 automated development & verification record — cites ledger #4590 |
+| **#4610** | `c25b32ddf` | `main` | B1a-2 identity read + registries — §4 item 1 substep 1.2/1.3; gates B1a-3 |
+| **#4614** | `6b01ebb53` | `main` | integration-guard required-check wiring — governance prerequisite for promotion |
+| **#4619** | `467ec6b31` | `main` | ledger ⟲OD3 amendment (PROPOSED) — fixes the δ=(c) seam contradiction |
+| **#4620** | `7888ee7cc` | `main` | B1b capability spike, evidence only — §4 item 2 |
+| **#4623** | `568426678` | `main` | IntegrationWorkbenchView flaky fix — declared PREREQUISITE for #4614's promotion |
+
+**Classification is exhaustive:** 134 open PRs at sampling = **10 IN_LINE** + **1** (this record, #4622) +
+**123 OUT_OF_LINE**, **0 UNCLASSIFIED**. Out-of-line tickets are *classified out*, never omitted.
+
+**#4614's row must be read with #4623:** #4614 prepares the required-check promotion but
+"deliberately does not perform it" — and **a declared prerequisite for that act (#4623) is open and
+unmerged**. The promotion cannot be scheduled from #4614 alone.
+
+### 2.1 Original per-ticket detail (retained, verified content unchanged)
 
 Heads re-derived 2026-07-26 (revision pass) via `gh pr view <n> --json headRefOid`. All nine are
 **Draft** by design, all based on `main`. CI states are point-in-time at those heads; two (#4591,
