@@ -1,5 +1,10 @@
 # T2-Gate — Two-Corp Coexistence Proof · Staging Runbook (2026-07-17)
 
+> Historical pre-fix evidence only. This runbook intentionally describes the legacy global-key
+> failure and must not be used as the post-fix acceptance procedure. The replacement is
+> `dingtalk-directory-corp-scope-staging-uat-20260725.md`, after both Phase A and Phase B satisfy
+> their deployment gates.
+
 Milestone: Canonical Org & Provider Transfer v1, Transfer MVP row **T2-Gate**（§3.4 of
 `provider-org-transfer-development-plan-20260709.md`; sequencing per
 `canonical-org-provider-transfer-v1-mvp-implementation-plan-20260713.md` §2）。

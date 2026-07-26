@@ -13,6 +13,15 @@ function fakeClient() {
     queries,
     query: async (sql: string, params?: unknown[]) => {
       queries.push({ sql, params })
+      if (/FROM directory_accounts account/.test(sql)) {
+        return {
+          rows: [{
+            ...ACCOUNT,
+            integration_provider: ACCOUNT.provider,
+            integration_corp_id: 'corpA',
+          }] as Array<Record<string, unknown>>,
+        }
+      }
       if (/SELECT org_id\s+FROM directory_integrations/.test(sql)) {
         return { rows: [{ org_id: 'orgA' }] as Array<Record<string, unknown>> }
       }
@@ -34,7 +43,7 @@ const ACCOUNT = {
   id: '11111111-1111-1111-1111-111111111111',
   integration_id: '22222222-2222-2222-2222-222222222222',
   provider: 'dingtalk',
-  corp_id: null as string | null,
+  corp_id: 'corpA',
   external_user_id: 'ext-1',
   union_id: 'union-1',
   open_id: 'open-1',
