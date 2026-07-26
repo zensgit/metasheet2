@@ -35,6 +35,24 @@
  * client, so every legacy byte — including that derivation — runs inside the
  * same SERIALIZABLE transaction as the claim/shadow/seal writes.
  *
+ * W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`, fixed on
+ * top of P1-3): P1-3's own in-transaction re-derivation had a latent bug —
+ * `deriveLegacyLivePunchAttributionV1` recomputed `calendarWorkDate` from
+ * `AttendanceLivePunchLegacyArgsV1.timezone`, but that field is the route's
+ * POST-resolution timezone (the WINNING shift's own rule timezone), not the
+ * PRE-resolution timezone the route actually fed into its own
+ * `resolvePunchWorkDateByShiftWindow` call. Whenever the client omits an
+ * explicit `timezone` and the winning shift's rule timezone differs from the
+ * org default rule timezone used for the route's first `resolveWorkContext`
+ * pass, the two calls receive DIFFERENT inputs and can return DIFFERENT
+ * resolutions — reachable with a single client-controlled punch, zero
+ * concurrency (see `punchSchema.timezone`). `AttendanceLivePunchLegacyArgsV1`
+ * now carries a second, closed `requestTimezone` field that is the exact
+ * PRE-resolution value; the adapter's `calendarWorkDate` recompute and its
+ * resolver call use ONLY `requestTimezone`, never `timezone` (`timezone`
+ * remains reserved for event/record persistence, unchanged from before this
+ * fix).
+ *
  * Posture matrix (lock 12.3 three-posture gate):
  *  - `legacy_projection_only`: same closed adapters, byte-identical DML and
  *    response; null-ID commands create no operation row, a stable-ID command
@@ -236,6 +254,19 @@ export interface AttendanceW4ResolvedCandidateV1 {
  * `unknown`-typed payload and no route-supplied prepared value crossing this
  * boundary anymore; no production identifier named after the removed field
  * remains anywhere in this module or in index.cjs after this remediation.
+ *
+ * W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`): the
+ * P1-3 landing above set `timezone` to the boundary's own POST-resolution
+ * field and let the in-transaction re-derivation use IT to recompute
+ * `calendarWorkDate` — but the route's own resolver call that PRODUCED the
+ * resolution being re-derived was fed the PRE-resolution timezone, not the
+ * post-resolution one. `requestTimezone` (below) closes that gap: it is the
+ * exact PRE-resolution value, carried through unmodified from
+ * `AttendanceLivePunchBoundaryInputV1.requestTimezone`. `timezone` remains
+ * the post-resolution value reserved for event/record persistence bytes
+ * (unchanged); `deriveLegacyLivePunchAttributionV1` in index.cjs must read
+ * ONLY `requestTimezone` to recompute `calendarWorkDate` and re-invoke the
+ * resolver.
  */
 export interface AttendanceLivePunchLegacyArgsV1 {
   readonly userId: string
@@ -247,7 +278,10 @@ export interface AttendanceLivePunchLegacyArgsV1 {
   readonly source: string
   readonly location: unknown
   readonly meta: unknown
+  /** POST-resolution timezone — event/record persistence ONLY. Do not use to recompute `calendarWorkDate`. */
   readonly timezone: string
+  /** PRE-resolution timezone the route fed its own resolver call — the ONLY field `deriveLegacyLivePunchAttributionV1` may use to recompute `calendarWorkDate`. */
+  readonly requestTimezone: string
   readonly isWorkday: boolean
 }
 
@@ -310,8 +344,38 @@ export interface AttendanceLivePunchBoundaryInputV1 {
   readonly occurredAtRaw: string | null
   /** Route-resolved instant (ISO, always offset-bearing). */
   readonly occurredAtResolved: string
-  /** Effective timezone the route resolved for this punch. */
+  /**
+   * Effective (POST-resolution) timezone the route resolved for this punch —
+   * the WINNING shift's own rule timezone when one resolved. Reserved for
+   * event/record persistence; the in-transaction legacy re-derivation must
+   * NOT use this field to recompute `calendarWorkDate` (see `requestTimezone`
+   * below and the module-header P1 remediation note).
+   */
   readonly timezone: string
+  /**
+   * W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`): the
+   * PRE-resolution timezone — the route's `timezone` local variable's value
+   * at the moment it called its own final `resolvePunchWorkDateByShiftWindow`,
+   * BEFORE that call's result (`punchWorkDate.timezone`) overwrites it. The
+   * closed legacy adapter's in-transaction `calendarWorkDate` recompute and
+   * its resolver re-invocation must use ONLY this field — using `timezone`
+   * (above) instead reproduces a DIFFERENT resolver call than the route's own
+   * and can byte-flip the persisted `workDateResolution` (real fixture, zero
+   * concurrency: client tz != winning shift's own rule tz). The two fields
+   * diverge exactly when `resolvePunchWorkDateByShiftWindow` resolves a shift
+   * AND that shift row's own `timezone` column is non-blank and differs from
+   * the PRE-resolution value — see that function's `nextTimezone` (plugin
+   * `index.cjs`): it takes the WINNING SHIFT's own rule timezone whenever one
+   * is set, unconditionally, WITHOUT re-consulting the client's request body.
+   * This means an explicit client-supplied `timezone` does NOT protect
+   * against divergence — the client tz can still be overwritten by a
+   * differently-timezoned winning shift (this is exactly the gate's
+   * zero-concurrency fixture: client `Asia/Tokyo`, winning shift `UTC`). The
+   * two fields coincide only when the resolution is unresolved/ambiguous, or
+   * when a resolved shift's own timezone column is blank (falls back to the
+   * pre-resolution value) or happens to equal it.
+   */
+  readonly requestTimezone: string
   readonly source: string
   readonly location: unknown
   readonly meta: unknown
@@ -700,6 +764,7 @@ function buildLegacyPunchArgs(input: AttendanceLivePunchBoundaryInputV1): Attend
     location: input.location,
     meta: input.meta,
     timezone: input.timezone,
+    requestTimezone: input.requestTimezone,
     isWorkday: input.isWorkday,
   }
 }

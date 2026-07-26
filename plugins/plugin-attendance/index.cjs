@@ -21147,25 +21147,49 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
 //
 // W4C-2 remediation P1-3 (#4612 gate finding c-5082182541): `rule` and
 // `punchWorkDateResolution` are derived HERE, in-transaction, from the boundary's
-// closed args (orgId/userId/occurredAt/timezone) — they are NO LONGER accepted as
-// route-computed values crossing into the transaction (see
-// w4c2-live-scheduled-boundary.ts's module comment and
-// `AttendanceLivePunchLegacyArgsV1`). `calendarWorkDate` is recomputed fresh via
-// `toWorkDate(occurredAt, timezone)` on the SAME (occurredAt, timezone) pair the
-// punch route itself feeds its own final `resolvePunchWorkDateByShiftWindow` call
-// — NOT the boundary's post-resolution `workDate` field, which is a DIFFERENT
-// value for an overnight shift (see resolvePunchWorkDateByShiftWindow's own
-// workDate/timezone fixed-point property). `groupAttendanceType` is omitted, same
-// as the route's own final resolver call for this code path.
-async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurredAt, timezone }) {
-  const calendarWorkDate = toWorkDate(occurredAt, timezone)
+// closed args — they are NO LONGER accepted as route-computed values crossing
+// into the transaction (see w4c2-live-scheduled-boundary.ts's module comment
+// and `AttendanceLivePunchLegacyArgsV1`). `groupAttendanceType` is omitted,
+// same as the route's own final resolver call for this code path.
+//
+// W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`, fixed on
+// top of P1-3): the FIRST version of this function recomputed
+// `calendarWorkDate` from `timezone` — but `timezone` on the boundary's args
+// is the route's POST-resolution value (the WINNING shift's own rule
+// timezone), not the PRE-resolution value the route actually fed into its own
+// `resolvePunchWorkDateByShiftWindow` call. The two diverge exactly when that
+// call resolves a shift AND the winning shift row's OWN `timezone` column is
+// non-blank and differs from the PRE-resolution value —
+// resolvePunchWorkDateByShiftWindow's `nextTimezone` takes the winning
+// shift's rule timezone unconditionally whenever it is set, WITHOUT
+// re-consulting the client's request body; an explicit client-supplied
+// timezone does NOT prevent the overwrite (real fixture, zero concurrency,
+// single punch: client `Asia/Tokyo`, winning shift `UTC` — see
+// `punchSchema.timezone`, client-supplied and optional). Recomputing
+// with the wrong timezone re-invokes the resolver with DIFFERENT input than
+// the route used, which can return a DIFFERENT resolution (different
+// `reasonCode`/`evidenceSnapshot`/even a different winning shift) — a
+// `legacy_projection_only` byte-red-line break AND, since a `resolved` kind
+// gets permanently frozen into `record.meta` on first write (see
+// `buildFrozenWorkDateAttribution` below), a PERMANENT wrong evidence
+// snapshot. Fix: use `requestTimezone` — the boundary's closed projection of
+// the route's own PRE-resolution `timezone` local variable (see
+// `AttendanceLivePunchBoundaryInputV1.requestTimezone`'s doc comment for the
+// exact route line this mirrors) — for BOTH the `calendarWorkDate` recompute
+// and the resolver call's own `timezone` argument. `requestTimezone` is a
+// pure projection of `(occurredAt, client-or-default tz)`, not a
+// route-computed "prepared plan" (the resolution/rule outputs are still
+// derived here, in-transaction, from that projection) — it does not
+// reintroduce the kind of route-smuggled value P1-3 removed.
+async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurredAt, requestTimezone }) {
+  const calendarWorkDate = toWorkDate(occurredAt, requestTimezone)
   const defaultRule = await loadDefaultRule(trx, orgId)
   const { adapters } = createPluginAttendanceWorkDateResolver(trx)
   const resolution = await adapters.live.resolvePunchWorkDate({
     orgId,
     userId,
     occurredAt,
-    timezone,
+    timezone: requestTimezone,
     calendarWorkDate,
   })
   if (resolution.kind === 'resolved') {
@@ -21175,6 +21199,21 @@ async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurred
       // transaction (deleted mid-flight) — a closed, values-free 409 (not a
       // raw Error, which `respondIfW4BoundaryError`/`instanceof HttpError`
       // would NOT recognize and which would fall through to a generic 500).
+      //
+      // Reachability (#4612 gate2 靶3, corrected): this is NOT provable
+      // unreachable from "SERIALIZABLE snapshot consistency" — that argument
+      // only guarantees the SAME inputs read twice see the same data, and P1
+      // above is proof that this function's two resolver inputs were NOT
+      // always the same. The real, narrower reason this branch is defensive
+      // (not provably dead, but not reachable via the P1 tz-drift path
+      // either): the route's own `rehydrateResolvedWorkDateContext` (this
+      // file, `resolvePunchWorkDateByShiftWindow` call site) ALREADY runs the
+      // identical `loadShiftById(orgId, resolution.shiftId)` against ITS OWN
+      // resolution before the route ever calls into this boundary — if that
+      // lookup were going to fail, the route fails first (a different error)
+      // and this transaction never starts. This branch remains defensive
+      // scaffolding for a lookup this function does not need to prove
+      // reachable to justify a closed 409 instead of an unmapped 500.
       throw new HttpError(
         409,
         'W4C2_LEGACY_RESOLVED_SHIFT_NOT_FOUND',
@@ -21193,6 +21232,17 @@ async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurred
     // introduced deliberately by moving resolution in-transaction for P1-3 —
     // it replaces the PRE-FIX silent behavior of writing against the route's
     // stale resolution. See PR body §"W4C-2 修复轮" for the disclosure.)
+    //
+    // Reachability (#4612 gate2 靶3, corrected): "reaching this branch means
+    // DB state changed" is true ONLY given this function's resolver call
+    // receives the SAME input the route's own resolver call received (P1
+    // above). Before the P1 fix, a client tz/winning-shift-tz mismatch alone
+    // (zero concurrency) could make this function re-invoke the resolver with
+    // a DIFFERENT `calendarWorkDate` than the route used and land here even
+    // with an UNCHANGED DB — i.e. the "only a real race reaches this" claim
+    // was false while `requestTimezone` did not exist. With `requestTimezone`
+    // now guaranteeing input-equivalence with the route's own call, a genuine
+    // DB-state change is once again the only remaining path here.
     throw new HttpError(
       409,
       'W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION',
@@ -21219,14 +21269,18 @@ async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
     location,
     meta,
     timezone,
+    requestTimezone,
     isWorkday,
   } = args
   const occurredAt = new Date(args.occurredAt)
+  // P1 fix: requestTimezone (the route's PRE-resolution input), NEVER
+  // timezone (the route's POST-resolution persistence value) — see this
+  // function's own module comment above `deriveLegacyLivePunchAttributionV1`.
   const { rule, punchWorkDateResolution } = await deriveLegacyLivePunchAttributionV1(trx, {
     orgId,
     userId,
     occurredAt,
-    timezone,
+    requestTimezone,
   })
   const settings = await getSettings(trx)
 
@@ -26850,6 +26904,15 @@ module.exports = {
             }
           }
 
+          // W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`):
+          // snapshot the PRE-resolution timezone — the exact value fed into the
+          // resolvePunchWorkDateByShiftWindow call directly below — BEFORE
+          // `timezone` is reassigned to the POST-resolution value a few lines
+          // down. The canonical write boundary's in-transaction legacy
+          // re-derivation must reproduce THIS call, not the reassigned one; see
+          // AttendanceLivePunchBoundaryInputV1.requestTimezone's doc comment.
+          const requestTimezone = timezone
+
           const punchWorkDate = await resolvePunchWorkDateByShiftWindow({
             db,
             orgId,
@@ -27100,6 +27163,7 @@ module.exports = {
             occurredAtRaw: rawOccurredAt ?? null,
             occurredAtResolved: occurredAt.toISOString(),
             timezone,
+            requestTimezone,
             source: parsed.data.source ?? 'manual',
             location: parsed.data.location ?? null,
             meta: parsed.data.meta ?? null,
