@@ -1420,9 +1420,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
           //      create/update; the one-time migration backfill described
           //      above under (iv) is a second sanctioned writer whose source
           //      columns are NOT analyzed here) never produces either shape
-          //      via create/update
-          //      (dense 0..2 for (iii) — see the migration's header comment;
-          //      strict `HH:MM` input for (iv) — see above).
+          //      via create/update (dense 0..2 for (iii) — see the
+          //      migration's header comment; strict `HH:MM` input for (iv)
+          //      — see above).
           //
           //  (c) CONCLUSION, corrected: an identity-only, fingerprint-silent
           //      leg is NOT reachable from two well-formed shifts (part a
