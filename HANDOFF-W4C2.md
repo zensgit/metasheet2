@@ -12,11 +12,125 @@
 （判定记录 #4612 `c-5082182541`，门审 MD `pr4612-w4c2-gate-20260725.md`）
 判 REQUEST_CHANGES；owner 于 #4595 c-5082275704 授权「仅限修复 + 新
 exact-head 独立门审」。本轮修复 P1-1/P1-3/P1-4/P2-1 四条 finding + NIT-1
-文档更正，**P1-2（scheduled 侧 outbox cutover）明确不做，待 owner 裁 G-2
-形状**（三条路后果不同，见 `attendance-issue-4556-w4c2-remediation-plan-20260726.md`
-§1）。详见各 finding 对应小节（P1-1 见下方「字节红线」、P1-3/P1-4 见新增
+文档更正。详见各 finding 对应小节（P1-1 见下方「字节红线」、P1-3/P1-4 见新增
 `w4c2-live-scheduled-boundary.ts` 章节、P2-1 见 leg 5e、NIT-1 见下方 20 号
-呈裁点更正）。**本轮不合并、不 arm、不转 Ready、不开后续切片。**
+呈裁点更正）。
+
+**Stage G-补1 — advisor 复审三项 declare-item（DONE，同轮）**：advisor 复审
+指出 P1-1 的 MK-2 四刀验收当时只跑了**合并腿**（789→787），未证明「改一个
+嵌套值」这把刀本身独立命中 value-assertion 半边——已补跑四把刀**各自独立**
+mutate+restore（见下方「P1-1 四刀独立验收」）。另指出 P1-3 新增的
+`deriveLegacyLivePunchAttributionV1` 两个 ambiguous/shift-changed 分支原用
+裸 `throw new Error(...)`，不在 `respondIfW4BoundaryError`/`instanceof
+HttpError` 的闭集识别范围内，会落到未映射的 500——已改为 `HttpError(409,
+...)` 并配新增测试种子 `__attendanceW4c2LegacyAttributionForTests`
++ 直接调用测试证明（见下方章节），mutation 自检已过。第三项（跑
+default-config 单测面）见下方「实跑实数」。
+
+**Stage G-补2 — P1-2（DONE，owner G-2 裁决 (c)-plus 落地）**：owner 于
+#4612 `c-5082614287`（上游授权 #4595 `c-5082275704`）裁定
+`attendance.absence.generated` 是**运维通知**（bare count，无 record 身份），
+**不进** §7.1a 结果事件耐久合同——判据是「事件是否携带单条结果身份」而非
+「由谁 emit」。落地三条：① design-lock §7.1a 最小澄清（同一 PR，独立
+commit）；② scheduled 侧该 emit 收窄到 `outcome.kind === 'legacy'`（含
+bare-module fallback），对齐 live 侧既有写法，`attendance.work_date
+.review_required` 明确保持不变（不在 G-2 范围内）；③ follow-up issue
+**#4616**（scheduled 侧 per-record 耐久事件的残余风险，明确新增能力，归
+W4C-3c 或独立票）。见下方「P1-2 落地明细」。
+
+**本轮（含 declare-item + P1-2）不合并、不 arm、不转 Ready、不开后续切片。**
+
+### P1-1 四刀独立验收（补跑，advisor declare-item）
+
+原验收只跑了「合并腿」（MK-2 一次性做 delete/add/null 三项，789→787，两个
+golden 测试红），advisor 指出这与门审原意「四刀各自独立验收」不同——尤其
+「改一个嵌套值」这把刀单独跑才能证明 value-assertion 半边真的独立生效
+（key-path 半边对纯改值不敏感）。四把刀在 fresh DB 上各自 mutate→跑两个
+golden 测试→restore，结果：
+
+| 刀 | 变更 | 结果 |
+| --- | --- | --- |
+| ① delete `record.status` | 单独删一个嵌套键 | 两测试红，命中 key-path 断言（L142） |
+| ② 新增 `record.__probe` | 单独加一个嵌套键 | 两测试红，命中 key-path 断言（L142） |
+| ③ `workDateResolution = null` | 子树塌陷 | 两测试红，命中 key-path 断言（L142，子树整体消失） |
+| ④ `record.status` 值改动（键集不变） | 只改值不改键 | 两测试红，**命中的是 value 断言（L150），不是 key-path** —— 证明 value 半边独立生效 |
+
+Restore 后重跑两个 golden 测试确认恢复绿。四刀独立验收数据替换原「合并腿」
+单行记账。
+
+### declare-item — P1-3 新分支的 500 面收口
+
+`deriveLegacyLivePunchAttributionV1`（`plugins/plugin-attendance/index.cjs`
+~L21141）两个新分支（`resolvedShift` 找不到、in-transaction 重新解析出
+ambiguous）原用裸 `throw new Error(...)`——`respondIfW4BoundaryError` 的闭集
+按 `error.name` 匹配，裸 Error 不在集合内，也不是 `instanceof HttpError`，
+会落到路由 catch 块末尾的通用 500。两处改为
+`throw new HttpError(409, '<closed code>', '<values-free message>')`，命中
+既有 `error instanceof HttpError` 分支。
+
+新增测试种子 `__attendanceW4c2LegacyAttributionForTests`
+（`deriveLegacyLivePunchAttributionV1` + `HttpError`，同一约定的
+`__xyzForTests` 直调导出），配一条真实 DB 测试（
+`attendance-w4c2-live-scheduled-boundary.db.test.ts` 新增 it 块）：两个重叠
+published shift 制造真实 ambiguous 结果，直调该函数证明抛出
+`HttpError(409, W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION)`，
+配正控（无重叠 fixture 走同一 seam 正常返回不抛错）。Mutation 自检：commit
+后把 `HttpError` 改回裸 `throw new Error(...)`，测试精确红在
+`toBeInstanceOf(HttpError)` 断言上；`git checkout --` 精确还原后重跑绿。
+
+此分支只在真实并发（route 预检和本事务之间数据被改动）下触达——不构造
+HTTP 级 rendezvous race（本轮范围外），测试直接调用该函数本身验证分支行为，
+在 PR body 中明确披露这一范围边界。
+
+### P1-2 落地明细
+
+owner G-2 裁决 (c)-plus 三条：
+
+1. **design-lock §7.1a 澄清**（`docs/development/attendance-issue-4556-w4-
+   segment-calculation-design-lock-20260724.md`，独立 commit
+   `967f1d4ff`）：在「W4C-0 generates the exact reachable event-kind/payload
+   inventory...」句后插入一段，判据 = 事件是否携带单条结果可重建身份，而非
+   由谁 emit；bare-count 运维通知（举例 `attendance.absence.generated`）不进
+   合同；同时追认 `ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1` 闭集排除此类事件是
+   正确分类。只加澄清，未动其它条款。
+2. **scheduled 侧 emit 收窄**（`plugins/plugin-attendance/index.cjs`
+   `runAutoAbsenceForOrgDate` ~L21606-21671，独立 commit `7701760f2`）：新增
+   `isLegacySideOutcome`（`outcome.kind === 'legacy'` 或 bare-module fallback
+   为 true），`attendance.absence.generated` 的 emit 收窄到该标志为 true 时才
+   发生；`attendance.work_date.review_required` 是不同事件（未解析工作日
+   attribution，非生成计数），**保持原样不收窄**（不在 G-2 范围内，逐字保留
+   `if (emit) {...}` 外层）。
+   新增测试（`attendance-work-date-resolver-w2.db.test.ts` 新 it 块）：直调
+   `runAutoAbsenceForOrgDate` 两次，`w4Boundary.executeScheduledRun` 分别 stub
+   返回 `{kind:'w4', rows:[]}` 与 `{kind:'legacy', rows:[...]}`，断言前者
+   `attendance.absence.generated` 未 emit、后者 emit 了。Mutation 自检：把
+   `if (isLegacySideOutcome)` 改成 `if (true)`，测试精确红在
+   `emittedW4.some(...)` 断言（expected false 实收 true）；`git checkout --`
+   精确还原后重跑绿（12/12）。
+3. **follow-up issue #4616**：「scheduled 结果缺 per-record 耐久事件（live
+   有、scheduled 无）」——本裁决明确承接的残余风险，属新增能力，候选归属
+   W4C-3c 或独立票，票内已注明不得把这个当成「给 `attendance.absence
+   .generated` 加 per-record payload」来做。
+
+### 本轮实跑实数（declare-item + P1-2 全部落地后，全新库 `ms2_w4c2_fix`）
+
+- **CI 同构 attendance 真库步全量**（同 `.github/workflows/plugin-tests.yml`
+  「Run attendance integration tests」步逐字复制的 64 文件清单）：
+  **64 files / 795 passed，零改写零红**（789 原基线 + 本轮净新 6 条：P1-4 三腿
+  + P2-1 一腿 + declare-item-1 一条 + P1-2 一条）。首次在复用 DB 上跑出 1 条
+  假红（`attendance-plugin.test.ts` 的 auto-shift 计数），换全新库复测后
+  63→64 files 全绿——确认是本会话反复手工探测遗留的 DB 污染，不是本轮改动
+  引入的真实回归（与 P1-1 阶段的先例同一根因）。
+- `tsc --noEmit`：exit 0，零诊断输出。
+- `node --check plugins/plugin-attendance/index.cjs`：OK。
+- default-config 单测面（advisor declare-item 3）：`pnpm --filter
+  core-backend test` 裸调是 watch 模式（package.json `"test": "vitest"` 无
+  `run`），会挂起不退出——已用 `vitest run` 显式跑了唯一两个直接 import 改动
+  模块（`w4c2-live-scheduled-boundary.ts`/`w4c0-operation-registry.ts` 等）的
+  default-config 单测规格：`src/attendance/__tests__/{w4c0-operation-layer,
+  w4c2-frozen-attribution,w4c1-merge-policy,w4c2-shadow-expected-differences}
+  .test.ts` —— **4 files / 55 passed**。未跑 core-backend 全包默认套件（规模
+  超出本轮改动直接相关范围，且原 watch-mode 挂起已排除误导性 0 输出）。
 
 ---
 
