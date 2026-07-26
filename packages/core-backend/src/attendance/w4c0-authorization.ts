@@ -97,6 +97,17 @@ export type AttendanceWriteSubjectScopeV1 =
   | { readonly kind: 'explicit_users'; readonly userIds: readonly string[] }
   | { readonly kind: 'org_scheduler' }
 
+/**
+ * W4C-2: the registered internal scheduler identity (lock 4.1 "scheduler scope
+ * is available only to the registered internal scheduler identity"). The
+ * internal scheduler is an in-process actor, not a directory user: the SQL
+ * recheck below waives the users-table/membership predicates for EXACTLY this
+ * `(posture='scheduler', actorId=constant)` pair — any other scheduler-postured
+ * actor still fails the ordinary active-user recheck. Subject predicates are
+ * never waived.
+ */
+export const ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1 = 'attendance-w4-internal-scheduler'
+
 export type AuthorizedAttendanceWriteContextV1 = Opaque<
   Readonly<{
     actorId: string
@@ -297,9 +308,16 @@ export async function recheckAttendanceAuthorizationInTransactionV1(
     if (result.rows.length !== 1) throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
   }
 
-  await requireActiveUser(verified.actorId)
-  if (verified.actorPosture !== 'platform_admin') {
-    await requireActiveMembership(verified.actorId)
+  // W4C-2: the registered internal scheduler identity is in-process, not a
+  // directory user; its ACTOR predicates are structural (posture + constant),
+  // never DB rows. Every subject predicate below still applies unchanged.
+  const isRegisteredInternalScheduler =
+    verified.actorPosture === 'scheduler' && verified.actorId === ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1
+  if (!isRegisteredInternalScheduler) {
+    await requireActiveUser(verified.actorId)
+    if (verified.actorPosture !== 'platform_admin') {
+      await requireActiveMembership(verified.actorId)
+    }
   }
   for (const userId of subjectUserIds) {
     if (userId === verified.actorId) continue

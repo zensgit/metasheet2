@@ -1116,6 +1116,26 @@ export interface PluginServices {
    */
   attendanceW4SegmentCalculation?: {
     validateIanaTimezone(zone: unknown): string
+    /**
+     * W4C-2 — canonical live/scheduled write boundary factory (lock 8.1). The
+     * plugin calls this ONCE at activate, injecting its legacy execution
+     * closures (event insert + record upsert + merge lift, absence
+     * INSERT..SELECT, in-transaction W2 resolvers, frozen-context loader).
+     * Routes then submit pure data envelopes; no per-request callback exists.
+     */
+    createLiveScheduledBoundary(config: {
+      legacyAdapters: import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+    }): import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledBoundaryV1
+    /**
+     * W4C-2 — one drain pass over the durable result-event outbox (lock 7.1a).
+     * The plugin schedules this ONLY under the same env gate as the posture
+     * allowlist (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` non-empty): no
+     * env => no worker => byte-identical runtime.
+     */
+    drainResultEventOutbox(options: {
+      emit: (delivery: { eventKind: string; payload: unknown; payloadSchemaVersion: number }) => void | Promise<void>
+      batchLimit?: number
+    }): Promise<{ claimed: number; delivered: number; failed: number }>
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

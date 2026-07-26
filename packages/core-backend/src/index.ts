@@ -102,6 +102,8 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 // W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
 // `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
+import { createAttendanceLiveScheduledBoundaryV1 } from './attendance/w4c2-live-scheduled-boundary'
+import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2035,6 +2037,39 @@ export class MetaSheetServer {
           manifest.name === 'plugin-attendance'
             ? {
                 validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+                // W4C-2: canonical live/scheduled write boundary (lock 8.1).
+                // The factory captures a dedicated-connection provider over the
+                // core pool; the plugin injects its legacy adapters once at
+                // activate and cuts P01-P04 over to the returned boundary.
+                createLiveScheduledBoundary: (config: {
+                  legacyAdapters: import('./attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+                }) =>
+                  createAttendanceLiveScheduledBoundaryV1({
+                    legacyAdapters: config.legacyAdapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                // W4C-2: one outbox drain pass (lock 7.1a delivery side).
+                drainResultEventOutbox: async (options: {
+                  emit: (delivery: {
+                    eventKind: string
+                    payload: unknown
+                    payloadSchemaVersion: number
+                  }) => void | Promise<void>
+                  batchLimit?: number
+                }) => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  try {
+                    return await dispatchAttendanceResultEventOutboxV1(client, {
+                      emit: options.emit,
+                      batchLimit: options.batchLimit,
+                    })
+                  } finally {
+                    client.release()
+                  }
+                },
               }
             : undefined,
         automationRegistry,
