@@ -57,25 +57,37 @@
  *    stays non-ambiguous throughout (so it never throws its own 409),
  *    reaching the NEW step-7 gate: `outcome_reason_code='context_mismatch'`,
  *    zero segments, legacy projection intact.
- *  - L6 (group C, race), RE-SCOPED (mutation self-check finding, disclosed
- *    below and in the PR body): a real two-connection race that changes
- *    ONLY the winning shift row's own `timezone` column (identity —
- *    workDate/shiftId — unchanged, so the step-7 gate stays silent) proves
- *    the frozen context's timezone reflects the TRANSACTION's own in-flight
- *    read of the winning shift row. It does NOT independently discriminate
- *    the `w4c2-live-scheduled-boundary.ts` freeze-step fix's `timezone:`
- *    argument to `buildShadowFrozenContext` — mutating that argument (to
- *    `input.timezone`, and separately to a nonsense literal) left this leg
- *    green both times, because `buildW4ShadowFrozenContextV1` (`index.cjs`
- *    ~L21519) independently re-reads the shift row in the SAME transaction
- *    and overrides whatever is passed whenever the row's own `timezone`
- *    column is non-blank. That argument is therefore correct per the lock
- *    (Q16/Q17) but observably inert for any fixture where the winning shift
- *    carries a timezone — disclosed rather than claimed as discriminated.
+ *  - L6 (group C, race), RE-SCOPED TWICE — round 1 (mutation self-check
+ *    finding, disclosed below and in the PR body): a real two-connection
+ *    race that changes ONLY the winning shift row's own `timezone` column
+ *    (identity — workDate/shiftId — unchanged) does NOT independently
+ *    discriminate the `w4c2-live-scheduled-boundary.ts` freeze-step fix's
+ *    `timezone:` argument to `buildShadowFrozenContext` — mutating that
+ *    argument (to `input.timezone`, and separately to a nonsense literal)
+ *    left this leg green both times, because `buildW4ShadowFrozenContextV1`
+ *    (`index.cjs` ~L21519) independently re-reads the shift row in the SAME
+ *    transaction and overrides whatever is passed whenever the row's own
+ *    `timezone` column is non-blank. That argument is therefore correct per
+ *    the lock (Q16/Q17) but observably inert for any fixture where the
+ *    winning shift carries a timezone. Round 2 (#4612 gate3 P2-1 closure,
+ *    second round — source-definition fingerprint half of step 7 landed):
+ *    this leg is NOW the fingerprint-only discriminating leg — identity
+ *    stays silent (workDate/shiftId unchanged) but the OUTER-vs-INNER
+ *    source-definition fingerprint now differs, so `outcome` correctly
+ *    flips from `completed` (pre-fingerprint-fix) to
+ *    `review_required`/`context_mismatch` (post-fix) — see the test's own
+ *    updated comment for the full account.
  *  - L7 (group B, race + pre-existing evidence): reuses L5's race and adds
  *    a pre-existing `attendance_events` row tagged to the CORRECT anchor
  *    day (the freeze step's own resolved `workDate`) that the OLD
  *    (`input.workDate`) anchor would never see.
+ *  - Group D (shiftId-only race, see below) and the 2×2 exclusivity matrix
+ *    for the two step-7 conjuncts (identity vs. source-definition
+ *    fingerprint) — including the PROVEN (CHECK-constraint-backed, not
+ *    merely argued) structural-subsumption finding that an "identity-only,
+ *    fingerprint-silent" leg cannot be built from a real DB fixture in this
+ *    schema — are documented in `w4c2-live-scheduled-boundary.ts`'s own
+ *    `identityDrift` comment and in the PR body; not repeated here.
  *
  * Shared-DB discipline: fixture ids are file-namespaced random UUIDs.
  */
@@ -258,6 +270,29 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const SID_OCCURRED_AT = '2026-07-21T10:00:00.000Z'
 
   // ---------------------------------------------------------------------
+  // Group D-overnight (W4C2 gate3 P2-1 second closure round — self-report
+  // ③ from that round: "Group D only covered a non-overnight shiftId-only
+  // race"). Same construction as Group D, but BOTH candidate shifts are
+  // OVERNIGHT (22:00-06:00 / 21:00-07:00 UTC), assigned on the SAME
+  // `start_date` (OSID_DAY) — an overnight candidate's own `workDate` is
+  // the day the shift STARTS (the night before the punch instant), so
+  // pinning both shifts to the SAME start_date keeps identity's `workDate`
+  // half FIXED across the race, exactly like Group D, while `shiftId`
+  // swaps. This is deliberately NOT argued-equivalent to Group D — built as
+  // its own real two-connection race, because the overnight resolution path
+  // (`workDate` != `toWorkDate(occurredAt, timezone)`) is the exact
+  // defect class two EARLIER rounds on this PR (P1-3, gate2 P1) already
+  // broke on, non-overnight-shaped reasoning having been proven unsafe to
+  // extrapolate from more than once on this PR.
+  // ---------------------------------------------------------------------
+  const osidOrg = randomUUID()
+  const osidShiftX = randomUUID() // overnight, 22:00-06:00 UTC, route-visible at read time
+  const osidShiftY = randomUUID() // overnight, 21:00-07:00 UTC, race-installed, SAME start_date
+  const osidUser = randomUUID()
+  const OSID_DAY = '2026-07-22' // the night BOTH shifts start
+  const OSID_OCCURRED_AT = '2026-07-23T02:00:00.000Z' // inside both windows
+
+  // ---------------------------------------------------------------------
   // Group E (#4612 gate3 P2-1 self-report ③' closure — advisor-corrected
   // construction): two zero-concurrency fixtures that each isolate ONE of
   // the two P2-1 fix lines (L2 = freeze-step `timezone` argument, L3 =
@@ -309,7 +344,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     process.env.SKIP_PLUGINS = 'false'
     priorAllowlistEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED =
-      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, eDay1Org, eDay2Org].join(',')
+      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, osidOrg, eDay1Org, eDay2Org].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
@@ -366,6 +401,15 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     await insertShift(sidShiftY, sidOrg, 'W4C2-P21-SidY', 'UTC', '08:00', '18:00', false)
     await insertAssignment(randomUUID(), sidOrg, sidUser, sidShiftX, SID_DAY)
 
+    // Group D-overnight fixtures (overnight shiftId-only race). Both shifts
+    // OVERNIGHT, SAME start_date (OSID_DAY), both windows contain
+    // OSID_OCCURRED_AT — only shiftX is assigned/active at route-read time.
+    await insertShadowRolloutRow(osidOrg)
+    await insertActiveUser(osidUser, osidOrg)
+    await insertShift(osidShiftX, osidOrg, 'W4C2-P21-OsidX', 'UTC', '22:00', '06:00', true)
+    await insertShift(osidShiftY, osidOrg, 'W4C2-P21-OsidY', 'UTC', '21:00', '07:00', true)
+    await insertAssignment(randomUUID(), osidOrg, osidUser, osidShiftX, OSID_DAY)
+
     // Group E fixtures (L2/L3 exclusive discriminating legs). Both use the
     // SAME overnight shift shape (belongs to day EDAY); only occurredAt and
     // client tz differ between the two orgs.
@@ -381,7 +425,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   }, 120000)
 
   afterAll(async () => {
-    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, eDay1User, eDay2User]) {
+    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -564,27 +608,43 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(evidence[0].ref).toBe(preExisting.rows[0].id)
   })
 
-  // L6, RE-SCOPED (mutation self-check finding, disclosed): the freeze-step
-  // fix at `w4c2-live-scheduled-boundary.ts` (`timezone:
-  // resolution.fullWinner?.timezone ?? input.requestTimezone` passed into
-  // `buildShadowFrozenContext`) is CORRECT per the lock's Q16/Q17 but is
-  // OBSERVABLY INERT for this leg: `buildW4ShadowFrozenContextV1`
-  // (`index.cjs` ~L21519) independently re-reads the winning shift row
-  // FRESH, in the same transaction, and overrides whatever `timezone`
-  // parameter the caller passes whenever the row's own `timezone` column is
-  // non-blank (`shift.timezone || <passed timezone>`) — which is every
-  // constructible fixture here. Mutation-verified twice: reverting the
-  // boundary.ts argument to `input.timezone`, AND replacing it with a
-  // nonsense literal (`'Pacific/Kiritimati'`), both left this leg green
-  // (`context_snapshot.timezone` stayed `'Asia/Kolkata'` either way). This
-  // leg therefore does NOT discriminate that boundary.ts line — it proves a
-  // real, valuable, but DIFFERENT property: the freeze step's frozen
-  // context correctly reflects the TRANSACTION's own in-flight read of the
-  // winning shift row (via `buildW4ShadowFrozenContextV1`'s own re-read),
-  // not the route's pre-race value — end-to-end proof the race is actually
-  // observed. See the PR body's mutation table for the "no independently
-  // provable leg" disclosure on the boundary.ts line itself.
-  it('L6 (re-scoped): the frozen context reflects the TRANSACTION\'s own in-flight read of the winning shift row\'s timezone after a race, not the route\'s pre-race value (does not discriminate the boundary.ts parameter — see comment above)', async () => {
+  // L6, RE-SCOPED TWICE:
+  //
+  // Round 1 (mutation self-check finding, disclosed): the freeze-step fix at
+  // `w4c2-live-scheduled-boundary.ts` (`timezone: resolution.fullWinner?.timezone
+  // ?? input.requestTimezone` passed into `buildShadowFrozenContext`) is
+  // CORRECT per the lock's Q16/Q17 but is OBSERVABLY INERT for this leg:
+  // `buildW4ShadowFrozenContextV1` (`index.cjs` ~L21519) independently
+  // re-reads the winning shift row FRESH, in the same transaction, and
+  // overrides whatever `timezone` parameter the caller passes whenever the
+  // row's own `timezone` column is non-blank — which is every constructible
+  // fixture here. Mutation-verified twice (reverting the argument to
+  // `input.timezone`, and replacing it with a nonsense literal), both left
+  // THIS ORIGINAL leg green (`context_snapshot.timezone` stayed
+  // `'Asia/Kolkata'` either way) — it does NOT discriminate that line, but
+  // proves a real, valuable, DIFFERENT property: the frozen context
+  // reflects the TRANSACTION's own in-flight read, not the route's
+  // pre-race value.
+  //
+  // Round 2 (#4612 gate3 P2-1 closure, second round — this leg is now ALSO
+  // the fingerprint-only discriminating leg for §8.2 step 7's second
+  // clause): `workDate`/`shiftId` (candidate IDENTITY) are UNCHANGED by
+  // this race by construction — only the winning shift's OWN `timezone`
+  // column changes underneath the SAME shiftId — so before the
+  // source-definition fingerprint half was wired, `outcome` stayed
+  // `completed` (real DB evidence retained in the PR body: two pre-fix rows
+  // both show `outcome='calculated'`/`completed` with
+  // `context_snapshot.timezone='Asia/Kolkata'`). With the fingerprint half
+  // wired, the OUTER (pre-race) and INNER (post-race) source-definition
+  // fingerprints now differ (via `context.timezone` and the strict-rebuild
+  // `absoluteWindow`/`attributionWindow`, which both shift with the raced
+  // timezone) even though identity does not — `outcome` now correctly
+  // flips to `review_required`/`context_mismatch`. This is the leg that
+  // demonstrates the identity conjunct alone is NOT sufficient: an
+  // in-place shift-definition edit under a stable shiftId is exactly the
+  // race class the lock's "source-definition fingerprint" clause exists to
+  // catch, and it was previously silent.
+  it('L6 (re-scoped twice): identity is UNCHANGED by this race, but the winning shift\'s OWN definition changes underneath it — the fingerprint-only conjunct now catches what the identity conjunct alone cannot', async () => {
     const plugin = loadPlugin()
     const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
     if (typeof setSeam !== 'function') {
@@ -621,11 +681,22 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(res.status, res.raw).toBe(200)
     const calcs = await calculationRowsForUser(tzRaceUser)
     expect(calcs.length).toBe(1)
-    // Identity unchanged -> step-7 gate stays silent (not a context_mismatch
-    // review) -- the race is contained to timezone only.
+    // Identity (workDate/shiftId) is UNCHANGED by this race — kept from
+    // round 1, still true and still worth asserting explicitly (the
+    // identity conjunct must NOT be the reason this leg goes red).
     expect(calcs[0].attribution_snapshot.value.workDate).toBe('2026-07-19')
     expect(calcs[0].attribution_snapshot.value.shiftId).toBe(tzRaceShift)
+    // Round 1's property still holds: the frozen context reflects the
+    // TRANSACTION's own in-flight read of the winning shift row, not the
+    // route's pre-race value.
     expect(calcs[0].context_snapshot.timezone).toBe('Asia/Kolkata')
+    // Round 2 (NEW): the fingerprint-only conjunct now catches this —
+    // outer (pre-race) and inner (post-race) source-definition fingerprints
+    // differ even though identity does not.
+    expect(calcs[0].outcome).toBe('review_required')
+    expect(calcs[0].outcome_reason_code).toBe('context_mismatch')
+    expect(calcs[0].expected_segment_count).toBe(0)
+    expect(await segmentCountForCalculation(calcs[0].id)).toBe(0)
   })
 
   // Group D (#4612 gate3 P2-1 self-report ⑥ closure). Before the step-7 gate
@@ -633,9 +704,20 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // ONLY `workDate` (unchanged by this race by construction), so the
   // shadow calculation completed against the RACE-INSTALLED shift's context
   // with `outcome='completed'` — a fail-open. Proven via the mutation table
-  // in the PR body (neutering the `shiftId` half of `identityDrift` flips
-  // this leg's `outcome` assertion back to `completed`, matching pre-fix
-  // behavior byte-for-byte).
+  // in the PR body (neutering the `shiftId` half of the IDENTITY conjunct,
+  // AS IT STOOD in that round, flipped this leg's `outcome` assertion back
+  // to `completed`, matching pre-fix behavior byte-for-byte).
+  //
+  // #4612 gate3 P2-1 closure, SECOND round (source-definition fingerprint
+  // half landed): this leg is NO LONGER identity-exclusive. `shiftId` is
+  // part of BOTH conjuncts now (the fingerprint domain's `attribution.value`
+  // and `context` both carry `shiftId`), so neutering the identity conjunct
+  // ALONE no longer flips this leg back to `completed` — the fingerprint
+  // conjunct independently catches the same race. See the PR body's 2×2
+  // exclusivity matrix (neuter identity alone / neuter fingerprint alone /
+  // neuter both) for the corrected, empirically re-verified numbers; the
+  // single-conjunct claim above is retained as a historical record of what
+  // was true in that earlier round, not a claim about current behavior.
   it('Group D: a shiftId-ONLY race (workDate held fixed, only the winning shift swaps) hits the widened step-7 candidate-identity gate', async () => {
     const plugin = loadPlugin()
     const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
@@ -750,6 +832,120 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs[0].outcome).toBe('completed')
     expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
     expect(calcs[0].attribution_snapshot.value.shiftId).toBe(sidShiftX)
+  })
+
+  // Group D-overnight (#4612 gate3 P2-1 second closure round self-report
+  // ③: "Group D only covered a non-overnight shiftId-only race"). Same
+  // race shape as Group D, but both candidate shifts are OVERNIGHT with the
+  // SAME `start_date` (OSID_DAY) — identity's `workDate` half stays fixed
+  // at OSID_DAY across the race (the overnight candidate's own `workDate`
+  // is the night it starts, not the calendar day the punch instant falls
+  // on), only `shiftId` swaps.
+  it('Group D-overnight: a shiftId-ONLY race between two OVERNIGHT shifts sharing the same start_date hits the widened step-7 candidate-identity gate', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(osidUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: OSID_OCCURRED_AT, timezone: 'UTC', orgId: osidOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B: swap the ACTIVE assignment from shiftX to shiftY —
+      // SAME user, SAME start_date (OSID_DAY), a genuine committed write
+      // fully independent of connection A. Both overnight shifts' windows
+      // contain OSID_OCCURRED_AT, so the in-transaction re-resolution stays
+      // non-ambiguous (single matching candidate) throughout.
+      const asgX = (await pool.query(
+        'SELECT id::text AS id FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2 AND shift_id = $3',
+        [osidOrg, osidUser, osidShiftX],
+      )).rows[0].id
+      await pool.query('UPDATE attendance_shift_assignments SET is_active = false WHERE id = $1', [asgX])
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+         VALUES ($1, $2, $3, $4, $5, $5, true, 'published', 1)`,
+        [randomUUID(), osidOrg, osidUser, osidShiftY, OSID_DAY],
+      )
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+    }
+
+    expect(res.status, res.raw).toBe(200)
+    expect(res.body?.ok).toBe(true)
+
+    const calcs = await calculationRowsForUser(osidUser)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].outcome).toBe('review_required')
+    expect(calcs[0].outcome_reason_code).toBe('context_mismatch')
+    expect(calcs[0].expected_segment_count).toBe(0)
+    expect(await segmentCountForCalculation(calcs[0].id)).toBe(0)
+    // The freeze step genuinely re-resolved in-transaction to the
+    // race-installed winner (shiftY) — SAME start_date (identity's
+    // `workDate` half unchanged, exactly like Group D), DIFFERENT shift.
+    expect(calcs[0].attribution_snapshot.posture).toBe('resolved_v2')
+    expect(calcs[0].attribution_snapshot.value.workDate).toBe(OSID_DAY)
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(osidShiftY)
+  })
+
+  // Race-genuineness control for Group D-overnight (same discipline as
+  // Group D's own positive control, `feedback_toctou_needs_constructed_race`).
+  it('Group D-overnight positive control: with connection B disarmed (no shift swap), the SAME punch shape completes normally', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    const controlUser = randomUUID()
+    await insertActiveUser(controlUser, osidOrg)
+    await insertAssignment(randomUUID(), osidOrg, controlUser, osidShiftX, OSID_DAY)
+
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(controlUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: OSID_OCCURRED_AT, timezone: 'UTC', orgId: osidOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B intentionally disarmed: no assignment mutation at all.
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+      await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
+    }
+
+    expect(res.status, res.raw).toBe(200)
+    const calcs = await calculationRowsForUser(controlUser)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].outcome).toBe('completed')
+    expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(osidShiftX)
   })
 
   // Group E (#4612 gate3 P2-1 self-report ③' closure — advisor-corrected
