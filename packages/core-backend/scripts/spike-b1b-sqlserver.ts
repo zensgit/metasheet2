@@ -749,6 +749,12 @@ async function main(): Promise<void> {
     // readback (rather than a fresh live query, which is what this script always does) would
     // have been decorative.
     log.check(
+      // DERIVED, not independent (review, 2026-07-26) — labelled rather than counted as its own
+      // evidence. This is arithmetically implied by two controls already GREEN above it (S-1: Phase A
+      // rcsi=0; S-4b-readback-reports-on: Phase B rcsi=1), so it cannot fail unless one of those
+      // already has. Same pattern this round removed as S-6-mutation-emit-from-phaseA; kept only
+      // because the id is referenced in the battery's S-0 substitution disclosure, and now labelled
+      // so the check count is not read as holding one more independent observation than it does.
       'S-0-mutation-stale-cached-readback-would-be-decorative',
       'MUTATION: a cached PRE-toggle readback (rcsi=0) compared against the REAL post-toggle state must disagree, proving a cached (non-live) readback would misreport reality',
       'RED',
