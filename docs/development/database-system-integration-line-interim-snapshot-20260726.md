@@ -493,6 +493,7 @@ shipped” is misreading it: what shipped is **authority substrate + refusal mac
 deliberately inert. The single open PR whose merge changes runtime behaviour is #4591’s
 fail-closed guard, and it is sequenced last precisely because it is the one that does.
 
-That is the honest shape of the closeout: **the stock-prep face is finished and waits on two
+That is the honest shape of the line at this snapshot — not a closeout: **the stock-prep face is
+finished and waits on two
 non-engineering acts; the GIP face is a fully-fenced latent substrate whose first user-visible
 consequence has not yet been authorized, scoped, or scheduled.**
