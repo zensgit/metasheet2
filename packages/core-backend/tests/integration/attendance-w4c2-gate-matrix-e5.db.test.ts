@@ -1371,4 +1371,35 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     expect(absenceCallCount()).toBe(0)
     expect((await operationRows(untouchedOrg, 'scheduled')).length).toBe(0)
   })
+
+  it('P1-4 leg D — W4C2_SCHEDULED_ADMIN_WITNESS_REQUIRED (#4612 gate2 M7 finding: deleting this guard left e5 17/17 green): admin_run with a null adminActorId is rejected at MINT, before any per-user transaction opens (zero absence-adapter calls; zero new operation rows)', async () => {
+    // Real production caller unreachability (why this guard's own producer
+    // never fires it, per the gate's P3-1 disposition): the only production
+    // `admin_run` caller is index.cjs's `POST /api/attendance/auto-absence/run`
+    // route, which passes `getUserId(req)` as `adminActorId` — and
+    // `withPermission('attendance:admin', ...)` (-> `withAnyPermission`) 401s
+    // BEFORE the handler runs at all when there is no authenticated user, so
+    // the route can never reach this boundary call with a null/empty
+    // adminActorId. This leg proves the BOUNDARY's own guard is load-bearing
+    // in isolation (defense in depth), independent of route reachability —
+    // exactly the leg 5a-5d/A-C direct-witness-construction style above.
+    const { adapters, absenceCallCount } = throwingScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+    const opsBefore = (await operationRows(adminWitnessOrg, 'scheduled')).length
+
+    await expect(
+      boundary.executeScheduledRun({
+        orgId: adminWitnessOrg,
+        workDate: '2026-07-13',
+        timezone: 'UTC',
+        targetUserIds: [adminWitnessTargetUser],
+        initiator: 'admin_run',
+        adminActorId: null,
+      }),
+    ).rejects.toMatchObject({ code: 'W4C2_SCHEDULED_ADMIN_WITNESS_REQUIRED' })
+
+    expect(absenceCallCount()).toBe(0)
+    expect((await operationRows(adminWitnessOrg, 'scheduled')).length).toBe(opsBefore)
+    expect(await recordCount(adminWitnessTargetUser)).toBe(0)
+  })
 })
