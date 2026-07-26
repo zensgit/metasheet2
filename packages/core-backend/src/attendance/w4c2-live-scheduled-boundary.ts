@@ -1279,8 +1279,15 @@ export function createAttendanceLiveScheduledBoundaryV1(
           // ("Group D").
           //
           // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round —
-          // source-definition fingerprint half LANDED): the lock's second
-          // equality clause is now wired. `input.outerSourceDefinitionFingerprint`
+          // source-definition fingerprint half WIRED, PENDING O-5): the
+          // comparison this code performs is wired end-to-end, but it
+          // compares a NARROWER domain than the object §8.2 step 7 names
+          // ("the source-definition fingerprint" — the storage column's
+          // domain, which still includes `reasonCode`) — see the O-5 status
+          // block atop `computeAttendanceOuterComparableSourceDefinition
+          // FingerprintV1` in `w4c1-fingerprints.ts` and the PR body's O-5
+          // section for the two full remediation specs and why this is not
+          // yet a satisfied clause. `input.outerSourceDefinitionFingerprint`
           // is the route's own PRE-transaction fingerprint (see the field's
           // own doc comment); `innerComparableSourceDefinitionFingerprint`
           // below is this transaction's own freeze-step fingerprint, in the
