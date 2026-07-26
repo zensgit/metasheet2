@@ -552,6 +552,44 @@ async function l2RebrandsRejectionsNotOnlyThrows() {
   console.log('  ASYNC-L2 rejection re-branded, thenable re-branded, branded rejection passed through, resolve intact')
 }
 
+// ---------------------------------------------------------------------------
+// IN-CODE LINE CITATIONS ARE RE-DERIVED, NOT HAND-PATCHED.
+//
+// The executor header cites its own line numbers to name the second public factory
+// whose products are trusted. Those citations have gone stale in THREE consecutive
+// rounds, because every edit above them shifts them and the fix each time was to
+// hand-patch the numbers — which is a fix that expires the moment anyone edits the
+// file again. Pinning them mechanically converts a recurring review finding into a
+// RED, and it is the same "the ledger is the code, so audit the code" posture the
+// module already claims for its comments.
+// ---------------------------------------------------------------------------
+function inCodeLineCitationsAreAccurate() {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const file = path.join(__dirname, '..', 'lib', 'gip-server-bound-source-executor.cjs')
+  const lines = fs.readFileSync(file, 'utf8').split('\n')
+  const lineOf = (re, what) => {
+    const index = lines.findIndex((line) => re.test(line))
+    assert.ok(index >= 0, `could not locate ${what} — the citation pin is looking for something that no longer exists`)
+    return index + 1
+  }
+  const actual = {
+    factory: lineOf(/^function createHarnessSourceBinderForTests/, 'the harness binder factory'),
+    weakSet: lineOf(/^const trustedSourceBinders = new WeakSet/, 'the trustedSourceBinders WeakSet'),
+    write: lineOf(/trustedSourceBinders\.add\(binder\)/, 'the WeakSet write'),
+    exported: lineOf(/^ {2}createHarnessSourceBinderForTests,/, 'the export entry'),
+  }
+  const cited = lines.find((line) => line.includes('is the SOLE writer into'))
+  assert.ok(cited, 'the header citation sentence has gone missing')
+  const citedNext = lines[lines.indexOf(cited) + 1]
+  const claim = `${cited}\n${citedNext}`
+  for (const [name, value] of Object.entries(actual)) {
+    assert.ok(claim.includes(`:${value}`),
+      `stale in-code citation: ${name} is at line ${value}, which the header does not cite. Header says:\n${claim}`)
+  }
+  console.log(`  CITATIONS re-derived: factory=:${actual.factory} weakSet=:${actual.weakSet} write=:${actual.write} export=:${actual.exported}`)
+}
+
 async function main() {
   await entryTableIsGated()
   await l2RebrandsRejectionsNotOnlyThrows()
@@ -559,6 +597,7 @@ async function main() {
   credentialHandleIsGuardedNotEnumerated()
   doorsAreDistinguishable()
   thereIsExactlyOnePlainObjectDefinition()
+  inCodeLineCitationsAreAccurate()
   console.log('gip-inert-entry-gate.test.cjs OK')
 }
 
