@@ -20,12 +20,24 @@
 // frozen per-reason map and ignores every constructor argument beyond the reason,
 // so direct construction cannot carry text either.
 
+const {
+  isPlainObject,
+  inertRecord,
+  createEntryGuard,
+  guardExportTable,
+} = require('./gip-inert-entry.cjs')
+
 const OBSERVABILITY_CONTRACT_ERROR_REASONS = Object.freeze([
   'COUNTER_SAMPLE_INVALID',
   'COUNTER_SAMPLE_NOT_VALUES_FREE',
   'HANDSHAKE_REQUEST_INVALID',
   'HANDSHAKE_EXPECTATION_INVALID',
   'HANDSHAKE_INPUT_HOSTILE',
+  // L2 ONLY. No path inside this module emits this token: it is thrown exclusively by
+  // the entry boundary, when something escaped that the inert snapshot did not
+  // contain. Its whole purpose is to be DISTINGUISHABLE from every L1 token, so the
+  // two doors have exclusive failures instead of covering for each other.
+  'OBSERVABILITY_ENTRY_NOT_INERT',
 ])
 const ERROR_REASON_SET = new Set(OBSERVABILITY_CONTRACT_ERROR_REASONS)
 
@@ -37,6 +49,7 @@ const ERROR_MESSAGES = Object.freeze({
   HANDSHAKE_REQUEST_INVALID: 'capability handshake request does not satisfy the frozen request shape',
   HANDSHAKE_EXPECTATION_INVALID: 'capability handshake expectation does not satisfy the frozen shape',
   HANDSHAKE_INPUT_HOSTILE: 'capability handshake input could not be read as inert data',
+  OBSERVABILITY_ENTRY_NOT_INERT: 'a public entry point was reached with data that could not be made inert',
 })
 
 class GipReadObservabilityContractError extends Error {
@@ -95,11 +108,15 @@ function safeOwnSymbols(value, reason) {
   return []
 }
 
-function isPlainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const proto = Object.getPrototypeOf(value)
-  return proto === Object.prototype || proto === null
-}
+// `isPlainObject` is now the SHARED definition from the inert-entry gate — the same
+// strict predicate, in ONE place rather than three byte-identical copies. It is
+// deliberately NOT internally guarded: it runs only on values the entry gate has
+// already made inert, so its `Object.getPrototypeOf` cannot reach a trap, and leaving
+// it unguarded is what gives the gate an EXCLUSIVE failure. If it swallowed traps
+// itself, removing the snapshot from an entry point would still be refused here and
+// the gate's positive control would prove nothing.
+const failEntryNotInert = () => fail('OBSERVABILITY_ENTRY_NOT_INERT')
+const guardEntry = createEntryGuard(GipReadObservabilityContractError, failEntryNotInert)
 
 function assertClosedKeySet(value, allowedKeys, hostileReason, extraKeyReason) {
   const keys = safeOwnKeys(value, hostileReason)
@@ -151,7 +168,14 @@ const COUNTER_SAMPLE_KEYS = new Set(UNORDERED_OFFSET_ATTEMPT_COUNTER.sampleKeys)
 // A sample is `{ value }` and NOTHING else. Any identifier — tenant, config,
 // object, field, system — is refused rather than dropped, so a wiring slice
 // cannot quietly widen the contract later.
-function assertValuesFreeCounterSample(sample) {
+function assertValuesFreeCounterSample(rawSample) {
+  // L1 — FIRST TOUCH. Every interrogation of `rawSample` happens inside the gate; from
+  // here down the function reads `sample`, a frozen first-party record, and the
+  // caller's object is never touched again. The reason is the module's existing
+  // merged `COUNTER_SAMPLE_INVALID`: a sample that cannot be read as inert data is
+  // not a valid sample, and splitting it would add a token whose only job is to tell
+  // a hostile caller which of its traps fired.
+  const sample = inertRecord(rawSample, () => fail('COUNTER_SAMPLE_INVALID'))
   if (!isPlainObject(sample)) fail('COUNTER_SAMPLE_INVALID')
   assertClosedKeySet(sample, COUNTER_SAMPLE_KEYS, 'COUNTER_SAMPLE_INVALID', 'COUNTER_SAMPLE_NOT_VALUES_FREE')
   const value = safeRead(sample, 'value', 'COUNTER_SAMPLE_INVALID')
@@ -217,7 +241,12 @@ function readIdentityString(container, key, reason) {
 // refuse to run". The two refusal outcomes are ORDERED: a peer too old to speak the
 // protocol is told to upgrade FIRST, because its config-version claim cannot be
 // trusted to mean what this side means by it.
-function evaluateCapabilityHandshake(request, expectation) {
+function evaluateCapabilityHandshake(rawRequest, rawExpectation) {
+  // L1 — FIRST TOUCH, both arguments, before any shape check. `HANDSHAKE_INPUT_HOSTILE`
+  // already exists for exactly this outcome and is used for both, so a caller cannot
+  // learn from the token WHICH of the two carried the trap.
+  const request = inertRecord(rawRequest, () => fail('HANDSHAKE_INPUT_HOSTILE'))
+  const expectation = inertRecord(rawExpectation, () => fail('HANDSHAKE_INPUT_HOSTILE'))
   if (!isPlainObject(request)) fail('HANDSHAKE_REQUEST_INVALID')
   if (!isPlainObject(expectation)) fail('HANDSHAKE_EXPECTATION_INVALID')
   assertClosedKeySet(request, REQUEST_KEY_SET, 'HANDSHAKE_INPUT_HOSTILE', 'HANDSHAKE_REQUEST_INVALID')
@@ -244,7 +273,12 @@ function evaluateCapabilityHandshake(request, expectation) {
   return Object.freeze({ outcome: 'READY', mayRun: true })
 }
 
-module.exports = {
+// L2 — every function-valued export, top level AND `__internals`, is wrapped by the
+// entry boundary. A NEWLY ADDED export is wrapped automatically by construction; the
+// suite's export-table walk then drives it through the hostile matrix without anyone
+// having to remember to add it, which is the property that makes this a class closure
+// rather than a fifth round of trap enumeration.
+module.exports = guardExportTable({
   OBSERVABILITY_CONTRACT_ERROR_REASONS,
   GipReadObservabilityContractError,
   UNORDERED_OFFSET_ATTEMPT_COUNTER,
@@ -276,4 +310,4 @@ module.exports = {
     EXPECTATION_KEY_SET_MEMBERS: Object.freeze([...EXPECTATION_KEY_SET].sort()),
     COUNTER_SAMPLE_KEY_MEMBERS: Object.freeze([...COUNTER_SAMPLE_KEYS].sort()),
   },
-}
+}, guardEntry)
