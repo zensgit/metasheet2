@@ -713,15 +713,65 @@ function computeActivationReadinessNeverEscapesRawForeignErrors() {
   const serializedLookup = String(caughtLookup.message) + JSON.stringify(caughtLookup.details) + String(caughtLookup.stack)
   assert.ok(!serializedLookup.includes(lookupMarker), 'the raw marker text must never leak into the branded error')
 
-  // Non-regression: a registry.lookup() call that throws its OWN legitimate
-  // branded error (e.g. a malformed contractId) must propagate UNCHANGED,
-  // never re-labeled as a `registry` failure.
+  // (c2) P1 FIX (adversarial residual after #4610 head): the round-7 catch
+  // re-threw any GipCanonicalObjectContractError unchanged, so a hostile
+  // registry.lookup that threw a FORGED branded error (the class is a public
+  // constructor) smuggled attacker message/details/cause past the "never
+  // escape raw foreign error" guard that already covered TypeError. This is
+  // the same brand-exemption class system-identity round 3 deleted. Positive
+  // control just below: a genuine malformed token still fails with field
+  // contractId (pre-validation), proving the pin is not a blanket "every
+  // lookup failure becomes field:registry".
+  const forgedBrandMarker = 'ACTIVATION-READINESS-FORGED-BRAND-MARKER'
+  const forgedCauseMarker = 'ACTIVATION-READINESS-FORGED-CAUSE-MARKER'
+  const forgedBrandRegistry = {
+    lookup() {
+      const err = new GipCanonicalObjectContractError(
+        'CANONICAL_OBJECT_CONTRACT_UNREGISTERED',
+        `forged branded leak ${forgedBrandMarker}`,
+        { leaked: forgedBrandMarker, nested: { s: forgedBrandMarker } },
+      )
+      err.cause = new Error(forgedCauseMarker)
+      throw err
+    },
+  }
+  const caughtForgedBrand = rejects(
+    () => __internals.computeActivationReadiness(forgedBrandRegistry, [{ contractId: 'bom_line', version: 'v1' }]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a forged GipCanonicalObjectContractError from hostile registry.lookup must be discarded and converted, never rethrown',
+  )
+  assert.equal(caughtForgedBrand.details.field, 'registry')
+  assert.equal(
+    caughtForgedBrand.message,
+    'registry.lookup could not be evaluated',
+    'POSITIVE CONTROL of the fixed reason text — a message-only or reason-only check could be satisfied by rethrowing the forged error if it happened to use the same reason token',
+  )
+  assert.equal(caughtForgedBrand.reason, 'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID')
+  assert.notEqual(
+    caughtForgedBrand.reason,
+    'CANONICAL_OBJECT_CONTRACT_UNREGISTERED',
+    'MUTATION DISCRIMINATOR — the forged reason token must not survive; reintroducing `if (error instanceof GipCanonicalObjectContractError) throw error` would let UNREGISTERED through and this assertion reds',
+  )
+  const serializedForged = String(caughtForgedBrand.message)
+    + JSON.stringify(caughtForgedBrand.details)
+    + String(caughtForgedBrand.stack)
+    + String(caughtForgedBrand.cause && caughtForgedBrand.cause.message)
+    + JSON.stringify(caughtForgedBrand.cause)
+  assert.ok(!serializedForged.includes(forgedBrandMarker), 'forged branded message/details/stack must never leak')
+  assert.ok(!serializedForged.includes(forgedCauseMarker), 'forged .cause chain must never leak')
+  assert.equal(caughtForgedBrand.cause, undefined, 'replacement error must not retain the foreign .cause pointer')
+
+  // Positive control: a malformed reference contractId is refused by THIS
+  // module's own requiredIdentityToken pre-validation (field: contractId),
+  // never re-labeled as a `registry` failure and never dependent on
+  // rethrowing whatever registry.lookup threw. Discriminates against a
+  // broken fix that only ever emits field:registry for every bad reference.
   const malformedRefCaught = rejects(
     () => __internals.computeActivationReadiness(registry, [{ contractId: '', version: 'v1' }]),
     'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
-    'a malformed reference contractId must propagate lookup()\'s own branded error unchanged',
+    'a malformed reference contractId must fail via requiredIdentityToken pre-validation with field contractId',
   )
-  assert.equal(malformedRefCaught.details.field, 'contractId', 'the branded error from inside registry.lookup() must keep its ORIGINAL field, not be re-labeled to "registry"')
+  assert.equal(malformedRefCaught.details.field, 'contractId', 'the pre-validation error must keep field contractId, not be re-labeled to "registry"')
 }
 
 // ---------------------------------------------------------------------------
