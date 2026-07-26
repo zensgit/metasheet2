@@ -155,3 +155,163 @@ export function assertLegacyPunchResponseGoldenShapeV1(
   expect(workDateResolution.kind).toBe(expected.workDateResolutionKind)
   expect(workDateResolution.reasonCode).toBe(expected.workDateResolutionReasonCode)
 }
+
+/**
+ * W4C-2 remediation P2-1 (#4612 gate2 finding, exact-head `ad5541027`): the
+ * `resolved` counterpart of the pin above. The gate's M10 mutation
+ * (`calendarWorkDate` shifted a whole day at `index.cjs`
+ * `deriveLegacyLivePunchAttributionV1`) proved the ORIGINAL pin above never
+ * exercises `deriveLegacyLivePunchAttributionV1`'s `resolution.kind ===
+ * 'resolved'` branch at all — both existing fixtures leave the punching user
+ * unscheduled, so `workDateResolution` is always `{ kind: 'unresolved',
+ * reasonCode: 'UNSCHEDULED_NO_SHIFT', ... }`. This is the resolved shape: a
+ * published shift actually wins, `resolution.workDate`/`.shiftId` are
+ * non-null, AND — because a first `resolved` write freezes evidence into
+ * `record.meta.workDateAttributionV1` (see `buildFrozenWorkDateAttribution`
+ * in `attendance-work-date-resolver.cjs`, called from
+ * `applyLivePunchProjectionLegacyV1` in index.cjs) — the persisted DB
+ * projection carries a SECOND, independent copy of the same resolution
+ * fields. Both copies are recursive-key-path-pinned AND value-asserted here:
+ * a P1-style bug that flips `reasonCode`/`evidenceSnapshot.calendarWorkDate`
+ * only in ONE of the two copies (response vs. frozen DB meta) would still be
+ * caught, because both are asserted independently against the SAME expected
+ * values.
+ */
+export const LEGACY_LIVE_PUNCH_GOLDEN_KEY_PATHS_RESOLVED_V1: readonly string[] = [
+  'event',
+  'event.created_at',
+  'event.event_type',
+  'event.id',
+  'event.location',
+  'event.meta',
+  'event.occurred_at',
+  'event.org_id',
+  'event.source',
+  'event.timezone',
+  'event.user_id',
+  'event.work_date',
+  'record',
+  'record.created_at',
+  'record.current_calculation_id',
+  'record.early_leave_minutes',
+  'record.first_in_at',
+  'record.id',
+  'record.is_workday',
+  'record.last_out_at',
+  'record.late_minutes',
+  'record.meta',
+  'record.meta.absence_late_count',
+  'record.meta.severe_late_count',
+  'record.meta.severe_late_minutes',
+  'record.meta.workDateAttributionV1',
+  'record.meta.workDateAttributionV1.evidenceSnapshot',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.attributionTailMinutes',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.calendarWorkDate',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.matchingCount',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.absoluteWindow',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.absoluteWindow.endAt',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.absoluteWindow.startAt',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.assignmentId',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.isOvernight',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.segmentIndex',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.shiftId',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.source',
+  'record.meta.workDateAttributionV1.evidenceSnapshot.winner.workDate',
+  'record.meta.workDateAttributionV1.orgId',
+  'record.meta.workDateAttributionV1.reasonCode',
+  'record.meta.workDateAttributionV1.segmentIndex',
+  'record.meta.workDateAttributionV1.shiftId',
+  'record.meta.workDateAttributionV1.userId',
+  'record.meta.workDateAttributionV1.version',
+  'record.meta.workDateAttributionV1.workDate',
+  'record.org_id',
+  'record.projection_owner',
+  'record.source_batch_id',
+  'record.status',
+  'record.timezone',
+  'record.updated_at',
+  'record.user_id',
+  'record.visibility_reason',
+  'record.visibility_state',
+  'record.work_date',
+  'record.work_minutes',
+  'workDateResolution',
+  'workDateResolution.evidenceSnapshot',
+  'workDateResolution.evidenceSnapshot.attributionTailMinutes',
+  'workDateResolution.evidenceSnapshot.calendarWorkDate',
+  'workDateResolution.evidenceSnapshot.matchingCount',
+  'workDateResolution.evidenceSnapshot.winner',
+  'workDateResolution.evidenceSnapshot.winner.absoluteWindow',
+  'workDateResolution.evidenceSnapshot.winner.absoluteWindow.endAt',
+  'workDateResolution.evidenceSnapshot.winner.absoluteWindow.startAt',
+  'workDateResolution.evidenceSnapshot.winner.assignmentId',
+  'workDateResolution.evidenceSnapshot.winner.isOvernight',
+  'workDateResolution.evidenceSnapshot.winner.segmentIndex',
+  'workDateResolution.evidenceSnapshot.winner.shiftId',
+  'workDateResolution.evidenceSnapshot.winner.source',
+  'workDateResolution.evidenceSnapshot.winner.workDate',
+  'workDateResolution.kind',
+  'workDateResolution.reasonCode',
+  'workDateResolution.segmentIndex',
+  'workDateResolution.shiftId',
+  'workDateResolution.workDate',
+].slice().sort()
+
+export interface LegacyPunchGoldenExpectedValuesResolvedV1 {
+  readonly userId: string
+  readonly status: string
+  readonly workMinutes: number
+  readonly lateMinutes: number
+  readonly firstInAt: string | null
+  readonly lastOutAt: string | null
+  /** The route's PRE-resolution `calendarWorkDate` — see P1's `requestTimezone`. */
+  readonly calendarWorkDate: string
+  readonly reasonCode: string
+  readonly shiftId: string
+  /** The winning shift instance's own `workDate` (NOT `calendarWorkDate`). */
+  readonly resolvedWorkDate: string
+  readonly matchingCount: number
+}
+
+/**
+ * Recursive key-path pin PLUS explicit value assertions, asserted
+ * INDEPENDENTLY on both the response's own `workDateResolution` AND the
+ * persisted `record.meta.workDateAttributionV1` frozen copy — see this
+ * module's constant doc comment above for why both copies matter.
+ */
+export function assertLegacyPunchResponseGoldenShapeResolvedV1(
+  data: PlainRecord,
+  expected: LegacyPunchGoldenExpectedValuesResolvedV1,
+): void {
+  expect(recursiveKeyPaths(data)).toEqual([...LEGACY_LIVE_PUNCH_GOLDEN_KEY_PATHS_RESOLVED_V1])
+
+  const record = data.record as PlainRecord
+  const event = data.event as PlainRecord
+  const workDateResolution = data.workDateResolution as PlainRecord
+  const recordMeta = record.meta as PlainRecord
+  const frozen = recordMeta.workDateAttributionV1 as PlainRecord
+
+  expect(event.user_id).toBe(expected.userId)
+  expect(record.user_id).toBe(expected.userId)
+  expect(record.status).toBe(expected.status)
+  expect(record.work_minutes).toBe(expected.workMinutes)
+  expect(record.late_minutes).toBe(expected.lateMinutes)
+  expect(record.first_in_at).toBe(expected.firstInAt)
+  expect(record.last_out_at).toBe(expected.lastOutAt)
+
+  expect(workDateResolution.kind).toBe('resolved')
+  expect(workDateResolution.reasonCode).toBe(expected.reasonCode)
+  expect(workDateResolution.shiftId).toBe(expected.shiftId)
+  expect(workDateResolution.workDate).toBe(expected.resolvedWorkDate)
+  const responseEvidence = workDateResolution.evidenceSnapshot as PlainRecord
+  expect(responseEvidence.calendarWorkDate).toBe(expected.calendarWorkDate)
+  expect(responseEvidence.matchingCount).toBe(expected.matchingCount)
+
+  expect(frozen.reasonCode).toBe(expected.reasonCode)
+  expect(frozen.shiftId).toBe(expected.shiftId)
+  expect(frozen.workDate).toBe(expected.resolvedWorkDate)
+  const frozenEvidence = frozen.evidenceSnapshot as PlainRecord
+  expect(frozenEvidence.calendarWorkDate).toBe(expected.calendarWorkDate)
+  expect(frozenEvidence.matchingCount).toBe(expected.matchingCount)
+}
