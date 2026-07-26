@@ -21,10 +21,19 @@
  * at activate (closures over its own module functions — event INSERT + record
  * upsert + merge lift for live, the absence INSERT..SELECT for scheduled, the
  * W2 in-transaction resolvers, and the frozen-context loader). Routes submit
- * pure data; no route-provided callback, intent, or prepared value is accepted
- * (lock 4.1). Adapters receive a plugin-shaped `trx` wrapper over the ONE
- * canonical transaction client, so every legacy byte runs inside the same
- * SERIALIZABLE transaction as the claim/shadow/seal writes.
+ * pure data; no route-provided callback or intent is accepted (lock 4.1).
+ * W4C-2 remediation P1-3 (#4612 gate finding) made this literally true for the
+ * legacy live-punch adapter too: it no longer accepts the opaque, unvalidated,
+ * `unknown`-typed per-request bundle the pre-remediation boundary passed
+ * through. `AttendanceLivePunchLegacyArgsV1` (below) is a
+ * CLOSED, typed projection of the boundary's own already-canonical
+ * `AttendanceLivePunchBoundaryInputV1` fields — no route-computed `rule`,
+ * `punchWorkDateResolution`, or `settings` crosses into the transaction;
+ * `applyLivePunchProjectionLegacyV1` derives all three itself, in-transaction,
+ * from those closed fields (see its own module comment in index.cjs). Adapters
+ * receive a plugin-shaped `trx` wrapper over the ONE canonical transaction
+ * client, so every legacy byte — including that derivation — runs inside the
+ * same SERIALIZABLE transaction as the claim/shadow/seal writes.
  *
  * Posture matrix (lock 12.3 three-posture gate):
  *  - `legacy_projection_only`: same closed adapters, byte-identical DML and
@@ -216,15 +225,43 @@ export interface AttendanceW4ResolvedCandidateV1 {
   }>
 }
 
+/**
+ * W4C-2 remediation P1-3 (#4612 gate finding, confirmed author self-report):
+ * the CLOSED, typed argument shape `applyLivePunchLegacy` receives — every
+ * field here is either a canonical top-level field the boundary ALREADY
+ * carries on `AttendanceLivePunchBoundaryInputV1` (never a route-computed
+ * "prepared plan"), or something the adapter derives ITSELF, in-transaction,
+ * from these fields (`rule`, `punchWorkDateResolution`, `settings` — see
+ * `applyLivePunchProjectionLegacyV1` in index.cjs). There is no opaque
+ * `unknown`-typed payload and no route-supplied prepared value crossing this
+ * boundary anymore; no production identifier named after the removed field
+ * remains anywhere in this module or in index.cjs after this remediation.
+ */
+export interface AttendanceLivePunchLegacyArgsV1 {
+  readonly userId: string
+  readonly orgId: string
+  readonly workDate: string
+  /** Route-resolved instant (ISO, always offset-bearing) — same as occurredAtResolved. */
+  readonly occurredAt: string
+  readonly eventType: 'check_in' | 'check_out'
+  readonly source: string
+  readonly location: unknown
+  readonly meta: unknown
+  readonly timezone: string
+  readonly isWorkday: boolean
+}
+
 export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
   /**
    * P01/P02 verbatim transaction body: event INSERT -> record lock -> frozen
    * V1 attribution meta -> upsert -> merge lift. MUST generate any random IDs
    * inside itself (the SERIALIZABLE wrapper may re-run the whole closure).
    * The merge lift is invoked only after the upsert returned the record row —
-   * the P3-3 "record row exists" guarantee lives inside this adapter.
+   * the P3-3 "record row exists" guarantee lives inside this adapter. The
+   * adapter derives `rule`/`punchWorkDateResolution`/`settings` itself, in
+   * this same transaction, from the closed args below (P1-3 remediation).
    */
-  applyLivePunchLegacy(trx: AttendancePluginShapedTrxV1, args: unknown): Promise<{
+  applyLivePunchLegacy(trx: AttendancePluginShapedTrxV1, args: AttendanceLivePunchLegacyArgsV1): Promise<{
     event: Record<string, unknown>
     record: Record<string, unknown>
     workDateResolution: unknown
@@ -282,8 +319,6 @@ export interface AttendanceLivePunchBoundaryInputV1 {
   readonly workDate: string
   readonly isWorkday: boolean
   readonly holidayKind: string | null
-  /** Opaque args for `applyLivePunchLegacy` (pure data computed by the route). */
-  readonly legacyArgs: unknown
 }
 
 export type AttendanceLivePunchBoundaryResultV1 =
@@ -646,6 +681,29 @@ async function loadLivePunchEvidence(
   }))
 }
 
+/**
+ * W4C-2 remediation P1-3: the boundary's own closed projection of
+ * `AttendanceLivePunchBoundaryInputV1` into `AttendanceLivePunchLegacyArgsV1`
+ * — every field is copied verbatim from an already-canonical top-level input
+ * field; nothing here is a route-computed "prepared plan" (`rule`,
+ * `punchWorkDateResolution`, `settings` are deliberately NOT projected —
+ * the adapter derives them itself, in-transaction).
+ */
+function buildLegacyPunchArgs(input: AttendanceLivePunchBoundaryInputV1): AttendanceLivePunchLegacyArgsV1 {
+  return {
+    userId: input.userId,
+    orgId: input.orgId,
+    workDate: input.workDate,
+    occurredAt: input.occurredAtResolved,
+    eventType: input.eventType,
+    source: input.source,
+    location: input.location,
+    meta: input.meta,
+    timezone: input.timezone,
+    isWorkday: input.isWorkday,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Factory.
 // ---------------------------------------------------------------------------
@@ -701,13 +759,14 @@ export function createAttendanceLiveScheduledBoundaryV1(
     return withConnection((client) =>
       runAttendanceResultOperationTransactionV1(client, async (trx) => {
         const pluginTrx = pluginShapedTrx(trx)
+        const legacyPunchArgs = buildLegacyPunchArgs(input)
 
         if (rolloutKey === null) {
           if (input.operationId !== null) {
             // A stable-ID command requires a canonical org key (values-free).
             boundaryFail('W4C2_ORG_KEY_OUTSIDE_W4_DOMAIN')
           }
-          const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
+          const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
           return { kind: 'legacy' as const, response: result }
         }
 
@@ -724,7 +783,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
             // Null-ID legacy command: same closed adapter, no operation row, no
             // outbox, no calculation, NO strict envelope/witness surface; the
             // route keeps its existing synchronous best-effort emit.
-            const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
+            const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
             return { kind: 'legacy' as const, response: result }
           }
           // W4-postured org + null-ID falls through to the registry protocol,
@@ -782,7 +841,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         if (preflight.kind === 'legacy_no_operation') {
           // Posture raced to legacy between the probe and the registry re-read:
           // the null-ID legacy contract applies (no operation row).
-          const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
+          const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
           return { kind: 'legacy' as const, response: result }
         }
 
@@ -795,7 +854,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
           // Stable-ID legacy command: same closed adapter plus ONLY the
           // compatibility operation claim/seal — no calculation, no outbox, no
           // W4 result pointer (lock 4.1/12 preamble).
-          const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
+          const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
           await sealAttendanceResultOperationV1(trx, identity, {
             responseSnapshot: wireJson(result),
           })
@@ -820,7 +879,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
 
         // Shadow: execute the prepared legacy projection (the same closed
         // adapter bytes), then append the shadow result atomically.
-        const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
+        const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
 
         const parent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
         if (!parent) {
