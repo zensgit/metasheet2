@@ -243,7 +243,7 @@ async function positiveControlThroughExecutor() {
     expiresAt: '2026-07-27T00:00:00Z',
   })
   assert.equal(qualification.status, 'candidate')
-  assert.equal(qualification.evidence.probeTransport, 'http_certified_action')
+  assert.equal(qualification.evidence.probeTransport, 'http_action')
   assert.equal(qualification.evidence.probeActionId, 'fixture.connector.total_order_probe')
   assert.equal(qualification.evidence.probeConnectorKind, 'erp_http')
   assert.equal(qualification.evidence.checkedKeyColumnCount, 2)

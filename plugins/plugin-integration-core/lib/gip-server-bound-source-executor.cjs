@@ -15,6 +15,9 @@
 //     is `plugins/plugin-integration-core/`.
 //   * NO certification is minted. NO strategy is registered. §4 step 2 — the real
 //     MySQL / SQL Server capability spike — has not run.
+//   * B-4 is NOT fully closed by this slice. §4 step 1.5's own text says "B-4 is
+//     closed by 1.4's builder identity AND BY STEP 3", and step 3 has not run. What
+//     lands here is the builder-identity half only.
 //
 // -- Q2 / DECISION (ε) IS UNRULED, AND THIS IS WHAT THIS MODULE ASSUMED ------
 // The §4.0 decision roster carries FOUR decisions — (α), (β), (γ), (δ) — and no (ε).
@@ -148,9 +151,21 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 // BUILD IS SPLIT FROM TRUST. `createHttpProbeActionRegistry` below is EXPORTED and
 // BUILD-ONLY: calling it, from anywhere, confers NOTHING. It is retained
 // deliberately as the untrusted test seam. `buildTrustedHttpProbeActionRegistry` is
-// the ONLY writer into the trust WeakSet and is exported NOWHERE — not at top
-// level, not under `__internals` (reachable by require(), so a trust-granting verb
-// there is the identical hole one namespace deeper).
+// the ONLY writer into the trust WeakSet and is exported NOWHERE under that name —
+// not at top level, not under `__internals` (reachable by require(), so a
+// trust-granting verb there is the identical hole one namespace deeper).
+//
+// ⚠ SCOPE THE CLAIM HONESTLY — this split is NOT unconditionally closed.
+// `createHarnessHttpProbeActionRegistryForTests` below is a PUBLIC WRAPPER that calls
+// the private granter, so it IS "a public factory whose products are trusted". The
+// `ForTests` suffix is a NAME, not a mechanism. It exists because the certified
+// registry ships EMPTY and the ratified positive control is otherwise not executable
+// at all; its containment today is LATENCY (zero production consumers, proven by
+// executed enumeration), and closing it is a precondition of any runtime wiring. Do
+// not read the paragraph above as "no public factory confers trust here" — read it as
+// "the BUILD-ONLY factory confers nothing", which is what the mutation battery proves.
+// Mitigation that does hold: both factories sit inside the exact-key-set export pin,
+// so neither can be widened and no third one can be added without reding.
 //
 // This is the class the owner ruled on for #4610's registries — "a public factory
 // whose products are trusted is equivalent to no trust check at all" — and it is
@@ -266,7 +281,17 @@ function createHarnessSourceBinderForTests(entries) {
     // The factory is invoked HERE, inside the boundary, and only its return value —
     // the opaque handle — is retained. Whatever secret it closed over never becomes
     // a property of anything this module holds.
-    const handle = credentialFactory()
+    //
+    // It is a FOREIGN call, so it gets the same unconditional discard as every other
+    // foreign call in this module: no cause, no stack, no message, no class
+    // exemption. A connector factory that throws its configuration into the error is
+    // otherwise a leak channel on the one path that touches credential material.
+    let handle
+    try {
+      handle = credentialFactory()
+    } catch (_error) {
+      fail('EXECUTOR_COMPONENTS_INVALID')
+    }
     if (!handle || typeof handle !== 'object' || typeof handle.execute !== 'function') {
       fail('EXECUTOR_COMPONENTS_INVALID')
     }
@@ -361,7 +386,13 @@ async function executeOrderingKeyProbeInternal(bound, resolution) {
   // row values, no identifiers beyond FIRST-PARTY action identity.
   return Object.freeze({
     probeKind: 'ordering_key_total_order_negative',
-    probeTransport: 'http_certified_action',
+    // `http_action`, NOT `http_certified_action`. This token is bound into the
+    // qualification digest, and B-5's doctrine is that "'certified' requires a
+    // VERIFIED guarantee, not an honest label". The certified registry SHIPS EMPTY
+    // and §4 step 2 has not run, so NOTHING is certified at this head — writing
+    // "certified" into the digest would be an overclaim, and renaming it after a
+    // qualification exists would be a digest-lineage change.
+    probeTransport: 'http_action',
     probeActionId: action.actionId,
     probeActionVersion: action.actionVersion,
     probeConnectorKind: action.connectorKind,
