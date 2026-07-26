@@ -78,9 +78,21 @@ published shift 制造真实 ambiguous 结果，直调该函数证明抛出
 后把 `HttpError` 改回裸 `throw new Error(...)`，测试精确红在
 `toBeInstanceOf(HttpError)` 断言上；`git checkout --` 精确还原后重跑绿。
 
-此分支只在真实并发（route 预检和本事务之间数据被改动）下触达——不构造
-HTTP 级 rendezvous race（本轮范围外），测试直接调用该函数本身验证分支行为，
-在 PR body 中明确披露这一范围边界。
+**此测试只覆盖 ambiguous 一支**；该分支只在真实并发（route 预检和本事务之间
+数据被改动）下触达——不构造 HTTP 级 rendezvous race（本轮范围外），测试直接
+调用该函数本身验证分支行为，在 PR body 中明确披露这一范围边界。
+
+`resolvedShift` 找不到那一支**没有配测试**——可达性分析：该分支要求
+`resolvePunchWorkDate` 先返回 `kind:'resolved'`（即
+`loadPublishedCandidatesForWorkDateResolver` 的
+`JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id` 已经
+命中），随后 `loadShiftById` 用同一 `(shiftId, orgId)` 在**同一事务**里再查
+一次却查不到。`explicitShiftId`（`index.cjs:14732`/`14789`）只是对已 JOIN
+候选的过滤，不绕过该 JOIN。Postgres SERIALIZABLE 快照在事务第一条语句时
+冻结，同一事务内后续语句的可见性不因其它事务的并发 COMMIT/DELETE 而改变——
+因此 JOIN 命中的行在同一事务的 `loadShiftById` 里不可能变得不可见：这支
+分支在当前 schema + 快照隔离下**可证明不可达**，与 NIT-1 呈裁点 20 同一
+纪律（不为不存在的窗口造伪证）。`HttpError` 包装仍保留作为防御性收口。
 
 ### P1-2 落地明细
 
