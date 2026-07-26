@@ -6,6 +6,7 @@ IMAGE_OWNER="${IMAGE_OWNER:-zensgit}"
 IMAGE_TAG="${IMAGE_TAG:-}"
 BUILD_SOURCE="${BUILD_SOURCE:-https://github.com/zensgit/metasheet2}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-}"
+STAGING_DEPLOY_SCOPE="${STAGING_DEPLOY_SCOPE:-backend}"
 
 function info() {
   echo "[build-dingtalk-staging-images] $*" >&2
@@ -33,8 +34,12 @@ require_control_free_path "${IMAGE_PROVENANCE_FILE}"
 [[ "${IMAGE_OWNER}" =~ ^[a-z0-9._-]+$ ]] || die "IMAGE_OWNER has an invalid format"
 [[ "${IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]] || die "IMAGE_TAG must be a full 40-character lowercase commit SHA"
 [[ "${BUILD_SOURCE}" == "https://github.com/zensgit/metasheet2" ]] || die "BUILD_SOURCE must be the canonical repository URL"
+[[ "${STAGING_DEPLOY_SCOPE}" == "backend" || "${STAGING_DEPLOY_SCOPE}" == "full" ]] \
+  || die "STAGING_DEPLOY_SCOPE must be backend or full"
 [[ -f "${SOURCE_DIR}/Dockerfile.backend" ]] || die "source checkout is missing the backend Dockerfile"
-[[ -f "${SOURCE_DIR}/Dockerfile.frontend" ]] || die "source checkout is missing the frontend Dockerfile"
+if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
+  [[ -f "${SOURCE_DIR}/Dockerfile.frontend" ]] || die "source checkout is missing the frontend Dockerfile"
+fi
 [[ -d "$(dirname "${IMAGE_PROVENANCE_FILE}")" ]] || die "IMAGE_PROVENANCE_FILE parent directory does not exist"
 
 SOURCE_SHA="$(git -C "${SOURCE_DIR}" rev-parse HEAD 2>/dev/null || true)"
@@ -56,11 +61,13 @@ trap cleanup EXIT INT TERM
 
 git -C "${SOURCE_DIR}" archive --format=tar "${IMAGE_TAG}" | tar -xf - -C "${BUILD_CONTEXT}"
 [[ -f "${BUILD_CONTEXT}/Dockerfile.backend" ]] || die "archived commit is missing Dockerfile.backend"
-[[ -f "${BUILD_CONTEXT}/Dockerfile.frontend" ]] || die "archived commit is missing Dockerfile.frontend"
+if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
+  [[ -f "${BUILD_CONTEXT}/Dockerfile.frontend" ]] || die "archived commit is missing Dockerfile.frontend"
+fi
 
 info "Source checkout validated"
 info "Backend image identity validated"
-info "Web image identity validated"
+info "Deploy scope: ${STAGING_DEPLOY_SCOPE}"
 
 COMMON_BUILD_ARGS=(
   --build-arg "VCS_REF=${IMAGE_TAG}"
@@ -70,35 +77,52 @@ COMMON_BUILD_ARGS=(
 )
 
 docker build -f "${BUILD_CONTEXT}/Dockerfile.backend" "${COMMON_BUILD_ARGS[@]}" -t "${BACKEND_IMAGE}" "${BUILD_CONTEXT}"
-docker build -f "${BUILD_CONTEXT}/Dockerfile.frontend" "${COMMON_BUILD_ARGS[@]}" -t "${WEB_IMAGE}" "${BUILD_CONTEXT}"
-
 docker image inspect "${BACKEND_IMAGE}" >/dev/null
-docker image inspect "${WEB_IMAGE}" >/dev/null
 
-for image in "${BACKEND_IMAGE}" "${WEB_IMAGE}"; do
+images=("${BACKEND_IMAGE}")
+if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
+  info "Web image identity validated"
+  docker build -f "${BUILD_CONTEXT}/Dockerfile.frontend" "${COMMON_BUILD_ARGS[@]}" -t "${WEB_IMAGE}" "${BUILD_CONTEXT}"
+  docker image inspect "${WEB_IMAGE}" >/dev/null
+  images+=("${WEB_IMAGE}")
+fi
+
+for image in "${images[@]}"; do
   revision="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${image}")"
   [[ "${revision}" == "${IMAGE_TAG}" ]] || die "built image revision does not match IMAGE_TAG"
 done
 
 BACKEND_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "${BACKEND_IMAGE}")"
-WEB_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "${WEB_IMAGE}")"
 [[ "${BACKEND_IMAGE_ID}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "backend image ID is invalid"
-[[ "${WEB_IMAGE_ID}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "web image ID is invalid"
 
-python3 - "${IMAGE_PROVENANCE_FILE}" "${IMAGE_TAG}" "${BACKEND_IMAGE}" "${BACKEND_IMAGE_ID}" "${WEB_IMAGE}" "${WEB_IMAGE_ID}" <<'PY'
+provenance_args=(
+  "${IMAGE_PROVENANCE_FILE}"
+  "${IMAGE_TAG}"
+  "${BACKEND_IMAGE}"
+  "${BACKEND_IMAGE_ID}"
+)
+if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
+  WEB_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "${WEB_IMAGE}")"
+  [[ "${WEB_IMAGE_ID}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "web image ID is invalid"
+  provenance_args+=("${WEB_IMAGE}" "${WEB_IMAGE_ID}")
+fi
+
+python3 - "${provenance_args[@]}" <<'PY'
 import json
 import os
 import sys
 
-target, commit, backend_image, backend_id, web_image, web_id = sys.argv[1:]
+target, commit, backend_image, backend_id, *web = sys.argv[1:]
 payload = {
     "schema": "metasheet-dingtalk-staging-image-provenance/v1",
     "commit": commit,
     "backendImage": backend_image,
     "backendImageId": backend_id,
-    "webImage": web_image,
-    "webImageId": web_id,
 }
+if web:
+    if len(web) != 2:
+        raise SystemExit(1)
+    payload["webImage"], payload["webImageId"] = web
 temporary = f"{target}.tmp.{os.getpid()}"
 with open(temporary, "x", encoding="utf-8") as handle:
     json.dump(payload, handle, sort_keys=True, separators=(",", ":"))

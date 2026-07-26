@@ -104,7 +104,7 @@ GitHub Actions in this repository only build Docker images on `main` and `master
 
 To test `#725/#723/#724` before merge:
 
-1. Build local images from the PR source tree:
+1. Build the local backend image from the PR source tree:
 
 ```bash
 IMAGE_OWNER=zensgit \
@@ -115,7 +115,9 @@ bash scripts/ops/build-dingtalk-staging-images.sh
 ```
 
 The build refuses a dirty or mismatched checkout and builds from `git archive` of the exact SHA,
-not from live ignored files. It writes the backend/web image IDs to the private provenance file.
+not from live ignored files. The default worker-drain scope writes the backend image ID to the
+private provenance file. A release that also changes the staging web image must set
+`STAGING_DEPLOY_SCOPE=full` for both build and deploy.
 
 2. Set the same `IMAGE_OWNER` and `IMAGE_TAG` in `docker/app.staging.env`.
 
@@ -123,12 +125,15 @@ not from live ignored files. It writes the backend/web image IDs to the private 
 
 ```bash
 SKIP_PULL=1 \
+STAGING_DEPLOY_SCOPE=backend \
 DEPLOY_EXPECTED_COMMIT=<same-full-40-character-pr-commit-sha> \
 DEPLOY_IMAGE_PROVENANCE_FILE=/absolute/private/path/image-provenance.json \
 bash scripts/ops/deploy-dingtalk-staging.sh
 ```
 
-This uses the locally built images already present on the staging host.
+This uses the locally built backend image already present on the staging host and leaves the web
+container unchanged. Use the explicit `full` scope only when the reviewed release includes web
+runtime changes.
 
 ## Verification
 

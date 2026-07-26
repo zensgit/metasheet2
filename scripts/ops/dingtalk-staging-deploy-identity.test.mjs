@@ -246,11 +246,22 @@ test('deploy accepts one attested healthy backend for project and ingress', asyn
   assert.match(result.stderr, /WORKER_DRAIN_GATE_PASS expected_project_workers=1 observed_project_workers=1 managed_project_old_workers=0 staging_ingress_workers=1 staging_ingress_unmanaged_workers=0/)
   const log = await readFile(h.commandLog, 'utf8')
   assert.match(log, /compose --project-name metasheet2-dingtalk-staging /)
-  assert.match(log, /compose .* up -d --remove-orphans backend web/)
+  assert.match(log, /compose .* pull backend/)
+  assert.match(log, /compose .* up -d --remove-orphans backend/)
+  assert.doesNotMatch(log, /backend web/)
   assert.match(log, /compose .* ps -q --all backend/)
   assert.match(log, /ps -q --filter publish=18900/)
   assert.match(log, /ps -q --filter label=com\.docker\.compose\.project=metasheet2-dingtalk-staging/)
   assert.match(log, /inspect -f \{\{\.Image\}\} backend-one/)
+})
+
+test('deploy full scope explicitly updates backend and web', async (t) => {
+  const h = await withHarness(t)
+  const result = run(deployScript, deployEnv(h, { STAGING_DEPLOY_SCOPE: 'full' }))
+  assert.equal(result.status, 0, result.stderr)
+  const log = await readFile(h.commandLog, 'utf8')
+  assert.match(log, /compose .* pull backend web/)
+  assert.match(log, /compose .* up -d --remove-orphans backend web/)
 })
 
 test('deploy uses the backend Compose project as the exact service selector', async (t) => {
@@ -273,6 +284,12 @@ const deployCases = [
     name: 'production Compose project',
     overrides: { COMPOSE_PROJECT_NAME: 'metasheet2' },
     error: /COMPOSE_PROJECT_NAME must be metasheet2-dingtalk-staging/,
+    beforeMutation: true,
+  },
+  {
+    name: 'invalid deploy scope',
+    overrides: { STAGING_DEPLOY_SCOPE: 'frontend' },
+    error: /STAGING_DEPLOY_SCOPE must be backend or full/,
     beforeMutation: true,
   },
   {
@@ -467,13 +484,13 @@ test('deploy rejects mismatched image reference in provenance before Compose mut
   assert.equal(log.trim(), 'compose version')
 })
 
-test('local build uses archived exact source, all provenance args, and writes image IDs', async (t) => {
+test('local backend build uses archived exact source, all provenance args, and writes image ID', async (t) => {
   const h = await withHarness(t)
   const result = run(buildScript, buildEnv(h))
   assert.equal(result.status, 0, result.stderr)
   const log = await readFile(h.commandLog, 'utf8')
   const builds = log.split('\n').filter((line) => line.startsWith('build '))
-  assert.equal(builds.length, 2)
+  assert.equal(builds.length, 1)
   for (const invocation of builds) {
     assert.match(invocation, new RegExp(`--build-arg VCS_REF=${goodSha}`))
     assert.match(invocation, new RegExp(`--build-arg BUILD_IMAGE_TAG=${goodSha}`))
@@ -484,8 +501,20 @@ test('local build uses archived exact source, all provenance args, and writes im
   const provenance = JSON.parse(await readFile(h.provenanceFile, 'utf8'))
   assert.equal(provenance.commit, goodSha)
   assert.equal(provenance.backendImageId, goodBackendImageId)
-  assert.equal(provenance.webImageId, goodWebImageId)
+  assert.equal(Object.hasOwn(provenance, 'webImageId'), false)
   assert.equal((await stat(h.provenanceFile)).mode & 0o777, 0o600)
+})
+
+test('local full build includes the web image in provenance', async (t) => {
+  const h = await withHarness(t)
+  const result = run(buildScript, buildEnv(h, { STAGING_DEPLOY_SCOPE: 'full' }))
+  assert.equal(result.status, 0, result.stderr)
+  const log = await readFile(h.commandLog, 'utf8')
+  const builds = log.split('\n').filter((line) => line.startsWith('build '))
+  assert.equal(builds.length, 2)
+  const provenance = JSON.parse(await readFile(h.provenanceFile, 'utf8'))
+  assert.equal(provenance.backendImageId, goodBackendImageId)
+  assert.equal(provenance.webImageId, goodWebImageId)
 })
 
 const buildCases = [

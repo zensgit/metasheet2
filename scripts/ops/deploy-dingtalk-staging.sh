@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker-compose.app.staging.yml}"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.staging.env}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-metasheet2-dingtalk-staging}"
+STAGING_DEPLOY_SCOPE="${STAGING_DEPLOY_SCOPE:-backend}"
 SKIP_PULL="${SKIP_PULL:-0}"
 ENV_VALIDATOR="${ROOT_DIR}/scripts/ops/validate-env-file.sh"
 BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-http://127.0.0.1:18900/health}"
@@ -51,6 +52,8 @@ DEPLOY_EXPECTED_COMMIT="${DEPLOY_EXPECTED_COMMIT:-${DEPLOY_IMAGE_TAG}}"
 [[ "${DEPLOY_IMAGE_OWNER}" =~ ^[a-z0-9._-]+$ ]] || die "DEPLOY_IMAGE_OWNER has an invalid format"
 [[ "${COMPOSE_PROJECT_NAME}" == "metasheet2-dingtalk-staging" ]] \
   || die "COMPOSE_PROJECT_NAME must be metasheet2-dingtalk-staging"
+[[ "${STAGING_DEPLOY_SCOPE}" == "backend" || "${STAGING_DEPLOY_SCOPE}" == "full" ]] \
+  || die "STAGING_DEPLOY_SCOPE must be backend or full"
 [[ "${DEPLOY_IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]] || die "DEPLOY_IMAGE_TAG must be a full 40-character lowercase commit SHA"
 [[ "${DEPLOY_EXPECTED_COMMIT}" == "${DEPLOY_IMAGE_TAG}" ]] || die "DEPLOY_EXPECTED_COMMIT must match DEPLOY_IMAGE_TAG"
 [[ "${SKIP_PULL}" == "0" || "${SKIP_PULL}" == "1" ]] || die "SKIP_PULL must be 0 or 1"
@@ -95,6 +98,7 @@ info "Compose file validated"
 info "Env file validated"
 info "Image owner validated"
 info "Image commit validated"
+info "Deploy scope: ${STAGING_DEPLOY_SCOPE}"
 info "Skip pull: ${SKIP_PULL}"
 
 "${ENV_VALIDATOR}" "${ENV_FILE}"
@@ -108,9 +112,17 @@ compose() {
 compose config >/dev/null
 compose up -d postgres redis
 if [[ "${SKIP_PULL}" != "1" ]]; then
-  compose pull backend web
+  if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
+    compose pull backend web
+  else
+    compose pull backend
+  fi
 fi
-compose up -d --remove-orphans backend web
+if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
+  compose up -d --remove-orphans backend web
+else
+  compose up -d --remove-orphans backend
+fi
 
 info "Waiting for backend health endpoint"
 for _ in $(seq 1 30); do
