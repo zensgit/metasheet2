@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
   extractStepById,
+  isQuotedInTestExclude,
   stepHasEnvDatabaseUrl,
   stepInvokesVitestIntegrationConfig,
   wholeFileVitestArgs,
@@ -19,11 +20,13 @@ import {
 // multitable-owned. Only 2 of the 216 are incidentally named, by
 // `approval-data-closure-ci-wiring.test.mjs` (a DIFFERENT family's guard, listing two multitable
 // fixtures its own suites share DML with) — not by any multitable-owned guard. Counted across the
-// three real-DB steps' de-duplicated file union (365 files), the 16 pre-existing guards together
-// name 30 of them (approval, PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's 7 files were
-// not among the 30. The other 335 — multitable's 216 included — are outside every existing
-// guard's file list. This closes attendance's own gap; it does not close "the last" gap in the
-// workflow.
+// three real-DB steps' de-duplicated file union (365 files), the 16 PRE-EXISTING guards together
+// name 23 of them (approval, PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's 7 files were
+// not among those 23 (#4612 gate-confirm P3-1: an earlier draft of this comment miscounted this as
+// "30", which double-counts this PR's own 7 files as if a pre-existing guard already named them).
+// THIS file — the 17th guard — adds those 7, bringing the ALL-17-guards total to 30 (23 + 7); the
+// other 335 — multitable's 216 included — are outside every guard's (all 17) file list. This
+// closes attendance's own gap; it does not close "the last" gap in the workflow.
 // This is the exact skip-green shape gate4 caught for THIS PR's own primary evidence file
 // (attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts) earlier in this same PR's history —
 // present in the run-list, but the matching vitest.config.ts exclude line was missing, so the
@@ -125,10 +128,18 @@ test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integrati
 for (const file of FILES) {
   test(`vitest.config.ts excludes ${file} from the no-DB job`, () => {
     const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
+    // Structured parse (depth-1 `test.exclude` array body, line-comments stripped), shared with
+    // `t2gate-collision-mechanism-ci-wiring.test.mjs`: a bare `cfg.includes("'${file}'")` substring
+    // check is satisfied by a commented-out entry, a `coverage.exclude` entry, or any other
+    // free-text mention of the path — none of which actually excludes the file from the no-DB job
+    // (#4612 gate-confirm P2-1: the substring form was the weakest of the 17 `*-ci-wiring.test.mjs`
+    // guards' exclude assertions and did not catch that exact shape).
     assert.ok(
-      cfg.includes(`'${file}'`),
-      `vitest.config.ts must exclude ${file} (DATABASE_URL-gated whole file) — a missing entry `
-        + `is the exact skip-green shape gate4 found for this PR's own primary evidence file`,
+      isQuotedInTestExclude(cfg, file),
+      `vitest.config.ts must exclude ${file} (DATABASE_URL-gated whole file) as an exact quoted `
+        + `entry inside the direct test.exclude array — a comment / coverage.exclude / free-text `
+        + `hit is not placement. A missing entry is the exact skip-green shape gate4 found for `
+        + `this PR's own primary evidence file`,
     )
   })
 

@@ -265,10 +265,13 @@ jobs:
       # scripts/ops/ is multitable-owned, and only 2 of the 216 files are incidentally named by a
       # DIFFERENT family's guard (approval-data-closure-ci-wiring.test.mjs, which lists two
       # multitable fixtures its own suites share DML with). The accurate scope, counted directly
-      # from the three real-DB steps' de-duplicated 365-file union: 16 pre-existing guards together
-      # name 30 of them (approval, PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's 7 W4C-2
-      # files were not among the 30, and the other 335 — multitable's 216 included — remain outside
-      # every existing guard's file list. This closes attendance's own gap, not "the last" gap.
+      # from the three real-DB steps' de-duplicated 365-file union: the 16 PRE-EXISTING guards
+      # together name 23 of them (approval, PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's
+      # 7 W4C-2 files were not among those 23 (#4612 gate-confirm P3-1: an earlier draft of this
+      # comment miscounted this as "30", which double-counts this PR's own 7 as if a pre-existing
+      # guard already named them). This 17th guard adds those 7, bringing the ALL-17-guards total to
+      # 30 (23 + 7); the other 335 — multitable's 216 included — remain outside every guard's
+      # (all 17) file list. This closes attendance's own gap, not "the last" gap.
       # Pins the attendance step's stable id + literal DATABASE_URL + vitest.integration.config.ts
       # invocation, and that each of the seven files is (a) excluded from the no-DB job's default
       # vitest.config.ts and (b) run as a whole-file arg of that step, and (c) exists on disk.

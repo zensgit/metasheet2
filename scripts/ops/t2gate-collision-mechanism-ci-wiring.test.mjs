@@ -6,7 +6,10 @@ import { dirname, join } from 'node:path'
 import {
   REAL_DB_STEP_IDS,
   extractStepById,
+  extractTestExcludeArrayBody,
+  isQuotedInTestExclude,
   isSuiteWiredInRealDbStep,
+  quotedExcludeEntries,
   realDbStepWholeFileArgs,
   requireExecutableRealDbStep,
   stepHasEnvDatabaseUrl,
@@ -14,6 +17,15 @@ import {
   stepRunsOnNode20Matrix,
   wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
+
+// `extractTestExcludeArrayBody` / `quotedExcludeEntries` / `isQuotedInTestExclude` originated in
+// THIS file and are re-exported here (via the shared module) so any pre-existing external import
+// of them from this path keeps working; #4612 gate-confirm P2-1 promoted their DEFINITIONS into
+// `ci-realdb-step-contract.mjs` so `attendance-w4c2-ci-wiring.test.mjs` (and any future guard)
+// can share the SAME structured parser instead of a bare substring check. This file's synthetic
+// decoy coverage below is unchanged — it now exercises the imported functions rather than local
+// ones, with identical behavior (verified: moved verbatim, no logic edited).
+export { extractTestExcludeArrayBody, isQuotedInTestExclude, quotedExcludeEntries }
 
 // Two-point wiring contract for the real-DB multi-corp directory-key suite. The historical filename
 // is retained to avoid silently dropping its required-gate placement.
@@ -47,149 +59,10 @@ const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 
 // ---------------------------------------------------------------------------
-// vitest.config.ts source parsers (exported for synthetic mutation coverage)
-// ---------------------------------------------------------------------------
-
-/**
- * Strip // line comments and "..." / '...' string literals so brace scanning
- * does not trip on braces inside comments/strings. Good enough for vitest config.
- * @param {string} src
- * @returns {string} same length; non-code regions replaced with spaces
- */
-function maskCommentsAndStrings(src) {
-  let out = ''
-  let i = 0
-  while (i < src.length) {
-    // line comment
-    if (src[i] === '/' && src[i + 1] === '/') {
-      out += '  '
-      i += 2
-      while (i < src.length && src[i] !== '\n') {
-        out += ' '
-        i += 1
-      }
-      continue
-    }
-    // block comment
-    if (src[i] === '/' && src[i + 1] === '*') {
-      out += '  '
-      i += 2
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
-        out += src[i] === '\n' ? '\n' : ' '
-        i += 1
-      }
-      if (i < src.length) {
-        out += '  '
-        i += 2
-      }
-      continue
-    }
-    // single- or double-quoted string (no template literals needed for exclude arrays)
-    if (src[i] === "'" || src[i] === '"') {
-      const q = src[i]
-      out += ' '
-      i += 1
-      while (i < src.length && src[i] !== q) {
-        if (src[i] === '\\' && i + 1 < src.length) {
-          out += '  '
-          i += 2
-          continue
-        }
-        out += src[i] === '\n' ? '\n' : ' '
-        i += 1
-      }
-      if (i < src.length) {
-        out += ' '
-        i += 1
-      }
-      continue
-    }
-    out += src[i]
-    i += 1
-  }
-  return out
-}
-
-/**
- * Body of the direct `test.exclude: [ ... ]` array only — property of the `test` object
- * at brace depth 1. Nested `coverage.exclude` (or any later/deeper exclude) is ignored.
- * @param {string} src
- * @returns {string | null} raw array body, or null if no direct test.exclude
- */
-export function extractTestExcludeArrayBody(src) {
-  const masked = maskCommentsAndStrings(src)
-  const testKey = /\btest\s*:\s*\{/.exec(masked)
-  if (!testKey) return null
-  // Position of the `{` that opens the test object.
-  const openBrace = masked.indexOf('{', testKey.index + testKey[0].length - 1)
-  if (openBrace < 0) return null
-
-  let depth = 1
-  let i = openBrace + 1
-  while (i < masked.length && depth > 0) {
-    const ch = masked[i]
-    if (ch === '{') {
-      depth += 1
-      i += 1
-      continue
-    }
-    if (ch === '}') {
-      depth -= 1
-      i += 1
-      continue
-    }
-    // Direct property of `test` only (depth === 1).
-    if (depth === 1) {
-      const rest = masked.slice(i)
-      const m = /^(exclude\s*:\s*\[)/.exec(rest)
-      if (m) {
-        const bracketOpen = i + m[1].length - 1 // index of `[`
-        let bDepth = 0
-        for (let j = bracketOpen; j < masked.length; j++) {
-          if (masked[j] === '[') bDepth += 1
-          else if (masked[j] === ']') {
-            bDepth -= 1
-            if (bDepth === 0) {
-              // Slice the ORIGINAL source so quoted entries stay intact.
-              return src.slice(bracketOpen + 1, j)
-            }
-          }
-        }
-        return null
-      }
-    }
-    i += 1
-  }
-  return null
-}
-
-/**
- * Quoted string entries in an exclude-array body. Strips // line comments first so a
- * decoy path that only appears in a comment is NOT counted as an exclude entry.
- * @param {string} arrayBody
- * @returns {string[]}
- */
-export function quotedExcludeEntries(arrayBody) {
-  const noLineComments = arrayBody
-    .split('\n')
-    .map((line) => line.replace(/\/\/.*$/, ''))
-    .join('\n')
-  const entries = []
-  const re = /'([^']+)'|"([^"]+)"/g
-  let m
-  while ((m = re.exec(noLineComments)) !== null) {
-    entries.push(m[1] ?? m[2])
-  }
-  return entries
-}
-
-/** @param {string} src @param {string} file */
-export function isQuotedInTestExclude(src, file) {
-  const body = extractTestExcludeArrayBody(src)
-  if (body == null) return false
-  return quotedExcludeEntries(body).includes(file)
-}
-
+// vitest.config.ts source parsers: `maskCommentsAndStrings` / `extractTestExcludeArrayBody` /
+// `quotedExcludeEntries` / `isQuotedInTestExclude` now LIVE in `./ci-realdb-step-contract.mjs`
+// (#4612 gate-confirm P2-1 promotion — see the import block above and the re-export note there).
+// This file keeps their synthetic decoy coverage below; the definitions are shared, not local.
 // ---------------------------------------------------------------------------
 // Repo contracts (real sources)
 // ---------------------------------------------------------------------------

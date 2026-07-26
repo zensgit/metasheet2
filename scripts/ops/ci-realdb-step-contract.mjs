@@ -592,3 +592,166 @@ export function isSuiteWiredInRealDbStep(wf, stepId, file) {
 export function realDbStepWholeFileArgs(wf, stepId) {
   return wholeFileVitestArgs(requireExecutableRealDbStep(wf, stepId))
 }
+
+// ---------------------------------------------------------------------------
+// vitest.config.ts `test.exclude` structured parsing (#4612 gate-confirm P2-1)
+//
+// Promoted here from `t2gate-collision-mechanism-ci-wiring.test.mjs` (where it originated and
+// still carries its synthetic decoy coverage) so any `*-ci-wiring.test.mjs` guard that needs to
+// prove a suite is excluded from the no-DB job CAN share ONE parser instead of re-implementing
+// (or, as `attendance-w4c2-ci-wiring.test.mjs` did before this promotion, falling back to) a bare
+// `cfg.includes("'file'")` substring check. A substring check is satisfied by a commented-out
+// entry, a `coverage.exclude` entry, or any other free-text mention — none of which actually
+// excludes the file from the no-DB job. As of this promotion, two guards import it —
+// `t2gate-collision-mechanism-ci-wiring.test.mjs` (where it originated) and
+// `attendance-w4c2-ci-wiring.test.mjs` (this round, #4612 gate-confirm P2-1). The other 15
+// `*-ci-wiring.test.mjs` guards each still assert exclude-array placement with their own bare
+// `cfg.includes(\`'\${FILE}'\`)` substring check (verified by grep, this promotion) — narrowing
+// those 15 to this shared parser is unstarted follow-up, out of this round's scope.
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip // line comments and "..." / '...' string literals so brace scanning
+ * does not trip on braces inside comments/strings. Good enough for vitest config.
+ * @param {string} src
+ * @returns {string} same length; non-code regions replaced with spaces
+ */
+function maskCommentsAndStrings(src) {
+  let out = ''
+  let i = 0
+  while (i < src.length) {
+    // line comment
+    if (src[i] === '/' && src[i + 1] === '/') {
+      out += '  '
+      i += 2
+      while (i < src.length && src[i] !== '\n') {
+        out += ' '
+        i += 1
+      }
+      continue
+    }
+    // block comment
+    if (src[i] === '/' && src[i + 1] === '*') {
+      out += '  '
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
+        out += src[i] === '\n' ? '\n' : ' '
+        i += 1
+      }
+      if (i < src.length) {
+        out += '  '
+        i += 2
+      }
+      continue
+    }
+    // single- or double-quoted string (no template literals needed for exclude arrays)
+    if (src[i] === "'" || src[i] === '"') {
+      const q = src[i]
+      out += ' '
+      i += 1
+      while (i < src.length && src[i] !== q) {
+        if (src[i] === '\\' && i + 1 < src.length) {
+          out += '  '
+          i += 2
+          continue
+        }
+        out += src[i] === '\n' ? '\n' : ' '
+        i += 1
+      }
+      if (i < src.length) {
+        out += ' '
+        i += 1
+      }
+      continue
+    }
+    out += src[i]
+    i += 1
+  }
+  return out
+}
+
+/**
+ * Body of the direct `test.exclude: [ ... ]` array only — property of the `test` object
+ * at brace depth 1. Nested `coverage.exclude` (or any later/deeper exclude) is ignored.
+ * @param {string} src
+ * @returns {string | null} raw array body, or null if no direct test.exclude
+ */
+export function extractTestExcludeArrayBody(src) {
+  const masked = maskCommentsAndStrings(src)
+  const testKey = /\btest\s*:\s*\{/.exec(masked)
+  if (!testKey) return null
+  // Position of the `{` that opens the test object.
+  const openBrace = masked.indexOf('{', testKey.index + testKey[0].length - 1)
+  if (openBrace < 0) return null
+
+  let depth = 1
+  let i = openBrace + 1
+  while (i < masked.length && depth > 0) {
+    const ch = masked[i]
+    if (ch === '{') {
+      depth += 1
+      i += 1
+      continue
+    }
+    if (ch === '}') {
+      depth -= 1
+      i += 1
+      continue
+    }
+    // Direct property of `test` only (depth === 1).
+    if (depth === 1) {
+      const rest = masked.slice(i)
+      const m = /^(exclude\s*:\s*\[)/.exec(rest)
+      if (m) {
+        const bracketOpen = i + m[1].length - 1 // index of `[`
+        let bDepth = 0
+        for (let j = bracketOpen; j < masked.length; j++) {
+          if (masked[j] === '[') bDepth += 1
+          else if (masked[j] === ']') {
+            bDepth -= 1
+            if (bDepth === 0) {
+              // Slice the ORIGINAL source so quoted entries stay intact.
+              return src.slice(bracketOpen + 1, j)
+            }
+          }
+        }
+        return null
+      }
+    }
+    i += 1
+  }
+  return null
+}
+
+/**
+ * Quoted string entries in an exclude-array body. Strips // line comments first so a
+ * decoy path that only appears in a comment is NOT counted as an exclude entry.
+ * @param {string} arrayBody
+ * @returns {string[]}
+ */
+export function quotedExcludeEntries(arrayBody) {
+  const noLineComments = arrayBody
+    .split('\n')
+    .map((line) => line.replace(/\/\/.*$/, ''))
+    .join('\n')
+  const entries = []
+  const re = /'([^']+)'|"([^"]+)"/g
+  let m
+  while ((m = re.exec(noLineComments)) !== null) {
+    entries.push(m[1] ?? m[2])
+  }
+  return entries
+}
+
+/**
+ * True when `file` is a quoted entry of the direct `test.exclude` array (never a comment, never
+ * `coverage.exclude`, never a nested/free-text mention).
+ * @param {string} src
+ * @param {string} file
+ * @returns {boolean}
+ */
+export function isQuotedInTestExclude(src, file) {
+  const body = extractTestExcludeArrayBody(src)
+  if (body == null) return false
+  return quotedExcludeEntries(body).includes(file)
+}
