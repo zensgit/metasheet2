@@ -16,6 +16,40 @@
 | OUT_OF_LINE | **123** |
 | **UNCLASSIFIED** | **0** |
 
+### 0.0b RE-SAMPLED — and the staleness rule FIRED on its own record
+
+| | |
+|---|---|
+| `recordedAt` | `2026-07-26T15:42:34Z` |
+| `mainSha` | `1f93c462f` |
+| open PRs | **133** — was **134** at the previous sampling |
+| IN_LINE | **10** · RECORD_SELF **1** · OUT_OF_LINE **122** · **UNCLASSIFIED 0** |
+
+⟲ **One PR closed between the two samplings**, so the earlier 134/123 reading is now stale — exactly what
+the rule below predicts. Recorded rather than quietly re-stated: a record that silently absorbs a count
+change is the failure this rule exists to prevent.
+
+### 0.0c PER-TICKET CLASSIFICATION — auditable artefact, not a summary number
+
+⟲ **The previous revision's "122 classified OUT_OF_LINE, 0 UNCLASSIFIED" was UNFALSIFIABLE as published.**
+Only the totals and the ten IN_LINE rows were shown, so **an in-line ticket wrongly filed as out-of-line
+would still satisfy 10 + 1 + 122 = 133 and UNCLASSIFIED = 0**. The arithmetic proved nothing about the
+classification.
+
+Every row is now persisted, values-free (`prNumber`, `classification`, `reasonClass` — **no titles, no
+branch names, no bodies**):
+
+| | |
+|---|---|
+| file | `docs/development/database-system-integration-line-open-pr-classification-20260726.tsv` |
+| **SHA-256** | `341d01fbd02f48af31444fb0c211327cd1c02b3704e42efc6d1a0d88d89392a2` |
+| rows | 133 (header excluded) |
+
+`reasonClass` is a **closed vocabulary**: `LEDGER_SLICE`, `PREREQ_FOR_4614`, `THIS_RECORD`,
+`NIGHTLY_AUTOMATION`, `ATTENDANCE_LINE`, `APPROVAL_LINE`, `MULTITABLE_LINE`,
+`DINGTALK_DIRECTORY_LINE`, `MATERIAL_RECON_LINE`, `CI_INFRA_OTHER`, `DOCS_OTHER_LINE`,
+`TEST_INFRA_OTHER`, `OTHER_LINE`. Any reviewer can now check a single row rather than trust a total.
+
 **STALENESS RULE, machine-checkable:** this record is **stale the moment any new open PR appears or any
 listed `headRefOid` moves**. It does not degrade gracefully; re-sample before relying on it.
 Basis lineage: `4be09076d` → `df610db9a` → `ac05efa25fd0dfdae0779e7ae14a3a942a0c374e`.
@@ -60,6 +94,12 @@ copied from prose: merge SHAs via `git log origin/main`; open-PR heads via
 > delta was harmless (the ledger blob is byte-identical at both refs), but omitting a known basis change
 > from the one command offered to prove "re-derived, not copied from prose" is a claim stronger than its
 > evidence. Current basis is `ac05efa25`, sampled at `2026-07-26T15:27:35Z` together with every head in §2.
+
+> ### ⛔ HISTORICAL RETRACTED BLOCK — DO NOT USE
+> Everything from here to the end of §0's correction subsections is **retained for audit only**. It states
+> defunct facts in the present tense — "nine tickets", the keyword-filter-plus-#4622-bound enumeration
+> method, and the basis `4be09076d`. **All three are superseded** by §0.0b/§0.0c above. Do not act on any
+> figure inside this block; if it disagrees with §0.0b, §0.0b wins.
 
 Basis, re-confirmed
 at this revision:
