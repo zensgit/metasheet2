@@ -2020,11 +2020,11 @@ root-cause shape today, at the structural cost described above.
    section 3.2's four listed preconditions (corrected, `matching.length
    === 1`-gated mechanism spec; positive control; the negative control
    from the counterexample; the check-out/disappearance analysis) — until
-   then this item stays on whichever unconditional token (`(i)` or
-   `(ii-wide)`) is also ratified, if any, or blocks on the follow-up round
-   if `(ii-narrow)` was the owner's sole preference. Whichever token is
-   ratified, this item is governed by section 3.2's gate shape, not by
-   this step's run-identity gate list.
+   then this item blocks on that follow-up round; `OD-W4C-53` is a
+   single-choice ballot, so this document does not presume a fallback
+   token the owner did not also cast. Whichever token is ratified, this
+   item is governed by section 3.2's gate shape, not by this step's
+   run-identity gate list.
 4. New **exact-head** independent adversarial review of the resulting head.
 5. Even at zero P1/P2, the lane **stops**: merging PR #4612 remains an owner
    decision, and this amendment authorizes no arming, flag enablement, org
