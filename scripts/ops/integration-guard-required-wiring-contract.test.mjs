@@ -146,6 +146,37 @@ import { assertBranch } from './integration-guard-assert-branch.mjs'
  * capture, not that GitHub Actions evaluates it as expected at runtime) — see "BE HONEST ABOUT WHAT EACH
  * LAYER CAN AND CANNOT PROVE" below, which this correction does not supersede, only sharpens.
  *
+ * THIRD REVIEW ROUND (2026-07-26) — three more findings, all closed here:
+ *   - [P1] The exact-equality treatment above was applied to the terminal step's `env:` (Pin 9) and to
+ *     every load-bearing step's `run:` (Pins 6/7/8), but NOT to the classifier step's (`id: changes`)
+ *     own `env:` block (EVENT_NAME/BASE_SHA/HEAD_SHA) — that was left entirely unpinned, not even by
+ *     substring. This is a UNIVERSAL false negative, not a narrow one: on a real `pull_request` event
+ *     `github.sha` (HEAD_SHA) is a MERGE COMMIT, and the `run:` block's own empty-diff fallback
+ *     (`git diff-tree --root -r "$HEAD_SHA"`, taken whenever BASE_SHA is empty or the all-zeros
+ *     sentinel) emits ZERO paths for any merge commit — verified against this PR's own real
+ *     GitHub-generated merge commit in the PR body's evidence for this round. A mutation hardcoding
+ *     `env.BASE_SHA` to the all-zeros sentinel (the `run:` text, which IS pinned, stays byte-for-byte
+ *     untouched) therefore forces every run down that empty-diff path regardless of what actually
+ *     changed. Closed by extending Pin 6 to exact-pin EVENT_NAME/BASE_SHA/HEAD_SHA the same way Pin 9
+ *     already pins the terminal step's four env values.
+ *   - [P3] Pin 2 (`on.merge_group` exists) was asymmetric with Pin 1's "reject ANY narrowing key"
+ *     treatment of `on.pull_request` — it only checked `hasOwnProperty`, never the value's shape, so
+ *     both `merge_group: { types: [] }` (filters out the only type merge_group supports — the trigger
+ *     never actually fires) and `merge_group: { types: [checks_requested], branches: [not-main] }` (the
+ *     exact permanent-Pending mode this whole contract exists to prevent, on the merge_group half)
+ *     stayed green. Made symmetric: the key set is pinned to exactly `['types']` and `types` itself to
+ *     exactly `['checks_requested']` — merge_group legitimately needs that one key (unlike
+ *     pull_request), so this cannot mirror Pin 1's "zero keys" shape verbatim, only its "reject any
+ *     narrowing beyond what's structurally required" intent.
+ *   - [P3] Added a NUL-byte-absence pin (Pin 12) over the workflow file and all three extracted scripts.
+ *     Not hypothetical: the exact defect it guards against (a literal raw NUL byte where a `'\0'` escape
+ *     belonged, making the whole file render as BINARY in review — no patch, additions=0/deletions=0)
+ *     occurred once already on this branch (fixed in `b1aae0244`) and has recurred in this line before;
+ *     nothing previously REDs if it recurs a third time.
+ * Real `node --test` RED output for all three, plus the corrected M9/M10 mutation-ledger counts this
+ * round's two new baseline tests shifted (M9 now REDs 5, not 4; M10 now REDs 4, not 3 — M11 unchanged at
+ * 1), live in PR #4614's body, not here — same house rule as the second round above.
+ *
  * WHY THIS LIVES HERE, NOT A COPY OF THE INTEGRATION SUITE. The owner was explicit: do NOT copy the
  * integration suite into `test (20.x)` (two copies would drift apart) — only the wiring contract
  * belongs here. `test (20.x)` is the already-required job (plugin-tests.yml `test:`, matrix
@@ -206,6 +237,14 @@ const RELEVANT_ENV_EXACT = '${{ steps.changes.outputs.relevant }}'
 const NOOP_OUTCOME_ENV_EXACT = '${{ steps.noop.outcome }}'
 const PLUGIN_OUTCOME_ENV_EXACT = '${{ steps.plugin-core-tests.outcome }}'
 const WEB_OUTCOME_ENV_EXACT = '${{ steps.web-guard-specs.outcome }}'
+
+// Captured the same way (JSON.stringify(step.env.X) dumped from a parsed copy of the current file,
+// pasted verbatim) for the CLASSIFIER step's own env — see Pin 6 (P1, third review round, 2026-07-26)
+// for why these three were previously unpinned and what that gap allowed.
+const EVENT_NAME_ENV_EXACT = '${{ github.event_name }}'
+const BASE_SHA_ENV_EXACT =
+  '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}'
+const HEAD_SHA_ENV_EXACT = '${{ github.sha }}'
 
 // ---------------------------------------------------------------------------
 // YAML parse bridge (python3 + PyYAML -> JSON), fail-closed. See header for why this is duplicated
@@ -371,16 +410,53 @@ test('on.pull_request exists and is a bare trigger with no event-narrowing key a
 })
 
 // ---------------------------------------------------------------------------
-// Pin 2: on.merge_group exists — otherwise a merge-queue entry never produces the context either.
+// Pin 2 (P3 correction, third review round, 2026-07-26): on.merge_group exists — otherwise a
+// merge-queue entry never produces the context either. Made SYMMETRIC with Pin 1's "reject any
+// narrowing key" treatment: the original version of this pin only checked `hasOwnProperty(on,
+// 'merge_group')` and never looked inside the value, so both of the following stayed GREEN:
+//   - `merge_group: { types: [] }` — an empty `types:` filters out the only event type GitHub's
+//     `merge_group` trigger supports (`checks_requested`), so the trigger never actually fires for a
+//     real merge-queue event — the "workflow never runs, context pending forever" failure mode this
+//     whole contract exists to prevent, just reached through `types:` instead of a missing trigger.
+//   - `merge_group: { types: [checks_requested], branches: [not-main] }` — `branches:` scopes which
+//     merge-queue base branches produce the context, the exact same permanent-Pending mode Pin 1
+//     forbids on `pull_request` via `branches`/`branches-ignore`, just unpinned on the merge_group half.
+// Unlike `pull_request` (which needs zero keys — GitHub's default event-type set is already correct),
+// `merge_group` legitimately needs `types: [checks_requested]` (the only type it supports) for the
+// production workflow as it stands, so this pin cannot simply mirror Pin 1's "reject ANY key". Instead:
+// the key set is pinned to EXACTLY `['types']` (rejecting `branches`/`branches-ignore`/anything else),
+// and `types` itself is pinned to EXACTLY `['checks_requested']` (rejecting both the empty-array and
+// any-other-value variants).
 // ---------------------------------------------------------------------------
 
-test('on.merge_group trigger exists', () => {
+test('on.merge_group trigger exists and carries no key beyond the required types: [checks_requested]', () => {
   const on = onBlock()
   assert.ok(
     Object.prototype.hasOwnProperty.call(on, 'merge_group'),
     'on.merge_group must exist — without it a merge-queue entry never triggers this workflow and ' +
       'the integration-guard context is never produced for it, so it would wait forever once required',
   )
+  const mg = on.merge_group
+  assert.ok(mg === null || isPlainObject(mg), 'on.merge_group must be a bare/empty trigger or a mapping')
+  if (isPlainObject(mg)) {
+    const keys = Object.keys(mg)
+    assert.deepEqual(
+      keys,
+      ['types'],
+      `on.merge_group must carry EXACTLY the "types" key and no other (found: ${JSON.stringify(keys)}) ` +
+        '— `branches`/`branches-ignore` (or any other key) scopes which merge-queue entries produce ' +
+        'this context, the same permanent-Pending class Pin 1 forbids on pull_request, just through a ' +
+        'different key on the merge_group half',
+    )
+    assert.deepEqual(
+      mg.types,
+      ['checks_requested'],
+      `on.merge_group.types must be EXACTLY ["checks_requested"] (found: ${JSON.stringify(mg.types)}) ` +
+        '— an empty array filters out the only event type GitHub\'s merge_group trigger supports, so ' +
+        'the workflow would never actually fire for a real merge-queue event despite the trigger key ' +
+        'being present',
+    )
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -469,9 +545,27 @@ test('the classifier, no-op, real-branch, and terminal steps forbid continue-on-
 // `steps.changes.outputs.relevant` regardless of what the script actually classified — this is mutation
 // M4d's second half, proven RED-before-fix in PR #4614's review ledger. Exact equality catches ANY
 // added/removed/reordered line, not just that specific bypass.
+//
+// EXTENDED (P1, third review round, 2026-07-26): the `run:` pin above proves the SCRIPT is still
+// invoked byte-identically, but the classifier step's `env:` block (EVENT_NAME/BASE_SHA/HEAD_SHA — the
+// script's only inputs) was entirely unpinned until now. That gap is a UNIVERSAL false negative, not a
+// narrow one: on a real `pull_request` event, `github.sha` (HEAD_SHA) is a MERGE COMMIT, and
+// `git diff-tree --root --no-commit-id -r <merge-sha>` (the `run:` block's own fallback branch, taken
+// whenever `BASE_SHA` is empty or the all-zeros sentinel) emits ZERO paths for a merge commit — verified
+// empirically against a real merge commit in this repo's own history, not asserted:
+//   $ git diff-tree --root --no-commit-id --name-only -z -r 48a425044 | tr '\0' '\n' | wc -l
+//   0
+// So a mutation that hardcodes `env.BASE_SHA` to the all-zeros sentinel (leaving the `run:` text, which
+// IS pinned, completely untouched) forces every `pull_request`/`merge_group` run down the empty-diff
+// path regardless of what the PR actually changed — `classify()` receives an empty file list, returns
+// `false`, and the no-op branch runs green. This is caught by NEITHER Door A (classify.mjs's own tests
+// never see a merge-commit HEAD_SHA) NOR Door B (assertBranch() accepts `relevant=false` with the no-op
+// branch having run to completion — that is exactly the state this mutation produces). Closed here by
+// extending the same byte-identical-equality treatment already applied to `run:` to the three `env:`
+// values, symmetric with Pin 9's treatment of the terminal step's `env:`.
 // ---------------------------------------------------------------------------
 
-test('the scope-detection step (id: changes) run: text is byte-identical to the pinned classifier invocation', () => {
+test('the scope-detection step (id: changes) run: text and its EVENT_NAME/BASE_SHA/HEAD_SHA env values are byte-identical to the pinned literals', () => {
   const job = requireJob()
   const classifier = stepById(job, CLASSIFIER_STEP_ID)
   assert.ok(classifier, `job.${JOB_ID} must have a step with id: ${CLASSIFIER_STEP_ID}`)
@@ -482,6 +576,26 @@ test('the scope-detection step (id: changes) run: text is byte-identical to the 
       `deviation (an inline reimplementation, an appended line that bypasses the script's own ` +
       `$GITHUB_OUTPUT write, a dropped -z flag) fails this pin even if the required substrings are ` +
       `still present somewhere in the text`,
+  )
+  const env = isPlainObject(classifier.env) ? classifier.env : {}
+  assert.equal(
+    String(env.EVENT_NAME ?? ''),
+    EVENT_NAME_ENV_EXACT,
+    'env.EVENT_NAME must be EXACTLY `${{ github.event_name }}`',
+  )
+  assert.equal(
+    String(env.BASE_SHA ?? ''),
+    BASE_SHA_ENV_EXACT,
+    'env.BASE_SHA must be EXACTLY the pinned `pull_request.base.sha || merge_group.base_sha || before` ' +
+      'expression — a mutation that hardcodes this to the all-zeros sentinel (or any other constant) ' +
+      'forces the classifier down its empty-diff fallback on every run regardless of what actually ' +
+      'changed, and since HEAD_SHA is a merge commit on pull_request events, that fallback yields zero ' +
+      'paths (see the mechanism documented above the test) — a universal false negative',
+  )
+  assert.equal(
+    String(env.HEAD_SHA ?? ''),
+    HEAD_SHA_ENV_EXACT,
+    'env.HEAD_SHA must be EXACTLY `${{ github.sha }}`',
   )
 })
 
@@ -649,6 +763,36 @@ test('every guarded-path roster entry resolves to a real file/directory, case-ex
     [],
     `roster entries that do not resolve on disk (case-exact): ${JSON.stringify(missing, null, 2)}`,
   )
+})
+
+// ---------------------------------------------------------------------------
+// Pin 12 (P3, third review round, 2026-07-26): none of the files this contract depends on may contain
+// a raw NUL (0x00) byte. This is not a hypothetical: at `fd48ecf91` (before this same PR's own
+// `b1aae0244` fix), `integration-guard-classify.mjs` line 63 had a literal raw NUL byte where the
+// two-character `\0` escape belonged, which made git/GitHub classify the whole file as BINARY — no
+// patch rendered in review, `additions=0 deletions=0` from the API, even though every sibling file in
+// the PR had a real diff. That defect recurred once already in this exact line and was fixed by hand
+// each time, with nothing to stop it recurring a third time. One-line-per-file pin, closes the class.
+// ---------------------------------------------------------------------------
+
+test('none of the files this contract reads/imports contain a raw NUL (0x00) byte', () => {
+  const filesToCheck = [
+    ['integration-guard.yml', WORKFLOW_PATH],
+    ['integration-guard-guarded-paths.mjs', join(repoRoot, 'scripts/ops/integration-guard-guarded-paths.mjs')],
+    ['integration-guard-classify.mjs', join(repoRoot, 'scripts/ops/integration-guard-classify.mjs')],
+    ['integration-guard-assert-branch.mjs', join(repoRoot, 'scripts/ops/integration-guard-assert-branch.mjs')],
+  ]
+  for (const [label, path] of filesToCheck) {
+    const bytes = readFileSync(path)
+    assert.equal(
+      bytes.includes(0),
+      false,
+      `${label} contains a raw NUL (0x00) byte — this is the exact defect class that made ` +
+        `integration-guard-classify.mjs render as a BINARY file (no patch, additions=0/deletions=0) in ` +
+        `PR review before this fix; a raw NUL anywhere in a source string (e.g. a mistyped '\\0' ` +
+        `escape) silently makes the WHOLE FILE invisible to diff/review tooling, not just the one line`,
+    )
+  }
 })
 
 // ---------------------------------------------------------------------------

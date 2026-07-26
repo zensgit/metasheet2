@@ -100,12 +100,40 @@
 # contract stayed 27/27 GREEN: one kept the classifier invocation line untouched but appended a line
 # that unconditionally overwrote `relevant=false` afterward (and separately, neutered the script's own
 # `$GITHUB_OUTPUT` write); the other kept the required substring inside an `env:` expression built so it
-# never actually evaluates to the classifier's real output. Both are now closed by EXACT-EQUALITY
-# pinning on each step's full `run:`/`env:` text plus two new behavioural tests that spawn the real
-# classifier CLI and assert `$GITHUB_OUTPUT`'s exact byte content — see scripts/ops/integration-guard-
-# required-wiring-contract.test.mjs's own header correction for the full account, including what this
-# upgrade can and cannot still prove (it remains source-text/subprocess-level proof, not a GitHub Actions
-# runtime exercise).
+# never actually evaluates to the classifier's real output.
+#
+# CORRECTION (P2, third review round, 2026-07-26): the sentence that used to follow the paragraph above
+# — "Both are now closed by EXACT-EQUALITY pinning on each step's full run:/env: text" — OVERREACHED and
+# is RETRACTED here, not reworded. At that point only the TERMINAL step's `env:` (4 values:
+# RELEVANT/NOOP_OUTCOME/PLUGIN_OUTCOME/WEB_OUTCOME) was exact-pinned; the classifier step's own `env:`
+# (EVENT_NAME/BASE_SHA/HEAD_SHA — its only inputs) carried no pin AT ALL, substring or exact. That gap
+# was itself a live P1 (see the classifier `env:` finding below) — "each step's ... env:" was simply not
+# true of the code at the time the sentence was written. Stated precisely, now that both are closed:
+# `run:` text is exact-pinned on all five load-bearing steps (classifier/no-op/plugin-core-tests/
+# web-guard-specs/terminal); `env:` text is exact-pinned on two of those five — the classifier step (3
+# values) and the terminal step (4 values), the only two steps that carry an `env:` block at all — plus
+# two new behavioural tests that spawn the real classifier CLI and assert `$GITHUB_OUTPUT`'s exact byte
+# content. See scripts/ops/integration-guard-required-wiring-contract.test.mjs's own header for the full
+# account, including what this upgrade can and cannot still prove (it remains source-text/subprocess-
+# level proof, not a GitHub Actions runtime exercise).
+#
+# CORRECTION (P1, third review round, 2026-07-26): the classifier step's `env:` block
+# (EVENT_NAME/BASE_SHA/HEAD_SHA) was entirely UNPINNED until this round — not even substring-checked —
+# and that gap was a UNIVERSAL false negative, not a narrow one. On a real `pull_request` event,
+# `github.sha` (HEAD_SHA) is a MERGE COMMIT, and `git diff-tree --root --no-commit-id -r <merge-sha>`
+# (the `run:` block's own fallback branch, taken whenever `BASE_SHA` is empty or the all-zeros sentinel)
+# emits ZERO paths for a merge commit by design (`diff-tree` ignores merges unless `-m`/`-c` is given) —
+# verified against this PR's own real GitHub-generated merge commit, not merely asserted:
+#   $ git diff-tree --root --no-commit-id --name-only -z -r b83e180d8 | wc -l   # zeros-sentinel branch
+#   0
+#   $ git diff --name-only -z 97cf62033 b83e180d8 | wc -l                       # real BASE_SHA branch
+#   6
+# So a mutation that hardcodes `env.BASE_SHA` to the all-zeros sentinel — leaving the pinned `run:` text
+# byte-for-byte untouched — forces EVERY `pull_request`/`merge_group` run down the empty-diff path
+# regardless of what actually changed, flipping this exact PR from `relevant=true` to `relevant=false`.
+# Closed by extending the same byte-identical-equality treatment already applied to `run:` to the three
+# `env:` values, symmetric with the terminal step's treatment above — see Pin 6 in the contract test
+# file for the pin and the RED mutation output.
 #
 # A YAML-shape contract for these properties (no `paths` on pull_request, `merge_group` present, the
 # job's exact name, the forbidden job/step keys, the classifier/no-op/real-branch step wiring, and the
