@@ -509,16 +509,17 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
       // resolveIntegrationCorpId ("returns '' when the integration row is missing, e.g. deleted") names a
       // cause the schema makes unreachable.
       //
-      // The genuinely reachable cause is an integration that EXISTS but whose corp cannot be read:
-      // corp_id is NOT NULL yet '' is still accepted (and resolveIntegrationCorpId also filters
-      // provider='dingtalk'). That is a real misconfiguration, and it must read as OUR failure — never as
-      // "the frame carried no corp anchor", which would wrongly tell an operator to close the flag.
+      // The genuinely reachable cause is an integration that EXISTS but is not a DingTalk integration.
+      // Phase B rejects blank corp ids at the schema boundary, while resolveIntegrationCorpId also
+      // requires provider='dingtalk'. A delivery pinned to a differently typed integration is a real
+      // misconfiguration, and it must read as OUR failure — never as "the frame carried no corp anchor",
+      // which would wrongly tell an operator to close the flag.
       const instanceId = await newInstance()
       const brokenIntegrationId = randomUUID()
       await q(
         `INSERT INTO directory_integrations (id, name, provider, status, corp_id, config, updated_at)
-         VALUES ($1, $2, 'dingtalk', 'active', '', '{}'::jsonb, now())`,
-        [brokenIntegrationId, `b3cb-corp-broken-${TS}`],
+         VALUES ($1, $2, 'wecom', 'active', $3, '{}'::jsonb, now())`,
+        [brokenIntegrationId, `b3cb-corp-broken-${TS}`, CORP_B],
       )
       try {
         const row = await insertDingTalkApprovalCardDelivery(q, {

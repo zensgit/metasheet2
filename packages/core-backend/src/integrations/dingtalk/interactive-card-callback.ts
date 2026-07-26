@@ -208,10 +208,11 @@ function readCallbackCorpAnchor(payload: unknown): CallbackCorpAnchor {
  * integration UNPINS the delivery — which refuses earlier as `integration_unpinned`. A delivery can never
  * point at a missing integration (the FK forbids it).
  *
- * What IS reachable: the row exists but its corp cannot be read — `corp_id` is NOT NULL yet '' is still
- * accepted, and this lookup also requires `provider='dingtalk'`. Both are misconfigurations on OUR side,
- * and they surface as `delivery_corp_unresolved` — deliberately NOT as `corp_anchor_absent`, because the
- * two demand opposite responses (fix our config vs. close the flag because DingTalk sends no corp field).
+ * What IS reachable: the row exists but is not a DingTalk integration. This lookup deliberately requires
+ * `provider='dingtalk'`, so a delivery pinned to a differently typed directory integration cannot supply
+ * an authoritative DingTalk corp. That misconfiguration surfaces as `delivery_corp_unresolved` —
+ * deliberately NOT as `corp_anchor_absent`, because the two demand opposite responses (fix our config vs.
+ * close the flag because DingTalk sends no corp field).
  */
 async function resolveIntegrationCorpId(query: QueryFn, integrationId: string): Promise<string> {
   const result = await query(
