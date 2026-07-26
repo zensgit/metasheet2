@@ -74,10 +74,25 @@
 > mechanism as specified flips both the resolved `workDate` and `shiftId`,
 > not only `reasonCode`, when this operation's write touches — rather than
 > creates — a pre-existing open record on the resolved previous workDate.
-> `OD-W4C-53`/`O-5` is now a **two-token** ballot, `(i)` vs `(ii-wide)`;
-> `(ii-narrow)` is described in full but is not offered as a ratifiable
-> token this pass — see section 3.2 for the corrected scope and the
-> preconditions a follow-up round would need to supply.
+> `OD-W4C-53`/`O-5` remains a **three-token** ballot: `(i)` and `(ii-wide)`
+> are unconditional tokens, and `(ii-narrow)` is now a **conditional**
+> token — castable as a direction decision, but void as an implementation
+> authorization until section 3.2's four preconditions are supplied and
+> gated — see section 3.2 for the corrected scope and the preconditions a
+> follow-up round would need to supply.
+>
+> **Consistency fix (this pass).** A final-gate review (bound to head
+> `a2cd9ab7c83d85495acda911a08d2f6be4bf29f9`) found this scope note and
+> section 3.2's own text (the sentence immediately preceding the
+> retraction above, and the opening of the `(ii)` cell) stated the ballot's
+> cardinality two different ways: this note previously said "two-token"
+> and "`(ii-narrow)` is … not offered as a ratifiable token this pass",
+> while section 3.1's row and the rest of section 3.2 said three tokens,
+> two unconditional and one conditional. The two-token wording above and
+> at section 3.2's `(ii)` opening are corrected in this pass to match the
+> row; nothing else in section 3.1/3.2 changed. The PR body was updated in
+> the same pass to stop asserting the retracted safety claim above the
+> retraction's own text.
 >
 > Runtime posture: PR #4612 stays **Draft** under
 > **OWNER-AUTHORIZATION-HOLD**. This amendment contains **no runtime code**
@@ -668,7 +683,11 @@ CREATE UNIQUE INDEX uq_areo_run_identity
 ```
 
 **A run ID may never masquerade as a per-user operation ID.** Six
-independent mechanical blocks, each separately mutation-provable:
+mechanical blocks, each separately mutation-provable (blocks 1-5 are
+independent of each other; block 6 is not a further independent block but
+a guard *for* blocks 3-4 — see block 6's own text — closing the
+NULL-discriminant hole that would otherwise let SQL three-valued logic
+defeat them):
 
 1. **Referential.** `fk_areo_operation` did not exist before. A run UUID
    written into `operation_id` has no matching
@@ -1676,17 +1695,19 @@ column's domain (`{resolvedAt}` only).
 
 **Option (ii) — eliminate the self-observation at its root, not a single
 fix but two sub-variants of differing cost and, as this addendum now
-establishes, differing readiness.** `OD-W4C-53`'s ballot has **two**
-ratifiable tokens this pass, `(i)` and `(ii-wide)`; a third,
+establishes, differing readiness.** `OD-W4C-53`'s ballot has **three**
+tokens this pass: `(i)` and `(ii-wide)` are unconditional. The third,
 **`(ii-narrow)`**, is described in full below for the same reason a prior
 draft was faulted for understating it (a prior advisor round caught this
 document steering the owner toward `(i)` by omission in the `O-1` cell,
 section 3.1's table, `OD-W4C-49` history — this section still owes the
-owner the full shape of `(ii)`), but `(ii-narrow)` is **not itself a
-ratifiable token this pass**: the mechanism this document specifies for it
-is demonstrated unsafe below by an executed counterexample, and a
-corrected mechanism has not been specified or gated. If the owner rules
-`(ii-wide)` (or, in a follow-up round, a corrected `(ii-narrow)`), the
+owner the full shape of `(ii)`), and is a **conditional token**: castable
+as a direction decision this pass, but void as an implementation
+authorization until section 3.2's four preconditions (below) are supplied
+and gated — the mechanism this document specifies for it is demonstrated
+unsafe below by an executed counterexample, and a corrected mechanism has
+not yet been specified or gated. If the owner rules `(ii-wide)` (or, in a
+follow-up round, a corrected `(ii-narrow)`), the
 storage-domain fingerprint (unchanged) is what step 7 compares, and the
 false positive is closed by removing its cause rather than by narrowing
 the comparison. There are two structurally different ways to do that:
@@ -1867,9 +1888,14 @@ the comparison. There are two structurally different ways to do that:
       last_out_at IS NULL`, `:14815-14821`) independently of any exclusion
       rule. Whether that disappearance can itself change which candidate
       `openByWorkDate` resolves to between the outer and inner reads is a
-      question about record *disappearance*; every argument in this cell,
-      kept or retracted, analyses only record *appearance*. This document
-      does not know the answer and does not claim one.
+      question about record *disappearance*; the kept narrower-safety
+      claim, the retracted general-safety claim, and the counterexample
+      that disproves the latter — the arguments in this cell that reach any
+      conclusion about the resolved candidate — analyse only record
+      *appearance* (Fact 1 and Fact 2, above, establish structural
+      properties of the resolver and do not themselves reach a safety
+      conclusion either way). This document does not know the answer and
+      does not claim one.
     - **Conclusion (corrected; supersedes the retracted "general case"
       claim below it).** The scenario this cell previously flagged as
       unverified — "`openPreviousMatches` is the *only* path that finds a
@@ -1931,12 +1957,14 @@ the comparison. There are two structurally different ways to do that:
   is conditional (section 3.1's ballot row): before it discharges that
   condition and counts as an implementation authorization, it needs — as a
   **precondition** to implementation, not a confirming regression test
-  after the fact — (1) a corrected mechanism specification (e.g. gating
-  the row-ID exclusion itself on `matching.length === 1` at the point the
-  exclusion is applied — the *gating condition* costs nothing exactly where
-  the kept narrower claim above already guarantees safety; the exclusion's
-  effect of moving `reasonCode` at `matching.length === 1` is unaffected
-  and remains the whole point of `(ii-narrow)`); (2) a positive control
+  after the fact — (1) a corrected mechanism specification, specifically
+  gating the row-ID exclusion itself on `matching.length === 1` at the
+  point the exclusion is applied (this is the discharge bar this document
+  requires, matching section 4 step 3's phrasing, not one illustrative
+  option among several — the *gating condition* costs nothing exactly
+  where the kept narrower claim above already guarantees safety; the
+  exclusion's effect of moving `reasonCode` at `matching.length === 1` is
+  unaffected and remains the whole point of `(ii-narrow)`); (2) a positive control
   proving the resolved candidate (not just `reasonCode`) is unchanged
   across a representative set of fixtures where the open-record path and
   the containing-shift path would otherwise disagree; (3) a **required
@@ -1948,7 +1976,18 @@ the comparison. There are two structurally different ways to do that:
   the corrected, gated mechanism; and (4) an
   analysis (not merely a gate) of the check-out/disappearance direction
   flagged above, since no gate can substitute for an argument that does not
-  yet exist. *(ii-wide)* needs a full re-run of every other §8.2 gate in the
+  yet exist. **Acceptance criterion for (4)**, so it cannot be discharged by
+  prose alone: the follow-up round must produce either (a) the same
+  positive/negative control shape as (2)/(3) — a fixture in which this
+  operation's `check_out` closes a pre-existing open row that was itself
+  one of `openPreviousMatches`'s matches, showing by execution whether the
+  resolved candidate can change between outer and inner reads because of
+  the removal — or (b) a structural argument in the style of section 3.2's
+  kept Fact 1/Fact 2 (a proof over a named, closed set of cases, not an
+  unscoped safety claim) that the disappearance direction cannot affect the
+  resolved candidate. Either form is acceptable; two paragraphs of prose
+  declaring the question closed, without (a) or (b), does not discharge
+  this precondition. *(ii-wide)* needs a full re-run of every other §8.2 gate in the
   governing lock and the W4C-1/W4C-2 gate suites unaffected by the reorder,
   since a step-order change is exactly the kind of edit this document's own
   precedent (section 0.1 reason 3) warns against making without checking
