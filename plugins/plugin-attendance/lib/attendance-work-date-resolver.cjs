@@ -957,7 +957,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       )
       if (scheduledCandidates.length === 1) {
         const winner = scheduledCandidates[0]
-        return resolvedResult({
+        return attachFullWinner(resolvedResult({
           workDate: winner.workDate,
           shiftId: winner.shiftId,
           segmentIndex: winner.segmentIndex,
@@ -970,7 +970,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
             matchingCount: 1,
             channel,
           },
-        })
+        }))
       }
       if (scheduledCandidates.length > 1) {
         return ambiguousResult({
@@ -1020,7 +1020,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       throw new Error('OPEN_RECORD_SOURCE_INVALID')
     }
 
-    return selectAmongMatchingCandidates({
+    return attachFullWinner(selectAmongMatchingCandidates({
       matching,
       occurredAt,
       calendarWorkDate,
@@ -1028,7 +1028,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       attributionTailMinutes,
       orgId,
       userId,
-    })
+    }))
   }
 
   return {

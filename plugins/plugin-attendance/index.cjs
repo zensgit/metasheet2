@@ -21098,6 +21098,288 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
   return { outsideGeofence }
 }
 
+// ---------------------------------------------------------------------------------------------
+// W4C-2 (#4556 lock §8.1/§12.3) — the closed legacy execution adapters the plugin injects ONCE
+// into the canonical live/scheduled write boundary at activate. Routes submit pure data; every
+// byte of legacy DML below runs inside the boundary's SERIALIZABLE transaction (the `trx`
+// argument is the boundary's plugin-shaped transaction wrapper, never the pool).
+// ---------------------------------------------------------------------------------------------
+
+// P01 (live punch) verbatim former POST /api/attendance/punch transaction body, with the P02
+// second mutable post-upsert pass REMOVED (lock §4.4: "The exact current
+// `applyAttendanceInOutMergePolicy` branch behavior is lifted into a pure frozen policy before
+// calculation. W4 changes no `internalWinsOnIn`/`externalWinsOnOut` meaning; it removes only the
+// second mutable post-upsert pass"). The frozen merge-policy DECISION is computed purely (host
+// port `applyMergePolicyPure` — one source, no drift) BEFORE the single record write, so the
+// final row/response bytes are identical to the old append-then-override sequence while the
+// second UPDATE no longer exists. Random IDs are generated inside this function so a
+// whole-transaction 40001 retry re-runs it safely.
+//
+// P3-3 explicit guarantee (W4C-1 gate handover): the pure merge decision needs only the
+// POST-APPEND boundary VALUES, never a written intermediate row — the same single statement that
+// persists the record row also carries the merged boundaries, so the "no record row yet" branch
+// the pure policy cannot express is structurally unreachable here.
+async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
+  const {
+    userId,
+    orgId,
+    workDate,
+    occurredAt,
+    eventType,
+    source,
+    location,
+    meta,
+    timezone,
+    rule,
+    isWorkday,
+    punchWorkDateResolution,
+    settings,
+  } = args
+
+  const event = await trx.query(
+    `INSERT INTO attendance_events
+     (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+     RETURNING *`,
+    [
+      randomUUID(),
+      userId,
+      orgId,
+      workDate,
+      occurredAt,
+      eventType,
+      source,
+      timezone,
+      JSON.stringify(location ?? {}),
+      JSON.stringify(meta ?? {}),
+    ]
+  )
+
+  const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
+  // Freeze work-date attribution on first resolved write; later corrections/recomputes
+  // preserve this snapshot rather than re-resolving against current schedule.
+  const existingMeta = normalizeMetadata(protectedRecord?.meta)
+  const alreadyFrozen = parseFrozenWorkDateAttribution(
+    existingMeta?.[FROZEN_ATTRIBUTION_KEY] ?? existingMeta?.workDateAttributionV1,
+  )
+  let recordMeta
+  if (alreadyFrozen) {
+    recordMeta = { [FROZEN_ATTRIBUTION_KEY]: alreadyFrozen }
+  } else if (punchWorkDateResolution?.kind === 'resolved') {
+    recordMeta = {
+      [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+        punchWorkDateResolution,
+        { orgId, userId },
+      ),
+    }
+  }
+
+  const appendUpsert = () => upsertAttendanceRecord({
+    userId,
+    orgId,
+    workDate,
+    timezone,
+    rule: { ...rule, timezone },
+    updateFirstInAt: eventType === 'check_in' ? occurredAt : null,
+    updateLastOutAt: eventType === 'check_out' ? occurredAt : null,
+    mode: 'append',
+    isWorkday,
+    leaveMinutes: 0,
+    overtimeMinutes: 0,
+    meta: recordMeta,
+    existingRow: protectedRecord,
+    client: trx,
+  })
+
+  const mergePolicy = settings?.punchPolicy?.merge ?? DEFAULT_SETTINGS.punchPolicy.merge
+  const internalWinsOnIn = mergePolicy.internalWinsOnIn === true
+  const externalWinsOnOut = mergePolicy.externalWinsOnOut === true
+
+  let record
+  if (!internalWinsOnIn && !externalWinsOnOut) {
+    // Merge policy disabled (default): exactly the former single append upsert.
+    record = await appendUpsert()
+  } else {
+    // The same per-day event read the removed second pass performed, under the
+    // same record row lock, inside the same transaction.
+    const eventsForDay = await trx.query(
+      `SELECT event_type, source, occurred_at
+       FROM attendance_events
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date = $3
+         AND event_type IN ('check_in', 'check_out')
+       ORDER BY occurred_at ASC, id ASC`,
+      [userId, orgId, workDate]
+    )
+    // Post-append boundaries computed WITHOUT writing (exact value mirror of
+    // computeAttendanceRecordUpsertValues mode='append').
+    const protectedFirstMs = attendanceTimeMs(protectedRecord?.first_in_at)
+    const protectedLastMs = attendanceTimeMs(protectedRecord?.last_out_at)
+    const punchMs = attendanceTimeMs(occurredAt)
+    let appendFirstMs = protectedFirstMs
+    let appendLastMs = protectedLastMs
+    if (eventType === 'check_in' && punchMs != null) {
+      appendFirstMs = appendFirstMs == null || punchMs < appendFirstMs ? punchMs : appendFirstMs
+    }
+    if (eventType === 'check_out' && punchMs != null) {
+      appendLastMs = appendLastMs == null || punchMs > appendLastMs ? punchMs : appendLastMs
+    }
+    const decision = mergePolicyPure({
+      internalWinsOnIn,
+      externalWinsOnOut,
+      recordFirstInAtMs: appendFirstMs,
+      recordLastOutAtMs: appendLastMs,
+      protectedRecordFirstInAtMs: protectedFirstMs,
+      protectedRecordLastOutAtMs: protectedLastMs,
+      // Events with an unreadable instant were skipped by every legacy
+      // candidate pick and can never equal a finite protected value — dropping
+      // them before the strict pure policy is decision-identical.
+      events: eventsForDay
+        .map((row) => ({
+          eventType: row.event_type,
+          source: row.source,
+          occurredAtMs: attendanceTimeMs(row.occurred_at),
+        }))
+        .filter((row) => row.occurredAtMs != null),
+    })
+    if (!decision.changed) {
+      record = await appendUpsert()
+    } else {
+      const approvedMinutes = await loadApprovedMinutes(trx, orgId, userId, workDate)
+      record = await upsertAttendanceRecord({
+        userId,
+        orgId,
+        workDate,
+        timezone,
+        rule: { ...rule, timezone },
+        updateFirstInAt: decision.nextFirstInAtMs == null ? null : new Date(decision.nextFirstInAtMs),
+        updateLastOutAt: decision.nextLastOutAtMs == null ? null : new Date(decision.nextLastOutAtMs),
+        mode: 'override',
+        isWorkday,
+        leaveMinutes: approvedMinutes.leaveMinutes,
+        overtimeMinutes: approvedMinutes.overtimeMinutes,
+        meta: recordMeta,
+        existingRow: protectedRecord,
+        client: trx,
+      })
+    }
+  }
+
+  return { event: event[0], record, workDateResolution: punchWorkDateResolution }
+}
+
+// W4C-2: in-transaction W2 re-resolution (freeze step) — live channel. The opt-in
+// `includeFullWinner` out-params carry the winner's absolute/attribution windows and wall-time
+// provenance for the strict V2 rebuild; without the flag the resolver output is byte-identical.
+async function resolveW4LiveCandidateInTransactionV1(trx, args) {
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  return adapters.live.resolvePunchWorkDate({
+    orgId: args.orgId,
+    userId: args.userId,
+    occurredAt: new Date(args.occurredAt),
+    timezone: args.timezone,
+    calendarWorkDate: args.calendarWorkDate,
+    includeFullWinner: true,
+  })
+}
+
+// W4C-2: in-transaction W2 re-resolution (freeze step) — scheduled channel.
+async function resolveW4ScheduledCandidateInTransactionV1(trx, args) {
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  return adapters.scheduled.resolveScheduledWorkDate({
+    orgId: args.orgId,
+    userId: args.userId,
+    timezone: args.timezone,
+    calendarWorkDate: args.calendarWorkDate,
+    includeFullWinner: true,
+  })
+}
+
+// W4C-2: frozen calculation context from the winning shift (lock §4.1 FrozenAttendanceContextV1,
+// selector 'legacy'). Returns null whenever the closed shape cannot be represented faithfully
+// (missing shift, >3 segments, non-contiguous indexes, non-zero start offset, unreadable time)
+// — the boundary then records a review-required shadow calculation instead of guessing.
+async function buildW4ShadowFrozenContextV1(trx, args) {
+  const { orgId, userId, workDate, shiftId, timezone, isWorkday, holidayKind } = args
+  const shiftRows = await trx.query(
+    'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2 LIMIT 1',
+    [shiftId, orgId]
+  )
+  const shift = shiftRows[0]
+  if (!shift) return null
+  const lateGraceMinutes = Math.max(0, Math.floor(Number(shift.late_grace_minutes) || 0))
+  const earlyLeaveGraceMinutes = Math.max(0, Math.floor(Number(shift.early_grace_minutes) || 0))
+  const segmentRows = await trx.query(
+    `SELECT segment_index, start_time, end_time, start_day_offset, end_day_offset
+     FROM attendance_shift_segments
+     WHERE org_id = $1 AND shift_id = $2
+     ORDER BY segment_index ASC`,
+    [orgId, shiftId]
+  )
+  let segments
+  if (segmentRows.length > 0) {
+    if (segmentRows.length > 3) return null
+    segments = []
+    for (let i = 0; i < segmentRows.length; i += 1) {
+      const row = segmentRows[i]
+      const index = Number(row.segment_index)
+      const startDayOffset = Number(row.start_day_offset ?? 0)
+      const endDayOffset = Number(row.end_day_offset ?? 0)
+      const startTime = normalizeTimeString(row.start_time)
+      const endTime = normalizeTimeString(row.end_time)
+      if (index !== i || startDayOffset !== 0 || (endDayOffset !== 0 && endDayOffset !== 1) || !startTime || !endTime) {
+        return null
+      }
+      segments.push({
+        index,
+        startTime,
+        endTime,
+        startDayOffset: 0,
+        endDayOffset,
+        lateGraceMinutes,
+        earlyLeaveGraceMinutes,
+      })
+    }
+  } else {
+    const startTime = normalizeTimeString(shift.work_start_time)
+    const endTime = normalizeTimeString(shift.work_end_time)
+    if (!startTime || !endTime) return null
+    segments = [{
+      index: 0,
+      startTime,
+      endTime,
+      startDayOffset: 0,
+      endDayOffset: resolveOvernightFlag(shift.is_overnight, startTime, endTime) ? 1 : 0,
+      lateGraceMinutes,
+      earlyLeaveGraceMinutes,
+    }]
+  }
+  const rule = await loadDefaultRule(trx, orgId)
+  const severeLateThresholdMinutes = Number.isFinite(Number(rule?.severeLateThresholdMinutes))
+    ? Math.max(0, Number(rule.severeLateThresholdMinutes))
+    : DEFAULT_RULE.severeLateThresholdMinutes
+  const absenceLateThresholdMinutes = Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
+    ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
+    : DEFAULT_RULE.absenceLateThresholdMinutes
+  return {
+    schemaVersion: 1,
+    selector: 'legacy',
+    orgId,
+    userId,
+    workDate,
+    timezone: typeof shift.timezone === 'string' && shift.timezone ? shift.timezone : timezone,
+    shiftId,
+    isWorkday: isWorkday !== false,
+    holidayKind: holidayKind ?? null,
+    calculationGroupId: null,
+    roundingMinutes: Math.max(0, Math.floor(Number(shift.rounding_minutes) || 0)),
+    severeLateThresholdMinutes,
+    absenceLateThresholdMinutes,
+    segments,
+  }
+}
+
 async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
   if (!userIds || userIds.length === 0) return []
   return db.query(
@@ -21237,7 +21519,41 @@ async function runAutoAbsenceForOrgDate(db, options) {
       })
     }
   }
-  const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
+  // W4C-2 (#4556 lock §12.3): the scheduled direct insert is removed from the production
+  // initiators — both the cron callback (P03) and the administrator run (P04) supply the
+  // canonical boundary (`options.w4Boundary` + `options.initiator`), which executes the SAME
+  // closed absence adapter inside its canonical transaction (legacy posture: byte-identical
+  // single INSERT..SELECT; W4 posture: one durable scheduled operation per user). The direct
+  // `generateAbsenceRecords(db, ...)` call below remains ONLY for bare-module consumers that
+  // construct their own `db` (no host services port exists there, so no boundary can) — the
+  // production initiators fail closed instead of taking this branch when the boundary is
+  // missing (see the cron run loop and POST /api/attendance/auto-absence/run).
+  const w4Boundary = options.w4Boundary ?? null
+  let rows
+  let suspendedByRollout = false
+  if (w4Boundary) {
+    const initiator = options.initiator === 'admin_run' ? 'admin_run' : 'cron'
+    const outcome = await w4Boundary.executeScheduledRun({
+      orgId,
+      workDate,
+      timezone: rule.timezone,
+      targetUserIds: targetUsers,
+      initiator,
+    })
+    if (outcome.kind === 'suspended') {
+      suspendedByRollout = true
+      rows = []
+    } else {
+      rows = outcome.rows
+    }
+  } else {
+    rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
+  }
+  if (suspendedByRollout) {
+    // Suspended rollout posture: closed synchronous outcome, zero source DML,
+    // no generated/review events (values-free reason code only).
+    return { skipped: true, reason: 'segment_calculation_suspended', total: 0 }
+  }
   if (!skipDedup) lastAutoAbsenceKey = key
   if (emit) {
     emit('attendance.absence.generated', {
@@ -21266,7 +21582,7 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
 }
 
-function scheduleAutoAbsence({ db, logger, emit }) {
+function scheduleAutoAbsence({ db, logger, emit, w4Boundary }) {
   clearAutoAbsenceSchedule()
   const settings = settingsCache.value
   if (!settings.autoAbsence?.enabled) return
@@ -21284,6 +21600,12 @@ function scheduleAutoAbsence({ db, logger, emit }) {
 
   const run = async () => {
     try {
+      // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
+      // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
+      if (!w4Boundary) {
+        logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
+        return
+      }
       const lookbackDays = settings.autoAbsence.lookbackDays || 1
       const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
       const orgIds = orgRows.length > 0
@@ -21300,6 +21622,8 @@ function scheduleAutoAbsence({ db, logger, emit }) {
             rule,
             logger,
             emit,
+            w4Boundary,
+            initiator: 'cron',
           })
         }
       }
@@ -22566,6 +22890,49 @@ module.exports = {
       }
     }
 
+    // W4C-2 (#4556 lock §8.1/§12.3): the canonical live/scheduled write boundary. Constructed
+    // ONCE at activate — the plugin injects its closed legacy execution adapters (module
+    // functions over the boundary's own transaction wrapper); routes submit pure data and no
+    // per-request callback exists (lock §4.1). When the host port is absent (non-core host /
+    // bare-module harness) the boundary is null and every production initiator FAILS CLOSED
+    // (503 / skipped job) instead of re-entering the old writer.
+    const w4MergePolicyPure =
+      attendanceW4SegmentCalculationPort && typeof attendanceW4SegmentCalculationPort.applyMergePolicyPure === 'function'
+        ? attendanceW4SegmentCalculationPort.applyMergePolicyPure
+        : null
+    const w4LiveScheduledBoundary =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.createLiveScheduledBoundary === 'function'
+      && w4MergePolicyPure
+        ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
+            legacyAdapters: {
+              applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
+              applyScheduledAbsenceLegacy: (trx, args) =>
+                generateAbsenceRecords(trx, args.orgId, args.workDate, args.timezone, args.userIds),
+              resolveLiveCandidate: (trx, args) => resolveW4LiveCandidateInTransactionV1(trx, args),
+              resolveScheduledCandidate: (trx, args) => resolveW4ScheduledCandidateInTransactionV1(trx, args),
+              buildShadowFrozenContext: (trx, args) => buildW4ShadowFrozenContextV1(trx, args),
+            },
+          })
+        : null
+    // Values-free HTTP mapping for typed W4 boundary/registry/command/authorization errors
+    // (closed codes only; the raw caller value is never echoed). Returns true when handled.
+    const W4_ERROR_NAMES = new Set([
+      'AttendanceW4OperationError',
+      'AttendanceW4RegistryError',
+      'AttendanceW4CommandError',
+      'AttendanceW4AuthorizationError',
+      'AttendanceW4LiveScheduledBoundaryError',
+      'AttendanceW4MergePolicyError',
+    ])
+    const respondIfW4BoundaryError = (res, error) => {
+      if (!error || typeof error !== 'object' || !W4_ERROR_NAMES.has(error.name)) return false
+      const code = typeof error.code === 'string' && error.code ? error.code : 'W4_OPERATION_FAILED'
+      const status = Number.isInteger(error.httpStatus) ? error.httpStatus : 422
+      res.status(status).json({ ok: false, error: { code, message: code } })
+      return true
+    }
+
     // T3-2: register the working-day calendar provider (adapter) the approval SLA path consults through
     // the WorkdayCalendarPort. This is the ONLY approval↔attendance coupling — approval never reads
     // attendance_* tables; it calls resolve(orgId, asOf) and receives a snapshot day-mask. The adapter
@@ -23693,6 +24060,10 @@ module.exports = {
 
     const punchSchema = z.object({
       eventType: z.enum(['check_in', 'check_out']),
+      // W4C-2 (#4556 lock §7.1): optional client-supplied stable operation UUID — a
+      // response-loss retry with the same key and congruent payload replays the stored
+      // response. Absent (every pre-W4 client) => the legacy null-ID command contract.
+      operationId: z.string().uuid().optional(),
       occurredAt: z.string().optional(),
       occurred_at: z.string().optional(),
       timezone: z.string().optional(),
@@ -26568,86 +26939,71 @@ module.exports = {
             }
           }
 
-          const result = await db.transaction(async (trx) => {
-            const event = await trx.query(
-              `INSERT INTO attendance_events
-               (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
-               RETURNING *`,
-              [
-                randomUUID(),
-                userId,
-                orgId,
-                workDate,
-                occurredAt,
-                parsed.data.eventType,
-                parsed.data.source ?? 'manual',
-                timezone,
-                JSON.stringify(parsed.data.location ?? {}),
-                JSON.stringify(parsed.data.meta ?? {}),
-              ]
-            )
-
-            const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
-            // Freeze work-date attribution on first resolved write; later corrections/recomputes
-            // preserve this snapshot rather than re-resolving against current schedule.
-            const existingMeta = normalizeMetadata(protectedRecord?.meta)
-            const alreadyFrozen = parseFrozenWorkDateAttribution(
-              existingMeta?.[FROZEN_ATTRIBUTION_KEY] ?? existingMeta?.workDateAttributionV1,
-            )
-            let recordMeta
-            if (alreadyFrozen) {
-              recordMeta = { [FROZEN_ATTRIBUTION_KEY]: alreadyFrozen }
-            } else if (punchWorkDateResolution?.kind === 'resolved') {
-              recordMeta = {
-                [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
-                  punchWorkDateResolution,
-                  { orgId, userId },
-                ),
-              }
-            }
-            let record = await upsertAttendanceRecord({
-              userId,
-              orgId,
-              workDate,
-              timezone,
-              rule: { ...context.rule, timezone },
-              updateFirstInAt: parsed.data.eventType === 'check_in' ? occurredAt : null,
-              updateLastOutAt: parsed.data.eventType === 'check_out' ? occurredAt : null,
-              mode: 'append',
-              isWorkday: context.isWorkingDay,
-              leaveMinutes: 0,
-              overtimeMinutes: 0,
-              meta: recordMeta,
-              existingRow: protectedRecord,
-              client: trx,
+          // W4C-2 (#4556 lock §8.1/§12.3): P01/P02 cutover. The former inline transaction body
+          // is now the closed legacy adapter (`applyLivePunchProjectionLegacyV1`, injected once
+          // at activate) executed inside the canonical write boundary — operation claim and
+          // suspension preflight precede the first source DML; the `legacy_projection_only`
+          // null-ID path runs the same adapter bytes with zero operation/calculation/outbox
+          // rows. A missing boundary FAILS CLOSED; the old inline writer no longer exists here.
+          if (!w4LiveScheduledBoundary) {
+            res.status(503).json({
+              ok: false,
+              error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
             })
-            record = await applyAttendanceInOutMergePolicy({
-              client: trx,
-              userId,
-              orgId,
-              workDate,
-              timezone,
-              rule: { ...context.rule, timezone },
-              isWorkday: context.isWorkingDay,
-              settings: punchPolicySettings,
-              record,
-              protectedRecord,
-            })
-
-            return { event: event[0], record, workDateResolution: punchWorkDateResolution }
-          })
-
-          emitEvent('attendance.punched', {
-            userId,
+            return
+          }
+          const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
             orgId,
-            workDate,
+            userId,
+            operationId: typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null,
             eventType: parsed.data.eventType,
-            occurredAt: occurredAt.toISOString(),
+            occurredAtRaw: rawOccurredAt ?? null,
+            occurredAtResolved: occurredAt.toISOString(),
             timezone,
+            source: parsed.data.source ?? 'manual',
+            location: parsed.data.location ?? null,
+            meta: parsed.data.meta ?? null,
+            photoFileRef:
+              typeof parsed.data.photoFileId === 'string' && parsed.data.photoFileId.trim()
+                ? parsed.data.photoFileId.trim()
+                : null,
+            workDate,
+            isWorkday: context.isWorkingDay,
+            holidayKind: null,
+            legacyArgs: {
+              userId,
+              orgId,
+              workDate,
+              occurredAt,
+              eventType: parsed.data.eventType,
+              source: parsed.data.source ?? 'manual',
+              location: parsed.data.location ?? {},
+              meta: parsed.data.meta ?? {},
+              timezone,
+              rule: context.rule,
+              isWorkday: context.isWorkingDay,
+              punchWorkDateResolution,
+              settings: punchPolicySettings,
+            },
           })
-          res.json({ ok: true, data: result })
+          if (boundaryOutcome.kind === 'legacy' || boundaryOutcome.kind === 'legacy_compat') {
+            // Lock §12.3 legacy-posture leg: the same synchronous best-effort emit as before.
+            // Shadow results deliver durably through the outbox row instead; a replay emits
+            // nothing (zero DML happened).
+            emitEvent('attendance.punched', {
+              userId,
+              orgId,
+              workDate,
+              eventType: parsed.data.eventType,
+              occurredAt: occurredAt.toISOString(),
+              timezone,
+            })
+          }
+          res.json({ ok: true, data: boundaryOutcome.response })
         } catch (error) {
+          if (respondIfW4BoundaryError(res, error)) {
+            return
+          }
           if (error instanceof HttpError) {
             res.status(error.status).json({
               ok: false,
@@ -43215,15 +43571,32 @@ module.exports = {
         }
         const targetOrgId = parsed.data.orgId || getOrgId(req) || DEFAULT_ORG_ID
         try {
+          // W4C-2 (#4556 lock §12.3): P04 cutover — the administrator initiator supplies the
+          // canonical boundary (initiator 'admin_run'; a distinct durable run identity from the
+          // cron initiator) and FAILS CLOSED when it is unavailable, never the direct insert.
+          // `skipDedup` only skips the in-process key; durable scheduled-run replay lives in
+          // the registry and cannot be bypassed by it.
+          if (!w4LiveScheduledBoundary) {
+            res.status(503).json({
+              ok: false,
+              error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+            })
+            return
+          }
           const result = await runAutoAbsenceForOrgDate(db, {
             orgId: targetOrgId,
             workDate,
             logger,
             emit: emitEvent,
             skipDedup: true,
+            w4Boundary: w4LiveScheduledBoundary,
+            initiator: 'admin_run',
           })
           res.json({ ok: true, data: result })
         } catch (error) {
+          if (respondIfW4BoundaryError(res, error)) {
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -44309,7 +44682,7 @@ module.exports = {
             return
           }
           const saved = await saveSettings(db, merged)
-          scheduleAutoAbsence({ db, logger, emit: emitEvent })
+          scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
           scheduleHolidaySync({ db, logger, emit: emitEvent })
           emitEvent('attendance.settings.updated', {
             settings: saved,
@@ -44481,7 +44854,7 @@ module.exports = {
 
 	    try {
 	      await getSettings(db)
-	      scheduleAutoAbsence({ db, logger, emit: emitEvent })
+	      scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
 	      scheduleHolidaySync({ db, logger, emit: emitEvent })
 	      scheduleImportUploadCleanup()
 	      if (autoShiftAutoWriteSchedulerUnregister) {

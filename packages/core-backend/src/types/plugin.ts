@@ -1117,6 +1117,17 @@ export interface PluginServices {
   attendanceW4SegmentCalculation?: {
     validateIanaTimezone(zone: unknown): string
     /**
+     * W4C-2 — the ONE pure frozen in/out merge-policy decision (lock 4.4: "it
+     * removes only the second mutable post-upsert pass"). The canonical live
+     * adapter computes the decision BEFORE its single record write; the plugin
+     * never re-implements the branch logic.
+     */
+    applyMergePolicyPure(input: unknown): {
+      readonly changed: boolean
+      readonly nextFirstInAtMs: number | null
+      readonly nextLastOutAtMs: number | null
+    }
+    /**
      * W4C-2 — canonical live/scheduled write boundary factory (lock 8.1). The
      * plugin calls this ONCE at activate, injecting its legacy execution
      * closures (event insert + record upsert + merge lift, absence

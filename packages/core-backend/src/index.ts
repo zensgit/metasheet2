@@ -102,6 +102,7 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 // W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
 // `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
+import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
 import { createAttendanceLiveScheduledBoundaryV1 } from './attendance/w4c2-live-scheduled-boundary'
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
 import {
@@ -2037,6 +2038,14 @@ export class MetaSheetServer {
           manifest.name === 'plugin-attendance'
             ? {
                 validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+                // W4C-2 (lock 4.4): the ONE pure frozen in/out merge-policy
+                // decision. The plugin's canonical live adapter consumes this
+                // instead of the removed second mutable post-upsert pass — the
+                // plugin never copies the branch logic, one source, no drift.
+                applyMergePolicyPure: (input: unknown) =>
+                  applyAttendanceInOutMergePolicyPureV1(
+                    input as Parameters<typeof applyAttendanceInOutMergePolicyPureV1>[0],
+                  ),
                 // W4C-2: canonical live/scheduled write boundary (lock 8.1).
                 // The factory captures a dedicated-connection provider over the
                 // core pool; the plugin injects its legacy adapters once at

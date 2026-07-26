@@ -665,59 +665,104 @@ export function createAttendanceLiveScheduledBoundaryV1(
   async function executeLivePunch(
     input: AttendanceLivePunchBoundaryInputV1,
   ): Promise<AttendanceLivePunchBoundaryResultV1> {
-    const envelope: NormalizedAttendanceSourceOperationEnvelopeV1 = normalizeAttendanceSourceOperationEnvelopeV1({
-      schemaVersion: 1,
-      orgId: input.orgId,
-      correlationId: `live-punch:${input.orgId}:${input.userId}:${input.workDate}`,
-      command: {
-        schemaVersion: 1,
-        kind: 'live_punch',
-        subjectUserId: input.userId,
-        operationId: input.operationId,
-        payload: {
-          eventType: input.eventType,
-          // Command identity: the client's own business-time bytes when it sent
-          // any; otherwise the route-resolved instant (a client that wants a
-          // congruent response-loss retry supplies occurredAt explicitly).
-          occurredAt: input.occurredAtRaw ?? input.occurredAtResolved,
-          timezone: input.timezone,
-          source: input.source,
-          location: wireJson(input.location) as Record<string, unknown> | null,
-          meta: wireJson(input.meta) as Record<string, unknown> | null,
-          photoFileRef: input.photoFileRef,
-        },
-      },
-      batch: null,
-    })
-
-    const authorization = createAuthorizedAttendanceWriteContextV1({
-      actorId: input.userId,
-      actorPosture: 'self',
-      tokenSubjectUserId: input.userId,
-      orgId: envelope.orgId,
-      subjectScope: { kind: 'self', userId: input.userId },
-      capability: 'punch',
-      sourceRef: LIVE_SOURCE_REF,
-    })
+    // Org-key pre-classification. The rollout domain is canonical UUIDs plus the
+    // exact 'default' sentinel; a legacy org key OUTSIDE that lexical domain can
+    // never carry a rollout-state row through the sanctioned transition writer
+    // (the posture seam itself refuses non-canonical keys), so it is
+    // structurally `legacy_projection_only`. Its null-ID commands take the same
+    // closed legacy adapter with NO canonical parsing at all — the legacy
+    // response/projection red line admits no new rejection surface.
+    let rolloutKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1> | null = null
+    try {
+      rolloutKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
+    } catch {
+      rolloutKey = null
+    }
 
     return withConnection((client) =>
       runAttendanceResultOperationTransactionV1(client, async (trx) => {
+        const pluginTrx = pluginShapedTrx(trx)
+
+        if (rolloutKey === null) {
+          if (input.operationId !== null) {
+            // A stable-ID command requires a canonical org key (values-free).
+            boundaryFail('W4C2_ORG_KEY_OUTSIDE_W4_DOMAIN')
+          }
+          const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
+          return { kind: 'legacy' as const, response: result }
+        }
+
+        // Suspension preflight precedes the first source DML (lock 12.3): the
+        // org rollout SHARED advisory lock, then the one posture seam.
+        await acquireAttendanceCalculationRolloutLock(trx, rolloutKey, 'shared')
+        const posture = await resolveSegmentCalculationPosture(trx, rolloutKey as unknown as string)
+
+        if (input.operationId === null) {
+          if (posture.writePosture === 'blocked') {
+            throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
+          }
+          if (posture.writePosture === 'legacy_projection_only') {
+            // Null-ID legacy command: same closed adapter, no operation row, no
+            // outbox, no calculation, NO strict envelope/witness surface; the
+            // route keeps its existing synchronous best-effort emit.
+            const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
+            return { kind: 'legacy' as const, response: result }
+          }
+          // W4-postured org + null-ID falls through to the registry protocol,
+          // which fails closed with W4C0_OPERATION_ID_REQUIRED before source DML.
+        }
+
+        // Stable-ID or W4-postured command: strict envelope + branded witness +
+        // full registry preflight (replay-before-suspension per lock 7.1/8.2).
+        const envelope: NormalizedAttendanceSourceOperationEnvelopeV1 = normalizeAttendanceSourceOperationEnvelopeV1({
+          schemaVersion: 1,
+          orgId: input.orgId,
+          correlationId: `live-punch:${input.orgId}:${input.userId}:${input.workDate}`,
+          command: {
+            schemaVersion: 1,
+            kind: 'live_punch',
+            subjectUserId: input.userId,
+            operationId: input.operationId,
+            payload: {
+              eventType: input.eventType,
+              // Command identity: the client's own business-time bytes when it
+              // sent any; otherwise the route-resolved instant (a client that
+              // wants a congruent response-loss retry supplies occurredAt
+              // explicitly).
+              occurredAt: input.occurredAtRaw ?? input.occurredAtResolved,
+              timezone: input.timezone,
+              source: input.source,
+              location: wireJson(input.location) as Record<string, unknown> | null,
+              meta: wireJson(input.meta) as Record<string, unknown> | null,
+              photoFileRef: input.photoFileRef,
+            },
+          },
+          batch: null,
+        })
+
+        const authorization = createAuthorizedAttendanceWriteContextV1({
+          actorId: input.userId,
+          actorPosture: 'self',
+          tokenSubjectUserId: input.userId,
+          orgId: envelope.orgId,
+          subjectScope: { kind: 'self', userId: input.userId },
+          capability: 'punch',
+          sourceRef: LIVE_SOURCE_REF,
+        })
+
         const preflight = await attendanceResultOperationPreflightV1(trx, authorization, envelope.registryInput)
 
         if (preflight.kind === 'replay') {
-          const command = envelope.commands[0]
-          const operationId = command.operationId as string
-          return { kind: 'replay' as const, response: preflight.responses.itemResponses[operationId] }
+          const responses = Object.values(preflight.responses.itemResponses)
+          return { kind: 'replay' as const, response: responses[0] ?? null }
         }
         if (preflight.kind === 'suspended') {
           throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
         }
 
-        const pluginTrx = pluginShapedTrx(trx)
-
         if (preflight.kind === 'legacy_no_operation') {
-          // Null-ID legacy command: same closed adapter, no operation row, no
-          // outbox, no calculation; the route keeps its existing emit.
+          // Posture raced to legacy between the probe and the registry re-read:
+          // the null-ID legacy contract applies (no operation row).
           const result = await adapters.applyLivePunchLegacy(pluginTrx, input.legacyArgs)
           return { kind: 'legacy' as const, response: result }
         }
@@ -739,8 +784,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         }
 
         // W4 posture. Distinguish effective shadow vs eligible vs authoritative
-        // (still under the org rollout shared lock the preflight acquired).
-        const posture = await resolveSegmentCalculationPosture(trx, envelope.orgId)
+        // (still under the org rollout shared lock acquired above).
         if (posture.effectiveState === 'authoritative' || org.acceptedWritePosture === 'authoritative') {
           // The authoritative live writer is NOT delivered by W4C-2; fail
           // closed before any source DML (whole transaction rolls back).
@@ -952,17 +996,36 @@ export function createAttendanceLiveScheduledBoundaryV1(
     if (!(SCHEDULED_INITIATORS as readonly string[]).includes(input.initiator)) {
       boundaryFail('W4C2_SCHEDULED_INITIATOR_INVALID')
     }
-    const orgKey = parseCanonicalAttendanceOrgKeyV1(input.orgId) as string
     const workDate = parseCanonicalAttendanceWorkDateV1(input.workDate) as string
     const targetUserIds = [...input.targetUserIds].map(String)
-    const authorization = scheduledAuthorization(orgKey, input.initiator)
+    // Org-key pre-classification (same doctrine as executeLivePunch): a legacy
+    // org key outside the canonical lexical domain cannot carry a rollout row,
+    // so it is structurally `legacy_projection_only` — same closed adapter, no
+    // canonical org/user parsing, no witness surface.
+    let rolloutKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1> | null = null
+    try {
+      rolloutKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
+    } catch {
+      rolloutKey = null
+    }
+    const orgKey = rolloutKey === null ? String(input.orgId) : (rolloutKey as unknown as string)
 
     // Posture probe + (for legacy) the batch DML in ONE canonical transaction:
     // suspension preflight and posture resolution precede the first source DML.
     const probe = await withConnection((client) =>
       runAttendanceResultOperationTransactionV1(client, async (trx) => {
-        await recheckAttendanceAuthorizationInTransactionV1(trx, authorization)
-        const rolloutKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgKey)
+        if (rolloutKey === null) {
+          if (targetUserIds.length === 0) {
+            return { mode: 'legacy' as const, rows: [] as Array<{ user_id: string }> }
+          }
+          const rows = await adapters.applyScheduledAbsenceLegacy(pluginShapedTrx(trx), {
+            orgId: orgKey,
+            workDate,
+            timezone: input.timezone,
+            userIds: targetUserIds,
+          })
+          return { mode: 'legacy' as const, rows: rows as Array<{ user_id: string }> }
+        }
         await acquireAttendanceCalculationRolloutLock(trx, rolloutKey, 'shared')
         const posture = await resolveSegmentCalculationPosture(trx, orgKey)
         if (posture.writePosture === 'blocked') {
@@ -989,6 +1052,10 @@ export function createAttendanceLiveScheduledBoundaryV1(
 
     if (probe.mode === 'suspended') return { kind: 'suspended' }
     if (probe.mode === 'legacy') return { kind: 'legacy', rows: probe.rows }
+
+    // W4 path only below: the witness is minted for the canonical org key and
+    // SQL-rechecked inside every per-user registry transaction.
+    const authorization = scheduledAuthorization(orgKey, input.initiator)
 
     // W4 posture: one durable scheduled operation per user with a
     // deterministic run identity — durable replay survives restart and the
