@@ -86,7 +86,7 @@ if [[ "\${1:-}" == "inspect" ]]; then
   elif [[ " $* " == *"org.opencontainers.image.revision"* ]]; then
     printf '%s\\n' "\${FAKE_BACKEND_REVISION:-${goodSha}}"
   elif [[ " $* " == *"com.docker.compose.project"* ]]; then
-    printf '%s\\n' "\${FAKE_COMPOSE_PROJECT:-metasheet-staging}"
+    printf '%s\\n' "\${FAKE_COMPOSE_PROJECT:-metasheet2-dingtalk-staging}"
   elif [[ " $* " == *"com.docker.compose.service"* ]]; then
     case "\${target}" in
       backend-one) echo backend ;;
@@ -103,7 +103,7 @@ fi
 if [[ "\${1:-}" == "ps" ]]; then
   if [[ " $* " == *" --filter publish=18900 "* ]]; then
     printf '%s\\n' "\${FAKE_INGRESS_CONTAINER_IDS:-backend-one}"
-  elif [[ " $* " == *" --filter label=com.docker.compose.project=\${FAKE_COMPOSE_PROJECT:-metasheet-staging} "* ]]; then
+  elif [[ " $* " == *" --filter label=com.docker.compose.project=\${FAKE_COMPOSE_PROJECT:-metasheet2-dingtalk-staging} "* ]]; then
     printf '%s\\n' "\${FAKE_PROJECT_CONTAINER_IDS:-backend-one
 postgres-one
 redis-one
@@ -245,10 +245,11 @@ test('deploy accepts one attested healthy backend for project and ingress', asyn
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stderr, /WORKER_DRAIN_GATE_PASS expected_project_workers=1 observed_project_workers=1 managed_project_old_workers=0 staging_ingress_workers=1 staging_ingress_unmanaged_workers=0/)
   const log = await readFile(h.commandLog, 'utf8')
+  assert.match(log, /compose --project-name metasheet2-dingtalk-staging /)
   assert.match(log, /compose .* up -d --remove-orphans backend web/)
   assert.match(log, /compose .* ps -q --all backend/)
   assert.match(log, /ps -q --filter publish=18900/)
-  assert.match(log, /ps -q --filter label=com\.docker\.compose\.project=metasheet-staging/)
+  assert.match(log, /ps -q --filter label=com\.docker\.compose\.project=metasheet2-dingtalk-staging/)
   assert.match(log, /inspect -f \{\{\.Image\}\} backend-one/)
 })
 
@@ -266,6 +267,12 @@ const deployCases = [
     name: 'mutable image tag',
     overrides: { DEPLOY_IMAGE_TAG: 'latest', DEPLOY_EXPECTED_COMMIT: 'latest' },
     error: /full 40-character lowercase commit SHA/,
+    beforeMutation: true,
+  },
+  {
+    name: 'production Compose project',
+    overrides: { COMPOSE_PROJECT_NAME: 'metasheet2' },
+    error: /COMPOSE_PROJECT_NAME must be metasheet2-dingtalk-staging/,
     beforeMutation: true,
   },
   {

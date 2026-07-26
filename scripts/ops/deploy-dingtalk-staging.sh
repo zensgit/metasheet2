@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker-compose.app.staging.yml}"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.staging.env}"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-metasheet2-dingtalk-staging}"
 SKIP_PULL="${SKIP_PULL:-0}"
 ENV_VALIDATOR="${ROOT_DIR}/scripts/ops/validate-env-file.sh"
 BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-http://127.0.0.1:18900/health}"
@@ -48,6 +49,8 @@ DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-${ENV_IMAGE_TAG:-}}"
 DEPLOY_EXPECTED_COMMIT="${DEPLOY_EXPECTED_COMMIT:-${DEPLOY_IMAGE_TAG}}"
 
 [[ "${DEPLOY_IMAGE_OWNER}" =~ ^[a-z0-9._-]+$ ]] || die "DEPLOY_IMAGE_OWNER has an invalid format"
+[[ "${COMPOSE_PROJECT_NAME}" == "metasheet2-dingtalk-staging" ]] \
+  || die "COMPOSE_PROJECT_NAME must be metasheet2-dingtalk-staging"
 [[ "${DEPLOY_IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]] || die "DEPLOY_IMAGE_TAG must be a full 40-character lowercase commit SHA"
 [[ "${DEPLOY_EXPECTED_COMMIT}" == "${DEPLOY_IMAGE_TAG}" ]] || die "DEPLOY_EXPECTED_COMMIT must match DEPLOY_IMAGE_TAG"
 [[ "${SKIP_PULL}" == "0" || "${SKIP_PULL}" == "1" ]] || die "SKIP_PULL must be 0 or 1"
@@ -98,7 +101,8 @@ info "Skip pull: ${SKIP_PULL}"
 
 compose() {
   APP_ENV_FILE="${ENV_FILE}" IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" \
-    docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+    docker compose --project-name "${COMPOSE_PROJECT_NAME}" \
+      --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
 
 compose config >/dev/null
@@ -142,7 +146,8 @@ backend_revision="$(docker inspect -f '{{ index .Config.Labels "org.opencontaine
 [[ "${backend_revision}" == "${DEPLOY_EXPECTED_COMMIT}" ]] || die "managed backend worker revision does not match the pinned deploy commit"
 
 compose_project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "${backend_id}" 2>/dev/null || true)"
-[[ "${compose_project}" =~ ^[A-Za-z0-9_.-]+$ ]] || die "managed backend worker has no valid Compose project"
+[[ "${compose_project}" == "${COMPOSE_PROJECT_NAME}" ]] \
+  || die "managed backend worker Compose project does not match the staging project"
 project_container_ids="$(docker ps -q --filter "label=com.docker.compose.project=${compose_project}" | sed '/^[[:space:]]*$/d')"
 project_services=""
 while IFS= read -r project_container_id; do

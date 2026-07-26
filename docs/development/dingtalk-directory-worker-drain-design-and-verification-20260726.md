@@ -39,13 +39,15 @@ registry signing is outside this slice.
 The deploy path:
 
 1. accepts only the same full SHA and matching provenance JSON;
-2. restricts the health probe to `http://127.0.0.1:18900/health`;
-3. applies Compose with `--remove-orphans`;
-4. requires exactly one backend container in the managed Compose project;
-5. requires the only running container publishing host port `18900` to be that same backend;
-6. requires the complete running service set to be exactly `backend`, `postgres`, `redis`, `web`;
-7. verifies configured image reference, immutable image ID, OCI revision, and health build commit;
-8. emits one values-free PASS only after every check succeeds:
+2. fixes every Compose invocation to the exact `metasheet2-dingtalk-staging` project and rejects
+   any override before Compose mutation, so the staging compose file cannot target production;
+3. restricts the health probe to `http://127.0.0.1:18900/health`;
+4. applies Compose with `--remove-orphans`;
+5. requires exactly one backend container in the managed Compose project;
+6. requires the only running container publishing host port `18900` to be that same backend;
+7. requires the complete running service set to be exactly `backend`, `postgres`, `redis`, `web`;
+8. verifies configured image reference, immutable image ID, OCI revision, and health build commit;
+9. emits one values-free PASS only after every check succeeds:
 
    ```text
    WORKER_DRAIN_GATE_PASS expected_project_workers=1 observed_project_workers=1 managed_project_old_workers=0 staging_ingress_workers=1 staging_ingress_unmanaged_workers=0 build_commit_match=1 image_match=1 image_id_match=1 revision_match=1 project_services_match=1
@@ -74,9 +76,11 @@ user, enable automatic sync/deprovision, or change a runtime flag.
 ## 4. Verification
 
 The hermetic behavior suite executes the real Bash scripts through temporary PATH shims and covers
-38 cases:
+39 cases:
 
 - one attested healthy backend produces PASS;
+- the default command carries the exact staging Compose project and a production-project override
+  fails before any Compose mutation;
 - mutable/abbreviated identity, stale provenance, stale image reference, image-ID mismatch,
   revision mismatch, stale/missing/unhealthy health identity, zero/multiple project workers,
   multiple/unmanaged ingress workers, non-running backend, wrong project selector, and
@@ -92,7 +96,7 @@ Additional repository tests cover immutable deploy traceability and evidence-pac
 behavior suite and its source wiring guard run in both Node 18 and Node 20 legs of the `test`
 matrix, and each suite asserts the other's invocation. A live GitHub branch-protection API read on
 2026-07-26 confirmed `test (20.x)` is a strict required context. The Node 18 leg is additional
-coverage, not claimed as a required context. The final four-file local run passed 64 of 64 tests.
+coverage, not claimed as a required context. The final four-file local run passed 65 of 65 tests.
 
 The final product-code tree at `a5a4958d37dd7b20911fc4bb4ad8262e72ebd76f` was copied only
 under `/private/tmp/dingtalk-worker-gate-mut-r2.AzDjbz` for 37 single-variable mutations. All 37
@@ -125,13 +129,33 @@ rewrite.
 This incident is evidence about the test harness, not staging or production execution: no real
 Docker build, deployment, migration, sync, bind, user creation, or flag change occurred.
 
-## 6. Remaining owner gates
+## 6. Deployment finding and recovery
 
-1. review and merge Phase A;
-2. deploy Phase A with flags and schedules unchanged;
-3. build/deploy the exact Phase A SHA and capture this gate's PASS under an exclusive host change
-   window;
-4. review, retarget, and fully re-run Phase B CI;
-5. migrate Phase B before releasing the host change window;
-6. run the two-corp UAT;
-7. perform only the separately authorized existing-user binding and same-corp callback proof.
+During the owner-authorized Phase A staging deployment on 2026-07-26, the version of
+`deploy-dingtalk-staging.sh` then on `main` did not pass an explicit Compose project name. Running
+it from the shared deploy checkout therefore selected the checkout directory's production Compose
+project before the staging container-name conflict stopped the command. Staging backend/web were
+not updated by that failed attempt. The production Redis container was briefly stopped and the
+production Postgres container was removed; both were recreated or restarted from the production
+Compose file and existing persistent volumes, and their health checks plus the production backend
+health endpoint returned healthy/200 before staging work resumed.
+
+Phase A was then deployed successfully to the staging project by explicitly setting
+`COMPOSE_PROJECT_NAME=metasheet2-dingtalk-staging`. The exact merge/image SHA was
+`ac05efa25fd0dfdae0779e7ae14a3a942a0c374e`; staging backend and web both served that immutable
+tag and returned HTTP 200. Automatic provisioning remained `0`; Stream, deprovision, and pending
+activation remained unset/default-off.
+
+This finding is the load-bearing reason the script now fixes and validates the exact staging
+project name before any Compose mutation. A caller cannot select the production project through
+the environment, and the post-deploy container label must match the same staging project.
+
+## 7. Remaining owner gates
+
+1. review and merge this worker-drain hardening;
+2. build/deploy the exact Phase A SHA through this hardened path and capture its PASS under an
+   exclusive host change window;
+3. review, retarget, and fully re-run Phase B CI;
+4. migrate Phase B before releasing the host change window;
+5. run the two-corp UAT;
+6. perform only the separately authorized existing-user binding and same-corp callback proof.
