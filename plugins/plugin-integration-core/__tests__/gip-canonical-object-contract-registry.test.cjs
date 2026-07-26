@@ -352,10 +352,36 @@ function hostileOwnKeysTrapOnFieldsNeverEscapesRaw() {
   // value must still fire FIRST, without ever attempting enumeration — only
   // a Proxy can make Object.keys itself throw; null must still hit the
   // ORIGINAL "must be a non-empty plain object" reason.
-  rejects(
+  //
+  // ROUND 8 FIX (owner HARD HOLD #4610 — closing a review-round-7 vacuous
+  // assertion): the check below used to assert ONLY the reason token
+  // (CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID) returned by `rejects()`
+  // — but BOTH the isPlainObject short-circuit above AND the enumeration
+  // try/catch's own failure branch emit that SAME reason token; only their
+  // `message` text differs ("fields must be a non-empty plain object" vs
+  // "fields could not be enumerated"). A reason-only check cannot
+  // discriminate which of the two guards actually fired. Measured directly:
+  // moving the isPlainObject short-circuit to AFTER the Object.keys
+  // try/catch (so `fields: null` reaches `Object.keys(null)`, which throws,
+  // routing it into the enumeration guard's catch instead) left the
+  // reason-only assertion passing, while `caught.message` had silently
+  // become "fields could not be enumerated" — the pin's own named claim
+  // ("must still hit the ORIGINAL ... reason, not the enumeration guard")
+  // was false on the code as it stood. (`fields: []` — the pre-existing
+  // "array fields" case in malformedEntriesRefused — does NOT discriminate
+  // this mutation either: `Object.keys([])` does not throw, so that case is
+  // caught only by the SAME, now-relocated isPlainObject check running
+  // later in the function — door-level cover, not a pin on this specific
+  // ordering.) Asserting the MESSAGE, not just the reason, closes the gap.
+  const caughtNull = rejects(
     () => createCanonicalObjectContractRegistry([{ contractId: 'c', version: 'v1', fields: null }]),
     'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
     'null fields must still be refused by the isPlainObject short-circuit, not the enumeration guard',
+  )
+  assert.equal(
+    caughtNull.message,
+    'fields must be a non-empty plain object',
+    'null fields must produce the ORIGINAL isPlainObject short-circuit MESSAGE — the reason token alone is shared by the enumeration-guard failure path and does not discriminate between the two',
   )
 }
 
@@ -528,6 +554,26 @@ function activationReadinessMechanism() {
 // `registry`, by design, so a hostile registry object is squarely its own
 // caller's responsibility to have excluded, but a raw throw must still never
 // escape THIS function).
+//
+// ROUND 8 FIX (owner HARD HOLD #4610 — closing a review-round-7 overclaim):
+// round 7's own commit message claimed this function's guards were "proven
+// branded + values-free, then independently neutered to red (one guard at a
+// time)" — true for the Symbol.iterator/contractId/lookup cases below, but
+// FALSE for three of this function's OWN guarded reads: readArrayLength(references),
+// readArrayElement(references, index), and readEntryField(reference, 'version')
+// had NO test that set a hostile value at that SPECIFIC site — the
+// Symbol.iterator case (a) below never reaches readArrayLength/readArrayElement
+// at all (the guarded loop never invokes the iterator, so .length and each
+// index are read normally, from a real, well-behaved array), and case (b)
+// only ever probed reference.contractId, never reference.version. Measured
+// directly, on the code as it stood before this fix: neutering
+// `readArrayLength(references, 'references')` back to `references.length`
+// ALONE left this file's full suite GREEN (rc=0); same for
+// `readArrayElement(references, index, 'references')` back to
+// `references[index]`; same for `readEntryField(reference, 'version')` back
+// to `reference.version`. The three cases below close exactly those three
+// gaps, mirroring the Proxy-`.length`-trap and index-getter fixtures
+// `hostileEntriesIteratorNeverEscapesRaw` already uses for `entries`.
 // ---------------------------------------------------------------------------
 function computeActivationReadinessNeverEscapesRawForeignErrors() {
   const registry = createCanonicalObjectContractRegistry([
@@ -552,8 +598,72 @@ function computeActivationReadinessNeverEscapesRawForeignErrors() {
     'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
     'a hostile getter on a reference field must be discarded and converted, never escape as a raw foreign error',
   )
+  assert.equal(caughtGetter.details.field, 'contractId')
   const serializedGetter = String(caughtGetter.message) + JSON.stringify(caughtGetter.details) + String(caughtGetter.stack)
   assert.ok(!serializedGetter.includes(getterMarker), 'the raw marker text must never leak into the branded error')
+
+  // (b2) ROUND 8 FIX — the SAME hostile-getter class, but on reference.version
+  // specifically (round 7 only ever probed contractId at this site; version's
+  // readEntryField call had zero direct test coverage).
+  const versionGetterMarker = 'ACTIVATION-READINESS-VERSION-GETTER-MARKER'
+  const hostileVersionRef = { contractId: 'bom_line', get version() { throw new TypeError(versionGetterMarker) } }
+  const caughtVersionGetter = rejects(
+    () => __internals.computeActivationReadiness(registry, [hostileVersionRef]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile getter on reference.version must be discarded and converted, never escape as a raw foreign error',
+  )
+  assert.equal(caughtVersionGetter.details.field, 'version')
+  const serializedVersionGetter = String(caughtVersionGetter.message) + JSON.stringify(caughtVersionGetter.details) + String(caughtVersionGetter.stack)
+  assert.ok(!serializedVersionGetter.includes(versionGetterMarker), 'the raw marker text must never leak into the branded error')
+
+  // (b3) ROUND 8 FIX — a Proxy WRAPPING a real `references` array, with a
+  // hostile `.length` trap. Mirrors hostileEntriesIteratorNeverEscapesRaw's
+  // case (c) for `entries`: `Array.isArray` is true for such a Proxy (IsArray
+  // walks the proxy target chain without invoking any trap), so the
+  // UNGUARDED direct-read form (`references.length`) would throw raw the
+  // moment the length is actually read. Pins readArrayLength(references, ...)
+  // specifically — the Symbol.iterator case (a) above never exercises this
+  // read at all, since a well-behaved real array's `.length` is read without
+  // incident on that path.
+  const lengthMarker = 'ACTIVATION-READINESS-LENGTH-MARKER'
+  const lengthProxyRefs = new Proxy([{ contractId: 'bom_line', version: 'v1' }], {
+    get(target, prop, receiver) {
+      if (prop === 'length') throw new TypeError(lengthMarker)
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const caughtLength = rejects(
+    () => __internals.computeActivationReadiness(registry, lengthProxyRefs),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile length trap on a Proxy-wrapped references array must be discarded, never escape as a raw foreign error',
+  )
+  assert.equal(caughtLength.details.field, 'references')
+  const serializedLength = String(caughtLength.message) + JSON.stringify(caughtLength.details) + String(caughtLength.stack)
+  assert.ok(!serializedLength.includes(lengthMarker), 'the raw marker text must never leak into the branded error')
+
+  // (b4) ROUND 8 FIX — a genuine array carrying a hostile accessor at ONE
+  // index (`Object.defineProperty`), the rest ordinary. Mirrors
+  // hostileEntriesIteratorNeverEscapesRaw's case (a) for `entries`. Pins
+  // readArrayElement(references, index, ...) specifically — distinct from the
+  // Symbol.iterator case (a) above (which never invokes an indexed read
+  // through this hostile path at all) and from the length-Proxy case (b3)
+  // just above (a different read site: the per-index `[[Get]]`, not `.length`).
+  const elementMarker = 'ACTIVATION-READINESS-ELEMENT-MARKER'
+  const indexHostileRefs = [{ contractId: 'bom_line', version: 'v1' }]
+  Object.defineProperty(indexHostileRefs, 1, {
+    enumerable: true,
+    configurable: true,
+    get() { throw new TypeError(elementMarker) },
+  })
+  indexHostileRefs.length = 2
+  const caughtElement = rejects(
+    () => __internals.computeActivationReadiness(registry, indexHostileRefs),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile getter at one references index must be discarded and converted, never escape as a raw foreign error',
+  )
+  assert.equal(caughtElement.details.field, 'references')
+  const serializedElement = String(caughtElement.message) + JSON.stringify(caughtElement.details) + String(caughtElement.stack)
+  assert.ok(!serializedElement.includes(elementMarker), 'the raw marker text must never leak into the branded error')
 
   // (c) duck-typed registry whose .lookup() itself throws raw.
   const lookupMarker = 'ACTIVATION-READINESS-LOOKUP-MARKER'
@@ -599,6 +709,50 @@ function internalsExactKeySet() {
 }
 
 // ---------------------------------------------------------------------------
+// (8b) ROUND 8 FIX (owner HARD HOLD #4610 — closing a review-round-7 false
+// claim): round 7's own commit message claimed "Spot-checked the two
+// remaining __internals keys (requiredIdentityToken, hasControlCharacter):
+// both gate on `typeof value !== 'string'` before touching the value" — FALSE
+// for hasControlCharacter, which is ALSO directly on __internals (this test
+// file already calls __internals.computeActivationReadiness and
+// __internals.normalizeContractEntry directly, so hasControlCharacter is
+// reachable the identical way) and had no type gate of its own — only its
+// caller, requiredIdentityToken, gated before calling it. Proves BOTH
+// failure shapes the false claim concealed: (a) a hostile non-string object
+// whose `.length` throws must never escape a raw foreign error, and (b) a
+// plain non-string primitive must be refused as a validated contract
+// (branded error), not silently coerced/ignored — pinning a TYPE gate, not
+// merely a length-read guard.
+// ---------------------------------------------------------------------------
+function hasControlCharacterGuardsNonStringInput() {
+  const marker = 'CONTROL-CHAR-HOSTILE-LENGTH-MARKER'
+  const hostileLength = { length: { valueOf() { throw new RangeError(marker) } } }
+  const caughtHostile = rejects(
+    () => __internals.hasControlCharacter(hostileLength),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile non-string value with a throwing .length must be discarded and converted, never escape as a raw foreign error',
+  )
+  const serializedHostile = String(caughtHostile.message) + JSON.stringify(caughtHostile.details) + String(caughtHostile.stack)
+  assert.ok(!serializedHostile.includes(marker), 'the raw marker text must never leak into the branded error')
+
+  // A PLAIN non-string primitive (no hostile getter at all) must ALSO be
+  // refused — this is the pin that discriminates "added a length-read try/catch"
+  // from "added an actual typeof gate": a length-read guard alone would let
+  // `42` through silently (since `(42).length` is `undefined`, the loop body
+  // never runs, and the old code returned `false` with no error at all).
+  rejects(
+    () => __internals.hasControlCharacter(42),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a plain non-string primitive must be refused by an explicit type gate, not silently treated as containing no control characters',
+  )
+
+  // Non-regression: a genuine string with a control character, and one
+  // without, must still behave exactly as before.
+  assert.equal(__internals.hasControlCharacter('clean'), false, 'a clean string must still report no control character')
+  assert.equal(__internals.hasControlCharacter('bad\x01text'), true, 'a string containing a control character must still be detected')
+}
+
+// ---------------------------------------------------------------------------
 // (9) Vocabulary discipline.
 // ---------------------------------------------------------------------------
 function frozenVocabularyIsExhaustive() {
@@ -632,6 +786,7 @@ function main() {
   activationGateRefusesCallerAssertedEvidence()
   activationReadinessMechanism()
   computeActivationReadinessNeverEscapesRawForeignErrors()
+  hasControlCharacterGuardsNonStringInput()
   internalsExactKeySet()
   frozenVocabularyIsExhaustive()
   console.log('gip-canonical-object-contract-registry.test.cjs OK')

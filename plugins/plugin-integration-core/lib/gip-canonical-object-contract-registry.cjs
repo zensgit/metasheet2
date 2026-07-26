@@ -59,8 +59,11 @@
 // enumeration, a hostile array iterator or index accessor on an `entries`
 // array — is a GipCanonicalObjectContractError carrying one of the frozen
 // CANONICAL_OBJECT_CONTRACT_ERROR_REASONS tokens above, never a raw foreign
-// error (class, message, or stack) from whatever object supplied the input.
-// Two read paths this round closed to make that literally true:
+// error (class, message, or stack) from whatever object supplied the input —
+// with two narrow, measured exceptions, stated honestly in the SCOPE
+// paragraph below rather than left as an unqualified "never". Two read paths
+// this round closed to make the above true for every OTHER caller-reachable
+// route:
 // readEntryField (guards `entry.contractId` / `entry.version` / `entry.fields`
 // reads — RAW-CONTRACT-ID — and the `Object.keys(rawFields)` ENUMERATION
 // itself — RAW-OWN-KEYS, a distinct step from the property read, since a
@@ -70,18 +73,34 @@
 // with a hostile index accessor or an attacker-assigned `Symbol.iterator`
 // passes `Array.isArray` exactly like an ordinary array).
 // SCOPE, stated honestly (the same discipline this file already uses for
-// LATENT/unreachable paths): this contract covers every error reachable from
-// this module's EXPORTED surface today. It does NOT cover
-// buildInventoryAttestation's own `references` array reads, which have the
-// identical unguarded shape — that function is module-private with ZERO call
-// sites anywhere in this shipped module (see the LATENT note above it), so
-// there is no path, in production or in any test, that could exercise a fix
-// there; a future amendment wiring a real caller to it must close that same
-// gap before shipping. It also does not cover fail()'s own internal
+// LATENT/unreachable paths) — NARROWER than "never a raw foreign error" reads
+// on its own, in two ways measured directly, not merely asserted: (1) a
+// pathologically deep `fields` value drives `deepCloneFrozenCanonical`
+// (gip-canonical-json.cjs) past the JS engine's own call-stack limit; its
+// `throw error` re-throw for a non-`CanonicalDomainError` forwards that
+// engine-generated `RangeError: Maximum call stack size exceeded` RAW —
+// unbranded — out of `createCanonicalObjectContractRegistry`. No attacker
+// TEXT escapes this way (the message is engine-authored, not caller-supplied),
+// so it is not a values-free leak, but it IS a raw foreign CLASS crossing this
+// module's boundary, contradicting "never" read literally; closing it is a
+// separate, future fix, not claimed here. (2) fail()'s own internal
 // undeclared-reason branch (a bare Error, deliberately NOT a
-// GipCanonicalObjectContractError) — that branch fires only on a PROGRAMMER
-// bug in this module's own source (a typo'd reason token in a call to fail()
-// added by a future edit), never on any caller-supplied input.
+// GipCanonicalObjectContractError) is reachable directly by ANY caller who
+// invokes the exported `__internals.fail('SOME_UNDECLARED_REASON', ...)`
+// themselves — `fail` is exported, so "never on any caller-supplied input" is
+// imprecise; the honest statement is that this branch only fires on a
+// reason-token argument, which every call inside this module's OWN source
+// supplies as a fixed literal (never derived from `entry`/`references`
+// content) — a typo'd literal is a programmer bug in this file, not something
+// caller DATA can trigger through the module's normal entries/references
+// surface. With those two narrowings stated, this contract covers every
+// OTHER error reachable from this module's EXPORTED surface today. It does
+// NOT cover buildInventoryAttestation's own `references` array reads, which
+// have the identical unguarded shape — that function is module-private with
+// ZERO call sites anywhere in this shipped module (see the LATENT note above
+// it), so there is no path, in production or in any test, that could
+// exercise a fix there; a future amendment wiring a real caller to it must
+// close that same gap before shipping.
 
 const { deepCloneFrozenCanonical, CanonicalDomainError } = require('./gip-canonical-json.cjs')
 
@@ -121,7 +140,29 @@ function isPlainObject(value) {
 // Control-char check via explicit char-code comparison (never a regex escape
 // literal) — printable ASCII is code point 0x20-0x7e; anything below 0x20 or
 // exactly 0x7f (DEL) is a control character.
+//
+// P1 FIX (owner HARD HOLD #4610, round 8 — closing a review-round-7 false
+// claim): round 7's own commit message asserted "Spot-checked the two
+// remaining __internals keys (requiredIdentityToken, hasControlCharacter):
+// both gate on `typeof value !== 'string'` before touching the value" — FALSE
+// for hasControlCharacter, which had NO type gate of its own: its only
+// caller, requiredIdentityToken, gates on `typeof value !== 'string'` BEFORE
+// calling it, but hasControlCharacter is ALSO on __internals (exported
+// directly, reachable by any require()-holding caller, exactly the surface
+// round 7's own "CLOSED ERROR CONTRACT" header commits to guarding) and was
+// exercised with a bare `text.length`/`text.charCodeAt` — a hostile non-string
+// argument such as `{ length: { valueOf() { throw ... } } }` threw a raw,
+// unbranded error straight out of this function; a plain non-string
+// primitive (e.g. `42`) silently returned `false` with no gate at all,
+// which is not an escape but is not a validated contract either. Adding the
+// SAME gate its caller already applies makes the module's own two callers
+// symmetric and, applied here too, makes hasControlCharacter closed under
+// hostile input on its own terms, not merely by accident of always being
+// called after another function's check.
 function hasControlCharacter(text) {
+  if (typeof text !== 'string') {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'hasControlCharacter requires a string input', {})
+  }
   for (let index = 0; index < text.length; index += 1) {
     const code = text.charCodeAt(index)
     if (code < 0x20 || code === 0x7f) return true
