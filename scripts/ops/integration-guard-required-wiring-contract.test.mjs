@@ -277,7 +277,13 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *     49 pass / 0 fail. A false-green opened by the slice whose subject is closing false-greens.
  *     Closed by DOOR D at the end of this file, which EXECUTES both scripts (the web runner against a
  *     PATH-injected `pnpm` argv-recording shim) instead of pinning their text — extract AND pin,
- *     never extract alone. Per-mutation exclusivity is recorded in PR #4614's body.
+ *     never extract alone. The per-mutation exclusivity ledger (M-A…M-G; M-B/M-C/M-G each red exactly
+ *     one, different, test) is in commit `a022080a3`'s message and in PR #4614's round-5 evidence
+ *     COMMENT — NOT in the PR body, unlike every previous round. The body had reached 60,972 of
+ *     GitHub's 65,536-character limit and could not absorb another round section; the body carries a
+ *     short pointer to that comment instead. This file's "evidence lives in PR #4614's body" house
+ *     rule (see the third-round paragraph above) is therefore superseded from round 5 onward — flagged
+ *     for the owner rather than silently broken, since the body cannot take many more rounds either.
  */
 
 const __filename = fileURLToPath(import.meta.url)
