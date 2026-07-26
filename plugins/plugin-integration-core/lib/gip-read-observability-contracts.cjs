@@ -81,6 +81,20 @@ function safeOwnKeys(value, reason) {
   return []
 }
 
+// A symbol-keyed member is invisible to `Object.keys`. Same shape as the
+// `safeOwnSymbols` in the §4 step 1.4 executor module and in the approved-binding
+// resolver, both of which already check both halves. Their basenames are deliberately
+// NOT written out here: this slice's latency enumeration treats ANY file mentioning a
+// module's basename as a consumer of it, and this module is not on that allowlist.
+function safeOwnSymbols(value, reason) {
+  try {
+    return Object.getOwnPropertySymbols(value)
+  } catch (_error) {
+    fail(reason)
+  }
+  return []
+}
+
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const proto = Object.getPrototypeOf(value)
@@ -94,6 +108,19 @@ function assertClosedKeySet(value, allowedKeys, hostileReason, extraKeyReason) {
   for (let index = 0; index < keys.length; index += 1) {
     if (!allowedKeys.has(keys[index])) fail(extraKeyReason)
   }
+  // B1a-3 round 4. Until this line, this function read `Object.keys` ONLY — so a
+  // SYMBOL-keyed member was ACCEPTED AND SILENTLY DROPPED while its string-keyed twin
+  // was refused, and the comment at `assertValuesFreeCounterSample` claiming any
+  // identifier "is refused rather than dropped" was therefore FALSE of this code.
+  // EXECUTED before the fix: `assertValuesFreeCounterSample({ value: 1,
+  // [Symbol('tenantId')]: '…' })` returned `{"value":1}`, and the same held for both
+  // handshake records. No value transited (both entry points rebuild their result from
+  // frozen literals over individually-read members), so this was a FALSE COMMENT
+  // rather than a live leak — but it is the identical overclaim that the executor
+  // module's own P2-D note says it was correcting, in a sibling module, left unfixed.
+  // The `hostileReason`/`extraKeyReason` split matches the string half exactly: a
+  // throwing enumeration is HOSTILE INPUT, a present symbol is an EXTRA KEY.
+  if (safeOwnSymbols(value, hostileReason).length > 0) fail(extraKeyReason)
 }
 
 // Control characters by CHARACTER CODE — an identity token that can carry a

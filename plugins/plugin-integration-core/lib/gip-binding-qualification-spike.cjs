@@ -286,11 +286,47 @@ function createProbeStrategyRegistry(entries) {
 const PROBE_RUN_INPUT_KEYS = Object.freeze(['resolution', 'envelopeKey', 'probedAt', 'expiresAt'])
 const PROBE_RUN_INPUT_KEY_SET = new Set(PROBE_RUN_INPUT_KEYS)
 
+// GUARDED READ of the caller-supplied COMPONENTS object (B1a-3 round 4, P1).
+//
+// This is a SEPARATE DOOR from `safeReadRunInput` below, deliberately, and not a
+// reuse of it. Two reasons, both stated so the choice is checkable:
+//
+//   * REASON TOKEN. Every other refusal in `createBindingQualificationProber` is
+//     `PROBE_EXECUTOR_UNTRUSTED`, because this door is about EXECUTOR ADMISSION at
+//     construction time, not about run-lifecycle input. Importing
+//     `PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED` — the run-input token — into a
+//     construction-time door would make the outward reason lie about which door fired.
+//   * DOOR EXCLUSIVITY. A shared reader is a shared door: neutering it would RED both
+//     the construction-time and the run-input cases at once, so neither case would
+//     prove anything about its own guard. This line has already paid for
+//     门级排他 ≠ 词级排他 — a same-named channel with two doors, where neutering one
+//     still REDs because the other fires.
+//
+// Catch, DISCARD UNCONDITIONALLY (no `cause`, no `message`, no `stack`, no class
+// exemption), fail closed under the reason this site already declares.
+function safeReadComponent(components, key) {
+  try {
+    return components[key]
+  } catch (_error) {
+    fail('PROBE_EXECUTOR_UNTRUSTED', 'a trusted server-bound source executor is required', {})
+  }
+  return undefined
+}
+
 function createBindingQualificationProber(components) {
   if (!isPlainObject(components)) {
     fail('PROBE_EXECUTOR_UNTRUSTED', 'a trusted server-bound source executor is required', {})
   }
-  const executor = components.executor
+  // GUARDED (P1, round 4). `components` is CALLER-SUPPLIED and this module's
+  // `isPlainObject` is the LOOSE one — it does no enumeration and no prototype check,
+  // so `{ get executor() { throw new Error(<attacker text>) } }` passes it intact and
+  // the throw then escaped the PUBLIC export as an UNBRANDED `Error` carrying the
+  // attacker's text verbatim in `.message` and `.stack`. Executed before this fix:
+  // 3 of 4 constructions leaked (enumerable getter, non-enumerable getter, Proxy
+  // get-trap); the Proxy ownKeys-trap was already refused, but only incidentally —
+  // the trap is never invoked here, the read simply falls through to the target and
+  // yields `undefined`, which the identity check rejects. That is not a guard.
+  const executor = safeReadComponent(components, 'executor')
   // WeakSet-backed checker: returns false for primitives and null, never throws. A
   // duck-typed object carrying every expected public field is refused here.
   if (!isTrustedServerBoundSourceExecutor(executor)) {
@@ -407,7 +443,7 @@ function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresA
 // caller's `message` and `stack` — the same leak channel the two new modules close.
 // A non-enumerable getter does not even appear in `Object.keys()`.
 //
-// Same SHAPE as `gip-server-bound-source-executor.cjs`'s `safeRead` (:91) and the
+// Same SHAPE as `gip-server-bound-source-executor.cjs`'s `safeRead` (:102) and the
 // §4 step 1.6 read-observability contracts module's (:64) — that module's basename
 // is deliberately NOT written out here, because its own latency enumeration treats
 // any file mentioning it as a consumer. Catch, DISCARD UNCONDITIONALLY
@@ -536,6 +572,20 @@ async function probeFromTrustedResolution(executor, input) {
   })
 }
 
+// GUARDED READ of `verifyBindingQualification`'s OUTER argument (B1a-3 round 4, P2).
+// Defined at module scope, above the function, because it must run BEFORE
+// `qualification` exists — `readQualificationField` is defined inside the body and
+// closes over `qualification`, so it cannot guard the read that produces it.
+function safeReadVerifyInput(verifyInput, key) {
+  try {
+    return verifyInput[key]
+  } catch (_error) {
+    // Discard unconditionally: no cause, no message, no stack, no class exemption.
+    fail('QUALIFICATION_NOT_OBJECT', 'qualification must be a plain object', {})
+  }
+  return undefined
+}
+
 // verifyBindingQualification — PURE LOCAL, transaction-safe: recomputes the digest
 // from the caller's expected inputs + the qualification's own evidence, then checks
 // binding, status and expiry. ZERO external I/O by construction. An expired
@@ -546,7 +596,33 @@ async function probeFromTrustedResolution(executor, input) {
 // recomputed the digest from `expectedInputs`, a CALLER-SUPPLIED object — a live
 // counter-construction to the ratified sentence. The parameter is gone; the expected
 // tuple now comes from a trusted `resolution` and nothing else.
-function verifyBindingQualification({ qualification, resolution, envelopeKey, now }) {
+function verifyBindingQualification(verifyInput) {
+  // GUARDED OUTER READ (B1a-3 round 4, P2). This function used to DESTRUCTURE its
+  // caller-supplied argument in the parameter list — `({ qualification, resolution,
+  // envelopeKey, now })` — which fires before any guard in the body can run. EXECUTED
+  // before this fix: 5 of 5 constructions escaped UNBRANDED with the attacker's text
+  // in `.message` and `.stack` — a throwing getter on each of the four fields, plus a
+  // Proxy get-trap over the whole argument.
+  //
+  // The destructure pattern exists on `main`, so the CHANNEL is not new to this PR.
+  // What was indefensible is the ASYMMETRY: this PR wrote `readQualificationField`
+  // for the six INNER reads and left the OUTER read that obtains `qualification`
+  // itself raw, with the guard sitting ten lines below in the same function.
+  //
+  // `safeReadVerifyInput` is a THIRD door, separate from `safeReadComponent` and
+  // `safeReadRunInput`, for the same door-exclusivity reason stated at each: a shared
+  // reader is a shared door, and neutering it would RED several cases at once, so no
+  // case would prove anything about its own guard. It reuses the EXISTING
+  // `QUALIFICATION_NOT_OBJECT` token — no vocabulary addition — on the same merged
+  // outward reason this function already states below for the inner reads.
+  if (!isPlainObject(verifyInput)) {
+    fail('QUALIFICATION_NOT_OBJECT', 'qualification must be a plain object', {})
+  }
+  // Each read ONCE, into a local; the LOCALS are used from here down.
+  const qualification = safeReadVerifyInput(verifyInput, 'qualification')
+  const resolution = safeReadVerifyInput(verifyInput, 'resolution')
+  const envelopeKey = safeReadVerifyInput(verifyInput, 'envelopeKey')
+  const now = safeReadVerifyInput(verifyInput, 'now')
   if (!isPlainObject(qualification)) {
     fail('QUALIFICATION_NOT_OBJECT', 'qualification must be a plain object', {})
   }

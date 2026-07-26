@@ -1024,6 +1024,332 @@ async function hostileGetterOnTheVerifiedQualificationIsRefusedNotLeaked() {
 }
 
 // ---------------------------------------------------------------------------
+// P1 (B1a-3 round 4) · A HOSTILE GETTER ON THE PROBER'S **COMPONENTS** OBJECT.
+//
+// `createBindingQualificationProber(components)` read `components.executor` RAW. The
+// spike's `isPlainObject` is the LOOSE one — no enumeration, no prototype check — so
+// `{ get executor() { throw new Error(<attacker text>) } }` passed it intact and the
+// throw escaped the PUBLIC export as an UNBRANDED `Error` with the attacker's text
+// verbatim in `.message` and `.stack`.
+//
+// THIS SITE IS IN SCOPE AND IS NOT SHIELDED BY "byte-identical to main": on `main`
+// the factory was `createBindingQualificationProber(strategyRegistry)` — a POSITIONAL
+// argument that read no property from caller data. `const executor =
+// components.executor` is a `+` line in this PR's diff.
+//
+// THREE CONSTRUCTIONS, because they are three different mechanisms and any one of
+// them alone would leave the other two untested:
+//   ① an ENUMERABLE getter,
+//   ② a NON-ENUMERABLE getter (invisible to `Object.keys` entirely),
+//   ③ a Proxy GET-trap.
+// The Proxy OWNKEYS-trap is included as a FOURTH case and is asserted to be refused
+// — but note WHY, because it is not a guard: the ownKeys trap is never invoked on
+// this path at all; the read falls through to the empty target, yields `undefined`,
+// and the identity check rejects it. Recording that distinction is the point.
+// ---------------------------------------------------------------------------
+async function hostileGetterOnTheProberComponentsIsRefusedNotLeaked() {
+  const stack = buildStack()
+
+  // POSITIVE CONTROL first: a well-formed components object still mints a prober,
+  // so "refuse everything" cannot pass this test.
+  const good = createBindingQualificationProber({ executor: stack.executor })
+  assert.deepEqual(keySet(good), ['probeFromResolution'])
+
+  const constructions = [
+    ['enumerable getter', () => {
+      const o = {}
+      Object.defineProperty(o, 'executor', {
+        enumerable: true, configurable: true, get() { throw new Error(ATTACKER_TEXT) },
+      })
+      return o
+    }],
+    ['non-enumerable getter', () => {
+      const o = {}
+      Object.defineProperty(o, 'executor', {
+        enumerable: false, configurable: true, get() { throw new Error(ATTACKER_TEXT) },
+      })
+      return o
+    }],
+    ['Proxy get-trap', () => new Proxy({}, {
+      get(_target, prop) { throw new Error(`${ATTACKER_TEXT}::${String(prop)}`) },
+    })],
+    ['Proxy ownKeys-trap', () => new Proxy({}, {
+      ownKeys() { throw new Error(ATTACKER_TEXT) },
+    })],
+  ]
+
+  for (const [label, make] of constructions) {
+    const components = make()
+    // The construction must actually REACH the read: the loose `isPlainObject` must
+    // accept it. Asserted, so a case cannot silently degrade into "refused by the
+    // type check" and stop testing the read.
+    assert.ok(components && typeof components === 'object' && !Array.isArray(components),
+      `${label}: the fixture must pass the loose plain-object check`)
+
+    let caught = null
+    try { createBindingQualificationProber(components) } catch (error) { caught = error }
+
+    assert.ok(caught, `${label}: must fail closed`)
+    assert.ok(caught instanceof GipQualificationError,
+      `${label}: expected GipQualificationError, got ${caught && caught.name}`)
+    // Token EQUALITY on the reason this DOOR declares — not the run-input token.
+    assert.equal(caught.reason, 'PROBE_EXECUTOR_UNTRUSTED')
+    for (const surface of [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]) {
+      assert.ok(!surface.includes(ATTACKER_TEXT),
+        `${label}: attacker text escaped: ${surface.slice(0, 200)}`)
+    }
+  }
+
+  // POSITIVE CONTROL for the canary traversal itself.
+  assert.ok(String(new Error(ATTACKER_TEXT).stack).includes(ATTACKER_TEXT))
+}
+
+// ---------------------------------------------------------------------------
+// P2 (B1a-3 round 4) · THE **SPIKE'S OWN** ENUMERATION DOOR, TESTED SEPARATELY.
+//
+// `probeFromTrustedResolution` wraps `Object.keys(input)` in a try/catch because the
+// `ownKeys` trap fires during ENUMERATION, before any property is read. That guard
+// had NO test in any of the four suites: neutered alone, all four stayed exit 0.
+//
+// Meanwhile the body's leak-channel table listed channel 4 (ownKeys-during-
+// enumeration) as closed and cited **M19** — but M19's RED comes from the EXECUTOR
+// module's `safeOwnKeys`, a DIFFERENT DOOR in a DIFFERENT MODULE. The tested door was
+// covering for the untested one. This is 门级排他 ≠ 词级排他: one channel NAME, two
+// doors, and neutering either one still REDs while the other fires.
+//
+// So this test drives the SPIKE's door specifically, through public exports only, and
+// asserts BOTH states are distinguishable:
+//   guard PRESENT ⇒ branded `PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED`, no leak;
+//   guard REMOVED ⇒ bare `Error` carrying the canary in `.message` AND `.stack`
+//                   (executed; see the round-4 battery — and note the escape is NOT a
+//                   `GipSourceExecutorError`, which is what proves the executor's
+//                   `safeOwnKeys` is not the door answering here).
+// ---------------------------------------------------------------------------
+async function ownKeysTrapDuringRunInputEnumerationIsRefusedNotLeaked() {
+  const stack = buildStack()
+  const resolution = await resolveAlpha(stack.resolver)
+
+  const target = { resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT }
+  let ownKeysCalls = 0
+  const input = new Proxy(target, {
+    ownKeys() { ownKeysCalls += 1; throw new Error(ATTACKER_TEXT) },
+  })
+
+  // The fixture must reach the ENUMERATION: the loose `isPlainObject` accepts a Proxy
+  // over a plain object, so nothing refuses it earlier.
+  assert.ok(input && typeof input === 'object' && !Array.isArray(input))
+
+  let caught = null
+  try { await stack.prober.probeFromResolution(input) } catch (error) { caught = error }
+
+  assert.ok(caught, 'a throwing ownKeys trap must fail the probe closed')
+  assert.ok(caught instanceof GipQualificationError,
+    `expected GipQualificationError, got ${caught && caught.name}`)
+  assert.equal(caught.reason, 'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED')
+  for (const surface of [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]) {
+    assert.ok(!surface.includes(ATTACKER_TEXT), `attacker text escaped: ${surface.slice(0, 200)}`)
+  }
+
+  // THE DOOR IS DEMONSTRABLY LIVE. Without this, the refusal above could be coming
+  // from anywhere and the test would prove nothing about the enumeration guard.
+  assert.equal(ownKeysCalls, 1, 'the ownKeys trap must actually have been invoked')
+
+  // DOOR EXCLUSIVITY, asserted rather than assumed: the refusal is the SPIKE's, not
+  // the executor module's `safeOwnKeys`. A `GipSourceExecutorError` here would mean
+  // this test is measuring the other door — the exact substitution the round-3 table
+  // made in prose.
+  assert.ok(!(caught instanceof GipSourceExecutorError),
+    'the refusal must come from the spike module, not the executor module')
+
+  // POSITIVE CONTROL: the same stack with an ordinary run input still qualifies.
+  const clean = await stack.prober.probeFromResolution({
+    resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT,
+  })
+  assert.equal(clean.status, 'candidate')
+}
+
+// ---------------------------------------------------------------------------
+// P2 (B1a-3 round 4) · THE **OUTER** ARGUMENT OF `verifyBindingQualification`.
+//
+// Round 3 wrote `readQualificationField` for the six INNER reads and left the OUTER
+// read that obtains `qualification` raw — the argument was DESTRUCTURED in the
+// parameter list, which fires before any guard in the body. Executed before the fix:
+// 5 of 5 leaked UNBRANDED (one throwing getter per field, plus a Proxy get-trap over
+// the whole argument). The destructure pattern exists on `main`, so the CHANNEL is
+// not new; the ASYMMETRY — a guard already sitting in the same function — is what
+// this closes.
+// ---------------------------------------------------------------------------
+async function outerVerifyArgumentIsGuardedNotDestructuredRaw() {
+  const stack = buildStack()
+  const resolution = await resolveAlpha(stack.resolver)
+  const genuine = await stack.prober.probeFromResolution({
+    resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT, expiresAt: '2026-07-27T00:00:00Z',
+  })
+
+  // POSITIVE CONTROL: the ordinary object-literal call still verifies.
+  assert.equal(verifyBindingQualification({
+    qualification: genuine, resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
+  }).verified, true)
+
+  const fields = ['qualification', 'resolution', 'envelopeKey', 'now']
+  const constructions = fields.map((field) => [`throwing getter on .${field}`, () => {
+    const o = {
+      qualification: genuine, resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
+    }
+    delete o[field]
+    Object.defineProperty(o, field, {
+      enumerable: true, configurable: true, get() { throw new Error(ATTACKER_TEXT) },
+    })
+    return o
+  }])
+  constructions.push(['Proxy get-trap over the WHOLE argument', () => new Proxy({}, {
+    get(_target, prop) { throw new Error(`${ATTACKER_TEXT}::${String(prop)}`) },
+  })])
+
+  for (const [label, make] of constructions) {
+    let caught = null
+    try { verifyBindingQualification(make()) } catch (error) { caught = error }
+    assert.ok(caught, `${label}: must fail closed`)
+    assert.ok(caught instanceof GipQualificationError,
+      `${label}: expected GipQualificationError, got ${caught && caught.name}`)
+    assert.equal(caught.reason, 'QUALIFICATION_NOT_OBJECT')
+    for (const surface of [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]) {
+      assert.ok(!surface.includes(ATTACKER_TEXT),
+        `${label}: attacker text escaped: ${surface.slice(0, 200)}`)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P3 (B1a-3 round 4) · THE READ-ONCE INVARIANT, PINNED INSTEAD OF ASSERTED.
+//
+// Both paths carry an in-code comment stating as FACT that `expiresAt` is read ONCE
+// through the guarded reader into a local, "so a differing-return accessor cannot
+// answer one thing to a presence test and another to the use". NEITHER path had a
+// test: the round-3 battery's M9 DISCLOSED the gap on the probe path, and the verify
+// path's identical gap (M14 — a second `readQualificationField('expiresAt')` left all
+// four suites GREEN) was not disclosed at all — it was written as a closed invariant.
+//
+// An asserted-but-untested invariant is a hidden bug, so BOTH are pinned here, which
+// also removes the asymmetry rather than merely declaring it.
+//
+// The discriminator is BEHAVIOURAL, not a call count. A call count alone is the
+// "counting guard" shape this line has already paid for — `reads === 1` is asserted
+// too, but it is the CONSEQUENCE assertions that carry the test:
+//   * VERIFY: the getter answers the genuine instant on read #1 (so the MAC still
+//     authenticates) and a POSTPONED instant on read #2. Read-once ⇒ the local is the
+//     genuine instant ⇒ QUALIFICATION_EXPIRED. Double-read ⇒ the expiry comparison
+//     sees the postponed instant ⇒ the call RETURNS VERIFIED — a fail-OPEN inversion,
+//     which is precisely what the comment claims cannot happen.
+//   * PROBE: the getter answers instant A on read #1 and instant B on read #2.
+//     Read-once ⇒ the minted qualification carries A. Double-read ⇒ it carries B,
+//     which the MAC was not computed over.
+// ---------------------------------------------------------------------------
+async function expiresAtIsReadExactlyOnceOnBothPaths() {
+  // ---- VERIFY PATH (the undisclosed one, M14) ----
+  const stack = buildStack()
+  const resolution = await resolveAlpha(stack.resolver)
+  const GENUINE_EXPIRY = '2026-07-27T00:00:00Z'
+  const POSTPONED_EXPIRY = '2027-01-01T00:00:00Z'
+  const genuine = await stack.prober.probeFromResolution({
+    resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT, expiresAt: GENUINE_EXPIRY,
+  })
+
+  const hostile = { ...genuine }
+  delete hostile.expiresAt
+  let verifyReads = 0
+  Object.defineProperty(hostile, 'expiresAt', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      verifyReads += 1
+      // Read #1 answers the GENUINE value, so the MAC still authenticates and the
+      // function proceeds; every later read answers the POSTPONED value.
+      return verifyReads === 1 ? GENUINE_EXPIRY : POSTPONED_EXPIRY
+    },
+  })
+
+  // `now` is AFTER the genuine expiry and BEFORE the postponed one — the two readings
+  // give opposite verdicts, which is what makes this discriminating.
+  const NOW_AFTER_GENUINE_EXPIRY = '2026-07-28T00:00:00Z'
+  refusesWith(
+    () => verifyBindingQualification({
+      qualification: hostile, resolution, envelopeKey: ENVELOPE_KEY, now: NOW_AFTER_GENUINE_EXPIRY,
+    }),
+    GipQualificationError,
+    'QUALIFICATION_EXPIRED',
+  )
+  assert.equal(verifyReads, 1,
+    'verifyBindingQualification must read qualification.expiresAt EXACTLY once')
+
+  // The two-verdict property of the fixture is asserted, not assumed: with the
+  // POSTPONED value the same `now` would NOT be expired. Without this, the refusal
+  // above could hold for a reason unrelated to which value was read.
+  assert.ok(Date.parse(POSTPONED_EXPIRY) > Date.parse(NOW_AFTER_GENUINE_EXPIRY))
+  assert.ok(Date.parse(GENUINE_EXPIRY) <= Date.parse(NOW_AFTER_GENUINE_EXPIRY))
+
+  // ---- PROBE PATH (the one round 3 disclosed as M9) ----
+  const probeStack = buildStack()
+  const probeResolution = await resolveAlpha(probeStack.resolver)
+  const FIRST = '2026-07-27T00:00:00Z'
+  const SECOND = '2026-12-31T00:00:00Z'
+  let probeReads = 0
+  const runInput = { resolution: probeResolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT }
+  Object.defineProperty(runInput, 'expiresAt', {
+    enumerable: true,
+    configurable: true,
+    get() { probeReads += 1; return probeReads === 1 ? FIRST : SECOND },
+  })
+  const minted = await probeStack.prober.probeFromResolution(runInput)
+  assert.equal(probeReads, 1, 'the probe path must read input.expiresAt EXACTLY once')
+  assert.equal(minted.expiresAt, FIRST,
+    'the minted qualification must carry the value from the SINGLE read')
+  assert.notEqual(FIRST, SECOND)
+
+  // ...and the minted qualification is internally consistent: its MAC authenticates
+  // the expiry it actually carries. Under a double read the two would disagree.
+  assert.equal(verifyBindingQualification({
+    qualification: minted, resolution: probeResolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
+  }).verified, true)
+}
+
+// ---------------------------------------------------------------------------
+// NIT (B1a-3 round 4) · THE BINDER FAILS CLOSED ON A DUPLICATE, LIKE THE REGISTRY.
+//
+// `createHarnessSourceBinderForTests` used a bare last-wins `set`, while the action
+// registry refuses a duplicate outright. The binder is, per the module header, the
+// SOLE granting path into `trustedSourceBinders` and the whole of B-1's mechanism, so
+// a silent re-point of a systemContentKey is the worst place for last-wins.
+// ---------------------------------------------------------------------------
+function duplicateSystemContentKeyIsRefusedNotLastWins() {
+  const first = harnessSource()
+  const second = harnessSource()
+  refusesWith(
+    () => createHarnessSourceBinderForTests([
+      { systemContentKey: 'SCK-DUPLICATE', credentialFactory: first.credentialFactory },
+      { systemContentKey: 'SCK-DUPLICATE', credentialFactory: second.credentialFactory },
+    ]),
+    GipSourceExecutorError,
+    'EXECUTOR_COMPONENTS_INVALID',
+  )
+  // POSITIVE CONTROL: two DISTINCT keys still build, so this is not "refuse two
+  // entries".
+  const ok = createHarnessSourceBinderForTests([
+    { systemContentKey: 'SCK-DISTINCT-1', credentialFactory: harnessSource().credentialFactory },
+    { systemContentKey: 'SCK-DISTINCT-2', credentialFactory: harnessSource().credentialFactory },
+  ])
+  assert.ok(ok.handleFor('SCK-DISTINCT-1'))
+  assert.ok(ok.handleFor('SCK-DISTINCT-2'))
+  // Mirrors the registry's own duplicate refusal, asserted side by side so the two
+  // stay aligned.
+  refusesWith(
+    () => createHttpProbeActionRegistry([harnessAction({ execute: async () => ({}) }), harnessAction({ execute: async () => ({}) })]),
+    GipSourceExecutorError,
+    'PROBE_ACTION_DECLARATION_INVALID',
+  )
+}
+
+// ---------------------------------------------------------------------------
 // P1-A (B1a-3 round 3) · A RESIDUAL PINNED BY ASSERTING THE CHANNEL **EXISTS**.
 //
 // `gip-binding-qualification-spike.cjs` removed `fail` from `__internals` and its
@@ -1243,6 +1569,12 @@ async function main() {
   await answerPlaneIsValuesFreeAndForeignTextIsDiscarded()
   await hostileGetterOnAnAllowlistedKeyIsRefusedNotLeaked()
   await hostileGetterOnTheVerifiedQualificationIsRefusedNotLeaked()
+  // --- B1a-3 round 4 ---
+  await hostileGetterOnTheProberComponentsIsRefusedNotLeaked()
+  await ownKeysTrapDuringRunInputEnumerationIsRefusedNotLeaked()
+  await outerVerifyArgumentIsGuardedNotDestructuredRaw()
+  await expiresAtIsReadExactlyOnceOnBothPaths()
+  duplicateSystemContentKeyIsRefusedNotLastWins()
   brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
   latentByEnumeration()

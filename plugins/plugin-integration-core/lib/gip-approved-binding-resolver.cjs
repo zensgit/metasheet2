@@ -243,6 +243,18 @@ function createHarnessSystemIdentityAuthorityForTests(systemContentKeyBySystemId
   return authority
 }
 
+// COMPOSITE-KEY SEPARATOR = U+0000, WRITTEN AS THE ESCAPE `\x00`, NEVER AS A RAW
+// NUL BYTE (B1a-3 round 4, P3). It was committed as a raw NUL until this round, and
+// the cost was not cosmetic: a file containing a NUL is BINARY to BSD `grep`, which
+// then reports ZERO line hits for tokens that are demonstrably present — `grep -c
+// safeOwnSymbols` on this file returned nothing (exit 1) while `git grep` returned 2.
+// This module's posture is that its in-code comments ARE the ledger and are audited
+// by source-text sweeps, so a file that goes grep-invisible bakes the
+// "empty read is not absence" trap into the audit surface itself. The separator VALUE
+// is unchanged — U+0000 either way — which is proven by hashing the generated key
+// before and after. NUL is chosen because `readIdentityToken` rejects every control
+// character, so no admissible contractId/contractVersion can contain the separator
+// and forge a collision.
 function createHarnessCanonicalObjectAuthorityForTests(entries) {
   if (!Array.isArray(entries)) fail('RESOLVER_COMPONENTS_INVALID')
   const table = new Map()
@@ -253,11 +265,11 @@ function createHarnessCanonicalObjectAuthorityForTests(entries) {
     const contractId = readIdentityToken(entry, 'contractId', 'RESOLVER_COMPONENTS_INVALID')
     const contractVersion = readIdentityToken(entry, 'contractVersion', 'RESOLVER_COMPONENTS_INVALID')
     const canonicalObjectVersion = readIdentityToken(entry, 'canonicalObjectVersion', 'RESOLVER_COMPONENTS_INVALID')
-    table.set(`${contractId} ${contractVersion}`, canonicalObjectVersion)
+    table.set(`${contractId}\x00${contractVersion}`, canonicalObjectVersion)
   }
   const authority = Object.freeze({
     canonicalObjectVersionFor(contractId, contractVersion) {
-      const found = table.get(`${contractId} ${contractVersion}`)
+      const found = table.get(`${contractId}\x00${contractVersion}`)
       if (typeof found !== 'string') fail('RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED')
       return found
     },

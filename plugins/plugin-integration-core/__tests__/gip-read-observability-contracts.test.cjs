@@ -64,6 +64,39 @@ function counterContract() {
     refusesWith(() => assertValuesFreeCounterSample({ value: 1, [identifier]: 'x' }),
       'COUNTER_SAMPLE_NOT_VALUES_FREE')
   }
+
+  // ── B1a-3 round 4 · THE SYMBOL HALF ──────────────────────────────────────────
+  // `assertClosedKeySet` here checked `Object.keys` ONLY, while the contract comment
+  // on this function states any identifier "is refused rather than dropped". EXECUTED
+  // before the fix: `assertValuesFreeCounterSample({ value: 1, [Symbol('tenantId')]:
+  // '…' })` returned `{"value":1}` — ACCEPTED AND DROPPED — while the STRING-keyed
+  // twin was correctly REFUSED. So the sentence was false of the code. No value
+  // transited (the result is rebuilt from a frozen literal over individually-read
+  // members), which makes it a FALSE COMMENT rather than a live leak — and it is the
+  // identical overclaim that the §4 step 1.4 executor module's own P2-D note says it
+  // was correcting, left standing in a sibling module.
+  //
+  // Each case is asserted against its STRING-KEYED TWIN in the same loop, because the
+  // twin is what makes the symbol case discriminating: before the fix the twin passed
+  // and the symbol did not, so a test that only exercised the twin was green against
+  // nothing.
+  for (const identifier of ['tenantId', 'objectKey', 'systemId']) {
+    const symbolKeyed = { value: 1, [Symbol(identifier)]: 'SHOULD-NOT-BE-DROPPED' }
+    // The fixture really is symbol-keyed and really is invisible to `Object.keys` —
+    // otherwise this case would be testing the string half a second time.
+    assert.deepEqual(Object.keys(symbolKeyed), ['value'])
+    assert.equal(Object.getOwnPropertySymbols(symbolKeyed).length, 1)
+    refusesWith(() => assertValuesFreeCounterSample(symbolKeyed), 'COUNTER_SAMPLE_NOT_VALUES_FREE')
+    refusesWith(() => assertValuesFreeCounterSample({ value: 1, [identifier]: 'x' }),
+      'COUNTER_SAMPLE_NOT_VALUES_FREE')
+  }
+  // A WELL-KNOWN symbol is still a symbol — the refusal is not a denylist of
+  // `Symbol()`-minted descriptions.
+  refusesWith(() => assertValuesFreeCounterSample({ value: 1, [Symbol.toStringTag]: 'Counter' }),
+    'COUNTER_SAMPLE_NOT_VALUES_FREE')
+  // POSITIVE CONTROL for the symbol half: a sample with NO symbol still passes, so
+  // "refuse every object" cannot satisfy the four assertions above.
+  assert.equal(assertValuesFreeCounterSample({ value: 4 }).value, 4)
   // Shape hygiene on the one legal member.
   refusesWith(() => assertValuesFreeCounterSample({ value: -1 }), 'COUNTER_SAMPLE_INVALID')
   refusesWith(() => assertValuesFreeCounterSample({ value: 1.5 }), 'COUNTER_SAMPLE_INVALID')
@@ -134,6 +167,18 @@ function handshakeContract() {
     'HANDSHAKE_REQUEST_INVALID')
   refusesWith(() => evaluateCapabilityHandshake(request, { ...expectation, allowDowngrade: true }),
     'HANDSHAKE_EXPECTATION_INVALID')
+  // …and SYMBOL-keyed on both records too (B1a-3 round 4). The same `assertClosedKeySet`
+  // serves all three entry points in this module, so the symbol gap was not confined
+  // to the counter: EXECUTED before the fix, BOTH of these returned
+  // `{"outcome":"READY","mayRun":true}` — accepted and dropped — while their
+  // string-keyed twins two lines up were refused.
+  refusesWith(() => evaluateCapabilityHandshake({ ...request, [Symbol('extraCapability')]: true }, expectation),
+    'HANDSHAKE_REQUEST_INVALID')
+  refusesWith(() => evaluateCapabilityHandshake(request, { ...expectation, [Symbol('allowDowngrade')]: true }),
+    'HANDSHAKE_EXPECTATION_INVALID')
+  // POSITIVE CONTROL for the two symbol refusals: the same records WITHOUT the symbol
+  // are still READY, so "refuse every handshake" cannot pass them.
+  assert.equal(evaluateCapabilityHandshake({ ...request }, { ...expectation }).outcome, 'READY')
 
   refusesWith(() => evaluateCapabilityHandshake({ ...request, clientBuild: '' }, expectation),
     'HANDSHAKE_REQUEST_INVALID')
