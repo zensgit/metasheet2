@@ -41,20 +41,28 @@
 | **(b) run 级 outbox** | 引入一个 run 级锚（run 级 operation 或对 outbox 放宽 identity 约束），挂一条聚合事件 | **保持外部事件语义不变**（消费者零改）。代价：需要一个「run 级 operation」概念——当前 §7.1 的 operation 是 batch/item 二元且绑 per-user target；要么新增第三类 kind（**锁 §7.1 合同变更 ⇒ 可能需 amendment**），要么放宽 outbox 的 identity 校验（**削弱 W4C-0 刚建立的 verified-identity 不变量**，且 K11 类的「窄性」问题会重演）。 |
 | **(c) §7.1a 合同豁免** | 明文把 run 级生命周期事件排除在 outbox 耐久合同之外，scheduled 侧保留同步 emit 但**照 live 侧收窄到 legacy 姿态**（或保留全姿态同步 emit 并明文声明其 best-effort） | 改动最小、无 wire 变更。代价：**scheduled 侧的事件不具备 crash-after-commit-before-emit 的投递保证**——这正是 §7.1a 要解决的问题，等于对该面**明文降级**。必须写清「哪些事件是耐久的、哪些是 best-effort」，否则 W4C-5 soak 与后续片会重蹈同一含混。 |
 
-### 1.3 本车道的中立观察（不替 owner 选）
+### 1.3 ⚠️ 裁决已给出：**G-2 = (b2)**，本节的原「中立观察」已作废
 
-- (a) 是唯一同时满足「耐久」与「不动 §7.1 operation 合同」的路，但**代价落在外部 wire**。
-- (b) 语义最保守，但代价落在**刚建立的身份不变量**上，且很可能触发 amendment。
-- (c) 代价最小但**把问题从「未实现」转成「明文不保证」**——若选它，锁 §7.1a 文本必须同步修订，否则文档与实现再次背离（本片已经因此吃了一条 P1-3 的注释证伪）。
+**owner 于 2026-07-26 裁决 G-2 = (b2)**（记录 #4612 `c-5082785641`），推翻了本车道先前建议并被短暂落地的 (c)-plus（该落地已回滚，commit `ad5541027`）。
 
-**裁决产出物**：owner 选定后，本计划 §2.1 才能填实具体落点。
+**本节原文（保留为历史，勿再引用）**曾写：「(c) 代价最小但把问题从『未实现』转成『明文不保证』」，并以「同步修订 §7.1a 文本」为条件把它包装成可接受。**该判断是错的**，owner 的三条理由逐条成立：
+
+1. **锁并非文字含混**：§7.1a `:1317` 明确规定 W4C-2 完成 live/scheduled event cutover，§12.3 `:2672` 再次要求 scheduled outbox 在 operation seal 前写入 ⇒ (c)-plus 是**合同降级**，不是分类勘误。**且第一轮门审判 P1-2 时已引用这两处**——本车道随后的「分类含混」论证实际是用自己的重读覆盖了门审的原文引用。
+2. **W4C-0 闭集漏项不能反证锁错了**：`w4c0-operation-contract.ts:92` 不含 `attendance.absence.generated`，**更像该 inventory 的缺陷**；本车道曾把它当作三个「独立信号」之一，推理方向错误。
+3. **漏了第二条 run 级事件**：scheduled 路径实际发出**两条**，`attendance.work_date.review_required`（携待人工核对信息）本车道**完全未查**。
+
+**(b2) 的落地形状**见独立 amendment：`attendance-issue-4556-w4c2-scheduled-run-identity-amendment-20260726.md`（PR #4617，PROPOSED）。核心是保留 run 级公共事件与外部语义，同时建立**真实 durable run 身份**（scheduled-run row + outbox 身份的 `operation_id | scheduled_run_id` discriminated union），两条事件均入闭集按条件耐久投递。
+
+**§2.1 的落点须以该 amendment 为准**，且 **owner RATIFY 该 amendment 之后**才可实现 P1-2。
+
+> 教训（已入库）：门审引锁原文判「未实现」时，禁用「重读锁文」去覆盖；实现侧闭集/清单的漏项默认是**清单缺陷**，不是合同意图。
 
 ---
 
 ## 2. 逐条修复设计（G-2 之外均可立即执行）
 
 ### 2.1 P1-2 — scheduled 侧 outbox
-**待 G-2 裁决后填实。** 无论哪条路，共同的验收腿：
+**G-2 已裁 (b2)；落点以 PR #4617 的 amendment 为准，且须 owner RATIFY 后才可实现。** 无论哪条路，共同的验收腿：
 - scheduled 侧存在与 live 侧**同等强度**的排他腿——删掉 scheduled 的耐久机制必须红（当前删 live 的红 5 条、scheduled 零红，正是缺失的证据）。
 - `legacy_projection_only` 下 scheduled 侧仍**零 outbox 行**（对齐 live 侧既有腿）。
 - crash-after-commit-before-emit / dispatcher 重启 / 并发 dispatcher 三腿在 scheduled 面各自成立（**真并发双连接**）。
