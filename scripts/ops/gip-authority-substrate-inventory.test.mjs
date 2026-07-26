@@ -2158,9 +2158,15 @@ describe('stderr values-free discipline — real subprocess (#4603 P2(a))', () =
     // dependency of packages/core-backend/package.json; a contributor who ran `pnpm install` at
     // the repo root (an ordinary, unremarkable step) and then ran this test file directly would
     // resolve `pg` successfully via workspace hoisting, and the whole point of this test — proving
-    // the redaction actually engaged — would silently stop being exercised while still reading
-    // green (a false-negative-shaped risk this repo's doctrine treats as a defect, not a nuisance:
-    // see feedback_positive_control_not_failclosed.md). The CI workflow itself never installs
+    // the redaction actually engaged — would stop being exercised. CORRECTION (review, 2026-07-25):
+    // an earlier draft of this comment called that "silently ... while still reading green", i.e. a
+    // FALSE-GREEN. That is wrong, and this same block refutes it three sentences below: replaying
+    // the old shape against a stub `pg` reds LOUDLY with `control failed: 'pg' imported
+    // successfully...`. The real defect class is a FALSE-RED — an environment-dependent spurious
+    // failure that a contributor cannot act on, because it is not their change that broke it. The
+    // control was already fail-closed in the sense doctrine cares about
+    // (feedback_positive_control_not_failclosed.md); what it was not, was environment-independent.
+    // The fix below is worth keeping for exactly that reason. The CI workflow itself never installs
     // (checkout + setup-node + `node --test`, no install step — see
     // .github/workflows/gip-authority-substrate-inventory.yml), so CI never actually saw this gap;
     // this only bites a contributor running the suite locally after `pnpm install`.
