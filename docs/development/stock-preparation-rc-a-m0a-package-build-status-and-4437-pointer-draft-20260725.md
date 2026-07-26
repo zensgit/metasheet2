@@ -270,14 +270,16 @@ Downloaded the real artifact read-only (`gh run download 30148584851`) — not h
   25197ba31dcc5638c63eb79e4928e4db6b0fcdc715aae799f7672d70119d0056  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725-deploy-bootstrap.ps1
   75261b3f3b3a161e6c586d95ee4110a740454957c3c55cb0cd5e742839a176d5  metasheet-multitable-onprem-v2.5.0-m0a-rca-20260725-deploy-bootstrap.bat
   ```
-  **These four checksums are A1-run-scoped evidence that the build+verify half executed and self-verified —
-  they are NOT the checksums the eventual A2 freeze run will produce.** `BUILD_PROVENANCE.json` (packaged
-  *inside* the checksummed archive) embeds `builtAt` (`date -u` at build time) and `ciRunId`
-  (`$GITHUB_RUN_ID`) — both per-run values baked into the archive bytes before hashing
+  **These four checksums are A1-run-scoped evidence that the build+verify half executed and self-verified.**
+  `BUILD_PROVENANCE.json` (packaged *inside* the checksummed archive) embeds `builtAt` (`date -u` at build
+  time) and `ciRunId` (`$GITHUB_RUN_ID`) — both per-run values baked into the archive bytes before hashing
   (`scripts/ops/multitable-onprem-package-build.sh` lines ~508-510). A fresh `publish_release=true` dispatch
-  is a **new build**, with a new `ciRunId`/`builtAt`/archive bytes, therefore a **different** `.tgz`/`.zip`
-  SHA256 than the four values above. Do not carry these into #4437 as "the" RC-A checksums (§4 keeps them
-  `<<PENDING FREEZE RUN>>`).
+  (§3.2, Path B) is a **new build**, with a new `ciRunId`/`builtAt`/archive bytes, therefore a **different**
+  `.tgz`/`.zip` SHA256 than the four values above — under that path, do not carry these into #4437 as "the" RC-A
+  checksums. **Erratum (this update):** under the owner's now-recommended Path A (§3.2a, freeze), the opposite
+  is true — these four checksums, unchanged, ARE what A2 publishes, verified by a post-publish round-trip
+  re-hash (§3.2a step 5). §4 keeps the corresponding fields `<<PENDING FREEZE RUN>>` because A2 (either path)
+  has not happened yet, not because these values are assumed wrong under every path.
 - **In-archive `BUILD_PROVENANCE.json`** (extracted from the `.tgz`, not the external sidecar — **read in
   full, not excerpted**, per this fix pass's re-extraction and read of the same archive; the prior draft
   showed only a partial field set here without marking it as an excerpt, while the sibling manifest block
