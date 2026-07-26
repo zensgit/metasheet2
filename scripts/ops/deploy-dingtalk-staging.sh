@@ -140,7 +140,7 @@ backend_count="$(printf '%s\n' "${backend_ids}" | awk 'NF { count += 1 } END { p
 [[ "${backend_count}" == "1" ]] || die "managed staging stack must have exactly one backend worker"
 backend_id="$(printf '%s\n' "${backend_ids}" | head -n 1)"
 
-ingress_backend_ids="$(docker ps -q --filter "publish=18900" | sed '/^[[:space:]]*$/d')"
+ingress_backend_ids="$(docker ps --no-trunc -q --filter "publish=18900" | sed '/^[[:space:]]*$/d')"
 ingress_backend_count="$(printf '%s\n' "${ingress_backend_ids}" | awk 'NF { count += 1 } END { print count + 0 }')"
 [[ "${ingress_backend_count}" == "1" ]] || die "staging backend ingress must resolve to exactly one running container"
 [[ "${ingress_backend_ids}" == "${backend_id}" ]] || die "staging backend ingress does not resolve to the managed backend worker"

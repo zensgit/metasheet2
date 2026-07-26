@@ -79,13 +79,15 @@ user, enable automatic sync/deprovision, or change a runtime flag.
 ## 4. Verification
 
 The hermetic behavior suite executes the real Bash scripts through temporary PATH shims and covers
-42 cases:
+43 cases:
 
 - one attested healthy backend produces PASS;
 - the default command carries the exact staging Compose project and a production-project override
   fails before any Compose mutation;
 - backend-only is the default build/deploy scope, `full` is explicit and tested, and any other
   scope fails before Compose mutation;
+- ingress ownership compares full container IDs from both Compose and Docker, so Docker's default
+  12-character `ps -q` rendering cannot produce a false worker mismatch;
 - mutable/abbreviated identity, stale provenance, stale image reference, image-ID mismatch,
   revision mismatch, stale/missing/unhealthy health identity, zero/multiple project workers,
   multiple/unmanaged ingress workers, non-running backend, wrong project selector, and
@@ -101,7 +103,7 @@ Additional repository tests cover immutable deploy traceability and evidence-pac
 behavior suite and its source wiring guard run in both Node 18 and Node 20 legs of the `test`
 matrix, and each suite asserts the other's invocation. A live GitHub branch-protection API read on
 2026-07-26 confirmed `test (20.x)` is a strict required context. The Node 18 leg is additional
-coverage, not claimed as a required context. The final four-file local run passed 68 of 68 tests.
+coverage, not claimed as a required context. The final four-file local run passed 69 of 69 tests.
 
 The final product-code tree at `a5a4958d37dd7b20911fc4bb4ad8262e72ebd76f` was copied only
 under `/private/tmp/dingtalk-worker-gate-mut-r2.AzDjbz` for 37 single-variable mutations. All 37
@@ -161,6 +163,11 @@ deploy host's Node heap and the fail-closed script emitted no provenance. Stagin
 healthy deployed image. The scripts now default to the backend-only scope that matches this gate's
 actual safety claim; the previous full-stack behavior remains available only through an explicit,
 tested `STAGING_DEPLOY_SCOPE=full`.
+
+The first attested backend-only deploy replaced the worker successfully but the gate then refused
+to issue PASS because Compose returned a full container ID while `docker ps -q` returned its
+12-character form. Inspection proved both values named the same sole managed worker. The ingress
+query now uses `--no-trunc`, with a discriminating regression that fails if the option is removed.
 
 ## 7. Remaining owner gates
 

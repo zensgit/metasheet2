@@ -102,7 +102,14 @@ if [[ "\${1:-}" == "inspect" ]]; then
 fi
 if [[ "\${1:-}" == "ps" ]]; then
   if [[ " $* " == *" --filter publish=18900 "* ]]; then
-    printf '%s\\n' "\${FAKE_INGRESS_CONTAINER_IDS:-backend-one}"
+    ingress_ids="\${FAKE_INGRESS_CONTAINER_IDS:-backend-one}"
+    if [[ "\${FAKE_TRUNCATE_INGRESS_IDS_WITHOUT_NO_TRUNC:-0}" == "1" && " $* " != *" --no-trunc "* ]]; then
+      while IFS= read -r ingress_id; do
+        printf '%.12s\\n' "\${ingress_id}"
+      done <<< "\${ingress_ids}"
+    else
+      printf '%s\\n' "\${ingress_ids}"
+    fi
   elif [[ " $* " == *" --filter label=com.docker.compose.project=\${FAKE_COMPOSE_PROJECT:-metasheet2-dingtalk-staging} "* ]]; then
     printf '%s\\n' "\${FAKE_PROJECT_CONTAINER_IDS:-backend-one
 postgres-one
@@ -250,7 +257,7 @@ test('deploy accepts one attested healthy backend for project and ingress', asyn
   assert.match(log, /compose .* up -d --remove-orphans backend/)
   assert.doesNotMatch(log, /backend web/)
   assert.match(log, /compose .* ps -q --all backend/)
-  assert.match(log, /ps -q --filter publish=18900/)
+  assert.match(log, /ps --no-trunc -q --filter publish=18900/)
   assert.match(log, /ps -q --filter label=com\.docker\.compose\.project=metasheet2-dingtalk-staging/)
   assert.match(log, /inspect -f \{\{\.Image\}\} backend-one/)
 })
@@ -271,6 +278,19 @@ test('deploy uses the backend Compose project as the exact service selector', as
   }))
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stderr, /WORKER_DRAIN_GATE_PASS/)
+})
+
+test('deploy compares the full ingress container identity', async (t) => {
+  const h = await withHarness(t)
+  const fullContainerId = 'a'.repeat(64)
+  const result = run(deployScript, deployEnv(h, {
+    FAKE_BACKEND_IDS: fullContainerId,
+    FAKE_INGRESS_CONTAINER_IDS: fullContainerId,
+    FAKE_TRUNCATE_INGRESS_IDS_WITHOUT_NO_TRUNC: '1',
+  }))
+  assert.equal(result.status, 0, result.stderr)
+  const log = await readFile(h.commandLog, 'utf8')
+  assert.match(log, /ps --no-trunc -q --filter publish=18900/)
 })
 
 const deployCases = [
