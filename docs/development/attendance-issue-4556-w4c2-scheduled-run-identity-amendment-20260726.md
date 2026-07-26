@@ -87,18 +87,51 @@
 > retraction above, and the opening of the `(ii)` cell) stated the ballot's
 > cardinality two different ways: this note previously said "two-token"
 > and "`(ii-narrow)` is … not offered as a ratifiable token this pass",
-> while section 3.1's row and the rest of section 3.2 said three tokens,
-> two unconditional and one conditional. The two-token wording above and
-> at section 3.2's `(ii)` opening are corrected in this pass to match the
-> row. The same review also raised, and this pass separately fixes,
-> section 3.2's precondition (1) wording (aligned to section 4 step 3's
-> phrasing), precondition (4) (an explicit acceptance bar added), and one
-> overbroad "every argument … analyses only appearance" sentence (narrowed
-> to name its exception) — none of those three touch the ballot's token
-> count or shape, which is what this note documents. Section 3.1's ballot
-> row itself is unchanged. The PR body was updated in the same pass to
-> stop asserting the retracted safety claim above the retraction's own
-> text.
+> while section 3.1's row said three tokens, two unconditional and one
+> conditional. The two-token wording above and at section 3.2's `(ii)`
+> opening are corrected in this pass to match the row. The same review
+> also raised, and this pass separately fixes, section 3.2's precondition
+> (1) wording (aligned to section 4 step 3's phrasing), precondition (4)
+> (an explicit acceptance bar added), and one overbroad "every argument …
+> analyses only appearance" sentence (narrowed to name its exception) —
+> none of those three touch the ballot's token count or shape, which is
+> what this note documents. Section 3.1's ballot row itself is unchanged.
+> The PR body was updated in the same pass to stop asserting the
+> retracted safety claim above the retraction's own text. *(This
+> paragraph originally also claimed "the rest of section 3.2" — beyond
+> the two sites named above — uniformly said three tokens; that claim was
+> false and is corrected by the paragraph below.)*
+>
+> **Consistency fix, continued (this pass).** A subsequent gate review
+> (bound to head `3122264352d1e114fa3c67a8fa11031d9d1ac3cd`) found that
+> the sweep described in the paragraph above was itself incomplete: it
+> searched only the hyphenated forms "two-token" and "two ratifiable",
+> and missed section 3.2's Recommendation-intro sentence (the paragraph
+> beginning "Recommendation, not a decision"), which used the
+> unhyphenated wording "restricted to the two tokens this document can
+> currently offer" — an unconditional two-token count, eleven lines
+> before this same section's `(ii-narrow)` cell reopens the third token
+> as conditional-but-live. It is corrected in this pass to read
+> "restricted to the two unconditional tokens," matching section 3.1's
+> row's own "(i) over (ii-wide) among the two unconditional tokens"
+> construction. This paragraph does not itself claim the resulting sweep
+> is now exhaustive; the current, word-pattern-based (not
+> hyphenation-specific) census of every ballot-cardinality wording site
+> in this document and the PR body is carried in the PR body's revision
+> record, not restated here.
+>
+> This pass also tightens section 3.1's ballot row: its precondition (1)
+> reference said only "corrected, gated mechanism spec," looser than
+> section 3.2 precondition (1) and section 4 step 3's explicit
+> `matching.length === 1`-gating requirement, and this document's own
+> revision banner names section 3.1's row the sole authoritative ballot
+> text — so a reader who reads only that row would learn a softer bar
+> than the document actually requires. The row now reads "corrected,
+> `matching.length === 1`-gated mechanism spec" in that one place. The
+> "Section 3.1's ballot row itself is unchanged" sentence in the paragraph
+> two above describes only the diff bound to head
+> `a2cd9ab7c83d85495acda911a08d2f6be4bf29f9` (round 4's own pass); it does
+> not describe the document's current state after this pass's edit.
 >
 > Runtime posture: PR #4612 stays **Draft** under
 > **OWNER-AUTHORIZATION-HOLD**. This amendment contains **no runtime code**
@@ -1594,7 +1627,7 @@ one-pass ratification — see the scope note at the top of this document.
 | `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair to target rows (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a terminal outcome; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
 | `OD-W4C-51` (`O-2`) — canonical order for `ordinal` / resume-guard shape | (a) pin the membership resolution query to `ORDER BY user_id` (or another explicit total order); `ordinal` becomes a pure function of membership; narrow gate 4's "byte-identical to pre-amendment emit" claim to key/value-set equivalence plus the new canonical order; (b) leave resolution order undefined as today; change the resume guard (section 1.7 step 3) to an order-insensitive set fingerprint; withdraw gate 10's "or one ordinal" leg | **(a)**, because the ordered fingerprint this draft already specifies (section 1.3) cannot be satisfied on resume by an unpinned membership query, and pinning without owner sign-off is not available to the author alone — a one-time, disclosed change to `reasons` ordering is preferable to shipping a resume guard that spuriously fires on a benign restart |
 | `OD-W4C-52` (`O-4`) — does a `running` run block shadow/eligible promotion | (a) extend the lock's promotion-block predicate (lock lines 2689-2690, 2250) to treat a `running` `attendance_scheduled_runs` row as blocking, same as an incomplete operation; accept the operational cost that a promotion window must avoid colliding with an in-flight scheduled run; (b) do not block promotion; instead redefine finalization (section 1.8 step 1) to execute under the run's own frozen posture rather than the currently resolved one — a considered, narrow reversal of this draft's own "posture flip is remediation, never a rebase" stance, scoped to finalization only | no recommendation — this is an operational rollout-timing tradeoff ((a)) versus a semantic reversal of a stance this same draft asserts elsewhere ((b)); both are internally consistent, and the choice is the owner's to make, not the author's |
-| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | **Two unconditional tokens, one conditional token:** (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column — unconditional; **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface) — unconditional; **(ii-narrow)** exclude the operation's own just-written row from the resolver's `openPreviousMatches` match — **conditional**: section 3.2 demonstrates by executed counterexample that the mechanism *as specified in this document* flips both `workDate` and `shiftId` (not only `reasonCode`) when this operation's write touches a pre-existing open record it did not create; a ruling of `(ii-narrow)` authorizes the *direction* (eliminate self-observation at the resolver, not by widening the fingerprint domain) but is **void as an implementation authorization unless and until** the four preconditions in section 3.2's "Gate shape this option needs" (corrected, gated mechanism spec; positive control; the negative control from the counterexample above; a check-out/disappearance analysis) are supplied and gated — implementation does not start on the mechanism as currently specified | (i) over (ii-wide) among the two unconditional tokens — see reasoning in section 3.2. No recommendation is made on `(ii-narrow)`'s *direction* (that remains the owner's to prefer, per section 3.2's closing paragraph) or on whether its voidness condition will ever be satisfied — only that today's specified mechanism does not clear it |
+| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | **Two unconditional tokens, one conditional token:** (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column — unconditional; **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface) — unconditional; **(ii-narrow)** exclude the operation's own just-written row from the resolver's `openPreviousMatches` match — **conditional**: section 3.2 demonstrates by executed counterexample that the mechanism *as specified in this document* flips both `workDate` and `shiftId` (not only `reasonCode`) when this operation's write touches a pre-existing open record it did not create; a ruling of `(ii-narrow)` authorizes the *direction* (eliminate self-observation at the resolver, not by widening the fingerprint domain) but is **void as an implementation authorization unless and until** the four preconditions in section 3.2's "Gate shape this option needs" (corrected, `matching.length === 1`-gated mechanism spec; positive control; the negative control from the counterexample above; a check-out/disappearance analysis) are supplied and gated — implementation does not start on the mechanism as currently specified | (i) over (ii-wide) among the two unconditional tokens — see reasoning in section 3.2. No recommendation is made on `(ii-narrow)`'s *direction* (that remains the owner's to prefer, per section 3.2's closing paragraph) or on whether its voidness condition will ever be satisfied — only that today's specified mechanism does not clear it |
 
 ### 3.2 `O-5`/`OD-W4C-53` — a fifth pending decision, bundled from outside this document's own schema
 
@@ -1991,16 +2024,22 @@ the comparison. There are two structurally different ways to do that:
   the removal — or (b) a structural argument in the style of section 3.2's
   kept Fact 1/Fact 2 (a proof over a named, closed set of cases, not an
   unscoped safety claim) that the disappearance direction cannot affect the
-  resolved candidate. Either form is acceptable; two paragraphs of prose
-  declaring the question closed, without (a) or (b), does not discharge
-  this precondition. *(ii-wide)* needs a full re-run of every other §8.2 gate in the
+  resolved candidate, **where the named closed set is itself shown to
+  cover every row this operation's own write can trigger the mechanism
+  against — the row-ID exclusion applies per row of this operation's
+  `openRecords` writes, whether newly created or merely touched, not to a
+  representative subset of them** (a closed-set proof that omits this
+  coverage step is the same shape as the round-2 proof this document's
+  own section 3.2 counterexample already defeated). Either form is
+  acceptable; two paragraphs of prose declaring the question closed,
+  without (a) or (b), does not discharge this precondition. *(ii-wide)* needs a full re-run of every other §8.2 gate in the
   governing lock and the W4C-1/W4C-2 gate suites unaffected by the reorder,
   since a step-order change is exactly the kind of edit this document's own
   precedent (section 0.1 reason 3) warns against making without checking
   every consumer.
 
-**Recommendation, not a decision — restricted to the two tokens this
-document can currently offer.** (i), on balance, against **(ii-wide)**
+**Recommendation, not a decision — restricted to the two unconditional
+tokens.** (i), on balance, against **(ii-wide)**
 specifically: (i) is the smaller, more contained change — one new domain
 separator and function, fully gated both ways above — against (ii-wide)'s
 reopening of RATIFIED lock text whose citation surface has not been audited
