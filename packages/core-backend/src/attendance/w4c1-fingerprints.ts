@@ -103,11 +103,29 @@ export function computeAttendanceSourceDefinitionFingerprintV1(input: unknown): 
  * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock §8.2
  * step 7's OUTER-vs-INNER "source-definition fingerprint equality" clause.
  *
+ * *** O-5 — STATUS: PENDING OWNER RATIFICATION, not yet a satisfied clause
+ * (#4612 gate3 round 3 independent review). §8.2 step 7's text names a
+ * single fingerprint, "the source-definition fingerprint" (the same one
+ * `computeAttendanceSourceDefinitionFingerprintV1` above computes and the
+ * storage column is named for). This function compares a SECOND, NARROWER
+ * domain instead — the object actually being compared for step-7 equality
+ * is therefore not the object the lock names. Two full remediation paths
+ * are written up in the PR body's O-5 section, each with its own complete
+ * spec, blast radius, and door shape; NEITHER is authorized by this
+ * comment or by landing this code — only an owner `OD-W4C-5x` decision can
+ * close this. PR #4612 does not claim "§8.2 step 7 satisfied" while this
+ * status line stands. ***
+ *
  * Same `{attribution, context}` input and the same nullability contract as
  * `computeAttendanceSourceDefinitionFingerprintV1`, but ALSO projects out
  * `reasonCode` (in addition to `resolvedAt`) — discovered empirically
  * (`attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts` "Group E /
- * eDay2", zero-concurrency false-positive before this exclusion existed):
+ * eDay2", zero-concurrency false-positive before this exclusion existed,
+ * later reproduced field-by-field in "Group F" — that test's own O-5
+ * mutation leg proves, on real captured values, that reinstating
+ * `reasonCode` into this domain flips the comparison; a companion literal
+ * source mutation reproduced the same false positive on eDay2 end-to-end,
+ * see PR body §O-5):
  * the lock's own §8.2 step ordering runs the legacy write (step 3) BEFORE
  * candidate re-resolution (step 4) in the SAME transaction, and the W2
  * resolver's `openPreviousMatches` branch (`selectAmongMatchingCandidates`)
@@ -115,14 +133,18 @@ export function computeAttendanceSourceDefinitionFingerprintV1(input: unknown): 
  * OWN step-3 write just created — producing a DIFFERENT `reasonCode`
  * (`OPEN_PREVIOUS_NIGHT_RECORD` vs `PREVIOUS_NIGHT_CONTAINING_SHIFT`) than
  * the route's pre-transaction (outer) read could ever see, with ZERO
- * concurrency and the SAME resulting `workDate`/`shiftId`. `reasonCode`
- * describes WHY a candidate won a tie-break, not WHICH candidate won (the
- * identity conjunct already covers "which") or what POLICY produced it
- * (grace/rounding/thresholds/segments/timezone/shift — what this fingerprint
- * domain is for) — excluding it from the OUTER-VS-INNER comparison is
- * therefore principled, not a weakening for convenience. The STORAGE
- * fingerprint (above) is UNCHANGED and still includes `reasonCode` — this is
- * a second, narrower comparison domain, not a redefinition of the first.
+ * concurrency and the SAME resulting `workDate`/`shiftId` (empirically
+ * confirmed to also affect the Group D-overnight positive-control shape,
+ * not only eDay2/Group F — see PR body). `reasonCode` describes WHY a
+ * candidate won a tie-break, not WHICH candidate won (the identity conjunct
+ * already covers "which") or what POLICY produced it (grace/rounding/
+ * thresholds/segments/timezone/shift — what this fingerprint domain is
+ * for) — this is the ARGUMENT for the exclusion being principled rather
+ * than a convenience weakening, but an argument is not the same thing as
+ * lock authority to compare a different object than the one §8.2 step 7
+ * names; see the O-5 status block above. The STORAGE fingerprint (above)
+ * is UNCHANGED and still includes `reasonCode` — this is a second,
+ * narrower comparison domain, not a redefinition of the first.
  */
 export function computeAttendanceOuterComparableSourceDefinitionFingerprintV1(input: unknown): string | null {
   const parsed = sourceDefinitionInputOrNull(input)
