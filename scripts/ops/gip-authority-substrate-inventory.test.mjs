@@ -232,6 +232,16 @@ describe('QUERY_ALLOWLIST entries are deep-frozen, not just the outer object (#4
       attemptRestore(QUERY_ALLOWLIST['probe.columns'], 'sql', original)
     }
   })
+
+  // Discrimination (run manually, not automated — this file has no mutation-testing harness),
+  // confirmed 2026-07-25 at HEAD (144-test suite): with the per-entry freeze loop in the source,
+  // 144/144 green. Deleting ONLY that loop (leaving `Object.freeze(QUERY_ALLOWLIST)` on the outer
+  // object intact) reds exactly the 4 tests in this describe block — 140/144 — and nothing else.
+  // The mutation tests above restore mutated state in a `finally` (see attemptRestore()) precisely
+  // so that a real gap here reds only its own tests instead of corrupting the module-level
+  // QUERY_ALLOWLIST singleton every other test in this file reads through the same fake-exec
+  // harness (SQL_TO_TAG, createFakeExec) — an earlier draft without the restore cascaded to ~40
+  // unrelated failures when the freeze was absent.
 })
 
 // ---------------------------------------------------------------------------
@@ -2163,6 +2173,21 @@ describe('stderr values-free discipline — real subprocess (#4603 P2(a))', () =
     // copy of the script placed there resolves `pg` deterministically the same way regardless of
     // whether the repo's own workspace has `pg` installed. This makes the control robust to a
     // resolvable `pg` rather than merely documenting the fragility.
+    //
+    // Verified against the actual failure condition, not merely asserted, on 2026-07-25: with a
+    // minimal stub package (`{"name":"pg","version":"0.0.0","main":"index.js"}` +
+    // `module.exports = { Pool: class Pool {} }`) placed at the REPO ROOT's `node_modules/pg`
+    // (the faithful stand-in for `pnpm install` hoisting `pg` from
+    // packages/core-backend/package.json into the workspace root) — (1) `import('pg')` resolved
+    // successfully from the repo root, confirming the stub genuinely reproduces the post-install
+    // condition; (2) the full suite stayed 144/144 green with the stub present — this test's
+    // isolated-directory construction is unaffected because `tmpdir()`'s ancestry never includes
+    // the repo; (3) replaying the OLD (pre-fix) control shape — `await import('pg')` from this
+    // test file's own location — against the same stub DID red with exactly the vacuous-control
+    // message this comment warns about (`control failed: 'pg' imported successfully...`),
+    // confirming the fragility being fixed was real, not hypothetical. Stub removed after
+    // verification; `node_modules/` is gitignored (`.gitignore` line 2) so it was never a
+    // candidate for being committed regardless.
     // realpathSync is REQUIRED here, not cosmetic: os.tmpdir() resolves under /var/folders on
     // macOS, which is itself a symlink to /private/var/folders. The script's own isEntry check
     // (`path.resolve(argv[1]) === fileURLToPath(import.meta.url)`) compares an UN-resolved argv[1]
