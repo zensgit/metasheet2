@@ -89,7 +89,7 @@ import {
 import {
   ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
   createAuthorizedAttendanceWriteContextV1,
-  recheckAttendanceAuthorizationInTransactionV1,
+  recheckAttendanceActorLivenessInTransactionV1,
   type AuthorizedAttendanceWriteContextV1,
 } from './w4c0-authorization'
 import {
@@ -451,7 +451,7 @@ export interface AttendanceScheduledRunBoundaryInputV1 {
    * before calling in), exactly the `executeLivePunch` precedent at
    * `input.userId`/`actorPosture: 'self'` below: the route hands a validated
    * plain id, the boundary mints the witness FROM it and rechecks it in the
-   * per-user transaction via the existing `recheckAttendanceAuthorizationInTransactionV1`
+   * per-user transaction via the existing `recheckAttendanceActorLivenessInTransactionV1`
    * chokepoint (w4c0-operation-registry.ts preflight step 1). Required on both
    * branches (never `undefined`) so a cron caller cannot silently omit it and
    * a caller cannot smuggle an admin identity into the cron path: `cron` MUST
@@ -1292,7 +1292,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
    * identity (route-supplied, same "route submits pure data, private adapter
    * mints" pattern as `executeLivePunch`'s `actorPosture: 'self'` witness
    * above), minted fresh for EACH target user with `subjectScope:
-   * 'explicit_users'` so `recheckAttendanceAuthorizationInTransactionV1`
+   * 'explicit_users'` so `recheckAttendanceActorLivenessInTransactionV1`
    * (called inside `attendanceResultOperationPreflightV1`, BEFORE any
    * source/result DML) independently re-verifies both the admin actor's own
    * active-user/membership state AND the target subject's — closing the gap
@@ -1309,7 +1309,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
    * (`user_permissions`/`role_permissions` carry no `org_id` column in this
    * codebase — an admin can already target ANY `orgId` in the request body).
    * `attendance_admin` posture would newly REQUIRE an active `user_orgs` row
-   * for the target org (`recheckAttendanceAuthorizationInTransactionV1`'s
+   * for the target org (`recheckAttendanceActorLivenessInTransactionV1`'s
    * `requireActiveMembership`), which would silently break that existing
    * cross-org capability. `platform_admin` waives the membership predicate
    * (matching current behavior) while still requiring the actor be a real
