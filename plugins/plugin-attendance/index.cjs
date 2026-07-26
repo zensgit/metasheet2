@@ -23081,10 +23081,27 @@ module.exports = {
       attendanceW4SegmentCalculationPort && typeof attendanceW4SegmentCalculationPort.applyMergePolicyPure === 'function'
         ? attendanceW4SegmentCalculationPort.applyMergePolicyPure
         : null
+    // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round): the ONE
+    // new port method for the lock §8.2 step 7 source-definition fingerprint
+    // half. Required for the SAME reason `w4MergePolicyPure` is required
+    // above — if the host provided the boundary factory but NOT this method,
+    // the route would have no way to supply `outerSourceDefinitionFingerprint`
+    // and every ordinary (non-race) punch would false-drift into
+    // `review_required` (a `null` outer value could never match a real inner
+    // one). Folding it into the SAME required-methods gate that already
+    // fails closed (503) keeps that failure mode unreachable — the boundary
+    // itself simply does not exist when this method is missing, exactly
+    // like the `applyMergePolicyPure`/`createLiveScheduledBoundary` case.
+    const w4ComputeOuterSourceDefinitionFingerprint =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1 === 'function'
+        ? attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1
+        : null
     const w4LiveScheduledBoundary =
       attendanceW4SegmentCalculationPort
       && typeof attendanceW4SegmentCalculationPort.createLiveScheduledBoundary === 'function'
       && w4MergePolicyPure
+      && w4ComputeOuterSourceDefinitionFingerprint
         ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
             legacyAdapters: {
               applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
@@ -26947,6 +26964,79 @@ module.exports = {
           // outdoor-approval flow) — only the resolution OBJECT itself is no
           // longer smuggled through.
 
+          // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round):
+          // OUTER half of the lock §8.2 step 7 source-definition fingerprint
+          // gate. Computed HERE — immediately alongside `punchWorkDate`,
+          // the SAME provenance point `punchWorkDate.shiftId` (the identity
+          // half, below) already uses — and deliberately NOT right before
+          // the boundary call further down: any later placement risks
+          // running AFTER a test/production race window has already closed
+          // (a real placement bug caught empirically in this round — moving
+          // this block past the `__setAttendanceW4LivePunchPreBoundarySeamForTests`
+          // await made every seam-based race leg's fingerprint conjunct a
+          // silent no-op, since by the time the seam's `await` resolves the
+          // race has ALREADY committed, so a POST-seam outer read would see
+          // the SAME post-race state the freeze step's inner read does).
+          //
+          // Byte-identical-by-construction to the freeze step's own
+          // in-transaction call — SAME function
+          // (`resolveW4LiveCandidateInTransactionV1`), SAME args shape
+          // (`calendarWorkDate` omitted, exactly like the boundary's own
+          // `resolveLiveCandidate` adapter call site), only the connection
+          // differs (`db`, not `trx`) because this runs BEFORE the
+          // transaction opens. No induction over `toWorkDate` equivalence is
+          // relied on here (unlike `resolvePunchWorkDateByShiftWindow`'s
+          // explicit `calendarWorkDate: workDate` above, which this
+          // deliberately does NOT reuse/extend — see PR body for why an
+          // `includeFullWinner` extension of that shared call was rejected
+          // as the closing mechanism).
+          //
+          // Gated on the SAME env var that gates the posture allowlist
+          // (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`) AND on the port
+          // method's presence (guards a partial/legacy host the same way
+          // the later `!w4LiveScheduledBoundary` check does — that check
+          // still fires normally a few lines down if the boundary itself is
+          // unavailable; this guard only prevents a crash on the READ
+          // happening before that check): when the env is unset, no org can
+          // ever resolve to a non-legacy posture, so the freeze step's
+          // `identityDrift` code this value feeds never executes — skipping
+          // the extra read keeps the default-off deployment's per-request
+          // DB cost byte-identical to before this change.
+          let outerSourceDefinitionFingerprint = null
+          if (
+            w4ComputeOuterSourceDefinitionFingerprint
+            && String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+          ) {
+            const outerResolution = await resolveW4LiveCandidateInTransactionV1(db, {
+              orgId,
+              userId,
+              occurredAt: occurredAt.toISOString(),
+              timezone: requestTimezone,
+            })
+            if (outerResolution && outerResolution.kind === 'resolved') {
+              const outerContext = await buildW4ShadowFrozenContextV1(db, {
+                orgId,
+                userId,
+                workDate: outerResolution.workDate,
+                shiftId: outerResolution.shiftId,
+                timezone:
+                  outerResolution.fullWinner && typeof outerResolution.fullWinner.timezone === 'string'
+                    ? outerResolution.fullWinner.timezone
+                    : requestTimezone,
+                isWorkday: context.isWorkingDay,
+                holidayKind: null,
+              })
+              outerSourceDefinitionFingerprint = w4ComputeOuterSourceDefinitionFingerprint({
+                orgId,
+                userId,
+                source: 'live_resolution',
+                nowIso: new Date().toISOString(),
+                resolution: outerResolution,
+                context: outerContext,
+              })
+            }
+          }
+
           // Punch-policy S1 (#2203): block a punch on a day with no schedule when the org opted into
           // unscheduled.mode='block'. workDate is the FINAL (tz-recalculated) date. Default 'allow' and
           // the primitive's fixed/free applicability guard mean this never blocks by default (no regression).
@@ -27182,6 +27272,12 @@ module.exports = {
             // above and never reaches here.
             shiftId:
               typeof punchWorkDate.shiftId === 'string' && punchWorkDate.shiftId ? punchWorkDate.shiftId : null,
+            // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round):
+            // the route's own PRE-transaction source-definition fingerprint
+            // — see the block above that computes it, and
+            // `AttendanceLivePunchBoundaryInputV1.outerSourceDefinitionFingerprint`'s
+            // own doc comment for the full contract.
+            outerSourceDefinitionFingerprint,
             isWorkday: context.isWorkingDay,
             holidayKind: null,
           })
