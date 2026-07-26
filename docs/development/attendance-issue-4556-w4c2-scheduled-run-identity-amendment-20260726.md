@@ -19,8 +19,27 @@
 >
 > Scope: the section 7.1a outbox **identity model**, the `scheduled`
 > entrypoint's **durable run identity**, the reserved class-`01` advisory
-> class, and the section 12.3 scheduled gates. Nothing else in the lock is
-> touched.
+> class, and the section 12.3 scheduled gates. Section 1's supersession list
+> is the complete accounting of what this amendment touches. Section 3's
+> decision table (`OD-W4C-44..52`) is what must be RATIFIED before
+> implementation, and includes four items (`O-1..O-4`, i.e. `OD-W4C-49..52`)
+> that this draft states in full but does **not** resolve — implementation
+> (section 4 step 3) does not start until all of `OD-W4C-44..52` are
+> ratified, not just `44..48`.
+>
+> **Revision note (this pass).** An independent gate review of this
+> document (bound to head `ea10a66fd91c30e191f566d07689a910fc1c9c98`)
+> found 5 P1 and 4 P2 defects, all addressed in this revision: two false
+> claims about which existing triggers protect the new identity columns
+> (sections 1.1, 1.4), a migration step that edited an already-applied
+> migration file to no effect (section 1.10), an incomplete supersession
+> list against four lock clauses this draft actually crosses (section 1),
+> a finalization-reachability gap this draft did not close or disclose
+> (section 0.5, 1.1.1, 1.7.1), a non-deterministic ordering dependency
+> (sections 1.2, 1.3), and four smaller issues (sections 1.7, 1.8, 1.9,
+> 1.2.1, 2). Author-fixable items are corrected in place; four items that
+> require an owner reading are stated as pending decisions
+> (`O-1..O-4`/`OD-W4C-49..52`, section 3) rather than resolved unilaterally.
 >
 > Owner authorization basis: PR #4595 `c-5082275704` (restricted resumption:
 > "W4C-2 修复 + 新 exact-head 独立门审" only) and PR #4612 `c-5082785641`
@@ -123,30 +142,109 @@ resumed run emits the same bytes an uninterrupted run would have emitted.
 that section 7.1a's `(org_id, entrypoint, operation_id, event_kind)` shape
 could not express, so that a run-level event can be delivered exactly once,
 durably, with unchanged payload bytes and unchanged "one run, one event"
-external semantics. It weakens nothing.
+external semantics. It weakens nothing **for the parts this draft fully
+specifies**. Section 0.5 discloses the one respect in which this draft, as
+written, does not yet complete that contract, and names the two owner
+decisions (`O-3`, `O-4`) required to close it.
+
+### 0.5 A defect this amendment does not yet close (pending `O-3`/`O-4`)
+
+Two structurally distinct triggers can make the finalization transaction
+(section 1.8) permanently inadmissible for a `running` run even though
+every per-user operation that *can* complete already has:
+
+1. **Mid-run posture promotion.** Section 1.8 step 1 requires equality
+   between the run's frozen `accepted_write_posture` and the *currently
+   resolved* posture. The governing lock's shadow/eligible promotion-block
+   predicate (lock lines 2689-2690, 2250) blocks promotion only while an
+   *operation* row is frozen in another posture; a `running` scheduled run
+   is not an operation row, and by lock lines 1124-1129's
+   *transaction-scoped* `claimed` state, an incomplete per-user target
+   simply has no row yet — there is nothing for the predicate to see.
+   Promotion is therefore free to proceed while a run is mid-flight, after
+   which the run's frozen posture can never again equal the resolved
+   posture, and finalization never admits.
+2. **A per-target permanent failure.** Section 1.1's `chk_asr_terminal_shape`
+   only recognizes `completed_user_count = expected_user_count` as the
+   successful terminal shape. This amendment, as drafted, defines no
+   outcome for a `generate` target whose per-user operation transaction
+   fails **deterministically** (fail-closed, not transient) — a shape the
+   governing lock's own W4-covered posture matrix produces routinely. That
+   single target can never reach `completed`, so the run can never reach
+   `completed` either.
+
+In both cases the only exit is the explicit `abandoned` transition
+(section 1.1), which by design writes **no** outbox row. The run's other,
+unaffected users already have durably committed absence records; the two
+run-level events reporting on them are lost, not delayed. This is the same
+failure shape red line `W4C-R27` (governing lock line 199) exists to
+forbid, reintroduced at the run level by conditioning run-level durability
+on finalization reachability instead of on commit.
+
+Sections 1.1.1, 1.7.1, and 1.8 below state the two provisional fixes in
+full and name the owner decisions — `O-3` = `OD-W4C-50`, `O-4` =
+`OD-W4C-52` — that must be ratified, alongside `OD-W4C-44..48` and `O-1`
+(`OD-W4C-49`) and `O-2` (`OD-W4C-51`), before implementation (section 3,
+section 4 step 2). This draft does not pick between the options it states.
 
 ## 1. Locked correction
 
-This amendment supersedes only these parts of the governing lock:
+This amendment supersedes these parts of the governing lock:
 
 - section 7.1a's single-shape outbox identity
   `(org_id, entrypoint, operation_id, event_kind)`, its closed event-kind
   set, and its "each W4-covered **source operation** ... stores one closed
   event row in the same transaction as its operation seal" as the *only*
   enqueue shape;
+- section 7.1a's "in the same transaction as its operation seal" durability
+  guarantee (lock lines 1319-1326) and red line **W4C-R27** (lock line 199),
+  **for the two run-level events only**: durability becomes conditioned on
+  the run reaching finalization (section 1.8) rather than on the
+  run-creation commit. **This conditioning is not yet fully closed by this
+  draft** — see section 0.5 and the pending decisions `O-3`/`O-4`
+  (`OD-W4C-50`, `OD-W4C-52`) below. Per-user event durability (the six
+  existing kinds) is unchanged and remains commit-conditioned only, per
+  `W4C-R27` as written;
 - section 7.1's sentence "Scheduled absence gains a durable
   scheduled-run/user/date source row", which is refined into a durable run
   row plus immutable target rows plus the unchanged per-user operations;
 - section 8.2's lock order and step 14, by inserting the reserved class-`01`
   run lock and by adding one new, strictly non-source **finalization
   transaction** shape;
-- `OD-W4C-40`'s "class `01` is reserved", which this amendment assigns;
+- `OD-W4C-40`'s "class `01` is reserved", which this amendment assigns —
+  **subject to `O-1`/`OD-W4C-49` ratifying the red-line rewrite immediately
+  below**;
+- red line **W4C-R42** (lock line 214, "`01` is forbidden", including its
+  "crossing a rollout/operation/target class ... fails independently"
+  clause), lock lines **2049-2050** ("Prefix `01` is reserved and forbidden
+  in W4"), **2126-2130** (the digest-seam gate: "admitting reserved class
+  `01` ... makes an exact gate fail"), and **2570** ("production
+  construction cannot inject it and class `01` is never acquired") — all
+  four are proposed to be superseded together, **pending `O-1`/`OD-W4C-49`**
+  (section 3). Until ratified, class `01` remains forbidden as written and
+  this amendment authorizes no implementation that acquires it;
+- the governing lock's shadow/eligible promotion-block predicate (lock
+  lines 2689-2690, 2250) — **only if `O-4`/`OD-W4C-52` selects option (a)**,
+  extending it to cover a `running` `attendance_scheduled_runs` row (section
+  1.7.1). If `O-4` selects option (b), this predicate is **not** superseded,
+  and the gap in section 0.5 is instead closed by the finalization mechanism
+  described in section 1.7.1(b)/1.8;
+- lock line **2670** ("durable scheduled-run replay survives process
+  restart and `skipDedup` cannot bypass it") — refined by this amendment's
+  stronger replay guarantee (section 1.7); see the residual noted in
+  section 5;
 - the section 12.3 scheduled gates affected by the above.
 
+**Not superseded**, and binding on this amendment's own design: red line
+**W4C-R43** (lock line 215, suspended stays retryable and distinct from a
+terminal remediation outcome) governs section 1.8 step 1's suspended branch
+(corrected below).
+
 Everything else — advisory hash bytes, the class-`00`/`10`/`11` formulas and
-tuples, the W4C-0 verified-identity factory and its source matrix, the three
-UUIDv5 namespaces, per-user scheduled operation derivation, posture
-normalization, batch limits, and every unrelated gate — remains **unchanged**.
+tuples (outside the four red-line clauses above, pending `O-1`), the W4C-0
+verified-identity factory and its source matrix, the three UUIDv5
+namespaces, per-user scheduled operation derivation, posture normalization,
+batch limits, and every unrelated gate — remains **unchanged**.
 
 ### 1.1 Durable scheduled-run row
 
@@ -234,16 +332,65 @@ Rules:
 - `abandoned` is an explicit operator remediation terminal state. It writes
   **no** outbox row and no source DML. It exists so a run whose targets can
   never complete cannot pin the partial unique index forever.
-- Rows reject `DELETE`/`TRUNCATE`. An `UPDATE` guard trigger permits changes
-  only to `state`, `completed_user_count`, `generated_count`,
-  `abandon_reason_code`, `finalized_at`, and only along a legal transition
-  out of `running`; every other column is frozen after insert.
+- Rows reject `DELETE`/`TRUNCATE`. An `UPDATE` guard trigger is implemented
+  as a **generic allowlist**, not a column-by-column freeze list: it
+  compares `to_jsonb(NEW)` and `to_jsonb(OLD)` with the mutable keys
+  (`state`, `completed_user_count`, `generated_count`, `abandon_reason_code`,
+  `finalized_at`) removed from both sides via the jsonb `-` operator, and
+  raises unless the two remaining objects are equal. Every column not in
+  that mutable set is therefore frozen **by construction**, including any
+  column a future migration adds without also adding it to this trigger's
+  mutable set — the safe default is frozen, not mutable. The legal
+  out-of-`running`-transition check is a **separate** condition evaluated
+  by the same trigger, in addition to (not instead of) the jsonb-equality
+  check.
 - `expected_user_count` equals the number of `target_kind='generate'` target
   rows; `review_count` equals the number of `target_kind='review'` target
   rows. Both are frozen at creation because both are fully known then. They
   are also constrained to match the actual target rows by a deferred
   commit-time constraint trigger, so an implementation cannot commit a run
   whose frozen counts disagree with its target rows.
+
+#### 1.1.1 Pending `O-3`/`OD-W4C-50`: per-`generate`-target permanent failure
+
+`chk_asr_terminal_shape` above encodes only the all-or-nothing shape:
+`completed` requires `completed_user_count = expected_user_count`. As
+drafted, this amendment defines **no** outcome for a `generate` target
+whose per-user operation transaction fails **deterministically** (a
+fail-closed rejection, not a transient error) — see section 0.5. Two
+options; this draft does not choose between them:
+
+- **(a) Add a durable per-target terminal-failure outcome.**
+  `attendance_scheduled_run_targets` gains a nullable, closed, values-free
+  `terminal_outcome` column (`'completed' | 'failed'`, non-null only once
+  the target's operation is durably terminal) and a closed
+  `failure_reason_code` (non-null iff `terminal_outcome = 'failed'`).
+  `chk_asr_terminal_shape`'s `completed` branch changes from
+  `completed_user_count = expected_user_count` to "every `generate` target
+  has a non-null `terminal_outcome`"; `completed_user_count` continues to
+  count only operations that reached a `completed` operation row (it does
+  **not** count `failed` targets), and `generated_count` is unaffected (it
+  already only counts `inserted = true` rows). **Wire compatibility is
+  preserved**: `attendance.absence.generated`'s `total` is
+  `generated_count` — a target that never inserted a row was never counted
+  by today's `generateAbsenceRecords`/`rows.length` either
+  (`plugins/plugin-attendance/index.cjs:21238`), so a failed target changes
+  nothing observable in that payload. This option needs a new section 2
+  gate: a run with one deterministically-failed `generate` target and all
+  others `completed` reaches `state='completed'` and emits both run-level
+  events with correct counts; a target with neither `completed` nor
+  `failed` still blocks finalization.
+- **(b) Keep the all-or-nothing shape** exactly as drafted, and accept as
+  an explicitly declared residual (section 5) that one user's
+  deterministic, permanent failure on a `generate` target withholds both
+  run-level events for the **entire** org's `work_date` until an operator
+  issues the explicit `abandoned` transition — at which point both events
+  are permanently lost for that run, not merely delayed, for every user
+  including the ones who succeeded.
+
+Section 1.8 and section 2 are written above assuming whichever option is
+chosen; no gate in this draft yet exercises the `failed` outcome, because
+it does not exist until `O-3` selects (a).
 
 ### 1.2 Immutable run target rows
 
@@ -290,20 +437,61 @@ CREATE TABLE attendance_scheduled_run_targets (
   execution cannot disagree.
 - The FK deliberately carries `work_date` so the derived-identity CHECK can be
   purely declarative without trusting a denormalized copy.
-- `ordinal` freezes the canonical order in which users were resolved, so the
-  `reasons` array of `attendance.work_date.review_required` is reconstructed
-  byte-stably at finalization regardless of restarts or row-visit order.
+- `ordinal` freezes, at row-insert time, whatever order the run-creation
+  transaction observed while resolving membership; once frozen it never
+  changes, so the `reasons` array of `attendance.work_date.review_required`
+  is reconstructed byte-stably at finalization regardless of restarts —
+  finalization (section 1.8 step 6) always reads `ordinal` from these
+  frozen rows, never re-resolves membership. **What is not yet decided is
+  whether that per-run frozen order is itself required to be a canonical,
+  deterministic function of membership** (so a byte-identical resume
+  recomputation, section 1.7 step 3, is achievable) **or is allowed to
+  remain whatever the membership query happens to return** (today's
+  behavior, order-undefined). This is pending decision `O-2`/`OD-W4C-51` —
+  see section 1.3 and section 3. The membership query this amendment
+  resolves against
+  (`plugins/plugin-attendance/index.cjs:21177-21185`, a `user_orgs`/`users`
+  join) carries **no** `ORDER BY` today, so its result order is not
+  guaranteed stable even for an unchanged membership set (PostgreSQL row
+  order is unspecified absent an explicit sort, and is empirically
+  affected by HOT updates, autovacuum, and plan shape). This draft does
+  not change that query.
 
 #### 1.2.1 Closed review reason codes
 
 `review_reason_code` is closed to exactly the union of
 
-- the frozen `REASON` map exported by
-  `plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs:28` (the
-  values the scheduled loop copies through today), and
+- the **`// unresolved`-segment** members of the frozen `REASON` map
+  exported by `plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs:28`
+  (`NO_MATCHING_SHIFT`, `FREE_TIME_NO_SHIFT`, `UNSCHEDULED_NO_SHIFT`,
+  `EXPLICIT_IMPORT_REQUIRES_SHIFT`, `EXPLICIT_SHIFT_MISMATCH`,
+  `MALFORMED_CROSS_ORG_REFERENCE`, `MALFORMED_CROSS_USER_REFERENCE`,
+  `MALFORMED_CANDIDATE_SHAPE`, `MALFORMED_CANDIDATE_SOURCE`,
+  `INVALID_INPUT`, `NO_PUBLISHED_CANDIDATE`), and
 - the three literals the scheduled loop supplies itself:
   `WORK_DATE_ATTRIBUTION_MISMATCH`, `WORK_DATE_ATTRIBUTION_AMBIGUOUS`,
   `WORK_DATE_ATTRIBUTION_UNRESOLVED`.
+
+The full `REASON` map has **20** members across three `//`-commented
+segments: 7 `resolved`, 2 `ambiguous`, 11 `unresolved`. Both non-`unresolved`
+segments (9 codes total) are intentionally **excluded**, confirmed by direct
+read of the scheduled loop's branches, not merely by the map's own comments:
+the scheduled loop (`plugins/plugin-attendance/index.cjs:21207-21216`) never
+surfaces a `kind === 'resolved'` result's `reasonCode` as a review reason —
+a resolved result either matches today's `workDate` (goes to `targetUsers`,
+no review row at all) or is demoted to the literal
+`WORK_DATE_ATTRIBUTION_MISMATCH`, never to its own `resolved`-segment code;
+and `kind === 'ambiguous'` (`index.cjs:21218-21223`) always pushes the
+literal `WORK_DATE_ATTRIBUTION_AMBIGUOUS`, never
+`scheduledResolution.reasonCode`, so the `ambiguous`-segment codes
+(`OVERLAPPING_SHIFT_WINDOWS`, `MULTIPLE_PUBLISHED_CANDIDATES`) are equally
+unreachable. Closing the DB constraint over the full 20-member map instead
+of this **14-member** reachable subset (11 `unresolved` codes + 3 literals)
+would admit 9 values the running system can never produce, silently
+weakening the negative gate section 1.5 requires ("an unlisted reason code
+is rejected at the DB boundary") by making it impossible to distinguish
+"this code is unreachable and correctly rejected" from "this code merely
+hasn't occurred in a test run yet".
 
 This creates a **third dual-copy** (resolver module + migration CHECK). The
 implementation must add the same kind of parity gate required in section 1.5
@@ -340,6 +528,45 @@ Properties this lock requires:
 - Ordinal is included explicitly so that two runs with the same membership but
   different resolution order are distinguishable.
 
+**Pending `O-2`/`OD-W4C-51`.** Section 1.7 step 3's resume guard requires
+byte-equality between a freshly recomputed `target_set_fingerprint` and the
+frozen one — and because the fingerprint is order-sensitive (above), that
+equality is only reliably reproducible across a restart if the membership
+query's result order is itself deterministic, which it is not today
+(section 1.2). Two options close this; this draft does not choose:
+
+- **(a) Pin a canonical order.** Change the membership query to `ORDER BY
+  user_id` (or another explicit, total, deterministic key) so `ordinal` is a
+  pure function of membership and a resume recomputation is byte-identical
+  by construction. **Consequence:** the `reasons` array's observable order
+  changes once, from today's undefined order to the canonical one. Gate 4
+  (section 2) currently requires payload bytes "identical to the
+  pre-amendment synchronous emit for the same inputs" — that claim must be
+  narrowed to key-set/value-set equivalence plus the new canonical order,
+  since today's order was never pinned and a byte-for-byte match against an
+  arbitrary legacy order is not achievable once the order is pinned to
+  something else.
+- **(b) Keep the resolved order undefined**, and change section 1.7 step 3's
+  resume guard from an ordered byte-comparison to an **order-insensitive**
+  comparison: a second fingerprint computed over the sorted tuple set
+  `{(userId, targetKind, reviewReasonCode)}` (no `ordinal` term), so
+  membership drift is still caught but a benign reordering across a resume
+  is not. `ordinal` itself is retained on each target row purely for output
+  stability (section 1.2's cross-restart guarantee holds either way, since
+  finalization never re-resolves membership). **Consequence:** gate 10
+  (section 2) currently requires "a resume whose recomputed target set
+  differs by one user, one reason code, **or one ordinal**, is fail-closed
+  remediation" — the "or one ordinal" clause must be withdrawn under (b),
+  since an ordinal-only difference across a resume becomes expected and
+  benign, not a defect. This is a gate rollback the owner is choosing, not
+  a simplification the author is entitled to make alone.
+
+Precedent for carrying two fingerprints (one ordered, one not) for exactly
+this reason exists in the governing lock's batch-registry design (lock
+lines 1077-1084: `item_sequence_fingerprint` **and** `item_set_fingerprint`,
+computed together); either option above may adopt that shape once `O-2` is
+decided.
+
 ### 1.4 Outbox identity becomes an explicit discriminated union
 
 `attendance_result_event_outbox` gains an explicit discriminant and a second,
@@ -374,7 +601,9 @@ ALTER TABLE attendance_result_event_outbox
       WHEN 'attendance.work_date.review_required'  THEN identity_kind = 'scheduled_run'
       ELSE identity_kind = 'operation'
     END
-  );
+  ),
+  ADD CONSTRAINT chk_areo_run_entrypoint
+    CHECK (identity_kind <> 'scheduled_run' OR entrypoint = 'scheduled');
 
 -- uq_areo_identity is a table CONSTRAINT, dropped only after the
 -- replacement partial unique index below exists:
@@ -388,8 +617,8 @@ CREATE UNIQUE INDEX uq_areo_run_identity
   WHERE scheduled_run_id IS NOT NULL;
 ```
 
-**A run ID may never masquerade as a per-user operation ID.** Four independent
-mechanical blocks, each separately mutation-provable:
+**A run ID may never masquerade as a per-user operation ID.** Five
+independent mechanical blocks, each separately mutation-provable:
 
 1. **Referential.** `fk_areo_operation` did not exist before. A run UUID
    written into `operation_id` has no matching
@@ -403,15 +632,52 @@ mechanical blocks, each separately mutation-provable:
 3. **Kind map.** `chk_areo_kind_identity_map` forbids the two run-level kinds
    from ever carrying an `operation_id`, and forbids the six per-user kinds
    from ever carrying a `scheduled_run_id`.
-4. **Type-level.** The TypeScript enqueue surface splits into two functions
+4. **Entrypoint binding.** `chk_areo_run_entrypoint` additionally ties
+   `identity_kind='scheduled_run'` to `entrypoint='scheduled'`, closing a
+   corruption-backstop gap: without it, the DB alone does not prevent a
+   `(run, kind)` tuple existing twice under two different `entrypoint`
+   values, since `uq_areo_run_identity` (below) includes `entrypoint` in
+   its key. No known code path can construct this today — the single typed
+   producer's `entrypoint` field is fixed to `'scheduled'` — but the CHECK
+   is one line and free.
+5. **Type-level.** The TypeScript enqueue surface splits into two functions
    with **disjoint opaque witnesses** (section 1.4.1). A run witness is not
    accepted by the operation enqueue and vice versa; a bare UUID string is
    accepted by neither.
 
 `chk_areo_delivered_pair`, the `pending|delivered` state machine, the
-`attempts`/`next_attempt_at` fields, the immutability trigger, and the
-`DELETE`/`TRUNCATE` refusals are unchanged and apply identically to run-level
-rows.
+`attempts`/`next_attempt_at` fields, and the `DELETE`/`TRUNCATE` refusals
+are unchanged and apply identically to run-level rows.
+
+**The immutability trigger is not unchanged and must be extended in this
+migration.** `attendance_w4_outbox_update_guard()` (migration
+`zzzz20260725120000_...:1493-1518`) is implemented as a column-by-column
+freeze list — `id`, `org_id`, `entrypoint`, `operation_id`, `event_kind`,
+`payload`, `payload_schema_version`, `business_key_fingerprint`,
+`created_at` — that predates this amendment's two new columns
+(`identity_kind`, `scheduled_run_id`). Left as-is, neither new column is
+protected: a `pending` run-level row's `scheduled_run_id` could be
+`UPDATE`d to point at a different run of the same org without tripping any
+existing check, letting one run's outbox row be delivered under another
+run's identity. This amendment requires the same generic-allowlist rewrite
+as section 1.1's run-row trigger: `CREATE OR REPLACE FUNCTION
+attendance_w4_outbox_update_guard()` compares `to_jsonb(NEW)` and
+`to_jsonb(OLD)` with the mutable keys (`delivery_state`, `attempts`,
+`next_attempt_at`, `delivered_at`) removed from both sides, keeping its
+existing `delivery_state`-terminality and `attempts`-non-decreasing checks
+unchanged. This is a required code change, made in the **same** migration
+as section 1.10's other steps, not a no-op — see gate 1's added legs in
+section 2.
+
+**New write-order dependency.** `fk_areo_operation` (added here; W4C-0
+deliberately omitted it, section 0.2) means a per-user enqueue call must
+occur **after** its operation row's `INSERT`, not before — this is
+compatible with `claimed` already existing at that point (lock line 2672ff's
+"before operation seal" ordering is about the outbox row preceding the
+operation's own **seal**, not its **creation**), but it is a call-order
+requirement on the existing W4C-0 enqueue interface that section 0.2's
+dual-copy description did not carry. Section 2 gate 1 gains a leg:
+enqueuing before the operation row exists is rejected by the FK.
 
 #### 1.4.1 TypeScript surface
 
@@ -504,6 +770,12 @@ snapshot.
 
 ### 1.6 Advisory class `01` and lock order
 
+> **Pending `O-1`/`OD-W4C-49`.** This section describes the assignment this
+> amendment proposes. It supersedes red line `W4C-R42` and the three
+> digest-seam/gate clauses named in section 1's supersession list, none of
+> which this amendment is authorized to rewrite on its own — see section 3.
+> Until `O-1` is ratified, no implementation may acquire class `01`.
+
 `OD-W4C-40` reserved class `01`. This amendment assigns it to the scheduled
 run key:
 
@@ -536,6 +808,18 @@ buildAttendanceScheduledRunAdvisoryKey =
   no retry, no compatibility fallback, no partial DML.
 - Only the scheduled entrypoint acquires class `01`. Live, import,
   integration, request, and approval paths acquire it never.
+- The existing builder-disjointness test
+  (`w4c0-identity.test.ts:740`, currently titled "keeps the two-bit classes
+  disjoint: 00 rollout, 10 operation, 11 target, 01 never") asserts
+  disjointness only over the three builders that existed before this
+  amendment; as written, adding this section's fourth builder does **not**
+  make it fail, because it never iterates the module's builder surface —
+  it names three builders by hand. This amendment requires that test
+  rewritten to (a) enumerate every builder the module **exports** (not a
+  hand-written list, so a future fifth builder cannot repeat this gap),
+  (b) assert the run builder's key lands in `[2^62, 2^63)` and every other
+  builder's key does not, and (c) fail if any exported builder has no
+  class assignment at all. See gate 16, section 2.
 
 ### 1.7 Start, per-user execution, restart resume
 
@@ -552,8 +836,14 @@ buildAttendanceScheduledRunAdvisoryKey =
    producing the ordered target vector;
 5. allocate `generation`, compute `target_set_fingerprint`, insert the run row
    (`state='running'`, frozen posture and counts) and all target rows;
-6. commit. No absence row, calculation, operation row, or outbox row is
-   written by this transaction.
+6. commit. For a run with at least one `target_kind='generate'` target, no
+   absence row, calculation, operation row, or outbox row is written by
+   this transaction — per-user work and finalization happen in later,
+   separate transactions (below, section 1.8). A run with **zero**
+   `generate` targets has no later per-user work to wait for; section 1.9
+   specifies that case, where this transaction **is** the finalization
+   transaction (section 1.8's steps 5-9 execute inline, in the same
+   `SERIALIZABLE` transaction, after step 5 above and before commit).
 
 **Per-user execution** is unchanged from the held branch: for each
 `target_kind='generate'` target, one canonical operation transaction with the
@@ -589,11 +879,113 @@ duplicate nor bypass durable state: a second invocation while a run is
 `running` resumes it; a second invocation after it is terminal creates
 generation `n+1`.
 
-**No stuck absorbing state.** A `running` run whose targets are all terminal
-but which was never finalized is finalized by the same registered private
-recovery sweep that resumes runs; no lease token, request body, or process
-identity confers that authority. A run that cannot progress is closed by the
-explicit `abandoned` transition.
+**No stuck absorbing state — recovery sweep, fully specified.** A `running`
+run whose targets are all terminal (per section 1.7's per-target check) but
+which was never finalized is finalized by a **registered, module-private**
+recovery sweep (matching the private-processor doctrine of governing lock
+lines 1159-1163) — never by request body, lease token, or process identity.
+The sweep is not a new concept invented here; it is the same mechanism this
+lock already requires to resume `running` runs, given a second
+responsibility, fully specified as follows:
+
+- **Trigger and period.** Runs on the existing scheduled-entrypoint
+  processor's tick — no new cron surface. Each tick scans; it does not wait
+  for an external caller.
+- **Scan predicate — must be cross-`workDate`.** `state = 'running'`, **not**
+  scoped to today's `work_date`. Section 1.6's class-`01` key and this run
+  row's own key both include `work_date`, so a run stranded on a prior
+  calendar day is invisible to any predicate scoped to the current day and
+  would never be swept. The scan is bounded (a `LIMIT`/batch cap per tick),
+  not unbounded, so sweep cost is proportional to the number of stranded
+  runs, not to total run history.
+- **Locking.** For each candidate run: acquire class-`00` org rollout
+  **shared**, then the class-`01` run key lock, then re-check `state =
+  'running'` under that lock before doing anything — the same order as the
+  resume protocol and section 1.8's finalization, so the sweep introduces
+  no new lock-order leg.
+- **Two branches per candidate, both already fully specified elsewhere in
+  this section** — the sweep introduces no third transaction shape:
+  - if any `target_kind='generate'` target's operation row is absent or not
+    `completed`, the sweep resumes the run exactly as the resume protocol
+    above describes (this is the "restart" case with no process to
+    restart);
+  - if every `generate` target is terminal, the sweep attempts finalization
+    exactly as section 1.8 describes, including its posture handling
+    (below).
+- **Authorization.** The sweep is the scheduled entrypoint's own registered
+  processor acting under its existing service identity; it accepts no
+  caller-supplied run ID scope beyond what its own scan produces, and no
+  request-supplied posture, org, or identity input can widen or narrow
+  which rows it is allowed to touch.
+- **Closes the window this draft would otherwise leave open:** the last
+  per-user commit succeeding and the finalization attempt never running
+  (process death between the two) leaves a run with all targets terminal
+  but `state='running'` forever, absent this sweep. Section 2 gate 18 lists
+  the required mutation legs, including a positive control (kill the
+  process, prove the sweep alone finalizes within the bounded scan window)
+  and a negative control (disable the sweep, prove only that leg fails).
+- **`dedup` early return does not, and must not, block the sweep.** The
+  scheduled entry point's in-process `lastAutoAbsenceKey` dedup early
+  return (`plugins/plugin-attendance/index.cjs:21173-21176`) is a
+  **process-local** variable set only after a successful synchronous
+  completion; it does not survive a process restart and therefore cannot
+  mask the crash-recovery case gate 18 exercises. It can mask only a
+  same-process, immediate-retry race (per-user work finishes,
+  `lastAutoAbsenceKey` is set, finalization fails transiently, the next
+  same-process invocation hits the dedup early return before reaching step
+  3's resume check). This amendment requires the dedup early return to be
+  positioned **after** acquiring the class-`01` run key lock and re-reading
+  run state — never before — so a `running` run with terminal targets is
+  always visible to the resume/finalize decision regardless of
+  `lastAutoAbsenceKey`.
+
+A run that cannot progress (section 1.1.1) is closed by the explicit
+`abandoned` transition.
+
+#### 1.7.1 Pending `O-4`/`OD-W4C-52`: does a `running` run block shadow/eligible promotion?
+
+Section 0.5 names the mid-run-promotion trigger: the governing lock's
+shadow/eligible promotion-block predicate (lock lines 2689-2690, 2250)
+blocks promotion only while an *operation* row is frozen in another
+posture; a `running` `attendance_scheduled_runs` row is invisible to it,
+because an incomplete per-user target has no row yet (lock lines
+1124-1129: `claimed` is transaction-scoped). Once promotion proceeds while
+a run is mid-flight, section 1.8 step 1's posture handling (below) is what
+determines whether finalization can still happen. Two options; this draft
+does not choose:
+
+- **(a) Extend the promotion-block predicate.** The lock-2689-2690 /
+  lock-2250 predicate, and the matching migration contract, are extended to
+  also treat any `attendance_scheduled_runs` row with `state='running'` as
+  a blocking object — the same treatment an incomplete operation already
+  gets. Promotion is refused (fail-closed, values-free) while any run is in
+  flight for that org. Section 1.8 step 1's `shadow`-vs-`authoritative`
+  mismatch branch (below) becomes practically unreachable, but is **not**
+  removed from the spec — it remains the fail-closed backstop if the
+  predicate extension is ever bypassed. **Operational consequence, which
+  the owner must weigh, not the author:** a rollout's shadow-to-
+  authoritative promotion window must avoid colliding with an in-flight
+  scheduled run, changing today's promotion-timing assumptions.
+- **(b) Do not block promotion.** Section 1.8 step 1's `shadow`-vs-
+  `authoritative` mismatch branch instead becomes the **primary** path (not
+  a backstop): finalization is redefined to execute **under the run's own
+  frozen `accepted_write_posture`**, folding counts and emitting events as
+  if that posture were still current, rather than failing on a mismatch
+  with the currently resolved posture at all. This is a **narrower**
+  version of the lock's already-completed-operation replay teaching (lock
+  lines 1109-1111) — finalization contains no source DML, so nothing it
+  does is actually posture-sensitive in the way a fresh source write would
+  be. **This directly reads on this amendment's own section 1.9 stance**
+  ("a posture flip ... is remediation, never a rebase") — option (b) is a
+  considered reversal of that stance for the finalization step
+  specifically, which is why it is an owner decision and not an
+  author-level simplification.
+
+Either option needs its own gate: (a) a "promotion blocked while a
+scheduled run is running" mutation leg; (b) a "run created under `shadow`,
+org promotes to `authoritative` mid-run, run still finalizes once under its
+frozen posture" mutation leg. Section 2 gate 21 is written to accept
+whichever is selected; neither leg exists in this draft until `O-4` picks.
 
 ### 1.8 Finalization transaction
 
@@ -601,8 +993,28 @@ Exactly one transaction, containing **no** source DML, **no** calculation
 write, and **no** class-`11` target lock:
 
 1. begin `SERIALIZABLE`; acquire class-`00` org rollout **shared**; resolve
-   posture and require equality with the run's frozen
-   `accepted_write_posture`;
+   posture.
+   - If the resolved posture is `blocked` (an org `suspended`; see
+     `w4c0-identity.ts:417-418,536`), finalization takes no further action:
+     return the closed, values-free, **retryable** outcome
+     `ATTENDANCE_SCHEDULED_RUN_FINALIZATION_DEFERRED` with **zero DML**;
+     the run stays `running`; a later attempt (a per-user completion
+     retry, or the recovery sweep, section 1.7) tries again. This is
+     compliance with red line `W4C-R43` (governing lock line 215): a
+     suspended org's in-flight run is **paused**, not remediated, exactly
+     as an in-flight operation already is elsewhere in this lock;
+   - if the resolved posture is `shadow` or `authoritative` and **equals**
+     the run's frozen `accepted_write_posture`, continue to step 2;
+   - if the resolved posture is `shadow` or `authoritative` and **differs**
+     from the run's frozen `accepted_write_posture` (the run was created
+     under one and the org has since promoted/demoted to the other), the
+     behavior of this branch is **pending `O-4`/`OD-W4C-52`** — see
+     section 0.5 and section 1.7.1. Option (a) makes this branch
+     unreachable in ordinary operation (promotion is blocked while the run
+     is `running`), and it remains fail-closed remediation as a backstop;
+     option (b) makes this branch the primary path and requires
+     finalization to proceed under the run's own frozen posture instead of
+     failing here. This draft does not pick between them;
 2. acquire the class-`01` run key lock;
 3. `SELECT ... FOR UPDATE` the run row. If it is already `completed`, return
    its recorded outcome with **zero DML** (this is the losing racer's path,
@@ -651,14 +1063,33 @@ payload keys, and one event per run.
 
 - The legacy leg and the durable leg must fail **independently** under
   mutation; neither may be the exclusive failure reason for the other.
-- A posture flip between run creation and a later per-user or finalization
-  transaction is remediation, never a rebase.
+- A posture flip between run creation and a later per-user transaction is
+  remediation, never a rebase — per-user operation transactions are
+  unaffected by `O-4` and keep this rule unconditionally. Whether a posture
+  flip is remediation or a rebase specifically **at finalization** is
+  pending `O-4`/`OD-W4C-52` (section 1.7.1); this row's finalization column
+  above reflects section 1.8 step 1 as drafted, which states both options.
 - An `eligible` state normalizes to accepted write posture `shadow` before it
   reaches the run row, exactly as in W4C-0 amendment section 1.2.
-- A run with `expected_user_count = 0` (no generate targets, e.g. every user
-  went to review, or the org has no working-day users) is still created and
-  finalized — in a single transaction when there is nothing to wait for — so
-  today's `total: 0` emission is preserved. The pre-existing `skipped` early
+- A run with `expected_user_count = 0` (no `generate` targets — every
+  resolved user went to review, which is the ordinary output of an
+  assigned/group scheduling ambiguity and not an edge case; see
+  `plugins/plugin-attendance/index.cjs:21208-21238`'s three
+  `reviewRequired.push` branches, and `review_count > 0` && `total: 0` is
+  its common shape) has its run-creation transaction (section 1.7) **be**
+  the finalization transaction: after inserting the run and target rows,
+  step 5 continues inline into section 1.8's steps 5-9 in the same
+  transaction — there is no separate finalization transaction and no
+  waiting, because `completed_user_count = expected_user_count = 0` is
+  already known to hold. This is **not** a third transaction shape; it is
+  section 1.8's finalization transaction, entered from the create path
+  instead of a later resume path, and section 2 gates 8/15 apply to it
+  exactly as written. `attendance.work_date.review_required` still emits
+  only when `review_count > 0`, with the full `reasons` array and
+  `total = review_count`; `attendance.absence.generated` still emits
+  unconditionally with `total: 0`, matching today's
+  `total: rows.length` (`rows.length === 0`) behavior byte-for-byte. The
+  pre-existing `skipped` early
   returns (`holiday-rest-no-policy`, `dedup`) still create nothing and emit
   nothing.
 
@@ -671,23 +1102,69 @@ must sort after the W4C-0 `zzzz20260725120000_...` migration they depend on).
 
 1. create `attendance_scheduled_runs` and
    `attendance_scheduled_run_targets` with every constraint above, plus the
-   `DELETE`/`TRUNCATE` refusal triggers, the run `UPDATE` column guard, and
-   the deferred commit-time constraint tying frozen counts to target rows;
+   `DELETE`/`TRUNCATE` refusal triggers, the run `UPDATE` guard implemented
+   per section 1.1's generic-allowlist form, and the deferred commit-time
+   constraint tying frozen counts to target rows;
 2. add `identity_kind` and `scheduled_run_id` to the outbox, drop
    `NOT NULL` on `operation_id`;
-3. **backfill** `identity_kind = 'operation'` for every existing row. Every
-   pre-existing row has a non-null `operation_id` by the old `NOT NULL`
-   constraint, so the backfill is total;
+3. **backfill**, crossing the existing (pre-amendment) guard trigger
+   correctly: `ALTER TABLE attendance_result_event_outbox DISABLE TRIGGER
+   trg_areo_update_guard;` then `UPDATE ... SET identity_kind = 'operation'`
+   for every existing row, then `ALTER TABLE
+   attendance_result_event_outbox ENABLE TRIGGER trg_areo_update_guard;`.
+   **This disable/enable pair is required, not optional**: the pre-existing
+   guard's first clause (`IF OLD.delivery_state = 'delivered' THEN RAISE
+   EXCEPTION`, migration `zzzz20260725120000_...:1498-1500`) rejects **any**
+   `UPDATE` on an already-`delivered` row regardless of which column
+   changes, so a plain backfill `UPDATE` aborts the migration the first
+   time it reaches a `delivered` pre-existing row. Every pre-existing row
+   has a non-null `operation_id` by the old `NOT NULL` constraint, so once
+   the trigger is out of the way the backfill itself is total;
 4. add the CHECK constraints, both FKs, and the two partial unique indexes;
    drop `uq_areo_identity` only after the operation partial unique index
    exists;
-5. extend `OUTBOX_EVENT_KINDS` (migration copy) in lockstep with the TS copy.
+5. `CREATE OR REPLACE FUNCTION attendance_w4_outbox_update_guard()` per
+   section 1.4's rewrite — **only after** step 3's backfill, not before:
+   the new generic-allowlist body treats `identity_kind` as frozen (it is
+   not in the mutable set), so installing it before the backfill would
+   block the backfill exactly as the old body does, just via a different
+   clause. Once installed, `identity_kind`/`scheduled_run_id` are frozen
+   before step 6 ever admits a row referencing them;
+6. `ALTER TABLE attendance_result_event_outbox DROP CONSTRAINT
+   chk_areo_event_kind`, then re-add it with all **eight** members, defined
+   as a literal **local to this new migration file**. The already-applied
+   W4C-0 migration's `OUTBOX_EVENT_KINDS` module constant
+   (`zzzz20260725120000_...:210-217`) is a historical artifact of an
+   already-applied migration and **must not be edited** — doing so has zero
+   effect on any database that has already run that migration, because the
+   constant is read only once, at that migration's own `up()`, to build
+   the CHECK this step now replaces. Only the runtime TS copy
+   (`w4c0-operation-contract.ts:92`) is edited, in the same commit, so
+   section 1.5's parity gate has two **current** lists to compare — the TS
+   copy and **this new migration's** local eight-member literal — not the
+   applied migration's six-member literal, which is permanently excluded
+   from parity once this migration lands (see gate 9, section 2).
+
+**Why the previous phrasing of step 5 was wrong, stated for the record.**
+An earlier draft of this step said "extend `OUTBOX_EVENT_KINDS` (migration
+copy) in lockstep with the TS copy," which reads as editing the applied
+migration's module constant. That constant is consumed exactly once, at
+`zzzz20260725120000_...:594`, to build the CHECK on a database that has
+already applied it; editing the source file after the fact changes nothing
+already-applied, so every upgraded database would be left with the original
+six-member `chk_areo_event_kind` forever, and the finalization insert of
+`attendance.absence.generated` (a run-level kind) would be rejected by the
+DB on every upgraded database, with no gate in this draft's original gate 9
+or gate 14 catching it (both exercised only a fresh database). Step 6 above
+replaces that instruction with an explicit `DROP`/re-`ADD` against the live
+constraint, which does change every upgraded database's schema, and gate 14
+(section 2) now requires a positive control against exactly this scenario.
 
 **Fail-closed semantics.** `fk_areo_operation` is added **validated**, never
 `NOT VALID`: if any pre-existing outbox row references an operation row that
 does not exist, the migration **aborts** and the deployment fails. The
 migration never deletes, nulls, or quarantines a row to make itself pass. The
-same rule applies to the extended kind CHECK.
+same rule applies to the extended kind CHECK (step 6).
 
 **Compatibility with existing W4C-0 outbox rows.** W4C-0 landed the schema and
 the transaction-bound enqueue interface with **no caller cutover**, so no
@@ -712,9 +1189,11 @@ rejected before source DML (section 1.7) rather than adopted.
   (`zzzz20260725120000_...:1722-1755`). It never clears history to pass;
 - only on a proven-empty database does it drop the two new tables, drop the
   two partial unique indexes and the new constraints/columns, restore
-  `operation_id NOT NULL` and the original single `uq_areo_identity`, and
-  restore the original six-member `chk_areo_event_kind`, leaving the W4C-0
-  shape byte-equivalent;
+  `operation_id NOT NULL` and the original single `uq_areo_identity`,
+  `DROP`/re-`ADD` `chk_areo_event_kind` back to its original six-member
+  form, and `CREATE OR REPLACE` `attendance_w4_outbox_update_guard()` back
+  to its original nine-column freeze-list body — leaving the W4C-0 shape
+  byte-equivalent;
 - a fresh/upgrade/replay-safe/down-empty/down-populated gate matrix applies,
   as in section 12.1.
 
@@ -734,6 +1213,16 @@ accepted as the exclusive reason.
    different leg. At the TS boundary, passing a run witness to
    `enqueueAttendanceResultEventOutboxV1` (and an operation witness to the run
    enqueue, and a bare UUID string to either) is rejected before any SQL.
+   **Added legs:** `UPDATE`ing a `pending` row's `scheduled_run_id` to a
+   different run of the same org fails (widening the trigger's mutable
+   allowlist to include `scheduled_run_id` — the only mutation shape the
+   generic-allowlist form of section 1.4 admits — makes only this leg pass;
+   the un-widened trigger must reject it); the symmetric `identity_kind`
+   `UPDATE` fails; an `entrypoint` other than `'scheduled'` on a
+   `scheduled_run` row fails `chk_areo_run_entrypoint` (dropping that CHECK
+   fails only this leg); enqueuing a run-level or per-user event before its
+   operation/run row exists fails `fk_areo_operation`/`fk_areo_scheduled_run`
+   (this exercises the write-order dependency noted in section 1.4).
 2. **`attendance.absence.generated` durable leg.** A crash after the
    finalization commit but before emit leaves the row `pending`; dispatcher
    restart delivers it exactly once; the run row is `completed` and no source
@@ -748,7 +1237,13 @@ accepted as the exclusive reason.
    payload bytes are identical to the pre-amendment synchronous emit for the
    same inputs, and exactly one event of each applicable kind is delivered per
    run. Adding a key, dropping `reasons`, renaming `total`, or emitting per
-   user fails.
+   user fails. **This gate's `reasons`-ordering scope is pending
+   `O-2`/`OD-W4C-51`** (sections 1.2, 1.3): under option (a) this gate's
+   "identical bytes" claim narrows to key-set/value-set equivalence plus
+   the newly pinned canonical order; under option (b) it holds as written
+   against whatever order the fixture's membership query happened to
+   produce, which remains reproducible only within one run's lifetime, not
+   across two separately-seeded fixture runs.
 5. **Legacy posture zero-outbox leg.** Under `legacy_projection_only` the run
    produces no run row, no target row, no operation row, no outbox row, and
    the unchanged synchronous best-effort emit with unchanged response bytes.
@@ -772,15 +1267,28 @@ accepted as the exclusive reason.
    before the state flip (and the reverse order) leaves **both** unwritten;
    a test-only witness proves one `txid_current()`/backend PID for the whole
    finalization. Splitting them into two transactions fails.
-9. **Closed-set parity.** The TS and migration copies of the event-kind list
-   are proven equal in membership and order by an executed gate (not a source
-   regex); changing either copy alone fails. An unlisted kind is rejected at
-   the DB boundary. The same parity and negative-value gates cover the closed
-   review-reason list of section 1.2.1.
+9. **Closed-set parity.** The comparison is between `w4c0-operation-contract.ts:92`'s
+   list and **this new migration's** local eight-member literal (section
+   1.10 step 6) — **not** the already-applied W4C-0 migration's
+   six-member `OUTBOX_EVENT_KINDS` constant, which is permanently excluded
+   from parity once this migration lands. The two current lists are proven
+   equal in membership and order by an executed gate (not a source regex);
+   changing either copy alone fails. An unlisted kind is rejected at the DB
+   boundary. The same parity and negative-value gates cover the closed
+   review-reason list of section 1.2.1, scoped to its 14 reachable members
+   (11 `unresolved`-segment `REASON` codes plus 3 literals — not the full
+   20-member `REASON` map).
 10. **Target-set resume guard.** A resume whose recomputed target set differs
-    by one user, one reason code, or one ordinal is fail-closed remediation
-    with zero DML; a byte-identical recomputation resumes. Removing the
-    fingerprint comparison fails only this leg.
+    by one user or one reason code is fail-closed remediation with zero DML;
+    a byte-identical recomputation resumes. Removing the fingerprint
+    comparison fails only this leg. **The "or one ordinal" leg is pending
+    `O-2`/`OD-W4C-51`**: under option (a) an ordinal-only difference is
+    also fail-closed remediation (kept, since ordinal becomes a
+    deterministic function of membership and a spurious difference implies
+    corruption); under option (b) it is explicitly **withdrawn** — an
+    ordinal-only difference across a resume is expected and must **not**
+    trip this guard, per the order-insensitive fingerprint of section 1.3
+    option (b).
 11. **Run row invariants.** Two `running` runs for one
     `(org, initiator, work_date)` are impossible; `generation` is strictly
     increasing; `accepted_write_posture`, `target_set_fingerprint`,
@@ -797,18 +1305,115 @@ accepted as the exclusive reason.
 13. **Cross-org isolation.** A run row, target row, or outbox row referencing
     another org's run/operation is refused; a second org's concurrent run for
     the same `work_date` is unaffected.
-14. **Migration gates.** Fresh, upgrade (with a pre-existing outbox row),
-    replay, `down()`-empty success, and `down()`-populated refusal all pass;
-    an outbox row referencing a missing operation row makes `up()` abort
-    rather than mutate data; `down()` restores the exact W4C-0 outbox shape.
+14. **Migration gates.** Fresh, upgrade (with pre-existing outbox rows —
+    the fixture **must** include at least one `delivery_state='delivered'`
+    row and one `'pending'` row, not only `pending`, since the delivered
+    row is what exercises step 3's disable/enable requirement), replay,
+    `down()`-empty success, and `down()`-populated refusal all pass; an
+    outbox row referencing a missing operation row makes `up()` abort
+    rather than mutate data; `down()` restores the exact W4C-0 outbox
+    shape. The pre-existing `delivered` row's identity, payload,
+    `delivery_state`, `attempts`, and timestamps must be byte-identical
+    after `up()`; removing the disable/enable pair around step 3's backfill
+    must make only this leg fail (the migration aborts partway instead of
+    completing).
+    **Upgrade positive control (required, not optional):** on a database
+    that has run only the W4C-0 migration (no earlier attempt at this one),
+    apply this migration, then `INSERT` a row with
+    `identity_kind='scheduled_run'`, `event_kind='attendance.absence.generated'`,
+    a valid `scheduled_run_id` — this **must succeed**. Reverting section
+    1.10 step 6 to a no-op (leaving `chk_areo_event_kind` at its
+    six-member W4C-0 form) must make **only** this leg fail; gate 9 and the
+    fresh-database leg of this gate must both stay green under that same
+    mutation, since neither exercises an upgraded database — this is the
+    exact false-green shape this control exists to close.
 15. **Lock-order gate.** Acquiring class-`01` before class-`00`, or acquiring
     class-`11` inside the finalization transaction, or performing any source
     DML in the finalization transaction, each fails its own leg.
+16. **Builder-disjointness gate covers every exported builder, not a
+    hand-written list.** Rewriting `w4c0-identity.test.ts:740` (section 1.6)
+    to iterate the module's exported builder surface: the fourth
+    (run-key) builder's key falls in `[2^62, 2^63)`; every other exported
+    builder's key falls outside it; an exported builder with no class
+    assignment fails the gate rather than passing silently. Reverting the
+    iteration to a hand-written three-builder list makes only this leg fail
+    once a fifth builder is later added — the gate's own regression proof
+    is: add a synthetic fifth builder with a deliberately wrong class in a
+    test-only fixture and confirm the gate catches it.
+17. **Suspended pause and mid-run finalize-exactly-once.** With the org
+    resolved to `blocked`/`suspended`, an attempt to finalize a `running`
+    run with all targets terminal returns
+    `ATTENDANCE_SCHEDULED_RUN_FINALIZATION_DEFERRED` with zero DML and the
+    run stays `running` (section 1.8 step 1); once the org returns to
+    `shadow`/`authoritative` matching the run's frozen posture, the next
+    attempt (or the recovery sweep, gate 18) finalizes it exactly once.
+    Folding the suspended branch into the posture-mismatch remediation
+    branch (i.e. reverting section 1.8 step 1's three-way split to two-way)
+    fails only this leg.
+18. **Recovery sweep — positive and negative control.** *Positive:* the
+    last per-user operation commits, the process is killed before the
+    finalization attempt runs, and — with no further caller invocation —
+    the sweep (section 1.7) finalizes the run exactly once within its
+    bounded scan window, including for a run whose `work_date` is a prior
+    calendar day relative to the sweep's current tick (the cross-`workDate`
+    leg). *Negative:* disabling the sweep leaves the run permanently
+    `running` with all targets terminal — and this must be the **only**
+    leg that fails; gates 2, 3, 6, and 7 (which do not depend on the sweep)
+    must stay green under that same mutation. A same-process run whose
+    `lastAutoAbsenceKey` is already set does not prevent the sweep from
+    reaching its resume/finalize decision (the dedup-early-return
+    positioning requirement in section 1.7).
+19. **Zero-`generate`-target run.** A run with `expected_user_count = 0` and
+    `review_count > 0` creates and finalizes in section 1.7's single
+    create transaction; `txid_current()` is the same value throughout
+    (gate 8 applies verbatim); no class-`11` lock is acquired (gate 15
+    applies verbatim); `attendance.absence.generated` emits with `total: 0`
+    and `attendance.work_date.review_required` emits with the full
+    `reasons` array. Splitting this into two transactions, or omitting
+    either emission, fails this leg without touching gates 8/15's other
+    legs.
+
+**Pending, activate on ratification of the named decision — not required
+today, but the amendment must not implement `O-3`/`O-4` without them:**
+
+20. *(activates on `O-3`/`OD-W4C-50` = (a))* A run with one
+    deterministically-failed `generate` target and the rest `completed`
+    reaches `state='completed'`, folds `completed_user_count` excluding
+    the failed target, and emits both run-level events with counts
+    matching option (a)'s definition (section 1.1.1); a target left with
+    neither `completed` nor `failed` still blocks finalization.
+21. *(activates on `O-4`/`OD-W4C-52` = (a))* Promotion from `shadow` to
+    `authoritative` is refused, values-free and with zero DML, while any
+    `attendance_scheduled_runs` row for that org is `state='running'`.
+    *(activates on `O-4`/`OD-W4C-52` = (b) instead)* A run created under
+    `shadow`, with the org promoted to `authoritative` before the run's
+    last target completes, still finalizes exactly once under its frozen
+    `shadow` posture, folding counts and emitting events as section 1.7.1
+    option (b) specifies.
 
 Section 12.3's existing scheduled gates remain in force and are amended only
 to read: run-level outbox rows are inserted in the finalization transaction
 that marks the run `completed`, while per-user outbox rows remain inserted
 before their operation seal.
+
+### 2.1 CI gate home
+
+Fifteen-plus gates that are only "mutation-proven on real PostgreSQL" in
+prose, with no suite or workflow step named, is this repo's own documented
+false-green shape (real-DB integration suites that never run in any
+workflow, or that skip-green in the no-DB job). This amendment requires:
+
+| Gate family | Suite location | CI gate home |
+| --- | --- | --- |
+| Gates 1-3, 5, 7-9, 11-15, 17-21 (constraint/trigger/transaction legs needing a real, committed transaction) | new `packages/core-backend/tests/integration/attendance-w4c2-scheduled-run-*.db.test.ts` file(s) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run attendance integration tests"** (whole-file wiring, alongside the existing `attendance-w4c0-*.db.test.ts` files) — **and** the same file name(s) added to `packages/core-backend/vitest.config.ts`'s `exclude` array, so the no-DB default `pnpm --filter @metasheet/core-backend test` run cannot skip-green them. A new no-DB `node --test` contract, `scripts/ops/w4c2-run-identity-ci-wiring.test.mjs` (following the established pattern of e.g. `scripts/ops/t1-org-transfer-ci-wiring.test.mjs`), asserts both wiring points exist for every `.db.test.ts` file this slice adds, and is itself run as a step in the same job. |
+| Gate 4 (payload/wire freeze, pure-function legs), gate 6 (restart cursor derivation), gate 10 (resume fingerprint), gate 16 (builder disjointness) | `packages/core-backend/src/attendance/__tests__/w4c0-identity.test.ts` or a sibling `w4c2-scheduled-run-identity.test.ts` for the new builder/fingerprint math (no DB needed for pure key/fingerprint computation) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run core-backend tests"** (`pnpm --filter @metasheet/core-backend test`) — required checks `test (18.x)` / `test (20.x)`. The durable-row-dependent halves of gates 4 and 6 (does the *delivered* byte stream match; does the *replayed* row set match) belong in the real-DB row above instead. |
+| Gate 9's parity leg specifically | a no-DB vitest/`node --test` comparing `w4c0-operation-contract.ts:92` against the new migration's local eight-member literal | same row as above (core-backend unit step). |
+
+Any new `.db.test.ts` file this slice adds that is **not** wired at both
+points above is, by this repo's own prior incident record, indistinguishable
+from a gate that was never run. Section 4 step 4's independent adversarial
+review must re-verify both wiring points for every gate claimed
+mutation-proven, not just read the gate's own assertions.
 
 ## 3. Decisions
 
@@ -832,12 +1437,33 @@ adds a column and a delivery constraint that today's behavior does not
 actually guarantee; `OD-W4C-47(c)` is a wire break. `OD-W4C-48(b)` creates a
 stuck non-terminal state.
 
+### 3.1 Pending decisions (`O-1..O-4`) — not resolved by this draft
+
+`OD-W4C-44..48` above are ordinary recommendations this draft makes and
+argues for. The four decisions below are different in kind: each is a
+**two-reading point** raised by an independent gate review — a place where
+this draft's own text pulls in two directions, or where closing a
+disclosed gap (section 0.5) requires reopening ground `OD-W4C-40..43`
+already settled one way. This draft states the options and a recommendation
+where one is defensible, but does **not** treat any of the four as decided,
+and section 4 step 2 requires all four ratified before implementation
+starts, not just accepted by omission.
+
+| Decision | Options | Recommendation |
+| --- | --- | --- |
+| `OD-W4C-49` (`O-1`) — rewrite red line `W4C-R42` for class `01` | (a) rewrite `W4C-R42` (lock line 214) and the three dependent clauses (lock lines 2049-2050, 2126-2130, 2570) from "`01` is forbidden" to "`01` is acquired only by the scheduled-run helper; any other caller acquiring `01`, or that helper acquiring `00`/`10`/`11`, fails independently" — i.e. `01` becomes a fifth reserved-then-assigned class rather than staying forbidden; (b) do not rewrite the red line — `OD-W4C-44(c)` (no run object, already rejected by the G-2 ruling) becomes the only compliant shape, and this amendment cannot proceed as drafted | **(a)**, because (b) reopens the already-rejected `(c)` option and leaves the two run-level events with no compliant durable home |
+| `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair to target rows (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a terminal outcome; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
+| `OD-W4C-51` (`O-2`) — canonical order for `ordinal` / resume-guard shape | (a) pin the membership resolution query to `ORDER BY user_id` (or another explicit total order); `ordinal` becomes a pure function of membership; narrow gate 4's "byte-identical to pre-amendment emit" claim to key/value-set equivalence plus the new canonical order; (b) leave resolution order undefined as today; change the resume guard (section 1.7 step 3) to an order-insensitive set fingerprint; withdraw gate 10's "or one ordinal" leg | **(a)**, because the ordered fingerprint this draft already specifies (section 1.3) cannot be satisfied on resume by an unpinned membership query, and pinning without owner sign-off is not available to the author alone — a one-time, disclosed change to `reasons` ordering is preferable to shipping a resume guard that spuriously fires on a benign restart |
+| `OD-W4C-52` (`O-4`) — does a `running` run block shadow/eligible promotion | (a) extend the lock's promotion-block predicate (lock lines 2689-2690, 2250) to treat a `running` `attendance_scheduled_runs` row as blocking, same as an incomplete operation; accept the operational cost that a promotion window must avoid colliding with an in-flight scheduled run; (b) do not block promotion; instead redefine finalization (section 1.8 step 1) to execute under the run's own frozen posture rather than the currently resolved one — a considered, narrow reversal of this draft's own "posture flip is remediation, never a rebase" stance, scoped to finalization only | no recommendation — this is an operational rollout-timing tradeoff ((a)) versus a semantic reversal of a stance this same draft asserts elsewhere ((b)); both are internally consistent, and the choice is the owner's to make, not the author's |
+
 ## 4. Execution sequence
 
 1. Merge this document as **PROPOSED** with no runtime code. PR #4612 stays
    Draft under OWNER-AUTHORIZATION-HOLD and is not touched by this merge.
 2. Owner RATIFYs the **exact merged SHA** of this file and decides
-   `OD-W4C-44..48`. Nothing below starts before that.
+   `OD-W4C-44..52` — the recommendations (`44..48`) **and** the four pending
+   two-reading decisions (`49..52`, section 3.1). Nothing below starts
+   before all nine are ratified.
 3. Only then implement P1-2 on the W4C-2 branch: the migration, the two new
    tables, the outbox discriminated union, the class-`01` builder/helper, the
    run-scoped enqueue surface, the run/resume/finalization transactions, the
@@ -873,3 +1499,28 @@ an accepted bound:
 - **`abandoned` has no consumer today.** It exists solely to prevent a stuck
   non-terminal run; if the owner picks `OD-W4C-48(b)`, gate 11 and section 1.1
   must be edited accordingly before implementation.
+- **Cross-generation per-user state amplification.** A fresh invocation
+  after a terminal run (section 1.1's `generation` allocation) mints a new
+  `run_id`, and because every per-user `operation_id` derives from
+  `(run_id, user_id, work_date)` (section 1.2), every user's operation
+  identity changes too — the registry sees `n` all-new operations, not a
+  replay, for generation `n+1`. Restart/crash replay **within one
+  generation** is unaffected, and is in fact strengthened by this
+  amendment (a restarted process re-reads the same `running` run row
+  instead of re-deriving an ID, per section 1.1). The wire is not broken:
+  a regeneration's absence-insert path stays guarded by `NOT EXISTS`
+  (`generateAbsenceRecords`), so a repeat generation for an
+  already-generated user inserts nothing and that user's contribution to
+  `generated_count`/`total` is unaffected. `OD-W4C-45` already puts "one
+  run per day, repeat calls replay" versus "each terminal-then-repeated
+  call is a new generation" on the table; this note makes explicit that
+  the recommended option (a) carries this per-user identity amplification
+  as its accepted cost.
+- **The finalization-reachability gap (section 0.5) is not closed by this
+  draft.** Until `O-3`/`OD-W4C-50` and `O-4`/`OD-W4C-52` are ratified and
+  implemented, a `running` run can, on the paths section 0.5 names, only
+  be closed by the explicit `abandoned` transition, which loses both
+  run-level events for the run's unaffected users too. Sections 1.1.1 and
+  1.7.1 are the full specification of both provisional fixes; section 2
+  gates 20-21 are inert (not required today) until the corresponding
+  decision selects a side.
