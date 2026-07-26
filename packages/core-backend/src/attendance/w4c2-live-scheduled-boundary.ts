@@ -116,6 +116,7 @@ import {
   calculateAttendanceSegmentsV1,
   type AttendanceSegmentCalculationResultV1,
 } from './w4c1-segment-calculator'
+import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
 import type {
   AttendanceAttributionSnapshotV1,
   AttendanceEvidenceV1,
@@ -400,6 +401,29 @@ export interface AttendanceLivePunchBoundaryInputV1 {
   readonly meta: unknown
   readonly photoFileRef: string | null
   readonly workDate: string
+  /**
+   * W4C-2 remediation (#4612 gate3 P2-1 self-report ⑥ — lock §8.2 step 7
+   * `:1821-1822` reads "candidate identity PLUS source-definition fingerprint
+   * equality", not workDate alone): the route's own PRE-transaction winning
+   * shift identity — `punchWorkDate.shiftId` — carried through the SAME way
+   * `workDate` already is. `null` only when the route's own resolution did
+   * NOT resolve a shift at all (the `LIVE_CALENDAR_FALLBACK_WORK_DATE_REASONS`
+   * unresolved-fallback branch of `resolvePunchWorkDateByShiftWindow`); the
+   * ambiguous case never reaches this boundary (the route responds 422
+   * itself). Verified (read, not assumed) against a false-positive risk on an
+   * ORDINARY (non-race) punch: the freeze step's in-transaction resolver call
+   * omits `calendarWorkDate` and is fed the IDENTICAL `(occurredAt,
+   * requestTimezone)` pair the route's own pre-transaction call used to
+   * derive its own `calendarWorkDate` — `attendance-work-date-resolver.cjs`
+   * derives `calendarWorkDate` via the SAME `toWorkDate(occurredAt,
+   * timezone)` formula when the explicit parameter is absent (`:799-803`),
+   * `groupAttendanceType` is uniformly omitted on this code path on BOTH
+   * sides (`index.cjs` ~L21152), and candidate SELECTION for the 'live'
+   * channel depends only on `(occurredAt, calendarWorkDate, DB state)`
+   * (`:1006-1031`) — so absent a genuine committed write between the two
+   * reads, both calls resolve the identical candidate (`shiftId` included).
+   */
+  readonly shiftId: string | null
   readonly isWorkday: boolean
   readonly holidayKind: string | null
 }
@@ -575,6 +599,20 @@ async function insertShadowCalculation(
     snapshotSchemaVersion: 1,
   })
   const provenanceFingerprint = computeAttendanceProvenanceFingerprintV1(input.provenanceRef)
+  // W4C-2 remediation (#4612 gate3 P2-1 self-report ⑥, lock 7.3 `:1400-1402`
+  // + 8.2 step 7 `:1821-1822`): this was `completed ? semanticFingerprint :
+  // null` — the semantic-input-fingerprint's OWN value (a different hash
+  // domain entirely), never the dedicated source-definition fingerprint the
+  // column is named for. `computeAttendanceSourceDefinitionFingerprintV1`
+  // (W4C-1) already has the correct nullability contract built in (null for
+  // `unsupported` posture OR an absent frozen context; the lock's "nullable
+  // only for the unsupported-attribution review posture" — a `resolved_v2`
+  // + `context_mismatch` review row still gets a real, non-null value), so
+  // it is called unconditionally here rather than gated on `completed`.
+  const sourceDefinitionFingerprint = computeAttendanceSourceDefinitionFingerprintV1({
+    attribution: input.attribution,
+    context: input.context,
+  })
   const calculationId = crypto.randomUUID()
   const completed = input.outcome === 'completed'
   const projection = completed ? input.dailyProjection : null
@@ -610,8 +648,10 @@ async function insertShadowCalculation(
       input.operationId,
       semanticFingerprint,
       provenanceFingerprint,
-      // Section 7.3: source-definition fingerprint nullable only for review.
-      completed ? semanticFingerprint : null,
+      // Section 7.3: source-definition fingerprint nullable only for
+      // unsupported/no-context review (see `sourceDefinitionFingerprint`'s
+      // own computation above — no longer aliased to `semanticFingerprint`).
+      sourceDefinitionFingerprint,
       canonicalAttendanceJsonV1(wireJson(input.attribution)),
       input.context === null ? null : canonicalAttendanceJsonV1(wireJson(input.context)),
       canonicalAttendanceJsonV1(wireJson(input.segmentSnapshot)),
@@ -1102,22 +1142,58 @@ export function createAttendanceLiveScheduledBoundaryV1(
             evidence,
             approvedFacts: [],
           })
-          // Section 8.2 step 7: the re-run candidate identity must equal the
-          // identity already committed to when this operation was
-          // normalized (`input.workDate`, baked into `envelope.correlationId`
-          // above) — reachable only via a genuine DB-state race between the
-          // route's pre-transaction resolution and this transaction's
-          // snapshot (the legacy adapter's own in-transaction resolution
-          // above and this one share the SAME inputs/snapshot, so they
-          // always agree with EACH OTHER; this compares against the OUTER,
-          // pre-transaction identity instead). A completed V2 result may
-          // never attach to a parent record keyed by a DIFFERENT work date
-          // than its own frozen attribution — canonical freeze semantics
-          // judgment §4.2 candidate (i): review-required with the closed
-          // `context_mismatch` code, zero segments, no pointer change, the
-          // legacy projection already applied above left exactly as is.
+          // Section 8.2 step 7 (`:1821-1822` verbatim: "require candidate
+          // identity plus source-definition fingerprint equality"): the
+          // re-run candidate identity must equal the identity already
+          // committed to when this operation was normalized (`input.workDate`
+          // / `input.shiftId`, the latter baked into the route's own
+          // pre-transaction `resolvePunchWorkDateByShiftWindow` call) —
+          // reachable only via a genuine DB-state race between the route's
+          // pre-transaction resolution and this transaction's snapshot (the
+          // legacy adapter's own in-transaction resolution above and this one
+          // share the SAME inputs/snapshot, so they always agree with EACH
+          // OTHER; this compares against the OUTER, pre-transaction identity
+          // instead). A completed V2 result may never attach to a parent
+          // record keyed by a DIFFERENT work date, NOR carry a DIFFERENT
+          // winning shift, than its own frozen attribution — canonical
+          // freeze semantics judgment §4.2 candidate (i): review-required
+          // with the closed `context_mismatch` code, zero segments, no
+          // pointer change, the legacy projection already applied above left
+          // exactly as is.
+          //
+          // W4C-2 remediation (#4612 gate3 P2-1 self-report ⑥): widened from
+          // workDate-only to (workDate, shiftId) — a `shiftId`-only race
+          // (workDate held fixed, only the winning shift swapped) previously
+          // slipped this gate silently (`outcome` stayed `completed`); see
+          // the real two-connection leg in
+          // `attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts`
+          // ("Group D").
+          //
+          // HONEST DISCLOSURE (source-definition fingerprint half NOT
+          // wired): the lock's second equality clause — a source-definition
+          // fingerprint equality between the OUTER (route, pre-transaction)
+          // and INNER (this transaction) reads — is not implemented here.
+          // The pure carrier exists and IS now correctly sealed
+          // (`computeAttendanceSourceDefinitionFingerprintV1`, wired into
+          // `insertShadowCalculation` below, replacing the prior
+          // semantic-fingerprint alias bug), but computing a COMPARABLE
+          // OUTER-side fingerprint requires calling `buildFrozenWorkDateAttributionV2`
+          // and `computeAttendanceSourceDefinitionFingerprintV1` — both
+          // core-backend TS functions — from the ROUTE (`index.cjs`, a
+          // plugin file) BEFORE this transaction opens. Neither function is
+          // exposed through the `attendanceW4SegmentCalculation` host port
+          // the plugin already consumes for `createLiveScheduledBoundary`/
+          // `applyMergePolicyPure`/`validateIanaTimezone` (`index.cjs`
+          // ~L23049-23098) — closing this half would mean adding NEW port
+          // surface, which is new capability/architecture, not "widen an
+          // existing gate to the lock's literal text". Left unwired and
+          // disclosed rather than faked; see the PR body for the full
+          // analysis (including why a same-identity, shift-content-only race
+          // would be the ONLY discriminating leg, and why that leg cannot
+          // even be attempted before the port surface exists).
           const identityDrift =
-            attribution.posture === 'resolved_v2' && attribution.value.workDate !== input.workDate
+            attribution.posture === 'resolved_v2' &&
+            (attribution.value.workDate !== input.workDate || attribution.value.shiftId !== input.shiftId)
           outcome = identityDrift ? 'review_required' : calculation.outcome
           outcomeReasonCode = identityDrift ? 'context_mismatch' : calculation.outcomeReasonCode
           const inserted = await insertShadowCalculation(trx, {
