@@ -4,9 +4,117 @@
 真库：Stage A/B 用 `ms2_w4c2`；Stage C 第三棒基线/验证用**全新** `ms2_w4c2_relay3`（基线）
 与 `ms2_w4c2_relay3b`（cutover 后），CI 同构 MIGRATION_EXCLUDE 全链迁移，postgres@127.0.0.1。
 
-**状态总览：Stage A + Stage B + Stage C（P01-P04 核心 cutover + collector curated 更新 +
-Stage E 首批 4 条 wiring 腿）DONE（已 commit：`a1d13dd06` cutover、其后一条 test commit）。
-剩余：Stage E 其余门矩阵腿 + Stage D dispatcher 生产接线 + Stage F mutation 汇总/PR。**
+**状态总览：Stage A + Stage B + Stage C + Stage D（第四棒，commit `21dc05110`：三姿态矩阵
+门腿 + V2 freeze 腿 + dispatcher env-gate 生产接线 + runId/freeze 纯单测 + 修复 Stage C 一处
+latent bug）DONE。剩余：Stage E 残余门矩阵腿（见下）+ Stage F mutation 汇总/PR。**
+
+---
+
+## Stage D — 姿态矩阵与冻结（DONE，第四棒，commit `21dc05110`）
+
+落点：
+
+- **修复 Stage C latent bug（矩阵腿抓出）**：boundary legacyOnlyTime 分支原把非闭集
+  `{kind:'legacy_time_ingress',...}` 塞进 evidence 传给
+  `computeAttendanceSemanticInputFingerprintV1` ⇒ `W4C0_EVIDENCE_SHAPE_INVALID` ⇒ 整个
+  shadow offset-less punch 500（Stage C 无 offset-less 测试故未暴露）。修复：evidence 保持
+  闭集空数组；raw + `legacy_parseDateInput_server_local` + resolvedInstant 冻进
+  `input_provenance.legacyTimeIngress`；raw 字节仍经 attribution.sourceFingerprint
+  （sha256(raw)）绑进 semantic fingerprint。落点
+  `w4c2-live-scheduled-boundary.ts` legacyOnlyTime 分支（~L830-L870）。**PR body 须declare：
+  锁文字「review carrying raw plus legacy-parser provenance」的存储落点选择 =
+  input_provenance（evidence 闭集是 W4C-0 锁面，不单方扩）。**
+- **dispatcher 生产接线（env-gate）**：index.cjs activate 内（annual-leave 注册块后）——
+  `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` 非空 且 port.drainResultEventOutbox 存在
+  才 `attendanceScheduler.registerJob({name:'attendance-w4-result-outbox-drain'})`；
+  **注册本身被 gate**（区别于其它 dormant-run job）：无 env ⇒ 无 job 对象 ⇒ 字节不变。
+  deactivate 反注册。tick 节奏归共享 attendance scheduler（ATTENDANCE_SCHEDULER_ENABLED，
+  与其余 job 同姿势）。测试探针 `module.exports.__attendanceW4OutboxDrainForTests`
+  （getState().gated + runOnce = 生产闭包本体非拷贝）。
+- **新 db 套件** `tests/integration/attendance-w4c2-posture-matrix.db.test.ts`（5 腿，已进
+  plugin-tests.yml attendance 步）：server 启动前设 exact-org env allowlist（shadow/eligible/
+  freeze 三 org）+ 合法初始态 rollout 行（shadow 初始合法；eligible 走 shadow→eligible 边）：
+  1. legacy 姿态 offset-less：200 legacy 形状 + 零 operation/calculation/outbox；
+  2. shadow offset-less（stable-ID）：legacy projection 保留（event+record）+ **恰一条**
+     mode='shadow'/entrypoint='live'/review_required/`legacy_time_ingress_not_authoritative`/
+     effect='none'/expected_segment_count=0/context null/segment 子行 0/evidence []/
+     input_provenance.legacyTimeIngress 全形状 + attribution unsupported+sha256(raw) +
+     sealed op（posture='shadow'，双指针）+ response_snapshot==wire body + outbox pending 1；
+  3. eligible offset-less：**正控先行**（同 org 严格时间 200 + 一条 shadow review
+     `missing_frozen_context`）→ 拒绝腿 422 `W4_ATTRIBUTION_UNSUPPORTED`（message==code、
+     raw 不回显）+ 零 event/record/calc/outbox + **claim 随事务回滚（零 operation 行）**；
+  4. V2 freeze：真 shift+assignment（Asia/Shanghai 09:00-18:00）⇒ calc1 completed/calculated、
+     attribution resolved_v2、absoluteWindow=01:00Z-10:00Z 精确 + attributionWindow 端=绝对端
+     +冻结 tail（自洽断言，tail 源不 pin）→ UPDATE shift 端 19:00 → calc2 窗口端=11:00Z
+     （正控：改动达及新解析）→ calc1 attribution_snapshot 逐字节重读不变（freeze）→
+     直接 UPDATE snapshot 被 `W4C0_IMMUTABLE` 拒（存储层绝对冻结）；
+  5. env-present drain：gated=true + runOnce（生产闭包）一遍投递全部 4 pending（org-scoped
+     恰 4 断言 + global-anchored counts，脏库复跑安全）→ 二遍 claimed 0。
+- **boundary wiring 套件追加 no-env 腿**（同片自有文件，additive）：beforeAll 显式 delete env；
+  gated=false + runOnce reject `W4_OUTBOX_DRAIN_NOT_GATED` —— 与矩阵套件 env-present 腿构成
+  排他对（MD4 证）。
+- **新纯单测** `src/attendance/__tests__/w4c2-frozen-attribution.test.ts`（15 腿，default
+  vitest include ⇒ 走 required 单测门）：freeze 语义（窗口=candidate 字面量；tail 改 60 ⇒
+  END_UNEXPLAINED 而非移窗；OT 撤销 ⇒ END_UNEXPLAINED；缩窗拒；start/end 漂移 MISMATCH 分腿；
+  DST gap start/end 分腿 + fold 拒；输入形状违规 throw 闭码——其中 offset-less approvedEndAt
+  在下层 `AttendanceW4TimeError/W4C1_INSTANT_INVALID` 拒，per-layer 实态已 pin）；
+  windowEvidenceFingerprint（requestId 排序不敏感 / tail/OT-identity/anchor 敏感）；
+  scheduled runId（**golden pin**：cron/default/2026-07-22 =
+  `3477855b-403c-5fa1-9268-eb21b45c44cb`、admin_run 同键 =
+  `268051a3-3f83-5c14-a315-19e1d3265554`，独立 RFC-4122 v5 实现算出后 pin 为字面量，防
+  namespace/推导序漂移破坏跨部署 durable replay；决定性/三键区分/v5 形状/闭集 initiator 拒/
+  非 canonical org+date 拒）。scheduled runId 实现本身 Stage C 已落（boundary L124-L168），
+  本棒补其判别腿；namespace 新常量呈裁点不变（原呈裁点 4）。
+
+### Stage D 实跑实数
+
+- **CI 同构 attendance 步全量（全新库 `ms2_w4c2_relay4b`，CI MIGRATION_EXCLUDE 全链迁移）：
+  63 files / 776 passed**（= Stage C 766 + wiring 4（Stage C 期未入列）+ 本棒 6 新，文件数
+  61+2 对账精确；零改写零红——字节红线证据；日志
+  scratchpad `w4c2-relay4-fullstep.log`，红 error 行 = 注入故障套件预期输出）。
+- 矩阵套件 5/5；boundary wiring 10/10（原 4 + no-env 1 = 5，两套件合跑 10/10）；
+  frozen-attribution 单测 15/15；collector gate 14/14；mock-activation + attendance 模块
+  spec 277/277；tsc --noEmit exit 0；node --check index.cjs OK。
+- 基线库：`ms2_w4c2_relay4`（开发/调试）+ `ms2_w4c2_relay4b`（判别，全新）。
+
+### Stage D mutation 记账（先 commit `21dc05110` 后 mutate，git checkout 精确路径还原，均实跑）
+
+| # | 变异 | Flip set（实测） | 还原核验 |
+|---|---|---|---|
+| MD1 | boundary legacyOnlyTime 检测 neuter（`&& false`——把 legacy 解析瞬时当 W4 evidence，diff 核对命中真代码行） | **恰 3 红**：矩阵腿 2（review 形状不符）+ 腿 3（eligible 不再拒）+ drain 腿（pending 5≠4 记账）；腿 1/freeze 绿 | 还原后 5/5 |
+| MD2 | legacyOnlyTime 分支 insertShadowCalculation 剥离（省略 shadow review） | **恰 1 红**：矩阵腿 2 独红（calcs 0≠1）——「omitting the shadow review fails independently」排他证 | 还原后（经 MD4 轮合跑）绿 |
+| MD3 | eligible 拒绝条件放宽为 `if (legacyOnlyTime)`（shadow 也拒 legacy 写） | **2 红**：矩阵腿 2（422≠200）+ drain 腿（pending 3≠4）；**腿 3 保持绿** ——「rejecting the shadow legacy write fails independently」由腿 2 独立判别 | 还原后 clean |
+| MD4 | index.cjs drain 注册去掉 env-gate 条件（无 env 也注册 worker） | **恰 1 红**（两套件 10 腿合跑）：boundary no-env 腿（gated true）；矩阵 env-present 腿绿——排他对成立 | 还原后 10/10 |
+| MD5 | frozen-attribution END_MISMATCH 检查 neuter（`if (false && ...)`) | **恰 1 红**：单测 legacy-helper drift 腿（end 漂移铸出 V2）；14 绿（start 漂移腿仍拦） | 还原后 15/15 |
+
+### Stage D 呈裁点/薄弱点（PR body 必列，续接 Stage C 呈裁点 1-7）
+
+8. **legacy-time provenance 落点 = input_provenance**（非 evidence_snapshot）：evidence 闭集
+   是 W4C-0 锁面（punch/approved_adjustment/scheduled_absence），legacy-only 值本就不可为 W4
+   evidence；锁 §12.3「carrying raw plus legacy-parser provenance」未 pin 存储列。声明之。
+9. **drain worker 双 env**：注册被 `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` gate，tick
+   还需 `ATTENDANCE_SCHEDULER_ENABLED=true`（共享 scheduler 既有姿势）。生产开 shadow 时两个
+   都要设——PR body/运维注记写明。
+10. **矩阵套件对 env 的进程内假设**：posture per-request 读 env，套件全程保持 allowlist 设定、
+    afterAll 精确还原；CI 每文件独立 fork 无泄漏。no-env 腿显式 delete env 后再 activate。
+11. **drain 全局计数**：dispatcher 按设计全库扫；套件对本套件 org 恰-4 断言 + 全局锚定 counts，
+    脏库复跑不假红（但判别仍应全新库）。
+12. **freeze db 腿的 tail 不 pin**：attributionWindow 端用「绝对端+冻结 tail 自洽」断言（tail
+    源为 org policy 默认 120，不锁死具体值）——移窗判别力在 calc2 正控 + 逐字节重读，不依赖
+    tail 具体值。
+
+### 接力者 TODO（Stage E 残余 + Stage F）——较第三棒清单的增量
+
+- ~~Stage D dispatcher 生产接线~~ DONE（本棒）。
+- ~~offset-less legacy time 三姿态矩阵~~ DONE（本棒，含 removing-each-side 独立判别 MD1-MD3）。
+- Stage E 仍余：scheduled W4 durable replay（重启等价 = 二次 run 同 runId per-user replay 零
+  DML + skipDedup 不可绕——runId 决定性纯腿本棒已铺，db 腿未铺）、forged witness 四腿
+  （boundary 面）、TOCTOU 双连接、promotion blocked/accepted_write_posture 不可 rebase 的
+  boundary 腿、P02 写次数判别腿（Stage C 呈裁点 7）、shadow strict-time punch 的 outbox
+  before seal **顺序**断言（本棒证了存在性与 pending 态；严格序 = crash-between 构造，
+  dispatcher 套件已有部分面）。
+- Stage F：mutation 汇总表（MA/MB/MC/MD + 新增）+ PR（body 照 #4606/#4607 形制 + §11.1 六项
+  + 呈裁点 1-12 全列）。PR 前 `rg -io "(close[sd]?|fix(es|ed)?|resolve[sd]?) #?[0-9]+"` 自查。
 
 ---
 
