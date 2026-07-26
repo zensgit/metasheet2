@@ -1119,7 +1119,12 @@ must sort after the W4C-0 `zzzz20260725120000_...` migration they depend on).
    changes, so a plain backfill `UPDATE` aborts the migration the first
    time it reaches a `delivered` pre-existing row. Every pre-existing row
    has a non-null `operation_id` by the old `NOT NULL` constraint, so once
-   the trigger is out of the way the backfill itself is total;
+   the trigger is out of the way the backfill itself is total. `DISABLE
+   TRIGGER`/`ENABLE TRIGGER` are catalog changes, not session state, but
+   this migration's `up()` runs inside one transaction (this repo's
+   existing migration runner convention), so a failure between the two
+   statements rolls the catalog change back with everything else —
+   the guard is never left off outside a failed, rolled-back attempt;
 4. add the CHECK constraints, both FKs, and the two partial unique indexes;
    drop `uq_areo_identity` only after the operation partial unique index
    exists;
@@ -1398,7 +1403,8 @@ before their operation seal.
 
 ### 2.1 CI gate home
 
-Fifteen-plus gates that are only "mutation-proven on real PostgreSQL" in
+Nineteen required gates (plus two pending gates, 20-21, inert until
+`O-3`/`O-4` rule) that are only "mutation-proven on real PostgreSQL" in
 prose, with no suite or workflow step named, is this repo's own documented
 false-green shape (real-DB integration suites that never run in any
 workflow, or that skip-green in the no-DB job). This amendment requires:
@@ -1451,7 +1457,7 @@ starts, not just accepted by omission.
 
 | Decision | Options | Recommendation |
 | --- | --- | --- |
-| `OD-W4C-49` (`O-1`) — rewrite red line `W4C-R42` for class `01` | (a) rewrite `W4C-R42` (lock line 214) and the three dependent clauses (lock lines 2049-2050, 2126-2130, 2570) from "`01` is forbidden" to "`01` is acquired only by the scheduled-run helper; any other caller acquiring `01`, or that helper acquiring `00`/`10`/`11`, fails independently" — i.e. `01` becomes a fifth reserved-then-assigned class rather than staying forbidden; (b) do not rewrite the red line — `OD-W4C-44(c)` (no run object, already rejected by the G-2 ruling) becomes the only compliant shape, and this amendment cannot proceed as drafted | **(a)**, because (b) reopens the already-rejected `(c)` option and leaves the two run-level events with no compliant durable home |
+| `OD-W4C-49` (`O-1`) — rewrite red line `W4C-R42` for class `01` | (a) rewrite `W4C-R42` (lock line 214) and the three dependent clauses (lock lines 2049-2050, 2126-2130, 2570) from "`01` is forbidden" to "`01` is acquired only by the scheduled-run helper; any other caller acquiring `01`, or that helper acquiring `00`/`10`/`11`, fails independently" — i.e. `01` becomes a fifth reserved-then-assigned class rather than staying forbidden; (b) do not rewrite the red line — class `01` stays forbidden, so `OD-W4C-46` cannot resolve to (a) (reserved class `01`) and must instead resolve to (b) (reuse class `10` with a third `kind` discriminant) or (c) (partial unique index + row locks alone, no advisory class), with section 1.6 and gate 16 rewritten to match whichever is chosen; `OD-W4C-44(c)` (no run object) remains a separate, already-rejected fallback if neither `OD-W4C-46(b)`/(c) is judged adequate | **(a)**, because both `OD-W4C-46(b)` and (c) were already argued against on their own merits (weakening the "cross-class upgrade is impossible" property, and making `23505` a control path, respectively) — reopening the red line's wording is a smaller change than accepting either of those costs |
 | `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair to target rows (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a terminal outcome; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
 | `OD-W4C-51` (`O-2`) — canonical order for `ordinal` / resume-guard shape | (a) pin the membership resolution query to `ORDER BY user_id` (or another explicit total order); `ordinal` becomes a pure function of membership; narrow gate 4's "byte-identical to pre-amendment emit" claim to key/value-set equivalence plus the new canonical order; (b) leave resolution order undefined as today; change the resume guard (section 1.7 step 3) to an order-insensitive set fingerprint; withdraw gate 10's "or one ordinal" leg | **(a)**, because the ordered fingerprint this draft already specifies (section 1.3) cannot be satisfied on resume by an unpinned membership query, and pinning without owner sign-off is not available to the author alone — a one-time, disclosed change to `reasons` ordering is preferable to shipping a resume guard that spuriously fires on a benign restart |
 | `OD-W4C-52` (`O-4`) — does a `running` run block shadow/eligible promotion | (a) extend the lock's promotion-block predicate (lock lines 2689-2690, 2250) to treat a `running` `attendance_scheduled_runs` row as blocking, same as an incomplete operation; accept the operational cost that a promotion window must avoid colliding with an in-flight scheduled run; (b) do not block promotion; instead redefine finalization (section 1.8 step 1) to execute under the run's own frozen posture rather than the currently resolved one — a considered, narrow reversal of this draft's own "posture flip is remediation, never a rebase" stance, scoped to finalization only | no recommendation — this is an operational rollout-timing tradeoff ((a)) versus a semantic reversal of a stance this same draft asserts elsewhere ((b)); both are internally consistent, and the choice is the owner's to make, not the author's |
