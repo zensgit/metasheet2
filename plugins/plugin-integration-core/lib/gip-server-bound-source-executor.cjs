@@ -203,8 +203,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:314) is the SOLE writer into
-//      `trustedSourceBinders` (:308, written :359) and is publicly EXPORTED (:486) — there is no
+//   2. `createHarnessSourceBinderForTests` (:331) is the SOLE writer into
+//      `trustedSourceBinders` (:325, written :405) and is publicly EXPORTED (:544) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
