@@ -872,6 +872,63 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     expect((await operationRows(schedOrg, 'scheduled')).length).toBe(0)
   })
 
+  it('leg 5e — P2-1 remediation (#4612 gate finding): a scheduler-postured witness with a NON-REGISTERED actorId fails the ordinary active-user recheck (the adjacent comment claims this as an invariant; K11 previously widened the exemption to any actorId and 789/789 stayed green — this leg makes the claim a tested one)', async () => {
+    const envelope = scheduledEnvelope(schedOrg, schedUser, '2026-07-23')
+    // Any scheduler-postured actorId OTHER than the registered constant must
+    // still fail the ordinary active-user recheck — even one shaped like a
+    // real UUID, deliberately never inserted into `users`.
+    const forgedActorId = randomUUID()
+    const forgedSchedulerWitness = createAuthorizedAttendanceWriteContextV1({
+      actorId: forgedActorId,
+      actorPosture: 'scheduler',
+      tokenSubjectUserId: null,
+      orgId: schedOrg,
+      subjectScope: { kind: 'org_scheduler' },
+      capability: 'scheduled',
+      sourceRef: 'w4c2-e5:scheduler-non-registered-actor-leg',
+    })
+    const opsBefore = (await operationRows(schedOrg, 'scheduled')).length
+    const raw = await pool.connect()
+    try {
+      await expect(
+        runAttendanceResultOperationTransactionV1(raw as unknown as AttendanceW4TransactionClientV1, (trx) =>
+          attendanceResultOperationPreflightV1(trx, forgedSchedulerWitness, envelope.registryInput),
+        ),
+      ).rejects.toThrow('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+    } finally {
+      raw.release()
+    }
+    // Zero durable rows from this call (delta, not absolute — leg 5c/leg 9
+    // write their own rows to this same org earlier/later in the file).
+    expect((await operationRows(schedOrg, 'scheduled')).length).toBe(opsBefore)
+
+    // POSITIVE CONTROL: identical shape, actorId IS the registered constant —
+    // reaches SQL and is authorized (leg 5c already proves this exact witness
+    // shape claims successfully; re-asserted here as the paired control for
+    // THIS leg's specific mutation axis — actorId, not capability).
+    const registered = createAuthorizedAttendanceWriteContextV1({
+      actorId: ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
+      actorPosture: 'scheduler',
+      tokenSubjectUserId: null,
+      orgId: schedOrg,
+      subjectScope: { kind: 'org_scheduler' },
+      capability: 'scheduled',
+      sourceRef: 'w4c2-e5:scheduler-non-registered-actor-control',
+    })
+    const rawControl = await pool.connect()
+    try {
+      await expect(
+        runAttendanceResultOperationTransactionV1(rawControl as unknown as AttendanceW4TransactionClientV1, async (trx) => {
+          const preflight = await attendanceResultOperationPreflightV1(trx, registered, envelope.registryInput)
+          expect(preflight.kind).toBe('claimed')
+          throw new Error('W4C2_E5_LEG5E_ROLLBACK_SENTINEL')
+        }),
+      ).rejects.toThrow('W4C2_E5_LEG5E_ROLLBACK_SENTINEL')
+    } finally {
+      rawControl.release()
+    }
+  })
+
   it('leg 5d — inactive membership: the stable-ID punch is a values-free 403 with ZERO source DML; re-activating the membership makes the identical punch write (positive control)', async () => {
     const token = await mintToken(inactiveMemberUser)
     const body = {
