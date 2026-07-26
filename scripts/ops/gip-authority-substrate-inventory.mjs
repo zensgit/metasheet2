@@ -142,11 +142,22 @@ const SCHEMA_PROBE_CAVEAT =
 const DEFAULT_PRIVATE_OUTPUT_DIR = 'artifacts/gip-authority-inventory'
 
 // ---------------------------------------------------------------------------
-// QUERY_ALLOWLIST — the ONLY SQL statements this script will ever execute.
-// Every statement is SELECT-only; assertReadOnlyAllowlist() enforces that
-// structurally at module load (same guard shape as #4594's, independently
-// implemented per the owner's task-brief carrier ruling — see the header
-// comment above; that ruling is not recorded in the ledger).
+// QUERY_ALLOWLIST — the ONLY SQL statements this script will ever execute,
+// PROVIDED an entry is not mutated post-load. `Object.freeze()` on the outer
+// object is SHALLOW: it stops a new tag from being added/removed/replaced,
+// but a nested entry object (e.g. QUERY_ALLOWLIST['probe.columns']) would
+// remain writable on its own unless frozen too — see the explicit per-entry
+// freeze loop right below this literal, which closes that gap (#4603 P3:
+// proven by an importer reassigning `.sql` on a live entry and observing
+// runQuery()/probeColumns() hand the mutated string straight to the
+// executor). With that loop in place, EVERY entry is independently frozen,
+// so a post-load `QUERY_ALLOWLIST[tag].sql = …` throws (strict-mode ESM)
+// instead of silently succeeding. assertReadOnlyAllowlist() enforces the
+// SELECT-only shape structurally at module load (same guard shape as
+// #4594's, independently implemented per the owner's task-brief carrier
+// ruling — see the header comment above; that ruling is not recorded in the
+// ledger) — freezing is what keeps that load-time proof true for the rest of
+// the process's life, not just at the instant it ran.
 // ---------------------------------------------------------------------------
 
 const QUERY_ALLOWLIST = Object.freeze({
@@ -176,6 +187,16 @@ const QUERY_ALLOWLIST = Object.freeze({
       "rows where the object column and config->>'object' disagree — a values-free integrity check; a non-zero result means some backfill/mapping decision fed only by the object column would miss rows whose stored config JSON disagrees with it. IS DISTINCT FROM (not <>) is deliberate: a row whose config JSON carries no 'object' key at all has config->>'object' = NULL, and IS DISTINCT FROM (unlike <>) treats object <> NULL as true rather than UNKNOWN per the SQL standard's IS DISTINCT FROM semantics — a missing key in config counts as a divergence, not a silent pass. A prior session in this PR reported exercising this against a seeded row with no 'object' key on an ephemeral local Postgres instance that was discarded afterward with no transcript captured — see PR body's caveat on that claim; this fix pass did not have a live Postgres runtime available to reproduce it independently, so treat the missing-key behaviour as following from the documented SQL semantics of IS DISTINCT FROM, not as an independently-reproduced live-DB proof.",
   },
 })
+
+// #4603 P3: `Object.freeze()` above is SHALLOW — it only locks the outer object's own key set, not
+// each nested entry object. Without this loop, `QUERY_ALLOWLIST['probe.columns'].sql = '…'` would
+// silently succeed post-load, and runQuery()/probeColumns() would hand the mutated string straight
+// to the executor — the "ONLY SQL statements this script will ever execute" claim above would be
+// false in scope (not just unenforced after the instant assertReadOnlyAllowlist() ran). Freeze each
+// entry independently so the same guarantee the outer freeze gives the key set also holds per-entry.
+for (const entry of Object.values(QUERY_ALLOWLIST)) {
+  Object.freeze(entry)
+}
 
 // A row count is only ever trustworthy if it is a non-negative SAFE integer. `Number(x) || 0`
 // (the prior shape of this predicate) turns undefined/null/''/'abc'/NaN into a silent 0 — the
@@ -1140,6 +1161,19 @@ if (isEntry) {
   // print happens OUTSIDE main()'s own stderr writes, so nothing inside this file can intercept or
   // redact it. Never interpolate the rejection reason here, for the same values-free discipline as
   // every other stderr write in this file.
+  //
+  // COVERAGE DISCLOSURE (#4603 HOLD, accepted gap, kept narrow — see the 'safeClose() rejection-
+  // swallow' describe block in the test file for what IS pinned): this specific `() => { ... }`
+  // rejection callback has zero test coverage, and that is not fixable through the createExecutor
+  // seam. With safeClose() now swallowing every executor.close() rejection at both finally sites
+  // (pinned by the tests referenced above), and parseArgs()/buildReport()/buildDryRunReport()
+  // already resolving every error they can produce to a mapped exit code inside main()'s own
+  // try/catch blocks, main() resolves by construction on every path the injectable seam can drive
+  // — there is no fixture that makes main() itself reject without mutating the source to
+  // (re)introduce an escape. Reaching this callback for real would require isEntry to be true (a
+  // condition gated on real process.argv[1]/import.meta.url identity, not exercisable via the
+  // createExecutor seam at all) AND some other future change to reopen an escape safeClose() no
+  // longer allows. Left disclosed rather than silently dropped; not claimed as covered.
   main().then(
     (code) => {
       process.exitCode = code

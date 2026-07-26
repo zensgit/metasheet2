@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, statSync, readlinkSync, rmSync, readdirSync } from 'node:fs'
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, statSync, readlinkSync, rmSync, readdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,6 +15,8 @@ import {
   assertReadOnlyAllowlist,
   isSafeNonNegativeInteger,
   INVALID_COUNT_REASON,
+  runQuery,
+  probeColumns,
   probeSchema,
   buildPlan,
   bucketByRegistry,
@@ -140,6 +142,95 @@ describe('assertReadOnlyAllowlist', () => {
   test('accepts a SELECT with a single harmless trailing semicolon (or none at all)', () => {
     assert.doesNotThrow(() => assertReadOnlyAllowlist({ x: { sql: 'SELECT 1;', describe: 'x' } }))
     assert.doesNotThrow(() => assertReadOnlyAllowlist({ x: { sql: 'SELECT 1', describe: 'x' } }))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// QUERY_ALLOWLIST entries — deep freeze (#4603 P3). `Object.freeze(QUERY_ALLOWLIST)` at the
+// literal's own definition site only locks the OUTER object's key set — it does not freeze each
+// nested `{ sql, describe }` entry object. Proven live before the fix: an importer could run
+// `QUERY_ALLOWLIST['probe.columns'].sql = 'DELETE FROM integration_external_systems; -- pwned'`
+// and BOTH runQuery() and probeColumns() would hand that exact mutated string to the executor —
+// assertReadOnlyAllowlist() never re-runs after module load, so it would never catch this. This
+// describe block holds every entry to the SAME standard KNOWN_CERTIFIED_CONNECTOR_KINDS /
+// KNOWN_CANONICAL_OBJECT_KEYS / RESIDUAL_NOTES are already held to elsewhere in this file (a
+// mutation attempt throws, not just "is frozen" as a comment).
+// ---------------------------------------------------------------------------
+
+// Best-effort restore for a module-level singleton mutation attempt. When the fix is in place the
+// original assignment above already threw (nothing changed, so this is a silent no-op attempt
+// that itself throws — swallowed here on purpose). When the fix is ABSENT the assignment above
+// succeeded and corrupted shared state; this restores it so a discrimination run's failure surface
+// stays limited to the tests in this describe block instead of cascading into every test below it
+// in the file (which all reference the same QUERY_ALLOWLIST singleton via the fake-exec harness).
+function attemptRestore(entry, key, original) {
+  try {
+    entry[key] = original
+  } catch {
+    // frozen (fix present) — nothing was mutated, nothing to restore
+  }
+}
+
+describe('QUERY_ALLOWLIST entries are deep-frozen, not just the outer object (#4603 P3)', () => {
+  test('every entry object is independently frozen (structural, not per-tag)', () => {
+    for (const [tag, entry] of Object.entries(QUERY_ALLOWLIST)) {
+      assert.ok(Object.isFrozen(entry), `QUERY_ALLOWLIST["${tag}"] entry is not frozen`)
+    }
+  })
+
+  test('the exact mutation the owner\'s probe used throws (strict-mode ESM), and the entry is unchanged afterward', () => {
+    const original = QUERY_ALLOWLIST['probe.columns'].sql
+    try {
+      assert.throws(() => {
+        QUERY_ALLOWLIST['probe.columns'].sql = 'DELETE FROM integration_external_systems; -- pwned'
+      }, TypeError)
+      // Read back: the throw must have happened BEFORE the write took effect, not merely been
+      // thrown after a silent mutation already landed.
+      assert.equal(QUERY_ALLOWLIST['probe.columns'].sql, original)
+      assert.doesNotMatch(QUERY_ALLOWLIST['probe.columns'].sql, /DELETE|pwned/)
+    } finally {
+      attemptRestore(QUERY_ALLOWLIST['probe.columns'], 'sql', original)
+    }
+  })
+
+  test('describe is frozen too (not just sql — the whole entry object, no per-field carve-out)', () => {
+    const original = QUERY_ALLOWLIST['probe.table_exists'].describe
+    try {
+      assert.throws(() => {
+        QUERY_ALLOWLIST['probe.table_exists'].describe = 'SENTINEL_SHOULD_NEVER_STICK'
+      }, TypeError)
+      assert.equal(QUERY_ALLOWLIST['probe.table_exists'].describe, original)
+    } finally {
+      attemptRestore(QUERY_ALLOWLIST['probe.table_exists'], 'describe', original)
+    }
+  })
+
+  test('positive control: after a (failed) mutation attempt, runQuery()/probeColumns() still hand the CORRECT, original SQL to the executor', async () => {
+    const original = QUERY_ALLOWLIST['probe.columns'].sql
+    try {
+      let attemptFailed = false
+      try {
+        QUERY_ALLOWLIST['probe.columns'].sql = 'DELETE FROM integration_external_systems; -- pwned'
+      } catch {
+        attemptFailed = true
+      }
+      assert.ok(attemptFailed, 'setup invariant broken: the mutation attempt above must throw for this positive control to be meaningful')
+
+      const received = []
+      const exec = async (sql, params) => {
+        received.push(sql)
+        return { rows: [{ column_name: 'kind' }] }
+      }
+      await runQuery(exec, 'probe.columns', ['integration_external_systems'])
+      await probeColumns(exec, 'integration_external_systems', ['kind'])
+      assert.equal(received.length, 2)
+      for (const sql of received) {
+        assert.equal(sql, original)
+        assert.doesNotMatch(sql, /DELETE|pwned/)
+      }
+    } finally {
+      attemptRestore(QUERY_ALLOWLIST['probe.columns'], 'sql', original)
+    }
   })
 })
 
@@ -2050,36 +2141,86 @@ describe('stderr values-free discipline — real subprocess (#4603 P2(a))', () =
   })
 
   test('forced `pg` driver-load failure: exit 1; stderr non-empty (positive control); the absolute path fragment PROVEN present in the raw import error is absent from both stdout and stderr', async () => {
-    // Positive control FIRST — prove the raw failure createPgExecutor() hits in this exact hermetic
-    // environment (no node_modules: the real CI workflow for this file — see
-    // .github/workflows/gip-authority-substrate-inventory.yml — checks out and runs `node --test`
-    // directly, no install step) really does carry an absolute path in its .message. If this
-    // control does not hold, the redaction assertions below would be vacuous — a probe that leaks
-    // nothing proves nothing.
-    let rawMessage = null
+    // #4603 P3(b): this control does NOT rely on `pg` being genuinely absent from the ambient
+    // dev/CI environment. The previous shape did — `await import('pg')` here (resolved from THIS
+    // test file's own location) and `runCliSubprocess([], env)` (resolved from SCRIPT_PATH,
+    // scripts/ops/ — the same directory) happened to coincide, but only because `pg` is a real
+    // dependency of packages/core-backend/package.json; a contributor who ran `pnpm install` at
+    // the repo root (an ordinary, unremarkable step) and then ran this test file directly would
+    // resolve `pg` successfully via workspace hoisting, and the whole point of this test — proving
+    // the redaction actually engaged — would silently stop being exercised while still reading
+    // green (a false-negative-shaped risk this repo's doctrine treats as a defect, not a nuisance:
+    // see feedback_positive_control_not_failclosed.md). The CI workflow itself never installs
+    // (checkout + setup-node + `node --test`, no install step — see
+    // .github/workflows/gip-authority-substrate-inventory.yml), so CI never actually saw this gap;
+    // this only bites a contributor running the suite locally after `pnpm install`.
+    //
+    // Fix: measure the raw `import('pg')` failure and the CLI's redaction of it in an ISOLATED
+    // directory with no `node_modules` anywhere in its ancestor chain up to the filesystem root —
+    // a fresh `mkdtemp` under `os.tmpdir()`, never a location inside this repo/workspace. Node's
+    // ESM bare-specifier resolution walks up from the IMPORTING FILE's own directory (NOT
+    // `process.cwd()`, and NOT `NODE_PATH` — that's CJS-only) looking for `node_modules`, so a
+    // copy of the script placed there resolves `pg` deterministically the same way regardless of
+    // whether the repo's own workspace has `pg` installed. This makes the control robust to a
+    // resolvable `pg` rather than merely documenting the fragility.
+    // realpathSync is REQUIRED here, not cosmetic: os.tmpdir() resolves under /var/folders on
+    // macOS, which is itself a symlink to /private/var/folders. The script's own isEntry check
+    // (`path.resolve(argv[1]) === fileURLToPath(import.meta.url)`) compares an UN-resolved argv[1]
+    // against Node's REALPATH-resolved import.meta.url — on an unresolved symlinked path those
+    // never match, isEntry is false, and main() never runs at all (silent exit 0, no output),
+    // which would make every assertion below either vacuous or wrong for the wrong reason. Calling
+    // realpathSync() up front makes the path we pass to spawnSync the SAME string Node's loader
+    // will report back, so isEntry evaluates true exactly as it does for the real script at
+    // SCRIPT_PATH (which is already realpath-stable, being inside this checkout). This is a
+    // test-construction fix, not a claim that the source's isEntry check itself is safe against
+    // symlinked invocation in general — see this PR's disclosure of that as a separate, narrower,
+    // non-blocking observation (does not affect this repo's CI, which runs on ubuntu-latest where
+    // /tmp is a real directory, not a symlink).
+    const isolatedDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'gip-authority-inventory-pgcontrol-')))
     try {
-      await import('pg')
-    } catch (e) {
-      rawMessage = e.message
-    }
-    assert.ok(
-      rawMessage,
-      'control failed: `pg` imported successfully in this test environment — the driver-load-failure scenario below did not actually occur, so its redaction assertions would be vacuous',
-    )
-    assert.ok(rawMessage.includes(__dirname), `control failed: raw import error does not carry the expected absolute path fragment — got: ${rawMessage}`)
+      const isolatedScriptPath = path.join(isolatedDir, 'gip-authority-substrate-inventory.mjs')
+      // The script's only non-builtin import anywhere in its source is the lazy `import('pg')`
+      // inside createPgExecutor() (see the source's "Lazy import" comment) — no relative imports
+      // to sibling repo files — so a standalone byte-for-byte copy is a faithful, self-contained
+      // subject; confirmed by this same copy running correctly below (help text, exit codes).
+      writeFileSync(isolatedScriptPath, readFileSync(SCRIPT_PATH, 'utf8'))
 
-    const env = { PATH: process.env.PATH, DATABASE_URL: 'postgres://sentinel-host-should-never-appear/db' }
-    const res = runCliSubprocess([], env)
-    assert.equal(res.status, 1)
-    assert.ok(res.stderr.length > 0, 'positive control failed: stderr was empty')
-    assert.equal(countOccurrences(res.stderr, __dirname), 0, `path fragment leaked into stderr: ${res.stderr}`)
-    assert.equal(countOccurrences(res.stdout, __dirname), 0, `path fragment leaked into stdout: ${res.stdout}`)
-    assert.equal(
-      countOccurrences(res.stderr, 'sentinel-host-should-never-appear'),
-      0,
-      `DATABASE_URL host leaked into stderr: ${res.stderr}`,
-    )
-    assert.equal(res.stderr.trim(), `[gip-authority-substrate-inventory] ERROR: ${CLI_ERROR_REASON.RUNTIME_FAILURE}`)
+      // Positive control FIRST — prove the raw failure createPgExecutor() would hit really does
+      // carry an absolute path, measured from the SAME isolated location the CLI copy below runs
+      // from (not this test file's own location, which is a different, incidental directory).
+      const rawProbePath = path.join(isolatedDir, 'raw-pg-import-probe.mjs')
+      writeFileSync(
+        rawProbePath,
+        "import('pg').then(() => { process.stdout.write('IMPORTED_OK') }, (e) => { process.stdout.write('FAILED:' + e.message) })\n",
+      )
+      const probeRes = spawnSync(process.execPath, [rawProbePath], { env: { PATH: process.env.PATH }, encoding: 'utf8', timeout: 10_000 })
+      const rawOut = probeRes.stdout ?? ''
+      assert.ok(
+        rawOut.startsWith('FAILED:'),
+        `control failed: \`pg\` imported successfully from the isolated directory — the driver-load-failure scenario below did not actually occur, so its redaction assertions would be vacuous. Raw probe stdout: ${rawOut}`,
+      )
+      assert.ok(
+        rawOut.includes(isolatedDir),
+        `control failed: raw import error does not carry the expected isolated-directory path fragment — got: ${rawOut}`,
+      )
+
+      const env = { PATH: process.env.PATH, DATABASE_URL: 'postgres://sentinel-host-should-never-appear/db' }
+      const res = spawnSync(process.execPath, [isolatedScriptPath], { env, encoding: 'utf8', timeout: 10_000 })
+      const stdout = res.stdout ?? ''
+      const stderr = res.stderr ?? ''
+      assert.equal(res.status, 1)
+      assert.ok(stderr.length > 0, 'positive control failed: stderr was empty')
+      assert.equal(countOccurrences(stderr, isolatedDir), 0, `path fragment leaked into stderr: ${stderr}`)
+      assert.equal(countOccurrences(stdout, isolatedDir), 0, `path fragment leaked into stdout: ${stdout}`)
+      assert.equal(
+        countOccurrences(stderr, 'sentinel-host-should-never-appear'),
+        0,
+        `DATABASE_URL host leaked into stderr: ${stderr}`,
+      )
+      assert.equal(stderr.trim(), `[gip-authority-substrate-inventory] ERROR: ${CLI_ERROR_REASON.RUNTIME_FAILURE}`)
+    } finally {
+      rmSync(isolatedDir, { recursive: true, force: true })
+    }
   })
 
   // --help is the one success-path (exit 0) public-output surface nothing else in this file
@@ -2165,6 +2306,129 @@ describe('main() exit-code contract (#4603 P2(b))', () => {
   // stays green, because none of them called main(). Reverted after confirming red; not re-run here
   // because this file has no automated mutation-testing harness, matching the existing
   // "Mutation-confirmed (#4603 P2)" comment style used elsewhere in this file for the same reason.
+})
+
+// ---------------------------------------------------------------------------
+// safeClose() — pin the rejection-swallow through the SAME injectable createExecutor seam the
+// exit-code contract tests above use (#4603 HOLD, accepted-gap item). Before this block, both of
+// main()'s `finally { await safeClose(executor) }` sites (the --dry-run branch and the real-report
+// branch) had zero coverage: an isolated mutation to bare `await executor.close()` at either site
+// left all 138 pre-existing tests green. That gap is genuine, not cosmetic — via this exact seam,
+// HEAD gives `{closeCalled:true, resolvedExitCode:0, mainRejectedWith:null}` for a rejecting
+// close(), while a bare-`await executor.close()` version lets that rejection escape main()'s own
+// try/catch from OUTSIDE (a `finally` block's own throw/reject supersedes whatever the try block
+// was about to return), reaching the caller as an unhandled rejection instead of the exit code the
+// run had already determined.
+//
+// The primary assertion in both tests below is that main() RESOLVES (does not reject) with the
+// exit code its own branch already computed — not merely that stderr stays clean. A rejecting
+// `close()` escaping main() would print on the REAL stderr file descriptor outside of any
+// process.stderr.write monkeypatch (see the "REAL SUBPROCESS PROOF" comment above the real-CLI
+// describe block for the same point made about the isEntry reject handler) — an in-process stderr
+// capture structurally cannot observe that failure mode, so resolution is the load-bearing check
+// and the stderr assertion is secondary defense-in-depth for the swallow itself.
+// ---------------------------------------------------------------------------
+
+async function withCapturedStdoutAndStderr(fn) {
+  const originalOut = process.stdout.write.bind(process.stdout)
+  const originalErr = process.stderr.write.bind(process.stderr)
+  let outBuf = ''
+  let errBuf = ''
+  process.stdout.write = (chunk) => {
+    outBuf += typeof chunk === 'string' ? chunk : chunk.toString()
+    return true
+  }
+  process.stderr.write = (chunk) => {
+    errBuf += typeof chunk === 'string' ? chunk : chunk.toString()
+    return true
+  }
+  try {
+    const result = await fn()
+    return { result, stdout: outBuf, stderr: errBuf }
+  } finally {
+    process.stdout.write = originalOut
+    process.stderr.write = originalErr
+  }
+}
+
+// Builds a createExecutor whose `close()` always rejects with a marker that must never leak
+// anywhere (a stand-in for safeClose()'s own worked example: `CLOSE_FAIL_MARKER…
+// host=customer-db.internal`, an underlying DB-close error carrying a hostname). Tracks whether
+// close() was actually invoked, so a version of main() that simply never calls close() cannot pass
+// these tests vacuously.
+function rejectingCloseExecutorFactory(exec) {
+  const state = { closeCalled: false }
+  const createExecutor = async () => ({
+    exec,
+    close: () => {
+      state.closeCalled = true
+      return Promise.reject(new Error('CLOSE_FAIL_MARKER — a real close error would carry operational detail like host=customer-db.internal here'))
+    },
+  })
+  return { createExecutor, state }
+}
+
+describe('safeClose() rejection-swallow — pinned through the createExecutor seam (#4603 HOLD)', () => {
+  test('--dry-run branch (L1112-ish finally): a rejecting executor.close() does not reject main(), and the exit code / stdout report are unaffected', async () => {
+    const exec = async () => ({ rows: [] })
+    const { createExecutor, state } = rejectingCloseExecutorFactory(exec)
+
+    let mainRejectedWith = null
+    let resolvedExitCode = null
+    const { stdout, stderr } = await withCapturedStdoutAndStderr(async () => {
+      try {
+        resolvedExitCode = await main(['--dry-run'], { DATABASE_URL: 'postgres://fixture/db' }, { createExecutor })
+      } catch (e) {
+        mainRejectedWith = e
+      }
+    })
+
+    assert.equal(mainRejectedWith, null, `main() rejected instead of resolving: ${mainRejectedWith && mainRejectedWith.stack}`)
+    assert.equal(resolvedExitCode, 0, '--dry-run with no schema issues should still resolve exit 0 despite the close() failure')
+    assert.ok(state.closeCalled, 'setup invariant broken: executor.close() was never called — this test would pass vacuously otherwise')
+    assert.ok(stdout.length > 0, 'the dry-run report should still have been printed to stdout')
+    assert.equal(countOccurrences(stderr, 'CLOSE_FAIL_MARKER'), 0, `close() rejection marker leaked onto stderr: ${stderr}`)
+    assert.equal(countOccurrences(stderr, 'customer-db.internal'), 0, `close() rejection detail leaked onto stderr: ${stderr}`)
+  })
+
+  test('real-report branch (L1149-ish finally): a rejecting executor.close() does not reject main(), and the exit code / stdout report are unaffected', async () => {
+    const schema = cloneSchema()
+    const exec = createFakeExec({ schema, counts: ZERO_COUNTS })
+    const { createExecutor, state } = rejectingCloseExecutorFactory(exec)
+
+    let mainRejectedWith = null
+    let resolvedExitCode = null
+    const { stdout, stderr } = await withCapturedStdoutAndStderr(async () => {
+      try {
+        resolvedExitCode = await main(['--no-private-out'], { DATABASE_URL: 'postgres://fixture/db' }, { createExecutor })
+      } catch (e) {
+        mainRejectedWith = e
+      }
+    })
+
+    assert.equal(mainRejectedWith, null, `main() rejected instead of resolving: ${mainRejectedWith && mainRejectedWith.stack}`)
+    assert.equal(resolvedExitCode, 0, 'nothing owed + --no-private-out should still resolve exit 0 despite the close() failure')
+    assert.ok(state.closeCalled, 'setup invariant broken: executor.close() was never called — this test would pass vacuously otherwise')
+    assert.ok(stdout.length > 0, 'the report should still have been printed to stdout')
+    assert.equal(countOccurrences(stderr, 'CLOSE_FAIL_MARKER'), 0, `close() rejection marker leaked onto stderr: ${stderr}`)
+    assert.equal(countOccurrences(stderr, 'customer-db.internal'), 0, `close() rejection detail leaked onto stderr: ${stderr}`)
+  })
+
+  // Discrimination (run manually, not automated — this file has no mutation-testing harness; same
+  // documentation style as the other "Mutation-confirmed" comments in this file), confirmed
+  // 2026-07-25: replacing `await safeClose(executor)` with a bare `await executor.close()` at ONLY
+  // the --dry-run site (~L1113) reds exactly the first test above (main() rejects:
+  // mainRejectedWith !== null) — 143/144, nothing else. Reverting that and doing the same at ONLY
+  // the real-report site (~L1150) reds the second test above AND the pre-existing 'forced `pg`
+  // driver-load failure' real-subprocess test (142/144) — NOT test pollution: at that site
+  // `executor` is declared `let executor` (no initial value) rather than `let executor = null`
+  // (the --dry-run site's declaration), so when createExecutor() itself throws before ever
+  // assigning `executor` — exactly what the real `pg`-absent subprocess test forces — a bare
+  // `executor.close()` throws on undefined, escapes main()'s finally as a second rejection, and
+  // the entry-point's last-resort reject handler (isEntry block, bottom of source) prints ITS OWN
+  // "ERROR: RUNTIME_FAILURE" line on top of the one main()'s own catch already wrote — the exact
+  // "printed that marker twice" failure mode the reviewer's probe described. Independent
+  // confirmation from a pre-existing test, not a designed assertion of this new describe block.
 })
 
 // ---------------------------------------------------------------------------
