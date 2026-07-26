@@ -159,15 +159,24 @@ jobs:
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
-      # #4610 by owner instruction): pins the YAML-shape properties that make .github/workflows/
-      # integration-guard.yml's produced `integration-guard` check safe to later mark as a required
-      # context — on.pull_request has NO paths: filter, on.merge_group exists, the job is present
-      # under the exact expected name with no matrix suffix, and the in-job scope classifier has BOTH
-      # branches (relevant ⇒ runs the full suite unchanged, irrelevant ⇒ an explicit no-op exit 0,
-      # not a GitHub-skipped step). Deliberately NOT a copy of the integration suite itself — that
-      # stays in integration-guard.yml only (owner ruling: two copies would drift apart). See
-      # scripts/ops/integration-guard-required-wiring-contract.test.mjs for the full rationale and an
-      # explicit note on what a YAML-shape assertion can and cannot prove.
+      # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
+      # header for the corrected rationale). Mixed YAML-shape + BEHAVIOURAL contract that makes
+      # .github/workflows/integration-guard.yml's produced `integration-guard` check safe to later mark
+      # as a required context:
+      #   - YAML-shape: on.pull_request has NO paths: filter, on.merge_group exists, the job is present
+      #     under the exact expected name with no matrix suffix, the job/classifier/real-branch/
+      #     terminal-assertion steps carry none of `if` (job-level)/`needs`/`continue-on-error`, the
+      #     classifier step invokes the extracted script (not inline bash), and the terminal safety-net
+      #     step exists with `if: always()` wired to the three branch steps' outcomes;
+      #   - behavioural: scripts/ops/integration-guard-classify.mjs's classify() is driven directly with
+      #     synthetic plugin-only/web-only/both/neither file lists (including a deeply-nested plugin
+      #     path, closing a glob-semantics regression class), and scripts/ops/integration-guard-assert-
+      #     branch.mjs's assertBranch() is driven directly with the full relevant/outcome state matrix
+      #     (including `relevant: 'unknown'`) — these do not depend on GitHub Actions actually running.
+      # Deliberately NOT a copy of the integration suite itself — that stays in integration-guard.yml
+      # only (owner ruling: two copies would drift apart). See scripts/ops/integration-guard-required-
+      # wiring-contract.test.mjs for the full rationale and an explicit note on what each layer can and
+      # cannot prove.
       - name: Integration Guard required-wiring contract
         run: node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs
 

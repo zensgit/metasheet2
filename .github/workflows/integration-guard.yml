@@ -19,27 +19,80 @@
 #      JSON.parse SyntaxError's offending-text snippet is never rendered into the status line.
 # Expand the spec list as more integration web specs are added.
 #
-# WIRING FOR REQUIRED-CONTEXT SAFETY (owner ruling, promotion slice, 2026-07-25). A required status
-# check is matched by check/job name; if the workflow never runs, the context is never produced, and
-# a PR/merge-queue entry that never touches a path in the `paths:` filter waits FOREVER on a check
-# that will never report. This workflow used to trigger `pull_request` with a `paths:` filter and had
-# no `merge_group` trigger at all, so it could not safely be promoted to required. This slice fixes
-# the WIRING ONLY (promoting the produced context `integration-guard` to a required check on branch
+# WIRING FOR REQUIRED-CONTEXT SAFETY (owner ruling, promotion slice, 2026-07-25, corrected 2026-07-25
+# after a P2 review finding — see below). A required status check is matched by check/job name; if the
+# workflow never RUNS for a given event, the context is never produced, and a PR/merge-queue entry
+# that never touches a path in a trigger-level `paths:` filter waits FOREVER on a check that will
+# never report. This workflow used to trigger `pull_request` with a `paths:` filter and had no
+# `merge_group` trigger at all, so it could not safely be promoted to required. This slice fixes the
+# WIRING ONLY (promoting the produced context `integration-guard` to a required check on branch
 # protection remains the owner's separate, later step — not done here):
-#   - `pull_request` now has NO `paths:` filter and `merge_group:` is added, so the job runs — and the
-#     `integration-guard` context is produced — on EVERY pull_request and EVERY merge_group event.
+#   - `pull_request` now has NO `paths:` filter and `merge_group:` is added, so the WORKFLOW runs — and
+#     the `integration-guard` context is produced — on EVERY pull_request and EVERY merge_group event.
+#     `merge_group:` is added because GitHub's own documentation requires any workflow that gates a
+#     required status check to explicitly add the `merge_group` event, or the merge queue's temporary
+#     merge-group ref never triggers it and the required check hangs pending — this is a documented
+#     platform requirement, not inferred from the "pending forever" argument above.
 #   - the guarded-path scope check moves INSIDE the job (the "Detect relevant integration changes"
-#     step below): a change inside the guarded paths runs the full suite unchanged (identical
-#     `pnpm --filter plugin-integration-core test` / vitest commands as before); a change outside them
-#     hits an explicit no-op step that echoes it is a DELIBERATE no-op and exits 0 — a real, executed,
-#     green step, not a GitHub-`skipped` step/job (a `skipped` job does not satisfy a required context
-#     the same way).
+#     step below, backed by the extracted scripts/ops/integration-guard-classify.mjs): a change inside
+#     the guarded paths runs the full suite unchanged (identical `pnpm --filter plugin-integration-core
+#     test` / vitest commands as before); a change outside them hits an explicit no-op step that
+#     echoes it is a DELIBERATE no-op and exits 0.
+#   - CORRECTION (P2, 2026-07-25): an earlier revision of this comment justified the explicit no-op
+#     step by claiming "a `skipped` job does not satisfy a required context the same way" a real green
+#     step does. THAT CLAIM IS BACKWARDS and is retracted here, not merely reworded. GitHub's actual
+#     behaviour is the opposite split:
+#       * a WORKFLOW that never runs (e.g. a trigger-level `paths:` filter that doesn't match) never
+#         reports ANY conclusion for the context it would have produced — the required check sits
+#         PENDING FOREVER. This is real and is why the trigger-level `paths:` filter was dropped and
+#         `merge_group:` was added, above.
+#       * a JOB that runs but is skipped by a job-level `if:` condition reports SUCCESS — a skipped job
+#         DOES satisfy a required context, exactly like a real green one. This is precisely why a
+#         job-level `if:`/`needs:`/`continue-on-error:` on `jobs.integration-guard` is now a FORBIDDEN,
+#         contract-pinned false-green vector (see scripts/ops/integration-guard-required-wiring-
+#         contract.test.mjs) rather than a defense — `jobs.integration-guard.if: false` would make this
+#         job report green having executed NOTHING, which is exactly the failure mode a required
+#         context promotion must not allow.
+#     The explicit no-op step is STILL worth keeping — not because a skipped job would fail to satisfy
+#     the required context (it wouldn't — see above), but because it yields an AUDITABLE, IN-BAND
+#     result: the job's own log states in plain text that this run was a deliberate out-of-scope no-op,
+#     rather than an out-of-band "the job/step conclusion was `skipped`" that a reviewer has to go
+#     looking for in the Actions UI to distinguish from "ran and happened to do nothing."
 #   - the job id/produced check name (`integration-guard`) is unchanged byte-for-byte, and `push` to
 #     main keeps its own separate trigger-level `paths:` filter (untouched by this slice).
+#
+# HARDENING (P1 x2, 2026-07-25 review of the above wiring slice — both closed here):
+#   1. The wiring above stops the workflow-never-runs false-green but did nothing to stop a job-level
+#      false-green: `jobs.integration-guard.if: false` or `continue-on-error: true` on a real test step
+#      both leave the job SUCCESS while running nothing (or ignoring a real failure). FIX: the job
+#      itself, the classifier step, and both real test steps are now contract-pinned to carry none of
+#      `if` (job-level only — step-level `if` gating relevant==true/false is the mechanism, not the
+#      vector), `needs`, or `continue-on-error`. See the contract test file for the five mutations this
+#      closes (owner's original two plus one per newly forbidden key).
+#   2. The in-job classifier was not itself load-bearing: renaming a guarded-path roster entry to a
+#      path that no longer exists, or defaulting the classification to an ambiguous "unknown" value,
+#      both left the job green — an out-of-scope-looking no-op that silently was actually an in-scope
+#      change nobody tested, or a value that skipped BOTH the no-op AND the real branches. FIX:
+#        - the classifier is now `scripts/ops/integration-guard-classify.mjs`, an executable script
+#          (not inline bash) that reads a NUL-delimited `git diff --name-only -z` file list (safe
+#          against paths containing spaces/newlines) and returns a JS `boolean` — there is no shell
+#          string default that could drift to `unknown`;
+#        - the guarded-path roster lives in ONE place, scripts/ops/integration-guard-guarded-paths.mjs,
+#          imported by the classifier and pinned by the contract test against `on.push.paths` below AND
+#          against the real filesystem (every roster entry must resolve to an existing file/directory);
+#        - `id: noop` / `id: plugin-core-tests` / `id: web-guard-specs` mark the three branch steps, and
+#          the terminal "Assert scope classification is decisive" step (`if: always()`, backed by
+#          scripts/ops/integration-guard-assert-branch.mjs) FAILS the job unless `relevant` is exactly
+#          `'true'`/`'false'` AND exactly the corresponding branch's steps actually ran to completion —
+#          this is a RUNTIME door, independent of the classifier script being correct, so neutering
+#          either one alone still leaves the other catching the mutation (see the contract test file).
+#
 # A YAML-shape contract for these properties (no `paths` on pull_request, `merge_group` present, the
-# job's exact name, both branches of the in-job scope check) lives in the already-required
-# `test (20.x)` job in .github/workflows/plugin-tests.yml, NOT a copy of the integration suite itself
-# — see scripts/ops/integration-guard-required-wiring-contract.test.mjs for the full rationale.
+# job's exact name, the forbidden job/step keys, the classifier/no-op/real-branch step wiring, and the
+# roster pin) plus BEHAVIOURAL tests of the extracted classify/assert-branch scripts live in the
+# already-required `test (20.x)` job in .github/workflows/plugin-tests.yml, NOT a copy of the
+# integration suite itself — see scripts/ops/integration-guard-required-wiring-contract.test.mjs for
+# the full rationale.
 name: Integration Guard
 
 on:
@@ -83,8 +136,6 @@ on:
       - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
       - 'apps/web/src/components/integration/MetaIntegrationFieldRuleAuthoring.vue'
       - 'apps/web/src/services/integration/workbench.ts'
-      - 'apps/web/src/components/integration/JsonAssist.vue'
-      - 'apps/web/src/utils/jsonAssist.ts'
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
       - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
       - 'apps/web/src/views/IntegrationHelpView.vue'
@@ -148,6 +199,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Unconditional (not gated on relevant==true) — the classifier step immediately below needs
+      # `node` available regardless of its own verdict.
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
       - name: Detect relevant integration changes
         id: changes
         shell: bash
@@ -158,131 +216,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Integration Guard: classifying for $EVENT_NAME (base=${BASE_SHA:-<none>}, head=$HEAD_SHA)."
+
           if [[ -z "${BASE_SHA:-}" || "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
-            changed_files="$(git diff-tree --root --no-commit-id --name-only -r "$HEAD_SHA")"
+            git diff-tree --root --no-commit-id --name-only -z -r "$HEAD_SHA" | node scripts/ops/integration-guard-classify.mjs
           else
-            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-          fi
-
-          relevant=false
-          while IFS= read -r path; do
-            case "$path" in
-              plugins/plugin-integration-core/*|\
-              apps/web/src/services/integration/readSourceConfigs.ts|\
-              apps/web/src/services/integration/readSourceCompositions.ts|\
-              apps/web/src/services/integration/errorCodeLabels.ts|\
-              apps/web/src/services/integration/fieldHints.ts|\
-              apps/web/src/services/integration/bridgeAgentConfigCheck.ts|\
-              apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue|\
-              apps/web/src/components/integration/IntegrationReadSourceWizard.vue|\
-              apps/web/src/services/integration/readSourceModePresets.ts|\
-              apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue|\
-              apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue|\
-              apps/web/src/components/integration/IntegrationCompositionWizard.vue|\
-              apps/web/src/services/integration/readSourceTemplateCatalog.ts|\
-              apps/web/src/components/integration/IntegrationTemplateCatalogPicker.vue|\
-              apps/web/src/components/integration/IntegrationWorkbenchRail.vue|\
-              apps/web/src/components/integration/IntegrationMonitoringSection.vue|\
-              apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue|\
-              apps/web/src/components/integration/IntegrationMappingRulesSection.vue|\
-              apps/web/src/components/integration/IntegrationObjectTemplateSection.vue|\
-              apps/web/src/components/integration/IntegrationPayloadPreviewSection.vue|\
-              apps/web/src/components/integration/IntegrationConnectionSection.vue|\
-              apps/web/src/components/integration/IntegrationBridgeAgentSection.vue|\
-              apps/web/src/components/integration/IntegrationPipelineRunSection.vue|\
-              apps/web/src/components/integration/IntegrationStockPrepPanel.vue|\
-              apps/web/src/components/integration/IntegrationExternalWritePanel.vue|\
-              apps/web/src/components/integration/IntegrationTableActionsPanel.vue|\
-              apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue|\
-              apps/web/src/components/integration/IntegrationOptionSetsStructuredEditor.vue|\
-              apps/web/src/components/integration/JsonAssist.vue|\
-              apps/web/src/utils/jsonAssist.ts|\
-              apps/web/src/utils/optionSetsStructured.ts|\
-              apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts|\
-              apps/web/src/components/integration/MetaIntegrationFieldRuleAuthoring.vue|\
-              apps/web/src/services/integration/workbench.ts|\
-              apps/web/src/components/integration/JsonAssist.vue|\
-              apps/web/src/utils/jsonAssist.ts|\
-              apps/web/src/views/IntegrationWorkbenchView.vue|\
-              apps/web/src/views/IntegrationK3WiseSetupView.vue|\
-              apps/web/src/views/IntegrationHelpView.vue|\
-              apps/web/tests/composition-vocab-mirror.spec.ts|\
-              apps/web/tests/multitable-resolver-vocab-mirror.spec.ts|\
-              apps/web/tests/integrationErrorCodeLabels.spec.ts|\
-              apps/web/tests/fieldHints.spec.ts|\
-              apps/web/tests/integrationWorkbench.spec.ts|\
-              apps/web/tests/MetaIntegrationFieldRuleAuthoring.spec.ts|\
-              apps/web/tests/bridgeAgentConfigCheck.spec.ts|\
-              apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts|\
-              apps/web/tests/IntegrationReadSourceWizard.spec.ts|\
-              apps/web/tests/readSourceModePresets.spec.ts|\
-              apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts|\
-              apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts|\
-              apps/web/tests/IntegrationCompositionWizard.spec.ts|\
-              apps/web/tests/readSourceTemplateCatalog.spec.ts|\
-              apps/web/tests/IntegrationTemplateCatalogPicker.spec.ts|\
-              apps/web/tests/readSourceCompositions.service.spec.ts|\
-              apps/web/tests/IntegrationWorkbenchView.spec.ts|\
-              apps/web/tests/IntegrationWorkbenchRail.spec.ts|\
-              apps/web/tests/IntegrationMonitoringSection.spec.ts|\
-              apps/web/tests/IntegrationCleaningDatasetSection.spec.ts|\
-              apps/web/tests/IntegrationMappingRulesSection.spec.ts|\
-              apps/web/tests/IntegrationObjectTemplateSection.spec.ts|\
-              apps/web/tests/IntegrationPayloadPreviewSection.spec.ts|\
-              apps/web/tests/IntegrationConnectionSection.spec.ts|\
-              apps/web/tests/IntegrationBridgeAgentSection.spec.ts|\
-              apps/web/tests/IntegrationPipelineRunSection.spec.ts|\
-              apps/web/tests/IntegrationStockPrepPanel.spec.ts|\
-              apps/web/tests/IntegrationExternalWritePanel.spec.ts|\
-              apps/web/tests/IntegrationTableActionsPanel.spec.ts|\
-              apps/web/tests/IntegrationFieldOptionSyncPanel.spec.ts|\
-              apps/web/tests/IntegrationOptionSetsStructuredEditor.spec.ts|\
-              apps/web/tests/utils/optionSetsStructured.spec.ts|\
-              apps/web/tests/IntegrationK3WiseSetupView.spec.ts|\
-              apps/web/tests/IntegrationHelpView.spec.ts|\
-              apps/web/tests/JsonAssist.spec.ts|\
-              apps/web/tests/utils/jsonAssist.spec.ts|\
-              apps/web/src/components/integration/stockPreparation/*|\
-              apps/web/src/services/integration/stockPreparation/*|\
-              apps/web/tests/StockPreparationWorkspace.spec.ts|\
-              apps/web/tests/StockPreparationProjectWorkspaceView.spec.ts|\
-              apps/web/tests/StockPreparationSnapshotDiffView.spec.ts|\
-              apps/web/tests/bomSnapshotDiff.spec.ts|\
-              apps/web/tests/StockPreparationMappingConfirmView.spec.ts|\
-              apps/web/tests/StockPreparationUnitConfirmView.spec.ts|\
-              apps/web/tests/StockPreparationPrepLineView.spec.ts|\
-              apps/web/tests/StockPreparationExceptionQueueView.spec.ts|\
-              apps/web/tests/StockPreparationDashboardView.spec.ts|\
-              apps/web/tests/StockPreparationStageOverview.spec.ts|\
-              apps/web/tests/StockPreparationStageStepper.spec.ts|\
-              .github/workflows/integration-guard.yml)
-                relevant=true
-                break
-                ;;
-            esac
-          done <<< "$changed_files"
-
-          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
-          if [[ "$relevant" == true ]]; then
-            echo "Integration Guard: relevant changes detected for $EVENT_NAME."
-          else
-            echo "Integration Guard: no relevant changes detected for $EVENT_NAME."
+            git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" | node scripts/ops/integration-guard-classify.mjs
           fi
 
       - name: No-op (out of scope) — deliberate success, not a skipped job
+        id: noop
         if: steps.changes.outputs.relevant == 'false'
         run: |
           echo "Integration Guard: no changes in guarded paths for this ${{ github.event_name }} event."
-          echo "This is a DELIBERATE NO-OP SUCCESS (exit 0) -- not a GitHub-skipped step/job -- so the"
-          echo "integration-guard required context is produced and green without running the"
-          echo "integration suite."
+          echo "This is a DELIBERATE NO-OP SUCCESS (exit 0) -- an auditable, in-band result in this"
+          echo "job's own log, not an out-of-band skipped conclusion a reviewer would have to look up."
           exit 0
-
-      - name: Setup Node.js 20.x
-        if: steps.changes.outputs.relevant == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
 
       - name: Setup pnpm
         if: steps.changes.outputs.relevant == 'true'
@@ -317,6 +266,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run plugin-integration-core CJS test chain (hermetic, no DB)
+        id: plugin-core-tests
         if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter plugin-integration-core test
 
@@ -328,5 +278,23 @@ jobs:
       # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
       # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
       - name: Run integration web guard specs (targeted)
+        id: web-guard-specs
         if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper --reporter=dot
+
+      # Terminal runtime safety net (P1 hardening, 2026-07-25): runs regardless of what happened above
+      # (`if: always()`) and FAILS the job unless `relevant` came out strictly 'true'/'false' AND
+      # exactly the corresponding branch's steps ran to completion (plugin-core-tests + web-guard-specs
+      # succeeded and noop was skipped, XOR noop succeeded and both real steps were skipped). See
+      # scripts/ops/integration-guard-assert-branch.mjs for the full rationale — this is one of TWO
+      # independent doors against the classifier producing an ambiguous verdict (the other is that
+      # scripts/ops/integration-guard-classify.mjs's classify() only ever returns a JS boolean).
+      - name: Assert scope classification is decisive (terminal safety net)
+        id: assert-branch
+        if: always()
+        run: node scripts/ops/integration-guard-assert-branch.mjs
+        env:
+          RELEVANT: ${{ steps.changes.outputs.relevant }}
+          NOOP_OUTCOME: ${{ steps.noop.outcome }}
+          PLUGIN_OUTCOME: ${{ steps.plugin-core-tests.outcome }}
+          WEB_OUTCOME: ${{ steps.web-guard-specs.outcome }}
