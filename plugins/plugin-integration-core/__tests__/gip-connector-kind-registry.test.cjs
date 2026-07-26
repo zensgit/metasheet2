@@ -226,7 +226,9 @@ function malformedDeclarationsRefused() {
 // reachable throw in this module already honors. Covers all five direct
 // `entry.*` reads normalizeDeclaration performs (kind, aliases, and the
 // three extractors) — not just the three extractor properties, since the
-// same unguarded-read shape applied identically to kind/aliases.
+// same unguarded-read shape applied identically to kind/aliases. (5c) below
+// covers a sixth, distinct read site: an element INSIDE a supplied aliases
+// array.
 // ---------------------------------------------------------------------------
 function hostileGetterOnDeclarationFieldNeverEscapesRaw() {
   for (const field of ['kind', 'aliases', 'extractEndpointIdentity', 'extractAuthPrincipal', 'extractAuthTenantScope']) {
@@ -244,6 +246,32 @@ function hostileGetterOnDeclarationFieldNeverEscapesRaw() {
     )
     assert.equal(caught.details.field, field)
   }
+}
+
+// ---------------------------------------------------------------------------
+// (5c) P3 FIX (owner HARD HOLD #4610 residual, round 6, found in re-review of
+// this round's own fix): a hostile GETTER defined at ONE INDEX of a supplied
+// `aliases` ARRAY must be discarded the same way — `Array.isArray` is true
+// for a genuine array carrying a hostile accessor at an index (added via
+// `Object.defineProperty`) exactly as much as for an ordinary array, so the
+// PRIOR shape here (`aliasesInput.map(...)`) let that accessor's raw throw
+// escape through .map()'s own internal element read, unguarded — the
+// identical hole one level deeper than (5b) above, on a DIFFERENT read site.
+// ---------------------------------------------------------------------------
+function hostileAliasArrayIndexGetterNeverEscapesRaw() {
+  const hostileAliases = ['legacy:harness']
+  Object.defineProperty(hostileAliases, 0, {
+    enumerable: true,
+    configurable: true,
+    get() { throw new TypeError('hostile aliases[0] getter — must never escape raw') },
+  })
+  const hostile = harnessDeclaration({ aliases: hostileAliases })
+  const caught = rejects(
+    () => createConnectorKindRegistry([hostile]),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'a hostile getter on an aliases array element must be discarded and converted to GipConnectorKindRegistryError, never escape as a raw foreign error',
+  )
+  assert.equal(caught.details.field, 'aliases')
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +384,7 @@ async function main() {
   forgedRegistryViaExportedFactoryIsRefused()
   missingExtractorsRefusedAtRegistration()
   hostileGetterOnDeclarationFieldNeverEscapesRaw()
+  hostileAliasArrayIndexGetterNeverEscapesRaw()
   malformedDeclarationsRefused()
   await legacyPathKeepsWorkingWhileGipBindingRefuses()
   internalsExactKeySet()

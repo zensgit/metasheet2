@@ -118,8 +118,19 @@ function readDeclaredField(entry, field) {
 // GIP-D0 §6 formula needs beyond `kind` itself (endpoint identity,
 // authPrincipalKey, authTenantScopeKey) must be a declared extractor — no
 // guessing, no fallback, no default (a guessing extraction is "silently blind",
-// ledger §3.0 B-2). Every property read off `entry` below goes through
-// readDeclaredField — see its comment for why.
+// ledger §3.0 B-2). Every direct `entry.*` property read below goes through
+// readDeclaredField (see its comment for why); each ELEMENT read out of a
+// supplied `aliases` array gets the identical guard inline, in the loop
+// below — `Array.isArray` is true for a real array with a hostile accessor
+// defined at one index (via `Object.defineProperty`) exactly as much as for
+// an ordinary array, so `.map()`'s own internal element read would
+// otherwise let a hostile index getter's raw throw escape unguarded, the
+// same hole one level deeper. (A `Proxy` wrapping the whole `aliases` array
+// is a broader, different attack surface — it can intercept `.length` and
+// iteration mechanics themselves, not just one index's value — and is out
+// of scope for this fix, at the same honesty-of-scope level this module
+// already uses elsewhere: this closes hostile ACCESSORS on genuine
+// objects/arrays, not an adversarial Proxy over the whole structure.)
 function normalizeDeclaration(entry) {
   if (!isPlainObject(entry)) {
     fail('CONNECTOR_KIND_DECLARATION_INVALID', 'a connector-kind declaration must be a plain object', {})
@@ -132,7 +143,14 @@ function normalizeDeclaration(entry) {
     fail('CONNECTOR_KIND_DECLARATION_INVALID', 'aliases must be an array', { field: 'aliases' })
   }
   const seenAliases = new Set()
-  const aliases = aliasesInput.map((raw) => {
+  const aliases = []
+  for (let index = 0; index < aliasesInput.length; index += 1) {
+    let raw
+    try {
+      raw = aliasesInput[index]
+    } catch {
+      fail('CONNECTOR_KIND_DECLARATION_INVALID', 'aliases could not be read from the declaration', { field: 'aliases' })
+    }
     const alias = requiredIdentityToken(raw, 'aliases')
     if (alias === kind) {
       fail('CONNECTOR_KIND_DECLARATION_INVALID', 'an alias must not equal its own canonical kind', { field: 'aliases' })
@@ -141,8 +159,8 @@ function normalizeDeclaration(entry) {
       fail('CONNECTOR_KIND_DECLARATION_INVALID', 'duplicate alias within one declaration', { field: 'aliases' })
     }
     seenAliases.add(alias)
-    return alias
-  })
+    aliases.push(alias)
+  }
 
   const extractEndpointIdentity = requiredExtractorFunction(readDeclaredField(entry, 'extractEndpointIdentity'), 'extractEndpointIdentity')
   const extractAuthPrincipal = requiredExtractorFunction(readDeclaredField(entry, 'extractAuthPrincipal'), 'extractAuthPrincipal')
