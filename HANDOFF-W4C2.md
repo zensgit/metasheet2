@@ -1,9 +1,121 @@
 # HANDOFF — W4C-2 live and scheduled shadow（阶段接力注记，不随 PR 交付内容变更）
 
 分支 `claude/w4c2-live-scheduled-shadow-20260725`（base = origin/main `aebac4f8b`）。
-真库：`ms2_w4c2`（CI 同构 MIGRATION_EXCLUDE 全链迁移，本地 PG，postgres@127.0.0.1）。
+真库：Stage A/B 用 `ms2_w4c2`；Stage C 第三棒基线/验证用**全新** `ms2_w4c2_relay3`（基线）
+与 `ms2_w4c2_relay3b`（cutover 后），CI 同构 MIGRATION_EXCLUDE 全链迁移，postgres@127.0.0.1。
 
-**状态总览：Stage A + Stage B DONE（已 commit）。核心 cutover（Stage C-F）未开工——本文
+**状态总览：Stage A + Stage B + Stage C（P01-P04 核心 cutover + collector curated 更新 +
+Stage E 首批 4 条 wiring 腿）DONE（已 commit：`a1d13dd06` cutover、其后一条 test commit）。
+剩余：Stage E 其余门矩阵腿 + Stage D dispatcher 生产接线 + Stage F mutation 汇总/PR。**
+
+---
+
+## Stage C — P01-P04 cutover（DONE，第三棒，commit `a1d13dd06` + wiring-test commit）
+
+落点：
+- **Boundary 重构** `packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts`：
+  - executeLivePunch：org-key 预分类（非 canonical org = 结构性 legacy，零 strict parse/零
+    witness/零新拒绝面）→ shared rollout lock + posture（suspension preflight 先于一切 DML）→
+    null-ID+legacy 短路走 adapter（零 envelope/witness——这是 766 基线字节不变的关键）→
+    stable-ID/W4 姿态走完整 W4C-0 registry 协议（replay-before-suspension 保持 7.1 语义）。
+  - executeScheduledRun：同 org 预分类；probe 事务内 rollout lock+posture+legacy 批量 DML；
+    witness 只在 W4 per-user 路径铸（probe 不再 recheck——非 canonical org 无法铸 witness）。
+- **Plugin adapters**（index.cjs，module-scope，`generateAbsenceRecords` 前）：
+  `applyLivePunchProjectionLegacyV1`（P01 逐字搬移 + **P02 lift**：port
+  `applyMergePolicyPure`（w4c1-merge-policy 唯一源）先算 decision，`!changed`→单次 append
+  upsert（与旧 #1 字节同）；`changed`→单次 override upsert（approvedMinutes+decision 边界，
+  终态行值与旧两写等价）——第二次 mutable UPDATE 不再存在于 live 路径）+
+  `resolveW4LiveCandidateInTransactionV1`/`resolveW4ScheduledCandidateInTransactionV1`
+  （includeFullWinner）+ `buildW4ShadowFrozenContextV1`（shift+segments→FrozenContextV1，
+  不可表达即 null→review）。
+- **路由 cutover**：punch 路由（~L26600s）换 boundary 调用（emit 只在 legacy/legacy_compat
+  kind；replay/w4 不直发）；`punchSchema` 增 optional `operationId`(uuid)；auto-absence
+  admin 路由与 cron run loop 传 `w4Boundary`+initiator（'admin_run'/'cron'），boundary 缺失
+  fail-closed（503 W4_WRITE_BOUNDARY_UNAVAILABLE / cron logger.error 跳过）。
+  `runAutoAbsenceForOrgDate` DML 点：有 boundary 走 executeScheduledRun（suspended→
+  `{skipped:true,reason:'segment_calculation_suspended',total:0}`）；**无 boundary 保留
+  direct `generateAbsenceRecords(db,...)` 仅供裸模块消费者**（W2 db test 直接调 helpers，
+  自带 db、无 host port——零改写纪律所迫；生产初始者不可达此分支，见呈裁点 6）。
+- **W4 错误映射** `respondIfW4BoundaryError`（activate 内）：按 error.name 闭集 + code/
+  httpStatus 映射，values-free（message=code）。
+- **Resolver**：第二棒定义而未接的 `attachFullWinner` 已接到 live/scheduled resolved 返回
+  （无 includeFullWinner 字节不变；由 766 基线复跑证得）。
+- **core port**（index.ts ~L2040s + types/plugin.ts）：新增 `applyMergePolicyPure`。
+- **Collector**：P01-P04 加 `canonicalizedBy: 'W4C-2'`（**title 字节不动**——test 2 的
+  pinned-baseline 再生投影含 title，改了会红）；P01 claims 增
+  `applyLivePunchProjectionLegacyV1`；`table-classification.cjs` W4_CANONICAL_PATH_PREFIXES
+  增 `w4c2-`（修复 Stage B 遗留的 out-of-boundary 红——**Stage B 时 collector gate 在 HEAD
+  上其实是红的**，第三棒接手时实测确认并修复）；collector test 增两条 additive 腿
+  （四 marker 独立断言 + 排他集合 + adapter symbol 认领）。
+- **Stage E 首批 wiring 腿** `tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts`
+  （4/4 绿，已进 plugin-tests.yml attendance 步）：legacy null-ID 零 operation/calculation/
+  outbox；stable-ID legacy_compat claim+seal+congruent replay 零新 DML+同 key 异 payload 409；
+  live/scheduled 两侧 suspension-precedes-DML 各配正控（legacy-state org 能写）。
+  suspended fixture 走 rollout 状态机合法边 legacy→shadow→eligible→authoritative→suspended
+  （持久 suspended 不依赖 env——posture seam 无视 allowlist 尊重 suspended）。
+
+### Stage C 实跑实数（全部于全新库）
+
+- 基线（cutover 前，`ms2_w4c2_relay3`）：attendance 步 61 files / **766 passed**。
+- cutover 后（`ms2_w4c2_relay3b`）：61 files / **766 passed**（零改写零红——字节红线证据）。
+- 新 wiring 套件 4/4；collector gate **14/14**（原 12 + 2 additive）；tsc --noEmit clean；
+  node --check index.cjs + resolver clean；portless mock-activation 单测 66/66；
+  resolver 单测+attendance 模块 spec 248/248。
+- 脏库复跑警示再证实：`ms2_w4c2_relay3` 复跑 attendance-plugin.test.ts 时 auto-shift
+  auto-write 腿假红（appliedCount 1≠0）——判别一律用全新库。
+
+### Stage C mutation 记账（先 commit 后 mutate，git checkout 精确路径还原，均实跑）
+
+| # | 变异 | Flip set（实测） | 还原核验 |
+|---|---|---|---|
+| MC1 | runAutoAbsenceForOrgDate 强制 `w4Boundary=null`（absence initiator 绕过 canonical writer） | **恰 1 红**：scheduled suspended 腿（suspended org 被直插 generated=1）；其余 3 绿（scheduled 正控腿在 direct insert 下同样能写，属预期） | 还原后 4/4 |
+| MC3 | boundary executeLivePunch 强制 `rolloutKey=null`（live 全部按 legacy 处理，suspension preflight 不可达） | **恰 2 红**：suspended live 腿（200+写入=绕过签名）+ stable-ID 腿（422 W4C2_ORG_KEY_OUTSIDE_W4_DOMAIN）；legacy null-ID 与 scheduled 腿绿 | 还原后 4/4 |
+| MC5 | 删 P01 的 `canonicalizedBy` marker | **恰 1 红**：collector marker 腿；13/14 绿 | 还原后 14/14 |
+
+### Stage C 呈裁点/薄弱点（PR body 必列，接力者续）
+
+1. **PUNCH_TOO_SOON vs stable-ID replay**：min-interval 节流在路由层先于 boundary，同 key
+   同 payload 的立即重试会 429（间隔过后 replay 正常返回存储响应）。锁 12.3「response-loss
+   retry returns one event and one result」严格读法下，keyed 重试或应绕过节流——**owner
+   裁**。wiring test 用 settings 快照/精确还原把 minPunchIntervalMinutes 置 0 后测 replay。
+2. **非 canonical org = 结构性 legacy**：rollout 表 org_id 无 canonical CHECK，理论上可被
+   raw SQL 塞进非 canonical org 的 suspended 行，但 sanctioned transition writer 不存在且
+   posture seam 本身拒绝非 canonical key——boundary 预分类与 W4C-0 姿态面一致。声明之。
+3. **P02 lift 的极角落语义差**：manual_result_edit marker + merge 翻转边界恰好回到
+   correctedAgainst 指纹时，旧两写会留下第一写挂上的 stale reviewConflict，单写不会。
+   旧行为可论证为 bug；无现有测试覆盖（766 零红）。PR body 声明。
+4. **holidayKind 传 null**（punch 路由 → shadow frozen context）：legacy 路径不受影响；
+   shadow 保真度欠账，Stage E 铺 shadow 腿时补（resolveWorkContext 的 holiday 出参可用）。
+5. **shadow+null-ID 拒绝**（W4C0_OPERATION_ID_REQUIRED）：W4 姿态 org 的无 key 客户端打卡
+   会 4xx——rollout scope 限 synthetic_staging，真实流量不可达；W4C-0 registry 既有语义。
+6. **裸模块 fallback**（runAutoAbsenceForOrgDate 无 boundary 时 direct insert）：为 W2 db
+   test 直调 helpers 的零改写所迫；生产初始者（cron/admin 路由）boundary 缺失一律
+   fail-closed 不达此分支，MC1 证明绕过会被 suspended 腿抓住。PR body 声明。
+7. **P02 正控腿未铺**（「restoring the P02 post-upsert mutation fails its own
+   positive-control leg」）：当前无测试能判别恢复第二写（终态等价）。Stage E/F 需铺
+   判别腿——建议：merge-enabled fixture 下断言 attendance_records 行的写次数
+   （statement-level trigger 计数或 xmax/cmax 探针）恰 1。**未竟**。
+
+### 接力者 TODO（Stage D/E/F 残余）
+
+- Stage D：dispatcher 生产接线（env-gate `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`
+  非空才注册 drain 循环；无 env ⇒ 无 worker ⇒ 字节不变）。port `drainResultEventOutbox`
+  已在（index.ts），只差 plugin activate 侧注册（attendanceScheduler.registerJob 姿势）。
+- Stage E 残余：shadow 三姿态矩阵腿（env allowlist + shadow org 的 stable-ID punch ⇒
+  calculation mode='shadow' projection_effect='none' + outbox before seal 断言）、
+  offset-less legacy time 三姿态矩阵（legacy/shadow-review/eligible-reject 三腿 removing
+  either side fails independently）、scheduled W4 durable replay（重启等价 = 二次 run 同
+  runId per-user replay 零 DML + skipDedup 不可绕）、forged witness 四腿（boundary 面）、
+  TOCTOU 双连接、promotion blocked/accepted_write_posture 不可 rebase 的 boundary 腿、
+  P02 写次数判别腿（上呈裁点 7）。
+- Stage F：mutation 汇总表（MA/MB/MC + 新增）+ PR（body 照 #4606/#4607 形制 + §11.1 六项 +
+  本文全部呈裁点）。PR 前 `rg -io "(close[sd]?|fix(es|ed)?|resolve[sd]?) #?[0-9]+"` 自查。
+
+---
+
+（以下为第一/第二棒原注记，保留供追溯）
+
+**原状态总览：Stage A + Stage B DONE（已 commit）。核心 cutover（Stage C-F）未开工——本文
 §Plan 节是完整架构决定记录，接力 agent 从 Stage C 起工。**
 
 ---
