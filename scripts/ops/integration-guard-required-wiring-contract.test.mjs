@@ -191,6 +191,9 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *   therefore now reds on the same mutation. Re-measured M9/M10 at the same head: still 5 and 4.
  *   Door D (below) contributed ZERO reds to all three — the extracted-script door and the
  *   classify/roster/assertBranch doors do not cover for each other in either direction.
+ *   [NARROWED, sixth round: that independence statement holds for the M9/M10/M11 mutation class it
+ *   was measured on. It does NOT generalise — see RETRACTION 2 and the import-abort P1 below, a
+ *   class in which no door caught anything until the subtest-count floor was added.]
  *
  * WHY THIS LIVES HERE, NOT A COPY OF THE INTEGRATION SUITE. The owner was explicit: do NOT copy the
  * integration suite into `test (20.x)` (two copies would drift apart) — only the wiring contract
@@ -284,6 +287,55 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *     short pointer to that comment instead. This file's "evidence lives in PR #4614's body" house
  *     rule (see the third-round paragraph above) is therefore superseded from round 5 onward — flagged
  *     for the owner rather than silently broken, since the body cannot take many more rounds either.
+ *
+ * SIXTH REVIEW ROUND (#4614 owner review, 2026-07-26) — ONE FINDING, closed here; plus TWO CLAIM
+ * RETRACTIONS. Measured at fe0b977cc6160774f2c56aef8ed1b273357e5d63.
+ *
+ *   - [P1] IMPORT-TIME ABORT COLLAPSES THE WHOLE CONTRACT TO A PASSING 1-SUBTEST FILE. `node --test`
+ *     treats a child process that exits 0 as a passing FILE. This file statically imports four
+ *     extracted modules at its top; a single `process.exit(0)` at the top of ANY of them aborts this
+ *     file during import evaluation, before one subtest body runs, and both callers reported
+ *     `tests 1 / pass 1 / fail 0`, exit 0 — GREEN. Nothing pinned the expected subtest count.
+ *     The sharpest instance is assert-branch.mjs, which has no second door behind it: neutering that
+ *     ONE file simultaneously (a) removes the runtime decisiveness door — `RELEVANT=unknown` returns
+ *     exit 0 instead of exit 1 — and (b) vacuously greens this contract, with nothing red anywhere.
+ *     Closed by a SUBTEST-COUNT FLOOR inline in both callers' `run:` blocks (exact-pinned by Pins
+ *     13/14 against one shared literal, guarded against rot by Pin 15). The floor cannot live in this
+ *     file (the collapse IS this file not running) and must not live in an extracted .sh helper (an
+ *     `exit 0` at that helper's top would green both callers with the contract never invoked at all).
+ *     PROBE NOTE, load-bearing: the insertion point differs per file — line 2 (after the shebang) for
+ *     assert-branch/classify/resolve-diff, but line 1 for guarded-paths.mjs, which has NO shebang. A
+ *     line-2 insertion there lands inside the opening block comment and is INERT (measured: 55 tests,
+ *     unchanged) — a weaker probe that reads as a false negative for that file specifically.
+ *
+ *   - RETRACTION 1 (scope). The round-5 evidence COMMENT's heading — "The extraction removed ALL
+ *     behavioural coverage of the extracted scripts — CONFIRMED, fixed here" — is FALSE AS SCOPED and
+ *     is retracted here, not reworded. Six scripts were extracted. Door D's tests cover the TWO .sh
+ *     scripts (noop.sh, run-web-specs.sh) only. The FOUR .mjs modules had no coverage at all against
+ *     the import-abort class — which is the P1 above. Correctly scoped: the extraction removed all
+ *     behavioural coverage of the two .sh scripts, and Door D restored it for those two.
+ *
+ *   - RETRACTION 2 (scope) — see also integration-guard.yml's own header, corrected in the same
+ *     commit. Its statement that the classifier door and the assert-branch door are independent
+ *     ("neutering either one alone still leaves the other catching the mutation") is FALSIFIED READ
+ *     LITERALLY, by the import-abort class: an import-abort in assert-branch.mjs is neither caught by
+ *     the classifier's tests nor by anything else in this contract. This is a SCOPE DEFECT IN THE
+ *     WORD "neutering", not a fabricated claim — the counts it cites (roster mutation REDs 4
+ *     classify-side, 0 assert-branch; assert-branch guard mutation REDs 2 assert-branch, 0
+ *     classify-side) are real and remain accurate for the ROSTER-vs-GUARD-LOGIC mutation class they
+ *     were measured on. Requalified to that class in both files.
+ *
+ *   - Likewise NARROWED, not restated: the fifth-round line above claiming "Door D contributed ZERO
+ *     reds ... the extracted-script door and the classify/roster/assertBranch doors do not cover for
+ *     each other in either direction" is true only for the mutation classes M9/M10/M11 measure. It
+ *     says nothing about the import-abort class, where — before this round — NO door caught anything.
+ *
+ *   - NOT RE-VERIFIED HERE, recorded as ASSERTED ONLY: the review's claim that the other three .mjs
+ *     neuters are caught downstream at workflow runtime (classify/guarded-paths leaving `relevant`
+ *     empty so the terminal door fails the job; resolve-diff leaving the diff file missing so the
+ *     next step dies under `set -euo pipefail`). That is a GitHub-Actions runtime assertion; this
+ *     round exercised only the contract, locally. The floor closes all four regardless of whether
+ *     that downstream claim holds, which is why it was not made a dependency of the fix.
  */
 
 const __filename = fileURLToPath(import.meta.url)
@@ -350,14 +402,48 @@ const WEB_GUARD_RUN_EXACT = 'bash scripts/ops/integration-guard-run-web-specs.sh
 
 const TERMINAL_RUN_EXACT = "node scripts/ops/integration-guard-assert-branch.mjs"
 
+// #4614 P1 (SIXTH review round, 2026-07-26) — the SUBTEST-COUNT FLOOR, and why both callers now run
+// a block instead of a one-liner. `node --test` treats a child process that exits 0 as a PASSING
+// FILE. This file statically imports four extracted modules at its top (assert-branch, classify,
+// guarded-paths, resolve-diff). A single `process.exit(0)` at the top of ANY of the four aborts this
+// file during import evaluation — before one subtest body runs — and `node --test` reports
+// `tests 1 / pass 1 / fail 0`, exit 0. Nothing pinned the expected subtest count, so BOTH callers
+// reported that collapse as GREEN. Measured at fe0b977cc (values-free, real output): clean baseline
+// `tests 55 / pass 55`, exit 0; with the neuter in assert-branch.mjs / classify.mjs / resolve-diff.mjs
+// (line 2, after the shebang) or guarded-paths.mjs (line 1 — it has NO shebang, so a line-2 insertion
+// lands inside its opening block comment and is INERT, a weaker probe that reads as a false negative)
+// every one collapses to `tests 1 / pass 1 / fail 0`, exit 0.
+//
+// The floor CANNOT live in this file (the collapse is precisely this file not running) and CANNOT
+// live in an extracted .sh helper (an `exit 0` at the top of that helper would green both callers
+// with the contract never invoked at all — strictly worse). It lives INLINE in each caller's `run:`
+// block, exact-pinned here.
+//
+// One literal backs BOTH constants below on purpose: the two copies must not drift, and pinning them
+// against EACH OTHER instead would stay green when both are mutated identically. Each pin still names
+// its own constant, so mutating one workflow reds that workflow's own pin only (门级排他).
+// Captured the house way: `JSON.stringify(step.run)` dumped from a python3+PyYAML parse of the
+// current workflow files and pasted verbatim, never hand-typed.
+const CONTRACT_RUN_EXACT = "set -euo pipefail\nMIN_CONTRACT_TESTS=56\nif ! contract_out=\"$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)\"; then\n  printf '%s\\n' \"$contract_out\"\n  echo \"integration-guard contract: node --test exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$contract_out\"\ncontract_tests=\"$(printf '%s\\n' \"$contract_out\" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)\"\nif [ -z \"$contract_tests\" ]; then\n  echo \"integration-guard contract: no 'tests <N>' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$contract_tests\" -lt \"$MIN_CONTRACT_TESTS\" ]; then\n  echo \"integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file\" >&2\n  exit 1\nfi\necho \"integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS).\"\n"
+
+// The floor value the pinned block above declares. Pin 15 asserts this is the number both workflow
+// copies actually carry AND that it still tracks the tests this file really declares.
+const CONTRACT_MIN_TESTS = 56
+
+// How far the floor may lag the declared test count before it must be bumped in BOTH workflows.
+// A floor left far below the real count would let a large deletion of tests pass unnoticed; a floor
+// above it would red CI permanently. Adding more than this many tests without bumping the floor
+// reds Pin 15 — deliberately, so the floor cannot silently rot into a `>= 1` no-op.
+const CONTRACT_MIN_TESTS_MAX_LAG = 3
+
 // #4614 P1 two-point wiring: this job's own unconditional self-check invocation of THIS contract
 // (see the workflow's own header for the full account of why this exists).
-const CONTRACT_SELF_CHECK_RUN_EXACT = 'node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs'
+const CONTRACT_SELF_CHECK_RUN_EXACT = CONTRACT_RUN_EXACT
 
 // #4614 P1 two-point wiring: the OTHER executable caller, inside plugin-tests.yml's required
 // `test` job — captured the same way (JSON.stringify(step.run) dumped from a parsed copy of the
 // current file, pasted verbatim).
-const PLUGIN_TESTS_CONTRACT_RUN_EXACT = 'node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs'
+const PLUGIN_TESTS_CONTRACT_RUN_EXACT = CONTRACT_RUN_EXACT
 
 const RELEVANT_ENV_EXACT = '${{ steps.changes.outputs.relevant }}'
 const NOOP_OUTCOME_ENV_EXACT = '${{ steps.noop.outcome }}'
@@ -1074,6 +1160,70 @@ test('plugin-tests.yml required test job still invokes this exact contract, id: 
     false,
     `the ${PLUGIN_TESTS_CONTRACT_STEP_ID} step must not carry continue-on-error — it is the step ` +
       `this half of the two-point wiring relies on actually failing the job when it fails`,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Pin 15 (#4614 P1, SIXTH review round — the subtest-count floor's own anti-rot pin).
+//
+// The floor itself is bash, inline in both callers' `run:` blocks, and is already exact-pinned by
+// Pins 13/14 above (both against the SAME literal, CONTRACT_RUN_EXACT — see its comment for why
+// pinning the two copies against each other instead would stay green when both are mutated
+// identically). This pin covers the one thing exact-equality alone cannot: that the NUMBER inside
+// that literal is still a meaningful floor rather than a rotted `>= 1` no-op.
+//
+// Two failure modes it closes:
+//   1. the floor drifts far below the tests this file actually declares — a later PR could then
+//      delete dozens of tests and both callers stay green (the floor would still be satisfied);
+//   2. the floor drifts ABOVE the declared count — CI reds permanently, and the usual repair is to
+//      quietly loosen the floor rather than restore the tests.
+// So: floor <= declared, and floor >= declared - CONTRACT_MIN_TESTS_MAX_LAG.
+//
+// WHAT THIS PIN IS NOT. Counting `^test(` in this file's own source is a SOURCE-TEXT assertion, not
+// a behavioural one — it cannot prove those tests assert anything. It is a drift guard on the floor.
+// The load-bearing door against the import-abort collapse is the bash floor in the callers, which is
+// exercised by the mutation ledger (each of the four .mjs neutered in turn), not by this pin.
+// ---------------------------------------------------------------------------
+
+test('the subtest-count floor both callers declare is the pinned value AND still tracks the tests this file declares', () => {
+  const source = readFileSync(__filename, 'utf8')
+
+  const declaredTests = source.split('\n').filter((line) => line.startsWith('test(')).length
+  assert.ok(
+    declaredTests > 1,
+    `this file must declare more than one top-level test(...) — a one-test contract cannot ` +
+      `distinguish a healthy run from the import-abort collapse the floor exists to catch`,
+  )
+
+  // The floor as it literally appears in the pinned `run:` text — read back out of the pin, not
+  // re-typed, so a hand edit to the literal that forgets this constant reds here.
+  const declarationsInPin = [...CONTRACT_RUN_EXACT.matchAll(/^MIN_CONTRACT_TESTS=(\d+)$/gm)].map((m) => Number(m[1]))
+  assert.deepEqual(
+    declarationsInPin,
+    [CONTRACT_MIN_TESTS],
+    `the pinned caller run: text must declare MIN_CONTRACT_TESTS exactly once, with the value ` +
+      `CONTRACT_MIN_TESTS (${CONTRACT_MIN_TESTS}) — a second declaration further down the block ` +
+      `would silently override the first`,
+  )
+
+  // …and that the pinned text is what BOTH workflows really carry is Pins 13/14's job; assert here
+  // only that both pins are backed by the same literal, so neither can drift alone unnoticed.
+  assert.equal(CONTRACT_SELF_CHECK_RUN_EXACT, CONTRACT_RUN_EXACT)
+  assert.equal(PLUGIN_TESTS_CONTRACT_RUN_EXACT, CONTRACT_RUN_EXACT)
+
+  assert.ok(
+    CONTRACT_MIN_TESTS <= declaredTests,
+    `the floor (${CONTRACT_MIN_TESTS}) must not exceed the ${declaredTests} tests this file ` +
+      `declares — a floor above the real count reds both callers permanently, and the usual ` +
+      `"fix" is to loosen the floor rather than restore the missing tests`,
+  )
+  assert.ok(
+    CONTRACT_MIN_TESTS >= declaredTests - CONTRACT_MIN_TESTS_MAX_LAG,
+    `the floor (${CONTRACT_MIN_TESTS}) has fallen more than ${CONTRACT_MIN_TESTS_MAX_LAG} behind ` +
+      `the ${declaredTests} tests this file declares — bump MIN_CONTRACT_TESTS in BOTH ` +
+      `.github/workflows/integration-guard.yml and .github/workflows/plugin-tests.yml, and ` +
+      `CONTRACT_MIN_TESTS plus the pinned run: literal here, or the floor rots into a no-op that ` +
+      `no longer notices a large deletion of tests`,
   )
 })
 

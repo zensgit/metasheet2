@@ -188,9 +188,40 @@ jobs:
       # step's presence (by this exact `id:`) in reverse — deleting either call site now reds the
       # OTHER caller's copy of the contract on its own specific pin. See integration-guard.yml's header
       # for the full account.
+      #
+      # #4614 P1 (sixth review round, 2026-07-26) — SUBTEST-COUNT FLOOR. `node --test` treats a child
+      # process that exits 0 as a PASSING FILE. The contract statically imports four extracted modules
+      # (integration-guard-assert-branch/-classify/-guarded-paths/-resolve-diff.mjs) at the top of the
+      # file, so a single `process.exit(0)` inserted at the top of ANY of the four aborts the test file
+      # during import evaluation, before a single subtest body runs — and the whole contract collapses
+      # to `tests 1 / pass 1 / fail 0`, exit 0. Nothing pinned the expected subtest count, so BOTH
+      # callers of this contract reported that collapse as green. The floor below is that missing pin:
+      # a run that reports fewer than MIN_CONTRACT_TESTS subtests fails the step. Keep this block
+      # BYTE-IDENTICAL to the `contract-self-check` step in .github/workflows/integration-guard.yml —
+      # the contract exact-pins BOTH copies against the same literal (not against each other, so
+      # mutating both copies identically does not stay green).
       - name: Integration Guard required-wiring contract
         id: integration-guard-contract
-        run: node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIN_CONTRACT_TESTS=56
+          if ! contract_out="$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)"; then
+            printf '%s\n' "$contract_out"
+            echo "integration-guard contract: node --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$contract_out"
+          contract_tests="$(printf '%s\n' "$contract_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$contract_tests" ]; then
+            echo "integration-guard contract: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$contract_tests" -lt "$MIN_CONTRACT_TESTS" ]; then
+            echo "integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file" >&2
+            exit 1
+          fi
+          echo "integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS)."
 
       # PB4-2 CI two-point wiring contract (no DB): the archive-read-only two-connection suite must
       # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).

@@ -92,6 +92,19 @@
 #          one alone still leaves the other catching the mutation — proven separately in PR #4614's
 #          body (mutating the roster REDs 4 classify-side tests and 0 assert-branch tests; mutating
 #          assert-branch's own guard REDs 1 assert-branch test and 0 classify-side tests).
+#          [REQUALIFIED (P1, sixth review round, 2026-07-26) — the sentence above is TRUE ONLY OF THE
+#          MUTATION CLASS IT CITES (roster edits vs. assert-branch guard-logic edits), and read
+#          literally, as an unqualified claim about "neutering", it is FALSIFIED. It is a scope defect
+#          in the word "neutering", not a fabricated claim: the two counts are real measurements of
+#          that class and remain accurate (the assert-branch figure is now 2, not 1 — see the fifth-
+#          round ledger correction in the contract test file). The class it does NOT cover is the
+#          IMPORT-TIME ABORT: `process.exit(0)` at the top of scripts/ops/integration-guard-assert-
+#          branch.mjs both removes this runtime door (RELEVANT=unknown then exits 0, not 1) AND
+#          collapses the whole wiring contract to a passing 1-subtest file, because `node --test`
+#          treats a zero-exit child as a passing FILE — green here, green in plugin-tests.yml, door
+#          gone, nothing red anywhere. Measured at fe0b977cc. Closed by the SUBTEST-COUNT FLOOR now
+#          inline in this job's `contract-self-check` step and its plugin-tests.yml twin; assert-
+#          branch is the one of the four extracted .mjs modules with no second door behind it.]
 #
 # CORRECTION (P1, second review round, 2026-07-26): item 2 above ("the classifier is now load-bearing")
 # was OVERSTATED and is RETRACTED here, not merely reworded. The contract test's own pins locating the
@@ -379,9 +392,40 @@ jobs:
       # carries this step — see the contract test file for both pins. (Like every other un-`if`'d
       # step here, GitHub's implicit `if: success()` still skips this one if `resolve-diff` above
       # failed closed — that path already fails the job on its own, so this is not a gap.)
+      #
+      # #4614 P1 (sixth review round, 2026-07-26) — SUBTEST-COUNT FLOOR. `node --test` treats a child
+      # process that exits 0 as a PASSING FILE. The contract statically imports four extracted modules
+      # (integration-guard-assert-branch/-classify/-guarded-paths/-resolve-diff.mjs) at the top of the
+      # file, so a single `process.exit(0)` inserted at the top of ANY of the four aborts the test file
+      # during import evaluation, before a single subtest body runs — and the whole contract collapses
+      # to `tests 1 / pass 1 / fail 0`, exit 0. Nothing pinned the expected subtest count, so BOTH
+      # callers of this contract reported that collapse as green. The floor below is that missing pin:
+      # a run that reports fewer than MIN_CONTRACT_TESTS subtests fails the step. Keep this block
+      # BYTE-IDENTICAL to the `integration-guard-contract` step in .github/workflows/plugin-tests.yml —
+      # the contract exact-pins BOTH copies against the same literal (not against each other, so
+      # mutating both copies identically does not stay green).
       - name: Integration Guard required-wiring contract (self-check, ungated on the scope verdict)
         id: contract-self-check
-        run: node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIN_CONTRACT_TESTS=56
+          if ! contract_out="$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)"; then
+            printf '%s\n' "$contract_out"
+            echo "integration-guard contract: node --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$contract_out"
+          contract_tests="$(printf '%s\n' "$contract_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$contract_tests" ]; then
+            echo "integration-guard contract: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$contract_tests" -lt "$MIN_CONTRACT_TESTS" ]; then
+            echo "integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file" >&2
+            exit 1
+          fi
+          echo "integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS)."
 
       - name: No-op (out of scope) — deliberate success, not a skipped job
         id: noop
