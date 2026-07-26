@@ -94,7 +94,9 @@
  *    (still true) with "not constructible at all" (false: see Group G).
  *  - Group G (shiftId-only race with BOTH candidate shifts frozen-context-
  *    null, see below): gate4's independent audit found the identity
- *    conjunct (`identityMismatch`, `w4c2-live-scheduled-boundary.ts:1354`)
+ *    conjunct (`identityMismatch`, `w4c2-live-scheduled-boundary.ts`'s
+ *    `const identityMismatch =` — file:line drifts across edits, see NIT-1
+ *    #4612 gate4 round 3, use the symbol not a line number)
  *    was an UNTESTED guard — neutering it left all 48 real-DB W4C-2 legs in
  *    this suite family green (zero discriminating signature), because every
  *    OTHER leg that swaps shiftId also swaps the fingerprint domain (which
@@ -1186,10 +1188,12 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   })
 
   // Group G (#4612 gate4 P2 closure — independent-review finding: neutering
-  // ONLY the identity conjunct, `identityMismatch` (`w4c2-live-scheduled-
-  // boundary.ts:1354`), left ALL 48 real-DB W4C-2 legs in this suite family
-  // green — zero discriminating signature — while neutering ONLY the
-  // fingerprint conjunct (`fingerprintMismatch`, `:1357`) reds exactly L6.
+  // ONLY the identity conjunct, `identityMismatch` (`const identityMismatch =`
+  // in `w4c2-live-scheduled-boundary.ts` — symbol reference, not a line
+  // number: see NIT-1 gate4 round 3), left ALL 48 real-DB W4C-2 legs in this
+  // suite family green — zero discriminating signature — while neutering
+  // ONLY the fingerprint conjunct (`const fingerprintMismatch =`, same file)
+  // reds exactly L6.
   // Group D/D-overnight do NOT close this gap: their fingerprint domain is
   // non-null (a well-formed shift's context always resolves), and that
   // domain CONTAINS `shiftId`, so a shiftId swap trips fingerprint too —
