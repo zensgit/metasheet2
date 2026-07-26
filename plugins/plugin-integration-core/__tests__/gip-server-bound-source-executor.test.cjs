@@ -1230,23 +1230,27 @@ async function outerVerifyArgumentIsGuardedNotDestructuredRaw() {
 // path's identical gap (M14 — a second `readQualificationField('expiresAt')` left all
 // four suites GREEN) was not disclosed at all — it was written as a closed invariant.
 //
-// An asserted-but-untested invariant is a hidden bug, so BOTH are pinned here, which
-// also removes the asymmetry rather than merely declaring it.
+// An asserted-but-untested invariant is a hidden bug, so BOTH are pinned, which also
+// removes the asymmetry rather than merely declaring it.
+//
+// THE TWO PATHS ARE **SEPARATE TEST FUNCTIONS**, deliberately. Written as one
+// function they would both RED inside the same frame, and "it REDs" would not say
+// WHICH read-once guard fired — the exact door-vs-word confusion this round's P2
+// finding is about. Split, the battery's frame extraction reports one EXCLUSIVE test
+// per mutation.
 //
 // The discriminator is BEHAVIOURAL, not a call count. A call count alone is the
 // "counting guard" shape this line has already paid for — `reads === 1` is asserted
-// too, but it is the CONSEQUENCE assertions that carry the test:
-//   * VERIFY: the getter answers the genuine instant on read #1 (so the MAC still
-//     authenticates) and a POSTPONED instant on read #2. Read-once ⇒ the local is the
-//     genuine instant ⇒ QUALIFICATION_EXPIRED. Double-read ⇒ the expiry comparison
-//     sees the postponed instant ⇒ the call RETURNS VERIFIED — a fail-OPEN inversion,
-//     which is precisely what the comment claims cannot happen.
-//   * PROBE: the getter answers instant A on read #1 and instant B on read #2.
-//     Read-once ⇒ the minted qualification carries A. Double-read ⇒ it carries B,
-//     which the MAC was not computed over.
+// too, but it is the CONSEQUENCE assertions that carry each test.
 // ---------------------------------------------------------------------------
-async function expiresAtIsReadExactlyOnceOnBothPaths() {
-  // ---- VERIFY PATH (the undisclosed one, M14) ----
+
+// VERIFY PATH — the gap that was NOT disclosed (the old M14).
+// The getter answers the genuine instant on read #1 (so the MAC still authenticates)
+// and a POSTPONED instant on read #2. Read-once ⇒ the local is the genuine instant ⇒
+// QUALIFICATION_EXPIRED. Double-read ⇒ the expiry comparison sees the postponed
+// instant ⇒ the call RETURNS VERIFIED — a fail-OPEN inversion, which is precisely
+// what the in-code comment claims cannot happen.
+async function expiresAtIsReadExactlyOnceOnTheVerifyPath() {
   const stack = buildStack()
   const resolution = await resolveAlpha(stack.resolver)
   const GENUINE_EXPIRY = '2026-07-27T00:00:00Z'
@@ -1287,8 +1291,14 @@ async function expiresAtIsReadExactlyOnceOnBothPaths() {
   // above could hold for a reason unrelated to which value was read.
   assert.ok(Date.parse(POSTPONED_EXPIRY) > Date.parse(NOW_AFTER_GENUINE_EXPIRY))
   assert.ok(Date.parse(GENUINE_EXPIRY) <= Date.parse(NOW_AFTER_GENUINE_EXPIRY))
+}
 
-  // ---- PROBE PATH (the one round 3 disclosed as M9) ----
+// PROBE PATH — the gap round 3 DID disclose (the old M9), now closed too, so the two
+// paths are pinned symmetrically instead of one being pinned and one declared.
+// The getter answers instant A on read #1 and instant B on read #2. Read-once ⇒ the
+// minted qualification carries A. Double-read ⇒ it carries B, which the MAC was not
+// computed over.
+async function expiresAtIsReadExactlyOnceOnTheProbePath() {
   const probeStack = buildStack()
   const probeResolution = await resolveAlpha(probeStack.resolver)
   const FIRST = '2026-07-27T00:00:00Z'
@@ -1573,7 +1583,8 @@ async function main() {
   await hostileGetterOnTheProberComponentsIsRefusedNotLeaked()
   await ownKeysTrapDuringRunInputEnumerationIsRefusedNotLeaked()
   await outerVerifyArgumentIsGuardedNotDestructuredRaw()
-  await expiresAtIsReadExactlyOnceOnBothPaths()
+  await expiresAtIsReadExactlyOnceOnTheVerifyPath()
+  await expiresAtIsReadExactlyOnceOnTheProbePath()
   duplicateSystemContentKeyIsRefusedNotLastWins()
   brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
