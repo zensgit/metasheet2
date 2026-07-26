@@ -27,16 +27,35 @@
   （wiring 1 腿 + matrix legacy/shadow 两腿，均是 pin 死
   `Object.keys(res.body.data).sort()===['event','record','workDateResolution']`
   的精确形状腿）；7 绿。Cut A 证「baseline 到达这条代码路径」，Cut B 证「wire body
-  的具体字节被断言」——两刀合证字节红线非计数糊弄。
+  的具体字节被断言」——两刀合证字节红线非计数糊弄。**精度声明（advisor 二轮复审
+  要求）**：`attendance-plugin.test.ts`（既有 baseline，766→789 计数链条的主体）
+  对 `workDateResolution` 的断言**零处**、对 `.data.record` 字段级断言**零处**
+  ——既有 baseline 实际 pin 的是**状态码 + DB 侧写行**，不是响应体字段内容；
+  MF2 翻红的三腿全部落在 W4C-2 **本片新增**的两个套件（boundary wiring +
+  posture-matrix）里。这仍是有效证据（显式 key-set 断言比偶然覆盖更强），但
+  PR body 措辞须精确到「既有 baseline pin 状态码+DB 行；响应体 key-set 由本片
+  新腿 pin」，不能笼统写「baseline 证字节不变」。
 - **scheduled-side 共享 resolver 移除判别腿（区别于 W4C-0 三 helper 单 catch 证明，
-  本片自己的调用点）**：`executeScheduledRun` 探测事务内的
-  `resolveSegmentCalculationPosture(trx, orgKey)`（~L1035）改成恒查一个不存在的
-  org key（`00000000-...`），live 侧对应调用（~L698）不动。**scoped 到三套件**（
-  boundary wiring + posture-matrix + gate-matrix-e5，23 腿合跑）：**恰 3 红**——
-  gate-matrix-e5 leg 6（authoritative 双入口，只有 admin_run 半面红，live 半面绿）
-  + leg 9（durable scheduled replay，op 计数归零）+ boundary wiring 的 suspended
-  scheduled 腿；posture-matrix 5/5 全绿、boundary wiring 的 live 腿全绿——live/
-  scheduled 排他证明成立，非 W4C-0 已证面的重复引用。
+  本片自己的调用点）**：`executeScheduledRun` 有**两处**独立
+  `resolveSegmentCalculationPosture` 调用——probe 事务内 ~L1035（批级）与
+  per-user W4 路径 re-check ~L1134。逐处单独 neuter（改查恒不存在的
+  org key `00000000-...`，另一处保持不动），live 侧对应调用（~L698）两刀都不动。
+  **scoped 到三套件**（boundary wiring + posture-matrix + gate-matrix-e5，
+  23 腿合跑）：
+  - **MF3a（~L1035 probe）：恰 3 红**——gate-matrix-e5 leg 6（authoritative 双
+    入口，只有 admin_run 半面红，live 半面绿）+ leg 9（durable scheduled
+    replay，op 计数归零）+ boundary wiring 的 suspended scheduled 腿；
+    posture-matrix 5/5 全绿、boundary wiring 的 live 腿全绿——live/scheduled
+    排他证明成立。
+  - **MF3b（~L1134 per-user re-check）：0 红，23/23 全绿**——**advisor 二轮复审
+    点名的必做刀**（"removing any one shared resolver call fails" 是逐 call-site
+    而非逐 predicate；`:1035`/`:1134` 是两处独立调用点，只刀一处不能代表另一处）。
+    结果是**真实的覆盖缺口**，非试验失败：per-user re-check 存在的唯一理由是
+    probe 与 per-user commit 之间的 TOCTOU（posture 在两次读之间被 promotion
+    改变），但没有任何 fixture 构造这个窗口——probe 已经在批级过滤掉
+    authoritative（~L1051-1053），所以但凡测试矩阵里的 org 在两次读之间姿态不变，
+    per-user 那次读就是死码路径。**如实记入呈裁点 20**（PR body 同步），不用
+    contrived fixture 硬凑绿，也不悄悄把 MF3b 并入 MF3a 冒充"resolver 移除已证"。
 
 ### collector P01-P04「removed independently」逐 marker 独立刀（Stage C 呈裁点未竟项清账）
 
@@ -66,6 +85,16 @@ claim 站点这一既有事实也不受影响）：
     已证；W4C-2 边界/frozen-attribution 代码零处引用 calculation_group 表
     （grep 零命中，含本棒复核）。本片不消费该字段，故不新增静态守卫，亦不新造
     mutation 腿——引用 W4C-1 既有证据而非重做。
+20. **scheduled-side per-user posture re-check（~L1134）未被任何 fixture 判别**
+    （MF3b，advisor 二轮复审要求的必做刀，结果 0 红/23 绿）：该行存在的唯一理由
+    是 probe（~L1035，批级）与 per-user commit 之间的 TOCTOU 窗口——若姿态在两次
+    读之间未变（本片全部 fixture 皆如此），这行是死码路径。**不是「resolver 移除
+    失败」被证过一半**——MF3a（probe 侧，恰 3 红）与 MF3b 是两个独立调用点的
+    两次独立判别，MF3b 的结果是「未覆盖」而非「通过」。修复方向（未做，留给
+    owner/下一片裁）：要么构造 promotion 在 probe 提交后、per-user 提交前发生的
+    真并发腿（双连接 rendezvous，同 §12.3 TOCTOU 纪律），要么如果 per-user
+    re-check 被证明在当前事务隔离级别下确实冗余（probe 已在同一 SERIALIZABLE
+    事务内锁 rollout 行，per-user 不可能看到不同姿态），删除死码并声明理由。
 
 ### Stage F 实跑实数
 
@@ -84,7 +113,8 @@ claim 站点这一既有事实也不受影响）：
 |---|---|---|---|
 | MF1 (Cut A) | boundary：null-ID + legacy_projection_only 短路条件恒 false（null-ID 落入完整 registry 协议） | **9 红/153 绿**（`attendance-plugin.test.ts` 单文件，全新库） | git checkout 还原 |
 | MF2 (Cut B) | index.cjs `applyLivePunchProjectionLegacyV1` 返回值丢弃 `workDateResolution` 键 | **恰 3 红**（boundary wiring 1 + posture-matrix legacy/shadow 2，两套件合跑 10 腿）；7 绿 | 同上 |
-| MF3 | boundary `executeScheduledRun` 探测事务内 posture 解析改查恒定不存在 org key（live 侧 ~L698 不动） | **恰 3 红**（三套件合跑 23 腿）：gate-matrix-e5 leg 6 admin_run 半面 + leg 9 + boundary wiring suspended-scheduled 腿；posture-matrix 5/5 与 live 腿全绿——排他 | 同上 |
+| MF3a | boundary `executeScheduledRun` **probe**（~L1035）posture 解析改查恒定不存在 org key（live 侧 ~L698、per-user ~L1134 不动） | **恰 3 红**（三套件合跑 23 腿）：gate-matrix-e5 leg 6 admin_run 半面 + leg 9 + boundary wiring suspended-scheduled 腿；posture-matrix 5/5 与 live 腿全绿——排他 | 同上 |
+| MF3b | boundary `executeScheduledRun` **per-user re-check**（~L1134）同一变异，probe~L1035/live~L698 不动 | **0 红/23 绿——未覆盖，非通过**（呈裁点 20：per-user re-check 是死码路径，唯一存在理由=未构造的 probe/per-user TOCTOU 窗口） | 同上 |
 | MF4 | curated-debt-entries.cjs：删 P02 `canonicalizedBy` | **恰 1 红**（14 测试中 13/14，line 217） | 同上 |
 | MF5 | curated-debt-entries.cjs：删 P03 `canonicalizedBy` | **恰 1 红**（13/14，line 218） | 同上 |
 | MF6 | curated-debt-entries.cjs：删 P04 `canonicalizedBy` | **恰 1 红**（13/14，line 219） | 同上 |
@@ -112,7 +142,8 @@ claim 站点这一既有事实也不受影响）：
 | ME5 | E | relay5（继承） | actor membership recheck 恒跳过 | 恰1红（21腿合跑） | forged witness |
 | MF1 | F | **relay6（第六棒新跑）** | null-ID+legacy 短路 neuter（可达性） | 9红/153绿 | advisor 判定净新 |
 | MF2 | F | **relay6（新跑）** | legacy 响应丢 workDateResolution 键（字节保真） | 恰3红/7绿 | advisor 判定净新 |
-| MF3 | F | **relay6（新跑）** | scheduled-side posture resolver 调用点移除 | 恰3红（23腿合跑） | resolver 排他，本片自证 |
+| MF3a | F | **relay6（新跑）** | scheduled-side posture resolver **probe** 调用点单独移除 | 恰3红（23腿合跑） | resolver 排他，本片自证 |
+| MF3b | F | **relay6（新跑，advisor 二轮要求）** | scheduled-side posture resolver **per-user re-check** 调用点单独移除 | **0红/23绿——未覆盖，呈裁点20** | 死码路径，非"通过"；owner/下一片裁 |
 | MF4 | F | **relay6（新跑）** | 删 P02 marker | 恰1红（13/14） | 未竟项清账 |
 | MF5 | F | **relay6（新跑）** | 删 P03 marker | 恰1红（13/14） | 未竟项清账 |
 | MF6 | F | **relay6（新跑）** | 删 P04 marker | 恰1红（13/14） | 未竟项清账 |
