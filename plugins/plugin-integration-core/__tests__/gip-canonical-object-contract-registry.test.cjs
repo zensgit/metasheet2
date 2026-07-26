@@ -38,6 +38,11 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 
+// The whole module namespace is bound too (not only the destructured names) so
+// the exact-key-set test can assert on the TOP-LEVEL export surface — a name
+// removed from __internals but re-added beside GipCanonicalObjectContractError
+// would otherwise be invisible to a test that only ever sees destructured keys.
+const contractRegistryModule = require(path.join(__dirname, '..', 'lib', 'gip-canonical-object-contract-registry.cjs'))
 const {
   createCanonicalObjectContractRegistry,
   resolveCanonicalObjectContractVersion,
@@ -46,7 +51,7 @@ const {
   GipCanonicalObjectContractError,
   CANONICAL_OBJECT_CONTRACT_ERROR_REASONS,
   __internals,
-} = require(path.join(__dirname, '..', 'lib', 'gip-canonical-object-contract-registry.cjs'))
+} = contractRegistryModule
 
 function rejects(fn, reason, message) {
   let caught = null
@@ -761,6 +766,72 @@ function computeActivationReadinessNeverEscapesRawForeignErrors() {
   assert.ok(!serializedForged.includes(forgedCauseMarker), 'forged .cause chain must never leak')
   assert.equal(caughtForgedBrand.cause, undefined, 'replacement error must not retain the foreign .cause pointer')
 
+  // (c3) SECOND FORGERY NEGATIVE CONTROL (owner P1 #4610 — part 4 of the
+  // ruled fix). Control (c2) above forges by CONSTRUCTING the public error
+  // class directly. This one never constructs anything: it makes the module
+  // author the error ITSELF, by calling a still-exported __internals helper
+  // from inside the hostile lookup. `requiredIdentityToken(value, field)`
+  // passes its CALLER-SUPPLIED `field` straight into both the message and
+  // `details.field`, so this yields a GENUINELY branded
+  // GipCanonicalObjectContractError carrying attacker text — produced by this
+  // module's own fail(), through this module's own code path.
+  //
+  // Why BOTH controls are required, and why this one is not redundant with
+  // (c2): they are killed by DIFFERENT mutations, which is the only evidence
+  // that each is separately load-bearing (a shared reason token is not
+  // discrimination — see this file's other notes on doors covering for each
+  // other). Measured, not asserted:
+  //   - mutation A, `if (error instanceof GipCanonicalObjectContractError)
+  //     throw error` in computeActivationReadiness's catch: reds BOTH.
+  //   - mutation B, a module-private-WeakSet brand exemption (fail() records
+  //     its own errors; the catch rethrows only those it recognises — the
+  //     round-2 shape gip-system-identity-read.cjs reversed): (c2) stays
+  //     GREEN, because a directly-constructed public-class error never went
+  //     through fail() and so is not in the set; only THIS control reds.
+  // Mutation B is the whole point of the owner's "unconditionally" ruling: it
+  // is the *plausible* fix — the one that looks like it distinguishes "my
+  // errors" from foreign ones — and (c2) alone cannot catch it. Removing the
+  // `fail` export narrows this manufacture route but provably does not close
+  // it, which is why the catch must convert unconditionally rather than test
+  // the brand.
+  const genuineBrandMarker = 'ACTIVATION-READINESS-GENUINE-BRAND-MARKER'
+  // Sanity/positive control on the ATTACK ITSELF: prove the route really does
+  // manufacture a genuinely branded error carrying the marker. Without this,
+  // a future change that made requiredIdentityToken values-free would turn the
+  // control below into a test that passes against nothing.
+  const manufactured = rejects(
+    () => __internals.requiredIdentityToken(42, genuineBrandMarker),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'ATTACK SANITY: the manufacture route must still produce a branded error',
+  )
+  assert.ok(manufactured instanceof GipCanonicalObjectContractError, 'ATTACK SANITY: the manufactured error must be a genuine instance of the module error class, indistinguishable by any brand test')
+  assert.ok(
+    (String(manufactured.message) + JSON.stringify(manufactured.details)).includes(genuineBrandMarker),
+    'ATTACK SANITY: the manufactured error must actually carry the attacker text — otherwise the negative control below proves nothing',
+  )
+
+  const genuineBrandRegistry = {
+    lookup() { __internals.requiredIdentityToken(42, genuineBrandMarker) },
+  }
+  const caughtGenuineBrand = rejects(
+    () => __internals.computeActivationReadiness(genuineBrandRegistry, [{ contractId: 'bom_line', version: 'v1' }]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a GENUINELY branded error manufactured through __internals by a hostile registry.lookup must be discarded and converted, exactly like a foreign one',
+  )
+  assert.equal(caughtGenuineBrand.details.field, 'registry')
+  assert.equal(
+    caughtGenuineBrand.message,
+    'registry.lookup could not be evaluated',
+    'the fixed, values-free replacement message must be emitted — a brand-preserving catch would forward the manufactured message instead',
+  )
+  const serializedGenuine = String(caughtGenuineBrand.message)
+    + JSON.stringify(caughtGenuineBrand.details)
+    + String(caughtGenuineBrand.stack)
+    + String(caughtGenuineBrand.cause && caughtGenuineBrand.cause.message)
+    + JSON.stringify(caughtGenuineBrand.cause)
+  assert.ok(!serializedGenuine.includes(genuineBrandMarker), 'manufactured-brand message/details/stack must never leak')
+  assert.equal(caughtGenuineBrand.cause, undefined, 'replacement error must not retain the manufactured error as .cause')
+
   // Positive control: a malformed reference contractId is refused by THIS
   // module's own requiredIdentityToken pre-validation (field: contractId),
   // never re-labeled as a `registry` failure and never dependent on
@@ -789,9 +860,21 @@ function computeActivationReadinessNeverEscapesRawForeignErrors() {
 function internalsExactKeySet() {
   assert.deepEqual(
     Object.keys(__internals).sort(),
-    ['computeActivationReadiness', 'fail', 'hasControlCharacter', 'normalizeContractEntry', 'requiredIdentityToken'],
+    ['computeActivationReadiness', 'hasControlCharacter', 'normalizeContractEntry', 'requiredIdentityToken'],
     '__internals must expose exactly this key set — in particular, the module-private trust WeakSets (registries AND inventory attestations) must never be re-exported under any name, and buildInventoryAttestation must never appear here either',
   )
+  // P1 FIX (owner #4610 — part 3 of the ruled fix): `fail` used to be in the
+  // list above. It is removed, and its ABSENCE is asserted separately and by
+  // name so a future re-add reds with a message that says WHY, not just
+  // "key sets differ". Asserted on the ARRAY membership rather than only
+  // `__internals.fail === undefined`, so a re-add as an own key holding
+  // undefined still reds.
+  assert.ok(
+    !Object.keys(__internals).includes('fail'),
+    '`fail` must never be exported: it is a primitive for manufacturing a GENUINELY branded GipCanonicalObjectContractError carrying arbitrary attacker message/details, which no instanceof/WeakSet brand test can distinguish from a legitimate internal error',
+  )
+  assert.equal(__internals.fail, undefined, '`fail` must not be reachable through __internals under its own name')
+  assert.equal(contractRegistryModule.fail, undefined, '`fail` must not be reachable at the TOP level either — removing it from __internals while re-adding it beside GipCanonicalObjectContractError would be the same hole one namespace up')
 }
 
 // ---------------------------------------------------------------------------

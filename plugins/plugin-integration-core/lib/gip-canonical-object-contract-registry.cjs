@@ -83,17 +83,34 @@
 // TEXT escapes this way (the message is engine-authored, not caller-supplied),
 // so it is not a values-free leak, but it IS a raw foreign CLASS crossing this
 // module's boundary, contradicting "never" read literally; closing it is a
-// separate, future fix, not claimed here. (2) fail()'s own internal
+// separate, future fix, not claimed here. (2) RETRACTED (owner P1 #4610, this
+// round) — this exception used to read: "fail()'s own internal
 // undeclared-reason branch (a bare Error, deliberately NOT a
 // GipCanonicalObjectContractError) is reachable directly by ANY caller who
 // invokes the exported `__internals.fail('SOME_UNDECLARED_REASON', ...)`
-// themselves — `fail` is exported, so "never on any caller-supplied input" is
-// imprecise; the honest statement is that this branch only fires on a
-// reason-token argument, which every call inside this module's OWN source
-// supplies as a fixed literal (never derived from `entry`/`references`
-// content) — a typo'd literal is a programmer bug in this file, not something
-// caller DATA can trigger through the module's normal entries/references
-// surface. With those two narrowings stated, this contract covers every
+// themselves — `fail` is exported, so 'never on any caller-supplied input' is
+// imprecise". `fail` is NO LONGER EXPORTED (see module.exports at the foot of
+// this file; the sibling gip-system-identity-read.cjs removed its own for the
+// identical reason and records that at its own fail()). That route is gone,
+// and the narrowing it justified is WITHDRAWN here rather than silently
+// deleted.
+//   What replaces it is NOT "this module can no longer be made to author a
+// branded error carrying caller text" — that would be the same overclaim one
+// namespace deeper, and it is measurably false. `requiredIdentityToken` is
+// still on __internals, and it calls fail() with a CALLER-SUPPLIED `field`
+// string that lands in BOTH the message and `details.field`: a direct
+// `__internals.requiredIdentityToken(42, attackerText)` throws a GENUINELY
+// branded GipCanonicalObjectContractError carrying attackerText, having never
+// touched `fail` at all. Removing the `fail` export therefore NARROWS
+// genuine-brand manufacture; it does not eliminate it — and no
+// `instanceof` / private-WeakSet "is this error mine?" test can ever separate
+// such an error from a legitimate internal one, because it IS legitimate by
+// construction. That is exactly why the defence at every foreign-call
+// boundary in this module is UNCONDITIONAL conversion — discard every throw,
+// branded or not — and never a brand test. Both shapes are pinned by
+// negative controls in this module's test file (the public-class forgery and
+// the genuine-brand manufacture), each proven load-bearing by a separate
+// neutering mutation. With that narrowing stated, this contract covers every
 // OTHER error reachable from this module's EXPORTED surface today. It does
 // NOT cover buildInventoryAttestation's own `references` array reads, which
 // have the identical unguarded shape — that function is module-private with
@@ -123,6 +140,18 @@ class GipCanonicalObjectContractError extends Error {
   }
 }
 
+// P1 FIX (owner #4610 — part 3 of the ruled fix, mirroring
+// gip-system-identity-read.cjs's identical removal): `fail` is NOT exported,
+// not at the top level and not under __internals. Exporting it handed any
+// require()-holding caller — including the very actors this module must not
+// trust (a hostile `registry.lookup`, a hostile getter on a declaration) — a
+// primitive for manufacturing a GENUINELY branded GipCanonicalObjectContractError
+// carrying arbitrary message/details. It had ZERO callers outside this file
+// (`grep -rn "__internals\.fail" plugins/ apps/ packages/` finds no call site
+// for this module), so the export bought nothing and cost a forge primitive.
+// See the module header's retracted SCOPE exception (2) for why removing it
+// NARROWS but does not eliminate genuine-brand manufacture, and why the
+// load-bearing defence is unconditional conversion rather than a brand test.
 function fail(reason, message, details = {}) {
   if (!ERROR_REASON_SET.has(reason)) {
     throw new Error(
@@ -292,9 +321,20 @@ function requiredIdentityToken(value, field) {
 // duck-typed forgery into something assertTrustedRegistry accepts — after
 // which `registry.lookup(...)` above becomes attacker-controlled and could
 // throw arbitrary text straight out of resolveCanonicalObjectContractVersion
-// / assertCanonicalObjectContractRegistryActivationReady (neither wraps that
-// call in a discarding catch) — "unforgeable" above is true only because
-// this stays private.
+// — "unforgeable" above is true only because this stays private.
+// PRECISION FIX (owner #4610, this round): this note used to name BOTH
+// resolveCanonicalObjectContractVersion AND
+// assertCanonicalObjectContractRegistryActivationReady as places that
+// "neither wraps that call in a discarding catch". That is now HALF FALSE and
+// is corrected rather than left to rot: the activation path reaches
+// registry.lookup only through computeActivationReadiness, which DOES wrap it
+// in an unconditional discarding catch (see its own P1 note below), so only
+// resolveCanonicalObjectContractVersion still calls lookup unwrapped. That
+// remaining call is reached only AFTER assertTrustedRegistry, so the callee
+// is always the genuine module-built closure, whose sole throw path is this
+// module's own requiredIdentityToken with FIXED field literals — no
+// caller-supplied text. It is not a leak today; it is load-bearing only while
+// this WeakSet stays private, which is what this note exists to say.
 //
 // P1-1 FIX (owner HARD HOLD #4610 — the SAME finding as
 // gip-connector-kind-registry.cjs's sibling module, mirrored here exactly):
@@ -682,7 +722,9 @@ module.exports = {
   GipCanonicalObjectContractError,
   CANONICAL_OBJECT_CONTRACT_ERROR_REASONS,
   __internals: {
-    fail,
+    // `fail` is deliberately ABSENT — see the P1 note above fail() itself and
+    // the retracted SCOPE exception (2) in the module header. Pinned by the
+    // exact-key-set test, so re-adding it reds.
     requiredIdentityToken,
     hasControlCharacter,
     normalizeContractEntry,
