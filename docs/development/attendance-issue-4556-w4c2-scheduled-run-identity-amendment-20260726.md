@@ -1586,20 +1586,21 @@ column's domain (`{resolvedAt}` only).
   on real PostgreSQL, per this document's own section 2 standard.
 
 **Option (ii) — eliminate the self-observation at its root, not a single
-fix but two sub-variants of differing cost.** The owner rules, by
-`OD-W4C-53=(ii)`, that the storage-domain fingerprint (unchanged) is what
-step 7 compares, and the false positive is closed by removing its cause
-rather than by narrowing the comparison. There are two structurally
-different ways to do that, and this document's earlier draft of this
-section understated the cheaper one — stated here in full to avoid
+fix but two sub-variants of differing cost.** `OD-W4C-53`'s ballot therefore
+has **three** valid tokens, not two: `(i)`, `(ii-narrow)`, `(ii-wide)`. If
+the owner rules `(ii-narrow)` or `(ii-wide)`, the storage-domain fingerprint
+(unchanged) is what step 7 compares, and the false positive is closed by
+removing its cause rather than by narrowing the comparison. There are two
+structurally different ways to do that, and this document's earlier draft
+of this section understated the cheaper one — stated here in full to avoid
 steering the owner toward (i) by omission, the same defect a prior advisor
 round caught in this document's `O-1` cell (section 3.1's table, `OD-W4C-49`
 history):
   - **(ii-narrow) Exclude the operation's own just-written row from
     `openPreviousMatches`.** `selectAmongMatchingCandidates`
-    (`plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs:371-428`)
+    (`plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs:~L371-428`)
     filters `openRecords` for `hasIn && !hasOut` rows matching the
-    candidate's `workDate` (`:384-395`), with no field in that filter
+    candidate's `workDate` (`~L384-395`), with no field in that filter
     distinguishing "an open record from a prior, unrelated operation" from
     "the row this same transaction's own step 3 just wrote." If step 4's
     caller can identify and exclude the latter (by row ID, or by not
@@ -1619,7 +1620,7 @@ history):
     (potentially to `unresolved`), which is a correctness regression, not a
     fingerprint-domain fix. Confirming or ruling out that case requires
     reading `selectAmongMatchingCandidates`'s full candidate-matching logic
-    (`:430-519`, not reproduced here) against real fixtures, which this
+    (`~L430-519`, not reproduced here) against real fixtures, which this
     docs-only pass does not have standing to do unilaterally per this
     document's own precedent (section 0.1 reason 3: a partial read must not
     stand in for a full consumer inventory).
@@ -1689,13 +1690,21 @@ recommending against it.
    tables, the outbox discriminated union, the class-`01` builder/helper, the
    run-scoped enqueue surface, the run/resume/finalization transactions, the
    two closed-set copies, and all of section 2's gates.
-   `OD-W4C-53`/`O-5` is implemented separately from this step: if ratified
-   `(i)`, commit `64ea17d1931c142a080aeab9dabe2e8c1098c2cd` (already on the
-   W4C-2 branch) needs only section 3.2's positive/negative gate pair added
-   before it counts as closed; if ratified `(ii)`, that commit is reverted
-   and the §8.2 reorder/re-resolution is implemented and gated instead per
-   section 3.2. Either way it is governed by section 3.2's gate shape, not
-   by this step's run-identity gate list.
+   `OD-W4C-53`/`O-5` is implemented separately from this step, and its
+   ballot has **three** valid tokens per section 3.2, each with its own
+   implementation branch: if ratified `(i)`, commit
+   `64ea17d1931c142a080aeab9dabe2e8c1098c2cd` (already on the W4C-2 branch)
+   needs only section 3.2's positive/negative gate pair added before it
+   counts as closed; if ratified `(ii-narrow)`, that commit is reverted and
+   `selectAmongMatchingCandidates`'s `openPreviousMatches` filter is changed
+   to exclude the operation's own just-written row, gated per section 3.2's
+   (ii-narrow) gate shape (including the candidate-unchanged positive
+   control that closes the semantic-safety gap section 3.2 leaves open); if
+   ratified `(ii-wide)`, that commit is reverted and lock §8.2's steps 3/4
+   are reordered or re-resolved and gated per section 3.2's (ii-wide) gate
+   shape, including the full §8.2 gate re-run it requires. Whichever token
+   is ratified, this item is governed by section 3.2's gate shape, not by
+   this step's run-identity gate list.
 4. New **exact-head** independent adversarial review of the resulting head.
 5. Even at zero P1/P2, the lane **stops**: merging PR #4612 remains an owner
    decision, and this amendment authorizes no arming, flag enablement, org
