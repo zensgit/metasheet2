@@ -21539,12 +21539,19 @@ async function runAutoAbsenceForOrgDate(db, options) {
   let suspendedByRollout = false
   if (w4Boundary) {
     const initiator = options.initiator === 'admin_run' ? 'admin_run' : 'cron'
+    // W4C-2 remediation P1-4 (#4612 gate finding): admin_run MUST carry the
+    // real host-authenticated administrator identity (route-supplied plain
+    // data, minted into a witness INSIDE the boundary — never the internal
+    // scheduler constant); cron MUST carry exactly null. The boundary rejects
+    // any other combination before minting any witness.
+    const adminActorId = initiator === 'admin_run' ? (options.adminActorId || null) : null
     const outcome = await w4Boundary.executeScheduledRun({
       orgId,
       workDate,
       timezone: rule.timezone,
       targetUserIds: targetUsers,
       initiator,
+      adminActorId,
     })
     if (outcome.kind === 'suspended') {
       suspendedByRollout = true
@@ -43599,6 +43606,12 @@ module.exports = {
             })
             return
           }
+          // W4C-2 remediation P1-4 (#4612 gate finding): the ROUTE'S OWN
+          // authenticated actor id (already RBAC-gated by withPermission
+          // above) is the real administrator identity that must enter the
+          // operation's actor field and audit chain — never the internal
+          // scheduler constant. getUserId(req) is guaranteed non-null here
+          // (withPermission/withAnyPermission already 401s a missing one).
           const result = await runAutoAbsenceForOrgDate(db, {
             orgId: targetOrgId,
             workDate,
@@ -43607,6 +43620,7 @@ module.exports = {
             skipDedup: true,
             w4Boundary: w4LiveScheduledBoundary,
             initiator: 'admin_run',
+            adminActorId: getUserId(req),
           })
           res.json({ ok: true, data: result })
         } catch (error) {

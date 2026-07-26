@@ -302,6 +302,25 @@ export interface AttendanceScheduledRunBoundaryInputV1 {
   readonly timezone: string
   readonly targetUserIds: readonly string[]
   readonly initiator: AttendanceScheduledRunInitiatorV1
+  /**
+   * W4C-2 remediation P1-4 (#4612 gate finding): the real host-authenticated
+   * administrator identity for `initiator: 'admin_run'` — plain route-supplied
+   * data (the ROUTE already performed its `attendance:admin` permission check
+   * before calling in), exactly the `executeLivePunch` precedent at
+   * `input.userId`/`actorPosture: 'self'` below: the route hands a validated
+   * plain id, the boundary mints the witness FROM it and rechecks it in the
+   * per-user transaction via the existing `recheckAttendanceAuthorizationInTransactionV1`
+   * chokepoint (w4c0-operation-registry.ts preflight step 1). Required on both
+   * branches (never `undefined`) so a cron caller cannot silently omit it and
+   * a caller cannot smuggle an admin identity into the cron path: `cron` MUST
+   * pass exactly `null`; `admin_run` MUST pass a non-empty string that is not
+   * the internal scheduler constant (lock 4.1: "scheduler scope is available
+   * only to the registered internal scheduler identity" — read here as also
+   * fencing the `scheduled` capability's ACTOR identity, not only the
+   * `subjectScope: 'org_scheduler'` shape; recorded as an explicit reading,
+   * not a silent assumption, per the prior gate's G-5 note).
+   */
+  readonly adminActorId: string | null
   readonly isWorkday?: boolean
   readonly holidayKind?: string | null
 }
@@ -976,14 +995,15 @@ export function createAttendanceLiveScheduledBoundaryV1(
   // Scheduled absence run.
   // -------------------------------------------------------------------------
 
-  function scheduledAuthorization(
-    orgId: string,
-    initiator: AttendanceScheduledRunInitiatorV1,
-  ): AuthorizedAttendanceWriteContextV1 {
-    // The registered internal scheduler identity (lock 4.1: "scheduler scope is
-    // available only to the registered internal scheduler identity"). The
-    // admin-run initiator is still permission-gated by its route; the ROUTE
-    // permission decision precedes minting, per the adapter contract.
+  /**
+   * `cron` (P03): the registered internal scheduler identity (lock 4.1:
+   * "scheduler scope is available only to the registered internal scheduler
+   * identity"). This witness is minted ONCE per run and reused across every
+   * target user — it carries no per-user subject (the `org_scheduler` scope
+   * intentionally waives per-subject predicates; the scheduler's target-user
+   * list itself is not caller-authorization-bearing).
+   */
+  function cronScheduledAuthorization(orgId: string): AuthorizedAttendanceWriteContextV1 {
     return createAuthorizedAttendanceWriteContextV1({
       actorId: ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
       actorPosture: 'scheduler',
@@ -991,7 +1011,55 @@ export function createAttendanceLiveScheduledBoundaryV1(
       orgId,
       subjectScope: { kind: 'org_scheduler' },
       capability: 'scheduled',
-      sourceRef: SCHEDULED_SOURCE_REF[initiator],
+      sourceRef: SCHEDULED_SOURCE_REF.cron,
+    })
+  }
+
+  /**
+   * `admin_run` (P04) — W4C-2 remediation P1-4: a HOST-ISSUED plain admin
+   * identity (route-supplied, same "route submits pure data, private adapter
+   * mints" pattern as `executeLivePunch`'s `actorPosture: 'self'` witness
+   * above), minted fresh for EACH target user with `subjectScope:
+   * 'explicit_users'` so `recheckAttendanceAuthorizationInTransactionV1`
+   * (called inside `attendanceResultOperationPreflightV1`, BEFORE any
+   * source/result DML) independently re-verifies both the admin actor's own
+   * active-user/membership state AND the target subject's — closing the gap
+   * where `admin_run` was previously minted with the internal scheduler
+   * constant and lost the real human operator identity entirely.
+   *
+   * The internal scheduler constant can never satisfy this branch: it is not
+   * a directory user, so `requireActiveUser` fails it in-transaction even
+   * without the explicit guard below — the guard exists to make the rejection
+   * a deterministic, zero-SQL, mint-time failure instead of an incidental one.
+   *
+   * Posture is `platform_admin`, not `attendance_admin`: the route's RBAC gate
+   * (`withPermission('attendance:admin', ...)`) is a GLOBAL permission check
+   * (`user_permissions`/`role_permissions` carry no `org_id` column in this
+   * codebase — an admin can already target ANY `orgId` in the request body).
+   * `attendance_admin` posture would newly REQUIRE an active `user_orgs` row
+   * for the target org (`recheckAttendanceAuthorizationInTransactionV1`'s
+   * `requireActiveMembership`), which would silently break that existing
+   * cross-org capability. `platform_admin` waives the membership predicate
+   * (matching current behavior) while still requiring the actor be a real
+   * active, non-deactivated user (closing the P1-4 gap) — org/subject
+   * predicates for the TARGET user are never waived.
+   */
+  function adminRunScheduledAuthorization(
+    orgId: string,
+    adminActorId: string,
+    userId: string,
+  ): AuthorizedAttendanceWriteContextV1 {
+    if (adminActorId === ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1) {
+      boundaryFail('W4C2_SCHEDULED_ADMIN_WITNESS_INVALID')
+    }
+    return createAuthorizedAttendanceWriteContextV1({
+      actorId: adminActorId,
+      actorPosture: 'platform_admin',
+      tokenSubjectUserId: adminActorId,
+      orgId,
+      subjectScope: { kind: 'explicit_users', userIds: [userId] },
+      capability: 'scheduled',
+      sourceRef: SCHEDULED_SOURCE_REF.admin_run,
     })
   }
 
@@ -1000,6 +1068,19 @@ export function createAttendanceLiveScheduledBoundaryV1(
   ): Promise<AttendanceScheduledRunBoundaryResultV1> {
     if (!(SCHEDULED_INITIATORS as readonly string[]).includes(input.initiator)) {
       boundaryFail('W4C2_SCHEDULED_INITIATOR_INVALID')
+    }
+    // W4C-2 remediation P1-4: the initiator/witness shape is validated
+    // UNCONDITIONALLY (before the posture probe, like the initiator check
+    // above) — this is caller-shape validation (only this module's own two
+    // production callers in index.cjs ever set `adminActorId`; no end-user
+    // input reaches it), not a new business-input rejection surface on the
+    // byte-identical legacy response, so it does not conflict with this
+    // module's "legacy admits no new rejection surface" doctrine.
+    if (input.initiator === 'cron' && input.adminActorId !== null) {
+      boundaryFail('W4C2_SCHEDULED_WITNESS_INITIATOR_MISMATCH')
+    }
+    if (input.initiator === 'admin_run' && (typeof input.adminActorId !== 'string' || input.adminActorId.length === 0)) {
+      boundaryFail('W4C2_SCHEDULED_ADMIN_WITNESS_REQUIRED')
     }
     const workDate = parseCanonicalAttendanceWorkDateV1(input.workDate) as string
     const targetUserIds = [...input.targetUserIds].map(String)
@@ -1058,9 +1139,14 @@ export function createAttendanceLiveScheduledBoundaryV1(
     if (probe.mode === 'suspended') return { kind: 'suspended' }
     if (probe.mode === 'legacy') return { kind: 'legacy', rows: probe.rows }
 
-    // W4 path only below: the witness is minted for the canonical org key and
-    // SQL-rechecked inside every per-user registry transaction.
-    const authorization = scheduledAuthorization(orgKey, input.initiator)
+    // W4 path only below: `cron` mints ONE org-scoped witness reused across
+    // every target user (no per-subject identity); `admin_run` mints a FRESH
+    // witness per user from the real host-authenticated admin identity
+    // (validated non-null/non-scheduler above) — see cronScheduledAuthorization
+    // / adminRunScheduledAuthorization. Both are SQL-rechecked inside every
+    // per-user registry transaction before any source/result DML.
+    const cronAuthorization = input.initiator === 'cron' ? cronScheduledAuthorization(orgKey) : null
+    const adminActorId = input.adminActorId
 
     // W4 posture: one durable scheduled operation per user with a
     // deterministic run identity — durable replay survives restart and the
@@ -1089,6 +1175,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
         },
         batch: null,
       })
+      const authorization =
+        cronAuthorization ?? adminRunScheduledAuthorization(orgKey, adminActorId as string, userId)
       const outcome = await withConnection((client) =>
         runAttendanceResultOperationTransactionV1(client, async (trx) => {
           const preflight = await attendanceResultOperationPreflightV1(trx, authorization, envelope.registryInput)

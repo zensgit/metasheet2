@@ -209,6 +209,9 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   const orderUser = randomUUID()
   const schedUser = randomUUID()
   const schedAmbUser = randomUUID()
+  // P1-4 remediation: the real administrator identity for leg 9's admin_run
+  // calls (must be an active `users` row for the new in-transaction recheck).
+  const schedAdminUser = randomUUID()
   const mergeUser = randomUUID()
 
   const ambShiftA = randomUUID()
@@ -458,6 +461,18 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     await pool.query('UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2', [
       inactiveMemberUser, authzOrg,
     ])
+    // Leg 9 (P1-4 remediation): schedAdminUser is a real active `users` row
+    // but DELIBERATELY carries NO schedOrg membership — platform_admin posture
+    // waives requireActiveMembership (see adminRunScheduledAuthorization), and
+    // this also proves the admin actor is not itself picked up as an
+    // absence-generation TARGET (insertActiveUser's [userId, orgId] loop above
+    // enrolls schedOrg membership, which would inflate leg 9's generated count).
+    await pool.query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+       VALUES ($1, $2, $1, 'W4C-2 e5 admin-run fixture', 'x', 'user', '[]'::jsonb, true, false, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [schedAdminUser, `${schedAdminUser}@w4c2-e5.test`],
+    )
 
     // W2 ambiguity fixtures: two overlapping published day shifts on the same
     // work date (both absolute windows contain the punch instant) — the natural
@@ -527,7 +542,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     for (const userId of [
       ambUser, ambControlUser, isoUserA, isoUserB, isoUserC, replayUser, inactiveMemberUser,
-      authoritativeUser, rebaseUser, orderUser, schedUser, schedAmbUser, mergeUser,
+      authoritativeUser, rebaseUser, orderUser, schedUser, schedAmbUser, schedAdminUser, mergeUser,
     ]) {
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM users WHERE id = $1', [userId]).catch(() => undefined)
@@ -988,7 +1003,13 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   })
 
   it('leg 9 — durable scheduled-run replay: the second administrator run replays per-user with zero DML on the SAME deterministic operation; W2-ambiguous user gets no parent/result; skipDedup cannot bypass the registry', async () => {
-    const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+    // W4C-2 remediation P1-4 (#4612 gate finding): admin_run now mints its
+    // witness from the ROUTE's real authenticated actor id (platform_admin
+    // posture, requireActiveUser only — see adminRunScheduledAuthorization's
+    // module comment), so the admin token's subject must be a real active
+    // `users` row (inserted in beforeAll) or the in-transaction recheck 403s
+    // before any source DML.
+    const adminToken = await mintToken(schedAdminUser, 'attendance:read,attendance:write,attendance:admin')
     const workDate = '2026-07-22'
     const expectedRunId = deriveAttendanceScheduledRunIdV1({ initiator: 'admin_run', orgId: schedOrg, workDate })
 
@@ -1015,7 +1036,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       source_root_id: expectedRunId,
       proof_user_id: schedUser,
       proof_work_date: workDate,
-      actor_id: ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
+      // P1-4: the real administrator identity, NOT the internal scheduler
+      // constant — this operation row (and its audit chain) now records who
+      // actually triggered the run.
+      actor_id: schedAdminUser,
       capability: 'scheduled',
     })
     const firstOperationId = opsAfterFirst[0].operation_id
