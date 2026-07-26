@@ -9,7 +9,9 @@
 > `attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md`
 > at merged commit `d6ac495b947c0b42ed7bee66d9531fbe25a486ca`
 > (file blob `528c6521d152f84bc067247b5f1c134cfb1183d3`, identical on
-> `origin/main` `97cf6203397b958c78c646f09176b93b00d279aa` and on the held
+> `origin/main` `9fdf68fa5c34d2224fbe6bd0d71b14ca78263502` (refreshed this
+> addendum; `git rev-parse origin/main` re-run, `git rev-parse
+> origin/main:<lock path>` re-confirms the same blob) and on the held
 > W4C-2 head `b5db447ae18700f023d8915353f2aee109121eb4`).
 > `OD-W4C-1..42` were RATIFIED at `a3e5765727ca608e8c49c7a44a025e6e4aae5d40`.
 >
@@ -102,7 +104,21 @@ Option `(a)` (turn one run into N per-user events) was also rejected: it
 changes `total` semantics, consumer trigger counts, and alerting meaning, so
 it is a public wire-semantics break.
 
-### 0.2 Verified current state at `97cf6203397b958c78c646f09176b93b00d279aa`
+### 0.2 Verified current state at `9fdf68fa5c34d2224fbe6bd0d71b14ca78263502`
+
+**Refreshed this addendum.** The prior SHA cited here
+(`97cf6203397b958c78c646f09176b93b00d279aa`) had fallen five commits behind
+`origin/main`. Re-run: `git diff --stat
+97cf6203397b958c78c646f09176b93b00d279aa origin/main --
+plugins/plugin-attendance/index.cjs
+plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs
+packages/core-backend/src/attendance/w4c0-operation-contract.ts
+packages/core-backend/src/attendance/w4c1-fingerprints.ts
+packages/core-backend/src/attendance/__tests__/w4c0-identity.test.ts
+packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts`
+— empty output for all six files this section and section 3.2 cite line
+numbers against. Every reference below therefore still holds on current
+`origin/main`, and the SHA is updated to the one actually verified.
 
 - `plugins/plugin-attendance/index.cjs:21242-21256`: after
   `generateAbsenceRecords(...)`, `emit('attendance.absence.generated', {orgId,
@@ -634,7 +650,7 @@ CREATE UNIQUE INDEX uq_areo_run_identity
   WHERE scheduled_run_id IS NOT NULL;
 ```
 
-**A run ID may never masquerade as a per-user operation ID.** Five
+**A run ID may never masquerade as a per-user operation ID.** Six
 independent mechanical blocks, each separately mutation-provable:
 
 1. **Referential.** `fk_areo_operation` did not exist before. A run UUID
@@ -661,6 +677,26 @@ independent mechanical blocks, each separately mutation-provable:
    with **disjoint opaque witnesses** (section 1.4.1). A run witness is not
    accepted by the operation enqueue and vice versa; a bare UUID string is
    accepted by neither.
+6. **Non-null discriminant.** `identity_kind` is `NOT NULL` (section 1.10
+   step 4, added **after** the backfill, per the same ordering constraint as
+   the CHECK constraints in that step). Without it, an insert with
+   `identity_kind IS NULL` defeats blocks 3 and 4 above via SQL three-valued
+   logic: `CASE 'attendance.absence.generated' WHEN identity_kind =
+   'scheduled_run' ...` and `identity_kind <> 'scheduled_run' OR entrypoint =
+   'scheduled'` both evaluate to `UNKNOWN` (not `FALSE`) when `identity_kind`
+   is `NULL`, and a CHECK constraint **passes** on `UNKNOWN` — it only fails
+   on `FALSE`. A `NULL`-discriminant row (e.g. `identity_kind=NULL,
+   operation_id=<real per-user operation>, event_kind='attendance.absence.generated',
+   entrypoint='live_punch'`) would satisfy `chk_areo_identity_operation` (also
+   `UNKNOWN` on `NULL = TRUE`), `chk_areo_identity_run`, and
+   `chk_areo_identity_exclusive` (a strict boolean, unaffected by
+   `identity_kind`), landing a run-level event kind on a per-user identity
+   with an arbitrary `entrypoint`, undetected by blocks 3-4. Dropping the
+   `NOT NULL` constraint (leaving `identity_kind` nullable, as an
+   implementation that follows section 1.10's numbered steps literally
+   without this addition would) must make only this leg fail; blocks 1-5 and
+   every other gate 1 leg must remain green under that same mutation, since
+   none of them independently reaches a `NULL`-discriminant row.
 
 `chk_areo_delivered_pair`, the `pending|delivered` state machine, the
 `attempts`/`next_attempt_at` fields, and the `DELETE`/`TRUNCATE` refusals
@@ -757,6 +793,21 @@ The list exists **twice** —
 warns that both must be reconciled. This amendment requires:
 
 - both copies changed in the same commit;
+- **the TS file's comment at lines 85-90 rewritten in the same commit.** As
+  written on `origin/main`, that comment asserts the (today six-member) TS
+  list is "byte-identical to the Stage A migration's `OUTBOX_EVENT_KINDS`"
+  and directs the reconciler to check "BOTH copies" against each other.
+  Section 1.10 step 6 deliberately makes that assertion false once this
+  migration lands: the already-applied Stage A migration's `OUTBOX_EVENT_KINDS`
+  constant is permanently excluded from parity once this migration lands,
+  and the TS copy's new parity partner is **this new migration's own local
+  eight-member literal** (section 1.10 step 6), not Stage A's. Leaving the
+  comment as-is would point the next maintainer, or Stage D's generated
+  reachable-event inventory reconciliation, at the wrong object — exactly
+  the "inventory defect must not recur silently" failure section 0.1 reason
+  2 names. The comment must be rewritten to name the new migration's local
+  literal as the parity partner, and gate 9's parity assertion (section 2)
+  must read the same object the rewritten comment names, not the old one;
 - a **parity gate** that fails when the two lists differ in membership or
   order, executed in a CI-gated suite (a source-text regex over one file is
   not acceptable evidence);
@@ -1142,9 +1193,20 @@ must sort after the W4C-0 `zzzz20260725120000_...` migration they depend on).
    existing migration runner convention), so a failure between the two
    statements rolls the catalog change back with everything else —
    the guard is never left off outside a failed, rolled-back attempt;
-4. add the CHECK constraints, both FKs, and the two partial unique indexes;
-   drop `uq_areo_identity` only after the operation partial unique index
-   exists;
+4. `ALTER COLUMN identity_kind SET NOT NULL` (must come after step 3's
+   backfill — the backfill runs while `identity_kind` is still nullable, so
+   this must not be pulled earlier), **then** add the CHECK constraints,
+   both FKs, and the two partial unique indexes; drop `uq_areo_identity`
+   only after the operation partial unique index exists. Section 1.4's SQL
+   block already shows this `SET NOT NULL` inline in its `-- after backfill
+   (section 1.10):` fragment (the second `ALTER TABLE` statement there); it
+   is called out as its own numbered sub-step here because an implementation
+   that copies the CHECK/FK/index additions from that fragment while missing
+   the leading `SET NOT NULL` line would leave `identity_kind` nullable and
+   defeat gate 1's block 6 (section 1.1) without any other step-4 leg
+   catching it — a `NULL` discriminant is not a CHECK constraint and has no
+   home among "the CHECK constraints, both FKs, and the two partial unique
+   indexes" unless named explicitly;
 5. `CREATE OR REPLACE FUNCTION attendance_w4_outbox_update_guard()` per
    section 1.4's rewrite — **only after** step 3's backfill, not before:
    the new generic-allowlist body treats `identity_kind` as frozen (it is
@@ -1244,7 +1306,16 @@ accepted as the exclusive reason.
    `scheduled_run` row fails `chk_areo_run_entrypoint` (dropping that CHECK
    fails only this leg); enqueuing a run-level or per-user event before its
    operation/run row exists fails `fk_areo_operation`/`fk_areo_scheduled_run`
-   (this exercises the write-order dependency noted in section 1.4).
+   (this exercises the write-order dependency noted in section 1.4); an
+   insert with **`identity_kind IS NULL`** (any `event_kind`, any
+   `operation_id`/`scheduled_run_id` combination satisfying
+   `chk_areo_identity_exclusive`) fails — this is section 1.1's block 6.
+   Reverting section 1.10 step 4's `SET NOT NULL` (leaving `identity_kind`
+   nullable while every other step-4 addition stays in place) must make
+   **only this leg** fail; the `identity_kind='operation'`/`'scheduled_run'`
+   legs above must remain green under that same mutation, since
+   `chk_areo_kind_identity_map` and `chk_areo_run_entrypoint` still reject a
+   non-`NULL`, wrongly-valued `identity_kind` on their own.
 2. **`attendance.absence.generated` durable leg.** A crash after the
    finalization commit but before emit leaves the row `pending`; dispatcher
    restart delivers it exactly once; the run row is `completed` and no source
@@ -1429,7 +1500,7 @@ workflow, or that skip-green in the no-DB job). This amendment requires:
 | Gate family | Suite location | CI gate home |
 | --- | --- | --- |
 | Gates 1-3, 5, 7-9, 11-15, 17-21 (constraint/trigger/transaction legs needing a real, committed transaction) | new `packages/core-backend/tests/integration/attendance-w4c2-scheduled-run-*.db.test.ts` file(s) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run attendance integration tests"** (whole-file wiring, alongside the existing `attendance-w4c0-*.db.test.ts` files) — **and** the same file name(s) added to `packages/core-backend/vitest.config.ts`'s `exclude` array, so the no-DB default `pnpm --filter @metasheet/core-backend test` run cannot skip-green them. A new no-DB `node --test` contract, `scripts/ops/w4c2-run-identity-ci-wiring.test.mjs` (following the established pattern of e.g. `scripts/ops/t1-org-transfer-ci-wiring.test.mjs`), asserts both wiring points exist for every `.db.test.ts` file this slice adds, and is itself run as a step in the same job. |
-| Gate 4 (payload/wire freeze, pure-function legs), gate 6 (restart cursor derivation), gate 10 (resume fingerprint), gate 16 (builder disjointness) | `packages/core-backend/src/attendance/__tests__/w4c0-identity.test.ts` or a sibling `w4c2-scheduled-run-identity.test.ts` for the new builder/fingerprint math (no DB needed for pure key/fingerprint computation) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run core-backend tests"** (`pnpm --filter @metasheet/core-backend test`) — required checks `test (18.x)` / `test (20.x)`. The durable-row-dependent halves of gates 4 and 6 (does the *delivered* byte stream match; does the *replayed* row set match) belong in the real-DB row above instead. |
+| Gate 4 (payload/wire freeze, pure-function legs), gate 6 (restart cursor derivation), gate 10 (resume fingerprint), gate 16 (builder disjointness) | `packages/core-backend/src/attendance/__tests__/w4c0-identity.test.ts` or a sibling `w4c2-scheduled-run-identity.test.ts` for the new builder/fingerprint math (no DB needed for pure key/fingerprint computation) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run core-backend tests"** (`pnpm --filter @metasheet/core-backend test`), which runs on both matrix legs (`18.x`, `20.x`) — but **only `test (20.x)` is a required branch-protection check** (`branches/main/protection/required_status_checks`, verified against `origin/main`, does not list `test (18.x)`). A Node-18-only regression in this step would go red without blocking merge; `test (20.x)` is the check that actually gates. The durable-row-dependent halves of gates 4 and 6 (does the *delivered* byte stream match; does the *replayed* row set match) belong in the real-DB row above instead. |
 | Gate 9's parity leg specifically | a no-DB vitest/`node --test` comparing `w4c0-operation-contract.ts:92` against the new migration's local eight-member literal | same row as above (core-backend unit step). |
 
 Any new `.db.test.ts` file this slice adds that is **not** wired at both
@@ -1444,7 +1515,7 @@ mutation-proven, not just read the gate's own assertions.
 | --- | --- | --- |
 | `OD-W4C-44` scheduled run identity | (a) durable `attendance_scheduled_runs` row with server-minted `run_id`, frozen posture/counts/target-set fingerprint, immutable target rows, closed `running|completed|abandoned` states, and run-level outbox written in the same finalization transaction as `completed`; (b) keep the derived in-process run ID and add only outbox columns; (c) no run object — reduce the two run-level events to per-user events | **(a)** |
 | `OD-W4C-45` repeat invocation and roster drift | (a) `generation` allocated under class-`01`; a fresh invocation after a terminal run starts generation `n+1` (today's re-emit behavior preserved), while the frozen `target_set_fingerprint` guards **resume** only and any drift on resume is fail-closed remediation; (b) one run per `(org, initiator, work_date)` forever — a repeat invocation is a zero-DML replay that emits nothing; (c) include the fingerprint in the run identity so a roster change mints a different run | **(a)** |
-| `OD-W4C-46` advisory class for the run lock | (a) assign the reserved class `01` over `(org, initiator, work_date)`, ordered `00 → 01 → 10 → 11`, with its own values-free `503 ATTENDANCE_SCHEDULED_RUN_BUSY`; (b) reuse class `10` with a third `kind` discriminant `scheduled_run`; (c) rely on the partial unique index and row locks alone | **(a)** |
+| `OD-W4C-46` advisory class for the run lock — **conditional on `O-1`/`OD-W4C-49` (section 3.1): option (a) is only available if `O-1` resolves to `(a)`; if `O-1` resolves to `(b)`, this item cannot resolve to (a) and must instead be decided between (b)/(c) (see `OD-W4C-49`'s option (b) cell for the forcing argument)** | (a) assign the reserved class `01` over `(org, initiator, work_date)`, ordered `00 → 01 → 10 → 11`, with its own values-free `503 ATTENDANCE_SCHEDULED_RUN_BUSY`; (b) reuse class `10` with a third `kind` discriminant `scheduled_run`; (c) rely on the partial unique index and row locks alone | **(a)**, contingent on `O-1=(a)` |
 | `OD-W4C-47` run-level payload and delivery order | (a) freeze both payloads byte-identically, keep the closed `reasons` vector rebuilt in target `ordinal` order, and leave inter-event delivery order unconstrained (as today's two independent `emit` calls already are); (b) additionally add a stored `delivery_ordinal` and require `attendance.absence.generated` to be delivered before `attendance.work_date.review_required` for the same run; (c) reduce `reasons` to a count | **(a)** |
 | `OD-W4C-48` non-terminal run escape hatch | (a) add the terminal `abandoned` state with a closed values-free reason code, written by an operator remediation path, emitting no event and writing no source DML; (b) `running|completed` only, and accept that an unsatisfiable run holds the partial unique index indefinitely | **(a)** |
 
@@ -1499,9 +1570,10 @@ the same pass as `O-1..O-4` rather than in a second round-trip.
 1821-1822): "re-run attribution/context selection from the transaction
 snapshot and require candidate identity plus **source-definition
 fingerprint** equality." As of `origin/main`
-`9fdf68fa5c34d2224fbe6bd0d71b14ca78263502` (re-checked at the time of this
-addendum, not the SHA cited elsewhere in this document's header), exactly
-one thing in this repository is named "source-definition fingerprint": the
+`9fdf68fa5c34d2224fbe6bd0d71b14ca78263502` (as of this pass, this now
+matches the SHA cited in this document's header, which was refreshed to the
+same commit), exactly one thing in this repository is named
+"source-definition fingerprint": the
 storage column `attendance_record_calculations.source_definition_fingerprint`
 (lock section 7.3) and its sole producer,
 `computeAttendanceSourceDefinitionFingerprintV1`
@@ -1607,23 +1679,86 @@ history):
     re-reading `openRecords` past whatever step 3 last touched), the
     self-observation the commit message describes disappears without
     touching lock §8.2's step order at all — the smallest possible fix.
-    **This document has not verified that this exclusion is semantically
-    safe.** The candidate the `openPreviousMatches` path finds and the
-    candidate the `PREVIOUS_NIGHT_CONTAINING_SHIFT` path finds converged on
-    the same `workDate`/`shiftId` in the one fixture PR #4612 exercised
-    (Group E / eDay2), but nothing in this document establishes that
-    convergence holds in general. If some real case exists where
-    `openPreviousMatches` is the *only* path that finds a given candidate —
-    i.e., the open record is not incidental corroboration but the sole
-    evidence — excluding the operation's own row would not just change
-    `reasonCode`, it would change the **resolved candidate itself**
-    (potentially to `unresolved`), which is a correctness regression, not a
-    fingerprint-domain fix. Confirming or ruling out that case requires
-    reading `selectAmongMatchingCandidates`'s full candidate-matching logic
-    (`~L430-519`, not reproduced here) against real fixtures, which this
-    docs-only pass does not have standing to do unilaterally per this
-    document's own precedent (section 0.1 reason 3: a partial read must not
-    stand in for a full consumer inventory).
+    **Update (this addendum): this exclusion has now been verified
+    semantically safe, in general, not only on the one fixture PR #4612
+    exercised.** The prior draft of this cell left the question open,
+    citing this document's own precedent against a partial read standing in
+    for a full consumer inventory (section 0.1 reason 3). That precedent
+    governs *implementation* decisions an author might otherwise make
+    unilaterally; it does not bar reading code to settle a fact this same
+    section's ballot depends on being well-formed, which is what follows.
+    The read covers `selectAmongMatchingCandidates`'s full body
+    (`attendance-work-date-resolver.cjs:371-519`), its caller
+    (`:982-1007`), the internal `calendarWorkDate` derivation
+    (`:792-814`), and — on the still-unmerged PR #4612 branch, commit
+    `64ea17d1931c142a080aeab9dabe2e8c1098c2cd`, since that is where the
+    concrete call sites this proof depends on live — the three resolve call
+    shapes in `index.cjs` (`resolvePunchWorkDateByShiftWindow` at
+    `:15050-15128`, `resolveW4LiveCandidateInTransactionV1` at
+    `:21423-21432`, and the outer-fingerprint call site added by that
+    commit at `~:26967-27034`).
+    - **Fact 1 — the candidate universe (`matching`) never depends on
+      `openRecords`.** `resolve()` computes `workDates` and `candidates`
+      (hence `matching`, via the `isInstantInWindow` filter at `:982-984`)
+      purely from `occurredAt`, `timezone`, and the internally-derived
+      `calendarWorkDate` (`:792-796`: `input.calendarWorkDate ||
+      toWorkDate(occurredAt, timezone) || input.explicitWorkDate`).
+      `openRecords` is loaded separately, afterward (`:986-997`), and never
+      feeds back into `matching`. Consequently `matching` is identical
+      across every resolve call in one live-punch request that shares the
+      same `occurredAt`/`timezone` pair, regardless of what has or has not
+      been written to the DB in between — including the punch-processing
+      route's own `punchWorkDate` call (which decides what section 1.10's
+      step-3-equivalent legacy write actually writes) and the later
+      in-transaction re-resolution used for the freeze/fingerprint step.
+    - **Fact 2 — an ambiguous `matching` set never reaches the write at
+      all.** The route fails closed with `422
+      WORK_DATE_ATTRIBUTION_AMBIGUOUS` and **returns before any write**
+      whenever `punchWorkDate.resolution.kind === 'ambiguous'`
+      (`index.cjs:26332-26343`, guarding the exact call at `:26321-26330`).
+      `selectAmongMatchingCandidates` only reaches its ambiguous branches
+      when a precedence step finds more than one candidate, or when no step
+      resolves a unique winner and `matching.length !== 1` (the fallthrough
+      at `:514-518`).
+    - **Putting the two together.** For step 3's (self-)write to ever
+      create a **previous-workDate** open record — the only shape that can
+      feed `openPreviousMatches` (`:397-403`, which requires
+      `candidate.workDate` strictly before `calendarWorkDate`) — the write
+      must have been driven by a *resolved*, non-ambiguous `punchWorkDate`
+      result whose winner has `workDate < calendarWorkDate`. Walking
+      `selectAmongMatchingCandidates`'s precedence (`:371-519`): such a
+      winner can only come from step 1 (`:405-421`, which requires an
+      *already-existing* open record — not this operation's own write,
+      since step 1 runs **before** the write and cannot see it) or from
+      steps 3/4 (`:469-511`), both of which additionally gate on
+      `matching.length === 1`. There is no path by which a previous-workDate
+      winner is produced from a `matching` set of size > 1 without going
+      through step 1's pre-existing-record branch. So: whenever this
+      operation's own write *can* be the sole evidence for a
+      previous-workDate `openPreviousMatches` entry, `matching.length` was
+      already `1` at write-decision time — and, by Fact 1, `matching.length`
+      is **still 1** at the later freeze/fingerprint re-resolution, because
+      it is the same candidate set. And when `matching.length === 1`,
+      `selectAmongMatchingCandidates`'s steps 1, 3, and 4 all resolve to
+      **the same sole candidate** (`matching[0]`) by construction — step 1
+      needs `openByWorkDate` to contain that one candidate's workDate, step
+      3 needs it to be overnight and previous-workDate with no cardinality
+      competitor, step 4 is the unconditional single-candidate fallback —
+      they differ only in which `reasonCode` is attached
+      (`OPEN_PREVIOUS_NIGHT_RECORD` vs `PREVIOUS_NIGHT_CONTAINING_SHIFT`/
+      `SINGLE_MATCHING_CANDIDATE`), never in the resolved `workDate`/
+      `shiftId`.
+    - **Conclusion.** The scenario this cell previously flagged as
+      unverified — "`openPreviousMatches` is the *only* path that finds a
+      given candidate, so excluding the self-written row changes the
+      resolved candidate itself" — cannot occur, because the precondition
+      for the self-written row to matter (`matching.length === 1`) is
+      exactly the condition under which the resolved candidate is already
+      invariant to `openRecords`. This matches, and now *proves* rather than
+      merely observes, PR #4612's own empirical finding on the Group E /
+      eDay2 fixture (`workDate`/`shiftId` unchanged, only `reasonCode`
+      differed) — that finding was not a coincidence of one fixture, it is
+      the general case. **(ii-narrow) is confirmed semantically safe.**
   - **(ii-wide) Reorder or re-resolve lock §8.2 steps 3/4.** Re-run step
     4's candidate re-resolution **before** step 3's legacy write commits,
     or swap the order of lock §8.2 steps 3 and 4 outright.
@@ -1632,9 +1767,10 @@ history):
   7 names, with no new dual-copy risk.
   *(ii-narrow)* is confined to `selectAmongMatchingCandidates` and its
   direct gates (the resolver already has its own gate suite this document
-  did not audit for this specific change), **if** the semantic-safety
-  question above resolves in its favor; if it does not, (ii-narrow) is not
-  available and only (ii-wide) or (i) remain.
+  did not audit for this specific change). The semantic-safety question
+  above is now resolved in its favor (see the proof in the cell above), so
+  all **three** tokens — `(i)`, `(ii-narrow)`, `(ii-wide)` — are available
+  and the owner may rule any of the three.
   *(ii-wide)*'s cost is structural: lock §8.2's numbered step sequence is
   cited by name elsewhere in the **already-RATIFIED** governing lock (e.g.
   lock lines 2177 "the section 8.2 order", 2283 "8.2 and performs zero
@@ -1653,7 +1789,10 @@ history):
   needs a positive control proving the resolved candidate (not just
   `reasonCode`) is unchanged across a representative set of fixtures where
   the open-record path and the containing-shift path would otherwise
-  disagree, to close the semantic-safety gap above. *(ii-wide)* needs a full
+  disagree — this is now a **confirming regression test** for the proof
+  above (the semantic-safety gap it was originally meant to close is
+  already closed by that proof), not a precondition for implementing
+  (ii-narrow). *(ii-wide)* needs a full
   re-run of every other §8.2 gate in the governing lock and the
   W4C-1/W4C-2 gate suites unaffected by the reorder, since a step-order
   change is exactly the kind of edit this document's own precedent (section
@@ -1663,11 +1802,17 @@ history):
 specifically: (i) is the smaller, more contained change — one new domain
 separator and function, fully gated both ways above — against (ii-wide)'s
 reopening of RATIFIED lock text whose citation surface has not been audited
-here. Against **(ii-narrow)**, this document makes **no** recommendation:
-(ii-narrow) may be cheaper than (i) if its semantic-safety question resolves
-favorably, and this document has not done the read required to know either
-way — recommending (i) over an unverified cheaper alternative would repeat
-the steering-by-omission this section exists to avoid. This is a weaker
+here. Against **(ii-narrow)**, this document still makes **no**
+recommendation, though the reason has changed: the semantic-safety question
+that previously left its cost unknown is now resolved favorably (see the
+proof above), so (ii-narrow) is confirmed both cheaper than (i) and confined
+in blast radius to `selectAmongMatchingCandidates` and its own gate suite.
+Whether that makes it preferable to (i) or (ii-wide) is a judgment about
+which kind of change the owner is willing to accept for this fix — a
+resolver-internal exclusion rule versus a new permanent dual-copy domain
+versus reopening RATIFIED step-numbering text — and this document does not
+get to make that tradeoff on the owner's behalf merely because it has now
+established that all three options are safe to execute. This is a weaker
 recommendation than `OD-W4C-49..51`'s (there, one option was already argued
 indefensible on its own terms); here, (ii-wide) is the architecturally
 cleaner fix and would be preferable if its blast radius were already
@@ -1699,7 +1844,8 @@ recommending against it.
    `selectAmongMatchingCandidates`'s `openPreviousMatches` filter is changed
    to exclude the operation's own just-written row, gated per section 3.2's
    (ii-narrow) gate shape (including the candidate-unchanged positive
-   control that closes the semantic-safety gap section 3.2 leaves open); if
+   control, which confirms in a real-DB fixture the safety section 3.2
+   already establishes by proof); if
    ratified `(ii-wide)`, that commit is reverted and lock §8.2's steps 3/4
    are reordered or re-resolved and gated per section 3.2's (ii-wide) gate
    shape, including the full §8.2 gate re-run it requires. Whichever token
@@ -1720,8 +1866,12 @@ These are stated rather than hidden; each is either an owner decision above or
 an accepted bound:
 
 - **External consumers are unenumerable.** No in-repo runtime subscriber to
-  either run-level event exists at `97cf6203397b958c78c646f09176b93b00d279aa`;
-  only two DB tests assert emission. This amendment therefore preserves the
+  either run-level event exists at `origin/main`
+  `9fdf68fa5c34d2224fbe6bd0d71b14ca78263502` (re-verified this addendum:
+  `git grep -n "attendance.absence.generated\|attendance.work_date.review_required"`
+  over non-test `.ts`/`.cjs`/`.js` finds only the two `emit(...)` call sites
+  themselves, `index.cjs:21243` and `:21249`); only two DB tests assert
+  emission. This amendment therefore preserves the
   wire contract instead of arguing from a consumer inventory.
 - **Third dual-copy created.** The closed review-reason list now lives in the
   resolver module and in a migration CHECK. Section 1.2.1 requires a parity
