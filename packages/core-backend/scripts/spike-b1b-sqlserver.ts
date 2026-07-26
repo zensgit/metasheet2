@@ -37,6 +37,18 @@ interface MssqlResult<T> {
 }
 interface MssqlRequest {
   query<T = Record<string, unknown>>(sql: string): Promise<MssqlResult<T>>
+  // batch() (README §"batch"): does NOT wrap the SQL in sp_executesql, unlike query(). This
+  // script uses batch() EXCLUSIVELY for every statement — CI evidence (run 30199592058,
+  // 2026-07-26) showed query() throwing "Transaction count after EXECUTE indicates a
+  // mismatching number of BEGIN and COMMIT statements" the moment BEGIN TRAN was issued via
+  // query() and a later statement executed on the same pinned connection: query()'s
+  // sp_executesql wrapping enforces a per-call transaction-count balance, which an explicit
+  // multi-call BEGIN…(later call)…COMMIT/ROLLBACK sequence (S-2/S-4/S-5's whole construction)
+  // structurally cannot satisfy. batch() sends the SQL as a raw batch (no sp_executesql), so
+  // session state — SET LOCK_TIMEOUT, SET TRANSACTION ISOLATION LEVEL, an open transaction —
+  // persists correctly across separate .request() calls on the SAME pinned (pool:{max:1,
+  // min:1}) connection, exactly like a persistent SSMS session.
+  batch<T = Record<string, unknown>>(sql: string): Promise<MssqlResult<T>>
   input(name: string, value: unknown): MssqlRequest
 }
 interface MssqlConnectionPool {
@@ -173,7 +185,7 @@ function qualifiesForRcsiProven(m: RcsiProvenMeasurement): boolean {
 // every PROBE (observation) statement issued through scalar()/readerSelectsProbeRow*() is
 // SELECT-only. Narrower than "every statement the reader connection issues": SESSION-
 // CONFIGURATION statements (SET LOCK_TIMEOUT, SET TRANSACTION ISOLATION LEVEL …) and the
-// writer's own transaction-control statements are issued directly via .request().query() and
+// writer's own transaction-control statements are issued directly via .request().batch() and
 // are never claimed as SELECT-only — overclaiming "every statement" would be exactly the
 // class of over-strong claim this line's own review discipline flags.
 function assertSelectOnly(sql: string): string {
@@ -185,7 +197,7 @@ function assertSelectOnly(sql: string): string {
 }
 
 async function scalar<T = unknown>(pool: MssqlConnectionPool, sql: string): Promise<T> {
-  const result = await pool.request().query<Record<string, unknown>>(assertSelectOnly(sql))
+  const result = await pool.request().batch<Record<string, unknown>>(assertSelectOnly(sql))
   const row = result.recordset[0]
   const key = row ? Object.keys(row)[0] : undefined
   return (key ? row![key] : undefined) as T
@@ -246,25 +258,25 @@ async function main(): Promise<void> {
       throw new Error(`spike-b1b-sqlserver: RCSI toggle must be issued from master, was issued from "${currentDb}"`)
     }
     const clause = rollbackImmediate ? 'WITH ROLLBACK IMMEDIATE' : ''
-    await pool.request().query(`ALTER DATABASE [${database}] SET READ_COMMITTED_SNAPSHOT ${targetState} ${clause}`)
+    await pool.request().batch(`ALTER DATABASE [${database}] SET READ_COMMITTED_SNAPSHOT ${targetState} ${clause}`)
   }
 
   try {
     // ── one-time setup: master connection, dedicated spike DB, decoy DB, probe table ──────
     masterPool = await openPinnedPool('master')
-    await masterPool.request().query(`IF DB_ID('${spikeDb}') IS NULL CREATE DATABASE [${spikeDb}]`)
+    await masterPool.request().batch(`IF DB_ID('${spikeDb}') IS NULL CREATE DATABASE [${spikeDb}]`)
     // Decoy DB: NEVER toggled, used only so S-0's DB_ID()-binding mutation has a database
     // whose RCSI state is KNOWN (freshly-created user databases default RCSI OFF — a
     // documented SQL Server default for a database this script itself just created, NOT an
     // assumption about a pre-existing system database's configuration) without ever having
     // to assume what `master`/`tempdb` ship with (§1.1: this battery asserts no such default).
-    await masterPool.request().query(`IF DB_ID('${decoyDb}') IS NULL CREATE DATABASE [${decoyDb}]`)
+    await masterPool.request().batch(`IF DB_ID('${decoyDb}') IS NULL CREATE DATABASE [${decoyDb}]`)
     // Ensure a clean starting posture (idempotent across local re-runs of this script).
     await toggleRcsi(masterPool, 'OFF', spikeDb, true)
 
     const setupPool = await openPinnedPool(spikeDb)
-    await setupPool.request().query(`IF OBJECT_ID('dbo.${SPIKE_TABLE}', 'U') IS NOT NULL DROP TABLE dbo.${SPIKE_TABLE}`)
-    await setupPool.request().query(
+    await setupPool.request().batch(`IF OBJECT_ID('dbo.${SPIKE_TABLE}', 'U') IS NOT NULL DROP TABLE dbo.${SPIKE_TABLE}`)
+    await setupPool.request().batch(
       `CREATE TABLE dbo.${SPIKE_TABLE} (id INT NOT NULL PRIMARY KEY, name NVARCHAR(50) NULL); ` +
         `INSERT INTO dbo.${SPIKE_TABLE} (id, name) VALUES (1,'a'), (2,'b'), (3,'c');`
     )
@@ -310,7 +322,7 @@ async function main(): Promise<void> {
     async function rcsiReadbackBound(pool: MssqlConnectionPool): Promise<{ db: string; rcsi: number }> {
       const result = await pool
         .request()
-        .query<{ db: string; rcsi: number }>(
+        .batch<{ db: string; rcsi: number }>(
           "SELECT DB_NAME() AS db, (SELECT is_read_committed_snapshot_on FROM sys.databases WHERE database_id = DB_ID()) AS rcsi"
         )
       obs(null)
@@ -327,7 +339,7 @@ async function main(): Promise<void> {
 
     // S-2a: LOCK_TIMEOUT set and read back on the SAME connection before the blocking statement
     async function setAndVerifyLockTimeout(pool: MssqlConnectionPool, ms: number): Promise<boolean> {
-      await pool.request().query(`SET LOCK_TIMEOUT ${ms}`)
+      await pool.request().batch(`SET LOCK_TIMEOUT ${ms}`)
       const readback = Number(await scalar<number>(pool, 'SELECT @@LOCK_TIMEOUT AS v'))
       obs(null)
       return readback === ms
@@ -343,7 +355,7 @@ async function main(): Promise<void> {
     // rollback, the identical statement succeeds and returns COMMITTED_ROW.
     async function readerSelectsProbeRow(): Promise<{ ok: true; name: string } | { ok: false; number: number | undefined }> {
       try {
-        const result = await reader!.request().query<{ name: string }>(assertSelectOnly(`SELECT name FROM dbo.${SPIKE_TABLE} WHERE id = 1`))
+        const result = await reader!.request().batch<{ name: string }>(assertSelectOnly(`SELECT name FROM dbo.${SPIKE_TABLE} WHERE id = 1`))
         obs(null)
         return { ok: true, name: result.recordset[0]!.name }
       } catch (error) {
@@ -351,11 +363,11 @@ async function main(): Promise<void> {
         return { ok: false, number: (error as { number?: number }).number }
       }
     }
-    await writer.request().query('BEGIN TRAN')
-    await writer.request().query(`UPDATE dbo.${SPIKE_TABLE} SET name = 'dirty_phaseA' WHERE id = 1`)
+    await writer.request().batch('BEGIN TRAN')
+    await writer.request().batch(`UPDATE dbo.${SPIKE_TABLE} SET name = 'dirty_phaseA' WHERE id = 1`)
     const s2Result = await readerSelectsProbeRow()
     log.check('S-2', 'reader blocked by the uncommitted writer fails with the engine lock-timeout error (1222) within the bound', 'GREEN', !s2Result.ok && s2Result.number === 1222)
-    await writer.request().query('ROLLBACK')
+    await writer.request().batch('ROLLBACK')
     const s2bResult = await readerSelectsProbeRow()
     const s2bLabel: RowLabel = 'COMMITTED_ROW'
     assertRowLabel(s2bLabel) // label discipline: NEVER 'PRE_IMAGE' here — Phase A has no version store (see S-2b note)
@@ -458,8 +470,8 @@ async function main(): Promise<void> {
     // other transactions; a DEDICATED short-`requestTimeout` pool must fail closed rather than
     // hang (the driver has no per-request override — see toggleRcsi's own comment).
     const contentionWriter = await openPinnedPool(spikeDb)
-    await contentionWriter.request().query('BEGIN TRAN')
-    await contentionWriter.request().query(`UPDATE dbo.${SPIKE_TABLE} SET name = 'holding_lock' WHERE id = 2`)
+    await contentionWriter.request().batch('BEGIN TRAN')
+    await contentionWriter.request().batch(`UPDATE dbo.${SPIKE_TABLE} SET name = 'holding_lock' WHERE id = 2`)
     const shortTimeoutMasterPool = await openPinnedPool('master', /* requestTimeoutMs */ 3000)
     let s4cTimedOutClosed = false
     try {
@@ -468,7 +480,7 @@ async function main(): Promise<void> {
       s4cTimedOutClosed = /timeout/i.test(String((error as Error).message)) || (error as { code?: string }).code === 'ETIMEOUT'
     }
     await shortTimeoutMasterPool.close()
-    await contentionWriter.request().query('ROLLBACK')
+    await contentionWriter.request().batch('ROLLBACK')
     await contentionWriter.close()
     log.check('S-4c', 'MUTATION: the toggle without WITH ROLLBACK IMMEDIATE, contended by an open writer transaction, must fail closed on a bounded timeout rather than hang', 'RED', !s4cTimedOutClosed)
 
@@ -527,7 +539,7 @@ async function main(): Promise<void> {
     // read on the SAME connection reads the POST-image.
     async function readerSelectsProbeRowPhaseB(): Promise<{ ok: true; name: string } | { ok: false; number: number | undefined }> {
       try {
-        const result = await reader!.request().query<{ name: string }>(assertSelectOnly(`SELECT name FROM dbo.${SPIKE_TABLE} WHERE id = 1`))
+        const result = await reader!.request().batch<{ name: string }>(assertSelectOnly(`SELECT name FROM dbo.${SPIKE_TABLE} WHERE id = 1`))
         obs(null)
         return { ok: true, name: result.recordset[0]!.name }
       } catch (error) {
@@ -535,17 +547,17 @@ async function main(): Promise<void> {
         return { ok: false, number: (error as { number?: number }).number }
       }
     }
-    await writer.request().query('BEGIN TRAN')
-    await writer.request().query(`UPDATE dbo.${SPIKE_TABLE} SET name = 'dirty_phaseB' WHERE id = 1`)
+    await writer.request().batch('BEGIN TRAN')
+    await writer.request().batch(`UPDATE dbo.${SPIKE_TABLE} SET name = 'dirty_phaseB' WHERE id = 1`)
     const s5iResult = await readerSelectsProbeRowPhaseB()
     log.check('S-5i', 'Phase B: the reader does NOT block (no 1222) while the writer holds an uncommitted update', 'GREEN', s5iResult.ok)
     const s5iiLabel: RowLabel = 'PRE_IMAGE'
     assertRowLabel(s5iiLabel) // label discipline: THE only legitimate use of PRE_IMAGE in this battery (contrast S-2b's COMMITTED_ROW)
     log.check('S-5ii', `Phase B: the returned row is the versioned ${s5iiLabel}, read while the writer's transaction is still open (never a dirty read)`, 'GREEN', s5iResult.ok && s5iResult.name === 'a')
-    await writer.request().query('COMMIT')
+    await writer.request().batch('COMMIT')
     const s5bResult = await readerSelectsProbeRowPhaseB()
     log.check('S-5b-visibility-positive-control', 'after the writer COMMITs, a fresh SELECT on the SAME reader connection observes the POST-image', 'GREEN', s5bResult.ok && s5bResult.name === 'dirty_phaseB')
-    await writer.request().query(`UPDATE dbo.${SPIKE_TABLE} SET name = 'a' WHERE id = 1`) // reset for cleanliness
+    await writer.request().batch(`UPDATE dbo.${SPIKE_TABLE} SET name = 'a' WHERE id = 1`) // reset for cleanliness
 
     // CP-1: the SAME statement sequence, byte-identical, with RCSI OFF, must red S-5(i) with a
     // lock timeout — this is exactly Phase A's own S-2 result, cross-referenced here rather
@@ -564,7 +576,7 @@ async function main(): Promise<void> {
     // Unbound-lookup trap: a FOREIGN session id (a throwaway connection deliberately forced to
     // SERIALIZABLE, guaranteeing a real mismatch) instead of inline @@SPID.
     const foreignConn = await openPinnedPool(spikeDb)
-    await foreignConn.request().query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+    await foreignConn.request().batch('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
     const foreignSpidValue = await spid(foreignConn)
     const foreignLookup = await s7Observation(reader, 'foreign-spid', foreignSpidValue)
     await foreignConn.close()
@@ -578,18 +590,18 @@ async function main(): Promise<void> {
     // Real ALLOW_SNAPSHOT_ISOLATION ON + forced SNAPSHOT isolation mutation, then revert.
     await reader.close()
     reader = null
-    await masterPool.request().query(`ALTER DATABASE [${spikeDb}] SET ALLOW_SNAPSHOT_ISOLATION ON`)
+    await masterPool.request().batch(`ALTER DATABASE [${spikeDb}] SET ALLOW_SNAPSHOT_ISOLATION ON`)
     reader = await openPinnedPool(spikeDb)
     await setAndVerifyLockTimeout(reader, LOCK_TIMEOUT_MS)
     const allowSnapshotAfterToggle = Number(await scalar<number>(reader, 'SELECT snapshot_isolation_state FROM sys.databases WHERE database_id = DB_ID()'))
     log.check('S-7-mutation-allow-snapshot-isolation-on', 'MUTATION: ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON -> the "ALLOW_SNAPSHOT_ISOLATION=0" assertion must red', 'RED', allowSnapshotAfterToggle === 0)
-    await reader.request().query('SET TRANSACTION ISOLATION LEVEL SNAPSHOT')
+    await reader.request().batch('SET TRANSACTION ISOLATION LEVEL SNAPSHOT')
     const forcedSnapshot = await s7Observation(reader, 'inline-spid')
     log.check('S-7-mutation-forced-snapshot-isolation', 'MUTATION: force the probe session to SNAPSHOT isolation -> the "never SNAPSHOT(5)" assertion must red', 'RED', forcedSnapshot.isolationLevel !== 5)
-    await reader.request().query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED') // revert session
+    await reader.request().batch('SET TRANSACTION ISOLATION LEVEL READ COMMITTED') // revert session
     await reader.close()
     reader = null
-    await masterPool.request().query(`ALTER DATABASE [${spikeDb}] SET ALLOW_SNAPSHOT_ISOLATION OFF`) // revert database
+    await masterPool.request().batch(`ALTER DATABASE [${spikeDb}] SET ALLOW_SNAPSHOT_ISOLATION OFF`) // revert database
     reader = await openPinnedPool(spikeDb) // reopen for the remainder of the run
     await setAndVerifyLockTimeout(reader, LOCK_TIMEOUT_MS)
 
@@ -664,8 +676,8 @@ async function main(): Promise<void> {
     // non-zero exit).
     log.assertAllPassed('sqlserver')
   } finally {
-    await reader?.request().query('ROLLBACK TRAN').catch(() => undefined)
-    await writer?.request().query('ROLLBACK TRAN').catch(() => undefined)
+    await reader?.request().batch('ROLLBACK TRAN').catch(() => undefined)
+    await writer?.request().batch('ROLLBACK TRAN').catch(() => undefined)
     await reader?.close().catch(() => undefined)
     await writer?.close().catch(() => undefined)
     // Leave RCSI ON (Phase B's real end state) is intentional — the run is DONE. A local
