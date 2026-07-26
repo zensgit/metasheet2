@@ -121,6 +121,7 @@ Phase A must retain these discriminating controls:
 | child corp repair | blank account corp becomes parent integration corp on sync | ordinary sync still completes |
 | immutable tenant | empty/set, set/change, and set/clear generic edits reject | same-corp resend succeeds |
 | callback corp pin | drifted linked account cannot act | same-corp linked account acts |
+| preview scoped sentinel wiring | same-corp shared union/open/external identity pair counts once | distinct same-corp identity still counts |
 | bind/unbind scope | corp-A legacy identity does not block or get deleted by corp B | same-corp lifecycle succeeds |
 | authoritative bind scope | drifted account corp rejects with zero identity/link writes | same-corp bind succeeds |
 | legacy unbind scope | blank/different-corp identity aborts without severing the link | same-corp identity is deleted |
@@ -135,12 +136,12 @@ Local exact-worktree verification:
 - required attendance directory/user-org real-DB regressions: 14/14;
 - required admission real-DB regressions: 9/9, including a NULL-corp rollback with zero
   `users`/link/identity residue;
-- combined affected real-PostgreSQL 15 files: 78/78;
+- combined affected real-PostgreSQL 15 files: 86/86;
 - required real-DB wiring and values-free contracts: 82/82;
 - TypeScript: `tsc --noEmit` clean;
 - `git diff --check` clean.
 
-Nine discriminating mutations were killed:
+Ten discriminating mutations were killed:
 
 1. neutering duplicate-provider-identity ambiguity changed `ambiguous` to `none`;
 2. restoring delimiter concatenation made two different corp/provider tuples match;
@@ -154,6 +155,8 @@ Nine discriminating mutations were killed:
    identity;
 9. replacing the identity table lock with a no-op let the concurrent writer pass before the link
    decision.
+10. removing preview's three corp-scoped sentinel writes counted a same-corp duplicate DingTalk
+    identity twice while preserving the distinct-account positive control.
 
 Required CI is a separate head-scoped gate and is not claimed here until the pushed Phase A head
 settles.
