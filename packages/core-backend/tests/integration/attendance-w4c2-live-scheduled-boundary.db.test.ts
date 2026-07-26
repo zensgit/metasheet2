@@ -264,6 +264,101 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect(await outboxCount('default')).toBe(outboxBefore)
   })
 
+  it('P1-3 remediation declare-item: in-transaction legacy attribution re-derivation rejects an ambiguous shift match with a CLOSED 409 (not an unmapped 500)', async () => {
+    // This branch is only reachable in production via a genuine race (assignment
+    // data changes between the route's own pre-check and this transaction) — the
+    // route's identical pre-check would already 422 the SAME data before ever
+    // calling the boundary. Rather than construct a contrived HTTP-level race
+    // (out of scope for this remediation round; see PR body §declare-items), this
+    // proves the branch's OWN behavior directly via the test-only seam, matching
+    // the existing __xyzForTests direct-call convention used elsewhere in this
+    // plugin (see resetAttendanceSettingsCacheForTests above).
+    const plugin = settingsRowRequireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+      __attendanceW4c2LegacyAttributionForTests?: {
+        deriveLegacyLivePunchAttributionV1: (
+          trx: unknown,
+          args: { orgId: string; userId: string; occurredAt: Date; timezone: string },
+        ) => Promise<unknown>
+        HttpError: new (status: number, code: string, message: string) => Error & { status: number; code: string }
+      }
+    }
+    const seam = plugin.__attendanceW4c2LegacyAttributionForTests
+    if (!seam) throw new Error('W4C2_TEST_SEAM_MISSING: __attendanceW4c2LegacyAttributionForTests')
+
+    const ambigOrg = randomUUID()
+    const ambigUser = randomUUID()
+    const shiftA = randomUUID()
+    const shiftB = randomUUID()
+    const asgA = randomUUID()
+    const asgB = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days)
+       VALUES ($1, $2, 'W4C2-Ambig-A', 'UTC', '06:00', '14:00', false, '[0,1,2,3,4,5,6]'::jsonb),
+              ($3, $2, 'W4C2-Ambig-B', 'UTC', '12:00', '16:00', false, '[0,1,2,3,4,5,6]'::jsonb)`,
+      [shiftA, ambigOrg, shiftB],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+       VALUES ($1, $3, $4, $5, '2026-07-17', '2026-07-17', true, 'published', 1),
+              ($2, $3, $4, $6, '2026-07-17', '2026-07-17', true, 'published', 2)`,
+      [asgA, asgB, ambigOrg, ambigUser, shiftA, shiftB],
+    )
+
+    // Adapters expect `query -> rows[]` (plugin-shaped), not the raw pg
+    // `QueryResult` — mirrors `pluginShapedTrx` in w4c2-live-scheduled-boundary.ts.
+    const pluginShaped = (raw: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => ({
+      async query(sqlText: string, params?: unknown[]) {
+        const result = await raw.query(sqlText, params ?? [])
+        return result.rows
+      },
+    })
+
+    const client = await pool.connect()
+    let caught: (Error & { status?: number; code?: string }) | undefined
+    try {
+      // 13:30 hits both A (06-14) and B (12-16) — same overlap recipe as the W2
+      // resolver's own "ambiguous (no row-order)" leg.
+      await seam.deriveLegacyLivePunchAttributionV1(pluginShaped(client), {
+        orgId: ambigOrg,
+        userId: ambigUser,
+        occurredAt: new Date('2026-07-17T13:30:00.000Z'),
+        timezone: 'UTC',
+      })
+    } catch (error) {
+      caught = error as Error & { status?: number; code?: string }
+    } finally {
+      client.release()
+    }
+
+    expect(caught).toBeInstanceOf(seam.HttpError)
+    expect(caught?.status).toBe(409)
+    expect(caught?.code).toBe('W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION')
+
+    // Positive control: the SAME seam on a NON-ambiguous (single-shift) fixture
+    // resolves cleanly instead of throwing — proves the 409 above is caused by
+    // the overlap, not by the direct-call harness itself.
+    const cleanUser = randomUUID()
+    const controlClient = await pool.connect()
+    let controlResult: unknown
+    let controlError: unknown
+    try {
+      controlResult = await seam.deriveLegacyLivePunchAttributionV1(pluginShaped(controlClient), {
+        orgId: ambigOrg,
+        userId: cleanUser,
+        occurredAt: new Date('2026-07-17T13:30:00.000Z'),
+        timezone: 'UTC',
+      })
+    } catch (error) {
+      controlError = error
+    } finally {
+      controlClient.release()
+    }
+    expect(controlError).toBeUndefined()
+    expect(controlResult).toBeTruthy()
+  })
+
   it('stable-ID legacy_compat: claim+seal, congruent replay returns stored response with zero new DML, incongruent same key is 409', async () => {
     await insertActiveUser(compatUser, 'default')
     const token = await mintToken(compatUser, 'attendance:write')
