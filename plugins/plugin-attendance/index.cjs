@@ -21606,6 +21606,17 @@ async function runAutoAbsenceForOrgDate(db, options) {
   const w4Boundary = options.w4Boundary ?? null
   let rows
   let suspendedByRollout = false
+  // W4C-2 remediation P1-2 (owner G-2 decision (c)-plus, #4612 c-5082614287):
+  // `attendance.absence.generated` is a run-level OPERATIONAL notification, not
+  // a §7.1a durable result event (payload is a bare count, carries no per-record
+  // identity to reconstruct any single fact) — it stays the SAME synchronous
+  // best-effort emit as before, narrowed to the legacy side of the posture
+  // split, mirroring the live-punch side's `boundaryOutcome.kind === 'legacy'
+  // || 'legacy_compat'` emit gate (~L27087). A W4-postured run's durable
+  // per-record facts flow through the operation/outbox rows already; emitting
+  // this bare-count notice for a W4 run as well would suggest a redundant
+  // synchronous channel exists for W4-postured results, which it does not.
+  let isLegacySideOutcome = true
   if (w4Boundary) {
     const initiator = options.initiator === 'admin_run' ? 'admin_run' : 'cron'
     // W4C-2 remediation P1-4 (#4612 gate finding): admin_run MUST carry the
@@ -21622,6 +21633,7 @@ async function runAutoAbsenceForOrgDate(db, options) {
       initiator,
       adminActorId,
     })
+    isLegacySideOutcome = outcome.kind === 'legacy'
     if (outcome.kind === 'suspended') {
       suspendedByRollout = true
       rows = []
@@ -21638,11 +21650,18 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
   if (!skipDedup) lastAutoAbsenceKey = key
   if (emit) {
-    emit('attendance.absence.generated', {
-      orgId,
-      workDate,
-      total: rows.length,
-    })
+    // P1-2: narrowed to the legacy side only — see the comment above this
+    // function's outcome branch. `attendance.work_date.review_required` below
+    // is a DIFFERENT event (unresolved work-date attribution, not a generated-
+    // absence count) and is OUT OF the G-2 decision's scope; its emit gate is
+    // deliberately left unchanged (still unconditional on `emit` alone).
+    if (isLegacySideOutcome) {
+      emit('attendance.absence.generated', {
+        orgId,
+        workDate,
+        total: rows.length,
+      })
+    }
     if (reviewRequired.length > 0) {
       emit('attendance.work_date.review_required', {
         orgId,
