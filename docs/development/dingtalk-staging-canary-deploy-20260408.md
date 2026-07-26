@@ -63,17 +63,26 @@ Do not reuse the old production callback path:
 cp docker/app.staging.env.example docker/app.staging.env
 ```
 
-2. Fill the real DingTalk credentials, fresh secret set, and target image tag in `docker/app.staging.env`.
+2. Fill the real DingTalk credentials and fresh secret set. Set `IMAGE_TAG` to the exact
+   40-character lowercase Git commit SHA covered by the image provenance file.
 
 3. Deploy a specific image tag:
 
 ```bash
 DEPLOY_IMAGE_OWNER=zensgit \
-DEPLOY_IMAGE_TAG=<git-sha-or-release-tag> \
+DEPLOY_IMAGE_TAG=<full-40-character-git-sha> \
+DEPLOY_EXPECTED_COMMIT=<same-full-40-character-git-sha> \
+DEPLOY_IMAGE_PROVENANCE_FILE=/absolute/private/path/image-provenance.json \
 bash scripts/ops/deploy-dingtalk-staging.sh
 ```
 
 If `DEPLOY_IMAGE_OWNER` and `DEPLOY_IMAGE_TAG` are omitted, the script now falls back to `IMAGE_OWNER` and `IMAGE_TAG` from `docker/app.staging.env`. This keeps ad-hoc `docker compose --env-file docker/app.staging.env ...` and the deploy script aligned instead of silently pulling `latest`.
+
+Mutable tags and abbreviated SHAs are rejected. The deploy also requires the build-generated
+provenance JSON and verifies the running backend's configured image, immutable Docker image ID,
+OCI revision label, and `/health` build commit before emitting a worker-drain PASS.
+The provenance file must be a regular file owned by the deploy user with mode `0400` or `0600`.
+It is controlled-host operator evidence, not a cryptographic signature or registry attestation.
 
 The staging deploy script now also validates the env file format before Compose runs. A corrupted single-line file with literal `\n` sequences will fail fast instead of tearing down containers and then discovering the env file is unreadable.
 
@@ -99,10 +108,14 @@ To test `#725/#723/#724` before merge:
 
 ```bash
 IMAGE_OWNER=zensgit \
-IMAGE_TAG=<pr-commit-sha> \
+IMAGE_TAG=<full-40-character-pr-commit-sha> \
+IMAGE_PROVENANCE_FILE=/absolute/private/path/image-provenance.json \
 SOURCE_DIR=/path/to/pr3-export \
 bash scripts/ops/build-dingtalk-staging-images.sh
 ```
+
+The build refuses a dirty or mismatched checkout and builds from `git archive` of the exact SHA,
+not from live ignored files. It writes the backend/web image IDs to the private provenance file.
 
 2. Set the same `IMAGE_OWNER` and `IMAGE_TAG` in `docker/app.staging.env`.
 
@@ -110,6 +123,8 @@ bash scripts/ops/build-dingtalk-staging-images.sh
 
 ```bash
 SKIP_PULL=1 \
+DEPLOY_EXPECTED_COMMIT=<same-full-40-character-pr-commit-sha> \
+DEPLOY_IMAGE_PROVENANCE_FILE=/absolute/private/path/image-provenance.json \
 bash scripts/ops/deploy-dingtalk-staging.sh
 ```
 
@@ -121,7 +136,17 @@ After deploy:
 
 - staging web should answer on `http://142.171.239.56:8082`
 - staging backend health should answer on `http://127.0.0.1:18900/health`
+- the deploy must emit exactly one values-free `WORKER_DRAIN_GATE_PASS` with
+  `observed_project_workers=1`, `managed_project_old_workers=0`,
+  `staging_ingress_workers=1`, `staging_ingress_unmanaged_workers=0`, and every match field
+  equal to `1`
+- verify there is no alternate staging backend upstream outside this Compose `backend` service
+  and the fixed loopback publish
 - then run the execution flow in `docs/development/dingtalk-staging-execution-checklist-20260408.md`
+
+For the corp-scope Phase A to Phase B cutover, treat that PASS as point-in-time evidence only.
+Hold an exclusive host change window through the Phase B migration. A privileged out-of-band
+Docker/Compose mutation invalidates the PASS and requires a fresh deploy/gate run.
 
 ## Rollback
 
@@ -130,6 +155,8 @@ Re-run the same script with the previous good tag:
 ```bash
 DEPLOY_IMAGE_OWNER=zensgit \
 DEPLOY_IMAGE_TAG=111324815e83f066dabd47dec2e7cfa97a045b3e \
+DEPLOY_EXPECTED_COMMIT=111324815e83f066dabd47dec2e7cfa97a045b3e \
+DEPLOY_IMAGE_PROVENANCE_FILE=/absolute/private/path/rollback-image-provenance.json \
 bash scripts/ops/deploy-dingtalk-staging.sh
 ```
 
