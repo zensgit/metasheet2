@@ -22,6 +22,7 @@ function record(overrides: Partial<SpikeRecord> & Pick<SpikeRecord, 'dialect' | 
   return {
     evidenceSchemaVersion: 1,
     phase: 'test-phase',
+    controlsTotal: 1,
     controlsInverted: 1,
     observationsTaken: 1,
     recordedAt: '2026-07-26T00:00:00Z',
@@ -62,14 +63,20 @@ describe('spike-b1b-gate-check — CP-7 (synthetic records, both directions)', (
     expect(verdict.open).toBe(false)
   })
 
-  it('CP-7 negative 4/4a: INCONCLUSIVE does not open', () => {
+  // These two ALSO serve as the X-4 MUTATION B/C structural pins (the PR body pastes the real
+  // source-edited-run-reverted transcript for both: widening OPENING_TOKENS to include
+  // 'INCONCLUSIVE', and making an ABSENT cell resolve `open: true`) — cross-referenced here
+  // rather than duplicated as separate test entries below, which previously asserted the
+  // IDENTICAL condition under a name ("was run against source and reverted") this file itself
+  // never checks; only the PR body's pasted transcript does.
+  it('CP-7 negative 4/4a: INCONCLUSIVE does not open (also the X-4 MUTATION B structural pin — see PR body transcript)', () => {
     const records: SpikeRecord[] = [record({ ...CELL, outcome: 'INCONCLUSIVE' })]
     const [verdict] = computeGateVerdict(records, [CELL])
     expect(verdict.open).toBe(false)
     expect(verdict.reason).toBe('INCONCLUSIVE')
   })
 
-  it('CP-7 negative 4/4b: an ABSENT record (no evidence at all) does not open, and is distinguishable from a refusal', () => {
+  it('CP-7 negative 4/4b: an ABSENT record (no evidence at all) does not open, and is distinguishable from a refusal (also the X-4 MUTATION C structural pin — see PR body transcript)', () => {
     const [verdict] = computeGateVerdict([], [CELL])
     expect(verdict.open).toBe(false)
     expect(verdict.reason).toBe('ABSENT')
@@ -110,24 +117,33 @@ describe('spike-b1b-gate-check — CP-7 (synthetic records, both directions)', (
   })
 })
 
-describe('spike-b1b-gate-check — X-4 mutation-of-the-gate-check itself (source-edited, run, reverted; see PR body for the pasted transcript)', () => {
-  // These two tests exist so the CP-7 table above is itself falsifiable: reviewers can (and
-  // the PR body documents doing so) temporarily edit computeGateVerdict's OPENING_TOKENS set
-  // to include 'INCONCLUSIVE' (X-4 MUTATION B) or make an ABSENT cell resolve `open: true`
-  // (X-4 MUTATION C), re-run this file, and observe the CP-7 negative tests above go RED. This
-  // describe block documents the two mutations that were run — see the PR body's pasted
-  // transcript of `git diff` + failing `vitest run` output for each, then reverted.
-  it('documents that X-4 MUTATION B (gate-check treats INCONCLUSIVE as opening) was run against source and reverted', () => {
-    // Structural pin only (this test does not itself mutate the shipped module — the PR body
-    // carries the real transcript): the shipped gate-check's OPENING_TOKENS must be an exact
-    // two-member set, so an edit that widens it is a one-line diff a reviewer can reproduce.
-    const records: SpikeRecord[] = [record({ ...CELL, outcome: 'INCONCLUSIVE' })]
+describe('spike-b1b-gate-check — control-inversion gate (a synthetic/corrupted record must never open)', () => {
+  // The gate-check previously had NO notion of control inversion at all: a synthetic record
+  // carrying an OPENING outcome opened its cell regardless of controlsInverted/controlsTotal.
+  // These MUTATIONS construct exactly that record and prove it is now refused (thrown, never
+  // silently opened) — the positive control ("a real green run's counts never trip this") is
+  // the last test in this block.
+  it('MUTATION: a PROVEN record with controlsInverted < controlsTotal (some controls ran and FAILED) must not open — throws', () => {
+    const records: SpikeRecord[] = [record({ ...CELL, outcome: 'MYSQL_PRECONDITIONS_PROVEN', controlsTotal: 5, controlsInverted: 3 })]
+    expect(() => computeGateVerdict(records, [CELL])).toThrow(/did not fully invert/)
+  })
+  it('MUTATION: a PROVEN record with controlsTotal=0 (no control ever ran) must not open — throws', () => {
+    const records: SpikeRecord[] = [record({ ...CELL, outcome: 'MYSQL_PRECONDITIONS_PROVEN', controlsTotal: 0, controlsInverted: 0 })]
+    expect(() => computeGateVerdict(records, [CELL])).toThrow(/did not fully invert/)
+  })
+  it('MUTATION (SQL Server): a SQLSERVER_RCSI_STATEMENT_SNAPSHOT_PROVEN record with mismatched counts must not open — throws', () => {
+    const records: SpikeRecord[] = [record({ ...SQLSERVER_CELL_B, outcome: 'SQLSERVER_RCSI_STATEMENT_SNAPSHOT_PROVEN', controlsTotal: 42, controlsInverted: 41 })]
+    expect(() => computeGateVerdict(records, [SQLSERVER_CELL_B])).toThrow(/did not fully invert/)
+  })
+  it('scope control: a NON-opening outcome with the SAME mismatched counts does NOT throw (the gate is scoped to opening outcomes only, never a universal reject)', () => {
+    const records: SpikeRecord[] = [record({ ...CELL, outcome: 'MYSQL_PRECONDITIONS_UNESTABLISHED', controlsTotal: 5, controlsInverted: 2 })]
     const [verdict] = computeGateVerdict(records, [CELL])
     expect(verdict.open).toBe(false)
   })
-  it('documents that X-4 MUTATION C (gate-check treats an absent record as opening) was run against source and reverted', () => {
-    const [verdict] = computeGateVerdict([], [CELL])
-    expect(verdict.open).toBe(false)
+  it('positive control: a record shaped exactly like a REAL green run (controlsInverted === controlsTotal >= 1) opens normally — the control-inversion gate never fires on genuine evidence', () => {
+    const records: SpikeRecord[] = [record({ ...CELL, outcome: 'MYSQL_PRECONDITIONS_PROVEN', controlsTotal: 28, controlsInverted: 28 })]
+    const [verdict] = computeGateVerdict(records, [CELL])
+    expect(verdict.open).toBe(true)
   })
 })
 

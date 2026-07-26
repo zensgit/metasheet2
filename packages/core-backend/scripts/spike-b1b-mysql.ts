@@ -259,12 +259,22 @@ async function main(): Promise<void> {
     const observedVersion = countObservation(String(versionRows[0]!.v))
     console.log('[b1b-mysql] observed VERSION():', observedVersion, '| declared major version:', declaredMajorVersion)
     log.check('X-2-baseline', `observed VERSION() "${observedVersion}" matches the declared matrix cell "${declaredMajorVersion}"`, 'GREEN', observedVersion.startsWith(declaredMajorVersion))
-    const decoyDeclaredVersion = '99.99'
+    // MUTATION: simulate the OBSERVATION a genuinely different (undeclared) MySQL major
+    // version would actually report — a real, plausible VERSION() shape for a version this
+    // spike has never declared+run (there is only one declared entry, '8.0', in
+    // ISOLATION_VARIABLE_BY_DECLARED_MAJOR_VERSION, so there is no sibling matrix cell to
+    // borrow a real prefix from the way the SQL Server script does) — compared against the
+    // SAME real needle (`declaredMajorVersion`, unchanged) the real check above uses. This
+    // mutates the OBSERVATION, never the assertion's needle (spike-b1b-shared.ts L150-152: "the
+    // OBSERVATION changes ... the ASSERTION function itself never changes") — the prior version
+    // of this check instead hardcoded an impossible needle ('99.99') and left the observation
+    // untouched, which is the inverse of the discipline this line requires.
+    const simulatedUndeclaredVersionObservation = '5.7.44-log' // a real MySQL 5.7 VERSION() shape
     log.check(
       'X-2-mutation-wrong-declared-label',
-      'MUTATION: leave the declared label mismatched against the real observed VERSION() (equivalent effect to pointing the job at the other matrix version while leaving the label unchanged)',
+      'MUTATION: simulate the OBSERVATION a different (undeclared) MySQL major version would report -> must NOT match the declared "8.0" needle (needle unchanged, only the observation is synthetic)',
       'RED',
-      observedVersion.startsWith(decoyDeclaredVersion)
+      simulatedUndeclaredVersionObservation.startsWith(declaredMajorVersion)
     )
 
     // ── M-1: probe table storage engine is InnoDB (+ M-1c control pair) ────────────────────
@@ -279,17 +289,17 @@ async function main(): Promise<void> {
     }
     const m1Baseline = await engineIsInnoDB(INNODB_TABLE)
     log.check('M-1-baseline', 'the probe table (bound to the SAME identifier the probe statements use) reports ENGINE=InnoDB', 'GREEN', m1Baseline)
-    log.check(
-      'M-1-mutation-misbound-table',
-      'MUTATION: bind the engine read to a different table name than the one actually probed',
-      'RED',
-      await engineIsInnoDB(MYISAM_SIBLING_TABLE)
-    )
+    // ONE call, ONE control — M-1-mutation-misbound-table and M-1c-control-pair-myisam-sibling
+    // previously called `engineIsInnoDB(MYISAM_SIBLING_TABLE)` TWICE under two different names
+    // for the exact same assertion (a misbound-table read and CP-2's negative half describe the
+    // SAME table with the SAME predicate — there is nothing that distinguishes them), double-
+    // counting one real control as two. This single check covers both framings honestly.
+    const m1MyisamSiblingCheck = await engineIsInnoDB(MYISAM_SIBLING_TABLE)
     log.check(
       'M-1c-control-pair-myisam-sibling',
-      'CP-2 negative half: the IDENTICAL assertion against a MyISAM sibling table (same database, same connection) must red',
+      'MUTATION / CP-2 negative half: binding the engine-identity read to a MyISAM sibling table (same database, same connection, same probe function) instead of the real InnoDB probe table must red',
       'RED',
-      await engineIsInnoDB(MYISAM_SIBLING_TABLE)
+      m1MyisamSiblingCheck
     )
     const m1 = m1Baseline
 
@@ -428,22 +438,33 @@ async function main(): Promise<void> {
       )
 
       await reader!.query('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ')
-      const negative = await readProbeName()
-      log.check(
-        'CP-5 negative: declared isolation (>= READ COMMITTED) sees the PRE-image',
-        'reader restored to the declared isolation observes the committed pre-image, not the uncommitted write',
-        'GREEN',
-        negative === 'a'
-      )
+      // CP-5's negative/visibility controls are only INFORMATIVE in the REAL (non-no-op)
+      // branch: the no-op branch changed zero rows, so "still sees the pre-image" / "still
+      // sees the post-image" here asserts nothing changed, which is not a control. Previously
+      // this ran in BOTH invocations under the SAME literal id string, so a no-op run's two
+      // vacuous re-checks silently double-counted as two more "controls" alongside the real
+      // branch's two genuine ones — four log entries, two distinct assertions, duplicate ids.
+      // Gating on `!writerUpdateIsNoOp` removes the duplication and the vacuous half at once.
+      if (!writerUpdateIsNoOp) {
+        const negative = await readProbeName()
+        log.check(
+          'CP-5 negative: declared isolation (>= READ COMMITTED) sees the PRE-image',
+          'reader restored to the declared isolation observes the committed pre-image, not the uncommitted write',
+          'GREEN',
+          negative === 'a'
+        )
 
-      await writer!.query('COMMIT')
-      const visibility = await readProbeName()
-      log.check(
-        'CP-5 visibility: after commit, a FRESH read on the SAME reader connection observes the POST-image',
-        'without this, "reader saw the old value" is also produced by a reader that is blind to all change',
-        'GREEN',
-        writerUpdateIsNoOp ? visibility === 'a' : visibility === 'dirty_uncommitted'
-      )
+        await writer!.query('COMMIT')
+        const visibility = await readProbeName()
+        log.check(
+          'CP-5 visibility: after commit, a FRESH read on the SAME reader connection observes the POST-image',
+          'without this, "reader saw the old value" is also produced by a reader that is blind to all change',
+          'GREEN',
+          visibility === 'dirty_uncommitted'
+        )
+      } else {
+        await writer!.query('COMMIT') // still needed to close the open transaction; not asserted on (see comment above)
+      }
 
       // Reset for the next sub-run / for cleanliness.
       await writer!.query(`UPDATE \`${INNODB_TABLE}\` SET name = 'a' WHERE id = 1`)
@@ -475,6 +496,7 @@ async function main(): Promise<void> {
       capabilityPosture: 'default',
       outcome,
       sameConnection: readerIdFirst === readerIdSecond,
+      controlsTotal: summary.total,
       controlsInverted: summary.passed,
       observationsTaken,
       recordedAt: new Date().toISOString(),

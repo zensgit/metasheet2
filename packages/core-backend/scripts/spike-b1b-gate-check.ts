@@ -73,7 +73,25 @@ export function computeGateVerdict(
     }
     const record = matches[0]
     assertValidSpikeRecord(record)
-    return { ...cell, open: OPENING_TOKENS.has(record.outcome), reason: record.outcome }
+    const opens = OPENING_TOKENS.has(record.outcome)
+    // Control-inversion gate (§1.3, generalized to THIS gate-check): an OPENING outcome whose
+    // own counts show controls did NOT fully invert (some ran but failed, or none ran at all)
+    // is internally inconsistent evidence — a synthetic or corrupted record could claim
+    // MYSQL_PRECONDITIONS_PROVEN with controlsInverted=0/controlsTotal=0 and, before this
+    // check, this function would still report open=true. Never silently resolved (same
+    // discipline as the "multiple records" ambiguity above) — malformed/inconsistent evidence
+    // throws rather than opening. A record produced by a REAL, uncorrupted run can never trip
+    // this: spike-b1b-mysql.ts/spike-b1b-sqlserver.ts both call log.assertAllPassed() (which
+    // throws before any record is emitted or written) BEFORE reaching an opening outcome, so
+    // controlsInverted === controlsTotal always holds on a genuine green run.
+    if (opens && (record.controlsTotal < 1 || record.controlsInverted !== record.controlsTotal)) {
+      throw new Error(
+        `spike-b1b-gate-check: record for ${cellKey(cell)} claims opening outcome "${record.outcome}" but its ` +
+          `own counts show controls did not fully invert (controlsInverted=${record.controlsInverted}, ` +
+          `controlsTotal=${record.controlsTotal}) — refusing to open on internally inconsistent evidence`
+      )
+    }
+    return { ...cell, open: opens, reason: record.outcome }
   })
 }
 

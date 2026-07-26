@@ -64,6 +64,15 @@ export interface SpikeRecord {
   readonly separateProfile?: boolean
   // X-1: reported as the equality VERDICT, never the raw session identifier (§6.2).
   readonly sameConnection?: boolean
+  // Count-only (values-free), populated from the SAME MutationLog.summary() snapshot
+  // controlsInverted comes from: the TOTAL number of mutation/control checks that had run by
+  // that point, vs controlsInverted's PASSED subset of them. Structurally required (not
+  // optional) so a record can never claim "N inverted" without also stating "out of how many"
+  // — the gate-check (spike-b1b-gate-check.ts) uses the pair to refuse an OPENING outcome
+  // whose own counts are inconsistent (a synthetic/corrupted record claiming PROVEN with zero
+  // or partial controls inverted), which controlsInverted alone could never distinguish from a
+  // fully-inverted run.
+  readonly controlsTotal: number
   readonly controlsInverted: number
   readonly observationsTaken: number
   readonly recordedAt: string
@@ -78,8 +87,16 @@ export function assertValidSpikeRecord(record: SpikeRecord): void {
   if (record.dialect !== 'mysql' && record.dialect !== 'sqlserver') {
     throw new Error(`spike-b1b internal: unknown dialect ${JSON.stringify(record.dialect)}`)
   }
+  if (!Number.isInteger(record.controlsTotal) || record.controlsTotal < 0) {
+    throw new Error('spike-b1b internal: controlsTotal must be a non-negative integer (count-only)')
+  }
   if (!Number.isInteger(record.controlsInverted) || record.controlsInverted < 0) {
     throw new Error('spike-b1b internal: controlsInverted must be a non-negative integer (count-only)')
+  }
+  if (record.controlsInverted > record.controlsTotal) {
+    throw new Error(
+      `spike-b1b internal: controlsInverted (${record.controlsInverted}) cannot exceed controlsTotal (${record.controlsTotal})`
+    )
   }
   if (!Number.isInteger(record.observationsTaken) || record.observationsTaken < 0) {
     throw new Error('spike-b1b internal: observationsTaken must be a non-negative integer (count-only)')
