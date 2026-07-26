@@ -129,6 +129,7 @@ until the stacked PR is retargeted after Phase A lands.
 | SQL three-value logic let NULL parent corp evade `!~` | require the parent column to remain `NOT NULL`, count NULL explicitly, and pin both preflight and migration refusals |
 | required CI only exercised CLI `ERROR/1` | execute `PASS/0` and `BLOCKED/2` through subprocesses in the required real-DB file |
 | exact-head CI found the callback `delivery_corp_unresolved` fixture still inserted a blank DingTalk corp that Phase B correctly rejects | preserve the canonical corp CHECK; construct the same fail-closed callback outcome with a valid-corp non-DingTalk integration, update the stale resolver comment, and run the migration plus callback suites 60/60 |
+| the approval real-DB lane still modeled a legacy empty integration corp as insertable after Phase B | make the immutability golden phase-aware: retain the generic-update refusal before Phase B, require the named canonical-corp CHECK and zero residue after Phase B, and run 5/5 in both schema states |
 
 ## 6. Remaining owner gates
 

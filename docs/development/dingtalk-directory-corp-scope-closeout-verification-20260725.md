@@ -68,6 +68,8 @@ Phase B:
 - a second Migrator run has no pending migration;
 - fully migrated Phase-B migration plus DingTalk callback compatibility suites run 60/60 after
   exact-head CI exposed and the fix removed a now-illegal blank-corp callback fixture;
+- the corp-immutability real-DB suite runs 5/5 on both pre-Phase-B and fully migrated schemas,
+  proving application-layer refusal before the migration and stronger database rejection after it;
 - 10-integration / 100,000-account / 200,000-identity scale sample completes in 3,158 ms;
 - a real lock blocker fails closed after about 5.2 seconds;
 - TypeScript clean.

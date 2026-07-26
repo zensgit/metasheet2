@@ -14,8 +14,9 @@ import { DirectoryTenantChangeBlockedError, updateDirectoryIntegration } from '.
  * flight; nothing has been written). A "block only if synced records already exist" rule
  * would let that swap through. These goldens seed that real row shape directly against the
  * migrated schema and re-SELECT after every rejected call to prove zero mutation, not just a
- * thrown error — plus the same-corp resend path that must remain allowed. Legacy empty rows
- * are fail-closed because a generic update cannot atomically retag existing or racing children.
+ * thrown error — plus the same-corp resend path that must remain allowed. Before Phase B, legacy
+ * empty rows are fail-closed because a generic update cannot atomically retag existing or racing
+ * children. After Phase B, the database rejects that legacy-invalid row shape outright.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -45,6 +46,20 @@ async function readIntegration(id: string): Promise<{ corp_id: string; name: str
     [id],
   )
   return result.rows[0]
+}
+
+async function phaseBCorpConstraintInstalled(): Promise<boolean> {
+  const result = await query<{ installed: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM pg_constraint constraint_row
+         JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
+        WHERE constraint_row.conname = 'directory_integrations_corp_id_canonical'
+          AND constraint_row.contype = 'c'
+          AND table_row.relname = 'directory_integrations'
+     ) AS installed`,
+  )
+  return result.rows[0]?.installed === true
 }
 
 function updateInput(overrides: { name: string; corpId: string }) {
@@ -119,7 +134,24 @@ describeIfDatabase('org-transfer Phase 1 §12.1 corp_id immutable-once-set guard
     expect(row.name).toBe(`renamed-${STAMP}`)
   })
 
-  it('legacy empty corp_id cannot be set through the generic update path', async () => {
+  it('legacy empty corp_id is blocked by the generic update before Phase B or rejected by the database after Phase B', async () => {
+    if (await phaseBCorpConstraintInstalled()) {
+      await expect(
+        insertIntegration(`initial-set-${STAMP}`, ''),
+      ).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'directory_integrations_corp_id_canonical',
+      })
+      const residue = await query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM directory_integrations
+          WHERE name = $1`,
+        [`initial-set-${STAMP}`],
+      )
+      expect(residue.rows).toEqual([{ count: 0 }])
+      return
+    }
+
     const id = await insertIntegration(`initial-set-${STAMP}`, '')
     integrationIds.push(id)
 
