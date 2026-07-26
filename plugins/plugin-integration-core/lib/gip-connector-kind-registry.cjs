@@ -67,13 +67,28 @@ function isPlainObject(value) {
 // Identity-token hygiene, mirroring gip-binding-qualification-spike.cjs's
 // requiredIdentityToken: server-authored constants only, never customer text —
 // but still must not silently accept control chars / megabyte strings.
+//
+// RETRACTION (round 10 residual on #4610 — class-wide, not file-local): the
+// rejection message below used to read "must be a non-empty, <=128
+// printable-char token" — the SAME "printable" overclaim this PR's sibling
+// module, gip-canonical-object-contract-registry.cjs, already retracts for
+// its own requiredIdentityToken (see that function's RETRACTION comment).
+// This file is NEW in this PR, so shipping it with the un-retracted wording
+// would have introduced, in the same commit, a second instance of the exact
+// invariant this PR formally retracts elsewhere. Measured directly against
+// the regex below: 0x85 (NEL), 0xa0 (NBSP), U+2028 (LINE SEPARATOR) and
+// U+200b (ZWSP) are all ACCEPTED — none of the four falls in the rejected
+// range. The TRUE invariant: this function rejects ONLY the C0 control range
+// (code points 0x00-0x1f) and DEL (0x7f) — every OTHER code point, printable
+// or not, ASCII or not, passes through undetected. Message wording now
+// matches the sibling module's corrected message exactly.
 function requiredIdentityToken(value, field) {
   if (typeof value !== 'string') {
     fail('CONNECTOR_KIND_DECLARATION_INVALID', `${field} must be a string`, { field })
   }
   const trimmed = value.trim()
   if (trimmed === '' || trimmed.length > 128 || /[\u0000-\u001f\u007f]/.test(trimmed)) {
-    fail('CONNECTOR_KIND_DECLARATION_INVALID', `${field} must be a non-empty, <=128 printable-char token`, { field })
+    fail('CONNECTOR_KIND_DECLARATION_INVALID', `${field} must be a non-empty, <=128-character token after trimming, with no C0 control characters (0x00-0x1f) or DEL (0x7f)`, { field })
   }
   return trimmed
 }

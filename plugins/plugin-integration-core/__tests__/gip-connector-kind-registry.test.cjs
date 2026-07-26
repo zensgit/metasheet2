@@ -362,6 +362,61 @@ function hostileAliasesLengthProxyNeverEscapesRaw() {
 }
 
 // ---------------------------------------------------------------------------
+// (5f) P3 FIX (round 10 residual on #4610) — RETRACTION: this module's own
+// rejection message used to claim "printable-char token". FALSE, measured
+// directly here — mirrors gip-canonical-object-contract-registry.test.cjs's
+// hasControlCharacterTrueInvariantIsPinned, adapted to this module's own
+// requiredIdentityToken (there is no separate hasControlCharacter helper in
+// this file — the C0/DEL check is inline in the regex). Pins the TRUE
+// invariant so the corrected rejection message cannot silently drift from
+// the code again. Built via String.fromCodePoint rather than string-literal
+// escapes, so the exact code point under test is unambiguous in source.
+// ---------------------------------------------------------------------------
+function requiredIdentityTokenTrueInvariantIsPinned() {
+  // (a) C0/DEL boundary, exhaustively at the edges — the mutation this
+  // guards against is narrower than "delete the whole regex": narrowing the
+  // C0 range or dropping just the DEL disjunct both left the suite green
+  // before these assertions existed (the pre-existing malformed-kind test
+  // only probes one C0 code point, 0x07).
+  rejects(
+    () => __internals.requiredIdentityToken(`bad${String.fromCodePoint(0x00)}text`, 'field'),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'code point 0x00 (NUL) must be rejected',
+  )
+  rejects(
+    () => __internals.requiredIdentityToken(`bad${String.fromCodePoint(0x1f)}text`, 'field'),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'code point 0x1f (US, the top of the C0 range) must be rejected',
+  )
+  rejects(
+    () => __internals.requiredIdentityToken(`bad${String.fromCodePoint(0x7f)}text`, 'field'),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'code point 0x7f (DEL) must be rejected — a distinct disjunct from the C0 range, not adjacent to it',
+  )
+  const okSpace = `ok${String.fromCodePoint(0x20)}text`
+  assert.equal(__internals.requiredIdentityToken(okSpace, 'field'), okSpace, 'code point 0x20 (SPACE, one past the top of C0) must NOT be rejected')
+  const okTilde = `ok${String.fromCodePoint(0x7e)}text`
+  assert.equal(__internals.requiredIdentityToken(okTilde, 'field'), okTilde, 'code point 0x7e (~, one below DEL) must NOT be rejected')
+
+  // (b) The four code points the retracted "printable-char token" claim said
+  // were rejected, but are not — none is in the C0/DEL set the regex actually
+  // tests. Embedded MID-TOKEN so trim() (a DIFFERENT check, one level up,
+  // that strips only LEADING/TRAILING WhiteSpace/LineTerminator runs — two of
+  // these four code points are in those sets) cannot confound the result.
+  const acceptedByRequiredIdentityToken = {
+    '0x85 NEL': 0x85,
+    '0xa0 NBSP': 0xa0,
+    'U+2028 LINE SEPARATOR': 0x2028,
+    'U+200b ZWSP': 0x200b,
+  }
+  for (const [name, codePoint] of Object.entries(acceptedByRequiredIdentityToken)) {
+    const token = `abc${String.fromCodePoint(codePoint)}def`
+    const result = __internals.requiredIdentityToken(token, 'field')
+    assert.equal(result, token, `${name} embedded mid-token must be accepted verbatim by requiredIdentityToken — the retracted message implied it would be refused`)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // (6) NEGATIVE CONTROL — the clause the ledger names as most likely to break:
 // a system whose kind is uncertified for GIP binding must still work,
 // unaffected, on its pre-GIP external-systems.cjs (legacy) path.
@@ -474,6 +529,7 @@ async function main() {
   hostileAliasArrayIndexGetterNeverEscapesRaw()
   hostileEntriesIteratorNeverEscapesRaw()
   hostileAliasesLengthProxyNeverEscapesRaw()
+  requiredIdentityTokenTrueInvariantIsPinned()
   malformedDeclarationsRefused()
   await legacyPathKeepsWorkingWhileGipBindingRefuses()
   internalsExactKeySet()
