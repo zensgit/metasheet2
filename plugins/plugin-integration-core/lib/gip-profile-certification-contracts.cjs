@@ -182,6 +182,21 @@ function normalizeClosedSet(value, vocabulary, field, reason) {
 // (future, individually-gated) bridge.bounded_read.v1. The pattern is frozen here so
 // lineage fields agree on ONE spelling; certifying any concrete id stays gated.
 const PROFILE_ID_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+\.v[1-9][0-9]*$/
+// Public contract (review B1a-1 P2): another module's SAVE-TIME validator needs to check the
+// profileId/applyProfileId shape without reaching into this module's `__internals` test/private
+// surface. This is that public entry point. It is a THIN wrapper over the SAME PROFILE_ID_PATTERN
+// object used by normalizeCertifiedReadActionProfile/normalizeCertifiedApplyProfile below and
+// exposed via __internals — never a second copy of the regex, so the two cannot drift. Carries the
+// same <=128-char bound as those call sites, but is DELIBERATELY untrimmed — normalizeCertified*
+// above trims (via nonBlankString) BEFORE testing length/pattern, so e.g. ' erp.a.v1 ' passes there;
+// this helper tests the raw value, so the same padded string fails here. That is not an oversight:
+// it matches how the one production consumer of this helper (read-source-config.cjs) already
+// validates its untrimmed field today, trimming only afterward at normalization/storage time — so
+// wiring this helper in is a behaviour-preserving refactor, not a widening of what that save path
+// accepts. A caller that wants the trimmed/nonBlankString semantics should trim before calling.
+function isValidProfileId(value) {
+  return typeof value === 'string' && value.length <= 128 && PROFILE_ID_PATTERN.test(value)
+}
 
 // GIP-D0 §3 "complete contract" components are all expressible: the four schema
 // dimensions + combination rules + maxScale + orderingKeyRequirement + the declared
@@ -553,6 +568,7 @@ module.exports = {
   GIP_CONSISTENCY_REQUIREMENT_STATUSES,
   GIP_PROFILE_ERROR_REASONS,
   GipProfileContractError,
+  isValidProfileId,
   normalizeCertifiedReadActionProfile,
   normalizeCertifiedApplyProfile,
   deriveRecoveryStrategy,

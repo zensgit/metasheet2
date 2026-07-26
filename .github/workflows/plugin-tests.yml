@@ -244,6 +244,19 @@ jobs:
       - name: Approval data-closure CI wiring contract
         run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
 
+      # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
+      # only ever exercises the verify script against a NORMAL package — it never proves the
+      # loopback-config negative case. Without an automated caller, deleting the loopback
+      # regex or its main-flow call site in scripts/ops/multitable-onprem-package-verify.sh
+      # still left every PR required check green. This step is that automated caller: pure
+      # bash, no DB, no pnpm install needed, so it runs early in the no-DB block. Gated to the
+      # 20.x leg only so it lands inside the required `test (20.x)` context (18.x is not
+      # required) rather than doubling the run for no reason — a failure here reds a required
+      # check on any PR touching the verify script.
+      - name: Multitable on-prem loopback-verify CI wiring contract (#4604)
+        if: matrix.node-version == '20.x'
+        run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
+
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
@@ -349,6 +362,23 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest run \
             tests/unit/attendance-shift-segments-service.test.ts \
             --reporter=dot
+
+      # #4556 W4C-0 Stage D: section 8.4 source/effect/result mechanical bypass guard. A
+      # node:test (.test.mjs) file — invisible to both `pnpm --filter core-backend test` and
+      # vitest.config.ts's exclude list — so it must be named explicitly here or it silently
+      # never runs. Scans the exact-head worktree for new/renamed/unclassified attendance DML
+      # against the pinned e0defbe26 debt baseline and its curated P01-P28/X01-X05 entries, and
+      # re-proves the pinned baseline artifact is byte-reproducible from that ref.
+      - name: Run attendance W4C-0 Stage D §8.4 DML inventory collector
+        run: |
+          # The byte-reproducibility leg re-generates the baseline manifest FROM the pinned
+          # commit itself (git ls-tree against e0defbe26…). actions/checkout is a shallow
+          # clone, so that commit object is absent — fetch exactly that one commit first.
+          # Deliberately NOT a conditional skip: a skip here would let the reproducibility
+          # leg silently never run in CI (skip-shaped-green).
+          git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7 || \
+            git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7
+          node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
 
       - name: Run linting
         if: matrix.node-version == '20.x'
@@ -915,6 +945,12 @@ jobs:
             tests/integration/attendance-decision-trace-w5-0.db.test.ts \
             tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
             tests/integration/attendance-work-date-resolver-w2.db.test.ts \
+            tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
+            tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts \
+            tests/integration/attendance-w4c0-operation-registry.db.test.ts \
+            tests/integration/attendance-w4c0-db-gates-e1.db.test.ts \
+            tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts \
+            tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

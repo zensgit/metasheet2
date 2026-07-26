@@ -463,6 +463,43 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
       // whole-file into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/attendance-work-date-resolver-w2.db.test.ts',
+      // #4556 W4C-0 Stage A: durable-storage migration smoke (SQL UUIDv5 golden vector,
+      // derived-ID/claimed-commit/immutability refusals, P07 V1 job shape, down()
+      // fail-closed). DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts',
+      // #4556 W4C-0 Stage B: TS/SQL UUIDv5 golden parity (three namespaces) + real
+      // pg_advisory_xact acquisition through the canonical helpers. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the
+      // attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts',
+      // #4556 W4C-0 Stage C: registry service claim/seal/replay/congruence + P07 V1
+      // reservation + advisory-helper deadline mapping against real Postgres.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml
+      // (two-point wiring).
+      'tests/integration/attendance-w4c0-operation-registry.db.test.ts',
+      // #4556 W4C-0 Stage E1: full section 12.1 DB-gate matrix (migration lifecycle on a
+      // scratch database, immutability refusal surface, transaction-bound deferred
+      // constraints, pointer/lineage gates, P07 job gates + two-connection reservation
+      // backstop). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green
+      // it; wired whole-file into the attendance real-DB step in plugin-tests.yml
+      // (two-point wiring).
+      'tests/integration/attendance-w4c0-db-gates-e1.db.test.ts',
+      // #4556 W4C-0 Stage E2: amendment section 2 identity-gate matrix (default/posture
+      // reload doors, cross-namespace masquerade matrix, durable rehydration drift,
+      // pre-lock/post-lock isolation) against real Postgres. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the
+      // attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts',
+      // #4556 W4C-0 Stage E3: section 12.1 dual-connection concurrency gates (two
+      // concurrent first claims, multi-key helper deadline, null-version worker
+      // atomicity, rollout shared/exclusive races, P07 enqueue-vs-transition and
+      // enqueue-vs-synchronous-caller in both commit orders). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into
+      // the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
