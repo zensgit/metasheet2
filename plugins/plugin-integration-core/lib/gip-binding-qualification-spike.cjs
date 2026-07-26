@@ -23,8 +23,24 @@
 // optionally expiring; customers can never submit or reuse one (enforced at the
 // future binding runtime — the spike freezes the shapes that make it checkable).
 
+// -- §4 step 1.5 (B1a-3): the legacy caller-supplied-tuple entry point is GONE ---
+// `createBindingQualificationProber(...)` used to return `Object.freeze({ probe })`,
+// and that `probe(input)` accepted a caller-supplied `query`, `keyColumns`,
+// `systemContentKey`, `configContentKey`, `objectKey`, `canonicalObjectVersion` and
+// `actionProfileVersion`. That construction — residual 1 of B-1 — is RETIRED AS
+// INEXPRESSIBLE, not detected: the frozen prober object's EXACT KEY SET is now
+// `{ probeFromResolution }`, so a re-addition under ANY name (including a symbol)
+// reds the pin. B-1 rejects detection in favour of inexpressibility, so "keep
+// probe() and add a check" was not an option.
+//
+// The six tuple fields now come from a trusted RESOLUTION, and execution comes from
+// a CLOSURE-BOUND server-bound source executor (§4 step 1.4, δ=(c): certified HTTP
+// probe actions only). Under δ=(c) the SQL builders below stay REACHABLE AS
+// BUILDERS but are on NO probe path — that is the accepted v1 outcome.
 const crypto = require('node:crypto')
 const { CanonicalDomainError, stableCanonicalStringify } = require('./gip-canonical-json.cjs')
+const { isTrustedBindingResolution } = require('./gip-approved-binding-resolver.cjs')
+const { isTrustedServerBoundSourceExecutor } = require('./gip-server-bound-source-executor.cjs')
 
 const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'QUALIFICATION_INPUT_INVALID',
@@ -38,6 +54,13 @@ const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'QUALIFICATION_ENVELOPE_MISMATCH',
   'QUALIFICATION_EXPIRED',
   'QUALIFICATION_STATUS_INVALID',
+  // B1a-3 §4 step 1.5 — residual 2's NAMED closed refusal. Any key outside the
+  // resolution-bound closed allowlist is refused under THIS token, so a
+  // caller-supplied query, connection handle, statement or executor is refused
+  // under ANY input key, including a novel one and a symbol.
+  'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED',
+  'PROBE_EXECUTOR_UNTRUSTED',
+  'PROBE_RESOLUTION_UNTRUSTED',
 ])
 const QUALIFICATION_ERROR_REASON_SET = new Set(QUALIFICATION_ERROR_REASONS)
 
@@ -198,13 +221,22 @@ const postgresTotalOrderProbeStrategy = Object.freeze({
   buildTotalOrderProbeSql: buildOrderingKeyTotalOrderProbeSql,
 })
 
-// TRUST is OBJECT IDENTITY, never a public field (review P1, round-6): a boolean
-// brand `__gipTrustedRegistry: true` is trivially duck-typed — a plain object carrying
-// that field + a resolve() passed the prober factory and minted candidates with an
-// attacker-controlled snapshotSemantics marker written into evidence. Membership in
-// this module-private WeakSet is UNFORGEABLE: the ONLY way in is to be constructed by
-// createProbeStrategyRegistry below. No public property is ever consulted.
-const trustedProbeStrategyRegistries = new WeakSet()
+// -- V-7 FIX (B1a-3, §4 step 1.5's "1.4's builder identity") ------------------
+// This module used to hold a `trustedProbeStrategyRegistries` WeakSet whose SOLE
+// WRITER was the EXPORTED `createProbeStrategyRegistry`. That is the shape the
+// owner ruled on for #4610's registries — "a public factory whose products are
+// trusted is equivalent to no trust check at all" — and it was still LIVE here:
+// any importer could mint a *trusted* registry carrying its own
+// `buildTotalOrderProbeSql` AND its own `snapshotSemantics`, which was written into
+// closed evidence and therefore into the qualification digest.
+//
+// The hole is CLOSED BY REMOVAL, which is stronger than splitting build from trust:
+// under δ=(c) no probe path resolves a SQL strategy at all, so there is no trust set
+// left for a public factory to write into. `createProbeStrategyRegistry` below is
+// now BUILD-ONLY — calling it, from anywhere, confers NOTHING and reaches no probe.
+// The build/trust split for the surface that IS live moved to
+// `gip-server-bound-source-executor.cjs`'s HTTP probe-action registry, where the
+// granting constructor is exported nowhere.
 
 // STRATEGY BINDING (review P1): strategies are SERVER-REGISTERED implementations
 // uniquely bound to an actionProfileVersion — runtime input never supplies strategy
@@ -234,31 +266,38 @@ function createProbeStrategyRegistry(entries) {
       buildTotalOrderProbeSql: entry.buildTotalOrderProbeSql,
     }))
   }
-  const registry = Object.freeze({
+  // BUILD-ONLY. No trust is granted here, by design — see the V-7 note above.
+  return Object.freeze({
     resolve(actionProfileVersion) {
       return byProfile.get(actionProfileVersion) || null
     },
   })
-  // Authenticate by IDENTITY, not by a forgeable public marker (review P1, round-6).
-  trustedProbeStrategyRegistries.add(registry)
-  return registry
 }
 
-// SERVICE FACTORY (review P1): binds a TRUSTED registry once, server-side, and returns
-// a prober whose probe() takes RUN DATA ONLY. A caller can never inject a fake
-// duck-typed registry into the qualification chain — the registry is captured here,
-// not per call, and must be an object this module ACTUALLY constructed. Trust is
-// WeakSet MEMBERSHIP (round-6): a duck-typed object — even one carrying
-// __gipTrustedRegistry:true and a working resolve() — is not in the private WeakSet
-// and is rejected.
-function createBindingQualificationProber(strategyRegistry) {
-  if (!trustedProbeStrategyRegistries.has(strategyRegistry)) {
-    // WeakSet.has(primitive) returns false (never throws) — null/strings fail here too.
-    fail('QUALIFICATION_INPUT_INVALID', 'a trusted probe-strategy registry (from createProbeStrategyRegistry) is required', { field: 'strategyRegistry' })
+// SERVICE FACTORY. Authority is CLOSURE-BOUND at construction: the server-bound
+// source executor is captured HERE, once, and admitted by OBJECT IDENTITY through
+// its owning module's checker. The per-call entry point takes a trusted RESOLUTION
+// and run-lifecycle data only — there is no seam through which a caller could pass
+// a registry, a strategy, a connection handle, a statement or a query.
+const PROBE_RUN_INPUT_KEYS = Object.freeze(['resolution', 'envelopeKey', 'probedAt', 'expiresAt'])
+const PROBE_RUN_INPUT_KEY_SET = new Set(PROBE_RUN_INPUT_KEYS)
+
+function createBindingQualificationProber(components) {
+  if (!isPlainObject(components)) {
+    fail('PROBE_EXECUTOR_UNTRUSTED', 'a trusted server-bound source executor is required', {})
   }
+  const executor = components.executor
+  // WeakSet-backed checker: returns false for primitives and null, never throws. A
+  // duck-typed object carrying every expected public field is refused here.
+  if (!isTrustedServerBoundSourceExecutor(executor)) {
+    fail('PROBE_EXECUTOR_UNTRUSTED', 'a trusted server-bound source executor is required', {})
+  }
+  // EXACT KEY SET — `{ probeFromResolution }` and nothing that accepts a
+  // caller-supplied tuple. Pinned by set equality in the test, so a re-addition
+  // under any name (plausible, obscure or symbol-keyed) reds.
   return Object.freeze({
-    probe(input) {
-      return probeWithTrustedRegistry(strategyRegistry, input)
+    probeFromResolution(input) {
+      return probeFromTrustedResolution(executor, input)
     },
   })
 }
@@ -290,24 +329,11 @@ function assertReadOnlySql(sql) {
   return text
 }
 
-// probeBindingQualification — OUTSIDE any transaction (the caller supplies a plain
-// query fn; the spike never opens/joins a transaction). Produces a CANDIDATE
-// qualification whose digest binds every input. Values-free evidence: counts and
-// booleans only — never key values, never row content.
-async function runReadOnlyProbe(query, sql) {
-  const text = assertReadOnlySql(sql)
-  let rows
-  try {
-    const result = await query(text)
-    rows = Array.isArray(result && result.rows) ? result.rows : null
-  } catch (_error) {
-    fail('PROBE_QUERY_FAILED', 'qualification probe query failed', { errorType: 'source_runtime' })
-  }
-  if (rows === null) {
-    fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable row plane', {})
-  }
-  return rows
-}
+// B1a-3 §4 step 1.5: the SQL execution path (`runReadOnlyProbe`) is REMOVED, not
+// privatised. It was the only consumer of a caller-supplied `query` function, and
+// under δ=(c) nothing may reach a SQL source. `assertReadOnlySql` survives as an
+// exported guard over the builders below, which remain BUILDERS on no probe path —
+// "SQL builders stay unreachable, that is the accepted v1 outcome".
 
 // Lifecycle fields are AUTHENTICATED with a KEYED MAC (review P1: an unkeyed hash
 // over public values is an integrity checksum anyone can recompute after postponing
@@ -363,38 +389,62 @@ function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresA
   })).digest('hex')
 }
 
-// INTERNAL: probe against a strategy resolved from the TRUSTED registry the factory
-// (createBindingQualificationProber) captured server-side. `input` carries RUN DATA
-// ONLY — never a registry or a strategy (review P1: a per-call registry was a
-// duck-typed injection bypass — a fake registry could mint candidates and write
-// arbitrary marker text into evidence). Not exported.
-async function probeWithTrustedRegistry(trustedRegistry, input) {
-  if (!isPlainObject(input) || typeof input.query !== 'function') {
-    fail('QUALIFICATION_INPUT_INVALID', 'probe needs a query function and a plain-object input', {})
+// INTERNAL, not exported. The RESOLUTION-BOUND probe path (§4 step 1.4 + 1.5).
+//
+// Every one of the six digest inputs comes from the trusted resolution. `input`
+// carries run-LIFECYCLE data only, on a CLOSED ALLOWLIST — so a caller-supplied
+// `query`, connection handle, statement, executor, registry or strategy is refused
+// under ANY key name, with the NAMED closed reason
+// PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED. That is residual 2, closed as a named
+// refusal; residual 1 is closed one level up, as inexpressibility.
+async function probeFromTrustedResolution(executor, input) {
+  if (!isPlainObject(input)) {
+    fail('QUALIFICATION_INPUT_INVALID', 'probe needs a plain-object run input', {})
   }
-  if (input.probeStrategy !== undefined || input.strategyRegistry !== undefined) {
-    // run data may NOT carry a strategy or a registry — those are factory-bound.
-    fail('QUALIFICATION_INPUT_INVALID', 'run input must not supply a strategy or registry (they are server-bound)', {})
+  // ALLOWLIST, not a denylist. A denylist of the names known today lets an executor
+  // arrive under a novel key.
+  let inputKeys
+  try {
+    inputKeys = Object.keys(input)
+  } catch (_error) {
+    // The ownKeys trap throws during ENUMERATION — discard unconditionally.
+    fail('PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED', 'run input must carry only resolution-bound lifecycle data', {})
+  }
+  for (let index = 0; index < inputKeys.length; index += 1) {
+    if (!PROBE_RUN_INPUT_KEY_SET.has(inputKeys[index])) {
+      fail('PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED', 'run input must carry only resolution-bound lifecycle data', {})
+    }
+  }
+  let inputSymbols
+  try {
+    inputSymbols = Object.getOwnPropertySymbols(input)
+  } catch (_error) {
+    fail('PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED', 'run input must carry only resolution-bound lifecycle data', {})
+  }
+  if (inputSymbols.length > 0) {
+    // A symbol-keyed executor is still an executor.
+    fail('PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED', 'run input must carry only resolution-bound lifecycle data', {})
+  }
+
+  const resolution = input.resolution
+  // Trust is OBJECT IDENTITY. A hand-built object carrying every expected public
+  // field — and any plausible brand — is refused BY NAME.
+  if (!isTrustedBindingResolution(resolution)) {
+    fail('PROBE_RESOLUTION_UNTRUSTED', 'a resolution minted by the approved-binding resolver is required', {})
   }
   const envelopeKey = normalizeEnvelopeKey(input.envelopeKey)
-  const actionProfileVersion = requiredString(input.actionProfileVersion, 'actionProfileVersion')
-  const strategy = trustedRegistry.resolve(actionProfileVersion)
-  if (!strategy || typeof strategy.buildTotalOrderProbeSql !== 'function') {
-    // fail closed by NAME: an unbound profile must never probe with a guessed dialect.
-    fail('PROBE_STRATEGY_UNBOUND', 'no certified probe strategy is bound to this action profile', {})
+
+  // Execution is the CLOSURE-BOUND executor's. Its answer is values-free counts plus
+  // first-party action identity; it carries no dialect and no snapshot claim (δ=(c),
+  // and decision (ε) is unruled — see the executor module header).
+  const observation = await executor.executeOrderingKeyProbe(resolution)
+  if (!isPlainObject(observation)) {
+    fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable observation', {})
   }
-  const objectName = requiredString(input.objectKey, 'objectKey')
-  const keyColumns = normalizeKeyColumns(input.keyColumns)
-  // ONE statement per the injected strategy (whose snapshot claim is profile-certified).
-  const rows = await runReadOnlyProbe(
-    input.query,
-    strategy.buildTotalOrderProbeSql({ objectName, keyColumns }),
-  )
-  const summary = rows.length === 1 && isPlainObject(rows[0]) ? rows[0] : null
-  const duplicateGroups = summary ? normalizeProbeCount(summary.duplicate_groups_sampled) : null
-  const nullRows = summary ? normalizeProbeCount(summary.null_key_rows) : null
+  const duplicateGroups = normalizeProbeCount(observation.duplicateGroupsSampled)
+  const nullRows = normalizeProbeCount(observation.nullKeyRowsSampled)
   if (duplicateGroups === null || nullRows === null) {
-    fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable summary row', {})
+    fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable observation', {})
   }
   if (duplicateGroups > 0) {
     // Fail closed — and do NOT echo the duplicated key values (values-free).
@@ -408,21 +458,27 @@ async function probeWithTrustedRegistry(trustedRegistry, input) {
   }
   const evidence = Object.freeze({
     probeKind: 'ordering_key_total_order_negative',
-    probeStrategyId: strategy.strategyId,
-    probeStrategyVersion: strategy.strategyVersion,
-    probeDialect: strategy.dialect,
-    snapshotSemantics: strategy.snapshotSemantics,
-    checkedKeyColumnCount: keyColumns.length,
+    // FIRST-PARTY action identity only. Deliberately ABSENT: probeDialect,
+    // snapshotSemantics, and every other guarantee token — §4 step 2 has not run,
+    // so no such claim is establishable, and an HTTP action has none to make.
+    probeTransport: requiredIdentityToken(observation.probeTransport, 'probeTransport'),
+    probeActionId: requiredIdentityToken(observation.probeActionId, 'probeActionId'),
+    probeActionVersion: requiredIdentityToken(observation.probeActionVersion, 'probeActionVersion'),
+    probeConnectorKind: requiredIdentityToken(observation.probeConnectorKind, 'probeConnectorKind'),
+    checkedKeyColumnCount: normalizeProbeCount(observation.checkedKeyColumnCount),
     duplicateGroupsFound: 0,
     nullKeyRowsFound: 0,
     probedAt: requiredUtcInstant(input.probedAt, 'probedAt'),
   })
+  if (evidence.checkedKeyColumnCount === null) {
+    fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable observation', {})
+  }
   const qualificationDigest = computeQualificationDigest({
-    actionProfileVersion,
-    systemContentKey: input.systemContentKey,
-    configContentKey: input.configContentKey,
-    objectKey: objectName,
-    canonicalObjectVersion: input.canonicalObjectVersion,
+    actionProfileVersion: resolution.actionProfileVersion,
+    systemContentKey: resolution.systemContentKey,
+    configContentKey: resolution.configContentKey,
+    objectKey: resolution.objectKey,
+    canonicalObjectVersion: resolution.canonicalObjectVersion,
     evidence,
   })
   const expiresAt = input.expiresAt !== undefined
@@ -443,9 +499,17 @@ async function probeWithTrustedRegistry(trustedRegistry, input) {
 // binding, status and expiry. ZERO external I/O by construction. An expired
 // qualification fails closed (QUALIFICATION_EXPIRED) — Run-start proper never
 // probes; it requires a fresh Preflight instead.
-function verifyBindingQualification({ qualification, expectedInputs, envelopeKey, now }) {
-  if (!isPlainObject(qualification) || !isPlainObject(expectedInputs)) {
-    fail('QUALIFICATION_NOT_OBJECT', 'qualification and expectedInputs must be plain objects', {})
+// §3.1 L371 — BOTH probe AND verify re-enter through the resolver; no cached
+// caller-side tuple is honoured on either path. Until B1a-3 this function
+// recomputed the digest from `expectedInputs`, a CALLER-SUPPLIED object — a live
+// counter-construction to the ratified sentence. The parameter is gone; the expected
+// tuple now comes from a trusted `resolution` and nothing else.
+function verifyBindingQualification({ qualification, resolution, envelopeKey, now }) {
+  if (!isPlainObject(qualification)) {
+    fail('QUALIFICATION_NOT_OBJECT', 'qualification must be a plain object', {})
+  }
+  if (!isTrustedBindingResolution(resolution)) {
+    fail('PROBE_RESOLUTION_UNTRUSTED', 'a resolution minted by the approved-binding resolver is required', {})
   }
   const key = normalizeEnvelopeKey(envelopeKey)
   if (!QUALIFICATION_STATUSES.includes(qualification.status) || qualification.status !== 'candidate') {
@@ -484,11 +548,11 @@ function verifyBindingQualification({ qualification, expectedInputs, envelopeKey
     }
   }
   const recomputed = computeQualificationDigest({
-    actionProfileVersion: expectedInputs.actionProfileVersion,
-    systemContentKey: expectedInputs.systemContentKey,
-    configContentKey: expectedInputs.configContentKey,
-    objectKey: expectedInputs.objectKey,
-    canonicalObjectVersion: expectedInputs.canonicalObjectVersion,
+    actionProfileVersion: resolution.actionProfileVersion,
+    systemContentKey: resolution.systemContentKey,
+    configContentKey: resolution.configContentKey,
+    objectKey: resolution.objectKey,
+    canonicalObjectVersion: resolution.canonicalObjectVersion,
     evidence: qualification.evidence,
   })
   if (recomputed !== qualification.qualificationDigest) {
@@ -512,7 +576,11 @@ module.exports = {
   createBindingQualificationProber,
   verifyBindingQualification,
   __internals: {
-    fail,
+    // `fail` is deliberately ABSENT (B1a-3). While exported here, any importer —
+    // including a foreign callback — could mint a GENUINELY BRANDED
+    // GipQualificationError whose `reason` was vocabulary-pinned but whose
+    // `message` and `details` were arbitrary caller text. Pinned by the
+    // exact-key-set test, so re-adding it reds.
     stableStringify,
     assertReadOnlySql,
     quoteIdentifier,
