@@ -160,6 +160,11 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *     untouched) therefore forces every run down that empty-diff path regardless of what actually
  *     changed. Closed by extending Pin 6 to exact-pin EVENT_NAME/BASE_SHA/HEAD_SHA the same way Pin 9
  *     already pins the terminal step's four env values.
+ *     [HISTORY, superseded — the two sentences above describe the pre-fourth-round code, when that
+ *     empty-diff fallback lived in the classifier step's inline `run:` bash. It moved into
+ *     resolveDiffArgs() in the fourth round and is now allow-listed to `push` only, so the same
+ *     all-zeros mutation now fails the job CLOSED rather than silently flipping it to relevant=false.
+ *     Kept as the record of why Pin 6 exists, not as a description of current behaviour.]
  *   - [P3] Pin 2 (`on.merge_group` exists) was asymmetric with Pin 1's "reject ANY narrowing key"
  *     treatment of `on.pull_request` — it only checked `hasOwnProperty`, never the value's shape, so
  *     both `merge_group: { types: [] }` (filters out the only type merge_group supports — the trigger
@@ -175,8 +180,17 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *     occurred once already on this branch (fixed in `b1aae0244`) and has recurred in this line before;
  *     nothing previously REDs if it recurs a third time.
  * Real `node --test` RED output for all three, plus the corrected M9/M10 mutation-ledger counts this
- * round's two new baseline tests shifted (M9 now REDs 5, not 4; M10 now REDs 4, not 3 — M11 unchanged at
- * 1), live in PR #4614's body, not here — same house rule as the second round above.
+ * round's two new baseline tests shifted (M9 now REDs 5, not 4; M10 now REDs 4, not 3), live in PR
+ * #4614's body, not here — same house rule as the second round above.
+ *   LEDGER CORRECTION (fifth round, 2026-07-26): this paragraph also said "M11 unchanged at 1". That
+ *   is STALE and is corrected here — M11 (removing assertBranch()'s own relevant!=='true'/'false'
+ *   guard) now REDs 2, re-measured against the current 55-test baseline. It went stale in ROUND 10,
+ *   not in this one: that round made the `relevant=""` test load-bearing (it previously passed three
+ *   `undefined` outcomes, which independently tripped the relevant='false' branch's outcome-
+ *   contradiction check, so it stayed green with the enum guard fully neutered), and a second test
+ *   therefore now reds on the same mutation. Re-measured M9/M10 at the same head: still 5 and 4.
+ *   Door D (below) contributed ZERO reds to all three — the extracted-script door and the
+ *   classify/roster/assertBranch doors do not cover for each other in either direction.
  *
  * WHY THIS LIVES HERE, NOT A COPY OF THE INTEGRATION SUITE. The owner was explicit: do NOT copy the
  * integration suite into `test (20.x)` (two copies would drift apart) — only the wiring contract

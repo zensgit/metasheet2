@@ -117,6 +117,18 @@
 # account, including what this upgrade can and cannot still prove (it remains source-text/subprocess-
 # level proof, not a GitHub Actions runtime exercise).
 #
+# CORRECTION (P1, third review round, 2026-07-26) — READ AS HISTORY, NOT AS CURRENT BEHAVIOUR. The
+# paragraph immediately below describes the code as it stood BEFORE the fourth round, when the
+# empty/zero-BASE_SHA fallback lived in the classifier step's own inline `run:` bash. It no longer
+# does: that decision now lives in scripts/ops/integration-guard-resolve-diff.mjs's `resolveDiffArgs()`
+# (`id: resolve-diff`, below), which allow-lists the root fallback to the `push` event ONLY and THROWS
+# for a missing/zero/malformed BASE_SHA on `pull_request`/`merge_group`. So its closing sentence — that
+# hardcoding `env.BASE_SHA` to the all-zeros sentinel "forces EVERY pull_request/merge_group run down
+# the empty-diff path" — is TRUE OF THE OLD CODE ONLY; against the current code that same mutation
+# fails the job closed instead of silently flipping it to relevant=false. The `b83e180d8` measurement
+# is a git-level fact and remains accurate; see the P2 entry below and resolve-diff.mjs's own header
+# (REACHABILITY: DELIBERATELY NOT ESTABLISHED) for what it does and does not prove.
+#
 # CORRECTION (P1, third review round, 2026-07-26): the classifier step's `env:` block
 # (EVENT_NAME/BASE_SHA/HEAD_SHA) was entirely UNPINNED until this round — not even substring-checked —
 # and that gap was a UNIVERSAL false negative, not a narrow one. On a real `pull_request` event,
