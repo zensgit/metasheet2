@@ -683,6 +683,13 @@ function createAttendanceWorkDateResolver(deps = {}) {
       assignmentId: row.assignmentId == null ? null : String(row.assignmentId),
       isOvernight,
       extendedByOvertime,
+      // W4C-2 (#4556): wall-time/zone provenance retained for the strict V2
+      // freeze rebuild. Internal candidate fields only — serializeCandidate /
+      // serializeAmbiguousCandidate project explicit fields, so nothing here
+      // reaches any existing payload.
+      workStartTime,
+      workEndTime,
+      timezone,
     }
   }
 
@@ -874,6 +881,23 @@ function createAttendanceWorkDateResolver(deps = {}) {
     }
     if (!Array.isArray(approvedOvertimeWindows)) {
       throw new Error('APPROVED_OVERTIME_SOURCE_INVALID')
+    }
+
+    // W4C-2 (#4556): opt-in additive out-params for the canonical boundary's
+    // V2 freeze. `includeFullWinner !== true` leaves every result byte-identical.
+    const includeFullWinner = input.includeFullWinner === true
+    const attachFullWinner = (result) => {
+      if (!includeFullWinner || !result || result.kind !== 'resolved') return result
+      const fullWinner = candidates.find(
+        (candidate) => String(candidate.workDate) === String(result.workDate)
+          && String(candidate.shiftId) === String(result.shiftId),
+      ) || null
+      return {
+        ...result,
+        fullWinner,
+        attributionTailMinutes,
+        approvedOvertimeWindows,
+      }
     }
 
     const candidates = []
