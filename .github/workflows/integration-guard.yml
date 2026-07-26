@@ -90,7 +90,8 @@
 #          `'true'`/`'false'` AND exactly the corresponding branch's steps actually ran to completion —
 #          this is a RUNTIME door, independent of the classifier script being correct; neutering either
 #          one alone still leaves the other catching the mutation — proven separately in PR #4614's
-#          body (mutating the roster REDs 4 classify-side tests and 0 assert-branch tests; mutating
+#          body (mutating the roster REDs 5 classify-side tests — ⟲ CORRECTED from 4, primary-measured at
+#          two heads — and 0 assert-branch tests; mutating
 #          assert-branch's own guard REDs 1 assert-branch test and 0 classify-side tests).
 #          [REQUALIFIED (P1, sixth review round, 2026-07-26) — the sentence above is TRUE ONLY OF THE
 #          MUTATION CLASS IT CITES (roster edits vs. assert-branch guard-logic edits), and read
@@ -103,8 +104,17 @@
 #          collapses the whole wiring contract to a passing 1-subtest file, because `node --test`
 #          treats a zero-exit child as a passing FILE — green here, green in plugin-tests.yml, door
 #          gone, nothing red anywhere. Measured at fe0b977cc. Closed by the SUBTEST-COUNT FLOOR now
-#          inline in this job's `contract-self-check` step and its plugin-tests.yml twin; assert-
-#          branch is the one of the four extracted .mjs modules with no second door behind it.]
+#          inline in this job's `contract-self-check` step and its plugin-tests.yml twin.
+#          ⟲ CORRECTED (round 7, measured): an earlier revision of THIS line said "assert-branch is
+#          THE ONE of the four extracted .mjs modules with no second door behind it". That is FALSE —
+#          it is TWO of four. `resolve-diff.mjs` has no second door either: neutered, the shell
+#          redirect still CREATES the diff file (0 bytes, not missing), `classify < file` exits 0
+#          writing relevant=false, and assert-branch then exits 0 on "no-op succeeded" — job green,
+#          guard ran nothing. The two that DO have a second door are classify.mjs and
+#          guarded-paths.mjs (both leave $GITHUB_OUTPUT empty -> relevant ABSENT -> assert-branch
+#          exit 1). The subtest-count floor closes all four regardless; only this ATTRIBUTION was
+#          wrong, and it was stated here unhedged while the contract header hedged the same claim as
+#          "ASSERTED ONLY" — the asymmetry is the defect.]
 #
 # CORRECTION (P1, second review round, 2026-07-26): item 2 above ("the classifier is now load-bearing")
 # was OVERSTATED and is RETRACTED here, not merely reworded. The contract test's own pins locating the

@@ -330,12 +330,15 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *     each other in either direction" is true only for the mutation classes M9/M10/M11 measure. It
  *     says nothing about the import-abort class, where — before this round — NO door caught anything.
  *
- *   - NOT RE-VERIFIED HERE, recorded as ASSERTED ONLY: the review's claim that the other three .mjs
- *     neuters are caught downstream at workflow runtime (classify/guarded-paths leaving `relevant`
- *     empty so the terminal door fails the job; resolve-diff leaving the diff file missing so the
- *     next step dies under `set -euo pipefail`). That is a GitHub-Actions runtime assertion; this
- *     round exercised only the contract, locally. The floor closes all four regardless of whether
- *     that downstream claim holds, which is why it was not made a dependency of the fix.
+ *   - ⟲ CORRECTED (round 7, measured — the earlier text below was ASSERTED-ONLY and one half of it
+ *     is now known FALSE). MEASURED: classify.mjs and guarded-paths.mjs DO have a second door —
+ *     neutered, each leaves $GITHUB_OUTPUT empty so `relevant` is ABSENT and assert-branch exits 1.
+ *     resolve-diff.mjs does NOT. The asserted mechanism for it was wrong in its details: the shell
+ *     redirect CREATES the diff file before node runs, so it is EMPTY, not missing; nothing dies
+ *     under `set -euo pipefail`; and an empty diff is classified relevant=false, which is classify's
+ *     documented-correct behaviour. So the honest count is TWO of four with no second door
+ *     (assert-branch and resolve-diff), not one. The floor closes all four regardless of the
+ *     downstream claim, which is why it was never made a dependency of the fix — that part stands.
  */
 
 const __filename = fileURLToPath(import.meta.url)
