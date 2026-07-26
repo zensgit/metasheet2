@@ -103,6 +103,7 @@ async function readIndexShape(db: Kysely<unknown>, shape: IndexShape): Promise<I
           JOIN pg_attribute attr
             ON attr.attrelid = table_rel.oid
            AND attr.attnum = key.attnum
+         WHERE key.position <= idx.indnkeyatts
          ORDER BY key.position
       )::text[] AS columns,
       pg_get_expr(idx.indpred, idx.indrelid) AS predicate

@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { Pool } from 'pg'
 
 // Phase A DingTalk directory identity isolation.
 //
@@ -49,12 +48,19 @@ const TS = Date.now()
 /** One root department with one user; the user's identity fields are per-test knobs. */
 type MockTenant = { unionId?: string; openId?: string; userId: string; name: string }
 let activeTenant: MockTenant | null = null
+let phaseBSchemaInstalled = false
 
 describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pull)', () => {
   const cleanupIntegrationIds: string[] = []
   const cleanupUserIds: string[] = []
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    const phaseBSchema = await query<{ installed: boolean }>(
+      `SELECT to_regclass(
+         'idx_directory_accounts_provider_corp_external_key'
+       ) IS NOT NULL AS installed`,
+    )
+    phaseBSchemaInstalled = phaseBSchema.rows[0]?.installed ?? false
     clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('t2g-token')
     clientMocks.listDingTalkDepartments.mockImplementation(async (_token: string, parentId: string) =>
       parentId === '1' && activeTenant ? [{ id: 'd100', parentId: '1', name: 'Mechanism Dept', order: 1, source: {} }] : []
@@ -166,12 +172,28 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
     expect((await accountKeys(corpB)).map((r) => r.external_key)).toEqual([`t2g-union-okB-${TS}`])
   })
 
-  it('repairs a legacy blank account corp from its immutable parent integration during sync', async () => {
+  it('repairs a legacy blank account corp before Phase B or rejects it after Phase B', async () => {
     const integrationId = await seedIntegration('corp-repair')
     activeTenant = {
       unionId: `t2g-union-corp-repair-${TS}`,
       userId: `t2g-user-corp-repair-${TS}`,
       name: 'Corp Repair',
+    }
+    if (phaseBSchemaInstalled) {
+      await expect(query(
+        `INSERT INTO directory_accounts (
+           integration_id, provider, corp_id, external_user_id, external_key, name, is_active, raw
+         ) VALUES ($1, 'dingtalk', '', $2, $3, 'Legacy Blank Corp', true, '{}'::jsonb)`,
+        [integrationId, activeTenant.userId, activeTenant.unionId],
+      )).rejects.toThrow(/directory_accounts_corp_id_canonical/)
+      const account = await query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM directory_accounts
+          WHERE integration_id = $1`,
+        [integrationId],
+      )
+      expect(account.rows).toEqual([{ count: 0 }])
+      return
     }
     await query(
       `INSERT INTO directory_accounts (
@@ -204,6 +226,30 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
     )
     const corpId = corpIdForTag('ambiguous')
     const sharedUnionId = `t2g-ambiguous-union-${TS}`
+    if (phaseBSchemaInstalled) {
+      await query(
+        `INSERT INTO user_external_identities (
+           provider, external_key, provider_union_id, corp_id, local_user_id, profile
+         ) VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+        [`t2g-ambiguous-key-a-${TS}`, sharedUnionId, corpId, firstUserId],
+      )
+      await expect(query(
+        `INSERT INTO user_external_identities (
+           provider, external_key, provider_union_id, corp_id, local_user_id, profile
+         ) VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+        [`t2g-ambiguous-key-b-${TS}`, sharedUnionId, corpId, secondUserId],
+      )).rejects.toThrow(/idx_user_external_identities_provider_corp_union/)
+      const identities = await query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM user_external_identities
+          WHERE provider = 'dingtalk'
+            AND corp_id = $1
+            AND provider_union_id = $2`,
+        [corpId, sharedUnionId],
+      )
+      expect(identities.rows).toEqual([{ count: 1 }])
+      return
+    }
     await query(
       `INSERT INTO user_external_identities (
          provider, external_key, provider_union_id, corp_id, local_user_id, profile
@@ -242,7 +288,7 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
     }])
   })
 
-  it('serializes the identity snapshot with writers and reconciles a later duplicate', async () => {
+  it('serializes the identity snapshot before Phase B or serializes uniqueness after Phase B', async () => {
     const firstUserId = `t2g-lock-first-${TS}`
     const secondUserId = `t2g-lock-second-${TS}`
     cleanupUserIds.push(firstUserId, secondUserId)
@@ -258,6 +304,34 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
     )
     const corpId = corpIdForTag('snapshot-lock')
     const sharedUnionId = `t2g-lock-union-${TS}`
+    if (phaseBSchemaInstalled) {
+      const inserts = await Promise.allSettled([
+        query(
+          `INSERT INTO user_external_identities (
+             provider, external_key, provider_union_id, corp_id, local_user_id, profile
+           ) VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+          [`t2g-lock-first-key-${TS}`, sharedUnionId, corpId, firstUserId],
+        ),
+        query(
+          `INSERT INTO user_external_identities (
+             provider, external_key, provider_union_id, corp_id, local_user_id, profile
+           ) VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+          [`t2g-lock-second-key-${TS}`, sharedUnionId, corpId, secondUserId],
+        ),
+      ])
+      expect(inserts.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      expect(inserts.filter((result) => result.status === 'rejected')).toHaveLength(1)
+      const identities = await query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM user_external_identities
+          WHERE provider = 'dingtalk'
+            AND corp_id = $1
+            AND provider_union_id = $2`,
+        [corpId, sharedUnionId],
+      )
+      expect(identities.rows).toEqual([{ count: 1 }])
+      return
+    }
     await query(
       `INSERT INTO user_external_identities (
          provider, external_key, provider_union_id, corp_id, local_user_id, profile
@@ -512,7 +586,7 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
     expect(effects.rows).toEqual([{ identities: 0, linked: 0 }])
   })
 
-  it('fails unbind closed when a repaired account still has a legacy blank-corp identity', async () => {
+  it('fails unbind closed on a legacy blank identity or rejects that state after Phase B', async () => {
     const localUserId = `t2g-blank-unbind-user-${TS}`
     cleanupUserIds.push(localUserId)
     await query(
@@ -533,6 +607,26 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
       adminUserId: `t2g-admin-${TS}`,
       enableDingTalkGrant: false,
     })
+    if (phaseBSchemaInstalled) {
+      await expect(query(
+        `UPDATE user_external_identities SET corp_id = '' WHERE local_user_id = $1`,
+        [localUserId],
+      )).rejects.toThrow(/user_external_identities_corp_id_canonical/)
+      const state = await query<{ corp_id: string; link_status: string; local_user_id: string }>(
+        `SELECT identity.corp_id, link.link_status, link.local_user_id
+           FROM user_external_identities identity
+           JOIN directory_account_links link ON link.local_user_id = identity.local_user_id
+          WHERE identity.local_user_id = $1
+            AND link.directory_account_id = $2`,
+        [localUserId, directoryAccountId],
+      )
+      expect(state.rows).toEqual([{
+        corp_id: corpIdForTag('blank-unbind'),
+        link_status: 'linked',
+        local_user_id: localUserId,
+      }])
+      return
+    }
     await query(
       `UPDATE user_external_identities SET corp_id = '' WHERE local_user_id = $1`,
       [localUserId],
@@ -558,7 +652,7 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
     }])
   })
 
-  it('normalizes legacy whitespace corp before rejecting a same-corp identity conflict', async () => {
+  it('normalizes legacy whitespace corp before Phase B or rejects it after Phase B', async () => {
     const existingUserId = `t2g-space-existing-${TS}`
     const targetUserId = `t2g-space-target-${TS}`
     cleanupUserIds.push(existingUserId, targetUserId)
@@ -575,6 +669,27 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
 
     const corpId = corpIdForTag('space-conflict')
     const sharedUnionId = `t2g-space-union-${TS}`
+    if (phaseBSchemaInstalled) {
+      await expect(query(
+        `INSERT INTO user_external_identities (
+           provider, external_key, provider_union_id, corp_id, local_user_id, profile
+         ) VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+        [
+          `t2g-space-existing-key-${TS}`,
+          sharedUnionId,
+          `  ${corpId}  `,
+          existingUserId,
+        ],
+      )).rejects.toThrow(/user_external_identities_corp_id_canonical/)
+      const identities = await query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM user_external_identities
+          WHERE local_user_id = $1`,
+        [existingUserId],
+      )
+      expect(identities.rows).toEqual([{ count: 0 }])
+      return
+    }
     await query(
       `INSERT INTO user_external_identities (
          provider, external_key, provider_union_id, corp_id, local_user_id, profile
@@ -912,6 +1027,42 @@ describeIfDatabase('directory corp-scope Phase B migration (isolated real DB)', 
       )
       expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
       expect(await constraintNames(db)).not.toContain('directory_integrations_corp_id_canonical')
+    })
+  })
+
+  it('up rejects a same-name INCLUDE replacement index with hidden extra attributes', async () => {
+    await withLegacySchema(async (db) => {
+      await sql`
+        CREATE UNIQUE INDEX idx_directory_accounts_provider_corp_external_key
+        ON directory_accounts(provider, corp_id, external_key)
+        INCLUDE (integration_id)
+        WHERE corp_id IS NOT NULL
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(
+        /index drift: idx_directory_accounts_provider_corp_external_key/,
+      )
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await constraintNames(db)).not.toContain('directory_integrations_corp_id_canonical')
+    })
+  })
+
+  it('up rejects a weaker same-name corp CHECK instead of accepting it as canonical', async () => {
+    await withLegacySchema(async (db) => {
+      await sql`
+        ALTER TABLE directory_accounts
+        ADD CONSTRAINT directory_accounts_corp_id_canonical
+        CHECK (corp_id IS NULL OR length(corp_id) > 0)
+      `.execute(db)
+
+      await expect(runUp(db)).rejects.toThrow(
+        /constraint drift: directory_accounts_corp_id_canonical/,
+      )
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await indexNames(db)).not.toContain(
+        'idx_directory_accounts_provider_corp_external_key',
+      )
+      expect(await constraintNames(db)).toContain('directory_accounts_corp_id_canonical')
     })
   })
 

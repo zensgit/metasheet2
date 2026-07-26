@@ -84,14 +84,15 @@ constraints/indexes but intentionally does not reverse already-canonicalized dat
 
 Local PostgreSQL 15 evidence:
 
-- combined Phase A compatibility plus isolated Phase B migration suite: 30/30;
+- pre-Phase-B and fully migrated Phase-B public-schema runs of the combined compatibility plus
+  isolated migration suite: 32/32 in each state;
 - fresh full Migrator reaches `zzzz20260725130000_expand_directory_identity_corp_scope`, and replay
   has no pending migration;
 - lock contention aborts after about 5.2 seconds while retaining the legacy guard;
 - synthetic scale sample (10 integrations, 100,000 accounts, 200,000 identities): 3,158 ms in one
   transaction, nine resulting indexes, three CHECKs, zero NULL account corp values;
-- seven Phase B mutations killed, including expression-index disguise, parent-provider drift, and
-  Unicode-whitespace acceptance;
+- ten Phase B mutations killed, including expression/`INCLUDE` index disguises, weaker same-name
+  CHECK acceptance, phase-detection drift, parent-provider drift, and Unicode-whitespace acceptance;
 - TypeScript and diff checks clean.
 
 The scale sample is a local engineering bound, not a production latency or availability promise.
@@ -110,6 +111,8 @@ Phase A lands.
 | expression key disappeared from the catalog column list | reject expressions and require exact key/total attribute counts |
 | child provider could drift from its parent integration | fail the migration before any backfill |
 | BTRIM and JavaScript trim accepted different whitespace sets | printable-ASCII token grammar in runtime and database |
+| Phase A compatibility fixtures became illegal after Phase B | keep one two-stage suite: runtime repair before Phase B, stronger DB rejection after Phase B, zero skips |
+| key-column catalog projection also included `INCLUDE` attributes | restrict the projection to `indnkeyatts` and pin total attributes with an independent mutation |
 | ordinary index creation could wait without bound | transaction-local 5-second lock timeout plus real contention test |
 | down appeared to imply data restoration | explicitly document and test irreversible canonicalization |
 

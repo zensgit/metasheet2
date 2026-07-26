@@ -27,7 +27,8 @@ automatic sync, deprovision, or runtime enablement.
 | legacy whitespace corp cannot bypass bind conflict | real bind negative and mutation |
 | migration canonicalizes data | isolated old-schema assertions |
 | all replacement indexes are structurally valid | catalog inspection plus wrong-definition negative |
-| expression/include keys cannot masquerade as ordinary columns | key/attribute counts plus expression catalog flag; up/down negatives |
+| expression/include keys cannot masquerade as ordinary columns | key-only catalog projection, total-attribute count, expression flag, and independent negatives |
+| weaker same-name CHECK cannot masquerade as canonical | exact catalog-definition negative |
 | partial replay cannot pass | no-legacy/incomplete-replacement negative |
 | duplicate scoped union cannot migrate | real unique-index build failure; legacy guard retained |
 | parent provider/corp is authoritative | integration canonicalization plus provider-drift rollback negative |
@@ -54,7 +55,9 @@ Phase A:
 
 Phase B:
 
-- isolated migration and inherited Phase A real-DB suite 30/30 on PostgreSQL 15;
+- pre-Phase-B public schema plus isolated migration suite 32/32 on PostgreSQL 15;
+- fully migrated Phase-B public schema plus the same suite 32/32, with five legacy-dirty-state
+  runtime fixtures switching to their stronger database-rejection assertions rather than skipping;
 - full fresh-database migration reaches
   `zzzz20260725130000_expand_directory_identity_corp_scope`;
 - a second Migrator run has no pending migration;
@@ -62,7 +65,7 @@ Phase B:
 - a real lock blocker fails closed after about 5.2 seconds;
 - TypeScript clean.
 
-Seven Phase B mutations are load-bearing:
+Ten Phase B mutations are load-bearing:
 
 1. trusting an existing replacement index without shape verification makes the wrong-definition
    upgrade test red;
@@ -73,6 +76,10 @@ Seven Phase B mutations are load-bearing:
 5. ignoring expression/extra key attributes lets a same-name replacement index pass;
 6. removing parent-provider equality lets a drifted account adopt the parent corp;
 7. restoring the BTRIM-only CHECK lets Unicode whitespace corp tokens persist.
+8. removing the total-attribute count lets an `INCLUDE` disguise pass;
+9. removing exact CHECK-definition comparison lets a weaker same-name constraint pass;
+10. forcing the suite to treat a migrated database as pre-Phase-B makes all five phase-aware
+    compatibility tests red.
 
 Required CI is recorded only after the final pushed head settles.
 
