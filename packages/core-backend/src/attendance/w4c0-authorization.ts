@@ -279,9 +279,31 @@ export function requireAuthorizedCapabilityForEntrypointV1(
 // posture may waive the ACTOR's membership but never org/subject/source
 // predicates. A directory deprovision or activation change between mint and use
 // therefore invalidates the witness.
+//
+// SCOPE BOUNDARY (renamed from `recheckAttendanceAuthorizationInTransactionV1`
+// — #4612 gate3 P2-1 remediation round, coordinator-flagged misleading-name
+// finding, `feedback_asserted_invariant_is_a_bug` class): despite the prior
+// name, this function does NOT re-derive or re-check PERMISSION grants. It
+// queries only `users.is_active` / `activation_status` and
+// `user_orgs.is_active` — actor/subject LIVENESS and org MEMBERSHIP, never
+// `user_permissions` / `role_permissions` / `user_roles`. The actual
+// permission gate for every caller of this transaction-bound recheck lives
+// at the ROUTE layer, before the transaction even opens — e.g.
+// `withPermission('attendance:admin', ...)` guarding the admin-run scheduled
+// trigger route (`plugins/plugin-attendance/index.cjs` ~L43739, whose handler
+// calls `runAutoAbsenceForOrgDate` -> `executeScheduledRun` -> this recheck)
+// and the equivalent live-punch `withPermission`/self-capability checks. This
+// function's own job is narrower: confirm the actor/subject identity a
+// witness was minted for is STILL live/a member by the time the transaction
+// actually runs (a directory deprovision or activation change between mint
+// and use invalidates the witness even though the ORIGINAL permission
+// decision was correct at mint time). If W4C-3b later widens the caller set
+// (new entrypoints reaching this recheck), re-evaluate whether an
+// in-transaction PERMISSION recheck is also needed then — that is a
+// deliberately deferred decision, not resolved by this rename.
 // ---------------------------------------------------------------------------
 
-export async function recheckAttendanceAuthorizationInTransactionV1(
+export async function recheckAttendanceActorLivenessInTransactionV1(
   trx: AttendanceW4TransactionClientV1,
   context: unknown,
 ): Promise<void> {
