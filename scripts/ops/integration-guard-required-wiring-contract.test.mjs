@@ -195,7 +195,8 @@ import { assertBranch } from './integration-guard-assert-branch.mjs'
  * a green path.
  */
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
 const repoRoot = join(__dirname, '..', '..')
 const WORKFLOW_PATH = join(repoRoot, '.github/workflows/integration-guard.yml')
 
@@ -773,14 +774,27 @@ test('every guarded-path roster entry resolves to a real file/directory, case-ex
 // patch rendered in review, `additions=0 deletions=0` from the API, even though every sibling file in
 // the PR had a real diff. That defect recurred once already in this exact line and was fixed by hand
 // each time, with nothing to stop it recurring a third time. One-line-per-file pin, closes the class.
+//
+// P3 FIX (round 10 residual): `filesToCheck` used to list only the four files this contract READS
+// (the workflow YAML) or IMPORTS (the three .mjs scripts) — it omitted THIS test file itself, even
+// though the test's own name ("none of the files this contract reads/imports") implied full coverage.
+// Chose to CLOSE the gap rather than merely narrow the name: this file is exactly as exposed to the
+// same review-hiding failure mode as its three siblings — a raw NUL byte here would render THIS
+// file's own diff as BINARY in PR review (git/GitHub's NUL-detection is diff-level, independent of
+// whether Node can still parse and execute the file, which it can — a NUL is a legal byte inside a JS
+// string/template literal) — and it is the one file that would let a reviewer-invisible edit silently
+// weaken any assertion in this entire contract. Self-referencing via `__filename`
+// (`fileURLToPath(import.meta.url)`, declared above) rather than a hand-typed path, so it cannot drift
+// if this file is ever renamed.
 // ---------------------------------------------------------------------------
 
-test('none of the files this contract reads/imports contain a raw NUL (0x00) byte', () => {
+test('none of the files this contract reads/imports/IS contain a raw NUL (0x00) byte', () => {
   const filesToCheck = [
     ['integration-guard.yml', WORKFLOW_PATH],
     ['integration-guard-guarded-paths.mjs', join(repoRoot, 'scripts/ops/integration-guard-guarded-paths.mjs')],
     ['integration-guard-classify.mjs', join(repoRoot, 'scripts/ops/integration-guard-classify.mjs')],
     ['integration-guard-assert-branch.mjs', join(repoRoot, 'scripts/ops/integration-guard-assert-branch.mjs')],
+    ['integration-guard-required-wiring-contract.test.mjs (this file)', __filename],
   ]
   for (const [label, path] of filesToCheck) {
     const bytes = readFileSync(path)
@@ -969,8 +983,22 @@ test('assertBranch(): relevant="unknown" is REJECTED regardless of outcomes (the
 })
 
 test('assertBranch(): relevant="" (empty/unset) is REJECTED', () => {
-  const result = assertBranch({ relevant: '', noopOutcome: undefined, pluginOutcome: undefined, webOutcome: undefined })
+  // P2 FIX (round 10 residual on #4614): this used to pass three `undefined`
+  // outcomes, which ALSO trip the relevant==='false' branch's own outcome-
+  // contradiction check (none of undefined/undefined/undefined matches
+  // success/skipped/skipped) — so the assertion below passed even with the
+  // enum guard (`relevant !== 'true' && relevant !== 'false'`) fully
+  // neutered, measured directly: commenting out that guard left this test
+  // green while the sibling "unknown" test correctly reds. Passing the
+  // DANGEROUS combo instead — the exact outcome shape the relevant=false
+  // branch treats as OK — means the only thing that can still produce
+  // ok:false here is the enum guard itself; if it is neutered, execution
+  // falls through to the relevant=false branch, that branch's own outcome
+  // check is satisfied, and this test reds. Mirrors the "unknown" test right
+  // above it, including its message assertion.
+  const result = assertBranch({ relevant: '', noopOutcome: 'success', pluginOutcome: 'skipped', webOutcome: 'skipped' })
   assert.equal(result.ok, false)
+  assert.match(result.message, /must be strictly 'true' or 'false'/)
 })
 
 test('assertBranch(): relevant=true but noop ALSO succeeded (contradiction — both branches ran) is REJECTED', () => {
