@@ -512,6 +512,25 @@ export default defineConfig({
       // job cannot skip-green it; wired whole-file into the attendance real-DB
       // step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-outbox-dispatcher.db.test.ts',
+      // #4556 W4C-2: canonical live/scheduled boundary WIRING gates (route-level,
+      // real MetaSheetServer + plugin activate). DATABASE_URL-gated; excluded here
+      // so the no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring; the exclusion was
+      // missed when the suite landed and is backfilled by Stage E).
+      'tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts',
+      // #4556 W4C-2: three-posture matrix + V2 freeze + env-gated outbox drain
+      // (route-level, real DB). DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml (two-point wiring; exclusion backfilled by Stage E).
+      'tests/integration/attendance-w4c2-posture-matrix.db.test.ts',
+      // #4556 W4C-2 Stage E: §12.3 residual gate matrix (W2 ambiguity review shape,
+      // V2-cast storage backstop, same-org/cross-org isolation, forged-witness
+      // zero-SQL legs, inactive membership, authoritative fail-closed, posture
+      // no-rebase, outbox-before-seal SQL-order probe, durable scheduled replay,
+      // P02 single-write discriminator). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
