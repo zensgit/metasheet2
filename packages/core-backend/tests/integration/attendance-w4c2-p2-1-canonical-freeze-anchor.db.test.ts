@@ -192,7 +192,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const calculationRowsForUser = async (userId: string) =>
     (await pool.query(
       `SELECT c.id::text AS id, c.outcome, c.outcome_reason_code, c.expected_segment_count,
-              c.semantic_input_fingerprint, c.attribution_snapshot, c.context_snapshot, c.evidence_snapshot
+              c.semantic_input_fingerprint, c.source_definition_fingerprint,
+              c.attribution_snapshot, c.context_snapshot, c.evidence_snapshot
        FROM attendance_record_calculations c
        JOIN attendance_records r ON r.id = c.attendance_record_id
        WHERE r.user_id = $1
@@ -378,6 +379,16 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(driftValue.reasonCode).toBe('SINGLE_MATCHING_CANDIDATE')
     expect(driftValue.absoluteWindow).toEqual(refWinner.absoluteWindow)
     expect(driftCalcs[0].semantic_input_fingerprint).toMatch(/^[0-9a-f]{64}$/)
+    // #4612 gate3 P2-1 self-report ⑥ closure: `source_definition_fingerprint`
+    // must be sealed from the dedicated W4C-1 domain
+    // (`computeAttendanceSourceDefinitionFingerprintV1`), never aliased to
+    // `semantic_input_fingerprint` (a DIFFERENT, domain-separated hash) —
+    // the two must differ even though both are computed from overlapping
+    // attribution/context inputs, because they hash under different
+    // domain-separation prefixes and (semantic) additionally folds in
+    // evidence/approvedFacts/mergePolicy/calculationTier/engineVersion.
+    expect(driftCalcs[0].source_definition_fingerprint).toMatch(/^[0-9a-f]{64}$/)
+    expect(driftCalcs[0].source_definition_fingerprint).not.toBe(driftCalcs[0].semantic_input_fingerprint)
     expect(driftCalcs[0].context_snapshot.workDate).toBe('2026-07-19')
 
     // L4 positive control: client tz == shift tz (no drift) resolves
