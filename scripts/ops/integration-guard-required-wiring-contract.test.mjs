@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, readdirSync, chmodSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -214,9 +214,26 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *   - [P2] "Missing/zero/invalid BASE_SHA still FAILS OPEN." Pin 6's exact-pin on the classifier
  *     step's `env: BASE_SHA: ...` EXPRESSION TEXT only proves that expression was not edited — it
  *     cannot prove the RUNTIME VALUE it evaluates to is ever non-empty/well-formed, which is a
- *     GitHub Actions runtime fact, not a source-text one. Against the real PR merge commit
- *     `b83e180d8`, the pre-fix code produced `relevant=false` while this contract stayed 30/30 green
- *     — a fail-open guarded only by an exact pin is still fail-open. Closed by extracting the
+ *     GitHub Actions runtime fact, not a source-text one.
+ *
+ *     SCOPE CORRECTION (fifth round, 2026-07-26) — an earlier wording of this paragraph read "Against
+ *     the real PR merge commit `b83e180d8`, the pre-fix code produced `relevant=false` while this
+ *     contract stayed 30/30 green". That claims an OBSERVED REACHABLE EXPLOIT and is RETRACTED, not
+ *     reworded down: no run of the pre-fix workflow was ever observed producing `relevant=false` on a
+ *     real `pull_request` event. What WAS measured is narrower and purely a git-level fact —
+ *     `git diff-tree --root --no-commit-id --name-only -z -r b83e180d8` emits ZERO paths for that
+ *     real GitHub-generated merge commit, while `git diff` against its real base emits 6. So the
+ *     proven statement is CONDITIONAL: *if* BASE_SHA is empty/all-zeros on a `pull_request` /
+ *     `merge_group` event, the pre-fix fallback classifies the run `relevant=false` no matter what it
+ *     touched.
+ *     WHAT THIS GATE DELIBERATELY DOES NOT ESTABLISH: whether that antecedent is REACHABLE in
+ *     practice. GitHub populates `github.event.pull_request.base.sha` / `github.event.merge_group.
+ *     base_sha` on those two events, and the `|| github.event.before` tail that can yield the
+ *     all-zeros sentinel is a push-on-a-new-ref artifact. No attempt was made to demonstrate a real
+ *     payload in which the sentinel branch is taken under `pull_request`/`merge_group`, and none
+ *     should be read into this file. The fix below is fail-closed REGARDLESS of reachability —
+ *     a fail-open path guarded only by an exact source-text pin is still fail-open whether or not
+ *     anyone has yet walked through it. Closed by extracting the
  *     decision into scripts/ops/integration-guard-resolve-diff.mjs's `resolveDiffArgs()`, a pure,
  *     unit-tested function (not more bash) that throws (fail-closed) for a missing/zero/malformed
  *     BASE_SHA on any event except `push` (the one legitimate initial-push shape), and ALSO throws
@@ -225,12 +242,28 @@ import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
  *     and that script's own header for the full account.
  * MAINTENANCE-COST RULING (same review): the classifier step's `run:` text (Pin 6), the no-op step's
  * `run:` text (Pin 8), and the web-guard-specs step's `run:` text (Pin 7) are now short one-line
- * script invocations (`node scripts/ops/integration-guard-resolve-diff.mjs | node scripts/ops/
- * integration-guard-classify.mjs`, `bash scripts/ops/integration-guard-noop.sh`, `bash scripts/ops/
- * integration-guard-run-web-specs.sh` respectively) rather than the huge inline bash/vitest-command
- * blocks previously pinned here — the owner explicitly declined to accept long-term exact-copying of
- * the huge web command or the no-op text inside this file's pins; both now live in their own script
- * files instead, and this file pins only the one-line invocation of each, per the owner's ruling.
+ * script invocations rather than the huge inline bash/vitest-command blocks previously pinned here —
+ * the owner explicitly declined to accept long-term exact-copying of the huge web command or the
+ * no-op text inside this file's pins; both now live in their own script files instead, and this file
+ * pins only the one-line invocation of each, per the owner's ruling. (An earlier wording of this
+ * paragraph described the classifier wiring as a single piped invocation, `node …resolve-diff.mjs |
+ * node …classify.mjs` — CORRECTED here: that is not what the workflow does, and the difference is
+ * load-bearing, not cosmetic. resolve-diff and classify are two SEPARATE steps handing off through a
+ * `$RUNNER_TEMP` file precisely so a resolve-diff failure is the STEP's own exit code; under a shared
+ * `pipefail` pipe, classify.mjs would still run to completion on the empty stdin and write
+ * `relevant=false` to `$GITHUB_OUTPUT`. See the P2 entry above and the `id: resolve-diff` step's own
+ * comment in the workflow.)
+ *
+ * FIFTH REVIEW ROUND (#4614 owner review, 2026-07-26) — ONE FINDING, closed here:
+ *   - [P1, opened by the previous round's own fix] the maintenance-cost extraction above moved the
+ *     no-op message and the web-spec command into scripts/ops/*.sh but left BOTH SCRIPT BODIES
+ *     ENTIRELY UNCOVERED — the reduced Pins 7/8 assert only that the workflow calls each script.
+ *     Three mutations that fully neuter a guarded step (`exit 0` at the top of the web runner; the
+ *     spec list gutted to one name; noop.sh reduced to a bare `exit 0`) each left this contract at
+ *     49 pass / 0 fail. A false-green opened by the slice whose subject is closing false-greens.
+ *     Closed by DOOR D at the end of this file, which EXECUTES both scripts (the web runner against a
+ *     PATH-injected `pnpm` argv-recording shim) instead of pinning their text — extract AND pin,
+ *     never extract alone. Per-mutation exclusivity is recorded in PR #4614's body.
  */
 
 const __filename = fileURLToPath(import.meta.url)
@@ -1375,4 +1408,258 @@ test('resolve-diff CLI: push with a malformed BASE_SHA exits non-zero and never 
   assert.notEqual(res.status, 0, `must exit non-zero: stdout=${res.stdout} stderr=${res.stderr}`)
   assert.match(res.stderr, /malformed/)
   assert.equal(res.stdout, '')
+})
+
+// ---------------------------------------------------------------------------
+// DOOR D — BEHAVIOUR OF THE EXTRACTED SHELL SCRIPTS (#4614 P1, fifth review round, 2026-07-26).
+//
+// THE DEFECT THIS CLOSES. The previous round satisfied the owner's maintenance-cost ruling by moving
+// the no-op message and the huge targeted-vitest command out of integration-guard.yml into
+// scripts/ops/integration-guard-noop.sh and scripts/ops/integration-guard-run-web-specs.sh, and
+// reducing this file's Pin 7 / Pin 8 to the one-line invocations `bash scripts/ops/integration-guard-
+// run-web-specs.sh` / `bash scripts/ops/integration-guard-noop.sh`. That extraction was correct in
+// form and OPENED A FALSE-GREEN: the pins now assert only that the workflow CALLS each script, and
+// nothing whatsoever asserted what either script DOES. Measured directly on this branch before this
+// Door existed — three independent mutations, each of which fully neuters a guarded step, and all
+// three left the contract at 49 pass / 0 fail / exit 0:
+//   1. `exit 0` inserted after `set -euo pipefail` in integration-guard-run-web-specs.sh
+//      (the ~46-spec web guard never runs at all)                              -> 49 pass, 0 fail
+//   2. the whole spec list replaced by a single spec name                      -> 49 pass, 0 fail
+//   3. integration-guard-noop.sh replaced by a bare `#!/usr/bin/env bash` + `exit 0`
+//      (the auditable in-band no-op message — the entire point of that step,
+//      per the workflow header's skipped-job-vs-deliberate-success argument —
+//      silently disappears)                                                    -> 49 pass, 0 fail
+// A false-green opened by the very slice whose subject is closing false-greens. THE RULE, per the
+// owner: whatever is extracted must carry its own behavioural coverage — extract AND pin, never
+// extract alone.
+//
+// WHY THESE TESTS ARE BEHAVIOURAL, NOT TEXT PINS. Re-pinning each script's body as an exact string
+// here would just move the copy the owner rejected from the workflow into this file — the same
+// maintenance cost, and still only a source-text assertion (see this repo's
+// "源码文本断言≠行为断言" doctrine: a regex/text guard proves nothing about what runs). So each
+// script is EXECUTED. integration-guard-run-web-specs.sh is run against a PATH-injected `pnpm` shim
+// that records its own argv NUL-delimited and exits with a caller-chosen status; the assertions are
+// on what the script actually invoked and on how it propagated the runner's exit code.
+//
+// HERMETIC BY CONSTRUCTION — this contract also runs in plugin-tests.yml's required `test` job,
+// BEFORE `pnpm install` and on a `fetch-depth: 1` shallow checkout. Nothing below needs a real pnpm,
+// a real vitest, node_modules, the network, or any git object: the shim IS the runner, and the only
+// filesystem reads are of files present in any checkout (the two scripts, and apps/web/tests).
+// ---------------------------------------------------------------------------
+
+const NOOP_SCRIPT_PATH = join(repoRoot, 'scripts/ops/integration-guard-noop.sh')
+const WEB_SPECS_SCRIPT_PATH = join(repoRoot, 'scripts/ops/integration-guard-run-web-specs.sh')
+
+/** The fixed prefix every invocation of the web guard must begin with, and the reporter flag it must
+ * end with. Short and structural — this is the invocation SHAPE, not a copy of the spec list (which
+ * is derived from the guarded-path roster below, never duplicated here). */
+const WEB_SPECS_ARGV_PREFIX = ['--filter', '@metasheet/web', 'exec', 'vitest', 'run']
+const WEB_SPECS_ARGV_SUFFIX = '--reporter=dot'
+
+/**
+ * Runs the extracted web-guard script with a temporary directory prepended to PATH containing a fake
+ * `pnpm` that records its argv (NUL-delimited, so a spec name containing whitespace could not be
+ * silently re-split) and exits with $SHIM_EXIT. Returns the child result plus the recorded argv
+ * (`null` when the shim was never invoked at all).
+ * @param {{ shimExit?: number }} [opts]
+ */
+function runWebSpecsScriptWithPnpmShim(opts = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'ig-webspecs-shim-'))
+  try {
+    const argvOut = join(dir, 'argv.nul')
+    const shim = join(dir, 'pnpm')
+    writeFileSync(shim, '#!/usr/bin/env bash\nprintf "%s\\0" "$@" > "$ARGV_OUT"\nexit "${SHIM_EXIT:-0}"\n')
+    chmodSync(shim, 0o755)
+
+    const res = spawnSync('bash', [WEB_SPECS_SCRIPT_PATH], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        ARGV_OUT: argvOut,
+        SHIM_EXIT: String(opts.shimExit ?? 0),
+      },
+    })
+
+    let argv = null
+    try {
+      argv = parseNulDelimited(readFileSync(argvOut))
+    } catch {
+      argv = null // the shim was never invoked at all
+    }
+    return { res, argv }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** Recursively collects every real spec file path (repo-relative, POSIX separators) under a dir. */
+function collectSpecFiles(absDir, relDir, acc = []) {
+  let entries
+  try {
+    entries = readdirSync(absDir, { withFileTypes: true })
+  } catch {
+    return acc
+  }
+  for (const e of entries) {
+    const abs = join(absDir, e.name)
+    const rel = `${relDir}/${e.name}`
+    if (e.isDirectory()) collectSpecFiles(abs, rel, acc)
+    else if (/\.spec\.[cm]?[jt]s$/.test(e.name)) acc.push(rel)
+  }
+  return acc
+}
+
+/** Every non-prefix guarded-path roster entry that is an apps/web spec file. This — NOT a second
+ * hand-maintained copy of the spec list — is the reference the web guard's coverage is measured
+ * against: the roster decides WHEN the guard runs, so any spec file the roster guards must be a spec
+ * file the guard actually RUNS, or the guard fires on a change it then does not test. */
+const WEB_SPEC_ROSTER_ENTRIES = GUARDED_PATH_ENTRIES.filter(
+  (e) => !isPrefixEntry(e) && /^apps\/web\/tests\/.*\.spec\.ts$/.test(e),
+)
+
+/**
+ * KNOWN, DELIBERATELY-RECORDED EXCEPTION (#4614, fifth round) — NOT silently fixed here.
+ *
+ * `apps/web/tests/utils/jsonAssist.spec.ts` is in the guarded-path roster, but the web guard's spec
+ * list names `JsonAssist` (capital J), which case-SENSITIVELY does not appear anywhere in that path.
+ * Whether this is a real coverage hole depends on a fact this contract's environment CANNOT settle:
+ * whether vitest's CLI filter is a case-sensitive substring match on the test file path. vitest is
+ * not installed in this checkout (this contract runs BEFORE `pnpm install`), and installing it to
+ * find out was out of scope for this round. So:
+ *   - if vitest's filter is case-INSENSITIVE, `JsonAssist` already matches and there is no hole;
+ *   - if it is case-SENSITIVE, this spec is guarded but never run — a real, pre-existing gap.
+ * Adding a `utils/jsonAssist` token to the script would be a guess about what CI then executes, so
+ * this is RECORDED and left for the owner rather than papered over. The assertion below pins this
+ * exception set EXACTLY (deepEqual, not a subset check): a NEW uncovered spec reds, and so does a
+ * STALE exception that has since become covered.
+ */
+const WEB_SPEC_CASE_ONLY_EXCEPTIONS = ['apps/web/tests/utils/jsonAssist.spec.ts']
+
+// --- integration-guard-noop.sh -------------------------------------------------------------
+
+test('noop.sh: exits 0 AND emits its auditable in-band message, interpolating the real event name', () => {
+  const res = spawnSync('bash', [NOOP_SCRIPT_PATH], {
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_EVENT_NAME: 'pull_request' },
+  })
+  assert.equal(res.status, 0, `noop.sh must exit 0: stdout=${res.stdout} stderr=${res.stderr}`)
+  // The whole reason this step exists (see integration-guard.yml's header) is that a DELIBERATE
+  // no-op success must be auditable IN THIS JOB'S OWN LOG, not an out-of-band skipped conclusion.
+  // A script that exits 0 without saying so is indistinguishable from the thing it exists to avoid.
+  assert.match(
+    res.stdout,
+    /no changes in guarded paths for this pull_request event/,
+    'noop.sh must state, in-band, that there were no guarded-path changes AND name the event ' +
+      '($GITHUB_EVENT_NAME must actually be interpolated, not dropped)',
+  )
+  assert.match(
+    res.stdout,
+    /DELIBERATE NO-OP SUCCESS \(exit 0\)/,
+    'noop.sh must label its own success as deliberate — this is the audit claim the workflow header rests on',
+  )
+  assert.match(res.stdout, /not an out-of-band skipped conclusion/)
+})
+
+test('noop.sh: still exits 0 with its message when GITHUB_EVENT_NAME is unset (the `:-<unknown>` default is load-bearing under `set -u`)', () => {
+  const env = { ...process.env }
+  delete env.GITHUB_EVENT_NAME
+  const res = spawnSync('bash', [NOOP_SCRIPT_PATH], { encoding: 'utf8', env })
+  // Without the `:-<unknown>` default, `set -u` would make this an unbound-variable error: the no-op
+  // step would RED and fail an out-of-scope job that is supposed to pass deliberately.
+  assert.equal(res.status, 0, `noop.sh must not trip \`set -u\`: stdout=${res.stdout} stderr=${res.stderr}`)
+  assert.match(res.stdout, /no changes in guarded paths for this <unknown> event/)
+})
+
+// --- integration-guard-run-web-specs.sh ------------------------------------------------------
+
+test('web-specs.sh: actually INVOKES the vitest runner, with the pinned invocation shape (kills an `exit 0` no-op)', () => {
+  const { res, argv } = runWebSpecsScriptWithPnpmShim()
+  assert.equal(res.status, 0, `must exit 0 when the runner succeeds: stdout=${res.stdout} stderr=${res.stderr}`)
+  assert.notEqual(
+    argv,
+    null,
+    'web-specs.sh never invoked the runner at all — an `exit 0` (or any other short-circuit) before ' +
+      'the pnpm line makes the entire ~46-spec web guard a silent no-op while the workflow step still reports success',
+  )
+  assert.ok(argv.length > WEB_SPECS_ARGV_PREFIX.length + 1, `runner argv is implausibly short: ${JSON.stringify(argv)}`)
+  assert.deepEqual(
+    argv.slice(0, WEB_SPECS_ARGV_PREFIX.length),
+    WEB_SPECS_ARGV_PREFIX,
+    'the web guard must run the targeted vitest runner in the @metasheet/web workspace',
+  )
+  assert.equal(argv[argv.length - 1], WEB_SPECS_ARGV_SUFFIX)
+  const specTokens = argv.slice(WEB_SPECS_ARGV_PREFIX.length, -1)
+  assert.ok(specTokens.length > 0, 'the runner was invoked with no spec filters at all')
+  for (const t of specTokens) {
+    assert.ok(
+      t.length > 0 && !t.startsWith('-'),
+      `spec filter must not be an empty string or a flag: ${JSON.stringify(t)}`,
+    )
+  }
+})
+
+test('web-specs.sh: PROPAGATES a failing runner exit code (kills a `|| true` / trailing `exit 0` swallow)', () => {
+  // An argv assertion alone cannot catch this: `... --reporter=dot || true` invokes the shim with
+  // byte-identical argv and still exits 0, so the guard would report success on a red spec suite —
+  // the same false-green shape this whole Door exists to close.
+  const { res, argv } = runWebSpecsScriptWithPnpmShim({ shimExit: 7 })
+  assert.notEqual(argv, null, 'the runner must still have been invoked')
+  assert.notEqual(
+    res.status,
+    0,
+    'web-specs.sh exited 0 even though the spec runner failed — a failing web guard would report SUCCESS',
+  )
+  assert.equal(res.status, 7, "the runner's own exit status must reach the workflow step unaltered")
+})
+
+test('web-specs.sh: every guarded apps/web spec in the roster is actually RUN by the web guard (kills a gutted spec list)', () => {
+  const { argv } = runWebSpecsScriptWithPnpmShim()
+  assert.notEqual(argv, null, 'the runner must have been invoked')
+  const specTokens = argv.slice(WEB_SPECS_ARGV_PREFIX.length, -1)
+
+  assert.ok(
+    WEB_SPEC_ROSTER_ENTRIES.length >= 40,
+    `the guarded-path roster should still list the full web spec set, found ${WEB_SPEC_ROSTER_ENTRIES.length}`,
+  )
+  // vitest CLI filters are substring matches against the test file path, so a roster spec is "run"
+  // iff at least one filter token appears in its path.
+  const uncovered = WEB_SPEC_ROSTER_ENTRIES.filter((entry) => !specTokens.some((t) => entry.includes(t))).sort()
+  assert.deepEqual(
+    uncovered,
+    [...WEB_SPEC_CASE_ONLY_EXCEPTIONS].sort(),
+    'guarded apps/web spec files that the web guard does NOT run: the guard fires on a change to ' +
+      'each of these but then never tests it. Expected exactly the recorded, owner-pending ' +
+      'case-mismatch exception set — see WEB_SPEC_CASE_ONLY_EXCEPTIONS above. A NEW entry here means ' +
+      'the spec list was gutted or a roster entry was added without a matching filter; a MISSING one ' +
+      'means the exception is stale and should be deleted.',
+  )
+
+  // The recorded exceptions must be case-mismatches specifically — not outright omissions. If one of
+  // them stops matching even case-insensitively, it is a plain missing spec and must not sit here.
+  const lowerTokens = specTokens.map((t) => t.toLowerCase())
+  for (const entry of WEB_SPEC_CASE_ONLY_EXCEPTIONS) {
+    assert.ok(
+      lowerTokens.some((t) => entry.toLowerCase().includes(t)),
+      `${entry} is not matched by any spec filter even case-insensitively — that is a plain omission, ` +
+        'not the recorded case-only mismatch, and must not be carried as an exception',
+    )
+  }
+})
+
+test('web-specs.sh: every spec filter resolves to at least one real spec file (kills a typo/renamed spec silently running nothing)', () => {
+  const { argv } = runWebSpecsScriptWithPnpmShim()
+  assert.notEqual(argv, null, 'the runner must have been invoked')
+  const specTokens = argv.slice(WEB_SPECS_ARGV_PREFIX.length, -1)
+
+  // `vitest run <filter>` with a filter matching zero files does not fail the run when other filters
+  // do match — so a renamed or mistyped spec name silently drops that spec from the guard forever.
+  const specFiles = collectSpecFiles(join(repoRoot, 'apps/web/tests'), 'apps/web/tests')
+  assert.ok(specFiles.length > 0, 'apps/web/tests must contain spec files — refusing to pass vacuously')
+  const dead = specTokens.filter((t) => !specFiles.some((f) => f.includes(t))).sort()
+  assert.deepEqual(
+    dead,
+    [],
+    'these web-guard spec filters match NO real file under apps/web/tests — each one runs nothing at all',
+  )
 })

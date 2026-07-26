@@ -29,6 +29,18 @@
  * ever non-empty/well-formed, because that is a GitHub Actions runtime fact, not a source-text
  * fact — a fail-open condition guarded only by an exact pin is nonetheless fail-open.
  *
+ * REACHABILITY: DELIBERATELY NOT ESTABLISHED. Everything above is CONDITIONAL — *if* BASE_SHA is
+ * empty/zero on `pull_request`/`merge_group`, the old fallback silently yields `relevant=false`. The
+ * `b83e180d8` figures are a git-level measurement of `diff-tree --root` on a real merge commit,
+ * nothing more; NO run of the pre-fix workflow was ever observed taking that branch on a real
+ * `pull_request` event, and no such claim is made here. GitHub does populate
+ * `github.event.pull_request.base.sha` / `github.event.merge_group.base_sha` on those two events, and
+ * the `|| github.event.before` tail that can produce the all-zeros sentinel is a push-on-a-new-ref
+ * artifact — so the antecedent may well be unreachable today. This function fails closed REGARDLESS:
+ * the point is not that someone has walked through the hole, it is that nothing in the source text
+ * could have told us if they had. Do not upgrade this to a reachable-exploit claim without a payload
+ * that shows it.
+ *
  * THE FIX. `resolveDiffArgs()` below decides the git invocation, and is fail-CLOSED by event:
  *   - a well-formed 40-hex BASE_SHA is ALWAYS accepted (any event) — `git diff` against it is safe
  *     regardless of why the workflow ran;
