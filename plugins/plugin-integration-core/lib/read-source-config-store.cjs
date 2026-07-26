@@ -154,6 +154,21 @@ function firstRow(result) {
   return null
 }
 
+// GIP B1a-3 (additive, NO behaviour change, NO request reachability): first-party
+// construction attestation. A consumer that must not admit a duck-typed store
+// (`typeof store.getForRuntime === 'function'` is exactly the door #4596's resolver
+// left open) can ask whether an object was built by THIS module. This exports a
+// CHECKER, never a granter: `isFirstPartyReadSourceConfigStore` admits nothing and
+// confers nothing — it answers a question about an object that already exists. The
+// `db` beneath the store stays the caller's; the property attested is "the approval,
+// tenancy and scope logic that ran is this module's", not "the rows are genuine".
+const firstPartyReadSourceConfigStores = new WeakSet()
+
+function isFirstPartyReadSourceConfigStore(store) {
+  // WeakSet.has(primitive) returns false rather than throwing — null/strings are safe.
+  return firstPartyReadSourceConfigStores.has(store)
+}
+
 function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {}) {
   if (
     !db ||
@@ -400,7 +415,7 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
     return rows.map(rowToPublicAuditEntry)
   }
 
-  return {
+  const store = {
     saveVersion,
     list,
     get,
@@ -409,6 +424,8 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
     retire,
     listAudit,
   }
+  firstPartyReadSourceConfigStores.add(store)
+  return store
 }
 
 module.exports = {
@@ -417,6 +434,7 @@ module.exports = {
   ReadSourceConfigConflictError,
   ReadSourceConfigNotApprovedError,
   createReadSourceConfigStore,
+  isFirstPartyReadSourceConfigStore,
   __internals: {
     contentKeyFor,
     stableStringify,
