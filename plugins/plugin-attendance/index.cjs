@@ -555,6 +555,25 @@ let annualLeaveAccrualSchedulerUnregister = null
 // test probe reads it to prove "no env => no worker => byte-identical runtime".
 let w4OutboxDrainSchedulerUnregister = null
 let w4OutboxDrainRunOnce = null
+// W4C-2 remediation P2 (#4612 review "腿1"): test-only synchronization point that
+// fires on the POST /api/attendance/punch route AFTER its own pre-boundary
+// work-date resolution has already succeeded and BEFORE the canonical
+// write-boundary transaction (w4LiveScheduledBoundary.executeLivePunch) begins.
+// Exists ONLY so a real-DB test can construct a GENUINE two-connection race
+// against the in-transaction ambiguous/shift-changed re-derivation added by
+// P1-3 (deriveLegacyLivePunchAttributionV1) — a second connection commits a
+// conflicting shift-assignment write while connection A is suspended here, so
+// A's canonical transaction re-reads live DB state and observes the change.
+// The setter fails outside a test runtime, matching the existing
+// __setAttendanceW4DigestSeamForTests precedent in w4c0-identity.ts — production
+// construction never calls it, so an unset seam is a plain no-op on every request.
+let attendanceW4LivePunchPreBoundarySeamForTests = null
+function __setAttendanceW4LivePunchPreBoundarySeamForTests(seam) {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('W4C2_LIVE_PUNCH_PRE_BOUNDARY_SEAM_FORBIDDEN')
+  }
+  attendanceW4LivePunchPreBoundarySeamForTests = typeof seam === 'function' ? seam : null
+}
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -22613,6 +22632,11 @@ module.exports = {
     deriveLegacyLivePunchAttributionV1,
     HttpError,
   },
+  // W4C-2 remediation P2 (#4612 review "腿1"): installs/clears the pre-boundary race
+  // seam declared above (POST /api/attendance/punch, after route precheck, before the
+  // canonical write-boundary transaction). Pass null to clear. Throws outside a test
+  // runtime — see the setter's own guard.
+  __setAttendanceW4LivePunchPreBoundarySeamForTests,
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
     createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
@@ -27060,6 +27084,13 @@ module.exports = {
               error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
             })
             return
+          }
+          // W4C-2 remediation P2 (#4612 review "腿1"): test-only race seam — see the
+          // module-level declaration and __setAttendanceW4LivePunchPreBoundarySeamForTests
+          // above. Unset in production (and in every test that never installs it), this
+          // is a plain no-op; the route's control flow is byte-identical either way.
+          if (attendanceW4LivePunchPreBoundarySeamForTests) {
+            await attendanceW4LivePunchPreBoundarySeamForTests({ orgId, userId, workDate, timezone })
           }
           const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
             orgId,
