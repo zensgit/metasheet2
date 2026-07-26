@@ -518,6 +518,23 @@ export default defineConfig({
       // real-DB step in plugin-tests.yml (two-point wiring; the exclusion was
       // missed when the suite landed and is backfilled by Stage E).
       'tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts',
+      // #4556 W4C-2 (#4612 gate4 P3-3): genuine live-punch race + admin_run
+      // authorization (real DB, route-level). DATABASE_URL-gated; excluded here so
+      // the no-DB job cannot skip-green it; already wired whole-file into the
+      // `Run attendance integration tests` step in plugin-tests.yml — this exclude
+      // line was the missing SECOND point of that two-point wiring (gate4 finding:
+      // present in the run-list but absent here, so the no-DB job's
+      // "Run core-backend tests" step collected and skip-greened it every PR).
+      'tests/integration/attendance-w4c2-p2-remediation.db.test.ts',
+      // #4556 W4C-2 (#4612 gate3/gate4 P2-1 remediation): canonical/shadow
+      // live-punch freeze-step anchor correctness (real DB, route-level + real
+      // two-connection races — this is the PR's OWN main-line suite, L1-L7 +
+      // Groups D/D-overnight/E/F/F2/G). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; already wired whole-file into the
+      // `Run attendance integration tests` step in plugin-tests.yml — this exclude
+      // line was the missing SECOND point (gate4 P3-3: the PR's own primary
+      // evidence file was skip-green in the no-DB lane every PR up to this point).
+      'tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts',
       // #4556 W4C-2: three-posture matrix + V2 freeze + env-gated outbox drain
       // (route-level, real DB). DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it; wired whole-file into the attendance real-DB step in

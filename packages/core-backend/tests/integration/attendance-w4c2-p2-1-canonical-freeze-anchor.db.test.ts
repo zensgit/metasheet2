@@ -83,11 +83,46 @@
  *    (`input.workDate`) anchor would never see.
  *  - Group D (shiftId-only race, see below) and the 2×2 exclusivity matrix
  *    for the two step-7 conjuncts (identity vs. source-definition
- *    fingerprint) — including the PROVEN (CHECK-constraint-backed, not
- *    merely argued) structural-subsumption finding that an "identity-only,
- *    fingerprint-silent" leg cannot be built from a real DB fixture in this
- *    schema — are documented in `w4c2-live-scheduled-boundary.ts`'s own
- *    `identityDrift` comment and in the PR body; not repeated here.
+ *    fingerprint) — the structural-subsumption finding (fingerprint domain
+ *    contains workDate/shiftId, so an ordinary shiftId swap between two
+ *    WELL-FORMED shifts trips BOTH conjuncts, not identity alone) — are
+ *    documented in `w4c2-live-scheduled-boundary.ts`'s own `identityDrift`
+ *    comment and in the PR body; not repeated here. RETRACTED (gate4 P2,
+ *    #4612): the earlier claim that an "identity-only, fingerprint-silent"
+ *    leg "cannot be built from a real DB fixture in this schema" was WRONG
+ *    as stated — it conflated "not reachable from two well-formed shifts"
+ *    (still true) with "not constructible at all" (false: see Group G).
+ *  - Group G (shiftId-only race with BOTH candidate shifts frozen-context-
+ *    null, see below): gate4's independent audit found the identity
+ *    conjunct (`identityMismatch`, `w4c2-live-scheduled-boundary.ts:1354`)
+ *    was an UNTESTED guard — neutering it left all 48 real-DB W4C-2 legs in
+ *    this suite family green (zero discriminating signature), because every
+ *    OTHER leg that swaps shiftId also swaps the fingerprint domain (which
+ *    CONTAINS shiftId) whenever `context` is non-null. Group G closes that
+ *    gap: both candidate shifts carry a single, deliberately non-dense
+ *    `attendance_shift_segments` row (`segment_index = 1`, no row 0) —
+ *    legal per this table's CHECK constraints (range 0-2, per-shift
+ *    uniqueness; no density constraint), but a shape only a MALFORMED /
+ *    hand-crafted fixture produces (the canonical shift service always
+ *    writes dense 0..2; see the migration's own contract header). With
+ *    `context === null` on BOTH the outer and inner reads,
+ *    `computeAttendanceOuterComparableSourceDefinitionFingerprintV1` returns
+ *    `null` both times (`sourceDefinitionInputOrNull`'s
+ *    `if (context === null) return null` branch, `w4c1-fingerprints.ts`) —
+ *    the fingerprint conjunct is STRUCTURALLY SILENT (`null !== null` is
+ *    always `false`), so only the identity conjunct can catch the shiftId
+ *    swap. Because the null context is a FIXTURE property (both candidate
+ *    shifts are malformed, race or no race), the standard "disarmed
+ *    connection B ⇒ outcome flips to `completed`" race-genuineness shape
+ *    (used by Group D/D-overnight) is UNREACHABLE here by construction —
+ *    Group G's positive control instead proves genuineness through the
+ *    `outcome_reason_code` flip (`context_mismatch` raced vs
+ *    `missing_frozen_context` disarmed) plus the persisted
+ *    `attribution_snapshot.value.shiftId` (race-installed shift vs the
+ *    original), which only a real committed write from connection B can
+ *    produce. See the test's own comment for the full account, including
+ *    why this is a deliberate, disclosed deviation from the literal
+ *    `feedback_toctou_needs_constructed_race` shape, not an omission.
  *
  * Shared-DB discipline: fixture ids are file-namespaced random UUIDs.
  */
@@ -374,6 +409,27 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const FPROBE_EDAY = EDAY
   const FPROBE_OCCURRED_AT = EDAY2_OCCURRED_AT
 
+  // ---------------------------------------------------------------------
+  // Group G (#4612 gate4 P2 closure — untested identity conjunct):
+  // shiftId-only race, SAME construction as Group D, except BOTH candidate
+  // shifts (gncShiftX, gncShiftY) are given a single deliberately
+  // NON-DENSE `attendance_shift_segments` row (`segment_index = 1`, row 0
+  // never inserted) instead of relying on the legacy work_start_time/
+  // work_end_time fallback. `buildW4ShadowFrozenContextV1`
+  // (`index.cjs` ~L21451) rejects any segment set where `segment_index !==
+  // its own array position (`index !== i`, ~L21479) — so BOTH the outer
+  // (pre-race, gncShiftX) and inner (post-race, gncShiftY) frozen-context
+  // reads return `null`. See the leg-map comment above and the test body
+  // for why this makes the fingerprint conjunct structurally silent,
+  // leaving identity as the ONLY discriminating conjunct for this leg.
+  // ---------------------------------------------------------------------
+  const gncOrg = randomUUID()
+  const gncShiftX = randomUUID() // route-visible at read time
+  const gncShiftY = randomUUID() // race-installed, same day, different shift
+  const gncUser = randomUUID()
+  const GNC_DAY = '2026-07-24'
+  const GNC_OCCURRED_AT = '2026-07-24T10:00:00.000Z'
+
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
@@ -387,7 +443,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     process.env.SKIP_PLUGINS = 'false'
     priorAllowlistEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED =
-      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, osidOrg, eDay1Org, eDay2Org, fProbeOrg].join(',')
+      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, osidOrg, eDay1Org, eDay2Org, fProbeOrg, gncOrg].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
@@ -473,10 +529,34 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     await insertActiveUser(fProbeUser, fProbeOrg)
     await insertShift(fProbeShift, fProbeOrg, 'W4C2-P21-FProbe', 'UTC', '22:00', '06:00', true)
     await insertAssignment(randomUUID(), fProbeOrg, fProbeUser, fProbeShift, FPROBE_EDAY)
+
+    // Group G fixtures (gate4 P2 closure — null-frozen-context shiftId-only
+    // race). Both shifts non-overnight, SAME day (GNC_DAY), both windows
+    // contain GNC_OCCURRED_AT — only gncShiftX is assigned/active at
+    // route-read time (identical shape to Group D otherwise). The
+    // deliberately non-dense `segment_index = 1` row on EACH shift is what
+    // makes `buildW4ShadowFrozenContextV1` return `null` for both —
+    // `insertShift` alone (no segment rows) would instead fall through to
+    // the legacy work_start_time/work_end_time single-segment fallback and
+    // produce a NON-null context, which is exactly the Group D shape this
+    // leg needs to differ from.
+    await insertShadowRolloutRow(gncOrg)
+    await insertActiveUser(gncUser, gncOrg)
+    await insertShift(gncShiftX, gncOrg, 'W4C2-P21-GncX', 'UTC', '09:00', '17:00', false)
+    await insertShift(gncShiftY, gncOrg, 'W4C2-P21-GncY', 'UTC', '08:00', '18:00', false)
+    for (const shiftId of [gncShiftX, gncShiftY]) {
+      await pool.query(
+        `INSERT INTO attendance_shift_segments
+           (org_id, shift_id, segment_index, start_time, start_day_offset, end_time, end_day_offset)
+         VALUES ($1, $2, 1, '09:00', 0, '17:00', 0)`,
+        [gncOrg, shiftId],
+      )
+    }
+    await insertAssignment(randomUUID(), gncOrg, gncUser, gncShiftX, GNC_DAY)
   }, 120000)
 
   afterAll(async () => {
-    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User, fProbeUser]) {
+    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User, fProbeUser, gncUser]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -875,7 +955,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // neuter both) for the corrected, empirically re-verified numbers; the
   // single-conjunct claim above is retained as a historical record of what
   // was true in that earlier round, not a claim about current behavior.
-  it('Group D: a shiftId-ONLY race (workDate held fixed, only the winning shift swaps) hits the widened step-7 candidate-identity gate', async () => {
+  it('Group D: a shiftId-ONLY race (workDate held fixed, only the winning shift swaps) hits the widened step-7 identity+fingerprint gate (BOTH conjuncts fire — this is NOT an identity-only-discriminating leg, see Group G for the leg that is)', async () => {
     const plugin = loadPlugin()
     const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
     if (typeof setSeam !== 'function') {
@@ -998,7 +1078,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // at OSID_DAY across the race (the overnight candidate's own `workDate`
   // is the night it starts, not the calendar day the punch instant falls
   // on), only `shiftId` swaps.
-  it('Group D-overnight: a shiftId-ONLY race between two OVERNIGHT shifts sharing the same start_date hits the widened step-7 candidate-identity gate', async () => {
+  it('Group D-overnight: a shiftId-ONLY race between two OVERNIGHT shifts sharing the same start_date hits the widened step-7 identity+fingerprint gate (BOTH conjuncts fire — this is NOT an identity-only-discriminating leg, see Group G for the leg that is)', async () => {
     const plugin = loadPlugin()
     const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
     if (typeof setSeam !== 'function') {
@@ -1103,6 +1183,171 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs[0].outcome).toBe('completed')
     expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
     expect(calcs[0].attribution_snapshot.value.shiftId).toBe(osidShiftX)
+  })
+
+  // Group G (#4612 gate4 P2 closure — independent-review finding: neutering
+  // ONLY the identity conjunct, `identityMismatch` (`w4c2-live-scheduled-
+  // boundary.ts:1354`), left ALL 48 real-DB W4C-2 legs in this suite family
+  // green — zero discriminating signature — while neutering ONLY the
+  // fingerprint conjunct (`fingerprintMismatch`, `:1357`) reds exactly L6.
+  // Group D/D-overnight do NOT close this gap: their fingerprint domain is
+  // non-null (a well-formed shift's context always resolves), and that
+  // domain CONTAINS `shiftId`, so a shiftId swap trips fingerprint too —
+  // identity is never the SOLE discriminator on those legs. This leg gives
+  // identity a real, if narrow, exclusive leg by making the fingerprint
+  // conjunct structurally silent: BOTH candidate shifts (gncShiftX,
+  // gncShiftY) carry a single non-dense `attendance_shift_segments` row
+  // (`segment_index = 1`, no row 0), which `buildW4ShadowFrozenContextV1`
+  // rejects (`index !== i`, `index.cjs` ~L21479) — so `context` is `null`
+  // on BOTH the outer (pre-race) and inner (post-race) reads.
+  // `computeAttendanceOuterComparableSourceDefinitionFingerprintV1` returns
+  // `null` whenever `context === null` (`sourceDefinitionInputOrNull`,
+  // `w4c1-fingerprints.ts`), so `fingerprintMismatch` compares `null !==
+  // null` — always `false`, regardless of the race. Disclosed deviation
+  // from the row-0/well-formed shift shape every other leg in this file
+  // uses: the sparse segment_index is a deliberately MALFORMED fixture (see
+  // the leg-map comment atop this file and `w4c2-live-scheduled-
+  // boundary.ts`'s STRUCTURAL NOTE) — not a production-reachable state (the
+  // canonical shift service only ever writes dense 0..2 segment rows).
+  it('Group G: a shiftId-ONLY race where BOTH candidate shifts have a null frozen context hits the step-7 gate on the identity conjunct ALONE (fingerprint conjunct is structurally silent, null === null)', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(gncUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: GNC_OCCURRED_AT, timezone: 'UTC', orgId: gncOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B: swap the ACTIVE assignment from gncShiftX to
+      // gncShiftY — SAME user, SAME day (GNC_DAY), a genuine committed
+      // write fully independent of connection A. Both shifts' windows
+      // contain GNC_OCCURRED_AT, so the in-transaction re-resolution stays
+      // non-ambiguous (single matching candidate) throughout.
+      const asgX = (await pool.query(
+        'SELECT id::text AS id FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2 AND shift_id = $3',
+        [gncOrg, gncUser, gncShiftX],
+      )).rows[0].id
+      await pool.query('UPDATE attendance_shift_assignments SET is_active = false WHERE id = $1', [asgX])
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+         VALUES ($1, $2, $3, $4, $5, $5, true, 'published', 1)`,
+        [randomUUID(), gncOrg, gncUser, gncShiftY, GNC_DAY],
+      )
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+    }
+
+    expect(res.status, res.raw).toBe(200)
+    expect(res.body?.ok).toBe(true)
+    // Legacy projection intact: still keyed at GNC_DAY (the day never
+    // changed in this race), unaffected by the canonical-side downgrade.
+    const rows = await recordRow(gncUser)
+    expect(rows.length).toBe(1)
+    expect(rows[0].work_date).toBe(GNC_DAY)
+
+    const calcs = await calculationRowsForUser(gncUser)
+    expect(calcs.length).toBe(1)
+    // The identity-conjunct-driven review: `context_mismatch`, NOT
+    // `missing_frozen_context` (the reason the null-context calculator
+    // would otherwise assign, see the positive control below) — this is
+    // the discriminating assertion; neutering `identityMismatch` alone
+    // flips this to `missing_frozen_context` (see the PR's mutation table).
+    expect(calcs[0].outcome).toBe('review_required')
+    expect(calcs[0].outcome_reason_code).toBe('context_mismatch')
+    expect(calcs[0].expected_segment_count).toBe(0)
+    expect(await segmentCountForCalculation(calcs[0].id)).toBe(0)
+    // The freeze step genuinely re-resolved in-transaction to the
+    // race-installed winner (shiftY) — same day, DIFFERENT shift — proving
+    // the gate is driven by the transaction's own snapshot, not a stale
+    // route value. `context_snapshot` is null on BOTH candidates by
+    // construction (the fixture's whole point), asserted here to nail down
+    // that this leg is genuinely in the null-context regime and not
+    // accidentally resolving a non-null context.
+    expect(calcs[0].attribution_snapshot.posture).toBe('resolved_v2')
+    expect(calcs[0].attribution_snapshot.value.workDate).toBe(GNC_DAY)
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(gncShiftY)
+    expect(calcs[0].context_snapshot).toBe(null)
+  })
+
+  // Race-genuineness control for Group G. Disclosed deviation from
+  // `feedback_toctou_needs_constructed_race`'s literal "disarmed connection
+  // B ⇒ SAME outcome shape as before the race" bar: for Group D/D-overnight
+  // that bar is `outcome` flipping `review_required` -> `completed`, but
+  // for Group G `context === null` is a FIXTURE property of BOTH candidate
+  // shifts (gncShiftX and gncShiftY are equally malformed), so disarming
+  // connection B can NEVER reach `completed` here — the null-context
+  // calculator (`w4c1-segment-calculator.ts:797`) always assigns
+  // `review_required`/`missing_frozen_context` regardless of the race. The
+  // equivalent-strength discriminator this control asserts instead: with
+  // NO swap, the identity conjunct sees the SAME shiftId on both the outer
+  // and inner reads (`identityMismatch` is false without any mutation), so
+  // `outcome_reason_code` falls through to the calculator's own
+  // `missing_frozen_context` — DIFFERENT from the raced leg's
+  // `context_mismatch` above — and `attribution_snapshot.value.shiftId`
+  // stays gncShiftX (never swapped). Only a real committed write from
+  // connection B can produce the raced leg's `context_mismatch` +
+  // gncShiftY combination; this control proves that combination is not an
+  // artifact of fixture assembly order.
+  it('Group G positive control: with connection B disarmed (no shift swap), the reason code falls through to the null-context calculator (missing_frozen_context, NOT context_mismatch) and shiftId never leaves gncShiftX', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    const controlUser = randomUUID()
+    await insertActiveUser(controlUser, gncOrg)
+    await insertAssignment(randomUUID(), gncOrg, controlUser, gncShiftX, GNC_DAY)
+
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(controlUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: GNC_OCCURRED_AT, timezone: 'UTC', orgId: gncOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B intentionally disarmed: no assignment mutation at all.
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+      await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
+    }
+
+    expect(res.status, res.raw).toBe(200)
+    const calcs = await calculationRowsForUser(controlUser)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].outcome).toBe('review_required')
+    expect(calcs[0].outcome_reason_code).toBe('missing_frozen_context')
+    expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(gncShiftX)
+    expect(calcs[0].context_snapshot).toBe(null)
   })
 
   // Group E (#4612 gate3 P2-1 self-report ③' closure — advisor-corrected
