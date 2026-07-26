@@ -93,6 +93,20 @@
 #          body (mutating the roster REDs 4 classify-side tests and 0 assert-branch tests; mutating
 #          assert-branch's own guard REDs 1 assert-branch test and 0 classify-side tests).
 #
+# CORRECTION (P1, second review round, 2026-07-26): item 2 above ("the classifier is now load-bearing")
+# was OVERSTATED and is RETRACTED here, not merely reworded. The contract test's own pins locating the
+# classifier/no-op/real-branch/terminal steps and their env wiring asserted only SUBSTRING PRESENCE
+# (`run.includes(...)`, `env.X.includes(...)`), which two mutations proved insufficient while the
+# contract stayed 27/27 GREEN: one kept the classifier invocation line untouched but appended a line
+# that unconditionally overwrote `relevant=false` afterward (and separately, neutered the script's own
+# `$GITHUB_OUTPUT` write); the other kept the required substring inside an `env:` expression built so it
+# never actually evaluates to the classifier's real output. Both are now closed by EXACT-EQUALITY
+# pinning on each step's full `run:`/`env:` text plus two new behavioural tests that spawn the real
+# classifier CLI and assert `$GITHUB_OUTPUT`'s exact byte content — see scripts/ops/integration-guard-
+# required-wiring-contract.test.mjs's own header correction for the full account, including what this
+# upgrade can and cannot still prove (it remains source-text/subprocess-level proof, not a GitHub Actions
+# runtime exercise).
+#
 # A YAML-shape contract for these properties (no `paths` on pull_request, `merge_group` present, the
 # job's exact name, the forbidden job/step keys, the classifier/no-op/real-branch step wiring, and the
 # roster pin) plus BEHAVIOURAL tests of the extracted classify/assert-branch scripts live in the
