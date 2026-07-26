@@ -948,6 +948,82 @@ async function hostileGetterOnAnAllowlistedKeyIsRefusedNotLeaked() {
 }
 
 // ---------------------------------------------------------------------------
+// P1-B, SECOND SITE (B1a-3 round 3) · `verifyBindingQualification` had the SAME leak.
+//
+// `qualification` is a CALLER-SUPPLIED plain object with NO closed key set, read RAW
+// at eight sites over six keys — `status` three times, `qualificationDigest` and
+// `expiresAt` more than once each. Executed before the fix: FIVE of the six keys
+// leaked attacker text as a bare `Error`; `evidence` escaped only because the MAC
+// check happens to fire first, which is ordering, not a guard.
+//
+// This function is IN SCOPE: this PR changed its signature (`expectedInputs` removed,
+// resolution gate added). Fixing the probe path and leaving this one open would make
+// the body's own "hostile property getters" claim false in the other half of the
+// module.
+//
+// SIX CASES, ONE PER KEY, and six separate mutations in the battery.
+// ---------------------------------------------------------------------------
+async function hostileGetterOnTheVerifiedQualificationIsRefusedNotLeaked() {
+  const stack = buildStack()
+  const resolution = await resolveAlpha(stack.resolver)
+  // A REAL qualification first, so the fixture is the shape the function actually
+  // verifies rather than a bare stand-in that trips an earlier guard.
+  const genuine = await stack.prober.probeFromResolution({
+    resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT, expiresAt: '2026-07-27T00:00:00Z',
+  })
+  // POSITIVE CONTROL: unmodified, it verifies.
+  assert.equal(verifyBindingQualification({
+    qualification: genuine, resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
+  }).verified, true)
+
+  const keys = ['status', 'envelopeKeyId', 'envelopeMac', 'qualificationDigest', 'expiresAt', 'evidence']
+  for (const key of keys) {
+    const hostile = { ...genuine }
+    delete hostile[key]
+    Object.defineProperty(hostile, key, {
+      enumerable: true, configurable: true, get() { throw new Error(ATTACKER_TEXT) },
+    })
+    let caught = null
+    try {
+      verifyBindingQualification({
+        qualification: hostile, resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
+      })
+    } catch (error) { caught = error }
+
+    assert.ok(caught, `qualification.${key}: the hostile getter must fail closed`)
+    assert.ok(caught instanceof GipQualificationError,
+      `qualification.${key}: expected GipQualificationError, got ${caught && caught.name}`)
+    assert.equal(caught.reason, 'QUALIFICATION_NOT_OBJECT')
+    for (const surface of [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]) {
+      assert.ok(!surface.includes(ATTACKER_TEXT),
+        `qualification.${key}: attacker text escaped: ${surface.slice(0, 200)}`)
+    }
+  }
+
+  // DECLARED, NOT CLOSED — the same class is still OPEN one level out, on
+  // `envelopeKey`, which `normalizeEnvelopeKey` reads raw. That function is
+  // byte-identical to `main` and is OUT OF SCOPE here; this assertion PINS the
+  // residual as OPEN so it cannot silently vanish from the ledger (see §9A/OS-3).
+  const hostileKey = { secret: Buffer.alloc(32, 5) }
+  Object.defineProperty(hostileKey, 'keyId', {
+    enumerable: true, configurable: true, get() { throw new Error(ATTACKER_TEXT) },
+  })
+  let envelopeCaught = null
+  try {
+    verifyBindingQualification({
+      qualification: genuine, resolution, envelopeKey: hostileKey, now: '2026-07-26T12:00:00Z',
+    })
+  } catch (error) { envelopeCaught = error }
+  assert.ok(envelopeCaught)
+  assert.ok(!(envelopeCaught instanceof GipQualificationError),
+    'OS-3 residual: this is expected to be an UNBRANDED escape today — if it is now branded, the '
+    + 'residual was closed and §9A/OS-3 must be updated')
+  assert.ok(String(envelopeCaught.message).includes(ATTACKER_TEXT),
+    'OS-3 residual: the envelopeKey getter channel is asserted to be OPEN — if this fails, it was '
+    + 'closed and the ledger must be updated')
+}
+
+// ---------------------------------------------------------------------------
 // P1-A (B1a-3 round 3) · A RESIDUAL PINNED BY ASSERTING THE CHANNEL **EXISTS**.
 //
 // `gip-binding-qualification-spike.cjs` removed `fail` from `__internals` and its
@@ -1166,6 +1242,7 @@ async function main() {
   await opaqueCredentialHandle()
   await answerPlaneIsValuesFreeAndForeignTextIsDiscarded()
   await hostileGetterOnAnAllowlistedKeyIsRefusedNotLeaked()
+  await hostileGetterOnTheVerifiedQualificationIsRefusedNotLeaked()
   brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
   latentByEnumeration()

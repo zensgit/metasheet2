@@ -553,26 +553,61 @@ function verifyBindingQualification({ qualification, resolution, envelopeKey, no
   if (!isTrustedBindingResolution(resolution)) {
     fail('PROBE_RESOLUTION_UNTRUSTED', 'a resolution minted by the approved-binding resolver is required', {})
   }
+  // GUARDED READS (P1-B, second site — B1a-3 round 3). `qualification` is a
+  // CALLER-SUPPLIED plain object with NO closed key set, and it used to be read RAW
+  // at eight sites over six keys — `status` three times, `qualificationDigest` and
+  // `expiresAt` more than once each. A throwing getter on any of them escaped to the
+  // caller as a bare `Error` carrying attacker text: EXECUTED, 5 of 6 keys leaked
+  // (`evidence` only escaped by luck of ordering, because the MAC check fires first,
+  // which is not a guard).
+  //
+  // Each key is now read ONCE, through the guarded reader, into a local, and the
+  // LOCALS are used below — so a differing-return accessor cannot answer one thing to
+  // a presence test and another to the use.
+  //
+  // REASON CHOICE, stated: this reuses the EXISTING `QUALIFICATION_NOT_OBJECT` rather
+  // than adding a vocabulary token. A qualification whose members throw on read is
+  // not readable as a plain data object, and it is the same outward reason the guard
+  // three lines above already uses — a MERGED outward reason, which is this module's
+  // shipped posture (splitting it is what RAC-7's mutation flags as an existence
+  // oracle). The cost is that the two conditions are not distinguishable from
+  // outside; that is deliberate, not an oversight.
+  const readQualificationField = (field) => {
+    try {
+      return qualification[field]
+    } catch (_error) {
+      // Discard unconditionally: no cause, no message, no stack, no class exemption.
+      fail('QUALIFICATION_NOT_OBJECT', 'qualification must be a plain object', {})
+    }
+    return undefined
+  }
+  const claimedStatus = readQualificationField('status')
+  const claimedEnvelopeKeyId = readQualificationField('envelopeKeyId')
+  const claimedEnvelopeMac = readQualificationField('envelopeMac')
+  const claimedDigest = readQualificationField('qualificationDigest')
+  const claimedExpiresAt = readQualificationField('expiresAt')
+  const claimedEvidence = readQualificationField('evidence')
+
   const key = normalizeEnvelopeKey(envelopeKey)
-  if (!QUALIFICATION_STATUSES.includes(qualification.status) || qualification.status !== 'candidate') {
+  if (!QUALIFICATION_STATUSES.includes(claimedStatus) || claimedStatus !== 'candidate') {
     fail('QUALIFICATION_STATUS_INVALID', 'only a candidate qualification is verifiable', {})
   }
   // AUTHENTICATE lifecycle before trusting it (review P1): the MAC is keyed with
   // SERVER-HELD secret material — a caller postponing expiresAt cannot recompute a
   // valid envelope from public values. keyId selects the key (rotation-ready).
-  if (qualification.envelopeKeyId !== key.keyId) {
+  if (claimedEnvelopeKeyId !== key.keyId) {
     fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
   }
   const expectedMac = computeEnvelopeMac({
     envelopeKey: key,
-    qualificationDigest: qualification.qualificationDigest,
-    status: qualification.status,
-    expiresAt: qualification.expiresAt,
+    qualificationDigest: claimedDigest,
+    status: claimedStatus,
+    expiresAt: claimedExpiresAt,
   })
   // strict hex syntax + decoded length BEFORE timingSafeEqual (review P2: a 64-char
   // non-hex MAC made Buffer.from decode short and timingSafeEqual throw
   // ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH — escaping the frozen vocabulary).
-  const provided = typeof qualification.envelopeMac === 'string' ? qualification.envelopeMac : ''
+  const provided = typeof claimedEnvelopeMac === 'string' ? claimedEnvelopeMac : ''
   if (!/^[0-9a-f]{64}$/.test(provided)) {
     fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
   }
@@ -582,9 +617,9 @@ function verifyBindingQualification({ qualification, resolution, envelopeKey, no
     || !crypto.timingSafeEqual(expectedBuffer, providedBuffer)) {
     fail('QUALIFICATION_ENVELOPE_MISMATCH', 'qualification lifecycle fields are not authenticated', {})
   }
-  if (qualification.expiresAt !== undefined) {
+  if (claimedExpiresAt !== undefined) {
     const nowInstant = Date.parse(requiredUtcInstant(now, 'now'))
-    const expiresInstant = Date.parse(requiredUtcInstant(qualification.expiresAt, 'expiresAt'))
+    const expiresInstant = Date.parse(requiredUtcInstant(claimedExpiresAt, 'expiresAt'))
     if (expiresInstant <= nowInstant) {
       fail('QUALIFICATION_EXPIRED', 'qualification expired; a fresh Preflight is required', {})
     }
@@ -595,9 +630,9 @@ function verifyBindingQualification({ qualification, resolution, envelopeKey, no
     configContentKey: resolution.configContentKey,
     objectKey: resolution.objectKey,
     canonicalObjectVersion: resolution.canonicalObjectVersion,
-    evidence: qualification.evidence,
+    evidence: claimedEvidence,
   })
-  if (recomputed !== qualification.qualificationDigest) {
+  if (recomputed !== claimedDigest) {
     // Input-binding violation (cross-object / cross-config reuse, or tampering).
     fail('QUALIFICATION_DIGEST_MISMATCH', 'qualification does not bind these inputs', {})
   }

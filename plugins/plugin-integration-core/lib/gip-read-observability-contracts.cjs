@@ -143,13 +143,19 @@ const CAPABILITY_HANDSHAKE_REQUEST_KEYS = Object.freeze([
   'configVersion',
 ])
 // The ENFORCEMENT set is DERIVED from the exported frozen array, and its MEMBERSHIP
-// is pinned in the suite (OB-1, B1a-3 round 3). Before that pin existed, the closed
-// key set was pinned only by (a) the exported array and (b) one literal extra-key
-// name in a refusal case — so widening this Set by ONE NAMED key
-// (`new Set([...CAPABILITY_HANDSHAKE_REQUEST_KEYS, 'debugPayload'])`) left the whole
-// suite GREEN: the array was unchanged and the named key still refused. Executed and
-// confirmed GREEN before the fix. The pin is now on this Set's exact membership, so
-// any widening — named or permissive — reds.
+// is pinned in the suite (OB-1, B1a-3 round 3) via a FROZEN SNAPSHOT in `__internals`.
+// Before that pin existed, the closed key set was pinned only by (a) the exported
+// array and (b) one literal extra-key name in a refusal case — so widening this Set
+// by ONE NAMED key (`new Set([...CAPABILITY_HANDSHAKE_REQUEST_KEYS, 'debugPayload'])`)
+// left the whole suite GREEN: the array was unchanged and the named key still
+// refused. Executed and confirmed GREEN before the fix.
+//
+// SCOPE THE PIN HONESTLY. It catches a widening WRITTEN INTO THIS FILE — that is the
+// mutation class it is built for. It does NOT make the Set immutable: a `Set` cannot
+// be frozen (`Object.freeze` does not cover internal slots), so any module holding a
+// reference could still `.add()` at runtime. What round 3 removed is the reference:
+// `__internals` now exports frozen ARRAY SNAPSHOTS, not the Sets themselves, so this
+// module hands out no mutable authority.
 const REQUEST_KEY_SET = new Set(CAPABILITY_HANDSHAKE_REQUEST_KEYS)
 
 const CAPABILITY_HANDSHAKE_EXPECTATION_KEYS = Object.freeze([
@@ -226,11 +232,21 @@ module.exports = {
     isPlainObject,
     assertClosedKeySet,
     hasControlCharacter,
-    // Exposed SO THAT THEIR MEMBERSHIP CAN BE PINNED (OB-1). These are the objects
-    // the enforcement actually consults; pinning only the exported arrays leaves a
-    // one-named-key widening of these Sets undetected.
-    REQUEST_KEY_SET,
-    EXPECTATION_KEY_SET,
-    COUNTER_SAMPLE_KEYS,
+    // FROZEN ARRAY SNAPSHOTS of the enforcement Sets, exposed SO THAT THEIR
+    // MEMBERSHIP CAN BE PINNED (OB-1): pinning only the exported key ARRAYS leaves a
+    // one-named-key widening of the Sets undetected.
+    //
+    // SNAPSHOTS, NOT THE SETS. Exporting the live `Set`s was the first attempt and it
+    // was WRONG: `Object.freeze` does not stop `Set.prototype.add` (internal slots,
+    // not properties), so `require(...).__internals.REQUEST_KEY_SET.add('x')` would
+    // widen the enforcement AT RUNTIME with nothing reding — verified by execution
+    // before this correction. That is the same class the executor module refuses by
+    // name ("reachable by require(), so a trust-granting verb there is the identical
+    // hole one namespace deeper"). A frozen array cannot be added to, and it is
+    // taken at module load, so a later `.add()` on the real Set makes the snapshot
+    // and the Set disagree — which the membership pin catches.
+    REQUEST_KEY_SET_MEMBERS: Object.freeze([...REQUEST_KEY_SET].sort()),
+    EXPECTATION_KEY_SET_MEMBERS: Object.freeze([...EXPECTATION_KEY_SET].sort()),
+    COUNTER_SAMPLE_KEY_MEMBERS: Object.freeze([...COUNTER_SAMPLE_KEYS].sort()),
   },
 }

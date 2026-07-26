@@ -284,13 +284,24 @@ function exportSurfaceIsPinned() {
     'evaluateCapabilityHandshake',
   ])
   assert.deepEqual(keySet(moduleExports.__internals), [
-    'COUNTER_SAMPLE_KEYS',
-    'EXPECTATION_KEY_SET',
-    'REQUEST_KEY_SET',
+    'COUNTER_SAMPLE_KEY_MEMBERS',
+    'EXPECTATION_KEY_SET_MEMBERS',
+    'REQUEST_KEY_SET_MEMBERS',
     'assertClosedKeySet',
     'hasControlCharacter',
     'isPlainObject',
   ])
+  // NO MUTABLE AUTHORITY LEAVES THE MODULE. `Object.freeze` does not stop
+  // `Set.prototype.add`, so exporting the live enforcement Sets would let any
+  // importer widen the closed key set at runtime with nothing reding. The snapshots
+  // are frozen ARRAYS, and an array genuinely cannot be added to.
+  for (const name of ['REQUEST_KEY_SET_MEMBERS', 'EXPECTATION_KEY_SET_MEMBERS', 'COUNTER_SAMPLE_KEY_MEMBERS']) {
+    const snapshot = moduleExports.__internals[name]
+    assert.ok(Array.isArray(snapshot), `${name} must be an array snapshot, never the live Set`)
+    assert.ok(!(snapshot instanceof Set), `${name} must not be a Set`)
+    assert.ok(Object.isFrozen(snapshot), `${name} must be frozen`)
+    assert.throws(() => { snapshot.push('widened') }, `${name} must refuse a push`)
+  }
   assert.deepEqual([...OBSERVABILITY_CONTRACT_ERROR_REASONS], [
     'COUNTER_SAMPLE_INVALID',
     'COUNTER_SAMPLE_NOT_VALUES_FREE',
@@ -361,20 +372,22 @@ function latentByEnumeration() {
 // they are not substitutes.
 // ---------------------------------------------------------------------------
 function enforcementSetsArePinnedByMembership() {
-  const { REQUEST_KEY_SET, EXPECTATION_KEY_SET, COUNTER_SAMPLE_KEYS } = moduleExports.__internals
+  const {
+    REQUEST_KEY_SET_MEMBERS, EXPECTATION_KEY_SET_MEMBERS, COUNTER_SAMPLE_KEY_MEMBERS,
+  } = moduleExports.__internals
 
   // MEMBERSHIP EQUALITY against the exported frozen arrays — one extra member in the
   // enforcement Set reds here, however plausible its name.
-  assert.deepEqual([...REQUEST_KEY_SET].sort(), [...CAPABILITY_HANDSHAKE_REQUEST_KEYS].sort())
-  assert.deepEqual([...EXPECTATION_KEY_SET].sort(), [...CAPABILITY_HANDSHAKE_EXPECTATION_KEYS].sort())
-  assert.deepEqual([...COUNTER_SAMPLE_KEYS].sort(), [...UNORDERED_OFFSET_ATTEMPT_COUNTER.sampleKeys].sort())
-  assert.equal(REQUEST_KEY_SET.size, CAPABILITY_HANDSHAKE_REQUEST_KEYS.length)
-  assert.equal(EXPECTATION_KEY_SET.size, CAPABILITY_HANDSHAKE_EXPECTATION_KEYS.length)
-  assert.equal(COUNTER_SAMPLE_KEYS.size, UNORDERED_OFFSET_ATTEMPT_COUNTER.sampleKeys.length)
+  assert.deepEqual([...REQUEST_KEY_SET_MEMBERS], [...CAPABILITY_HANDSHAKE_REQUEST_KEYS].sort())
+  assert.deepEqual([...EXPECTATION_KEY_SET_MEMBERS], [...CAPABILITY_HANDSHAKE_EXPECTATION_KEYS].sort())
+  assert.deepEqual([...COUNTER_SAMPLE_KEY_MEMBERS], [...UNORDERED_OFFSET_ATTEMPT_COUNTER.sampleKeys].sort())
+  assert.equal(REQUEST_KEY_SET_MEMBERS.length, CAPABILITY_HANDSHAKE_REQUEST_KEYS.length)
+  assert.equal(EXPECTATION_KEY_SET_MEMBERS.length, CAPABILITY_HANDSHAKE_EXPECTATION_KEYS.length)
+  assert.equal(COUNTER_SAMPLE_KEY_MEMBERS.length, UNORDERED_OFFSET_ATTEMPT_COUNTER.sampleKeys.length)
 
   // POSITIVE CONTROL for the membership assertions: the comparison must be shown to
   // DISTINGUISH — an all-equal comparator would pass the three lines above vacuously.
-  assert.notDeepEqual([...REQUEST_KEY_SET].sort(),
+  assert.notDeepEqual([...REQUEST_KEY_SET_MEMBERS],
     [...CAPABILITY_HANDSHAKE_REQUEST_KEYS, 'debugPayload'].sort())
 
   // BEHAVIOURAL, and complementary: a NOVEL key name generated at run time — a name
@@ -383,7 +396,7 @@ function enforcementSetsArePinnedByMembership() {
   const novelRequestKey = `k_${require('node:crypto').randomBytes(12).toString('hex')}`
   const novelExpectationKey = `k_${require('node:crypto').randomBytes(12).toString('hex')}`
   const novelSampleKey = `k_${require('node:crypto').randomBytes(12).toString('hex')}`
-  assert.ok(!REQUEST_KEY_SET.has(novelRequestKey))
+  assert.ok(!REQUEST_KEY_SET_MEMBERS.includes(novelRequestKey))
 
   const validRequest = { clientBuild: 'b', connectorProtocolVersion: 1, profileId: 'p', configVersion: 1 }
   const validExpectation = { minimumConnectorProtocolVersion: 1, requiredConfigVersion: 1 }
