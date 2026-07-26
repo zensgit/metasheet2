@@ -13,14 +13,17 @@ import {
 // #4612 gate4 round 4 (P3-4): the W4C-2 attendance real-DB suites had NO source-level two-point
 // wiring guard of their own.
 // #4612 gate4 round 5 correction: this is NOT "every OTHER family already has one". Checked
-// directly: `multitable`, whose real-DB step runs 216 `multitable-*` files, has no suite-level
-// guard of its own either — only 2 of those 216 files are incidentally named by a DIFFERENT
-// family's guard (b7/t2), not by any multitable-owned *-ci-wiring.test.mjs. Counted across the
+// directly: `multitable` (216 `multitable-*` files across this workflow's three real-DB steps'
+// file lists — 203 run by multitable's own step, the remaining 13 run by attendance's step) has
+// no suite-level guard of its own — none of the 17 files in scripts/ops/*-ci-wiring.test.mjs is
+// multitable-owned. Only 2 of the 216 are incidentally named, by
+// `approval-data-closure-ci-wiring.test.mjs` (a DIFFERENT family's guard, listing two multitable
+// fixtures its own suites share DML with) — not by any multitable-owned guard. Counted across the
 // three real-DB steps' de-duplicated file union (365 files), the 16 pre-existing guards together
 // name 30 of them (approval, PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's 7 files were
-// not among the 30. The other 335 — including all 216 multitable files — are outside every
-// existing guard's scope, guard or no guard. This closes attendance's own gap; it does not close
-// "the last" gap in the workflow.
+// not among the 30. The other 335 — multitable's 216 included — are outside every existing
+// guard's file list. This closes attendance's own gap; it does not close "the last" gap in the
+// workflow.
 // This is the exact skip-green shape gate4 caught for THIS PR's own primary evidence file
 // (attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts) earlier in this same PR's history —
 // present in the run-list, but the matching vitest.config.ts exclude line was missing, so the
