@@ -4,9 +4,118 @@
 真库：Stage A/B 用 `ms2_w4c2`；Stage C 第三棒基线/验证用**全新** `ms2_w4c2_relay3`（基线）
 与 `ms2_w4c2_relay3b`（cutover 后），CI 同构 MIGRATION_EXCLUDE 全链迁移，postgres@127.0.0.1。
 
-**状态总览：Stage A + B + C + D + Stage E（第五棒，commit `c44e18440`：§12.3 残余门矩阵
-13 腿真库套件 + 两点接线补漏 + ME1-ME5 mutation）DONE。剩余：Stage F（mutation 汇总表 +
-PR，body 呈裁点 1-15 全列）。**
+**状态总览：Stage A + B + C + D + E + Stage F（第六棒，本次：mutation 汇总 + advisor 判定
+两项净新验证缺口补齐 + P02/P03/P04 collector marker 独立刀 + 全量回归 + PR）DONE。**
+**PR #TBD（open，not armed），base=main，head=本分支 HEAD。**
+
+---
+
+## Stage F — mutation 汇总 + PR（DONE，第六棒）
+
+### 净新验证（advisor 判定：字节红线此前只有「计数相等」，未证「基线真能翻红」；已补两刀）
+
+- **Cut A（可达性）**：neuter `w4c2-live-scheduled-boundary.ts` executeLivePunch 的
+  null-ID+`legacy_projection_only` 短路分支（条件恒 false），null-ID 打卡改走完整
+  registry 协议。落点 ~L704。**scoped 到 `attendance-plugin.test.ts`（162 腿，
+  全新库）**：**9 红/153 绿**（非 vacuous——证明 default org 的既有 baseline 确实
+  在打这条短路分支；红的腿全部因打卡返回 403
+  `ATTENDANCE_WRITE_NOT_AUTHORIZED`——registry 协议对 null operationId 的拒绝码，
+  非我预期的 `W4C0_OPERATION_ID_REQUIRED` 字面，但同一防线，判别力成立）。
+- **Cut B（字节保真度）**：`applyLivePunchProjectionLegacyV1`（index.cjs ~L21275）
+  返回值丢弃 `workDateResolution` 键（`{ event, record }`，去掉第三键）。
+  **scoped 到两套件**（boundary wiring + posture-matrix，全新库）：**恰 3 红**
+  （wiring 1 腿 + matrix legacy/shadow 两腿，均是 pin 死
+  `Object.keys(res.body.data).sort()===['event','record','workDateResolution']`
+  的精确形状腿）；7 绿。Cut A 证「baseline 到达这条代码路径」，Cut B 证「wire body
+  的具体字节被断言」——两刀合证字节红线非计数糊弄。
+- **scheduled-side 共享 resolver 移除判别腿（区别于 W4C-0 三 helper 单 catch 证明，
+  本片自己的调用点）**：`executeScheduledRun` 探测事务内的
+  `resolveSegmentCalculationPosture(trx, orgKey)`（~L1035）改成恒查一个不存在的
+  org key（`00000000-...`），live 侧对应调用（~L698）不动。**scoped 到三套件**（
+  boundary wiring + posture-matrix + gate-matrix-e5，23 腿合跑）：**恰 3 红**——
+  gate-matrix-e5 leg 6（authoritative 双入口，只有 admin_run 半面红，live 半面绿）
+  + leg 9（durable scheduled replay，op 计数归零）+ boundary wiring 的 suspended
+  scheduled 腿；posture-matrix 5/5 全绿、boundary wiring 的 live 腿全绿——live/
+  scheduled 排他证明成立，非 W4C-0 已证面的重复引用。
+
+### collector P01-P04「removed independently」逐 marker 独立刀（Stage C 呈裁点未竟项清账）
+
+MC5（第三棒）只刀过 P01。本棒补 P02/P03/P04 三刀，每刀单独移除该 marker 的
+`canonicalizedBy: 'W4C-2'` 字段（P02/P04 的 claim 谓词维持不动，P04 与 P03 共享同一
+claim 站点这一既有事实也不受影响）：
+
+- P02 刀：**恰 1 红**（14 测试中 13 绿/1 红，红=line 217 assert，消息
+  `P02 (merge second-pass) must be removed-by-adapter`）。
+- P03 刀：**恰 1 红**（line 218，`P03 (cron absence) must be removed-by-adapter`）。
+- P04 刀：**恰 1 红**（line 219，`P04 (administrator absence run) must be
+  removed-by-adapter`）。
+
+四刀（含第三棒 P01/MC5）合起来证明 P01-P04 四个 debt id 的 `canonicalizedBy` 字段
+各自独立可判别——移除任一个只影响该 marker 自己的断言行，不掩护、不连坐。
+
+### 呈裁点 18-19（新增，PR body 必列）
+
+18. **Cut A 的观测错误码非预期字面**：null-ID 落入 W4 registry 协议路径后表面
+    码是 `ATTENDANCE_WRITE_NOT_AUTHORIZED`（403），不是最初设想的
+    `W4C0_OPERATION_ID_REQUIRED`——两者同属 registry 的 fail-closed 防线（witness/
+    envelope 校验序中 authorization context 先于 operationId 存在性检查），
+    实际拒绝点比注释描述的更靠前。不影响判别力结论（baseline 仍确实命中该分支），
+    但注释与实现的顺序描述有出入——本片不改注释，declare 之。
+19. **calculation-group read mutation（W4C-R7）不新造腿**：behavioral backstop
+    在 W4C-1 计算器闭集 schema（`calculationGroupId` → `input_schema_invalid`）
+    已证；W4C-2 边界/frozen-attribution 代码零处引用 calculation_group 表
+    （grep 零命中，含本棒复核）。本片不消费该字段，故不新增静态守卫，亦不新造
+    mutation 腿——引用 W4C-1 既有证据而非重做。
+
+### Stage F 实跑实数
+
+- 全量回归（**全新库 `ms2_w4c2_relay6`**，CI 同构 attendance 步 64 files）：
+  **789 passed**（与 Stage E 一致，零改写零红）。
+- tsc --noEmit exit 0；`node --check index.cjs`/`curated-debt-entries.cjs` OK；
+  plugin-tests.yml YAML parse OK。
+- collector 套件（node:test）：14/14（mutation 轮各自还原后复核）。
+- `git fetch origin main`：origin/main 领先本分支基点 2 commit（`551117bef`
+  `cd2670695`），均未触 attendance/index.cjs/plugin-attendance——未 rebase，PR body
+  须declare。
+
+### Stage F mutation 记账（先 commit 后 mutate，git checkout 精确路径还原，均实跑，diff 核对命中真代码行）
+
+| # | 变异 | Flip set（实测） | 还原核验 |
+|---|---|---|---|
+| MF1 (Cut A) | boundary：null-ID + legacy_projection_only 短路条件恒 false（null-ID 落入完整 registry 协议） | **9 红/153 绿**（`attendance-plugin.test.ts` 单文件，全新库） | git checkout 还原 |
+| MF2 (Cut B) | index.cjs `applyLivePunchProjectionLegacyV1` 返回值丢弃 `workDateResolution` 键 | **恰 3 红**（boundary wiring 1 + posture-matrix legacy/shadow 2，两套件合跑 10 腿）；7 绿 | 同上 |
+| MF3 | boundary `executeScheduledRun` 探测事务内 posture 解析改查恒定不存在 org key（live 侧 ~L698 不动） | **恰 3 红**（三套件合跑 23 腿）：gate-matrix-e5 leg 6 admin_run 半面 + leg 9 + boundary wiring suspended-scheduled 腿；posture-matrix 5/5 与 live 腿全绿——排他 | 同上 |
+| MF4 | curated-debt-entries.cjs：删 P02 `canonicalizedBy` | **恰 1 红**（14 测试中 13/14，line 217） | 同上 |
+| MF5 | curated-debt-entries.cjs：删 P03 `canonicalizedBy` | **恰 1 红**（13/14，line 218） | 同上 |
+| MF6 | curated-debt-entries.cjs：删 P04 `canonicalizedBy` | **恰 1 红**（13/14，line 219） | 同上 |
+
+### 全线 mutation 汇总表（MA-MF，含 run-by 溯源列——第一手实跑 vs 继承引用）
+
+| # | 阶段 | Run by（relay） | 变异 | Flip set | 备注 |
+|---|---|---|---|---|---|
+| MA1 | A | relay1（第一棒，继承记账） | 默认规则路由删 strict IANA 检查 | 恰2红/6绿 | timezone 写入门 |
+| MA2 | A | relay1（继承） | helper 换本地 loose 校验 | 恰3红 | offset-form 判别 |
+| MB1 | B | relay1（继承，首刀误中注释已重打） | dispatcher SQL 去 SKIP LOCKED | 恰1红（rendezvous 超时） | 教训已记 |
+| MB2 | B | relay1（继承） | dispatcher 不 emit 直接 delivered | 3红/2绿 | at-least-once |
+| MC1 | C | relay3（继承） | `runAutoAbsenceForOrgDate` 强制 w4Boundary=null | 恰1红（suspended 腿） | scheduled 绕过 |
+| MC3 | C | relay3（继承） | executeLivePunch 强制 rolloutKey=null | 恰2红 | live 绕过 |
+| MC5 | C | relay3（继承） | 删 P01 `canonicalizedBy` | 恰1红（13/14） | collector marker |
+| MD1 | D | relay4（继承） | legacyOnlyTime 检测 neuter | 恰3红 | 三姿态矩阵 |
+| MD2 | D | relay4（继承） | 省略 shadow review insert | 恰1红 | omit-review 排他 |
+| MD3 | D | relay4（继承） | eligible 拒绝条件错放宽 | 恰2红，腿3保持绿 | reject-legacy 排他 |
+| MD4 | D | relay4（继承） | drain worker 去 env-gate | 恰1红（两套件10腿） | no-env vs env-present 排他对 |
+| MD5 | D | relay4（继承） | END_MISMATCH 检查 neuter | 恰1红 | freeze 漂移 |
+| ME1 | E | relay5（继承） | outbox enqueue 挪到 seal 之后 | 恰1红（18腿合跑） | 顺序判别独占 |
+| ME2 | E | relay5（继承） | P02 changed 分支复活第一写 | 恰1红 | 写次数半面 |
+| ME3 | E | relay5（继承） | merge decision 恒走 append | 恰1红（与ME2翻不同断言） | 语义半面 |
+| ME4 | E | relay5（继承） | scheduled runId 改 randomUUID | 恰1红 | 决定性判别 |
+| ME5 | E | relay5（继承） | actor membership recheck 恒跳过 | 恰1红（21腿合跑） | forged witness |
+| MF1 | F | **relay6（第六棒新跑）** | null-ID+legacy 短路 neuter（可达性） | 9红/153绿 | advisor 判定净新 |
+| MF2 | F | **relay6（新跑）** | legacy 响应丢 workDateResolution 键（字节保真） | 恰3红/7绿 | advisor 判定净新 |
+| MF3 | F | **relay6（新跑）** | scheduled-side posture resolver 调用点移除 | 恰3红（23腿合跑） | resolver 排他，本片自证 |
+| MF4 | F | **relay6（新跑）** | 删 P02 marker | 恰1红（13/14） | 未竟项清账 |
+| MF5 | F | **relay6（新跑）** | 删 P03 marker | 恰1红（13/14） | 未竟项清账 |
+| MF6 | F | **relay6（新跑）** | 删 P04 marker | 恰1红（13/14） | 未竟项清账 |
 
 ---
 
