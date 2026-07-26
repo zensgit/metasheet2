@@ -957,6 +957,7 @@ jobs:
             tests/integration/attendance-w4c2-posture-matrix.db.test.ts \
             tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts \
             tests/integration/attendance-w4c2-p2-remediation.db.test.ts \
+            tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
