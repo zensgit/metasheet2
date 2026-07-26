@@ -1367,11 +1367,20 @@ export function createAttendanceLiveScheduledBoundaryV1(
           //      regex; this is NOT a "malformed row" case, it is legal per
           //      every CHECK/uniqueness constraint the table has, so it IS
           //      directly constructible in a real-DB test fixture, same as
-          //      (iii) — but the canonical writer's own input validation
-          //      (`SEGMENT_INPUT_TIME_PATTERN` in
+          //      (iii) — but the shift service's create/update path's own
+          //      input validation (`SEGMENT_INPUT_TIME_PATTERN` in
           //      `attendance-shift-service.cjs`, strict `HH:MM`, no seconds)
-          //      rejects anything but exact minute-granularity, so it never
-          //      produces one in production either; (v) a segment's
+          //      rejects anything but exact minute-granularity, so THAT path
+          //      never produces one either. NOT independently checked here:
+          //      the one-time migration backfill
+          //      (`zzzz20260724120000_create_attendance_shift_segments.ts`)
+          //      is a SEPARATE writer — it derives segment 0's `start_time`/
+          //      `end_time` from the shift's own legacy `work_start_time`/
+          //      `work_end_time` columns, not from validated create/update
+          //      input, and runs once at migrate time rather than on the
+          //      ongoing write path; whether those legacy columns can
+          //      themselves carry sub-second precision is not analyzed here;
+          //      (v) a segment's
           //      `start_day_offset !== 0` (ruled out the same way as (ii) —
           //      `chk_attendance_shift_segments_start_day_offset` CHECK
           //      forces `start_day_offset = 0`, so this disjunct of the
@@ -1418,9 +1427,14 @@ export function createAttendanceLiveScheduledBoundaryV1(
           //      (via (iii)), giving the identity conjunct a genuine
           //      discriminating leg (closing the untested-guard gap gate4
           //      found; the fingerprint conjunct remains the only conjunct
-          //      that mutation-discriminates every well-formed-shift leg in
-          //      the suite). See that test's own comment and the leg-map
-          //      atop the file for the mutation evidence.
+          //      with an EXCLUSIVE mutation-discriminating leg among the
+          //      well-formed-shift legs (L6: neutering fingerprint alone
+          //      reds ONLY L6) — Group D / Group D-overnight are DOUBLE-
+          //      covered well-formed-shift legs (neutering either conjunct
+          //      alone leaves them green; both must be neutered to red
+          //      them), not legs the fingerprint conjunct alone
+          //      discriminates). See that test's own comment and the
+          //      leg-map atop the file for the mutation evidence.
           //
           //  Letter note (#4612 gate4 round 3, P3-1/P3-2 fix): this
           //  sub-enumeration was previously five items (i)-(v) and mis-

@@ -4,7 +4,6 @@ import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
-  REAL_DB_STEP_IDS,
   extractStepById,
   stepHasEnvDatabaseUrl,
   stepInvokesVitestIntegrationConfig,
@@ -29,12 +28,20 @@ import {
 // which is a SUPERSET of the sibling steps' coverage, not a narrower pin. This guard therefore
 // does not call `requireExecutableRealDbStep`/`isSuiteWiredInRealDbStep` (which hard-require that
 // exact `if:` string and would wrongly reject this step as "not executable"); it composes the
-// equivalent checks from the lower-level exports instead, with a pin that accepts "no restrictive
-// `if:` at all" as at least as strong as the 20.x-only pin: an `if:` that excludes the required
-// 20.x leg (or any other value) is refused, but an ABSENT `if:` (today's real shape) is not.
+// equivalent checks from the lower-level exports instead, with an AFFIRMATIVE allowlist: only
+// an ABSENT `if:` (today's real shape) or an equality comparison against '20.x' is accepted —
+// see `requireAttendanceRealDbStepExecutable` below for why a substring/negative-match test on
+// `if:` is not safe here (the `!= '20.x'` idiom already appears three steps above this one).
+//
+// For the SAME reason, this step's id is NOT added to the shared, frozen `REAL_DB_STEP_IDS` in
+// `ci-realdb-step-contract.mjs`: that object is iterated by the already-existing
+// `t2gate-collision-mechanism-ci-wiring.test.mjs`, which asserts the FULL 20.x-only four-pin
+// contract on every entry — adding a step with a genuinely different contract there would break
+// that sibling guard (verified: it does, caught by running the full `*-ci-wiring.test.mjs` sibling
+// suite before landing). This step's id is kept local to this file instead.
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
-const STEP_ID = REAL_DB_STEP_IDS.attendance
+const STEP_ID = 'attendance-real-db-integration'
 
 const FILES = Object.freeze([
   'tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts',
@@ -61,13 +68,26 @@ function requireAttendanceRealDbStepExecutable() {
         + `by name prefix`,
     )
   }
+  // Affirmative allowlist, not a substring/negative-match test: a naive
+  // `!/20\.x/.test(cond)` check would WRONGLY PASS `if: matrix.node-version != '20.x'`
+  // (the literal substring "20.x" is present even though the condition EXCLUDES that
+  // leg) — and that exact negated-comparison idiom is already used three steps above
+  // this one ("Build web app": `if: matrix.node-version != '18.x'`), so it is not a
+  // hypothetical bypass. Only two shapes are accepted: no `if:` at all (today's real
+  // shape — the step runs unconditionally on both matrix legs), or an `if:` that is
+  // an EQUALITY comparison against '20.x' specifically. Everything else — including
+  // any `!=` form, `false`, or a comparison against a different value — is refused.
   const cond = typeof step.if === 'string' ? step.if.trim() : step.if
-  const excludesRequiredLeg = cond != null && !/20\.x/.test(String(cond))
-  if (excludesRequiredLeg) {
+  const isUnconditional = cond == null
+  const isAffirmativeEquals20x = typeof cond === 'string'
+    && /^matrix\.node-version\s*==\s*['"]20\.x['"]$/.test(cond)
+  if (!isUnconditional && !isAffirmativeEquals20x) {
     throw new Error(
-      `real-DB step id "${STEP_ID}" carries an "if:" (${JSON.stringify(cond)}) that does not `
-        + `mention the required 20.x leg — it must run unconditionally (today's shape) or on `
-        + `20.x, never be narrowed to exclude it`,
+      `real-DB step id "${STEP_ID}" carries an "if:" (${JSON.stringify(cond)}) that is neither `
+        + `absent (unconditional, today's shape) nor an affirmative `
+        + `"matrix.node-version == '20.x'" equality — a negated form `
+        + `("!= '18.x'"/"!= '20.x'") or any other condition can silently exclude the required `
+        + `20.x leg and is refused`,
     )
   }
   if (!stepHasEnvDatabaseUrl(step)) {

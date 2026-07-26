@@ -80,19 +80,25 @@
 import { spawnSync } from 'node:child_process'
 
 /**
- * Stable `id:` values of the real-DB steps in .github/workflows/plugin-tests.yml.
+ * Stable `id:` values of the real-DB steps in .github/workflows/plugin-tests.yml that share
+ * THIS module's `requireExecutableRealDbStep` four-pin contract (all four pins, including
+ * `if: matrix.node-version == '20.x'`, hold for both entries).
  *
- * `attendance` (added #4612 gate4 round 4, P3-4) is a THIRD, distinct real-DB step ("Run
- * attendance integration tests") — unlike `approval`/`multitable`, it runs UNCONDITIONALLY on
- * both matrix legs (no `if: matrix.node-version == '20.x'` pin), so `requireExecutableRealDbStep`
- * below (which hard-requires that exact `if:` string) does not apply to it as-is; the
- * attendance-w4c2-ci-wiring guard composes its own equivalent pin from the lower-level exports
- * instead of calling that function directly. See that guard file's own comment.
+ * DELIBERATELY DOES NOT include the third real-DB step, "Run attendance integration tests"
+ * (id `attendance-real-db-integration`, added #4612 gate4 round 4, P3-4): that step runs
+ * UNCONDITIONALLY on both matrix legs (no `if:` pin at all) rather than being restricted to
+ * 20.x, so it does not satisfy pin (a) as this module defines it. `t2gate-collision-mechanism-
+ * ci-wiring.test.mjs` iterates `Object.values(REAL_DB_STEP_IDS)` and asserts the FULL four-pin
+ * contract (including 20.x-only) on every entry — adding `attendance` here once made that
+ * existing, already-wired guard fail for a step that was never meant to satisfy that pin (caught
+ * by running the full `scripts/ops/*-ci-wiring.test.mjs` sibling suite before landing, #4612
+ * gate4 round 4). The attendance step's own id is instead a local constant in
+ * `attendance-w4c2-ci-wiring.test.mjs`, which composes its own (looser, "unconditional-or-20.x")
+ * equivalent of pin (a) from the lower-level exports below instead of this frozen allowlist.
  */
 export const REAL_DB_STEP_IDS = Object.freeze({
   approval: 'approval-real-db-integration',
   multitable: 'multitable-real-db-integration',
-  attendance: 'attendance-real-db-integration',
 })
 
 // ---------------------------------------------------------------------------
