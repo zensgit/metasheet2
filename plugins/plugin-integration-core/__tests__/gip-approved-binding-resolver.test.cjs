@@ -495,7 +495,14 @@ async function refusalsAreValuesFreeAndClosed() {
     enumerable: true, get() { throw new Error(ATTACKER) },
   })
   const resolver = resolverOver([rowFor('cfg-1', body())])
-  observed.push((await refusesWithAsync(() => resolver.resolveApprovedBinding(hostileRun), 'RESOLVER_RUN_INPUT_INVALID')).message)
+  // B1a-3 round 5: the token moved from RESOLVER_RUN_INPUT_INVALID to
+  // RESOLVER_INPUT_HOSTILE, and the move is the POINT rather than a regression. The
+  // throwing getter used to be caught late, by `readIdentityToken`'s own guarded read
+  // AFTER the allowlist had run. It is now caught at FIRST TOUCH by the inert-entry
+  // gate, before any shape check — which is precisely the ordering round 4 showed was
+  // missing, when `isPlainObject`'s unguarded prototype interrogation leaked BEFORE
+  // the allowlist. A hostile input is now reported as hostile, not as malformed.
+  observed.push((await refusesWithAsync(() => resolver.resolveApprovedBinding(hostileRun), 'RESOLVER_INPUT_HOSTILE')).message)
 
   const ownKeysBomb = new Proxy({ ...RUN }, { ownKeys() { throw new Error(ATTACKER) } })
   observed.push((await refusesWithAsync(() => resolver.resolveApprovedBinding(ownKeysBomb), 'RESOLVER_INPUT_HOSTILE')).message)
@@ -550,6 +557,8 @@ async function refusalsAreValuesFreeAndClosed() {
     'RESOLVER_SYSTEM_IDENTITY_UNAVAILABLE',
     'RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED',
     'RESOLVER_RESOLUTION_NOT_TRUSTED',
+    // B1a-3 round 5. L2-ONLY token — see `entryTableIsGated`.
+    'RESOLVER_ENTRY_NOT_INERT',
   ])
   assert.ok(Object.isFrozen(BINDING_RESOLVER_ERROR_REASONS))
 }

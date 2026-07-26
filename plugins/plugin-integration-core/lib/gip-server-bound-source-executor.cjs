@@ -58,6 +58,13 @@
 // discards unconditionally: no cause, no stack, no message, no class exemption.
 
 const { assertTrustedBindingResolution } = require('./gip-approved-binding-resolver.cjs')
+const {
+  isPlainObject,
+  inertRecord,
+  inertRecordList,
+  createEntryGuard,
+  guardExportTable,
+} = require('./gip-inert-entry.cjs')
 
 const SOURCE_EXECUTOR_ERROR_REASONS = Object.freeze([
   'EXECUTOR_COMPONENTS_INVALID',
@@ -69,6 +76,8 @@ const SOURCE_EXECUTOR_ERROR_REASONS = Object.freeze([
   'PROBE_SOURCE_HANDLE_UNAVAILABLE',
   'PROBE_ACTION_FAILED',
   'PROBE_ANSWER_UNVERIFIABLE',
+  // L2 ONLY — emitted by the entry boundary and by no path inside this module.
+  'EXECUTOR_ENTRY_NOT_INERT',
 ])
 const ERROR_REASON_SET = new Set(SOURCE_EXECUTOR_ERROR_REASONS)
 
@@ -82,6 +91,7 @@ const ERROR_MESSAGES = Object.freeze({
   PROBE_SOURCE_HANDLE_UNAVAILABLE: 'no source handle is bound to this resolution',
   PROBE_ACTION_FAILED: 'the HTTP probe action did not complete',
   PROBE_ANSWER_UNVERIFIABLE: 'the HTTP probe action returned no verifiable values-free answer',
+  EXECUTOR_ENTRY_NOT_INERT: 'a public entry point was reached with data that could not be made inert',
 })
 
 class GipSourceExecutorError extends Error {
@@ -135,11 +145,14 @@ function safeLength(value, reason) {
   return raw
 }
 
-function isPlainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const proto = Object.getPrototypeOf(value)
-  return proto === Object.prototype || proto === null
-}
+// `isPlainObject` is the SHARED strict predicate from the inert-entry gate. Before
+// round 5 this exact five-line function existed as THREE byte-identical copies, one
+// per module, each carrying the same unguarded `Object.getPrototypeOf` — which is how
+// one trap produced the same P1 in three places at once. It stays UNGUARDED by
+// design: it runs only on already-inert values, and a self-guarding predicate would
+// cover for the gate and destroy the gate's exclusive failure.
+const failEntryNotInert = () => fail('EXECUTOR_ENTRY_NOT_INERT')
+const guardEntry = createEntryGuard(GipSourceExecutorError, failEntryNotInert)
 
 function hasControlCharacter(text) {
   for (let index = 0; index < text.length; index += 1) {
@@ -248,7 +261,11 @@ function normalizeActionDeclaration(entry) {
 }
 
 // EXPORTED, BUILD-ONLY. Its product is NOT trusted.
-function createHttpProbeActionRegistry(entries) {
+function createHttpProbeActionRegistry(rawEntries) {
+  // L1 — FIRST TOUCH. Two levels: the array and each declaration record. The
+  // declarations' `sourceFieldFor` / `execute` members are carried BY IDENTITY —
+  // a snapshot of a function is not a function anyone can call.
+  const entries = inertRecordList(rawEntries, () => fail('EXECUTOR_INPUT_HOSTILE'))
   if (!Array.isArray(entries)) fail('PROBE_ACTION_DECLARATION_INVALID')
   const count = safeLength(entries, 'EXECUTOR_INPUT_HOSTILE')
   const byProfile = new Map()
@@ -311,7 +328,10 @@ const trustedSourceBinders = new WeakSet()
 // whole of B-1's mechanism: the handle demonstrably derives from each resolution's
 // own system record, so one executor answer cannot satisfy two differently-bound
 // resolutions.
-function createHarnessSourceBinderForTests(entries) {
+function createHarnessSourceBinderForTests(rawEntries) {
+  // L1 — FIRST TOUCH. Two levels: the array and each entry record. `credentialFactory`
+  // is carried BY IDENTITY, because it has to remain callable.
+  const entries = inertRecordList(rawEntries, () => fail('EXECUTOR_INPUT_HOSTILE'))
   if (!Array.isArray(entries)) fail('EXECUTOR_COMPONENTS_INVALID')
   const count = safeLength(entries, 'EXECUTOR_INPUT_HOSTILE')
   const bySystemContentKey = new Map()
@@ -334,7 +354,33 @@ function createHarnessSourceBinderForTests(entries) {
     } catch (_error) {
       fail('EXECUTOR_COMPONENTS_INVALID')
     }
-    if (!handle || typeof handle !== 'object' || typeof handle.execute !== 'function') {
+    // (α) — THIS READ IS DELIBERATELY *NOT* COVERED BY THE INERT-ENTRY GATE, and the
+    // reason is the ruling itself, not convenience. B1a-3 round 4 found this site
+    // leaking: the factory CALL was wrapped (three lines up) while
+    // `typeof handle.execute !== 'function'` was read RAW one line later, on a value
+    // the connector fully controls — so a handle whose `execute` is a throwing getter,
+    // or a Proxy with a `get` trap, escaped as a bare `Error` carrying the connector's
+    // text. 2 of 2 constructions leaked. The comment directly above already stated the
+    // invariant that read violated.
+    //
+    // The gate is the wrong instrument HERE. `inertRecord` works by ENUMERATING a
+    // value's own property names and symbols and reading every one of them. Decision
+    // (α) requires that the authentication secret is "consumed inside the boundary by
+    // a connector-owned factory returning an OPAQUE HANDLE / execution closure, never
+    // reachable from the executor" — and enumerating the handle is precisely how the
+    // executor would come to hold, see and be able to list whatever the handle carries.
+    // Snapshotting here would close a leak channel by opening the exact channel the
+    // ruling exists to forbid.
+    //
+    // So the read is guarded EXPLICITLY, with the same unconditional discard, and the
+    // ORIGINAL handle is retained by identity: no copy, no enumeration, no property
+    // list. `typeof` cannot run caller code, so the object test is safe raw; only the
+    // member read needs the guard. The suite pins the identity (`handleFor(k)` must be
+    // `===` the object the factory returned), which is the mechanical proof that no
+    // enumeration happened — without it, "we did not copy the handle" is only a
+    // comment, and a later "helpful" edit routing this through the gate would pass.
+    if (!handle || typeof handle !== 'object') fail('EXECUTOR_COMPONENTS_INVALID')
+    if (typeof safeRead(handle, 'execute', 'EXECUTOR_COMPONENTS_INVALID') !== 'function') {
       fail('EXECUTOR_COMPONENTS_INVALID')
     }
     // FAIL CLOSED ON A DUPLICATE (B1a-3 round 4, NIT). This used to be a bare
@@ -459,7 +505,11 @@ async function executeOrderingKeyProbeInternal(bound, resolution) {
 // The service factory. Authority is CLOSURE-BOUND at construction; the per-call
 // entry point takes a resolution and nothing else, so there is no seam through
 // which a caller could pass a registry, a binder, a handle or a query.
-function createServerBoundSourceExecutor(components) {
+function createServerBoundSourceExecutor(rawComponents) {
+  // L1 — FIRST TOUCH. ONE level: both members are admitted by `WeakSet.has`, which
+  // reads OBJECT IDENTITY, so a deep clone would make every trusted registry and
+  // binder un-admittable. Identity tests run no caller code.
+  const components = inertRecord(rawComponents, () => fail('EXECUTOR_INPUT_HOSTILE'))
   if (!isPlainObject(components)) fail('EXECUTOR_COMPONENTS_INVALID')
   assertClosedKeySet(components, new Set(['actionRegistry', 'sourceBinder']), 'EXECUTOR_COMPONENTS_INVALID')
   const actionRegistry = safeRead(components, 'actionRegistry', 'EXECUTOR_INPUT_HOSTILE')
@@ -468,15 +518,23 @@ function createServerBoundSourceExecutor(components) {
   if (!trustedSourceBinders.has(sourceBinder)) fail('EXECUTOR_COMPONENTS_INVALID')
   const bound = Object.freeze({ actionRegistry, sourceBinder })
   const executor = Object.freeze({
-    executeOrderingKeyProbe(resolution) {
+    // L2 on a RETURNED method. `guardExportTable` covers the export table, not a
+    // method minted per construction — and this one is `async`, so an uncontained
+    // throw becomes a REJECTION that no synchronous boundary sees.
+    executeOrderingKeyProbe: guardEntry(function executeOrderingKeyProbe(resolution) {
       return executeOrderingKeyProbeInternal(bound, resolution)
-    },
+    }),
   })
   trustedServerBoundSourceExecutors.add(executor)
   return executor
 }
 
-module.exports = {
+// L2 — every function-valued export, top level AND `__internals`. `CERTIFIED_HTTP_
+// PROBE_ACTION_REGISTRY` is deliberately NOT rebuilt: it is admitted downstream by
+// `WeakSet.has`, so wrapping it would silently make the certified registry
+// un-admittable. Its two methods are driven through the hostile matrix instead, so
+// the claim that they are inert is EXECUTED rather than asserted.
+module.exports = guardExportTable({
   SOURCE_EXECUTOR_ERROR_REASONS,
   GipSourceExecutorError,
   HTTP_PROBE_ACTION_DECLARATION_KEYS: ACTION_DECLARATION_KEYS,
@@ -494,4 +552,4 @@ module.exports = {
     hasControlCharacter,
     normalizeActionDeclaration,
   },
-}
+}, guardEntry)

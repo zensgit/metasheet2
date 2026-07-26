@@ -847,6 +847,8 @@ async function answerPlaneIsValuesFreeAndForeignTextIsDiscarded() {
     'PROBE_SOURCE_HANDLE_UNAVAILABLE',
     'PROBE_ACTION_FAILED',
     'PROBE_ANSWER_UNVERIFIABLE',
+    // B1a-3 round 5. L2-ONLY token — see `entryTableIsGated`.
+    'EXECUTOR_ENTRY_NOT_INERT',
   ])
 }
 

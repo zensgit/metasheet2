@@ -353,6 +353,10 @@ function exportSurfaceIsPinned() {
     'HANDSHAKE_REQUEST_INVALID',
     'HANDSHAKE_EXPECTATION_INVALID',
     'HANDSHAKE_INPUT_HOSTILE',
+    // B1a-3 round 5. L2-ONLY token: emitted by the entry boundary and by no path
+    // inside the module. It exists so the two fail-closed doors have EXCLUSIVE
+    // failures — see `entryTableIsGated` below.
+    'OBSERVABILITY_ENTRY_NOT_INERT',
   ])
   assert.ok(Object.isFrozen(OBSERVABILITY_CONTRACT_ERROR_REASONS))
 }
@@ -394,10 +398,50 @@ function latentByEnumeration() {
   assert.ok(hits.some((f) => f.endsWith('__tests__/gip-read-observability-contracts.test.cjs')))
   assert.ok(hits.some((f) => f.endsWith('lib/gip-read-observability-contracts.cjs')))
 
-  // The claim: every reference is the module itself or its own test. No route, no
-  // scheduled run, no runtime caller.
-  const consumers = hits.filter((f) => !/gip-read-observability-contracts\.(test\.)?cjs$/.test(f))
+  // The claim, stated as a RULE rather than as a filename list (B1a-3 round 5).
+  //
+  // WHAT CHANGED AND WHY, because this is a loosening and hiding it would be the
+  // defect this round exists to correct. The filter used to be the regex
+  // `/gip-read-observability-contracts\.(test\.)?cjs$/` — i.e. "the module itself or
+  // the ONE test file named after it". A SECOND test file that legitimately imports
+  // this module was therefore reported as a PRODUCTION CONSUMER, which is false: a
+  // test is not a route, a scheduled run or a runtime caller.
+  //
+  // The rule below is the one the two sibling modules of this slice already ship, so
+  // this is an alignment rather than an invention, and it is STRICTER than the old
+  // regex in the dimension that matters: the old regex admitted a file called
+  // `gip-read-observability-contracts.cjs` ANYWHERE IN THE TREE — including a route
+  // module — because it matched on basename alone. This one pins the directory.
+  //   * anything under `plugins/plugin-integration-core/__tests__/` — not production;
+  //   * within `plugins/plugin-integration-core/lib/`, ONLY this module itself;
+  //   * NOTHING anywhere else in the tree.
+  const PLUGIN = 'plugins/plugin-integration-core/'
+  const LIB_ALLOWED = new Set(['gip-read-observability-contracts.cjs'])
+  const consumers = hits.filter((file) => {
+    if (!file.startsWith(PLUGIN)) return true
+    const rest = file.slice(PLUGIN.length)
+    if (rest.startsWith('__tests__/')) return false
+    if (rest.startsWith('lib/')) return !LIB_ALLOWED.has(rest.slice('lib/'.length))
+    return true
+  })
   assert.deepEqual(consumers, [], `§4 step 1.6 must ship LATENT — found consumers: ${JSON.stringify(consumers)}`)
+
+  // POSITIVE CONTROL FOR THE RULE, not merely for the grep (B1a-3 round 5 — the old
+  // block had no such control). A filter that returned false for everything would
+  // satisfy the assertion above, so a hypothetical production caller must be shown to
+  // be REPORTED. Both a route inside this package and a file outside it are planted,
+  // because the rule has two independent halves and a control for one proves nothing
+  // about the other.
+  const planted = [`${PLUGIN}lib/http-routes.cjs`, 'apps/server/src/routes/anything.ts']
+  const plantedVerdict = planted.filter((file) => {
+    if (!file.startsWith(PLUGIN)) return true
+    const rest = file.slice(PLUGIN.length)
+    if (rest.startsWith('__tests__/')) return false
+    if (rest.startsWith('lib/')) return !LIB_ALLOWED.has(rest.slice('lib/'.length))
+    return true
+  })
+  assert.deepEqual(plantedVerdict, planted,
+    'the LATENT rule must report a planted production consumer — both inside lib/ and outside the package')
 }
 
 // ---------------------------------------------------------------------------

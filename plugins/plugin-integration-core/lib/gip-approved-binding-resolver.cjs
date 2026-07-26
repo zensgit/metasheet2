@@ -63,6 +63,13 @@ const {
   deriveSystemContentKeyForSystemId,
 } = require('./gip-system-identity-read.cjs')
 const { SANITIZATION_MARKER_PATTERN } = require('./payload-redaction.cjs')
+const {
+  isPlainObject,
+  inertRecord,
+  inertRecordList,
+  createEntryGuard,
+  guardExportTable,
+} = require('./gip-inert-entry.cjs')
 
 const BINDING_RESOLVER_ERROR_REASONS = Object.freeze([
   'RESOLVER_COMPONENTS_INVALID',
@@ -79,6 +86,9 @@ const BINDING_RESOLVER_ERROR_REASONS = Object.freeze([
   'RESOLVER_SYSTEM_IDENTITY_UNAVAILABLE',
   'RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED',
   'RESOLVER_RESOLUTION_NOT_TRUSTED',
+  // L2 ONLY — emitted by the entry boundary and by no path inside this module, so it
+  // is exclusively distinguishable from every L1 token above.
+  'RESOLVER_ENTRY_NOT_INERT',
 ])
 const ERROR_REASON_SET = new Set(BINDING_RESOLVER_ERROR_REASONS)
 
@@ -94,6 +104,7 @@ const ERROR_MESSAGES = Object.freeze({
   RESOLVER_SYSTEM_IDENTITY_UNAVAILABLE: 'system content key is not obtainable for this system',
   RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED: 'canonical object contract version is not registered',
   RESOLVER_RESOLUTION_NOT_TRUSTED: 'a resolution minted by this module is required',
+  RESOLVER_ENTRY_NOT_INERT: 'a public entry point was reached with data that could not be made inert',
 })
 
 class GipApprovedBindingResolverError extends Error {
@@ -145,11 +156,13 @@ function safeLength(value, reason) {
   return raw
 }
 
-function isPlainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const proto = Object.getPrototypeOf(value)
-  return proto === Object.prototype || proto === null
-}
+// `isPlainObject` is the SHARED strict predicate from the inert-entry gate — one
+// definition instead of three byte-identical copies. It stays UNGUARDED on purpose:
+// it only ever runs on values the gate has already made inert, and if it swallowed
+// traps itself it would cover for the gate, so removing the gate from an entry point
+// would no longer RED.
+const failEntryNotInert = () => fail('RESOLVER_ENTRY_NOT_INERT')
+const guardEntry = createEntryGuard(GipApprovedBindingResolverError, failEntryNotInert)
 
 function hasControlCharacter(text) {
   for (let index = 0; index < text.length; index += 1) {
@@ -225,7 +238,9 @@ function createCertifiedCanonicalObjectAuthority(contractRegistry) {
 // Its containment today is LATENCY — this module has zero production consumers,
 // proven by executed enumeration — and closing it is a precondition of any runtime
 // wiring, alongside RQ-2/RQ-3.
-function createHarnessSystemIdentityAuthorityForTests(systemContentKeyBySystemId) {
+function createHarnessSystemIdentityAuthorityForTests(rawTable) {
+  // L1 — FIRST TOUCH.
+  const systemContentKeyBySystemId = inertRecord(rawTable, () => fail('RESOLVER_INPUT_HOSTILE'))
   if (!isPlainObject(systemContentKeyBySystemId)) fail('RESOLVER_COMPONENTS_INVALID')
   const table = new Map()
   const keys = safeOwnKeys(systemContentKeyBySystemId, 'RESOLVER_INPUT_HOSTILE')
@@ -255,7 +270,9 @@ function createHarnessSystemIdentityAuthorityForTests(systemContentKeyBySystemId
 // before and after. NUL is chosen because `readIdentityToken` rejects every control
 // character, so no admissible contractId/contractVersion can contain the separator
 // and forge a collision.
-function createHarnessCanonicalObjectAuthorityForTests(entries) {
+function createHarnessCanonicalObjectAuthorityForTests(rawEntries) {
+  // L1 — FIRST TOUCH. Two levels: the array and each entry record.
+  const entries = inertRecordList(rawEntries, () => fail('RESOLVER_INPUT_HOSTILE'))
   if (!Array.isArray(entries)) fail('RESOLVER_COMPONENTS_INVALID')
   const table = new Map()
   const count = safeLength(entries, 'RESOLVER_INPUT_HOSTILE')
@@ -424,7 +441,12 @@ function readFieldMapTargets(config) {
   return targets
 }
 
-async function resolveApprovedBindingInternal(components, runInput) {
+async function resolveApprovedBindingInternal(components, rawRunInput) {
+  // L1 — FIRST TOUCH, BEFORE the allowlist. Round 4 found this entry leaking a bare
+  // `Error` with attacker text from `isPlainObject`'s prototype interrogation, i.e.
+  // BEFORE its own closed allowlist ever ran; the allowlist was never the first thing
+  // to touch the caller's object, only the first thing that LOOKED like a gate.
+  const runInput = inertRecord(rawRunInput, () => fail('RESOLVER_INPUT_HOSTILE'))
   if (!isPlainObject(runInput)) fail('RESOLVER_RUN_INPUT_INVALID')
   // CLOSED ALLOWLIST, not a denylist. A store, an authority, an executor or a query
   // can never arrive as run data — under a known name, a novel name, or a symbol.
@@ -518,7 +540,14 @@ async function resolveApprovedBindingInternal(components, runInput) {
 
 // The service factory. Dependencies are admitted by FIRST-PARTY IDENTITY and are
 // captured HERE, once — never per call.
-function createApprovedBindingResolver(components) {
+function createApprovedBindingResolver(rawComponents) {
+  // L1 — FIRST TOUCH. ONE level only, and that is load-bearing rather than lazy: the
+  // three members are admitted downstream by `isFirstPartyReadSourceConfigStore` and
+  // by `WeakSet.has`, both of which read OBJECT IDENTITY. A deep clone would hand
+  // those checks a copy and turn every legitimate first-party dependency into a
+  // refusal. The members are carried by identity and are only ever subjected to
+  // identity tests, which run no caller code.
+  const components = inertRecord(rawComponents, () => fail('RESOLVER_INPUT_HOSTILE'))
   if (!isPlainObject(components)) fail('RESOLVER_COMPONENTS_INVALID')
   assertClosedKeySet(
     components,
@@ -535,13 +564,21 @@ function createApprovedBindingResolver(components) {
   if (!trustedCanonicalObjectAuthorities.has(canonicalObjectAuthority)) fail('RESOLVER_COMPONENTS_INVALID')
   const bound = Object.freeze({ configStore, systemIdentityAuthority, canonicalObjectAuthority })
   return Object.freeze({
-    resolveApprovedBinding(runInput) {
+    // L2 on a RETURNED method. `guardExportTable` covers the module's export table;
+    // it does not reach a method minted per construction, and this one is `async`, so
+    // a throw it does not contain becomes a REJECTION that no synchronous boundary
+    // would ever see. Guarding it here is what puts the per-call entry point under
+    // the same boundary as the factory that produced it.
+    resolveApprovedBinding: guardEntry(function resolveApprovedBinding(runInput) {
       return resolveApprovedBindingInternal(bound, runInput)
-    },
+    }),
   })
 }
 
-module.exports = {
+// L2 — every function-valued export, top level AND `__internals`. A newly added
+// export is wrapped by construction, so the suite's export-table walk drives it
+// through the hostile matrix with nobody having to remember to add it.
+module.exports = guardExportTable({
   BINDING_RESOLVER_ERROR_REASONS,
   GipApprovedBindingResolverError,
   RESOLUTION_KEYS,
@@ -561,4 +598,4 @@ module.exports = {
     hasControlCharacter,
     assertLosslessConfigBody,
   },
-}
+}, guardEntry)
