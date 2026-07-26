@@ -125,6 +125,10 @@ const BUCKET_ALLOWLISTED_BUCKETS = Object.freeze(['operational', 'reference'])
 // the scanned file's repo-relative path starts with one of these. Anything else is a hard fail.
 const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   'packages/core-backend/src/attendance/w4c0-',
+  // W4C-2 (#4556 lock §8.1): the canonical live/scheduled write boundary and the durable
+  // outbox dispatcher are canonical-boundary modules — they are the ONLY non-w4c0 writers of
+  // the w4_canonical tables (shadow calculations/segments, outbox claim/deliver flips).
+  'packages/core-backend/src/attendance/w4c2-',
   'packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_',
 ])
 
