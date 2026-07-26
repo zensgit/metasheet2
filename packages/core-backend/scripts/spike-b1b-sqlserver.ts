@@ -22,6 +22,8 @@ import {
   DeclaredPhaseTracker,
   MutationLog,
   assertRowLabel,
+  assertSelectOnly as sharedAssertSelectOnly,
+  assertWriteOptIn as sharedAssertWriteOptIn,
   evidenceFileName,
   type OutcomeToken,
   type RowLabel,
@@ -95,15 +97,14 @@ function requiredEnv(name: string): string {
 }
 
 // X-6a (same discipline as smoke-sqlserver-seed.ts L43-49, blob 4993a805c…): refuse loudly,
-// never skip, without an explicit write opt-in.
+// never skip, without an explicit write opt-in. Delegates to the SHARED (spike-b1b-shared.ts)
+// implementation — see that module's own doc comment for why it is shared rather than
+// duplicated, and spike-b1b-shared.test.ts for its pure, DB-free baseline/mutation tests. The
+// real, LIVE mutation check below (inside main()) calls the same shared function again against
+// SYNTHETIC env objects (never process.env), which is what turns "the guard exists" into "the
+// guard's own mutation actually ran, in this job."
 function assertWriteOptIn(): void {
-  if (env.B1B_SEED_ALLOW_WRITE !== 'true') {
-    throw new Error(
-      'Refusing to run: this script MUTATES the target SQL Server (CREATE DATABASE, DDL/DML on a ' +
-        'dedicated spike database, ALTER DATABASE SET READ_COMMITTED_SNAPSHOT / ALLOW_SNAPSHOT_ISOLATION). ' +
-        'Set B1B_SEED_ALLOW_WRITE=true ONLY against a throwaway/CI/local instance.'
-    )
-  }
+  sharedAssertWriteOptIn(env, 'spike-b1b-sqlserver')
 }
 
 // X-6b: the RCSI toggle (and every other mutating statement this script issues) refuses
@@ -189,11 +190,7 @@ function qualifiesForRcsiProven(m: RcsiProvenMeasurement): boolean {
 // are never claimed as SELECT-only — overclaiming "every statement" would be exactly the
 // class of over-strong claim this line's own review discipline flags.
 function assertSelectOnly(sql: string): string {
-  const text = sql.trim()
-  if (!/^SELECT\b/i.test(text)) {
-    throw new Error(`spike-b1b-sqlserver internal: a probe/observation statement was not SELECT-only: ${text.slice(0, 40)}…`)
-  }
-  return text
+  return sharedAssertSelectOnly(sql, 'spike-b1b-sqlserver')
 }
 
 async function scalar<T = unknown>(pool: MssqlConnectionPool, sql: string): Promise<T> {
@@ -214,8 +211,14 @@ async function spid(pool: MssqlConnectionPool): Promise<number> {
 // within one phase it IS sufficient (X-1a/X-1b), since those comparisons happen milliseconds
 // apart on a connection that is never closed. For the CROSS-PHASE distinctness claim, pair
 // @@SPID with sys.dm_exec_sessions.login_time (inline-bound to @@SPID, same discipline as
-// S-7's DB_ID()/@@SPID binding) — even if the numeric slot is reused, the login timestamp of
-// a later-established connection cannot equal an earlier one's.
+// S-7's DB_ID()/@@SPID binding). RETRACTION-FIRST NOTE (not the original, over-strong wording):
+// `login_time` is a `datetime` column, whose documented rounding granularity is ~3.33ms — a
+// SPID recycled AND re-logged-in within the same rounding tick would still collide on this
+// pair. This has NOT happened in the runs observed so far (real, unbounded Phase A work runs
+// between the two logins), but the pairing narrows the collision window, it does not eliminate
+// it by construction the way, e.g., S-0's DB_ID() binding does. Treat S-4b as empirically
+// robust against the ONE failure mode CI evidence actually found (bare SPID reuse), not as a
+// mathematically guaranteed distinctness proof.
 async function sessionIdentity(pool: MssqlConnectionPool): Promise<string> {
   const spidValue = await spid(pool)
   const loginTime = await scalar<string>(
@@ -258,6 +261,28 @@ async function main(): Promise<void> {
     return value
   }
 
+  // ── X-6a MUTATION (real, run once, SYNTHETIC env objects — never process.env) ───────────
+  // assertWriteOptIn() already ran for REAL against process.env above (before `log` existed)
+  // — that call is the load-bearing gate for this run. These two calls exercise the SAME
+  // shared function (spike-b1b-shared.ts, mutation-tested in spike-b1b-shared.test.ts) again,
+  // against synthetic inputs that never touch the real environment, which is what turns "the
+  // guard exists" into "the guard's own mutation actually ran, in this job, with the RED
+  // pasted" (battery DoD §9.1).
+  let x6aMutationThrew = false
+  try {
+    sharedAssertWriteOptIn({}, 'x6a-mutation-probe')
+  } catch {
+    x6aMutationThrew = true
+  }
+  log.check('X-6a-mutation-unset-throws', 'MUTATION: call the SAME shared write-opt-in guard with a SYNTHETIC unset env -> must throw loudly, never skip', 'RED', !x6aMutationThrew)
+  let x6aBaselineThrew = false
+  try {
+    sharedAssertWriteOptIn({ B1B_SEED_ALLOW_WRITE: 'true' }, 'x6a-baseline-probe')
+  } catch {
+    x6aBaselineThrew = true
+  }
+  log.check('X-6a-baseline-set-does-not-throw', 'the same guard, called with the opt-in explicitly set (the real value this run uses), does not throw', 'GREEN', !x6aBaselineThrew)
+
   let masterPool: MssqlConnectionPool | null = null
   let reader: MssqlConnectionPool | null = null
   let writer: MssqlConnectionPool | null = null
@@ -279,6 +304,24 @@ async function main(): Promise<void> {
     await pool.request().batch(`ALTER DATABASE [${database}] SET READ_COMMITTED_SNAPSHOT ${targetState} ${clause}`)
   }
 
+  // S-0/S-1/X-7: RCSI readback bound to DB_ID()/DB_NAME() — hoisted above the try block (was
+  // previously defined inline, further down, right before its first real Phase A use) so
+  // X-7's contamination-simulation mutation below can call the EXACT SAME function before
+  // Phase A's reader pool even exists. Same function, same code path, called twice: once
+  // against a deliberately contaminated database (X-7), once for real (S-0/S-1).
+  async function rcsiReadbackBound(pool: MssqlConnectionPool): Promise<{ db: string; rcsi: number }> {
+    const result = await pool
+      .request()
+      .batch<{ db: string; rcsi: number }>(
+        "SELECT DB_NAME() AS db, (SELECT is_read_committed_snapshot_on FROM sys.databases WHERE database_id = DB_ID()) AS rcsi"
+      )
+    obs(null)
+    const parsed = { db: result.recordset[0]!.db, rcsi: Number(result.recordset[0]!.rcsi) }
+    // Diagnostic only (not part of the values-free evidence record — see §6).
+    console.log('[b1b-sqlserver] rcsiReadbackBound raw:', JSON.stringify(parsed))
+    return parsed
+  }
+
   try {
     // ── one-time setup: master connection, dedicated spike DB, decoy DB, probe table ──────
     masterPool = await openPinnedPool('master')
@@ -289,7 +332,33 @@ async function main(): Promise<void> {
     // assumption about a pre-existing system database's configuration) without ever having
     // to assume what `master`/`tempdb` ship with (§1.1: this battery asserts no such default).
     await masterPool.request().batch(`IF DB_ID('${decoyDb}') IS NULL CREATE DATABASE [${decoyDb}]`)
-    // Ensure a clean starting posture (idempotent across local re-runs of this script).
+
+    // ── X-7 MUTATION 1 (real, live, embedded): simulate "a PRIOR run left RCSI ON" ─────────
+    // Force RCSI ON directly (bypassing the real reset immediately below), then show that
+    // rcsiReadbackBound() — the SAME function the real Phase A/B records use further down, not
+    // a duplicate — REDs against that contaminated state. Then run the REAL idempotent reset
+    // (next statement, which every invocation performs regardless of whether contamination
+    // happened) and let S-0/S-1 below re-observe GREEN for real. This is the live proof of the
+    // battery's own framing: "the contamination is detected by an existing assertion, which is
+    // the point" — if the reset immediately below were ever silently dropped, S-1 would RED on
+    // the very next run against a database a prior run left RCSI ON, exactly as demonstrated
+    // here against a database THIS run just created and force-contaminated on purpose. (X-7's
+    // SECOND mutation — an open writer transaction at the phase boundary must fail closed, not
+    // hang — is proven for real by S-4c below, using a genuine open writer transaction as the
+    // contending force; not duplicated here, cross-referenced there.)
+    await masterPool.request().batch(`ALTER DATABASE [${spikeDb}] SET READ_COMMITTED_SNAPSHOT ON`)
+    const x7ContaminationProbe = await openPinnedPool(spikeDb)
+    const x7Contaminated = await rcsiReadbackBound(x7ContaminationProbe)
+    log.check(
+      'X-7-mutation-rcsi-left-on-contaminates',
+      "MUTATION: simulate RCSI left ON by a prior run -> rcsiReadbackBound()'s own observation (the SAME function S-0/S-1 use for real, below) must RED before the real reset (next statement) runs",
+      'RED',
+      x7Contaminated.rcsi === 0
+    )
+    await x7ContaminationProbe.close()
+
+    // Ensure a clean starting posture (idempotent across local re-runs of this script) — the
+    // step X-7's mutation directly above proves is load-bearing.
     await toggleRcsi(masterPool, 'OFF', spikeDb, true)
 
     const setupPool = await openPinnedPool(spikeDb)
@@ -309,6 +378,20 @@ async function main(): Promise<void> {
       x6bMutationRefused = true
     }
     log.check('X-6b-mutation-smoke_db', 'MUTATION: point the RCSI toggle at smoke_db -> must refuse', 'RED', !x6bMutationRefused)
+
+    // ── X-6c MUTATION (real, run once) ─────────────────────────────────────────────────────
+    let x6cMutationThrew = false
+    try {
+      assertSelectOnly(`UPDATE dbo.${SPIKE_TABLE} SET name = 'z' WHERE id = 1`)
+    } catch {
+      x6cMutationThrew = true
+    }
+    log.check(
+      'X-6c-mutation-non-select-rejected',
+      'MUTATION: pass a non-SELECT statement to the probe/observation guard -> must throw (HYGIENE, never a security boundary — B-4 stands)',
+      'RED',
+      !x6cMutationThrew
+    )
 
     // ═══════════════════════════════════ PHASE A ═══════════════════════════════════════
     reader = await openPinnedPool(spikeDb)
@@ -339,19 +422,10 @@ async function main(): Promise<void> {
     log.check('X-2-baseline', `observed ProductVersion "${productVersion}" matches declared "${declaredMajorVersion}"`, 'GREEN', productVersion.startsWith(expectedProductVersionPrefix))
     log.check('X-2-mutation-wrong-declared-label', 'MUTATION: declared label mismatched against the real observed ProductVersion (equivalent to pointing at the other matrix version while leaving the label unchanged)', 'RED', productVersion.startsWith('99.'))
 
-    // S-0: RCSI readback bound to DB_ID()/DB_NAME() — baseline in Phase A (expect rcsi=0, db=spikeDb)
-    async function rcsiReadbackBound(pool: MssqlConnectionPool): Promise<{ db: string; rcsi: number }> {
-      const result = await pool
-        .request()
-        .batch<{ db: string; rcsi: number }>(
-          "SELECT DB_NAME() AS db, (SELECT is_read_committed_snapshot_on FROM sys.databases WHERE database_id = DB_ID()) AS rcsi"
-        )
-      obs(null)
-      const parsed = { db: result.recordset[0]!.db, rcsi: Number(result.recordset[0]!.rcsi) }
-      // Diagnostic only (not part of the values-free evidence record — see §6).
-      console.log('[b1b-sqlserver] rcsiReadbackBound raw:', JSON.stringify(parsed))
-      return parsed
-    }
+    // S-0: RCSI readback bound to DB_ID()/DB_NAME() — baseline in Phase A (expect rcsi=0, db=spikeDb).
+    // rcsiReadbackBound() itself is defined ABOVE the try block now (hoisted for X-7's
+    // contamination-simulation mutation, which needs it before Phase A's reader pool exists —
+    // see that block's comment). Same function, same code path, no duplicate.
     const phaseAReadback = obs(await rcsiReadbackBound(reader))
     log.check('S-0-baseline-db-binding', 'the RCSI readback reports the probe connection\'s OWN current database', 'GREEN', phaseAReadback.db === spikeDb)
 
@@ -503,7 +577,16 @@ async function main(): Promise<void> {
     await shortTimeoutMasterPool.close()
     await contentionWriter.request().batch('ROLLBACK')
     await contentionWriter.close()
-    log.check('S-4c', 'MUTATION: the toggle without WITH ROLLBACK IMMEDIATE, contended by an open writer transaction, must fail closed on a bounded timeout rather than hang', 'RED', !s4cTimedOutClosed)
+    // Doubles as X-7's SECOND mutation ("leave the writer transaction open at phase end -> the
+    // following phase reds rather than hanging"): the contending force here IS a genuine open
+    // writer transaction (BEGIN TRAN, no COMMIT/ROLLBACK yet, two lines above) — the same
+    // failure shape X-7 names, not a separate re-implementation of it.
+    log.check(
+      'S-4c-also-X-7-mutation-2-open-writer-txn-fails-closed',
+      'MUTATION: the toggle without WITH ROLLBACK IMMEDIATE, contended by a genuinely open writer transaction (X-7\'s "left open at phase end" scenario), must fail closed on a bounded timeout rather than hang',
+      'RED',
+      !s4cTimedOutClosed
+    )
 
     // The REAL toggle, correctly formed: WITH ROLLBACK IMMEDIATE, no contending open pools.
     await toggleRcsi(masterPool!, 'ON', spikeDb, true)

@@ -208,6 +208,49 @@ export function assertRowLabel(label: RowLabel): RowLabel {
   return label
 }
 
+// ── X-6a: explicit write opt-in, refused LOUDLY (throws, never a silent skip) ─────────────
+//
+// Shared (not duplicated per-dialect) so its own mutation is provable ONCE, pure, DB-free —
+// then both spike-b1b-mysql.ts and spike-b1b-sqlserver.ts call the SAME function against
+// process.env, which is the load-bearing use; the synthetic-env calls each script also makes
+// against this same export (documented in each script) are what turns X-6a into a REAL,
+// executed mutation rather than a comment asserting what "would" happen.
+//
+// MUTATION: call with the opt-in unset -> must throw (never return normally — a caller that
+// wraps this in a try/catch that swallows the error and proceeds is ALSO wrong; that is what
+// "a skip is also RED" means, and is why this function's only two behaviours are "throw" or
+// "return undefined having done nothing else" — there is no third, partial-success path for a
+// caller to accidentally land on).
+export function assertWriteOptIn(envVars: NodeJS.ProcessEnv, mutatingScriptLabel: string): void {
+  if (envVars.B1B_SEED_ALLOW_WRITE !== 'true') {
+    throw new Error(
+      `Refusing to run ${mutatingScriptLabel}: this script MUTATES the target engine (DDL/DML on a ` +
+        'dedicated spike database/schema, session-level toggles, and — for SQL Server — a database-scoped ' +
+        'ALTER DATABASE). Set B1B_SEED_ALLOW_WRITE=true ONLY against a throwaway/CI/local instance — never ' +
+        'a customer or production server.'
+    )
+  }
+}
+
+// ── X-6c: probe/observation statements are SELECT-only (HYGIENE, never the security boundary
+// — battery explicit: B-4 stands, SQL-text inspection may never be cited as the boundary) ──
+//
+// Shared for the same reason as assertWriteOptIn above: one pure implementation, one set of
+// mutation-tested cases, imported by both dialect scripts rather than two near-identical
+// copies that could silently drift apart. Narrower than "every statement the connection
+// issues" — SESSION-CONFIGURATION statements (SET LOCK_TIMEOUT, SET SESSION autocommit, SET
+// [SESSION] TRANSACTION ISOLATION LEVEL …) and the writer's own transaction-control statements
+// are issued directly by each script and are never routed through this guard; claiming
+// "every statement" here would be exactly the over-strong-claim class this line's review
+// discipline flags (see each script's own X-6c comment for its precise, narrower claim).
+export function assertSelectOnly(sql: string, callerLabel: string): string {
+  const text = sql.trim()
+  if (!/^SELECT\b/i.test(text)) {
+    throw new Error(`${callerLabel} internal: a probe/observation statement was not SELECT-only: ${text.slice(0, 40)}…`)
+  }
+  return text
+}
+
 // ── Evidence file I/O (JSON, ONE file per (dialect, engineMajorVersion, phase) record) ────
 // A dialect/version pair can carry MORE THAN ONE record (SQL Server's Phase A and Phase B are
 // two separate certification units, §1.4) — the gate-check reads one SpikeRecord object per

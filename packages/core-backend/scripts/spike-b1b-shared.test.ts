@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { DeclaredPhaseTracker, MutationLog, assertRowLabel, evidenceFileName, isOutcomeToken } from './spike-b1b-shared'
+import {
+  DeclaredPhaseTracker,
+  MutationLog,
+  assertRowLabel,
+  assertSelectOnly,
+  assertWriteOptIn,
+  evidenceFileName,
+  isOutcomeToken,
+} from './spike-b1b-shared'
 
 // B1b capability spike — pure, DB-free tests for the shared harness mechanics (X-3's own
 // mutations, which are engine-agnostic and therefore cheap to prove here rather than only
@@ -99,6 +107,34 @@ describe('values-free row-label discipline (§6.1/§6.2)', () => {
   })
   it('rejects anything outside the closed vocabulary (the type system already prevents most of this; the runtime guard is the belt for a JS caller)', () => {
     expect(() => assertRowLabel('some_actual_value' as never)).toThrow(/closed vocabulary/)
+  })
+})
+
+describe('assertWriteOptIn — X-6a (explicit write opt-in, refused LOUDLY, never a silent skip)', () => {
+  it('baseline: opt-in explicitly set to "true" does not throw', () => {
+    expect(() => assertWriteOptIn({ B1B_SEED_ALLOW_WRITE: 'true' }, 'test-caller')).not.toThrow()
+  })
+  it('MUTATION: opt-in unset -> throws loudly (never a silent skip)', () => {
+    expect(() => assertWriteOptIn({}, 'test-caller')).toThrow(/Refusing to run test-caller/)
+  })
+  it('MUTATION: opt-in set to any other value (e.g. "1", "yes") -> still throws (exact-string gate, not truthy)', () => {
+    expect(() => assertWriteOptIn({ B1B_SEED_ALLOW_WRITE: '1' }, 'test-caller')).toThrow(/Refusing to run/)
+    expect(() => assertWriteOptIn({ B1B_SEED_ALLOW_WRITE: 'yes' }, 'test-caller')).toThrow(/Refusing to run/)
+  })
+})
+
+describe('assertSelectOnly — X-6c (probe/observation statements are SELECT-only; HYGIENE, never the boundary)', () => {
+  it('baseline: a SELECT statement passes through unchanged', () => {
+    expect(assertSelectOnly('SELECT 1 AS v', 'test-caller')).toBe('SELECT 1 AS v')
+  })
+  it('MUTATION: a non-SELECT statement (UPDATE) is rejected', () => {
+    expect(() => assertSelectOnly("UPDATE t SET name = 'z' WHERE id = 1", 'test-caller')).toThrow(/not SELECT-only/)
+  })
+  it('MUTATION: a non-SELECT statement (INSERT) is rejected', () => {
+    expect(() => assertSelectOnly("INSERT INTO t VALUES (1,'a')", 'test-caller')).toThrow(/not SELECT-only/)
+  })
+  it('a leading/trailing-whitespace SELECT is still accepted (trim before test)', () => {
+    expect(assertSelectOnly('  SELECT 1  ', 'test-caller')).toBe('SELECT 1')
   })
 })
 

@@ -18,6 +18,8 @@ import * as path from 'node:path'
 import {
   DeclaredPhaseTracker,
   MutationLog,
+  assertSelectOnly as sharedAssertSelectOnly,
+  assertWriteOptIn as sharedAssertWriteOptIn,
   evidenceFileName,
   type OutcomeToken,
   type SpikeRecord,
@@ -68,18 +70,13 @@ function requiredEnv(name: string): string {
 
 // X-6a: all mutating setup refuses to run LOUDLY (throws, never skips) unless an explicit
 // write opt-in is set. Precedent: packages/core-backend/scripts/smoke-sqlserver-seed.ts
-// L43-49 (blob 4993a805c…). MUTATION: unset the opt-in -> setup FAILS; a silent skip is
-// ALSO wrong (only reachable by manual inspection — see the PR body's pasted transcript of
-// running this script with B1B_SEED_ALLOW_WRITE unset).
+// L43-49 (blob 4993a805c…). Delegates to the SHARED (spike-b1b-shared.ts) implementation —
+// see that module's own doc comment for why it is shared rather than duplicated, and
+// spike-b1b-shared.test.ts for its pure, DB-free baseline/mutation tests. The real, LIVE
+// mutation check inside main() below calls the same shared function again against SYNTHETIC
+// env objects (never process.env) — the mutation actually runs, in this job.
 function assertWriteOptIn(): void {
-  if (env.B1B_SEED_ALLOW_WRITE !== 'true') {
-    throw new Error(
-      'Refusing to seed: this script MUTATES the target MySQL server (CREATE DATABASE / DROP + ' +
-        'CREATE + INSERT + session-level SET TRANSACTION / autocommit toggling on a WRITER connection). ' +
-        'Set B1B_SEED_ALLOW_WRITE=true ONLY against a throwaway/CI/local instance — never a customer or ' +
-        'production server.'
-    )
-  }
+  sharedAssertWriteOptIn(env, 'spike-b1b-mysql')
 }
 
 function printHelp(): void {
@@ -118,11 +115,7 @@ async function connectionId(conn: MySqlConnection): Promise<number> {
 // through this guard. Overclaiming "every statement" here would be exactly the class of
 // over-strong claim this line's own review discipline flags.
 function assertSelectOnly(sql: string): string {
-  const text = sql.trim()
-  if (!/^SELECT\b/i.test(text)) {
-    throw new Error(`spike-b1b-mysql internal: reader connection issued a non-SELECT statement: ${text.slice(0, 40)}…`)
-  }
-  return text
+  return sharedAssertSelectOnly(sql, 'spike-b1b-mysql')
 }
 async function readerQuery(reader: MySqlConnection, sql: string, params?: unknown[]): Promise<Record<string, unknown>[]> {
   const [rows] = await reader.query(assertSelectOnly(sql), params)
@@ -166,6 +159,28 @@ async function main(): Promise<void> {
 
   const tracker = new DeclaredPhaseTracker(['preconditions'])
   const log = new MutationLog()
+
+  // ── X-6a MUTATION (real, run once, SYNTHETIC env objects — never process.env) ───────────
+  // assertWriteOptIn() already ran for REAL against process.env above (before `log` existed)
+  // — that call is the load-bearing gate for this run. These two calls exercise the SAME
+  // shared function (spike-b1b-shared.ts, mutation-tested in spike-b1b-shared.test.ts) again,
+  // against synthetic inputs that never touch the real environment — the guard's own mutation
+  // actually runs, in this job, with the RED pasted (battery DoD §9.1).
+  let x6aMutationThrew = false
+  try {
+    sharedAssertWriteOptIn({}, 'x6a-mutation-probe')
+  } catch {
+    x6aMutationThrew = true
+  }
+  log.check('X-6a-mutation-unset-throws', 'MUTATION: call the SAME shared write-opt-in guard with a SYNTHETIC unset env -> must throw loudly, never skip', 'RED', !x6aMutationThrew)
+  let x6aBaselineThrew = false
+  try {
+    sharedAssertWriteOptIn({ B1B_SEED_ALLOW_WRITE: 'true' }, 'x6a-baseline-probe')
+  } catch {
+    x6aBaselineThrew = true
+  }
+  log.check('X-6a-baseline-set-does-not-throw', 'the same guard, called with the opt-in explicitly set (the real value this run uses), does not throw', 'GREEN', !x6aBaselineThrew)
+
   let reader: MySqlConnection | null = null
   let writer: MySqlConnection | null = null
   let setup: MySqlConnection | null = null
@@ -190,6 +205,20 @@ async function main(): Promise<void> {
     await writer.query(`CREATE TABLE \`${MYISAM_SIBLING_TABLE}\` (id INT NOT NULL PRIMARY KEY, name VARCHAR(50)) ENGINE=MyISAM`)
     await writer.query(`INSERT INTO \`${MYISAM_SIBLING_TABLE}\` (id, name) VALUES (1,'a')`)
     console.log('[ok] seeded dedicated spike database', { database: SPIKE_DATABASE, innodbTable: INNODB_TABLE, myisamTable: MYISAM_SIBLING_TABLE })
+
+    // ── X-6c MUTATION (real, run once) ─────────────────────────────────────────────────────
+    let x6cMutationThrew = false
+    try {
+      assertSelectOnly(`UPDATE \`${INNODB_TABLE}\` SET name = 'z' WHERE id = 1`)
+    } catch {
+      x6cMutationThrew = true
+    }
+    log.check(
+      'X-6c-mutation-non-select-rejected',
+      'MUTATION: pass a non-SELECT statement to the probe/observation guard -> must throw (HYGIENE, never a security boundary — B-4 stands)',
+      'RED',
+      !x6cMutationThrew
+    )
 
     let observationsTaken = 0
     const countObservation = <T>(value: T): T => {
@@ -320,6 +349,32 @@ async function main(): Promise<void> {
       'RED',
       await isolationAtLeastReadCommitted('ordered')
     )
+
+    // ── X-7 (real, live, embedded): contamination cannot cross a connection boundary ────────
+    // MySQL's session-scoped analog of SQL Server's S-1 re-run detector (there is no
+    // database-scoped state here to leave dirty — see this script's `finally` block). At this
+    // EXACT point the reader connection is genuinely mutated (SET SESSION TRANSACTION
+    // ISOLATION LEVEL READ UNCOMMITTED, just above) -- M-3-mutation-discriminating-read-
+    // uncommitted, immediately above, IS X-7's "contaminated state observed" half (reused, not
+    // duplicated). Open a genuinely FRESH connection here -- simulating what every later
+    // phase/job/matrix cell of this spike always does, by construction -- and show it reports
+    // the CLEAN default isolation despite the mutated reader connection remaining open right
+    // next to it: session-scoped state cannot leak across a connection boundary.
+    const freshConnectionForX7 = await mysql.createConnection({ ...baseConfig, database: SPIKE_DATABASE })
+    const [freshIsoRows] = (await freshConnectionForX7.query(`SELECT @@SESSION.${isolationVariable} AS iso`)) as [
+      Array<{ iso: string }>,
+      unknown,
+    ]
+    const freshIsoIndex = ISOLATION_ORDER.indexOf(String(freshIsoRows[0]!.iso) as (typeof ISOLATION_ORDER)[number])
+    observationsTaken += 1
+    await freshConnectionForX7.end()
+    log.check(
+      'X-7-fresh-connection-not-contaminated',
+      "a FRESH connection opened while the reader sits mutated at READ UNCOMMITTED (M-3-mutation-discriminating-read-uncommitted, just above) reports the engine's own CLEAN default isolation -- session-scoped state cannot cross a connection boundary, proving teardown/reconnect is sufficient for X-7's no-contamination guarantee",
+      'GREEN',
+      freshIsoIndex >= ISOLATION_ORDER.indexOf('READ-COMMITTED')
+    )
+
     log.check(
       'M-3-lexicographic-trap-demo',
       "DEMONSTRATION (never shipped): a naive lexicographic '>=' comparison WRONGLY accepts READ UNCOMMITTED ('U' > 'C') -- this is why the ordered-index comparison is mandatory",
