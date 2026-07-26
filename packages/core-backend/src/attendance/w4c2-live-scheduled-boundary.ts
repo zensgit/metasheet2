@@ -1341,9 +1341,13 @@ export function createAttendanceLiveScheduledBoundaryV1(
           //      inner reads, i.e. `buildW4ShadowFrozenContextV1` rejecting
           //      BOTH candidate shifts' shapes. The enumeration of its
           //      null-context paths (`index.cjs` ~L21451-21489 — cross-
-          //      checked against the function's four `return null` sites,
-          //      one of which is the ~L21479 compound guard's five
-          //      disjuncts, so this list has seven entries, not five):
+          //      checked against the function's four `return null` sites:
+          //      three simple sites, plus the ~L21479 compound guard's five
+          //      disjuncts. Two of those five disjuncts (`!startTime` and
+          //      `!endTime`) share one cause and collapse into the single
+          //      list item (iv) below, so the compound guard contributes
+          //      four list items, not five — 3 simple + 4 compound = the
+          //      seven entries that follow, not five and not eight):
           //      (i) no matching shift row; (ii) more than 3 segment rows
           //      (ruled out for a genuinely persisted shift — the CHECK
           //      bounds the RANGE (`chk_attendance_shift_segments_index_range`
@@ -1412,10 +1416,13 @@ export function createAttendanceLiveScheduledBoundaryV1(
           //      are DIFFERENT: both are legal per every CHECK/uniqueness
           //      constraint this table has, so both ARE directly
           //      constructible in a real-DB test fixture, even though the
-          //      canonical shift service (the only sanctioned writer) never
-          //      produces either shape in production (dense 0..2 for (iii)
-          //      — see the migration's header comment; strict `HH:MM` input
-          //      for (iv) — see above).
+          //      canonical shift service (the only writer audited here for
+          //      create/update; the one-time migration backfill described
+          //      above under (iv) is a second sanctioned writer whose source
+          //      columns are NOT analyzed here) never produces either shape
+          //      via create/update
+          //      (dense 0..2 for (iii) — see the migration's header comment;
+          //      strict `HH:MM` input for (iv) — see above).
           //
           //  (c) CONCLUSION, corrected: an identity-only, fingerprint-silent
           //      leg is NOT reachable from two well-formed shifts (part a
