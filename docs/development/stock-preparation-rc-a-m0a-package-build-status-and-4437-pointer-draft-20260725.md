@@ -384,6 +384,28 @@ missing its frontend bundle).
    `bash scripts/ops/multitable-onprem-package-verify.provenance.test.sh`; the doc does not imply CI coverage
    for either that it does not have.
 
+**Erratum / owner override (review #4604, round 2 — this update):** item 2's "Disclosed here rather than
+wired into a caller" decision above was **overruled by the owner**, on the specific finding that deleting the
+loopback regex or the main-flow call site still left every PR required check green — the "equally uncalled
+`.test.mjs` siblings" argument does not change that. Item 2's text above is left as the historical record of
+that (now-superseded) decision, not the current state. **What exists now:** a step in
+`.github/workflows/plugin-tests.yml`'s `test` job, gated `if: matrix.node-version == '20.x'` so it lands
+inside the branch-protection-required `test (20.x)` context rather than a new, unrequired one:
+```yaml
+- name: Multitable on-prem loopback-verify CI wiring contract (#4604)
+  if: matrix.node-version == '20.x'
+  run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
+```
+`plugin-tests.yml`'s `pull_request:` trigger carries no path filter, so this step runs on every PR regardless
+of which files changed. The step is a plain `run:` — no `continue-on-error`, no `|| true` — so a non-zero
+exit fails the job, which reds the required `test (20.x)` check. Proved locally against the exact command the
+step runs, before touching the workflow file (both mutations restored afterward, `git diff` empty): deleting
+the main-flow call site → 4 passed/1 failed; neutering the regex itself (`if search_extended_regex
+'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "$web_dist"; then` → `if false; then`) → 3 passed/2
+failed. Confirmed in a real CI run that the step executes inside the actual `test (20.x)` job and reports
+`RESULT: 5 passed, 0 failed`. The two `.test.mjs` siblings named in item 2 remain uncalled — that is unchanged
+and out of this update's scope; only the focused loopback test named in review #4604 was wired.
+
 **Scope limitation, stated plainly:** the ported pattern is reused **verbatim** per the owner's ruling
 ("reuse attendance's rule") and is not changed here. The fixtures prove the rule is falsifiable *as specified*
 — a bundle containing that exact literal string shape fails, a clean one passes — not that multitable's own
@@ -549,10 +571,15 @@ abbreviated to `<local>`:
    as its own historical record — not deleted or silently overwritten — because the P2 hardening changed how
    the `"loopback"` row is *derived* (a real code change, unlike the comment-only edit the erratum above
    describes), not what result a successful run against this artifact reports. The call-site pin added in
-   Hardening item 1 only fires when `multitable-onprem-package-verify-loopback.test.sh` is itself run (it is
-   not wired into any automated caller, per Hardening item 2 above) — it does not run as part of this or any
-   other real verify invocation, which is why this step re-runs the full verify script directly rather than
-   relying on the pin for behavioral proof.
+   Hardening item 1 only fires when `multitable-onprem-package-verify-loopback.test.sh` is itself run — at
+   the time this paragraph was originally written, that file had no automated caller (per Hardening item 2
+   above), so it did not run as part of this or any other real verify invocation, which is why this step
+   re-runs the full verify script directly rather than relying on the pin for behavioral proof.
+   **This is no longer the current state — see the Erratum / owner override immediately after Hardening item
+   2 above (review #4604, round 2): the pin's underlying focused test now runs automatically, inside CI's
+   required `test (20.x)` job, on every PR.** The point stands about *this specific historical run*
+   (`posthoc-verify-3`, a manual/standalone invocation): it did not depend on, and is not evidence about,
+   whatever CI wiring exists today.
 
 **Explicit non-conflation, stated plainly (this is the exact thing ⟲R7 exists to prevent):** run
 `30148584851`'s own `verify.json`, the one packaged inside the CI-produced Actions artifact, is **immutable
