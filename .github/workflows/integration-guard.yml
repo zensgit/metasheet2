@@ -70,9 +70,9 @@
 #      not a skip; forbidding the key closes both. FIX: the job itself, the classifier step, both real
 #      test steps, the no-op step, and the terminal assertion step are now contract-pinned to carry
 #      none of `if` (job-level only — step-level `if` gating relevant==true/false is the mechanism, not
-#      the vector), `needs`, or `continue-on-error`. See the contract test file for the eight mutations
-#      this closes (owner's original two, plus one per newly forbidden key across the job and every
-#      load-bearing step).
+#      the vector), `needs`, or `continue-on-error`. The mutation ledger (owner's original two, plus
+#      one per newly forbidden key across the job and every load-bearing step, each with real
+#      `node --test` RED output) lives in PR #4614's body, not in the contract test file itself.
 #   2. The in-job classifier was not itself load-bearing: renaming a guarded-path roster entry to a
 #      path that no longer exists, or defaulting the classification to an ambiguous "unknown" value,
 #      both left the job green — an out-of-scope-looking no-op that silently was actually an in-scope
@@ -88,8 +88,10 @@
 #          the terminal "Assert scope classification is decisive" step (`if: always()`, backed by
 #          scripts/ops/integration-guard-assert-branch.mjs) FAILS the job unless `relevant` is exactly
 #          `'true'`/`'false'` AND exactly the corresponding branch's steps actually ran to completion —
-#          this is a RUNTIME door, independent of the classifier script being correct, so neutering
-#          either one alone still leaves the other catching the mutation (see the contract test file).
+#          this is a RUNTIME door, independent of the classifier script being correct; neutering either
+#          one alone still leaves the other catching the mutation — proven separately in PR #4614's
+#          body (mutating the roster REDs 4 classify-side tests and 0 assert-branch tests; mutating
+#          assert-branch's own guard REDs 1 assert-branch test and 0 classify-side tests).
 #
 # A YAML-shape contract for these properties (no `paths` on pull_request, `merge_group` present, the
 # job's exact name, the forbidden job/step keys, the classifier/no-op/real-branch step wiring, and the
