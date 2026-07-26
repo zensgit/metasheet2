@@ -4,6 +4,50 @@
 `zensgit/metasheet2#4610`. This document does not authorize merging, runtime
 wiring, deployment, or activation.
 
+## 0. Scope narrowed (20260726) — read before §1
+
+This document's evidence is scoped to the parent head it names in §1:
+`1e761bc2450ad66e850624bf479be259319bb592`, revalidated only up to
+`c79576296e` (`#4610` round 10). **It has not been re-cut against later parent
+commits and must not be read as covering them.** Narrowing the status line
+here rather than re-cutting §1–§6 against the current head, to avoid
+introducing fresh, unreviewed claims into a document three reviewers (§4)
+already independently signed off on at its stated scope.
+
+A later commit on the same PR branch, `ba85e3ed293c2a920986524d205e18823db4c775`
+("B1a-2 — drop the `fail` forge primitive, pin both forgery routes",
+`#4610`), changed the same two files this document verifies. Concretely,
+relative to that later commit:
+
+- **§1's boundary claim no longer holds.** §1 says "[t]he new parent commit
+  changes only the connector-kind registry's rejection wording ... It does
+  not touch the canonical-object registry fixed here" — true only relative to
+  round 10 (`c79576296e`); `ba85e3ed2` modifies
+  `gip-canonical-object-contract-registry.cjs` again.
+- **§3 describes one regression control** (the hostile-registry
+  branded-rethrow case via `computeActivationReadiness`). The current PR body
+  (`#4610`, "Round 11" §"Part 4") documents **two** negative controls — (c2)
+  forgery via constructing the public `GipCanonicalObjectContractError` class
+  directly, and (c3) forgery via `__internals.requiredIdentityToken(42,
+  attackerText)` making the module author a genuinely-branded error — each
+  killed by a *different* mutation.
+- **§5's mutation table lists one mutation** (restore the `instanceof
+  GipCanonicalObjectContractError` rethrow). The current PR body documents
+  **two**, with different discrimination: mutation A (`instanceof`
+  public-class exemption) reds both (c2) and (c3); mutation B
+  (module-private-WeakSet brand exemption) reds only (c3) — the evidence that
+  a public-class-only control cannot catch the plausible selective-brand fix.
+- **The `fail`-export removal is unmentioned here.** `ba85e3ed2` removes
+  `__internals.fail` from `gip-canonical-object-contract-registry.cjs`
+  entirely (PR body "Round 11" §"Part 3"); this document's §2–§3 still
+  describe the pre-removal shape and do not reference the removal.
+
+For anything at or after `ba85e3ed2`, `zensgit/metasheet2#4610`'s PR body
+("Round 11" onward) is the current, SHA-bound authority — not this file. This
+document remains an accurate record of the branded-rethrow defect and repair
+**as they stood at `c79576296e`**; it is not a live description of the
+round-11+ state.
+
 ## 1. Scope and evidence boundary
 
 The review started from exact parent head
