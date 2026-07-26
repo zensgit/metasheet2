@@ -829,6 +829,11 @@ export function createAttendanceLiveScheduledBoundaryV1(
         if (legacyOnlyTime) {
           // Exactly one zero-segment, no-pointer review carrying the raw value
           // plus legacy-parser provenance (lock 12.3 matrix, shadow leg).
+          // `evidence_snapshot` stays a CLOSED AttendanceEvidenceV1 array (the
+          // legacy-only value is NOT admissible W4 evidence — that is the whole
+          // point of this branch), so the frozen raw/parser/resolved-instant
+          // provenance lives in `input_provenance`; the raw bytes still bind
+          // the semantic fingerprint through the attribution sourceFingerprint.
           outcome = 'review_required'
           outcomeReasonCode = 'legacy_time_ingress_not_authoritative'
           const attribution = unsupportedAttribution('unresolved', sha256Hex(String(input.occurredAtRaw)))
@@ -841,16 +846,16 @@ export function createAttendanceLiveScheduledBoundaryV1(
             attribution,
             context: null,
             segmentSnapshot: [],
-            evidence: [
-              {
-                kind: 'legacy_time_ingress',
+            evidence: [],
+            approvedFacts: [],
+            inputProvenance: {
+              ...provenanceRef,
+              legacyTimeIngress: {
                 raw: input.occurredAtRaw,
                 parser: 'legacy_parseDateInput_server_local',
                 resolvedInstant: input.occurredAtResolved,
               },
-            ],
-            approvedFacts: [],
-            inputProvenance: { ...provenanceRef },
+            },
             provenanceRef,
             mergePolicy: 'append',
             outcome,
