@@ -564,12 +564,57 @@ async function verifyBehaviour() {
   assert.ok(`${src}\nasync function runReadOnlyProbe`.includes('async function runReadOnlyProbe'))
 }
 
+// ---------------------------------------------------------------------------
+// P2-C (B1a-3 round 3) · `createProbeStrategyRegistry` iterates a CALLER array by
+// INDEX, not `for...of`.
+//
+// `for...of` over caller data hands control to an attacker-reachable
+// `Symbol.iterator` mid-loop — the same channel the slice's two new modules already
+// close by index-based iteration. The factory is BUILD-ONLY and reaches no probe
+// path, so this is hardening, not a live hole; it is fixed because the channel is
+// the same one and leaving one instance open invites the next reader to copy it.
+//
+// NOT IN SCOPE: `buildOrderingKeyDuplicateProbeSql` and the other SQL builders are
+// byte-identical to `main` and belong to the landed bounded-read line. They are not
+// touched here.
+// ---------------------------------------------------------------------------
+function callerArrayIteratorIsNeverHandedControl() {
+  const ITERATOR_CANARY = 'ITERATOR-CANARY-P2C'
+  const entries = [{
+    actionProfileVersion: 'x.y.v1',
+    strategyId: 'gip.total_order_probe.fixture',
+    strategyVersion: 'v1',
+    dialect: 'postgres',
+    snapshotSemantics: 'single_statement_mvcc',
+    buildTotalOrderProbeSql: () => 'SELECT 1',
+  }]
+  let iteratorCalls = 0
+  Object.defineProperty(entries, Symbol.iterator, {
+    configurable: true,
+    value() { iteratorCalls += 1; throw new Error(ITERATOR_CANARY) },
+  })
+
+  // The build succeeds, and the poisoned iterator is NEVER invoked.
+  const registry = createProbeStrategyRegistry(entries)
+  assert.equal(iteratorCalls, 0, 'the caller array\'s Symbol.iterator must never be handed control')
+  assert.equal(registry.resolve('x.y.v1').strategyId, 'gip.total_order_probe.fixture')
+
+  // POSITIVE CONTROL for the poison itself: it must be shown to FIRE under `for...of`,
+  // otherwise `iteratorCalls === 0` above proves nothing about the loop shape.
+  let control = null
+  try { for (const _entry of entries) { void _entry } } catch (error) { control = error }
+  assert.ok(control instanceof Error)
+  assert.equal(control.message, ITERATOR_CANARY)
+  assert.equal(iteratorCalls, 1, 'the poisoned iterator must be demonstrably live')
+}
+
 async function main() {
   frozenVocabulary()
   digestProperties()
   probeSqlReadOnly()
   await probeBehaviour()
   await verifyBehaviour()
+  callerArrayIteratorIsNeverHandedControl()
   console.log('gip-binding-qualification-spike.test.cjs OK')
 }
 

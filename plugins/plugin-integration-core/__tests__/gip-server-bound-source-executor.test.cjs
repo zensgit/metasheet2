@@ -47,6 +47,7 @@ const {
 } = executorModule
 const {
   GipQualificationError,
+  QUALIFICATION_ERROR_REASONS,
   createBindingQualificationProber,
   verifyBindingQualification,
 } = spikeModule
@@ -528,6 +529,53 @@ async function declarationAndTranslation() {
       'PROBE_ACTION_DECLARATION_INVALID',
     )
   }
+  // P2-D (B1a-3 round 3): the SAME smuggled claims, SYMBOL-KEYED. Until this round
+  // `assertClosedKeySet` in the executor read `Object.keys` only, so every one of
+  // these was ACCEPTED while its string-keyed twin above was refused — the header's
+  // "an exact-key-set pin" was not true of the code. The resolver's version has
+  // checked `getOwnPropertySymbols` since it landed; this is the parity fix.
+  for (const smuggled of ['dialect', 'snapshotSemantics', 'isolation', 'readOnly', 'guarantee']) {
+    const declaration = harnessAction({ execute: async () => ({}) })
+    declaration[Symbol(smuggled)] = 'claimed'
+    refusesWith(
+      () => createHttpProbeActionRegistry([declaration]),
+      GipSourceExecutorError,
+      'PROBE_ACTION_DECLARATION_INVALID',
+    )
+  }
+  // The same parity holds on the OTHER two call sites of `assertClosedKeySet`: the
+  // executor's own components, and the foreign connector's ANSWER.
+  {
+    const registry = createHarnessHttpProbeActionRegistryForTests([harnessAction({ execute: async () => ({}) })])
+    const binder = createHarnessSourceBinderForTests([{
+      systemContentKey: 'SCK-ALPHA-DISTINGUISHABLE',
+      credentialFactory: () => Object.freeze({ async execute() { return {} } }),
+    }])
+    const components = { actionRegistry: registry, sourceBinder: binder }
+    components[Symbol('query')] = () => {}
+    refusesWith(
+      () => createServerBoundSourceExecutor(components),
+      GipSourceExecutorError,
+      'EXECUTOR_COMPONENTS_INVALID',
+    )
+  }
+  {
+    const symbolAnswer = { duplicateGroupsSampled: 0, nullKeyRowsSampled: 0 }
+    symbolAnswer[Symbol('snapshotSemantics')] = 'single_statement_mvcc'
+    const symbolSource = {
+      log: { calls: 0 },
+      credentialFactory: () => Object.freeze({ async execute() { return symbolAnswer } }),
+    }
+    const symbolStack = buildStack({ sources: { alpha: symbolSource, beta: harnessSource() } })
+    const symbolResolution = await resolveAlpha(symbolStack.resolver)
+    await refusesWithAsync(
+      () => symbolStack.prober.probeFromResolution({
+        resolution: symbolResolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT,
+      }),
+      GipSourceExecutorError,
+      'PROBE_ANSWER_UNVERIFIABLE',
+    )
+  }
   // A second action for the same profile is a wiring bug, never a fallback.
   refusesWith(
     () => createHttpProbeActionRegistry([
@@ -642,7 +690,13 @@ async function opaqueCredentialHandle() {
 
 // ---------------------------------------------------------------------------
 // The answer plane is COUNTS ONLY — a connector cannot smuggle values or a
-// guarantee token back through it, and foreign text never escapes.
+// guarantee token back through it, and foreign text thrown by a connector never
+// escapes through a REFUSAL raised on the probe path.
+//
+// SCOPE (narrowed, B1a-3 round 3): the branded-error half of this function covers
+// THE TWO NEW MODULES' classes only. `GipQualificationError` is NOT clean and is not
+// claimed to be — see the in-body note and
+// `brandedErrorChannelIsOpenOnTheSpikeClass()`.
 // ---------------------------------------------------------------------------
 async function answerPlaneIsValuesFreeAndForeignTextIsDiscarded() {
   const observed = []
@@ -735,13 +789,38 @@ async function answerPlaneIsValuesFreeAndForeignTextIsDiscarded() {
     'EXECUTOR_INPUT_HOSTILE',
   ))
 
-  // A foreign callback that require()s the modules and tries to mint a branded
-  // error carrying attacker text: `fail` is not exported anywhere, and the two new
-  // modules' fail() takes no message and no details at all.
+  // ── SCOPE, NARROWED TO EXACTLY WHAT IS TESTED (B1a-3 round 3, P1-C) ──────────
+  // RETRACTION: this block previously read "a foreign callback that require()s THE
+  // MODULES ... cannot mint a branded error carrying attacker text" while
+  // constructing ONLY `GipSourceExecutorError` and `GipApprovedBindingResolverError`
+  // — the two NEW, already-clean classes. The one class that fails that sentence was
+  // the one class it did not construct. The sentence is now scoped to what it tests.
+  //
+  // WHAT THIS ASSERTS — THE TWO NEW MODULES ONLY (`gip-server-bound-source-executor.cjs`
+  // and `gip-approved-binding-resolver.cjs`): their `fail()` takes NO `message` and
+  // NO `details` parameter at all, and their error classes read a frozen per-reason
+  // message and ignore every further constructor argument. For those two, a foreign
+  // callback that require()s the module has nothing to put text into.
+  //
+  // WHAT THIS DOES **NOT** ASSERT: anything about `gip-binding-qualification-spike.cjs`.
+  // Its `GipQualificationError` is exported (and was already exported on `main`),
+  // takes `(reason, message, details)`, and GENUINELY DOES carry caller text. It is
+  // deliberately NOT added to the `observed[]` loop below: that loop asserts the text
+  // does NOT escape, and this class does carry it, so adding it there would red
+  // forever — and weakening the loop to accommodate it would be the wrong fix. The
+  // residual is instead pinned POSITIVELY, as a channel that EXISTS, by
+  // `brandedErrorChannelIsOpenOnTheSpikeClass()` in this file.
+  //
+  // Read the two together: THESE TWO ARE CLEAN (asserted here); THE THIRD IS NOT,
+  // and there is the test that proves it isn't.
   assert.equal(executorModule.fail, undefined)
   assert.equal(executorModule.__internals.fail, undefined)
   assert.equal(resolverModule.fail, undefined)
   assert.equal(resolverModule.__internals.fail, undefined)
+  // TRUE, and kept — but re-captioned. Removing `fail` from the spike's `__internals`
+  // buys ONE FEWER PATH plus frozen-vocabulary validation on the internal path. It
+  // does NOT close the branded-error text channel, because the class is exported.
+  // See `brandedErrorChannelIsOpenOnTheSpikeClass()`.
   assert.equal(spikeModule.__internals.fail, undefined)
   const branded = new GipSourceExecutorError('PROBE_ACTION_FAILED', ATTACKER_TEXT, { leak: ATTACKER_TEXT })
   observed.push(String(branded.message), String(branded.details))
@@ -769,6 +848,157 @@ async function answerPlaneIsValuesFreeAndForeignTextIsDiscarded() {
     'PROBE_ACTION_FAILED',
     'PROBE_ANSWER_UNVERIFIABLE',
   ])
+}
+
+// ---------------------------------------------------------------------------
+// P1-B (B1a-3 round 3) · A HOSTILE GETTER PARKED ON AN **ALLOWLISTED** KEY NAME.
+//
+// `probeFromTrustedResolution` refuses an `ownKeys` trap and an undeclared key, then
+// reads four ALLOWLISTED keys. `Object.keys()` enumeration does NOT invoke getters,
+// so a throwing getter on an allowlisted NAME passes the allowlist untouched and
+// fires on READ — and if the throw escapes, raw attacker text lands in the caller's
+// `.message` and `.stack`.
+//
+// Driven through PUBLIC EXPORTS ONLY: `createBindingQualificationProber(...)
+// .probeFromResolution(input)`. No `__internals`, no private require.
+//
+// FOUR CASES, ONE PER READ — not one case standing in for four. Four fail-closed
+// doors covering for each other is exactly the failure mode this line has paid for:
+// each of the four `safeReadRunInput` calls is separately mutated in the battery and
+// each REDs on its own case.
+//
+// The `resolution` case uses a NON-ENUMERABLE getter on purpose: the key never
+// appears in `Object.keys(input)` at all, which demonstrates directly that the
+// allowlist loop is not what protects these reads.
+// ---------------------------------------------------------------------------
+async function hostileGetterOnAnAllowlistedKeyIsRefusedNotLeaked() {
+  const cases = [
+    ['resolution', false],
+    ['envelopeKey', true],
+    ['probedAt', true],
+    ['expiresAt', true],
+  ]
+  const observations = []
+  for (const [key, enumerable] of cases) {
+    const stack = buildStack()
+    const resolution = await resolveAlpha(stack.resolver)
+    const base = {
+      resolution,
+      envelopeKey: ENVELOPE_KEY,
+      probedAt: PROBED_AT,
+      expiresAt: '2026-07-27T00:00:00Z',
+    }
+    delete base[key]
+    const input = { ...base }
+    Object.defineProperty(input, key, {
+      enumerable, configurable: true, get() { throw new Error(ATTACKER_TEXT) },
+    })
+
+    // The getter's key passes the allowlist: either it is not enumerated at all, or
+    // its NAME is on the allowlist. Asserted, so the case cannot silently degrade
+    // into "refused by the allowlist" and stop testing the read.
+    const enumerated = Object.keys(input)
+    if (enumerable) {
+      assert.ok(enumerated.includes(key), `${key}: the hostile key must be enumerated`)
+    } else {
+      assert.ok(!enumerated.includes(key), `${key}: the hostile key must be invisible to Object.keys`)
+    }
+    for (const seen of enumerated) {
+      assert.ok(['resolution', 'envelopeKey', 'probedAt', 'expiresAt'].includes(seen),
+        `${key}: the fixture must not smuggle an undeclared key — that would test the allowlist, not the read`)
+    }
+
+    let caught = null
+    try {
+      await stack.prober.probeFromResolution(input)
+    } catch (error) { caught = error }
+
+    assert.ok(caught, `${key}: the hostile getter must fail the probe closed`)
+    // Collect every observable surface, then assert on all of them at once.
+    const surfaces = [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]
+    observations.push({ key, reason: caught.reason, surfaces })
+
+    // FAIL CLOSED under the ALREADY-DECLARED token, by EQUALITY.
+    assert.ok(caught instanceof GipQualificationError,
+      `${key}: expected GipQualificationError, got ${caught && caught.name}`)
+    assert.equal(caught.reason, 'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED')
+  }
+
+  // THE ASSERTION: the attacker's text reaches no caller-observable surface.
+  assert.equal(observations.length, cases.length)
+  for (const observation of observations) {
+    for (const surface of observation.surfaces) {
+      assert.ok(!surface.includes(ATTACKER_TEXT),
+        `${observation.key}: attacker text escaped: ${surface.slice(0, 200)}`)
+    }
+  }
+
+  // POSITIVE CONTROL for the discard — "discard everything and refuse" must not be
+  // enough to pass. The same stack, with NO hostile getter, still qualifies.
+  const clean = buildStack()
+  const cleanResolution = await resolveAlpha(clean.resolver)
+  const qualification = await clean.prober.probeFromResolution({
+    resolution: cleanResolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT,
+  })
+  assert.equal(qualification.status, 'candidate')
+
+  // POSITIVE CONTROL for the canary itself: the traversal must be shown to FIND the
+  // text when it is present, otherwise every "absent" above is vacuous.
+  assert.ok(String(new Error(ATTACKER_TEXT).stack).includes(ATTACKER_TEXT))
+}
+
+// ---------------------------------------------------------------------------
+// P1-A (B1a-3 round 3) · A RESIDUAL PINNED BY ASSERTING THE CHANNEL **EXISTS**.
+//
+// `gip-binding-qualification-spike.cjs` removed `fail` from `__internals` and its
+// comment claimed that closed the branded-error text channel. IT DOES NOT:
+// `GipQualificationError` is itself exported, and was ALREADY exported on `main`
+// (the class body and its export are byte-identical to `main` at this head), so an
+// importer never needed `fail`. Hardening the class is OUT OF SCOPE here — it is
+// pre-existing `main` code belonging to the landed `bridge.bounded_read.v2` line and
+// needs its own gate.
+//
+// So the residual is DISCLOSED rather than dropped: this test asserts, POSITIVELY,
+// that the attacker text IS carried. A residual quietly missing from an assertion is
+// hidden; a residual pinned by an assertion is on the record. When a future PR
+// hardens the class, THIS TEST REDS — which forces the ledger to be updated instead
+// of going stale. That is its purpose, not an accident.
+// ---------------------------------------------------------------------------
+function brandedErrorChannelIsOpenOnTheSpikeClass() {
+  // PUBLIC EXPORT ONLY. No `__internals`, no `fail`.
+  assert.equal(spikeModule.fail, undefined)
+  assert.equal(spikeModule.__internals.fail, undefined)
+  assert.equal(typeof spikeModule.GipQualificationError, 'function')
+
+  const branded = new GipQualificationError(
+    'QUALIFICATION_INPUT_INVALID', ATTACKER_TEXT, { leak: ATTACKER_TEXT },
+  )
+  // The brand is GENUINE — an `instanceof` consumer cannot distinguish this from an
+  // internally-minted error.
+  assert.ok(branded instanceof GipQualificationError)
+  assert.ok(branded instanceof Error)
+  assert.equal(branded.name, 'GipQualificationError')
+  assert.equal(branded.reason, 'QUALIFICATION_INPUT_INVALID')
+
+  // THE POINT, ASSERTED POSITIVELY: the caller text IS carried, on both surfaces.
+  assert.equal(branded.message, ATTACKER_TEXT)
+  assert.ok(String(branded.stack).includes(ATTACKER_TEXT))
+  assert.deepEqual(branded.details, { leak: ATTACKER_TEXT })
+
+  // And the vocabulary check that `fail()` performs on the INTERNAL path is NOT
+  // performed by direct construction — this is exactly the delta that removing
+  // `fail` from `__internals` buys, stated as what it is and no more.
+  const undeclared = new GipQualificationError('NOT_A_DECLARED_REASON', ATTACKER_TEXT)
+  assert.ok(!QUALIFICATION_ERROR_REASONS.includes('NOT_A_DECLARED_REASON'))
+  assert.equal(undeclared.reason, 'NOT_A_DECLARED_REASON')
+  assert.equal(undeclared.message, ATTACKER_TEXT)
+
+  // CONTRAST, so the narrowing in `answerPlaneIsValuesFreeAndForeignTextIsDiscarded`
+  // is legible here too: the two NEW modules' classes refuse the same construction.
+  assert.equal(new GipSourceExecutorError('PROBE_ACTION_FAILED', ATTACKER_TEXT, { leak: ATTACKER_TEXT }).message,
+    'the HTTP probe action did not complete')
+  assert.equal(new GipApprovedBindingResolverError('RESOLVER_RUN_INPUT_INVALID', ATTACKER_TEXT).message.includes(ATTACKER_TEXT),
+    false)
 }
 
 // ---------------------------------------------------------------------------
@@ -935,6 +1165,8 @@ async function main() {
   await declarationAndTranslation()
   await opaqueCredentialHandle()
   await answerPlaneIsValuesFreeAndForeignTextIsDiscarded()
+  await hostileGetterOnAnAllowlistedKeyIsRefusedNotLeaked()
+  brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
   latentByEnumeration()
   console.log('gip-server-bound-source-executor.test.cjs OK')

@@ -30,10 +30,21 @@
 // This module takes the MINIMUM claim: the HTTP probe-action declaration requires
 // NEITHER `dialect` NOR `snapshotSemantics`, and HTTP probe evidence carries no
 // snapshot, isolation, read-only or dialect guarantee token AT ALL. Declaring
-// nothing cannot be an overclaim, and it makes "no guarantee token may be carried"
-// true BY CONSTRUCTION — an exact-key-set pin — rather than by a guard someone can
-// later widen. If the owner rules (ε) differently, the admission surface moves; that
-// is an amendment, not something this module anticipates.
+// nothing cannot be an overclaim. If the owner rules (ε) differently, the admission
+// surface moves; that is an amendment, not something this module anticipates.
+//
+// "No guarantee token may be carried" is held by TWO mechanisms, and both are
+// load-bearing — naming only one would be the same overclaim shape this round is
+// correcting:
+//   1. the exact-key-set pin on the DECLARATION (`assertClosedKeySet`). Round 3
+//      (P2-D) added the symbol half; before that a symbol-keyed `snapshotSemantics`
+//      was ACCEPTED by this "exact-key-set pin" while its string-keyed twin was
+//      refused, so the sentence was not yet true of the code. It is now.
+//   2. the OBSERVATION is REBUILT FROM A FIXED LITERAL at the bottom of
+//      `executeOrderingKeyProbeInternal` — nothing is spread or copied from the
+//      declaration or the connector's answer — so no member of either transits into
+//      evidence even if a future edit widens (1).
+// Mechanism 2 is why the shipped evidence stayed clean while (1) had the symbol gap.
 //
 // -- LATENT ------------------------------------------------------------------
 // Zero production consumers. No route, no scheduled run, no runtime caller, no flag,
@@ -106,6 +117,18 @@ function safeOwnKeys(value, reason) {
   return []
 }
 
+// A symbol-keyed member is invisible to `Object.keys`. Mirrors the resolver's
+// `safeOwnSymbols` (`gip-approved-binding-resolver.cjs`), whose `assertClosedKeySet`
+// has checked both halves since it landed.
+function safeOwnSymbols(value, reason) {
+  try {
+    return Object.getOwnPropertySymbols(value)
+  } catch (_error) {
+    fail(reason)
+  }
+  return []
+}
+
 function safeLength(value, reason) {
   const raw = safeRead(value, 'length', reason)
   if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) fail(reason)
@@ -144,6 +167,12 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
   for (let index = 0; index < keys.length; index += 1) {
     if (!allowedKeys.has(keys[index])) fail(extraKeyReason)
   }
+  // P2-D / B1a-3 round 3. Until this line, this function read `Object.keys` ONLY, so
+  // a SYMBOL-keyed member — a symbol-keyed `snapshotSemantics`, a symbol-keyed
+  // dependency — was ACCEPTED while its string-keyed twin was refused. "An exact
+  // key-set pin" was therefore not true of this function. A symbol-keyed
+  // snapshotSemantics is still a snapshotSemantics.
+  if (safeOwnSymbols(value, 'EXECUTOR_INPUT_HOSTILE').length > 0) fail(extraKeyReason)
 }
 
 // --- the certified HTTP probe-action registry -------------------------------
@@ -155,17 +184,30 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 // not at top level, not under `__internals` (reachable by require(), so a
 // trust-granting verb there is the identical hole one namespace deeper).
 //
-// ⚠ SCOPE THE CLAIM HONESTLY — this split is NOT unconditionally closed.
-// `createHarnessHttpProbeActionRegistryForTests` below is a PUBLIC WRAPPER that calls
-// the private granter, so it IS "a public factory whose products are trusted". The
-// `ForTests` suffix is a NAME, not a mechanism. It exists because the certified
-// registry ships EMPTY and the ratified positive control is otherwise not executable
-// at all; its containment today is LATENCY (zero production consumers, proven by
-// executed enumeration), and closing it is a precondition of any runtime wiring. Do
-// not read the paragraph above as "no public factory confers trust here" — read it as
-// "the BUILD-ONLY factory confers nothing", which is what the mutation battery proves.
-// Mitigation that does hold: both factories sit inside the exact-key-set export pin,
-// so neither can be widened and no third one can be added without reding.
+// ⚠ SCOPE THE CLAIM HONESTLY — this split is NOT unconditionally closed. There are
+// TWO public wrappers around a private granter in this module, not one, and the
+// earlier version of this block named only the first:
+//
+//   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
+//      `buildTrustedHttpProbeActionRegistry`.
+//   2. `createHarnessSourceBinderForTests` (:272) is the SOLE writer into
+//      `trustedSourceBinders` (:305) and is publicly EXPORTED (:432) — there is no
+//      private granter behind it at all, so it is not even "build split from trust";
+//      it is the single granting path. And unlike (1) it has NO CERTIFIED
+//      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
+//      binder does — so for binders there is currently no non-harness way to obtain
+//      a trusted one at all.
+//
+// Both ARE "a public factory whose products are trusted". The `ForTests` suffix is a
+// NAME, not a mechanism. They exist because the certified registry ships EMPTY and no
+// certified binder exists, so the ratified positive control is otherwise not
+// executable at all; their containment today is LATENCY (zero production consumers,
+// proven by executed enumeration), and closing BOTH is a precondition of any runtime
+// wiring. Do not read the paragraph above as "no public factory confers trust here" —
+// read it as "the BUILD-ONLY factory confers nothing", which is what the mutation
+// battery proves. Mitigation that does hold: both factories sit inside the
+// exact-key-set export pin, so neither can be widened and no third one can be added
+// without reding.
 //
 // This is the class the owner ruled on for #4610's registries — "a public factory
 // whose products are trusted is equivalent to no trust check at all" — and it is
