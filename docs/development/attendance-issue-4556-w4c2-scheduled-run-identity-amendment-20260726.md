@@ -1692,25 +1692,54 @@ history):
     (`:982-1007`), the internal `calendarWorkDate` derivation
     (`:792-814`), and — on the still-unmerged PR #4612 branch, commit
     `64ea17d1931c142a080aeab9dabe2e8c1098c2cd`, since that is where the
-    concrete call sites this proof depends on live — the three resolve call
-    shapes in `index.cjs` (`resolvePunchWorkDateByShiftWindow` at
-    `:15050-15128`, `resolveW4LiveCandidateInTransactionV1` at
-    `:21423-21432`, and the outer-fingerprint call site added by that
-    commit at `~:26967-27034`).
+    concrete call sites this proof depends on live — **all three** resolve
+    call sites: `punchWorkDate`'s own call to
+    `resolvePunchWorkDateByShiftWindow` (`index.cjs:26933`, unchanged from
+    `origin/main:26321`, using the route's `timezone` local variable
+    captured immediately before it is overwritten), the outer-fingerprint
+    read this commit adds (`index.cjs:~26985-27021`, `timezone:
+    requestTimezone`), and — located for this addendum, not merely
+    inferred — the **freeze/inner re-resolution** the boundary itself
+    performs at `w4c2-live-scheduled-boundary.ts:1109-1114`
+    (`adapters.resolveLiveCandidate(pluginTrx, { orgId, userId, occurredAt:
+    input.occurredAtResolved, timezone: input.requestTimezone })`,
+    `calendarWorkDate` deliberately omitted per that call site's own
+    comment at `:1098-1105`, "see `resolveLiveCandidate`'s own doc comment
+    ... for why `input.timezone`/`input.workDate` (POST-resolution) must
+    never be used here").
     - **Fact 1 — the candidate universe (`matching`) never depends on
-      `openRecords`.** `resolve()` computes `workDates` and `candidates`
+      `openRecords`, and all three calls share the same `occurredAt` and
+      `timezone`.** `resolve()` computes `workDates` and `candidates`
       (hence `matching`, via the `isInstantInWindow` filter at `:982-984`)
       purely from `occurredAt`, `timezone`, and the internally-derived
       `calendarWorkDate` (`:792-796`: `input.calendarWorkDate ||
       toWorkDate(occurredAt, timezone) || input.explicitWorkDate`).
       `openRecords` is loaded separately, afterward (`:986-997`), and never
-      feeds back into `matching`. Consequently `matching` is identical
-      across every resolve call in one live-punch request that shares the
-      same `occurredAt`/`timezone` pair, regardless of what has or has not
-      been written to the DB in between — including the punch-processing
-      route's own `punchWorkDate` call (which decides what section 1.10's
-      step-3-equivalent legacy write actually writes) and the later
-      in-transaction re-resolution used for the freeze/fingerprint step.
+      feeds back into `matching`. The `timezone` argument is where this
+      could still break — `punchWorkDate.timezone` overwrites the route's
+      `timezone` variable after resolution (`index.cjs:26958` on the #4612
+      branch / `:26345` on `origin/main`) with the **winning shift's own**
+      rule timezone, which can differ from the request's. This branch's own
+      code closes that gap explicitly: `index.cjs:26931` captures `const
+      requestTimezone = timezone` (the PRE-resolution value) **before**
+      `punchWorkDate` is computed, and both the outer read and the
+      boundary's `resolveLiveCandidate` call are wired to use only that
+      captured `requestTimezone` (`index.cjs:27014`, threaded to the
+      boundary at `:27256` as `requestTimezone`, consumed at
+      `w4c2-live-scheduled-boundary.ts:1113` as `input.requestTimezone`) —
+      never the post-resolution `timezone` field, which the boundary's own
+      doc comments (`:40-52`, `:263-274`, `:380-398`) flag by name as
+      unsafe for exactly this recomputation. A separate call site on this
+      same branch makes the rule explicit in one sentence
+      (`index.cjs:21275-21277`, the `deriveLegacyLivePunchAttributionV1`
+      caller): "P1 fix: requestTimezone (the route's PRE-resolution
+      input), NEVER timezone (the route's POST-resolution persistence
+      value)". `occurredAt` is likewise the
+      single route-level instant threaded through as `occurredAtResolved`.
+      Given identical `(occurredAt, timezone)`, `matching` is identical
+      across `punchWorkDate`'s call, the outer read, and the freeze/inner
+      re-resolution, regardless of what has or has not been written to the
+      DB in between.
     - **Fact 2 — an ambiguous `matching` set never reaches the write at
       all.** The route fails closed with `422
       WORK_DATE_ATTRIBUTION_AMBIGUOUS` and **returns before any write**
@@ -1726,19 +1755,24 @@ history):
       `candidate.workDate` strictly before `calendarWorkDate`) — the write
       must have been driven by a *resolved*, non-ambiguous `punchWorkDate`
       result whose winner has `workDate < calendarWorkDate`. Walking
-      `selectAmongMatchingCandidates`'s precedence (`:371-519`): such a
+      `selectAmongMatchingCandidates`'s precedence (`:371-519`) **as
+      `punchWorkDate`'s own call evaluates it** (i.e. before step 3's write
+      exists, so no self-observation is even possible at this call): such a
       winner can only come from step 1 (`:405-421`, which requires an
-      *already-existing* open record — not this operation's own write,
-      since step 1 runs **before** the write and cannot see it) or from
+      open record that already existed *before this resolve call ran* — by
+      construction not this operation's own not-yet-written row) or from
       steps 3/4 (`:469-511`), both of which additionally gate on
       `matching.length === 1`. There is no path by which a previous-workDate
       winner is produced from a `matching` set of size > 1 without going
       through step 1's pre-existing-record branch. So: whenever this
       operation's own write *can* be the sole evidence for a
-      previous-workDate `openPreviousMatches` entry, `matching.length` was
-      already `1` at write-decision time — and, by Fact 1, `matching.length`
-      is **still 1** at the later freeze/fingerprint re-resolution, because
-      it is the same candidate set. And when `matching.length === 1`,
+      previous-workDate `openPreviousMatches` entry (i.e. it is what makes
+      step 1 newly match at the **later** freeze/inner call, the one
+      `openPreviousMatches` self-observation is actually about),
+      `matching.length` was already `1` at `punchWorkDate`'s
+      write-decision time — and, by Fact 1, `matching.length` is **still
+      1** at the freeze/inner re-resolution, because it is the same
+      candidate set. And when `matching.length === 1`,
       `selectAmongMatchingCandidates`'s steps 1, 3, and 4 all resolve to
       **the same sole candidate** (`matching[0]`) by construction — step 1
       needs `openByWorkDate` to contain that one candidate's workDate, step
