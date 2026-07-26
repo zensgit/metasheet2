@@ -1332,7 +1332,17 @@ cannot insert/update operation, outbox, audit, source, shared-effect, or result
 rows. Completed legacy compatibility replay likewise performs no emit or
 business DML.
 W4C-0 generates the exact reachable event-kind/payload inventory; unrelated
-configuration/report events remain outside this lock. The unique identity is
+configuration/report events remain outside this lock. Run-level operational
+notifications are likewise outside this contract: the dispositive test is
+whether the event payload carries a single result's reconstructable identity
+(a record or operation identifier), not which code path performs the emit. An
+event whose payload is a bare aggregate — for example a count with no
+per-record identity, such as `attendance.absence.generated` — is a run-level
+notification, not a result event; it stays outside this durability contract
+regardless of posture and keeps its pre-existing synchronous/best-effort emit.
+This criterion confirms, rather than newly authorizes, that the exact
+reachable event-kind inventory above already excludes such events by correct
+classification, not by omission. The unique identity is
 `(org_id,entrypoint,operation_id,event_kind)`; payload schema/version,
 business-key fingerprint, guarded `pending|delivered` state, attempts,
 next-attempt time, and created/delivered timestamps are explicit. Identity and
