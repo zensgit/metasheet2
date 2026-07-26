@@ -50,12 +50,16 @@
   - **MF3b（~L1134 per-user re-check）：0 红，23/23 全绿**——**advisor 二轮复审
     点名的必做刀**（"removing any one shared resolver call fails" 是逐 call-site
     而非逐 predicate；`:1035`/`:1134` 是两处独立调用点，只刀一处不能代表另一处）。
-    结果是**真实的覆盖缺口**，非试验失败：per-user re-check 存在的唯一理由是
-    probe 与 per-user commit 之间的 TOCTOU（posture 在两次读之间被 promotion
-    改变），但没有任何 fixture 构造这个窗口——probe 已经在批级过滤掉
-    authoritative（~L1051-1053），所以但凡测试矩阵里的 org 在两次读之间姿态不变，
-    per-user 那次读就是死码路径。**如实记入呈裁点 20**（PR body 同步），不用
-    contrived fixture 硬凑绿，也不悄悄把 MF3b 并入 MF3a 冒充"resolver 移除已证"。
+    结果是**真实的覆盖缺口**，非试验失败：probe（~L1035）跑在自己的
+    `runAttendanceResultOperationTransactionV1` 里，**提交后**共享 rollout 锁即
+    释放；per-user re-check（~L1134）跑在**另一个、之后开启的**事务里——这是
+    一条跨事务的真实 TOCTOU 防线（promotion 恰好落在 probe commit 之后、
+    per-user commit 之前），**不是死码**，只是没有任何 fixture 构造出这个窗口
+    去驱动它。（advisor 二轮复审纠正：本条最初误判为"probe 与 per-user 同一
+    SERIALIZABLE 事务、per-user 读不可能不同"从而可删——那是错的，两次读
+    在不同事务里，删除会移除一条活防线。）**如实记入呈裁点 20**（PR body
+    同步），不用 contrived fixture 硬凑绿，也不悄悄把 MF3b 并入 MF3a 冒充
+    "resolver 移除已证"，更不建议删除这行代码。
 
 ### collector P01-P04「removed independently」逐 marker 独立刀（Stage C 呈裁点未竟项清账）
 
@@ -86,15 +90,17 @@ claim 站点这一既有事实也不受影响）：
     （grep 零命中，含本棒复核）。本片不消费该字段，故不新增静态守卫，亦不新造
     mutation 腿——引用 W4C-1 既有证据而非重做。
 20. **scheduled-side per-user posture re-check（~L1134）未被任何 fixture 判别**
-    （MF3b，advisor 二轮复审要求的必做刀，结果 0 红/23 绿）：该行存在的唯一理由
-    是 probe（~L1035，批级）与 per-user commit 之间的 TOCTOU 窗口——若姿态在两次
-    读之间未变（本片全部 fixture 皆如此），这行是死码路径。**不是「resolver 移除
-    失败」被证过一半**——MF3a（probe 侧，恰 3 红）与 MF3b 是两个独立调用点的
-    两次独立判别，MF3b 的结果是「未覆盖」而非「通过」。修复方向（未做，留给
-    owner/下一片裁）：要么构造 promotion 在 probe 提交后、per-user 提交前发生的
-    真并发腿（双连接 rendezvous，同 §12.3 TOCTOU 纪律），要么如果 per-user
-    re-check 被证明在当前事务隔离级别下确实冗余（probe 已在同一 SERIALIZABLE
-    事务内锁 rollout 行，per-user 不可能看到不同姿态），删除死码并声明理由。
+    （MF3b，advisor 二轮复审要求的必做刀，结果 0 红/23 绿）：probe（~L1035）跑在
+    自己独立的 `runAttendanceResultOperationTransactionV1` 里并**提交**（共享
+    rollout 锁随之释放）；per-user re-check（~L1134）跑在**之后开启的另一个**
+    事务里——这是一条**真实的跨事务 TOCTOU 防线**（promotion 恰好落在 probe
+    commit 之后、per-user commit 之前），**不是死码**，只是没有任何 fixture
+    构造出这个窗口去驱动它。**不是「resolver 移除失败」被证过一半**——MF3a
+    （probe 侧，恰 3 红）与 MF3b 是两个独立调用点的两次独立判别，MF3b 的结果是
+    「有效防线、零覆盖」而非「通过」，也不是「可删的死码」。修复方向（未做，
+    留给 owner/下一片裁）：构造 promotion 在 probe 提交后、per-user 提交前发生
+    的真双连接 rendezvous 腿（同 §12.3 TOCTOU 纪律）——这是唯一站得住的判别
+    构造；**不要删除这行代码**，它守的窗口是真的。
 
 ### Stage F 实跑实数
 
@@ -114,7 +120,7 @@ claim 站点这一既有事实也不受影响）：
 | MF1 (Cut A) | boundary：null-ID + legacy_projection_only 短路条件恒 false（null-ID 落入完整 registry 协议） | **9 红/153 绿**（`attendance-plugin.test.ts` 单文件，全新库） | git checkout 还原 |
 | MF2 (Cut B) | index.cjs `applyLivePunchProjectionLegacyV1` 返回值丢弃 `workDateResolution` 键 | **恰 3 红**（boundary wiring 1 + posture-matrix legacy/shadow 2，两套件合跑 10 腿）；7 绿 | 同上 |
 | MF3a | boundary `executeScheduledRun` **probe**（~L1035）posture 解析改查恒定不存在 org key（live 侧 ~L698、per-user ~L1134 不动） | **恰 3 红**（三套件合跑 23 腿）：gate-matrix-e5 leg 6 admin_run 半面 + leg 9 + boundary wiring suspended-scheduled 腿；posture-matrix 5/5 与 live 腿全绿——排他 | 同上 |
-| MF3b | boundary `executeScheduledRun` **per-user re-check**（~L1134）同一变异，probe~L1035/live~L698 不动 | **0 红/23 绿——未覆盖，非通过**（呈裁点 20：per-user re-check 是死码路径，唯一存在理由=未构造的 probe/per-user TOCTOU 窗口） | 同上 |
+| MF3b | boundary `executeScheduledRun` **per-user re-check**（~L1134，跑在 probe 提交后**另开**的事务里）同一变异，probe~L1035/live~L698 不动 | **0 红/23 绿——未覆盖，非通过**（呈裁点 20：真实跨事务 TOCTOU 防线，非死码，只是无 fixture 构造 promotion-in-window） | 同上 |
 | MF4 | curated-debt-entries.cjs：删 P02 `canonicalizedBy` | **恰 1 红**（14 测试中 13/14，line 217） | 同上 |
 | MF5 | curated-debt-entries.cjs：删 P03 `canonicalizedBy` | **恰 1 红**（13/14，line 218） | 同上 |
 | MF6 | curated-debt-entries.cjs：删 P04 `canonicalizedBy` | **恰 1 红**（13/14，line 219） | 同上 |
@@ -143,7 +149,7 @@ claim 站点这一既有事实也不受影响）：
 | MF1 | F | **relay6（第六棒新跑）** | null-ID+legacy 短路 neuter（可达性） | 9红/153绿 | advisor 判定净新 |
 | MF2 | F | **relay6（新跑）** | legacy 响应丢 workDateResolution 键（字节保真） | 恰3红/7绿 | advisor 判定净新 |
 | MF3a | F | **relay6（新跑）** | scheduled-side posture resolver **probe** 调用点单独移除 | 恰3红（23腿合跑） | resolver 排他，本片自证 |
-| MF3b | F | **relay6（新跑，advisor 二轮要求）** | scheduled-side posture resolver **per-user re-check** 调用点单独移除 | **0红/23绿——未覆盖，呈裁点20** | 死码路径，非"通过"；owner/下一片裁 |
+| MF3b | F | **relay6（新跑，advisor 二轮要求）** | scheduled-side posture resolver **per-user re-check** 调用点单独移除 | **0红/23绿——未覆盖，呈裁点20** | 真实跨事务 TOCTOU 防线（非死码）零覆盖；owner/下一片裁——**不要删除该行** |
 | MF4 | F | **relay6（新跑）** | 删 P02 marker | 恰1红（13/14） | 未竟项清账 |
 | MF5 | F | **relay6（新跑）** | 删 P03 marker | 恰1红（13/14） | 未竟项清账 |
 | MF6 | F | **relay6（新跑）** | 删 P04 marker | 恰1红（13/14） | 未竟项清账 |
