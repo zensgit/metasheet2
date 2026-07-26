@@ -1138,6 +1138,27 @@ export interface PluginServices {
       legacyAdapters: import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
     }): import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledBoundaryV1
     /**
+     * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock
+     * §8.2 step 7 second clause ("source-definition fingerprint equality").
+     * Pure; no DB access. The route calls this with its OWN pre-transaction
+     * W2 resolution (same shape `resolveLiveCandidate`/`resolveScheduledCandidate`
+     * return) and frozen context (same shape `buildShadowFrozenContext`
+     * returns, built by the route over its own non-transactional
+     * connection) to obtain a fingerprint comparable to the freeze step's
+     * own in-transaction one. This is the ONLY way the plugin can reach the
+     * source-definition fingerprint domain — it cannot compute one for
+     * arbitrary data, only for a resolution+context shape it already
+     * produces via its own adapters.
+     */
+    computeOuterSourceDefinitionFingerprintV1(input: {
+      readonly orgId: string
+      readonly userId: string
+      readonly source: 'live_resolution' | 'scheduled_resolution'
+      readonly nowIso: string
+      readonly resolution: unknown
+      readonly context: unknown
+    }): string | null
+    /**
      * W4C-2 — one drain pass over the durable result-event outbox (lock 7.1a).
      * The plugin schedules this ONLY under the same env gate as the posture
      * allowlist (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` non-empty): no

@@ -103,7 +103,10 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 // `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
-import { createAttendanceLiveScheduledBoundaryV1 } from './attendance/w4c2-live-scheduled-boundary'
+import {
+  createAttendanceLiveScheduledBoundaryV1,
+  computeAttendanceOuterSourceDefinitionFingerprintV1,
+} from './attendance/w4c2-live-scheduled-boundary'
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
 import {
   correlationContextEnrichmentMiddleware,
@@ -2060,6 +2063,17 @@ export class MetaSheetServer {
                       return { client, release: () => client.release() }
                     },
                   }),
+                // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second
+                // round) — lock §8.2 step 7 second clause. Pure; no DB
+                // access; wraps the module's own private
+                // `attributionFromResolution` so the plugin can only ever
+                // ask "what fingerprint would THIS resolution+context
+                // produce", never reach the raw builder/fingerprint
+                // primitives for arbitrary data.
+                computeOuterSourceDefinitionFingerprintV1: (input: unknown) =>
+                  computeAttendanceOuterSourceDefinitionFingerprintV1(
+                    input as Parameters<typeof computeAttendanceOuterSourceDefinitionFingerprintV1>[0],
+                  ),
                 // W4C-2: one outbox drain pass (lock 7.1a delivery side).
                 drainResultEventOutbox: async (options: {
                   emit: (delivery: {
