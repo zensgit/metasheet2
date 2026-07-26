@@ -756,13 +756,14 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // construction, superseding an earlier WRONG "structurally
   // indistinguishable" claim for the case where L2/L3 are BOTH wrong on the
   // SAME fixture). Zero concurrency — these are direct assertions on the
-  // resolved `reasonCode`, not races. `eDay1` isolates L2 (its correct
-  // resolution is `CURRENT_DAY_CONTAINING_SHIFT`); `eDay2` isolates L3 (its
-  // correct resolution is `PREVIOUS_NIGHT_CONTAINING_SHIFT`). Both legs'
-  // CORRECT values are asserted here; the mutation table in the PR body
-  // records the four fires/silent combinations (L2×eDay1 fires, L3×eDay1
-  // silent, L2×eDay2 silent, L3×eDay2 fires).
-  it('Group E: L2/L3 exclusive discriminating fixtures — correct resolution on each (mutation table in PR body records the fires/silent split)', async () => {
+  // resolved `reasonCode`, not races. Split into TWO independent `it`
+  // blocks (not one, combined) deliberately: vitest stops at the first
+  // failed `expect`, so a combined block would silently mask whichever
+  // fixture's assertion comes second during mutation testing — the exact
+  // "asserted invariant, never independently reached" failure mode this
+  // repo has hit before (see the PR body's earlier ⑥ self-report). Each
+  // block's mutation behavior is independently observable.
+  it('Group E / eDay1: correct resolution isolates L2 (mutation table in PR body: L2 fires, L3 silent on this fixture)', async () => {
     const token1 = await mintToken(eDay1User)
     const res1 = await punch(token1, {
       eventType: 'check_in', occurredAt: EDAY1_OCCURRED_AT, timezone: 'Etc/GMT+7', orgId: eDay1Org, operationId: randomUUID(),
@@ -773,7 +774,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs1[0].outcome).toBe('completed')
     expect(calcs1[0].attribution_snapshot.value.workDate).toBe(EDAY)
     expect(calcs1[0].attribution_snapshot.value.reasonCode).toBe('CURRENT_DAY_CONTAINING_SHIFT')
+  })
 
+  it('Group E / eDay2: correct resolution isolates L3 (mutation table in PR body: L2 silent, L3 fires on this fixture)', async () => {
     const token2 = await mintToken(eDay2User)
     const res2 = await punch(token2, {
       eventType: 'check_in', occurredAt: EDAY2_OCCURRED_AT, timezone: 'Asia/Tokyo', orgId: eDay2Org, operationId: randomUUID(),
@@ -793,8 +796,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     // `workDate: EDAY` and is STILL excluded whenever `calendarWorkDate ==
     // candidate.workDate` (the `candidate.workDate < calendarWorkDate`
     // guard is shared by both the open-record and previous-night checks),
-    // so the L2/L3 exclusivity property below is unaffected by which of
-    // the two "previous night" reason codes fires.
+    // so the L2/L3 exclusivity property is unaffected by which of the two
+    // "previous night" reason codes fires.
     expect(calcs2[0].attribution_snapshot.value.reasonCode).toBe('OPEN_PREVIOUS_NIGHT_RECORD')
   })
 })
