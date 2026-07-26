@@ -177,7 +177,19 @@ jobs:
       # only (owner ruling: two copies would drift apart). See scripts/ops/integration-guard-required-
       # wiring-contract.test.mjs for the full rationale and an explicit note on what each layer can and
       # cannot prove.
+      #
+      # #4614 P1 (owner review, 2026-07-26): before this step carried `id: integration-guard-contract`,
+      # this was the contract's ONLY executable caller, and neither this workflow's own path nor the
+      # contract test's own path was in integration-guard.yml's guarded-path roster — so deleting this
+      # one step made this job silently stop running the contract WHILE integration-guard.yml classified
+      # the change as out-of-scope and no-op'd green: both gates green, contract fully disconnected.
+      # Closed by a two-point wiring: integration-guard.yml now ALSO runs this same contract file
+      # unconditionally from its own job (id: contract-self-check), and the contract itself pins THIS
+      # step's presence (by this exact `id:`) in reverse — deleting either call site now reds the
+      # OTHER caller's copy of the contract on its own specific pin. See integration-guard.yml's header
+      # for the full account.
       - name: Integration Guard required-wiring contract
+        id: integration-guard-contract
         run: node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs
 
       # PB4-2 CI two-point wiring contract (no DB): the archive-read-only two-connection suite must

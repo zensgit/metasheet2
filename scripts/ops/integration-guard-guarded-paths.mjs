@@ -117,12 +117,29 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   '.github/workflows/integration-guard.yml',
   // Governance-slice self-coverage (2026-07-25): before extraction, ALL classification logic lived
   // inside integration-guard.yml itself, which was already in this roster, so editing the classifier
-  // made the guard run itself. After extraction, a PR touching ONLY these three scripts would
-  // otherwise classify as not-relevant and hit the no-op branch — never actually running the suite
-  // whose own gating logic just changed. These three entries close that gap.
+  // made the guard run itself. After extraction, a PR touching ONLY these scripts would otherwise
+  // classify as not-relevant and hit the no-op branch — never actually running the suite whose own
+  // gating logic just changed. These entries close that gap.
   'scripts/ops/integration-guard-guarded-paths.mjs',
   'scripts/ops/integration-guard-classify.mjs',
   'scripts/ops/integration-guard-assert-branch.mjs',
+  // Extended self-coverage (2026-07-26, #4614 two-point-wiring fix): BASE_SHA resolution and the
+  // two long-form commands the workflow used to inline are now their own files, and the contract
+  // that pins ALL of this — including the two-point call-site wiring into plugin-tests.yml — is
+  // itself now a guarded path (it, too, is part of "the guard's own gating logic").
+  'scripts/ops/integration-guard-resolve-diff.mjs',
+  'scripts/ops/integration-guard-noop.sh',
+  'scripts/ops/integration-guard-run-web-specs.sh',
+  'scripts/ops/integration-guard-required-wiring-contract.test.mjs',
+  // #4614 P1 two-point wiring: plugin-tests.yml is the contract's OTHER executable caller
+  // (test (20.x) runs it via `node --test scripts/ops/integration-guard-required-wiring-
+  // contract.test.mjs`). Before this entry, a PR that deleted ONLY that one invocation line
+  // classified as out-of-scope here (no guarded path touched) AND silently stopped running the
+  // contract in test (20.x) — both gates green, contract fully disconnected. Now such an edit is
+  // itself a guarded-path change, and integration-guard.yml's own unconditional self-check step
+  // (see the workflow) runs the contract regardless, whose Pin re-asserts plugin-tests.yml still
+  // carries the invocation — see the contract test file for the full two-point account.
+  '.github/workflows/plugin-tests.yml',
 ])
 
 /**

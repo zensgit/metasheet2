@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process'
 import { GUARDED_PATH_ENTRIES, isPrefixEntry, prefixOf } from './integration-guard-guarded-paths.mjs'
 import { classify, matchesGuardedPath, parseNulDelimited, findMissingRosterEntries } from './integration-guard-classify.mjs'
 import { assertBranch } from './integration-guard-assert-branch.mjs'
+import { resolveDiffArgs, ZERO_SHA } from './integration-guard-resolve-diff.mjs'
 
 /**
  * Integration Guard required-wiring contract (governance slice, 2026-07-25 — standalone from
@@ -193,21 +194,66 @@ import { assertBranch } from './integration-guard-assert-branch.mjs'
  * fail-closed regardless: a missing interpreter, missing PyYAML, or a YAML parse error all throw —
  * a workflow PyYAML cannot parse is also a workflow GitHub will not run, so a parse failure is never
  * a green path.
+ *
+ * FOURTH REVIEW ROUND (#4614 owner review, 2026-07-26) — TWO FINDINGS, both closed here:
+ *   - [P1] "the gating contract can be disconnected ENTIRELY and stay double-green." This contract's
+ *     ONLY executable caller was plugin-tests.yml's `test (20.x)` step, and neither that workflow's
+ *     path nor this file's own path was in the guarded-path roster — so deleting that one line
+ *     silently stopped `test (20.x)` from running this contract WHILE integration-guard.yml
+ *     classified the change as out-of-scope and no-op'd green. Closed by a TWO-POINT wiring: Pin 13
+ *     asserts integration-guard.yml now runs this exact file unconditionally as its own self-check
+ *     (id: contract-self-check, no `if` at all); Pin 14 asserts, in reverse, that plugin-tests.yml's
+ *     required `test` job still carries its own invocation (id: integration-guard-contract). Both
+ *     `.github/workflows/plugin-tests.yml` and this file's own path are now also in the guarded-path
+ *     roster (self-coverage, same rationale as the three scripts already there). Deleting either call
+ *     site now reds a DIFFERENT, specific pin — proven separately, per this repo's "门级排他≠词级排他"
+ *     doctrine — not one mutation tripping both. Precisely what this closes: `integration-guard` is
+ *     NOT a required check yet (see the workflow's own WIRING note), so this is a DETECTION fix
+ *     (something reds, observably, in a job's log), not an ENFORCEMENT one (blocking a merge) — that
+ *     still needs the owner's separate required-check promotion.
+ *   - [P2] "Missing/zero/invalid BASE_SHA still FAILS OPEN." Pin 6's exact-pin on the classifier
+ *     step's `env: BASE_SHA: ...` EXPRESSION TEXT only proves that expression was not edited — it
+ *     cannot prove the RUNTIME VALUE it evaluates to is ever non-empty/well-formed, which is a
+ *     GitHub Actions runtime fact, not a source-text one. Against the real PR merge commit
+ *     `b83e180d8`, the pre-fix code produced `relevant=false` while this contract stayed 30/30 green
+ *     — a fail-open guarded only by an exact pin is still fail-open. Closed by extracting the
+ *     decision into scripts/ops/integration-guard-resolve-diff.mjs's `resolveDiffArgs()`, a pure,
+ *     unit-tested function (not more bash) that throws (fail-closed) for a missing/zero/malformed
+ *     BASE_SHA on any event except `push` (the one legitimate initial-push shape), and ALSO throws
+ *     for a malformed BASE_SHA on `push` itself or on any event name it has not been told is safe —
+ *     there is no permissive default. See Door C below (the resolveDiffArgs()/CLI behavioural tests)
+ *     and that script's own header for the full account.
+ * MAINTENANCE-COST RULING (same review): the classifier step's `run:` text (Pin 6), the no-op step's
+ * `run:` text (Pin 8), and the web-guard-specs step's `run:` text (Pin 7) are now short one-line
+ * script invocations (`node scripts/ops/integration-guard-resolve-diff.mjs | node scripts/ops/
+ * integration-guard-classify.mjs`, `bash scripts/ops/integration-guard-noop.sh`, `bash scripts/ops/
+ * integration-guard-run-web-specs.sh` respectively) rather than the huge inline bash/vitest-command
+ * blocks previously pinned here — the owner explicitly declined to accept long-term exact-copying of
+ * the huge web command or the no-op text inside this file's pins; both now live in their own script
+ * files instead, and this file pins only the one-line invocation of each, per the owner's ruling.
  */
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const repoRoot = join(__dirname, '..', '..')
 const WORKFLOW_PATH = join(repoRoot, '.github/workflows/integration-guard.yml')
+const PLUGIN_TESTS_WORKFLOW_PATH = join(repoRoot, '.github/workflows/plugin-tests.yml')
 
 const JOB_ID = 'integration-guard'
+const RESOLVE_DIFF_STEP_ID = 'resolve-diff'
 const CLASSIFIER_STEP_ID = 'changes'
+const CONTRACT_SELF_CHECK_STEP_ID = 'contract-self-check'
 const NOOP_STEP_ID = 'noop'
 const PLUGIN_STEP_ID = 'plugin-core-tests'
 const WEB_STEP_ID = 'web-guard-specs'
 const TERMINAL_STEP_ID = 'assert-branch'
 const RELEVANT_TRUE_IF = "steps.changes.outputs.relevant == 'true'"
 const RELEVANT_FALSE_IF = "steps.changes.outputs.relevant == 'false'"
+
+// The OTHER executable caller of this contract (#4614 P1 two-point wiring) — the required
+// `test` job in plugin-tests.yml, located by exact `id:`, not by `- name:` title.
+const PLUGIN_TESTS_JOB_ID = 'test'
+const PLUGIN_TESTS_CONTRACT_STEP_ID = 'integration-guard-contract'
 
 // ---------------------------------------------------------------------------
 // EXACT-SHAPE pins (P1 correction, 2026-07-26): each literal below was captured by dumping
@@ -221,18 +267,44 @@ const RELEVANT_FALSE_IF = "steps.changes.outputs.relevant == 'false'"
 // (see the CORRECTION note in the file header above).
 // ---------------------------------------------------------------------------
 
-const CLASSIFIER_RUN_EXACT =
-  "set -euo pipefail\n\necho \"Integration Guard: classifying for $EVENT_NAME (base=${BASE_SHA:-<none>}, head=$HEAD_SHA).\"\n\nif [[ -z \"${BASE_SHA:-}\" || \"$BASE_SHA\" == \"0000000000000000000000000000000000000000\" ]]; then\n  git diff-tree --root --no-commit-id --name-only -z -r \"$HEAD_SHA\" | node scripts/ops/integration-guard-classify.mjs\nelse\n  git diff --name-only -z \"$BASE_SHA\" \"$HEAD_SHA\" | node scripts/ops/integration-guard-classify.mjs\nfi\n"
+// #4614 P2 fix: BASE_SHA resolution is now its OWN step (id: resolve-diff), not piped directly
+// into the classify step under a shared `pipefail` — see that step's own comment in the workflow
+// for why a shared pipeline would have left `steps.changes.outputs.relevant` ambiguous on a
+// resolve-diff failure (classify.mjs still runs to completion on the resulting empty stdin and
+// correctly, harmlessly, writes `relevant=false` for what looks like "no changes"). Splitting
+// means: this step's own exit code is resolve-diff's exit code, and a temp file in $RUNNER_TEMP
+// carries its NUL-delimited stdout to the classify step below.
+const RESOLVE_DIFF_RUN_EXACT =
+  'set -euo pipefail\nnode scripts/ops/integration-guard-resolve-diff.mjs > "$RUNNER_TEMP/integration-guard-diff.nul"\n'
 
-const NOOP_RUN_EXACT =
-  "echo \"Integration Guard: no changes in guarded paths for this ${{ github.event_name }} event.\"\necho \"This is a DELIBERATE NO-OP SUCCESS (exit 0) -- an auditable, in-band result in this\"\necho \"job's own log, not an out-of-band skipped conclusion a reviewer would have to look up.\"\nexit 0\n"
+// The classify step no longer needs EVENT_NAME/BASE_SHA/HEAD_SHA (resolve-diff, above, already
+// consumed them) — it only reads the temp file resolve-diff wrote and $GITHUB_OUTPUT, the latter
+// a GitHub-Actions-provided env var needing no explicit wiring.
+const CLASSIFIER_RUN_EXACT =
+  'set -euo pipefail\nnode scripts/ops/integration-guard-classify.mjs < "$RUNNER_TEMP/integration-guard-diff.nul"\n'
+
+// #4614 maintenance-cost ruling: the no-op message text is now scripts/ops/integration-guard-
+// noop.sh — this pins only the single-line invocation, not the message text itself.
+const NOOP_RUN_EXACT = 'bash scripts/ops/integration-guard-noop.sh'
 
 const PLUGIN_CORE_RUN_EXACT = "pnpm --filter plugin-integration-core test"
 
-const WEB_GUARD_RUN_EXACT =
-  "pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper --reporter=dot"
+// #4614 maintenance-cost ruling: the huge targeted-spec vitest command is now scripts/ops/
+// integration-guard-run-web-specs.sh — this pins only the single-line invocation, not the
+// command's contents (the owner explicitly declined to accept long-term exact-copying of this
+// command inside this file).
+const WEB_GUARD_RUN_EXACT = 'bash scripts/ops/integration-guard-run-web-specs.sh'
 
 const TERMINAL_RUN_EXACT = "node scripts/ops/integration-guard-assert-branch.mjs"
+
+// #4614 P1 two-point wiring: this job's own unconditional self-check invocation of THIS contract
+// (see the workflow's own header for the full account of why this exists).
+const CONTRACT_SELF_CHECK_RUN_EXACT = 'node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs'
+
+// #4614 P1 two-point wiring: the OTHER executable caller, inside plugin-tests.yml's required
+// `test` job — captured the same way (JSON.stringify(step.run) dumped from a parsed copy of the
+// current file, pasted verbatim).
+const PLUGIN_TESTS_CONTRACT_RUN_EXACT = 'node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs'
 
 const RELEVANT_ENV_EXACT = '${{ steps.changes.outputs.relevant }}'
 const NOOP_OUTCOME_ENV_EXACT = '${{ steps.noop.outcome }}'
@@ -314,6 +386,12 @@ function isPlainObject(value) {
 const workflowText = readFileSync(WORKFLOW_PATH, 'utf8')
 const doc = parseYamlDocument(workflowText)
 
+// #4614 P1 two-point wiring: also parse plugin-tests.yml so this contract can pin its OWN
+// invocation there in reverse (Pin 15 below) — same fail-closed PyYAML bridge, same doctrine as
+// the integration-guard.yml parse above.
+const pluginTestsWorkflowText = readFileSync(PLUGIN_TESTS_WORKFLOW_PATH, 'utf8')
+const pluginTestsDoc = parseYamlDocument(pluginTestsWorkflowText)
+
 /**
  * `on:` is a YAML 1.1 boolean keyword — PyYAML's SafeLoader resolves an unquoted `on` to the Python
  * bool `True`, and the jsonable() bridge above stringifies every key, so the parsed JSON carries the
@@ -354,6 +432,19 @@ function requireJob() {
       `exact job key (renaming/removing it silently orphans any future required-check promotion)`,
   )
   return doc.jobs[JOB_ID]
+}
+
+/**
+ * @returns {Record<string, unknown>}
+ */
+function requirePluginTestsJob() {
+  assert.ok(isPlainObject(pluginTestsDoc.jobs), 'plugin-tests.yml: jobs: mapping must exist')
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(pluginTestsDoc.jobs, PLUGIN_TESTS_JOB_ID),
+    `plugin-tests.yml: jobs.${PLUGIN_TESTS_JOB_ID} must exist — this is the already-required job ` +
+      `this contract's other executable caller lives inside`,
+  )
+  return pluginTestsDoc.jobs[PLUGIN_TESTS_JOB_ID]
 }
 
 /** @param {Record<string, unknown>} job */
@@ -515,10 +606,12 @@ test('jobs.integration-guard forbids job-level if/needs/continue-on-error', () =
 // carry `continue-on-error` — it would let any of them silently fail without failing the job.
 // ---------------------------------------------------------------------------
 
-test('the classifier, no-op, real-branch, and terminal steps forbid continue-on-error', () => {
+test('the resolve-diff, classifier, self-check, no-op, real-branch, and terminal steps forbid continue-on-error', () => {
   const job = requireJob()
   const guardedSteps = [
+    ['resolve-diff (id: resolve-diff)', stepById(job, RESOLVE_DIFF_STEP_ID)],
     ['classifier (id: changes)', stepById(job, CLASSIFIER_STEP_ID)],
+    ['contract self-check (id: contract-self-check)', stepById(job, CONTRACT_SELF_CHECK_STEP_ID)],
     ['no-op (id: noop)', stepById(job, NOOP_STEP_ID)],
     ['plugin-core-tests (id: plugin-core-tests)', stepById(job, PLUGIN_STEP_ID)],
     ['web-guard-specs (id: web-guard-specs)', stepById(job, WEB_STEP_ID)],
@@ -566,19 +659,28 @@ test('the classifier, no-op, real-branch, and terminal steps forbid continue-on-
 // values, symmetric with Pin 9's treatment of the terminal step's `env:`.
 // ---------------------------------------------------------------------------
 
-test('the scope-detection step (id: changes) run: text and its EVENT_NAME/BASE_SHA/HEAD_SHA env values are byte-identical to the pinned literals', () => {
+// #4614 P2 FIX (fourth review round, 2026-07-26): the classifier used to be ONE step running both
+// BASE_SHA resolution and classification in a `resolve-diff | classify` shell pipe under a shared
+// `pipefail`. That mechanism was itself wrong: classify.mjs still runs to completion on the
+// resulting EMPTY stdin (an empty diff correctly, harmlessly classifies as `relevant=false`) and
+// writes that to $GITHUB_OUTPUT before exiting 0 — so `steps.changes.outputs.relevant` would have
+// ended up `'false'` regardless of whether resolve-diff itself failed, even though the pipeline's
+// overall exit code (rightmost non-zero) did fail the step. Split into two steps instead: this pin
+// covers the FIRST, `id: resolve-diff`, which owns EVENT_NAME/BASE_SHA/HEAD_SHA and whose own exit
+// code is unambiguous (no pipe involved) — see Pin 6b below for the classify step's own (now
+// env-free) pin.
+test('the resolve-diff step (id: resolve-diff) run: text and its EVENT_NAME/BASE_SHA/HEAD_SHA env values are byte-identical to the pinned literals', () => {
   const job = requireJob()
-  const classifier = stepById(job, CLASSIFIER_STEP_ID)
-  assert.ok(classifier, `job.${JOB_ID} must have a step with id: ${CLASSIFIER_STEP_ID}`)
+  const resolveDiffStep = stepById(job, RESOLVE_DIFF_STEP_ID)
+  assert.ok(resolveDiffStep, `job.${JOB_ID} must have a step with id: ${RESOLVE_DIFF_STEP_ID}`)
   assert.equal(
-    classifier.run,
-    CLASSIFIER_RUN_EXACT,
-    `the ${CLASSIFIER_STEP_ID} step's run: text must be byte-identical to the pinned literal — any ` +
-      `deviation (an inline reimplementation, an appended line that bypasses the script's own ` +
-      `$GITHUB_OUTPUT write, a dropped -z flag) fails this pin even if the required substrings are ` +
-      `still present somewhere in the text`,
+    resolveDiffStep.run,
+    RESOLVE_DIFF_RUN_EXACT,
+    `the ${RESOLVE_DIFF_STEP_ID} step's run: text must be byte-identical to the pinned literal — any ` +
+      `deviation (an inline reimplementation, a dropped redirect) fails this pin even if the required ` +
+      `substrings are still present somewhere in the text`,
   )
-  const env = isPlainObject(classifier.env) ? classifier.env : {}
+  const env = isPlainObject(resolveDiffStep.env) ? resolveDiffStep.env : {}
   assert.equal(
     String(env.EVENT_NAME ?? ''),
     EVENT_NAME_ENV_EXACT,
@@ -589,15 +691,43 @@ test('the scope-detection step (id: changes) run: text and its EVENT_NAME/BASE_S
     BASE_SHA_ENV_EXACT,
     'env.BASE_SHA must be EXACTLY the pinned `pull_request.base.sha || merge_group.base_sha || before` ' +
       'expression — a mutation that hardcodes this to the all-zeros sentinel (or any other constant) ' +
-      'forces the classifier down its empty-diff fallback on every run regardless of what actually ' +
-      'changed, and since HEAD_SHA is a merge commit on pull_request events, that fallback yields zero ' +
-      'paths (see the mechanism documented above the test) — a universal false negative',
+      'forces resolveDiffArgs() down its fail-closed/root-fallback branch on every run regardless of ' +
+      'what actually changed',
   )
   assert.equal(
     String(env.HEAD_SHA ?? ''),
     HEAD_SHA_ENV_EXACT,
     'env.HEAD_SHA must be EXACTLY `${{ github.sha }}`',
   )
+})
+
+// Pin 6b: the classify step itself (id: changes) no longer owns EVENT_NAME/BASE_SHA/HEAD_SHA at
+// all (resolve-diff, above, already consumed them) — it only reads the temp file resolve-diff
+// wrote and $GITHUB_OUTPUT (a GitHub-Actions-provided env var, no explicit wiring needed), so this
+// pin is run:-only.
+test('the scope-classification step (id: changes) run: text is byte-identical to the pinned literal and does not re-acquire EVENT_NAME/BASE_SHA/HEAD_SHA', () => {
+  const job = requireJob()
+  const classifier = stepById(job, CLASSIFIER_STEP_ID)
+  assert.ok(classifier, `job.${JOB_ID} must have a step with id: ${CLASSIFIER_STEP_ID}`)
+  assert.equal(
+    classifier.run,
+    CLASSIFIER_RUN_EXACT,
+    `the ${CLASSIFIER_STEP_ID} step's run: text must be byte-identical to the pinned literal`,
+  )
+  // Narrow, not blanket: the invariant is "BASE_SHA resolution does not migrate back into this
+  // step", not "this step may never carry an env: block for any reason" — an unrelated future
+  // env: addition here should not fail this pin.
+  const env = isPlainObject(classifier.env) ? classifier.env : {}
+  for (const key of ['EVENT_NAME', 'BASE_SHA', 'HEAD_SHA']) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(env, key),
+      false,
+      `the ${CLASSIFIER_STEP_ID} step must not carry its own env.${key} — EVENT_NAME/BASE_SHA/` +
+        `HEAD_SHA belong to the ${RESOLVE_DIFF_STEP_ID} step only; reintroducing them here (instead ` +
+        `of reading the resolve-diff step's output file) would reintroduce the exact BASE_SHA-` +
+        `resolution ambiguity the step split closes`,
+    )
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -794,6 +924,7 @@ test('none of the files this contract reads/imports/IS contain a raw NUL (0x00) 
     ['integration-guard-guarded-paths.mjs', join(repoRoot, 'scripts/ops/integration-guard-guarded-paths.mjs')],
     ['integration-guard-classify.mjs', join(repoRoot, 'scripts/ops/integration-guard-classify.mjs')],
     ['integration-guard-assert-branch.mjs', join(repoRoot, 'scripts/ops/integration-guard-assert-branch.mjs')],
+    ['integration-guard-resolve-diff.mjs', join(repoRoot, 'scripts/ops/integration-guard-resolve-diff.mjs')],
     ['integration-guard-required-wiring-contract.test.mjs (this file)', __filename],
   ]
   for (const [label, path] of filesToCheck) {
@@ -807,6 +938,90 @@ test('none of the files this contract reads/imports/IS contain a raw NUL (0x00) 
         `escape) silently makes the WHOLE FILE invisible to diff/review tooling, not just the one line`,
     )
   }
+})
+
+// ---------------------------------------------------------------------------
+// Pin 13 (#4614 P1, two-point wiring). Before this pin existed, this contract's ONLY executable
+// caller was plugin-tests.yml's required `test` job — nothing in integration-guard.yml itself ran
+// this contract, and neither workflow's own path was in the guarded-path roster. So a PR that
+// deleted the ONE line in plugin-tests.yml invoking this contract made `test (20.x)` silently stop
+// running it, WHILE integration-guard.yml (having no caller of its own, and not itself a guarded
+// path) classified the change as out-of-scope and no-op'd green — BOTH gates green, contract fully
+// disconnected. Fixed by making integration-guard.yml run this exact contract file itself,
+// UNCONDITIONALLY (no `if` at all — not gated on relevant==true/false like the two real test
+// branches are, so it always executes regardless of what the classifier decided). This pin asserts
+// that self-check step exists, by exact `id:`, with byte-identical run: text and no gating `if`.
+// Paired with Pin 14 below (the reverse pin, inside plugin-tests.yml) — deleting EITHER call site
+// must red a DIFFERENT specific pin, not the same one, so neither call site is "the only thing
+// checking the other exists" while itself being unchecked.
+// ---------------------------------------------------------------------------
+
+test('integration-guard.yml runs this exact contract unconditionally as its own self-check, id: contract-self-check, no gating if', () => {
+  const job = requireJob()
+  const selfCheck = stepById(job, CONTRACT_SELF_CHECK_STEP_ID)
+  assert.ok(
+    selfCheck,
+    `job.${JOB_ID} must have a step with id: ${CONTRACT_SELF_CHECK_STEP_ID} — without it, this ` +
+      `contract's only executable caller is plugin-tests.yml, and deleting that ONE line silently ` +
+      `disconnects the contract while this workflow stays green (the exact #4614 P1 defect)`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(selfCheck, 'if'),
+    false,
+    `the ${CONTRACT_SELF_CHECK_STEP_ID} step must carry NO \`if\` key at all — it must run on ` +
+      `EVERY event this workflow triggers on, not only when relevant==true/false, or a scope this ` +
+      `workflow no-ops on would silently skip its own self-check too`,
+  )
+  assert.equal(
+    selfCheck.run,
+    CONTRACT_SELF_CHECK_RUN_EXACT,
+    `the ${CONTRACT_SELF_CHECK_STEP_ID} step's run: text must be byte-identical to the pinned ` +
+      `literal invoking this exact contract file`,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Pin 14 (#4614 P1, two-point wiring, REVERSE direction). Reads plugin-tests.yml — not
+// integration-guard.yml — and asserts its required `test` job still carries the exact step (by
+// `id:`) that invokes THIS contract file, with no gating `if` (so it still runs on BOTH matrix
+// legs, not silently narrowed to the non-required 18.x leg only — the same class of gap Pin 4
+// forbids at the job level) and no `continue-on-error`. This is the "in reverse" half of the
+// two-point wiring: Pin 13 (above) proves integration-guard.yml still calls this contract; this
+// pin proves plugin-tests.yml still does too. Deleting the plugin-tests.yml step reds THIS pin
+// specifically (via whichever caller is still running this file — either one); deleting the
+// integration-guard.yml self-check step reds Pin 13 specifically. Neither mutation reds the
+// other's pin, which is the evidence the two are not one door wearing two hats (per this repo's
+// "门级排他≠词级排他" doctrine).
+// ---------------------------------------------------------------------------
+
+test('plugin-tests.yml required test job still invokes this exact contract, id: integration-guard-contract, run on both matrix legs, no continue-on-error', () => {
+  const job = requirePluginTestsJob()
+  const step = stepById(job, PLUGIN_TESTS_CONTRACT_STEP_ID)
+  assert.ok(
+    step,
+    `plugin-tests.yml: jobs.${PLUGIN_TESTS_JOB_ID} must have a step with id: ` +
+      `${PLUGIN_TESTS_CONTRACT_STEP_ID} — deleting it silently stops the required test (20.x) job ` +
+      `from ever running this contract (the exact #4614 P1 defect, from the OTHER call site)`,
+  )
+  assert.equal(
+    step.run,
+    PLUGIN_TESTS_CONTRACT_RUN_EXACT,
+    `the ${PLUGIN_TESTS_CONTRACT_STEP_ID} step's run: text must be byte-identical to the pinned ` +
+      `literal invoking this exact contract file`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(step, 'if'),
+    false,
+    `the ${PLUGIN_TESTS_CONTRACT_STEP_ID} step must carry NO \`if\` key — narrowing it to a single ` +
+      `matrix leg (e.g. \`if: matrix.node-version == '18.x'\`) would silently stop the contract ` +
+      `from ever running in the REQUIRED "test (20.x)" leg while the job as a whole stays green`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(step, 'continue-on-error'),
+    false,
+    `the ${PLUGIN_TESTS_CONTRACT_STEP_ID} step must not carry continue-on-error — it is the step ` +
+      `this half of the two-point wiring relies on actually failing the job when it fails`,
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -1014,4 +1229,150 @@ test('assertBranch(): relevant=false but a real step ALSO succeeded (contradicti
 test('assertBranch(): relevant=true but a real step was skipped (real branch did not actually run) is REJECTED', () => {
   const result = assertBranch({ relevant: 'true', noopOutcome: 'skipped', pluginOutcome: 'skipped', webOutcome: 'success' })
   assert.equal(result.ok, false)
+})
+
+// ---------------------------------------------------------------------------
+// Behavioural tests of scripts/ops/integration-guard-resolve-diff.mjs — Door C (#4614 P2). These
+// drive resolveDiffArgs() directly as a PURE function (no filesystem, no subprocess, no real git)
+// with synthetic event/BASE_SHA/HEAD_SHA combinations — including the exact missing/zero/malformed
+// shapes the P2 finding named. Deliberately kept pure-function-only here: this same contract file
+// is ALSO invoked from plugin-tests.yml's required `test` job, which checks out with the default
+// SHALLOW `fetch-depth: 1` (see plugin-tests.yml's own W4C-0 step, which has to `git fetch
+// --depth=1` a specific commit for exactly this reason) — a test that spawned a real `git diff`
+// against arbitrary repo commits here could red on shallow-checkout depth alone, unrelated to
+// anything this fix is actually about. The CLI-level tests further below are restricted to the
+// FAIL-CLOSED path (which exits before ever calling `execFileSync('git', ...)`) for the same
+// reason — see that section's own note.
+// ---------------------------------------------------------------------------
+
+const VALID_SHA_A = 'a'.repeat(40)
+const VALID_SHA_B = 'b'.repeat(40)
+const MALFORMED_SHA = 'not-a-real-sha'
+
+test('resolveDiffArgs(): pull_request with a missing (undefined) BASE_SHA throws (fail-closed, not the root fallback)', () => {
+  assert.throws(
+    () => resolveDiffArgs({ eventName: 'pull_request', baseSha: undefined, headSha: VALID_SHA_B }),
+    /missing\/zero/,
+  )
+})
+
+test('resolveDiffArgs(): pull_request with an empty-string BASE_SHA throws', () => {
+  assert.throws(
+    () => resolveDiffArgs({ eventName: 'pull_request', baseSha: '', headSha: VALID_SHA_B }),
+    /missing\/zero/,
+  )
+})
+
+test('resolveDiffArgs(): pull_request with the all-zeros sentinel BASE_SHA throws', () => {
+  assert.throws(
+    () => resolveDiffArgs({ eventName: 'pull_request', baseSha: ZERO_SHA, headSha: VALID_SHA_B }),
+    /missing\/zero/,
+  )
+})
+
+test('resolveDiffArgs(): pull_request with a malformed (non-hex) BASE_SHA throws', () => {
+  assert.throws(
+    () => resolveDiffArgs({ eventName: 'pull_request', baseSha: MALFORMED_SHA, headSha: VALID_SHA_B }),
+    /malformed/,
+  )
+})
+
+test('resolveDiffArgs(): pull_request with a well-formed BASE_SHA returns a plain git diff against it', () => {
+  const result = resolveDiffArgs({ eventName: 'pull_request', baseSha: VALID_SHA_A, headSha: VALID_SHA_B })
+  assert.deepEqual(result, { args: ['diff', '--name-only', '-z', VALID_SHA_A, VALID_SHA_B] })
+})
+
+test('resolveDiffArgs(): merge_group with a missing/zero/malformed BASE_SHA throws (mirrors pull_request)', () => {
+  assert.throws(() => resolveDiffArgs({ eventName: 'merge_group', baseSha: undefined, headSha: VALID_SHA_B }), /missing\/zero/)
+  assert.throws(() => resolveDiffArgs({ eventName: 'merge_group', baseSha: ZERO_SHA, headSha: VALID_SHA_B }), /missing\/zero/)
+  assert.throws(() => resolveDiffArgs({ eventName: 'merge_group', baseSha: MALFORMED_SHA, headSha: VALID_SHA_B }), /malformed/)
+})
+
+test('resolveDiffArgs(): merge_group with a well-formed BASE_SHA returns a plain git diff against it', () => {
+  const result = resolveDiffArgs({ eventName: 'merge_group', baseSha: VALID_SHA_A, headSha: VALID_SHA_B })
+  assert.deepEqual(result, { args: ['diff', '--name-only', '-z', VALID_SHA_A, VALID_SHA_B] })
+})
+
+test('resolveDiffArgs(): push (initial push) with a missing/zero BASE_SHA is the ONLY allowed root fallback (positive control)', () => {
+  const missing = resolveDiffArgs({ eventName: 'push', baseSha: undefined, headSha: VALID_SHA_B })
+  assert.deepEqual(missing, { args: ['diff-tree', '--root', '--no-commit-id', '--name-only', '-z', '-r', VALID_SHA_B] })
+  const zero = resolveDiffArgs({ eventName: 'push', baseSha: ZERO_SHA, headSha: VALID_SHA_B })
+  assert.deepEqual(zero, { args: ['diff-tree', '--root', '--no-commit-id', '--name-only', '-z', '-r', VALID_SHA_B] })
+})
+
+test('resolveDiffArgs(): push with a malformed (non-hex, non-missing, non-zero) BASE_SHA still throws — not the legitimate initial-push signal', () => {
+  assert.throws(
+    () => resolveDiffArgs({ eventName: 'push', baseSha: MALFORMED_SHA, headSha: VALID_SHA_B }),
+    /malformed/,
+  )
+})
+
+test('resolveDiffArgs(): push with a well-formed BASE_SHA (an ordinary, non-initial push) returns a plain git diff', () => {
+  const result = resolveDiffArgs({ eventName: 'push', baseSha: VALID_SHA_A, headSha: VALID_SHA_B })
+  assert.deepEqual(result, { args: ['diff', '--name-only', '-z', VALID_SHA_A, VALID_SHA_B] })
+})
+
+test('resolveDiffArgs(): an unrecognised event name with a missing/zero BASE_SHA throws — no permissive default for an event not on the allowlist', () => {
+  // This is the owner's "only an initial push may use the root fallback" ruling stated as a
+  // negative control: `push` is the only allow-listed event, so anything else (a future workflow
+  // trigger, a typo'd event name, `workflow_dispatch`) must NOT silently fall through to the root
+  // diff-tree fallback just because it isn't `pull_request`/`merge_group` either.
+  assert.throws(
+    () => resolveDiffArgs({ eventName: 'workflow_dispatch', baseSha: undefined, headSha: VALID_SHA_B }),
+    /missing\/zero/,
+  )
+  assert.throws(
+    () => resolveDiffArgs({ eventName: 'workflow_dispatch', baseSha: ZERO_SHA, headSha: VALID_SHA_B }),
+    /missing\/zero/,
+  )
+})
+
+test('resolveDiffArgs(): an unrecognised event name with a well-formed BASE_SHA still returns a plain git diff (only the ROOT FALLBACK is event-restricted)', () => {
+  const result = resolveDiffArgs({ eventName: 'workflow_dispatch', baseSha: VALID_SHA_A, headSha: VALID_SHA_B })
+  assert.deepEqual(result, { args: ['diff', '--name-only', '-z', VALID_SHA_A, VALID_SHA_B] })
+})
+
+test('resolveDiffArgs(): a missing HEAD_SHA throws regardless of event or BASE_SHA', () => {
+  assert.throws(() => resolveDiffArgs({ eventName: 'pull_request', baseSha: VALID_SHA_A, headSha: undefined }))
+  assert.throws(() => resolveDiffArgs({ eventName: 'push', baseSha: undefined, headSha: '' }))
+})
+
+// ---------------------------------------------------------------------------
+// CLI-level tests of scripts/ops/integration-guard-resolve-diff.mjs — restricted to the FAIL-CLOSED
+// path only (see the Door C header above for why this file does not spawn a real `git diff` here).
+// Each case below throws inside resolveDiffArgs() before the script ever reaches
+// `spawnSync('git', ...)`, so these are checkout-depth-independent and do not touch git at all.
+// ---------------------------------------------------------------------------
+
+test('resolve-diff CLI: pull_request with an empty BASE_SHA exits non-zero and never invokes git', () => {
+  const scriptPath = join(repoRoot, 'scripts/ops/integration-guard-resolve-diff.mjs')
+  const res = spawnSync('node', [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, EVENT_NAME: 'pull_request', BASE_SHA: '', HEAD_SHA: VALID_SHA_B },
+  })
+  assert.notEqual(res.status, 0, `must exit non-zero: stdout=${res.stdout} stderr=${res.stderr}`)
+  assert.match(res.stderr, /missing\/zero/)
+  assert.equal(res.stdout, '', 'no git output must appear on stdout — git must never have been invoked')
+})
+
+test('resolve-diff CLI: merge_group with the all-zeros sentinel BASE_SHA exits non-zero and never invokes git', () => {
+  const scriptPath = join(repoRoot, 'scripts/ops/integration-guard-resolve-diff.mjs')
+  const res = spawnSync('node', [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, EVENT_NAME: 'merge_group', BASE_SHA: ZERO_SHA, HEAD_SHA: VALID_SHA_B },
+  })
+  assert.notEqual(res.status, 0, `must exit non-zero: stdout=${res.stdout} stderr=${res.stderr}`)
+  assert.match(res.stderr, /missing\/zero/)
+  assert.equal(res.stdout, '')
+})
+
+test('resolve-diff CLI: push with a malformed BASE_SHA exits non-zero and never invokes git', () => {
+  const scriptPath = join(repoRoot, 'scripts/ops/integration-guard-resolve-diff.mjs')
+  const res = spawnSync('node', [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, EVENT_NAME: 'push', BASE_SHA: MALFORMED_SHA, HEAD_SHA: VALID_SHA_B },
+  })
+  assert.notEqual(res.status, 0, `must exit non-zero: stdout=${res.stdout} stderr=${res.stderr}`)
+  assert.match(res.stderr, /malformed/)
+  assert.equal(res.stdout, '')
 })

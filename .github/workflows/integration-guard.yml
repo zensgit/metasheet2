@@ -141,6 +141,65 @@
 # already-required `test (20.x)` job in .github/workflows/plugin-tests.yml, NOT a copy of the
 # integration suite itself — see scripts/ops/integration-guard-required-wiring-contract.test.mjs for
 # the full rationale.
+#
+# FIX (#4614, owner review, 2026-07-26) — TWO SEPARATE FINDINGS CLOSED:
+#
+# [P1] "the gating contract can be disconnected ENTIRELY and stay double-green." Before this fix, the
+# contract's ONLY executable caller was plugin-tests.yml's `test (20.x)` step, and NEITHER that
+# workflow file NOR the contract test's own path was in this workflow's guarded-path roster. So
+# deleting that one line in plugin-tests.yml made `test (20.x)` silently stop running the contract,
+# while THIS workflow classified the change as out-of-scope (no guarded path touched) and no-op'd
+# green — both gates green, contract fully disconnected, with nothing to catch it. Closed by a
+# TWO-POINT wiring, same doctrine as this repo's other two-point CI-wiring contracts:
+#   1. this job now runs the contract itself, UNCONDITIONALLY WITH RESPECT TO THE SCOPE VERDICT
+#      (id: contract-self-check, no `if` at all — not gated on relevant==true/false the way the
+#      real test branches are, so it runs whether the classifier said true or false), independent
+#      of what plugin-tests.yml does. Precise caveat: it still sits after the `resolve-diff` step,
+#      so GitHub's own implicit `if: success()` skips it (same as every other un-`if`'d step) on
+#      the rare P2 fail-closed path below (an invalid BASE_SHA) — that path already fails the job
+#      via resolve-diff's own failure regardless, so this does not reopen the P1 gap;
+#   2. `.github/workflows/plugin-tests.yml` and `scripts/ops/integration-guard-required-wiring-
+#      contract.test.mjs` are now BOTH in the guarded-path roster (self-coverage, same rationale as
+#      the three extracted scripts already there);
+#   3. the contract itself now pins the invocation in plugin-tests.yml IN REVERSE (a new pin reads
+#      plugin-tests.yml and asserts its `test` job still carries the exact `id: integration-guard-
+#      contract` step invoking this contract) — see the contract test file for that pin and its
+#      sibling pin asserting THIS job still carries the `contract-self-check` step.
+# Deleting either call site now reds a DIFFERENT, specific pin (proven separately, not by one
+# mutation tripping both) — see the contract test file and PR #4614's body for the mutation ledger.
+# Note precisely what this closes: `integration-guard` is NOT a required check yet (see the WIRING
+# note above — promotion is still the owner's separate step), so this closes DETECTION (something
+# reds, observably, in this job's own log), not enforcement (blocking a merge) — that still needs the
+# separate required-check promotion.
+#
+# [P2] "Missing/zero/invalid BASE_SHA still FAILS OPEN." The classifier step's inline bash fallback
+# (`if BASE_SHA is empty/zero, git diff-tree --root ...`) fired identically whenever BASE_SHA was
+# empty for ANY reason, including a `pull_request`/`merge_group` event where it should never
+# legitimately be empty — and that fallback command is itself silently wrong for those events (see
+# the CORRECTION above: it emits zero paths for a merge commit). Pinning the `env: BASE_SHA: ...`
+# EXPRESSION TEXT (Pin 6) only proves the expression was not edited, never that the RUNTIME VALUE it
+# evaluates to is valid — a fail-open guarded only by an exact pin is still fail-open. Closed by
+# extracting the decision into scripts/ops/integration-guard-resolve-diff.mjs's `resolveDiffArgs()`,
+# a pure, unit-tested function (not more bash) that fails CLOSED (throws, non-zero exit) for a
+# missing/zero/malformed BASE_SHA on any event except `push` (the one legitimate initial-push
+# shape), and ALSO fails closed for a malformed BASE_SHA on `push` itself or any unrecognised event
+# name — there is no permissive default for an event this function has not been told is safe. Wired
+# as its OWN step (`id: resolve-diff`, no `if`), separate from the classifier step below it, so its
+# exit code is the step's own exit code — NOT a shell-pipeline `pipefail` mechanism, which would
+# have left `steps.changes.outputs.relevant` set to `'false'` (classify.mjs runs to completion, and
+# correctly, on the resulting empty diff) even though the pipeline's overall command failed; see the
+# `id: resolve-diff` step's own comment for that mechanism correction. A failure here means GitHub's
+# default step-skip-on-earlier-failure leaves the classify step UNRUN, so `relevant` is never set at
+# all — caught by scripts/ops/integration-guard-assert-branch.mjs's existing relevant!=='true'/
+# 'false' rejection. See scripts/ops/integration-guard-resolve-diff.mjs's own header for the full
+# account and the real b83e180d8 evidence.
+#
+# MAINTENANCE-COST RULING (#4614, same review): the owner accepts exact pins for the security-critical
+# env expressions and short one-line script invocations, but not long-term exact-copying of the huge
+# web-spec vitest command or the no-op step's message text inside the contract test's pins. Both are
+# now extracted into named scripts (scripts/ops/integration-guard-run-web-specs.sh and scripts/ops/
+# integration-guard-noop.sh) that this workflow invokes with a single-line `bash ...sh` call each —
+# the contract pins only that one line per step, not the script's contents.
 name: Integration Guard
 
 on:
@@ -240,6 +299,11 @@ on:
       - 'scripts/ops/integration-guard-guarded-paths.mjs'
       - 'scripts/ops/integration-guard-classify.mjs'
       - 'scripts/ops/integration-guard-assert-branch.mjs'
+      - 'scripts/ops/integration-guard-resolve-diff.mjs'
+      - 'scripts/ops/integration-guard-noop.sh'
+      - 'scripts/ops/integration-guard-run-web-specs.sh'
+      - 'scripts/ops/integration-guard-required-wiring-contract.test.mjs'
+      - '.github/workflows/plugin-tests.yml'
 
 jobs:
   integration-guard:
@@ -257,8 +321,25 @@ jobs:
         with:
           node-version: 20.x
 
-      - name: Detect relevant integration changes
-        id: changes
+      # #4614 P2 fix: this used to be piped straight into the classifier step
+      # (`resolve-diff | classify`), where a shell `pipefail` mechanism claim was made about how a
+      # resolve-diff failure would be observed — but `classify.mjs` still runs to completion on the
+      # resulting EMPTY stdin (an empty diff classifies as `relevant=false`, its own documented,
+      # correct behaviour for a genuinely empty change list) and writes that to $GITHUB_OUTPUT
+      # BEFORE exiting 0, so the pipeline's overall exit code (rightmost non-zero, i.e.
+      # resolve-diff's 1) and `steps.resolve-diff`'s outputs would have disagreed with what
+      # `steps.changes.outputs.relevant` ended up holding. Splitting into two steps removes that
+      # ambiguity entirely: this step's own exit code IS resolve-diff's exit code, with no pipeline
+      # involved, and — because it has no `if` at all — a failure here (non-zero exit) means
+      # GitHub's own default step-skip-on-earlier-failure leaves the classify step below UNRUN, so
+      # `steps.changes.outputs.relevant` is never set to anything at all (not `'false'`, just
+      # absent) — which is exactly the unambiguous "classification never happened" signal
+      # scripts/ops/integration-guard-assert-branch.mjs's relevant!=='true'/'false' check expects.
+      # `$RUNNER_TEMP` below is a GitHub Actions-provided per-job scratch directory env var (always
+      # set on a real runner); it is NOT set when hand-running this step's `run:` text locally —
+      # export it yourself first, or point at another writable path, if reproducing this by hand.
+      - name: Resolve Integration Guard diff target (fail-closed on missing/zero/malformed BASE_SHA)
+        id: resolve-diff
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -266,23 +347,34 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          node scripts/ops/integration-guard-resolve-diff.mjs > "$RUNNER_TEMP/integration-guard-diff.nul"
 
-          echo "Integration Guard: classifying for $EVENT_NAME (base=${BASE_SHA:-<none>}, head=$HEAD_SHA)."
+      - name: Detect relevant integration changes
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/ops/integration-guard-classify.mjs < "$RUNNER_TEMP/integration-guard-diff.nul"
 
-          if [[ -z "${BASE_SHA:-}" || "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
-            git diff-tree --root --no-commit-id --name-only -z -r "$HEAD_SHA" | node scripts/ops/integration-guard-classify.mjs
-          else
-            git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" | node scripts/ops/integration-guard-classify.mjs
-          fi
+      # Not gated on relevant==true/false (no `if` at all) — #4614 P1 two-point wiring: the OTHER
+      # executable caller of this contract is plugin-tests.yml's required `test (20.x)` job (`node
+      # --test scripts/ops/integration-guard-required-wiring-contract.test.mjs`). Before this step
+      # existed, deleting that one line in plugin-tests.yml meant test (20.x) silently stopped
+      # running the contract WHILE this workflow (having no caller of its own) never noticed —
+      # both gates green, contract fully disconnected. Running it here too, ungated on the scope
+      # verdict, means deleting either call site is still caught by the other: the contract's own
+      # Pins assert plugin-tests.yml still carries its invocation line AND that this job still
+      # carries this step — see the contract test file for both pins. (Like every other un-`if`'d
+      # step here, GitHub's implicit `if: success()` still skips this one if `resolve-diff` above
+      # failed closed — that path already fails the job on its own, so this is not a gap.)
+      - name: Integration Guard required-wiring contract (self-check, ungated on the scope verdict)
+        id: contract-self-check
+        run: node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs
 
       - name: No-op (out of scope) — deliberate success, not a skipped job
         id: noop
         if: steps.changes.outputs.relevant == 'false'
-        run: |
-          echo "Integration Guard: no changes in guarded paths for this ${{ github.event_name }} event."
-          echo "This is a DELIBERATE NO-OP SUCCESS (exit 0) -- an auditable, in-band result in this"
-          echo "job's own log, not an out-of-band skipped conclusion a reviewer would have to look up."
-          exit 0
+        run: bash scripts/ops/integration-guard-noop.sh
 
       - name: Setup pnpm
         if: steps.changes.outputs.relevant == 'true'
@@ -326,12 +418,15 @@ jobs:
       # LAST one, so 6 already-listed specs (IntegrationBridgeAgentSection, IntegrationPipelineRunSection,
       # IntegrationStockPrepPanel, IntegrationExternalWritePanel, IntegrationTableActionsPanel,
       # IntegrationFieldOptionSyncPanel) were silently NOT running despite appearing in the file.
-      # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
-      # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
+      # Consolidated at the time into a single unioned list — do not reintroduce a second `run:` key.
+      # #4614 maintenance-cost ruling (2026-07-26): that unioned spec list is now extracted into
+      # scripts/ops/integration-guard-run-web-specs.sh (owner did not accept long-term exact-copying
+      # of this huge command inside the contract test's pin) — add new specs to that file, not here;
+      # this step pins only the single-line invocation.
       - name: Run integration web guard specs (targeted)
         id: web-guard-specs
         if: steps.changes.outputs.relevant == 'true'
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper --reporter=dot
+        run: bash scripts/ops/integration-guard-run-web-specs.sh
 
       # Terminal runtime safety net (P1 hardening, 2026-07-25): runs regardless of what happened above
       # (`if: always()`) and FAILS the job unless `relevant` came out strictly 'true'/'false' AND
