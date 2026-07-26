@@ -439,13 +439,13 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       expect(link.rows[0].link_status).toBe('linked')
       expect(link.rows[0].match_strategy).toBe('auto_admit')
 
-      // Identity falls back to unionId; NO grant row is written when the grant is off.
+      // Identity falls back to the corp-scoped unionId; NO grant row is written when the grant is off.
       const identity = await query<{ external_key: string }>(
         `SELECT external_key FROM user_external_identities WHERE provider = 'dingtalk' AND local_user_id = $1`,
         [user.rows[0].id],
       )
       expect(identity.rows).toHaveLength(1)
-      expect(identity.rows[0].external_key).toBe(`dso-un-nogrant-${TS}`)
+      expect(identity.rows[0].external_key).toBe(`${CORP}:dso-un-nogrant-${TS}`)
 
       const grant = await query<{ enabled: boolean }>(
         `SELECT enabled FROM user_external_auth_grants WHERE provider = 'dingtalk' AND local_user_id = $1`,

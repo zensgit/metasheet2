@@ -14,7 +14,8 @@ import { DirectoryTenantChangeBlockedError, updateDirectoryIntegration } from '.
  * flight; nothing has been written). A "block only if synced records already exist" rule
  * would let that swap through. These goldens seed that real row shape directly against the
  * migrated schema and re-SELECT after every rejected call to prove zero mutation, not just a
- * thrown error — plus the paths that must NOT be blocked (same-corp resend, initial set).
+ * thrown error — plus the same-corp resend path that must remain allowed. Legacy empty rows
+ * are fail-closed because a generic update cannot atomically retag existing or racing children.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -118,17 +119,17 @@ describeIfDatabase('org-transfer Phase 1 §12.1 corp_id immutable-once-set guard
     expect(row.name).toBe(`renamed-${STAMP}`)
   })
 
-  it('initial set is allowed: empty corp_id becomes a value', async () => {
+  it('legacy empty corp_id cannot be set through the generic update path', async () => {
     const id = await insertIntegration(`initial-set-${STAMP}`, '')
     integrationIds.push(id)
 
-    const result = await updateDirectoryIntegration(
+    await expect(updateDirectoryIntegration(
       id,
       updateInput({ name: `initial-set-named-${STAMP}`, corpId: 'corpB' }),
-    )
+    )).rejects.toBeInstanceOf(DirectoryTenantChangeBlockedError)
 
-    expect(result?.corpId).toBe('corpB')
     const row = await readIntegration(id)
-    expect(row.corp_id).toBe('corpB')
+    expect(row.corp_id).toBe('')
+    expect(row.name).toBe(`initial-set-${STAMP}`)
   })
 })
