@@ -108,7 +108,15 @@
 # missing_punch preset, the mounted component's zh+en render matrix and R1 zero-write-CTA shape, and
 # the AttendanceSetupReadiness.vue / AttendanceView.vue wiring (real admin-rail navigation + the
 # self overview evidence-link click driving the SELF decision-trace endpoint with R1 negatives at
-# the mock network layer).
+# the mock network layer), and attendance-decision-trace-metric.spec.ts (Wave 5 收官验证 — the
+# design lock's §10 completion-definition 12-cell explainability metric matrix: six categories ×
+# {positive cell, undeterminable fail-closed cell}, mounted against the real component + real pure
+# module, one fixture per cell transcribed from the corresponding backend
+# `buildXxxTrace`/`deriveAttendanceDecisionTraceConfidence` builder — including the cross-cutting
+# posture-ceiling guard proving `confidence==='grounded'` is reachable for exactly one of the six
+# categories (⑥审批人来源) and never fabricated for the other five — see
+# docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md §9/§10 and
+# docs/development/attendance-vnext-wave5-explainability-development-verification-20260724.md).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -169,6 +177,7 @@ on:
       - 'apps/web/tests/AttendanceContextHelp.spec.ts'
       - 'apps/web/tests/attendance-context-help-wiring.spec.ts'
       - 'apps/web/tests/attendance-web-guard-workflow.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace-metric.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -307,4 +316,4 @@ jobs:
 
       - name: Run attendance web guard specs (targeted)
         if: steps.changes.outputs.relevant == 'true'
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-web-guard-workflow.spec --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendance-web-guard-workflow.spec --reporter=dot
