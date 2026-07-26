@@ -4,9 +4,128 @@
 真库：Stage A/B 用 `ms2_w4c2`；Stage C 第三棒基线/验证用**全新** `ms2_w4c2_relay3`（基线）
 与 `ms2_w4c2_relay3b`（cutover 后），CI 同构 MIGRATION_EXCLUDE 全链迁移，postgres@127.0.0.1。
 
-**状态总览：Stage A + Stage B + Stage C + Stage D（第四棒，commit `21dc05110`：三姿态矩阵
-门腿 + V2 freeze 腿 + dispatcher env-gate 生产接线 + runId/freeze 纯单测 + 修复 Stage C 一处
-latent bug）DONE。剩余：Stage E 残余门矩阵腿（见下）+ Stage F mutation 汇总/PR。**
+**状态总览：Stage A + B + C + D + Stage E（第五棒，commit `c44e18440`：§12.3 残余门矩阵
+13 腿真库套件 + 两点接线补漏 + ME1-ME5 mutation）DONE。剩余：Stage F（mutation 汇总表 +
+PR，body 呈裁点 1-15 全列）。**
+
+---
+
+## Stage E — §12.3 残余门矩阵（DONE，第五棒，commit `c44e18440`）
+
+落点：**新 db 套件** `packages/core-backend/tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts`
+（13 腿，route-level 真服务 + 少量 module-level 协议腿同库；已两点接线：plugin-tests.yml
+attendance 步 + vitest.config.ts no-DB exclude。**同 commit 补了 Stage C/D 两套件
+（live-scheduled-boundary / posture-matrix）漏加的 vitest exclude——两点接线补漏**）。
+
+腿 → 锁 §12.3 门映射（详见套件头注释）：
+
+1. **W2 ambiguity（live）**：两重叠已发布 assignment ⇒ 被**保留的 legacy 路由契约**
+   （R5/OD-4556-8）422 `WORK_DATE_ATTRIBUTION_AMBIGUOUS` 拒于 boundary 之前，零
+   event/record/operation/calculation/outbox（= fresh ambiguity 无 parent/result）；同 org
+   单 assignment 正控 completed/calculated resolved_v2。**发现（映射修正）：live 侧
+   「existing parent + ambiguous review」结构性不可达**——路由拒绝先于 boundary，freeze 内
+   ambiguous 只在 route-resolution 与 in-trx re-resolution 分歧（并发 assignment 发布）时可
+   达；unsupported→review 面由 matrix 套件（missing_frozen_context）+ w4c1 纯映射
+   `ambiguous→context_resolution_ambiguous`（calculator spec ~L1034）+ E1 review-shape
+   CHECK 三方合围。no-pointer 不变量改钉在 leg 9 的 scheduled review parent 上。
+2. **V2 cast 存储 backstop**：completed + 非 resolved_v2 attribution 直接 INSERT ⇒
+   `chk_arc_completed_shape` 拒（行为半面 = leg 1 ambiguous→unsupported；纯半面 =
+   frozen-attribution 单测闭码拒）。
+3. **same-org/cross-org isolation**：同 org 异 actor 同 key ⇒ 409
+   `ATTENDANCE_OPERATION_CONFLICT` 零 DML（op 行 actor 不变）；异 org 同 key ⇒ 独立
+   operation（PK = org+entrypoint+operation_id），互不可见。
+4. **W4 shadow response-loss retry**：shadow strict punch（带 note meta）replay ⇒ 字节同
+   response + 恰 1 event/1 calc/1 outbox/1 op；同 key 异 note ⇒ 409 零新 DML
+   （legacy_compat 半面在 wiring 套件 leg 2）。
+5. **forged witness 四腿**：(a) spread/JSON clone 伪 witness ⇒ preflight
+   `ATTENDANCE_WRITE_NOT_AUTHORIZED` 且**零 SQL**（throwing+counting client——stub 失败点
+   在守卫之内：若守卫没拦，观察到的是 stub 自己的 distinct error；真 witness 正控证
+   counting 有判别力后 sentinel 回滚）；(b) self override / token-subject /
+   scheduler-scope posture mismatch 三闭码在 **mint** 拒（无 SQL 面）；(c) scheduler witness
+   带错 capability（punch）打 scheduled envelope ⇒ 零 SQL 拒，正确 capability 正控达 SQL 后
+   回滚（零持久行）；(d) inactive membership route 腿：403 values-free、零
+   event/record/op/outbox，membership 复活正控 200。
+6. **authoritative fail-closed 双入口**：authoritative org（合法边走到）live punch 503
+   `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED` 零 DML（claim 随事务回滚）；admin absence run 同
+   码 503 零行。**呈裁点 13（见下）：§12.3「authoritative calculator review ⇒ retired
+   review_placeholder（普通读零行/history 有 review）」本片端到端不可达。**
+7. **accepted_write_posture 不可静默 rebase**：legacy 下 seal 的 compat op → 合法
+   legacy→shadow promotion（org 在 allowlist，即时生效）→ 同 key replay ⇒ 存储响应字节同 +
+   posture 仍 legacy_projection_only + 零新 calc/outbox；**新 key 正控走 shadow 路径**
+   （accepted_write_posture='shadow' + 1 calc——证 replay 腿非真空 legacy）；直接 UPDATE
+   posture ⇒ `W4C0_OPERATION_STATE` 触发器拒。
+8. **outbox before seal 严格序**：BEFORE UPDATE SQL-order probe 触发器（scoped
+   `NEW.org_id = orderOrg AND NEW.state='completed'`，seal 时 outbox 行必须已在）——
+   生产 shadow punch 在已装触发器下 200（序成立）；module-level claim+seal **不带 outbox**
+   同 org 被同一触发器抓（`W4C2_E5_SEAL_BEFORE_OUTBOX`，probe 实弹正控）。
+9. **durable scheduled replay + skipDedup + scheduled ambiguity**：admin run 两跑：run1
+   generated 1 + 恰 1 scheduled op（`identity_source_kind='scheduled'`、
+   `source_root_id == deriveAttendanceScheduledRunIdV1('admin_run',org,date)`、
+   proof_user/date、actor=internal-scheduler）+ 恰 1 scheduled review calc
+   （missing_frozen_context、零 children、parent 无 pointer）+ ambiguous user（两重叠
+   assignment）reviewRequired `WORK_DATE_ATTRIBUTION_AMBIGUOUS` 且零 record/op/calc；run2
+   generated 0、**同一 operation_id**、零新 DML。路由恒 `skipDedup:true` ⇒ in-memory key
+   被绕情况下仍零 DML = registry 是唯一 dedup = 重启等价（全部判定输入 DB-resident；
+   runId golden 已 pin）。**真跨进程重启未构造**（同进程双 server 不清 module state），
+   等价性论证写入套件注释——Stage F/PR body 自报。
+10. **P02 写次数判别腿（Stage C 呈裁点 7 清账）**：row-level audit 触发器（scoped
+    mergeUser）计 attendance_records DML；fixture = 直插 outdoor_approval event+record
+    （路由拒 reserved source，直插即 S3 writer 的自然形状）→ merge 开启
+    （internalWinsOnIn，settings 快照/leg 内 PUT 还原）→ internal check_in 触发
+    decision.changed ⇒ **恰 [UPDATE] 一次写** + first_in 翻到 internal 值（语义正控）+
+    legacy org 零 op/calc/outbox。
+
+### Stage E 实跑实数
+
+- 新套件 13/13 绿（`ms2_w4c2_relay5` 全新库首跑；脏库复跑亦 13/13——套件自带
+  per-run 随机 org/user 命名空间）。
+- 单测面：w4c1 calculator 76/76（**P3-1/P3-2/P3-5 hardening 三腿逐名确认绿**）+
+  frozen-attribution 15/15 + merge-policy + shadow-expected-differences，合计 108/108。
+- tsc --noEmit exit 0；plugin-tests.yml YAML parse OK；index.cjs 本棒零改动。
+- **CI 同构 attendance 步全量（全新库 `ms2_w4c2_relay5b`）：64 files / 789 passed**
+  （= Stage D 776 + 本棒 13；零改写零红——字节红线证据；日志 scratchpad
+  `w4c2-relay5-fullstep.log`）。
+
+### Stage E mutation 记账（先 commit `c44e18440` 后 mutate，git checkout 精确路径还原，均实跑，diff 核对命中真代码行）
+
+| # | 变异 | Flip set（实测） | 还原核验 |
+|---|---|---|---|
+| ME1 | boundary live：outbox enqueue 挪到 seal 之后（序反转） | **恰 1 红**（e5+matrix 两套件 18 腿合跑）：leg 8（probe 触发 punch 500）；matrix 全绿（其 outbox 断言只查存在性）——ORDER 判别独占 | git checkout 还原 |
+| ME2 | index.cjs：changed 分支复活 append 第一写（P02 二写回귀） | **恰 1 红**：leg 10 写次数半面（audit [UPDATE,UPDATE]≠[UPDATE]） | 同上 |
+| ME3 | index.cjs：merge decision neuter（恒走 append） | **恰 1 红**：leg 10 语义半面（first_in 停 00:30≠01:00）——与 ME2 翻不同断言 = 双侧判别 | 同上 |
+| ME4 | boundary：scheduled runId 改 crypto.randomUUID()（毁决定性） | **恰 1 红**：leg 9（source_root_id 不匹配/op 增殖） | 同上 |
+| ME5 | w4c0-authorization：actor membership recheck 恒跳过 | **恰 1 红**（e5+w4c0-registry 两套件 21 腿合跑）：leg 5d（200≠403）；registry 的 inactive-ACTOR 腿保持绿——membership 谓词独立判别 | 同上，还原后 tree clean |
+
+### Stage E 呈裁点/薄弱点（续接 1-12，PR body 必列）
+
+13. **authoritative review_placeholder 门本片不可达**：boundary 对 authoritative 全 fail-closed
+    （`W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED`，本片有双入口零 DML 腿），且当前**没有任何
+    read 路由过滤 `visibility_state`**（grep 零命中）——「普通读零行/history 有 review」的
+    read-side 面归交付 authoritative 执行的后续片。PR body 必须 declare。
+14. **promotion-blocked 门本片不可达**：sanctioned rollout transition writer 不存在（测试
+    fixture 走 raw SQL 合法边），「promotion drains/blocks on incomplete op/retryable job」
+    的运行时谓词随 promotion writer 交付；本片已证面 = posture 冻结不可 rebase（leg 7 双半
+    面）+ E3 的 enqueue-vs-transition 锁序。PR body declare。
+15. **live 侧 ambiguous-in-freeze 结构性不可达**（见 leg 1 映射修正）：并发 assignment 发布
+    的 TOCTOU 窗口存在但需在单 HTTP 请求内注入——未构造；unsupported-review 面已由
+    unresolved 味道 + 纯映射 + CHECK 合围。PR body 自报。
+16. **web decision UUID / verified channel replay 诸腿**照第一棒架构判点 9：registry 协议面
+    W4C-0 已证（operation-registry/identity-gates 套件），approval 路由 cutover 属 3b——
+    PR body 引用而非重做。
+17. **scheduled 重启等价未做真跨进程**（见腿 9 注）——论证：路由恒 skipDedup:true +
+    全部判定输入 DB-resident + runId golden pin；若 owner 要真重启腿，构造 = spawn 子进程
+    跑 run2（Stage F 可选加）。
+
+### 接力者 TODO（Stage F）——较第四棒清单的增量
+
+- ~~Stage E 全部残余腿~~ DONE（本棒；P02 写次数腿即 Stage C 呈裁点 7 清账）。
+- Stage F：mutation 汇总表（MA1-2/MB1-2/MC1-5(部分)/MD1-5/ME1-5）+ PR（body 照
+  #4606/#4607 形制 + §11.1 六项 + 呈裁点 1-17 全列 + §12.3 门→腿对照表——套件头注释
+  已按门排布可直接摘）。PR 前 `rg -io "(close[sd]?|fix(es|ed)?|resolve[sd]?) #?[0-9]+"`
+  自查 body。
+- 注意：collector P01-P04「independently removed」的 per-marker mutation 只跑过 P01
+  （MC5）；Stage F 若要满配可对 P02/P03/P04 marker 各补一刀（collector test 断言已按
+  marker 独立铺，预期各恰 1 红）。
 
 ---
 
