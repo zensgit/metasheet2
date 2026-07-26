@@ -207,6 +207,24 @@ async function spid(pool: MssqlConnectionPool): Promise<number> {
   return Number(await scalar<number>(pool, 'SELECT @@SPID AS v'))
 }
 
+// CI evidence (run 30199801644, SQL Server 2019): @@SPID is a RECYCLABLE slot number — a
+// lightly-loaded container can legitimately hand Phase B's brand-new connection the EXACT
+// SAME @@SPID Phase A's (already-closed) connection had. Bare-SPID equality is therefore not
+// sufficient to prove "a distinct session" across a connection close/reopen boundary (S-4b);
+// within one phase it IS sufficient (X-1a/X-1b), since those comparisons happen milliseconds
+// apart on a connection that is never closed. For the CROSS-PHASE distinctness claim, pair
+// @@SPID with sys.dm_exec_sessions.login_time (inline-bound to @@SPID, same discipline as
+// S-7's DB_ID()/@@SPID binding) — even if the numeric slot is reused, the login timestamp of
+// a later-established connection cannot equal an earlier one's.
+async function sessionIdentity(pool: MssqlConnectionPool): Promise<string> {
+  const spidValue = await spid(pool)
+  const loginTime = await scalar<string>(
+    pool,
+    'SELECT CONVERT(VARCHAR(33), login_time, 126) AS v FROM sys.dm_exec_sessions WHERE session_id = @@SPID'
+  )
+  return `${spidValue}@${loginTime}`
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   if (process.argv.includes('--help')) {
@@ -299,6 +317,9 @@ async function main(): Promise<void> {
     const phaseAWriterSpid = obs(await spid(writer))
     const phaseAReaderSpidSecondObservation = obs(await spid(reader))
     const phaseAX1aHolds = phaseAReaderSpid === phaseAReaderSpidSecondObservation
+    // S-4b's cross-phase distinctness needs the robust (spid, login_time) pair — see
+    // sessionIdentity()'s comment.
+    const phaseAReaderIdentity = obs(await sessionIdentity(reader))
     log.check('X-1a-phaseA-baseline', 'two reader observations on the pinned Phase A connection share one session id', 'GREEN', phaseAX1aHolds)
     log.check('X-1b-phaseA-baseline', 'Phase A writer session id differs from reader session id', 'GREEN', phaseAReaderSpid !== phaseAWriterSpid)
     // MUTATION: source the "writer identity" observation from the READER's own connection
@@ -505,7 +526,12 @@ async function main(): Promise<void> {
       'RED',
       phaseBReaderSpid !== phaseBMisdirectedWriterSpid
     )
-    log.check('S-4b-distinct-session-from-phaseA', "Phase B's reader session id differs from Phase A's (fresh connection, not reused)", 'GREEN', phaseBReaderSpid !== phaseAReaderSpid)
+    // Bare @@SPID equality is NOT sufficient here (see sessionIdentity()'s comment: @@SPID is a
+    // recyclable slot number and CI evidence showed Phase B legitimately reusing Phase A's
+    // numeric SPID after Phase A's connection closed) — the robust cross-phase proof pairs
+    // @@SPID with sys.dm_exec_sessions.login_time.
+    const phaseBReaderIdentity = obs(await sessionIdentity(reader))
+    log.check('S-4b-distinct-session-from-phaseA', "Phase B's reader session identity (spid@login_time) differs from Phase A's (fresh connection, not reused — robust to @@SPID recycling)", 'GREEN', phaseBReaderIdentity !== phaseAReaderIdentity)
 
     const phaseBReadback = obs(await rcsiReadbackBound(reader))
     log.check('S-4b-readback-reports-on', 'the fresh Phase B probe connection reports RCSI=1 via the DB_ID()-bound readback', 'GREEN', phaseBReadback.rcsi === 1 && phaseBReadback.db === spikeDb)
