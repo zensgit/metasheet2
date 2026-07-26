@@ -185,6 +185,7 @@ async function main(): Promise<void> {
   let writer: MySqlConnection | null = null
   let setup: MySqlConnection | null = null
 
+  let primaryError: unknown
   try {
     // Dedicated database (P-4 analog): the spike NEVER touches an existing database. There is
     // no MySQL precedent (`smoke_db`) in this repo to collide with — this is the first MySQL
@@ -508,6 +509,9 @@ async function main(): Promise<void> {
     }
     console.log('[b1b-mysql] RECORD (values-free):', JSON.stringify(record, null, 2))
     console.log('[b1b-mysql] mutation/control summary:', JSON.stringify(summary))
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
     // X-7 teardown: MySQL's mutations here are all SESSION-scoped (autocommit, isolation
     // level) — closing the connections resets every one of them; there is no MySQL analog of
@@ -520,6 +524,15 @@ async function main(): Promise<void> {
     await reader?.end().catch(() => undefined)
     await writer?.end().catch(() => undefined)
     await setup?.end().catch(() => undefined)
+    // ⟲FIX (review, 2026-07-26): log the PRIMARY error BEFORE finalize(). A throw inside
+    // `finally` REPLACES the `try`'s error, so a real failure would surface only as
+    // "missing phase record(s)". This shape pre-existed here (it was not introduced by the
+    // SQL Server fix round) and is corrected in both scripts together. finalize() still
+    // always runs and still reds a genuinely missing phase.
+    if (primaryError !== undefined) {
+      console.error('[b1b-mysql] PRIMARY error (logged before finalize(), which would otherwise replace it):')
+      console.error(primaryError)
+    }
     tracker.finalize() // X-3 MUTATION C: a phase that crashed before emit() reds HERE with "missing phase"
   }
 }

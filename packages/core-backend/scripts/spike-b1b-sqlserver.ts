@@ -353,6 +353,7 @@ async function main(): Promise<void> {
     return parsed
   }
 
+  let primaryError: unknown
   try {
     // ── one-time setup: master connection, dedicated spike DB, decoy DB, probe table ──────
     masterPool = await openPinnedPool('master')
@@ -920,6 +921,9 @@ async function main(): Promise<void> {
       console.log('[b1b-sqlserver] RECORD (values-free):', JSON.stringify(record, null, 2))
     }
     console.log('[b1b-sqlserver] mutation/control summary:', JSON.stringify(log.summary()))
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
     await reader?.request().batch('ROLLBACK TRAN').catch(() => undefined)
     await writer?.request().batch('ROLLBACK TRAN').catch(() => undefined)
@@ -943,6 +947,20 @@ async function main(): Promise<void> {
     // INCONCLUSIVE before rethrow (nothing missing there either); only a throw BEFORE either
     // phase's emit (e.g. mid-Phase-A) leaves a phase genuinely missing, and finalize() reds
     // that case with its own message, as designed.
+    // ⟲FIX (review, 2026-07-26): log the PRIMARY error BEFORE finalize() runs. Moving finalize()
+    // into `finally` was correct for X-3 MUTATION C, but it introduced a debuggability
+    // regression the reviewer caught with receipts: a throw inside `finally` REPLACES the
+    // `try`'s error, so a real failure surfaced only as "missing phase record(s): phaseA,
+    // phaseB". This PR's own history is the proof of cost — runs 30199592089 (BEGIN/COMMIT
+    // mismatch -> the query()->batch() fix) and 30199801644 (@@SPID recycling -> the S-4b
+    // login_time fix) were BOTH diagnosed from the underlying error text, and under the
+    // unfixed shape each would have surfaced only the "missing phase" message. finalize()
+    // still always runs and still reds a genuinely missing phase; the primary cause is simply
+    // no longer lost when it does.
+    if (primaryError !== undefined) {
+      console.error('[b1b-sqlserver] PRIMARY error (logged before finalize(), which would otherwise replace it):')
+      console.error(primaryError)
+    }
     tracker.finalize()
   }
 }
