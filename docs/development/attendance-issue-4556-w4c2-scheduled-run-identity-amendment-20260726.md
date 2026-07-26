@@ -1569,7 +1569,7 @@ one-pass ratification — see the scope note at the top of this document.
 | `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair to target rows (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a terminal outcome; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
 | `OD-W4C-51` (`O-2`) — canonical order for `ordinal` / resume-guard shape | (a) pin the membership resolution query to `ORDER BY user_id` (or another explicit total order); `ordinal` becomes a pure function of membership; narrow gate 4's "byte-identical to pre-amendment emit" claim to key/value-set equivalence plus the new canonical order; (b) leave resolution order undefined as today; change the resume guard (section 1.7 step 3) to an order-insensitive set fingerprint; withdraw gate 10's "or one ordinal" leg | **(a)**, because the ordered fingerprint this draft already specifies (section 1.3) cannot be satisfied on resume by an unpinned membership query, and pinning without owner sign-off is not available to the author alone — a one-time, disclosed change to `reasons` ordering is preferable to shipping a resume guard that spuriously fires on a benign restart |
 | `OD-W4C-52` (`O-4`) — does a `running` run block shadow/eligible promotion | (a) extend the lock's promotion-block predicate (lock lines 2689-2690, 2250) to treat a `running` `attendance_scheduled_runs` row as blocking, same as an incomplete operation; accept the operational cost that a promotion window must avoid colliding with an in-flight scheduled run; (b) do not block promotion; instead redefine finalization (section 1.8 step 1) to execute under the run's own frozen posture rather than the currently resolved one — a considered, narrow reversal of this draft's own "posture flip is remediation, never a rebase" stance, scoped to finalization only | no recommendation — this is an operational rollout-timing tradeoff ((a)) versus a semantic reversal of a stance this same draft asserts elsewhere ((b)); both are internally consistent, and the choice is the owner's to make, not the author's |
-| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | **Two ratifiable tokens this pass:** (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column; **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface). **A third token, `(ii-narrow)`** (exclude the operation's own just-written row from the resolver's `openPreviousMatches` match), is **not ratifiable this pass**: section 3.2 demonstrates by executed counterexample that the mechanism as specified flips both `workDate` and `shiftId` (not only `reasonCode`) when this operation's write touches a pre-existing open record it did not create, and a corrected, gated mechanism has not been specified or tested. Ratifying `(ii-narrow)` requires a follow-up round that supplies the four preconditions listed in section 3.2's "Gate shape this option needs" | (i) over (ii-wide) specifically, among the two tokens this row offers — see reasoning in section 3.2. No recommendation is made on `(ii-narrow)` because it is not currently offered as a choice; once a follow-up round supplies a corrected, gated mechanism, this row must be revised before it can be voted |
+| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | **Two unconditional tokens, one conditional token:** (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column — unconditional; **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface) — unconditional; **(ii-narrow)** exclude the operation's own just-written row from the resolver's `openPreviousMatches` match — **conditional**: section 3.2 demonstrates by executed counterexample that the mechanism *as specified in this document* flips both `workDate` and `shiftId` (not only `reasonCode`) when this operation's write touches a pre-existing open record it did not create; a ruling of `(ii-narrow)` authorizes the *direction* (eliminate self-observation at the resolver, not by widening the fingerprint domain) but is **void as an implementation authorization unless and until** the four preconditions in section 3.2's "Gate shape this option needs" (corrected, gated mechanism spec; positive control; the negative control from the counterexample above; a check-out/disappearance analysis) are supplied and gated — implementation does not start on the mechanism as currently specified | (i) over (ii-wide) among the two unconditional tokens — see reasoning in section 3.2. No recommendation is made on `(ii-narrow)`'s *direction* (that remains the owner's to prefer, per section 3.2's closing paragraph) or on whether its voidness condition will ever be satisfied — only that today's specified mechanism does not clear it |
 
 ### 3.2 `O-5`/`OD-W4C-53` — a fifth pending decision, bundled from outside this document's own schema
 
@@ -1834,10 +1834,13 @@ the comparison. There are two structurally different ways to do that:
       removes it from `openByWorkDate` at the freeze/inner re-resolution
       regardless.
 
-      **Executed counterexample** (transcribed from this repository's own
-      unit fixture,
+      **Executed counterexample** (transcribed from the round-3 gate
+      review's executed probe against this repository's own unit fixture,
       `packages/core-backend/tests/unit/attendance-work-date-resolver-w2.test.ts:222-276`,
-      run against `origin/main` `9fdf68fa5c34d2224fbe6bd0d71b14ca78263502`):
+      run against `origin/main` `9fdf68fa5c34d2224fbe6bd0d71b14ca78263502`;
+      **this document has not independently re-run it** — the same
+      disclosure standard this document applies to PR #4612's own diagnosis
+      earlier in this section):
       overnight shift `22:00→06:00` on `2026-07-15` plus morning shift
       `06:00→14:00` on `2026-07-16`; a **pre-existing** open
       `(org, user, 2026-07-15)` record from an earlier `22:05` check-in (a
@@ -1875,9 +1878,9 @@ the comparison. There are two structurally different ways to do that:
       shape above; it is not merely a hypothetical the retracted paragraph
       failed to rule out, it is now an executed counterexample against the
       exclusion mechanism exactly as this document specified it ("by row
-      ID," unconditionally). `(ii-narrow)`, as specified in the paragraph
-      that opens this bullet (`:1671-1681`), is **not** semantically safe in
-      general. What is established, precisely: safe when this operation's
+      ID," unconditionally). `(ii-narrow)`, as specified in the mechanism
+      paragraph that opens this `(ii-narrow)` bullet, is **not** semantically
+      safe in general. What is established, precisely: safe when this operation's
       write is the sole evidence creating the previous-workDate open record
       (the narrower claim kept above); not safe, and demonstrated unsafe by
       the counterexample above, when it instead touches a pre-existing open
@@ -1885,9 +1888,11 @@ the comparison. There are two structurally different ways to do that:
       direction. A corrected mechanism that additionally required
       `matching.length === 1` before applying the exclusion would avoid the
       demonstrated counterexample (in that regime the resolved candidate is
-      already invariant per the kept claim, so gating on it costs nothing
-      there) — but that gated mechanism is not what `:1671-1681` specifies,
-      has not itself been gated or fixture-tested by this document, and
+      already invariant per the kept claim, so gating on it — i.e. the
+      *condition for applying the exclusion*, not the exclusion's effect on
+      `reasonCode` — costs nothing there) — but that gated mechanism is not
+      what the mechanism paragraph above specifies, has not itself been
+      gated or fixture-tested by this document, and
       still leaves the check-out direction unanalysed. **The retracted
       sentence that previously closed this cell — "(ii-narrow) is confirmed
       semantically safe" — is withdrawn and is not replaced by an
@@ -1898,15 +1903,16 @@ the comparison. There are two structurally different ways to do that:
 - *Consequences (both sub-variants).* No second fingerprint domain is ever
   introduced — the compared object stays exactly the object lock §8.2 step
   7 names, with no new dual-copy risk.
-  *(ii-narrow)*, if a corrected form of it is eventually specified and
-  gated (see "Conclusion" above — the form this document specifies at
-  `:1671-1681` is retracted as unsafe), would be confined to
+  *(ii-narrow)*, once a corrected form of it is specified and gated (see
+  "Conclusion" above — the mechanism paragraph that opens this bullet, as
+  currently written, is retracted as unsafe), would be confined to
   `selectAmongMatchingCandidates` and its direct gates (the resolver
   already has its own gate suite this document did not audit for this
-  specific change). **Only two tokens are available for ratification from
-  this document as it stands: `(i)` and `(ii-wide)`.** `(ii-narrow)` is not
-  a ratifiable third token this pass — see the ballot-row correction in
-  section 3.1 and the deferred-status note at the end of this cell.
+  specific change). **`(i)` and `(ii-wide)` are unconditional tokens;
+  `(ii-narrow)` is a conditional token** — ratifiable in direction now, but
+  void as an implementation authorization until the preconditions below
+  are met — see the ballot-row correction in section 3.1 and the
+  voidness-condition note at the end of this cell.
   *(ii-wide)*'s cost is structural: lock §8.2's numbered step sequence is
   cited by name elsewhere in the **already-RATIFIED** governing lock (e.g.
   lock lines 2177 "the section 8.2 order", 2283 "8.2 and performs zero
@@ -1921,21 +1927,25 @@ the comparison. There are two structurally different ways to do that:
   against whichever sub-variant is chosen, shows the **existing, unmodified**
   `computeAttendanceSourceDefinitionFingerprintV1` no longer flips between
   outer and inner reads — i.e., the fix is proven at the point of causation,
-  not papered over by a second comparison domain. *(ii-narrow)*, before it
-  can be offered as a ratifiable token at all, needs — as a **precondition**
-  to implementation, not a confirming regression test after the fact — (1)
-  a corrected mechanism specification (e.g. gating the row-ID exclusion on
-  `matching.length === 1` at the point it is applied, so it is a no-op
-  exactly where the kept narrower claim above already guarantees safety);
-  (2) a positive control proving the resolved candidate (not just
-  `reasonCode`) is unchanged across a representative set of fixtures where
-  the open-record path and the containing-shift path would otherwise
-  disagree; (3) a **required failing-without-fix negative control** using
-  the pre-existing-open-previous-workDate-record shape from the
-  counterexample above (`matching.length === 2`, an open record on the
-  resolved previous workDate created by a *different, earlier* operation)
-  — this leg must fail on the mechanism as originally specified at
-  `:1671-1681` and pass on the corrected, gated mechanism; and (4) an
+  not papered over by a second comparison domain. *(ii-narrow)*'s ratification
+  is conditional (section 3.1's ballot row): before it discharges that
+  condition and counts as an implementation authorization, it needs — as a
+  **precondition** to implementation, not a confirming regression test
+  after the fact — (1) a corrected mechanism specification (e.g. gating
+  the row-ID exclusion itself on `matching.length === 1` at the point the
+  exclusion is applied — the *gating condition* costs nothing exactly where
+  the kept narrower claim above already guarantees safety; the exclusion's
+  effect of moving `reasonCode` at `matching.length === 1` is unaffected
+  and remains the whole point of `(ii-narrow)`); (2) a positive control
+  proving the resolved candidate (not just `reasonCode`) is unchanged
+  across a representative set of fixtures where the open-record path and
+  the containing-shift path would otherwise disagree; (3) a **required
+  failing-without-fix negative control** using the
+  pre-existing-open-previous-workDate-record shape from the counterexample
+  above (`matching.length === 2`, an open record on the resolved previous
+  workDate created by a *different, earlier* operation) — this leg must
+  fail on the mechanism paragraph as originally specified above and pass on
+  the corrected, gated mechanism; and (4) an
   analysis (not merely a gate) of the check-out/disappearance direction
   flagged above, since no gate can substitute for an argument that does not
   yet exist. *(ii-wide)* needs a full re-run of every other §8.2 gate in the
@@ -1955,28 +1965,33 @@ is the architecturally cleaner fix and would be preferable if its blast
 radius were already bounded — it is not yet, and bounding it is a larger
 undertaking than this docs-only pass can responsibly claim to have scoped.
 
-**`(ii-narrow)` is not part of this recommendation and is not a token this
-document offers for ratification this pass.** A prior revision of this
-document claimed the semantic-safety question was resolved in
-`(ii-narrow)`'s favor and, on that basis, recommended (or withheld a
-recommendation on, but still offered as a selectable third option) all
-three tokens. That claim is retracted above: the mechanism this document
-specifies for `(ii-narrow)` is demonstrated unsafe by an executed
-counterexample (a pre-existing open record touched, not created, by the
-operation's own write flips both `workDate` and `shiftId`), and a
-corrected, gated form of the mechanism has not itself been specified,
-gated, or checked against the check-out/disappearance direction. Offering
-`(ii-narrow)` as a vote-now option under those conditions would be exactly
-the "vote that may be void" this document elsewhere warns against
-(section 3.1's framing of why `O-1..O-5` are not decided by omission). The
-owner may still prefer, in principle, the *shape* of eliminating the
-self-observation at its root over widening a comparison domain — that
-preference is legitimate and is not overruled here — but exercising it on
-`(ii-narrow)` requires a follow-up round that first supplies the corrected
-mechanism and its own gate suite (see the four preconditions listed just
-above), not a vote on the token as currently specified. `(ii-wide)`
-already delivers that same root-cause shape today, at the structural cost
-described above, without needing a follow-up round.
+**`(ii-narrow)` — no recommendation, offered as a conditional third token,
+not withdrawn.** A prior revision
+of this document claimed the semantic-safety question was resolved in
+`(ii-narrow)`'s favor and, on that basis, treated it as an unconditionally
+ratifiable third option alongside `(i)`/`(ii-wide)`. That claim is
+retracted above: the mechanism this document specifies for `(ii-narrow)`
+is demonstrated unsafe by an executed counterexample (a pre-existing open
+record touched, not created, by the operation's own write flips both
+`workDate` and `shiftId`), and a corrected, gated form of the mechanism
+has not itself been specified, gated, or checked against the
+check-out/disappearance direction. That does **not** mean the token is
+withdrawn — this document does not reject it, and the owner's choice of
+*direction* (eliminate self-observation at the resolver, versus widen the
+fingerprint domain) is not this document's to make. What changes is what
+a ruling of `(ii-narrow)` *authorizes*: the owner may rule `OD-W4C-53 =
+(ii-narrow)` this pass, and that ruling stands as the direction decision —
+but it is **void as an authorization to implement** until the four
+preconditions above (corrected mechanism spec, positive control, the
+negative control from the counterexample, the check-out/disappearance
+analysis) are supplied and gated; section 4 step 3 does not start work on
+`(ii-narrow)`'s mechanism until then. This is a narrower, explicit
+voidness condition on one ballot row, not the "vote that may be void" this
+document elsewhere warns against (section 3.1's framing of why
+`O-1..O-5` are not decided by omission concerns a vote whose scope is
+*unclear*; here the scope and the condition are both stated on the row).
+`(ii-wide)` remains the only *unconditional* way to deliver that same
+root-cause shape today, at the structural cost described above.
 
 ## 4. Execution sequence
 
@@ -1991,18 +2006,24 @@ described above, without needing a follow-up round.
    run-scoped enqueue surface, the run/resume/finalization transactions, the
    two closed-set copies, and all of section 2's gates.
    `OD-W4C-53`/`O-5` is implemented separately from this step, and its
-   ballot has **two** ratifiable tokens per section 3.2, each with its own
-   implementation branch: if ratified `(i)`, commit
-   `64ea17d1931c142a080aeab9dabe2e8c1098c2cd` (already on the W4C-2 branch)
-   needs only section 3.2's positive/negative gate pair added before it
-   counts as closed; if
-   ratified `(ii-wide)`, that commit is reverted and lock §8.2's steps 3/4
-   are reordered or re-resolved and gated per section 3.2's (ii-wide) gate
-   shape, including the full §8.2 gate re-run it requires. `(ii-narrow)` is
-   **not** a ratifiable token this pass (section 3.2's retraction) and has
-   no implementation branch here; ratifying it requires a follow-up round
-   that first supplies section 3.2's four listed preconditions. Whichever
-   token is ratified, this item is governed by section 3.2's gate shape, not by
+   ballot has two unconditional tokens and one conditional token per
+   section 3.2, each with its own implementation branch: if ratified `(i)`,
+   commit `64ea17d1931c142a080aeab9dabe2e8c1098c2cd` (already on the W4C-2
+   branch) needs only section 3.2's positive/negative gate pair added
+   before it counts as closed; if ratified `(ii-wide)`, that commit is
+   reverted and lock §8.2's steps 3/4 are reordered or re-resolved and
+   gated per section 3.2's (ii-wide) gate shape, including the full §8.2
+   gate re-run it requires. If ratified `(ii-narrow)`, that ruling records
+   the direction decision but does **not** by itself authorize starting
+   implementation (section 3.2's retraction): work on `(ii-narrow)`'s
+   mechanism starts only after a follow-up round supplies and gates
+   section 3.2's four listed preconditions (corrected, `matching.length
+   === 1`-gated mechanism spec; positive control; the negative control
+   from the counterexample; the check-out/disappearance analysis) — until
+   then this item stays on whichever unconditional token (`(i)` or
+   `(ii-wide)`) is also ratified, if any, or blocks on the follow-up round
+   if `(ii-narrow)` was the owner's sole preference. Whichever token is
+   ratified, this item is governed by section 3.2's gate shape, not by
    this step's run-identity gate list.
 4. New **exact-head** independent adversarial review of the resulting head.
 5. Even at zero P1/P2, the lane **stops**: merging PR #4612 remains an owner
