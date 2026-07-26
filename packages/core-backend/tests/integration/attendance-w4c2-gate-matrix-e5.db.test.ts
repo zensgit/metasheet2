@@ -124,7 +124,14 @@ import {
   sealAttendanceResultOperationV1,
 } from '../../src/attendance/w4c0-operation-registry'
 import type { AttendanceW4TransactionClientV1, VerifiedAttendanceOperationIdentityV1 } from '../../src/attendance/w4c0-identity'
-import { deriveAttendanceScheduledRunIdV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
+import {
+  deriveAttendanceScheduledRunIdV1,
+  createAttendanceLiveScheduledBoundaryV1,
+  AttendanceW4LiveScheduledBoundaryError,
+  type AttendanceW4LiveScheduledLegacyAdaptersV1,
+  type AttendanceW4BoundaryConnectionV1,
+} from '../../src/attendance/w4c2-live-scheduled-boundary'
+import { AttendanceW4OperationError } from '../../src/attendance/w4c0-operation-contract'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -196,6 +203,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   const orderOrg = randomUUID()
   const schedOrg = randomUUID()
   const mergeOrg = randomUUID()
+  // P1-4 remediation legs (direct boundary construction, no HTTP route).
+  const adminWitnessOrg = randomUUID()
 
   const ambUser = randomUUID()
   const ambControlUser = randomUUID()
@@ -213,6 +222,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   // calls (must be an active `users` row for the new in-transaction recheck).
   const schedAdminUser = randomUUID()
   const mergeUser = randomUUID()
+  // P1-4 remediation legs.
+  const adminWitnessTargetUser = randomUUID()
+  const adminWitnessRealAdmin = randomUUID()
+  const adminWitnessStaleAdmin = randomUUID()
 
   const ambShiftA = randomUUID()
   const ambShiftB = randomUUID()
@@ -409,6 +422,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     priorAllowlistEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = [
       ambOrg, isoOrg, isoOrg2, replayOrg, authzOrg, authoritativeOrg, rebaseOrg, orderOrg, schedOrg,
+      adminWitnessOrg,
     ].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
@@ -432,7 +446,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     if (putRes.status !== 200) throw new Error(`settings PUT failed: ${putRes.status}`)
 
     // Rollout rows.
-    for (const orgId of [ambOrg, isoOrg, isoOrg2, replayOrg, authzOrg, orderOrg, schedOrg]) {
+    for (const orgId of [ambOrg, isoOrg, isoOrg2, replayOrg, authzOrg, orderOrg, schedOrg, adminWitnessOrg]) {
       await insertRolloutRow(orgId, 'shadow')
     }
     await insertRolloutRow(rebaseOrg, 'legacy')
@@ -453,6 +467,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       [schedUser, schedOrg],
       [schedAmbUser, schedOrg],
       [mergeUser, mergeOrg],
+      [adminWitnessTargetUser, adminWitnessOrg],
     ] as const) {
       await insertActiveUser(userId, orgId)
     }
@@ -472,6 +487,15 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
        VALUES ($1, $2, $1, 'W4C-2 e5 admin-run fixture', 'x', 'user', '[]'::jsonb, true, false, now(), now())
        ON CONFLICT (id) DO NOTHING`,
       [schedAdminUser, `${schedAdminUser}@w4c2-e5.test`],
+    )
+    // P1-4 remediation legs: a second real active admin (users-only, no
+    // adminWitnessOrg membership — platform_admin waives it) for the positive
+    // control. adminWitnessStaleAdmin is DELIBERATELY never inserted anywhere.
+    await pool.query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+       VALUES ($1, $2, $1, 'W4C-2 e5 admin-witness fixture', 'x', 'user', '[]'::jsonb, true, false, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [adminWitnessRealAdmin, `${adminWitnessRealAdmin}@w4c2-e5.test`],
     )
 
     // W2 ambiguity fixtures: two overlapping published day shifts on the same
@@ -543,6 +567,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     for (const userId of [
       ambUser, ambControlUser, isoUserA, isoUserB, isoUserC, replayUser, inactiveMemberUser,
       authoritativeUser, rebaseUser, orderUser, schedUser, schedAmbUser, schedAdminUser, mergeUser,
+      adminWitnessTargetUser, adminWitnessRealAdmin,
     ]) {
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM users WHERE id = $1', [userId]).catch(() => undefined)
@@ -1151,5 +1176,142 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       })
       expect(disable.status).toBe(200)
     }
+  })
+
+  // ---------------------------------------------------------------------
+  // P1-4 remediation (#4612 gate finding, c-5082182541) — cron/admin_run
+  // scheduled witness split. Direct boundary construction (own
+  // createAttendanceLiveScheduledBoundaryV1 instance + real pool connection,
+  // stub legacyAdapters) mirrors leg 5a-5d's direct-witness-construction
+  // style rather than the HTTP route, so these legs prove the BOUNDARY's own
+  // input-shape validation and witness minting, not route wiring.
+  // ---------------------------------------------------------------------
+
+  function throwingScheduledAdapters(): {
+    adapters: AttendanceW4LiveScheduledLegacyAdaptersV1
+    absenceCallCount: () => number
+  } {
+    let n = 0
+    const unreached = (name: string) => async () => {
+      throw new Error(`W4C2_P14_STUB_${name}_MUST_NOT_BE_REACHED`)
+    }
+    const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
+      applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
+      // Zero-effect ("nobody absent") but the CALL ITSELF is the signal a
+      // rejection leg must never produce — counted, never a real INSERT.
+      applyScheduledAbsenceLegacy: async () => {
+        n += 1
+        return []
+      },
+      resolveLiveCandidate: unreached('resolveLiveCandidate') as never,
+      resolveScheduledCandidate: unreached('resolveScheduledCandidate') as never,
+      buildShadowFrozenContext: unreached('buildShadowFrozenContext') as never,
+    }
+    return { adapters, absenceCallCount: () => n }
+  }
+
+  function buildDirectScheduledBoundary(adapters: AttendanceW4LiveScheduledLegacyAdaptersV1) {
+    return createAttendanceLiveScheduledBoundaryV1({
+      legacyAdapters: adapters,
+      async acquireConnection(): Promise<AttendanceW4BoundaryConnectionV1> {
+        const raw = await pool.connect()
+        return {
+          client: raw as unknown as AttendanceW4TransactionClientV1,
+          release: () => raw.release(),
+        }
+      },
+    })
+  }
+
+  it('P1-4 leg A — admin_run carrying the internal scheduler identity as its adminActorId is rejected at MINT, before any per-user transaction opens (zero absence-adapter calls; zero new operation rows)', async () => {
+    const { adapters, absenceCallCount } = throwingScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+    const opsBefore = (await operationRows(adminWitnessOrg, 'scheduled')).length
+
+    await expect(
+      boundary.executeScheduledRun({
+        orgId: adminWitnessOrg,
+        workDate: '2026-07-10',
+        timezone: 'UTC',
+        targetUserIds: [adminWitnessTargetUser],
+        initiator: 'admin_run',
+        adminActorId: ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
+      }),
+    ).rejects.toMatchObject({ code: 'W4C2_SCHEDULED_ADMIN_WITNESS_INVALID' })
+
+    expect(absenceCallCount()).toBe(0)
+    expect((await operationRows(adminWitnessOrg, 'scheduled')).length).toBe(opsBefore)
+    expect(await recordCount(adminWitnessTargetUser)).toBe(0)
+  })
+
+  it('P1-4 leg B — admin_run with a NEVER-REGISTERED admin identity is rejected before any source/result DML (zero rows); the identical call with a real active admin identity claims+seals the operation (positive control)', async () => {
+    const { adapters, absenceCallCount } = throwingScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+    const workDate = '2026-07-11'
+    const opsBefore = (await operationRows(adminWitnessOrg, 'scheduled')).length
+
+    // Rejection half: adminWitnessStaleAdmin was deliberately never inserted
+    // into `users` (module-scope note above) — the SAME shape a deactivated
+    // or deprovisioned admin would produce.
+    await expect(
+      boundary.executeScheduledRun({
+        orgId: adminWitnessOrg,
+        workDate,
+        timezone: 'UTC',
+        targetUserIds: [adminWitnessTargetUser],
+        initiator: 'admin_run',
+        adminActorId: adminWitnessStaleAdmin,
+      }),
+    ).rejects.toMatchObject({ code: 'ATTENDANCE_WRITE_NOT_AUTHORIZED' })
+    expect(absenceCallCount()).toBe(0)
+    expect((await operationRows(adminWitnessOrg, 'scheduled')).length).toBe(opsBefore)
+    expect((await calculationRowsForUser(adminWitnessTargetUser)).length).toBe(0)
+    expect(await recordCount(adminWitnessTargetUser)).toBe(0)
+
+    // Positive control: identical shape, adminWitnessRealAdmin IS a real
+    // active `users` row — the per-user operation is claimed and sealed with
+    // the real admin identity as actor_id (adapter reached exactly once).
+    const result = await boundary.executeScheduledRun({
+      orgId: adminWitnessOrg,
+      workDate,
+      timezone: 'UTC',
+      targetUserIds: [adminWitnessTargetUser],
+      initiator: 'admin_run',
+      adminActorId: adminWitnessRealAdmin,
+    })
+    expect(result.kind).toBe('w4')
+    expect(absenceCallCount()).toBe(1)
+    const opsAfter = await operationRows(adminWitnessOrg, 'scheduled')
+    expect(opsAfter.length).toBe(opsBefore + 1)
+    const sealed = opsAfter.find((row) => row.proof_user_id === adminWitnessTargetUser && row.proof_work_date === workDate)
+    expect(sealed).toMatchObject({
+      state: 'completed',
+      actor_id: adminWitnessRealAdmin,
+      capability: 'scheduled',
+    })
+  })
+
+  it('P1-4 leg C — cron carrying a non-null adminActorId is rejected before the posture probe (zero DB calls of any kind: a fresh org that was never given a rollout row still rejects)', async () => {
+    const { adapters, absenceCallCount } = throwingScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+    // A brand-new org with NO rollout row at all — if this leg's rejection
+    // required any DB read, a fresh UUID org key would take the structurally-
+    // legacy branch instead of throwing (proving the rejection is truly
+    // synchronous, ahead of every other check in the function).
+    const untouchedOrg = randomUUID()
+
+    await expect(
+      boundary.executeScheduledRun({
+        orgId: untouchedOrg,
+        workDate: '2026-07-12',
+        timezone: 'UTC',
+        targetUserIds: [randomUUID()],
+        initiator: 'cron',
+        adminActorId: adminWitnessRealAdmin,
+      }),
+    ).rejects.toMatchObject({ code: 'W4C2_SCHEDULED_WITNESS_INITIATOR_MISMATCH' })
+
+    expect(absenceCallCount()).toBe(0)
+    expect((await operationRows(untouchedOrg, 'scheduled')).length).toBe(0)
   })
 })
