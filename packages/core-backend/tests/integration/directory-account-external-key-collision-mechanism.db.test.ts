@@ -1,4 +1,7 @@
+import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
@@ -41,6 +44,7 @@ import {
   syncDirectoryIntegration,
   unbindDirectoryAccount,
 } from '../../src/directory/directory-sync'
+import { runDirectoryCorpScopePreflight } from '../../scripts/dingtalk-directory-corp-scope-preflight'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -769,9 +773,10 @@ describeIfDatabase('DingTalk directory account corp-scope (real sync, mocked pul
 
 describeIfDatabase('directory corp-scope Phase B migration (isolated real DB)', () => {
   const dbUrl = process.env.DATABASE_URL!
+  const coreBackendRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 
   async function withLegacySchema(
-    run: (db: Kysely<unknown>) => Promise<void>,
+    run: (db: Kysely<unknown>, pool: Pool, schema: string) => Promise<void>,
   ): Promise<void> {
     const adminPool = new Pool({ connectionString: dbUrl })
     const schema = `dtcorp_${randomUUID().replace(/-/g, '')}`
@@ -812,7 +817,7 @@ describeIfDatabase('directory corp-scope Phase B migration (isolated real DB)', 
         CREATE UNIQUE INDEX idx_directory_accounts_provider_external_key
         ON directory_accounts(provider, external_key)
       `.execute(db)
-      await run(db)
+      await run(db, testPool, schema)
     } finally {
       await db.destroy()
       await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
@@ -854,6 +859,361 @@ describeIfDatabase('directory corp-scope Phase B migration (isolated real DB)', 
       (trx) => corpScopeDown(trx as unknown as Kysely<unknown>),
     )
   }
+
+  function runPreflightCli(schema: string): {
+    exitCode: number | null
+    report: Record<string, unknown>
+    stdout: string
+  } {
+    const result = spawnSync(
+      'pnpm',
+      ['--silent', 'preflight:dingtalk-directory-corp-scope'],
+      {
+        cwd: coreBackendRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          DATABASE_URL: dbUrl,
+          PGOPTIONS: `-c search_path=${schema}`,
+        },
+      },
+    )
+    return {
+      exitCode: result.status,
+      report: JSON.parse(result.stdout) as Record<string, unknown>,
+      stdout: result.stdout,
+    }
+  }
+
+  it('preflight CLI starts cleanly and emits one values-free JSON error without DATABASE_URL', () => {
+    const env = { ...process.env }
+    delete env.DATABASE_URL
+    const result = spawnSync(
+      'pnpm',
+      ['--silent', 'preflight:dingtalk-directory-corp-scope'],
+      {
+        cwd: coreBackendRoot,
+        encoding: 'utf8',
+        env,
+      },
+    )
+
+    expect(result.status).toBe(1)
+    expect(() => JSON.parse(result.stdout)).not.toThrow()
+    expect(JSON.parse(result.stdout)).toEqual({
+      operation: 'dingtalk_directory_corp_scope_phase_b_preflight',
+      version: 1,
+      status: 'ERROR',
+      valuesFree: true,
+      readOnlyVerified: false,
+      code: 'PREFLIGHT_DATABASE_URL_REQUIRED',
+    })
+  })
+
+  it('preflight passes from a read-only snapshot and emits counts without source values', async () => {
+    await withLegacySchema(async (db, pool, schema) => {
+      const integrationId = randomUUID()
+      const corpId = `secret-corp-${randomUUID()}`
+      const externalKey = `secret-account-${randomUUID()}`
+      const unionId = `secret-union-${randomUUID()}`
+      await sql`
+        INSERT INTO directory_integrations(id, corp_id)
+        VALUES (${integrationId}, ${` ${corpId} `})
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationId}, 'dingtalk', NULL, ${externalKey})
+      `.execute(db)
+      await sql`
+        INSERT INTO user_external_identities(
+          provider, external_key, provider_union_id, corp_id
+        ) VALUES ('dingtalk', 'opaque-local-key', ${unionId}, ${corpId})
+      `.execute(db)
+
+      const before = await sql<{ integrations: string; accounts: string; identities: string }>`
+        SELECT
+          (SELECT count(*)::text FROM directory_integrations) AS integrations,
+          (SELECT count(*)::text FROM directory_accounts) AS accounts,
+          (SELECT count(*)::text FROM user_external_identities) AS identities
+      `.execute(db)
+      const report = await runDirectoryCorpScopePreflight(pool)
+      const cli = runPreflightCli(schema)
+      const serialized = JSON.stringify(report)
+      const after = await sql<{ integrations: string; accounts: string; identities: string }>`
+        SELECT
+          (SELECT count(*)::text FROM directory_integrations) AS integrations,
+          (SELECT count(*)::text FROM directory_accounts) AS accounts,
+          (SELECT count(*)::text FROM user_external_identities) AS identities
+      `.execute(db)
+
+      expect(report).toMatchObject({
+        status: 'PASS',
+        valuesFree: true,
+        readOnly: true,
+        schema: {
+          requiredTablesPresent: true,
+          integrationCorpNotNull: true,
+          legacyIndexExact: true,
+          scopedIndexCount: '0',
+          corpCheckCount: '0',
+        },
+        counts: {
+          integrations: '1',
+          accounts: '1',
+          identities: '1',
+        },
+        blockers: [],
+      })
+      expect(serialized).not.toContain(corpId)
+      expect(serialized).not.toContain(externalKey)
+      expect(serialized).not.toContain(unionId)
+      expect(after.rows).toEqual(before.rows)
+      expect(cli.exitCode).toBe(0)
+      expect(cli.report).toMatchObject({
+        status: 'PASS',
+        readOnly: true,
+        blockers: [],
+      })
+      expect(cli.stdout).not.toContain(corpId)
+      expect(cli.stdout).not.toContain(externalKey)
+      expect(cli.stdout).not.toContain(unionId)
+    })
+  })
+
+  it('preflight blocks projected identity collisions and scope drift without exposing values', async () => {
+    await withLegacySchema(async (db, pool, schema) => {
+      const integrationId = randomUUID()
+      const corpId = `blocked-corp-${randomUUID()}`
+      const duplicateUnionId = `blocked-union-${randomUUID()}`
+      const duplicateNullUnionId = `blocked-null-union-${randomUUID()}`
+      const duplicateCorpOpenId = `blocked-corp-open-${randomUUID()}`
+      const duplicateOpenId = `blocked-open-${randomUUID()}`
+      await sql`
+        INSERT INTO directory_integrations(id, provider, corp_id)
+        VALUES (${integrationId}, 'dingtalk', ${corpId})
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_integrations(provider, corp_id)
+        VALUES ('dingtalk', '   ')
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES (${integrationId}, 'drifted-provider', NULL, 'blocked-account')
+      `.execute(db)
+      await sql`
+        INSERT INTO user_external_identities(
+          provider, external_key, provider_union_id, provider_open_id, corp_id
+        ) VALUES
+          ('dingtalk', 'identity-corp-a', ${duplicateUnionId}, NULL, ${corpId}),
+          ('dingtalk', 'identity-corp-b', ${duplicateUnionId}, NULL, ${corpId}),
+          ('dingtalk', 'identity-null-union-a', ${duplicateNullUnionId}, NULL, NULL),
+          ('dingtalk', 'identity-null-union-b', ${duplicateNullUnionId}, NULL, '   '),
+          ('dingtalk', 'identity-corp-open-a', NULL, ${duplicateCorpOpenId}, ${corpId}),
+          ('dingtalk', 'identity-corp-open-b', NULL, ${duplicateCorpOpenId}, ${corpId}),
+          ('dingtalk', 'identity-null-open-a', NULL, ${duplicateOpenId}, NULL),
+          ('dingtalk', 'identity-null-open-b', NULL, ${duplicateOpenId}, '   '),
+          ('dingtalk', 'identity-invalid', NULL, NULL, E'corp\\tinvalid')
+      `.execute(db)
+
+      const report = await runDirectoryCorpScopePreflight(pool)
+      const cli = runPreflightCli(schema)
+      const serialized = JSON.stringify(report)
+
+      expect(report.status).toBe('BLOCKED')
+      expect(report.counts).toMatchObject({
+        invalidIntegrationScope: '1',
+        accountProviderDrift: '1',
+        invalidIdentityCorp: '1',
+        duplicateCorpUnionGroups: '1',
+        duplicateNullCorpUnionGroups: '1',
+        duplicateCorpOpenGroups: '1',
+        duplicateNullCorpOpenGroups: '1',
+      })
+      expect(report.blockers).toEqual([
+        'invalidIntegrationScope',
+        'accountProviderDrift',
+        'invalidIdentityCorp',
+        'duplicateCorpUnionGroups',
+        'duplicateNullCorpUnionGroups',
+        'duplicateCorpOpenGroups',
+        'duplicateNullCorpOpenGroups',
+      ])
+      expect(serialized).not.toContain(corpId)
+      expect(serialized).not.toContain(duplicateUnionId)
+      expect(serialized).not.toContain(duplicateNullUnionId)
+      expect(serialized).not.toContain(duplicateCorpOpenId)
+      expect(serialized).not.toContain(duplicateOpenId)
+      expect(cli.exitCode).toBe(2)
+      expect(cli.report).toMatchObject({
+        status: 'BLOCKED',
+        blockers: report.blockers,
+      })
+      expect(cli.stdout).not.toContain(corpId)
+      expect(cli.stdout).not.toContain(duplicateUnionId)
+      expect(cli.stdout).not.toContain(duplicateNullUnionId)
+      expect(cli.stdout).not.toContain(duplicateCorpOpenId)
+      expect(cli.stdout).not.toContain(duplicateOpenId)
+    })
+  })
+
+  it('preflight blocks a partially applied Phase B schema before reading it as migration-ready', async () => {
+    await withLegacySchema(async (db, pool) => {
+      await sql`
+        CREATE UNIQUE INDEX idx_user_external_identities_provider_corp_union
+        ON user_external_identities(provider, corp_id, provider_union_id)
+        WHERE corp_id IS NOT NULL AND provider_union_id IS NOT NULL
+      `.execute(db)
+
+      const report = await runDirectoryCorpScopePreflight(pool)
+
+      expect(report).toMatchObject({
+        status: 'BLOCKED',
+        schema: {
+          legacyIndexExact: true,
+          scopedIndexCount: '1',
+          corpCheckCount: '0',
+        },
+      })
+      expect(report.blockers).toEqual(['scoped_indexes_already_present'])
+    })
+  })
+
+  it('preflight and migration reject a nullable integration corp column with a NULL row', async () => {
+    await withLegacySchema(async (db, pool, schema) => {
+      await sql`
+        ALTER TABLE directory_integrations
+        ALTER COLUMN corp_id DROP NOT NULL
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_integrations(provider, corp_id)
+        VALUES ('dingtalk', NULL)
+      `.execute(db)
+
+      const report = await runDirectoryCorpScopePreflight(pool)
+      const cli = runPreflightCli(schema)
+
+      expect(report).toMatchObject({
+        status: 'BLOCKED',
+        schema: {
+          requiredTablesPresent: true,
+          integrationCorpNotNull: false,
+          legacyIndexExact: true,
+        },
+        counts: {
+          invalidIntegrationScope: '1',
+        },
+      })
+      expect(report.blockers).toEqual([
+        'integration_corp_not_null_missing',
+        'invalidIntegrationScope',
+      ])
+      expect(cli.exitCode).toBe(2)
+      expect(cli.report).toMatchObject({
+        status: 'BLOCKED',
+        blockers: report.blockers,
+      })
+      await expect(runUp(db)).rejects.toThrow(
+        /integration corp column must be NOT NULL/,
+      )
+      expect(await indexNames(db)).toContain('idx_directory_accounts_provider_external_key')
+      expect(await constraintNames(db)).not.toContain(
+        'directory_integrations_corp_id_canonical',
+      )
+    })
+  })
+
+  it('preflight reports a missing required table without attempting partial data reads', async () => {
+    await withLegacySchema(async (db, pool) => {
+      await sql`DROP TABLE user_external_identities`.execute(db)
+
+      const report = await runDirectoryCorpScopePreflight(pool)
+
+      expect(report.status).toBe('BLOCKED')
+      expect(report.schema).toMatchObject({
+        requiredTablesPresent: false,
+        integrationCorpNotNull: true,
+        legacyIndexExact: true,
+      })
+      expect(report.counts).toEqual({
+        integrations: '0',
+        accounts: '0',
+        identities: '0',
+        invalidIntegrationScope: '0',
+        orphanAccounts: '0',
+        accountProviderDrift: '0',
+        invalidIdentityCorp: '0',
+        duplicateAccountScopeGroups: '0',
+        duplicateCorpUnionGroups: '0',
+        duplicateNullCorpUnionGroups: '0',
+        duplicateCorpOpenGroups: '0',
+        duplicateNullCorpOpenGroups: '0',
+      })
+      expect(report.blockers).toEqual(['required_tables_missing'])
+    })
+  })
+
+  it('preflight reports legacy-index and existing-CHECK drift as separate blockers', async () => {
+    await withLegacySchema(async (db, pool) => {
+      await sql`DROP INDEX idx_directory_accounts_provider_external_key`.execute(db)
+      await sql`
+        ALTER TABLE directory_accounts
+        ADD CONSTRAINT directory_accounts_corp_id_canonical
+        CHECK (corp_id IS NULL OR corp_id ~ '^[!-~]+$')
+      `.execute(db)
+
+      const report = await runDirectoryCorpScopePreflight(pool)
+
+      expect(report).toMatchObject({
+        status: 'BLOCKED',
+        schema: {
+          legacyIndexExact: false,
+          scopedIndexCount: '0',
+          corpCheckCount: '1',
+        },
+      })
+      expect(report.blockers).toEqual([
+        'legacy_index_not_exact',
+        'corp_checks_already_present',
+      ])
+    })
+  })
+
+  it('preflight reports orphan accounts and projected account-scope duplicates under schema drift', async () => {
+    await withLegacySchema(async (db, pool) => {
+      const integrationA = randomUUID()
+      const integrationB = randomUUID()
+      await sql`
+        DROP INDEX idx_directory_accounts_provider_external_key
+      `.execute(db)
+      await sql`
+        ALTER TABLE directory_accounts
+        DROP CONSTRAINT directory_accounts_integration_id_fkey
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_integrations(id, corp_id)
+        VALUES (${integrationA}, 'corp-a'), (${integrationB}, 'corp-a')
+      `.execute(db)
+      await sql`
+        INSERT INTO directory_accounts(integration_id, provider, corp_id, external_key)
+        VALUES
+          (${integrationA}, 'dingtalk', NULL, 'duplicate-account'),
+          (${integrationB}, 'dingtalk', NULL, 'duplicate-account'),
+          (${randomUUID()}, 'dingtalk', NULL, 'orphan-account')
+      `.execute(db)
+
+      const report = await runDirectoryCorpScopePreflight(pool)
+
+      expect(report.counts).toMatchObject({
+        orphanAccounts: '1',
+        duplicateAccountScopeGroups: '1',
+      })
+      expect(report.blockers).toEqual([
+        'legacy_index_not_exact',
+        'orphanAccounts',
+        'duplicateAccountScopeGroups',
+      ])
+    })
+  })
 
   it('up canonicalizes corp data, installs every scoped guard, permits cross-corp keys, and replays', async () => {
     await withLegacySchema(async (db) => {

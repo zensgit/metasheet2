@@ -19,27 +19,62 @@ Run this owner/ops gate before UAT:
 
 4. Verify the staging topology has no alternate backend upstream outside the managed Compose
    `backend` service and the fixed loopback publish `127.0.0.1:18900`.
-5. Hold an exclusive host change window. Merge/deploy/verify Phase B migration before releasing
+5. Run the Phase B values-free preflight immediately before the controlled migration and require
+   exit code `0` with status `PASS`.
+6. Hold an exclusive host change window. Merge/deploy/verify Phase B migration before releasing
    it.
-6. If any privileged Docker/Compose or ingress change occurs after the PASS and before migration
+7. If any privileged Docker/Compose or ingress change occurs after the PASS and before migration
    completion, invalidate the evidence and repeat from step 3.
 
 Do not re-deploy Phase A after Phase B migration. The PASS is point-in-time evidence for the
 cutover, not a durable host lock or a claim about unrelated host processes.
 
-## 2. UAT entry criteria
+## 2. Phase B preflight
+
+Run this after Phase A is deployed to every worker and the old-worker count is zero, but before
+applying the Phase B migration:
+
+```bash
+DATABASE_URL="$STAGING_DATABASE_URL" \
+  pnpm --silent --filter @metasheet/core-backend \
+  preflight:dingtalk-directory-corp-scope \
+  > artifacts/dingtalk-directory-corp-scope-preflight.json
+```
+
+The preflight opens a `REPEATABLE READ READ ONLY` transaction. Its JSON contains only schema
+booleans, counts, and stable blocker codes; it does not return corp IDs, provider identity values,
+account keys, credentials, or the database URL.
+
+Exit codes:
+
+- `0`: `PASS`; retain the JSON evidence and continue to the controlled migration window.
+- `2`: `BLOCKED`; do not migrate. Resolve the reported data/schema class under a separately
+  reviewed repair plan, then rerun the preflight.
+- `1`: `ERROR`; read-only execution was not verified or the query could not complete. Do not
+  migrate and do not infer safety from an empty/missing report.
+
+`PASS` requires the exact legacy global index, a `NOT NULL` parent-integration corp column, no
+Phase B replacement index/CHECK already present, canonicalizable parent integration scope, no
+orphan/provider-drift account, canonicalizable identity corp, and no duplicate group that a
+Phase B scoped identity index would reject.
+
+Never paste the database URL or query raw offending values for this evidence. The report is a
+deployment gate, not a repair tool and not proof that old workers were drained.
+
+## 3. UAT entry criteria
 
 Do not start the UAT procedure until all conditions are true:
 
 1. The saved pre-UAT cutover evidence above is complete.
-2. Phase B schema migration is deployed and verified on staging.
-3. Automatic directory sync and directory deprovision remain disabled.
-4. The owner has authorized one manual sync and binding to one existing MetaSheet user.
-5. Two real DingTalk enterprises and one overlap person are available.
+2. The retained Phase B preflight report records exit code `0`, status `PASS`, and zero blockers.
+3. Phase B schema migration is deployed and verified on staging.
+4. Automatic directory sync and directory deprovision remain disabled.
+5. The owner has authorized one manual sync and binding to one existing MetaSheet user.
+6. Two real DingTalk enterprises and one overlap person are available.
 
 Stop if any criterion is unproven. Do not infer rollout completion from a successful migration.
 
-## 3. Values-free evidence
+## 4. Values-free evidence
 
 Record identifiers only as redacted labels (`integration-A`, `integration-B`, `user-existing`).
 Do not paste credentials, corp IDs, unionId/openId/userId values, raw SQL errors, card payloads,
@@ -52,36 +87,40 @@ Allowed evidence:
 - the values-free `WORKER_DRAIN_GATE_PASS` summary;
 - managed-project and staging-ingress worker counts;
 - whether an alternate staging backend upstream exists;
+- the complete values-free preflight JSON and exit code;
 - sync run status and values-free reason code;
 - row counts grouped by redacted integration label;
 - link status and match strategy;
 - callback outcome/reason and approval record count;
 - whether all runtime flags and schedules stayed unchanged.
 
-## 4. UAT procedure
+## 5. UAT procedure
 
-1. Capture the saved cutover PASS, exact Phase A SHA, Phase B migration ledger, private image
-   provenance reference, topology result, and relevant flag states. Do not run the Phase A deploy
-   again.
-2. Run one manual sync for integration A.
-3. Run one manual sync for integration B.
-4. Confirm both runs complete and each integration retains its own departments/accounts.
-5. Confirm the overlap account exists once under each integration even when provider identity
+1. Capture the saved cutover PASS, exact Phase A SHA, Phase B preflight report/exit code, Phase B
+   migration ledger, private image provenance reference, topology result, and relevant flag
+   states. Do not run the Phase A deploy again.
+2. Confirm no old worker remains.
+3. Run one manual sync for integration A.
+4. Run one manual sync for integration B.
+5. Confirm both runs complete and each integration retains its own departments/accounts.
+6. Confirm the overlap account exists once under each integration even when provider identity
    values are equal.
-6. Confirm neither account is automatically linked to the other enterprise's local user.
-7. Bind only the authorized target account to the existing MetaSheet user.
-8. Confirm bind/unbind conflict checks do not modify the other enterprise's identity row.
-9. Send a fresh approval card for the bound integration and click one decision.
-10. Confirm the callback resolves through the same integration and corp, writes one approval
+7. Confirm neither account is automatically linked to the other enterprise's local user.
+8. Bind only the authorized target account to the existing MetaSheet user.
+9. Confirm bind/unbind conflict checks do not modify the other enterprise's identity row.
+10. Send a fresh approval card for the bound integration and click one decision.
+11. Confirm the callback resolves through the same integration and corp, writes one approval
     action, and leaves the other integration untouched.
-11. Confirm no new MetaSheet user was created and no schedule/deprovision/flag changed.
+12. Confirm no new MetaSheet user was created and no schedule/deprovision/flag changed.
 
-## 5. Fail-closed outcomes
+## 6. Fail-closed outcomes
 
 Stop and do not retry automatically when:
 
 - the managed project has another backend, the fixed staging ingress resolves to another
   container, or an alternate staging backend upstream exists;
+- any old worker remains;
+- the preflight status is not `PASS`, its exit code is not `0`, or its JSON cannot be retained;
 - migration/index verification fails;
 - either manual sync fails or rolls back;
 - identity matching is ambiguous;
@@ -91,12 +130,14 @@ Stop and do not retry automatically when:
 
 Retain values-free evidence and return to code review. Do not repair staging data ad hoc.
 
-## 6. Evidence block
+## 7. Evidence block
 
 ```text
 Phase A deployment SHA:                 TBD
 Phase A image provenance schema:        TBD
 worker-drain gate summary:              TBD (must be WORKER_DRAIN_GATE_PASS)
+Phase B preflight exit/status:          TBD (must be 0 / PASS)
+Phase B preflight blocker count:        TBD (must be 0)
 Phase B migration SHA:                  TBD
 managed-project old worker count:       TBD (must be 0)
 staging-ingress unmanaged worker count: TBD (must be 0)

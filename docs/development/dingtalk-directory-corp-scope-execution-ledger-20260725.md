@@ -1,6 +1,6 @@
 # DingTalk directory corp-scope execution ledger
 
-Status: IMPLEMENTED / REVIEW PENDING
+Status: IMPLEMENTED / INDEPENDENT REVIEW APPROVED / OWNER REVIEW PENDING
 
 Date: 2026-07-25
 
@@ -46,10 +46,10 @@ Completed:
 Local verification at the final Phase A implementation worktree:
 
 - focused unit: 43/43;
-- focused PostgreSQL 15: 55/55;
+- focused PostgreSQL 15: 63/63;
 - required attendance directory/user-org real-DB regressions: 14/14;
 - CI placement/values-free contracts: 82/82;
-- nine discriminating mutations killed;
+- ten discriminating mutations killed;
 - TypeScript and diff checks clean.
 
 The first CI run found five old admission tests whose fake transaction clients did not model the
@@ -75,7 +75,11 @@ Completed:
 9. recreate and verify the global guard before down removes scoped protection;
 10. preserve scoped protection when down is data-incompatible;
 11. bound migration lock waiting to 5 seconds and statements to 5 minutes, restoring the caller's
-    prior settings after successful up/down.
+    prior settings after successful up/down;
+12. add a values-free, read-only Phase B preflight that projects the migration's corp
+    canonicalization and rejects a nullable parent-corp column, schema drift,
+    orphan/provider-drift accounts, invalid corp shapes, and every scoped identity duplicate
+    class before the migration window.
 
 Kysely 0.28 supplies one transaction for all pending PostgreSQL migrations; this migration does
 not open a nested transaction. The scoped settings are transaction-local. Failure rolls back the
@@ -84,20 +88,25 @@ constraints/indexes but intentionally does not reverse already-canonicalized dat
 
 Local PostgreSQL 15 evidence:
 
-- pre-Phase-B and fully migrated Phase-B public-schema runs of the combined compatibility plus
-  isolated migration suite: 32/32 in each state;
+- pre-Phase-B and fully migrated Phase-B public-schema runs of the combined compatibility,
+  preflight, plus isolated migration suite: 40/40 in each state;
+- fully migrated PostgreSQL 14.23 runs the same combined suite 40/40 locally;
+- CLI rehearsal on an isolated PostgreSQL 15 database: `PASS` exits `0`, a projected scoped
+  duplicate exits `2` as `BLOCKED`, and missing `DATABASE_URL` exits `1` with a values-free error;
 - fresh full Migrator reaches `zzzz20260725130000_expand_directory_identity_corp_scope`, and replay
   has no pending migration;
 - lock contention aborts after about 5.2 seconds while retaining the legacy guard;
 - synthetic scale sample (10 integrations, 100,000 accounts, 200,000 identities): 3,158 ms in one
   transaction, nine resulting indexes, three CHECKs, zero NULL account corp values;
-- ten Phase B mutations killed, including expression/`INCLUDE` index disguises, weaker same-name
-  CHECK acceptance, phase-detection drift, parent-provider drift, and Unicode-whitespace acceptance;
+- seventeen Phase B mutations killed, including expression/`INCLUDE` index disguises, weaker
+  same-name CHECK acceptance, phase-detection drift, parent-provider drift, Unicode-whitespace
+  acceptance, read-only transaction enforcement, projected duplicate detection, partial-schema
+  detection, nullable parent-corp schema/data checks, and CLI exit-code mapping;
 - TypeScript and diff checks clean.
 
 The scale sample is a local engineering bound, not a production latency or availability promise.
-PostgreSQL 14 remains unclaimed until the stacked PR is retargeted and required CI executes after
-Phase A lands.
+Local PostgreSQL 14 compatibility is established, but required PostgreSQL 14 CI remains unclaimed
+until the stacked PR is retargeted after Phase A lands.
 
 ## 5. Incident and correction ledger
 
@@ -115,6 +124,10 @@ Phase A lands.
 | key-column catalog projection also included `INCLUDE` attributes | restrict the projection to `indnkeyatts` and pin total attributes with an independent mutation |
 | ordinary index creation could wait without bound | transaction-local 5-second lock timeout plus real contention test |
 | down appeared to imply data restoration | explicitly document and test irreversible canonicalization |
+| row-count guidance did not prove a migration would accept staging data | add the read-only projected preflight and make `0 / PASS` an explicit deployment gate |
+| function tests missed a CLI top-level-await load failure | remove top-level await and add a required subprocess startup/error-contract test |
+| SQL three-value logic let NULL parent corp evade `!~` | require the parent column to remain `NOT NULL`, count NULL explicitly, and pin both preflight and migration refusals |
+| required CI only exercised CLI `ERROR/1` | execute `PASS/0` and `BLOCKED/2` through subprocesses in the required real-DB file |
 
 ## 6. Remaining owner gates
 
@@ -122,8 +135,9 @@ Phase A lands.
 2. review Phase B as a stacked contract;
 3. merge/deploy Phase A;
 4. prove old-worker count is zero;
-5. merge/deploy Phase B in a controlled migration window;
-6. execute the staging UAT;
-7. bind only the authorized account to the existing MetaSheet user;
-8. verify the same-corp approval callback;
-9. decide any later automatic-sync/deprovision/flag changes separately.
+5. run the values-free read-only preflight and require exit `0` / `PASS`;
+6. merge/deploy Phase B in a controlled migration window;
+7. execute the staging UAT;
+8. bind only the authorized account to the existing MetaSheet user;
+9. verify the same-corp approval callback;
+10. decide any later automatic-sync/deprovision/flag changes separately.

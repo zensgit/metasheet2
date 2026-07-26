@@ -232,7 +232,8 @@ async function assertAuthoritativeDirectoryScope(db: Kysely<unknown>): Promise<v
   const invalidIntegrations = await sql<{ count: string }>`
     SELECT COUNT(*)::text AS count
       FROM directory_integrations
-     WHERE corp_id !~ '^[!-~]+$'
+     WHERE corp_id IS NULL
+        OR corp_id !~ '^[!-~]+$'
         OR provider IS NULL
         OR provider = ''
   `.execute(db)
@@ -245,6 +246,7 @@ async function assertAuthoritativeDirectoryScope(db: Kysely<unknown>): Promise<v
       FROM directory_accounts account
       JOIN directory_integrations integration ON integration.id = account.integration_id
      WHERE account.provider IS DISTINCT FROM integration.provider
+        OR integration.corp_id IS NULL
         OR integration.corp_id !~ '^[!-~]+$'
   `.execute(db)
   if (result.rows[0]?.count !== '0') {
@@ -252,7 +254,27 @@ async function assertAuthoritativeDirectoryScope(db: Kysely<unknown>): Promise<v
   }
 }
 
+async function assertIntegrationCorpColumnNotNull(db: Kysely<unknown>): Promise<void> {
+  const result = await sql<{ is_not_null: boolean }>`
+    SELECT attribute.attnotnull AS is_not_null
+      FROM pg_attribute attribute
+      JOIN pg_class table_row ON table_row.oid = attribute.attrelid
+      JOIN pg_namespace namespace ON namespace.oid = table_row.relnamespace
+     WHERE namespace.nspname = current_schema()
+       AND table_row.relname = 'directory_integrations'
+       AND attribute.attname = 'corp_id'
+       AND attribute.attnum > 0
+       AND NOT attribute.attisdropped
+  `.execute(db)
+  if (result.rows[0]?.is_not_null !== true) {
+    throw new Error(
+      'directory corp-scope migration blocked: integration corp column must be NOT NULL',
+    )
+  }
+}
+
 async function canonicalizeCorpScope(db: Kysely<unknown>): Promise<void> {
+  await assertIntegrationCorpColumnNotNull(db)
   await sql`
     UPDATE directory_integrations
        SET corp_id = BTRIM(corp_id)

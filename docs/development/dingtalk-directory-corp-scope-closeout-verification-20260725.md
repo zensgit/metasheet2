@@ -1,6 +1,6 @@
 # DingTalk directory corp-scope closeout verification
 
-Status: ENGINEERING COMPLETE / EXACT-HEAD REVIEW AND CI PENDING / NOT DEPLOYED / UAT NOT RUN
+Status: ENGINEERING COMPLETE / INDEPENDENT REVIEW APPROVED / EXACT-HEAD CI PENDING / NOT DEPLOYED / UAT NOT RUN
 
 Date: 2026-07-25
 
@@ -32,6 +32,7 @@ automatic sync, deprovision, or runtime enablement.
 | partial replay cannot pass | no-legacy/incomplete-replacement negative |
 | duplicate scoped union cannot migrate | real unique-index build failure; legacy guard retained |
 | parent provider/corp is authoritative | integration canonicalization plus provider-drift rollback negative |
+| nullable parent-corp schema/data cannot pass | catalog `attnotnull` gate, explicit NULL count, migration refusal |
 | DB/runtime corp grammar agrees | tab/newline/NBSP/EM SPACE/BOM negatives |
 | up failure is atomic | constraints and new indexes absent after failure |
 | compatible down and replay work | real DB |
@@ -40,24 +41,28 @@ automatic sync, deprovision, or runtime enablement.
 | lock wait is bounded | real second-connection ACCESS EXCLUSIVE blocker; abort around 5.2 seconds |
 | timeout scope is contained | prior lock/statement settings restored after up/down |
 | migration runner integration works | fresh database migrated through the new migration |
-| PostgreSQL 14 compatibility | pending: required CI after Phase B retargets to main |
+| Phase B data/schema readiness is executable | values-free read-only preflight, projected duplicate/drift negatives, CLI exit-code rehearsal |
+| PostgreSQL 14 compatibility | local 14.23 suite 40/40; required CI pending after Phase B retarget |
 
 ## 3. Local results
 
 Phase A:
 
 - unit 43/43;
-- real PostgreSQL 15 55/55;
+- real PostgreSQL 15 63/63;
 - required attendance directory/user-org real-DB regressions 14/14;
 - CI contracts 82/82;
 - TypeScript clean;
-- nine mutations killed.
+- ten mutations killed.
 
 Phase B:
 
-- pre-Phase-B public schema plus isolated migration suite 32/32 on PostgreSQL 15;
-- fully migrated Phase-B public schema plus the same suite 32/32, with five legacy-dirty-state
+- pre-Phase-B public schema plus preflight and isolated migration suite 40/40 on PostgreSQL 15;
+- fully migrated Phase-B public schema plus the same suite 40/40, with five legacy-dirty-state
   runtime fixtures switching to their stronger database-rejection assertions rather than skipping;
+- fully migrated PostgreSQL 14.23 runs the same suite 40/40 locally;
+- CLI rehearsal: `PASS`/`0`, projected duplicate `BLOCKED`/`2`, and missing-configuration
+  values-free `ERROR`/`1`;
 - full fresh-database migration reaches
   `zzzz20260725130000_expand_directory_identity_corp_scope`;
 - a second Migrator run has no pending migration;
@@ -65,7 +70,7 @@ Phase B:
 - a real lock blocker fails closed after about 5.2 seconds;
 - TypeScript clean.
 
-Ten Phase B mutations are load-bearing:
+Seventeen Phase B mutations are load-bearing:
 
 1. trusting an existing replacement index without shape verification makes the wrong-definition
    upgrade test red;
@@ -80,6 +85,14 @@ Ten Phase B mutations are load-bearing:
 9. removing exact CHECK-definition comparison lets a weaker same-name constraint pass;
 10. forcing the suite to treat a migrated database as pre-Phase-B makes all five phase-aware
     compatibility tests red.
+11. removing `READ ONLY` makes the preflight's read-only positive control red;
+12. neutralizing one projected scoped-identity duplicate query makes its exact count assertion red;
+13. hiding a Phase B replacement index makes the partial-schema refusal red.
+14. removing the migration's parent-corp `NOT NULL` catalog assertion makes the nullable-schema
+    migration negative red;
+15. removing the preflight's nullable-column blocker makes its exact blocker assertion red;
+16. removing explicit NULL data detection makes the invalid-scope count assertion red;
+17. mapping `BLOCKED` to exit `0` makes the required subprocess test red.
 
 Required CI is recorded only after the final pushed head settles.
 
@@ -89,8 +102,10 @@ The scoped indexes are built with ordinary `CREATE UNIQUE INDEX` inside the migr
 This is intentionally PostgreSQL 14-compatible and atomic, but it can hold locks and scan large
 tables. A local 100,000-account / 200,000-identity sample completed in 3,158 ms, while a real lock
 blocker was cut off at about 5.2 seconds. Before deployment, ops must still measure real
-account/identity row counts and choose a controlled migration window. No claim is made that the
-local sample predicts production lock acquisition, I/O, replicas, or WAL behavior.
+account/identity row counts, obtain a `PASS` from the read-only preflight, and choose a controlled
+migration window. The preflight proves the projected schema/data blockers are absent in one
+repeatable-read snapshot; it does not predict production lock acquisition, I/O, replicas, WAL
+behavior, or prove old-worker drain.
 
 Kysely 0.28 executes all pending migrations in one transaction. The 5-second lock timeout therefore
 also protects this migration from waiting indefinitely, but a timeout aborts the whole pending
@@ -105,8 +120,8 @@ not part of this delivery.
 
 ## 5. Final disposition
 
-Engineering status: implementation and local evidence complete; exact-head adversarial re-review
-and CI remain required.
+Engineering status: implementation, local evidence, and independent adversarial re-review complete;
+exact-head required CI and owner review remain required.
 
 Operational status: blocked by explicit owner gates, not by unfinished code.
 
@@ -115,6 +130,7 @@ Required order:
 ```text
 Phase A review/merge/deploy
   -> prove all old workers drained
+  -> Phase B values-free preflight returns 0 / PASS
   -> Phase B review/merge/deploy
   -> post-fix two-corp staging UAT
   -> authorized existing-user bind
