@@ -305,10 +305,29 @@ export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
     trx: AttendancePluginShapedTrxV1,
     args: { orgId: string; workDate: string; timezone: string; userIds: readonly string[] },
   ): Promise<Array<{ user_id: string }>>
-  /** In-transaction W2 live re-resolution (channel 'live', full-winner opt-in). */
+  /**
+   * In-transaction W2 live re-resolution (channel 'live', full-winner
+   * opt-in). `calendarWorkDate` is deliberately OPTIONAL and omitted by this
+   * boundary's own call site (#4612 gate3 P2-1 remediation, canonical freeze
+   * semantics judgment §4.1): the boundary's `input.workDate` is a POST-
+   * resolution value (the route's OWN prior resolution's output, potentially
+   * a DIFFERENT calendar day than the punch's own day for an overnight
+   * shift — see `AttendanceLivePunchBoundaryInputV1.workDate`'s doc
+   * comment), never a valid resolver input. Passing it through here would
+   * reproduce a DIFFERENT W2 call than the route's own and can silently
+   * change the resolution for an overnight shift (same defect class the P1
+   * fix closed on the legacy sibling branch, `deriveLegacyLivePunchAttributionV1`
+   * in index.cjs). The resolver derives the anchor itself from
+   * `(occurredAt, timezone)` when the caller omits it — the SAME
+   * `toWorkDate` formula the legacy sibling calls explicitly
+   * (`attendance-work-date-resolver.cjs` channel='live' derivation) — so
+   * there is exactly one derivation formula, shared by both branches.
+   * Scheduled re-resolution below is DIFFERENT: its `calendarWorkDate` is
+   * the run's own identity byte, not a resolver output, and stays required.
+   */
   resolveLiveCandidate(
     trx: AttendancePluginShapedTrxV1,
-    args: { orgId: string; userId: string; occurredAt: string; timezone: string; calendarWorkDate: string },
+    args: { orgId: string; userId: string; occurredAt: string; timezone: string; calendarWorkDate?: string },
   ): Promise<AttendanceW4ResolvedCandidateV1>
   /** In-transaction W2 scheduled re-resolution (channel 'scheduled', full-winner opt-in). */
   resolveScheduledCandidate(
@@ -946,6 +965,34 @@ export function createAttendanceLiveScheduledBoundaryV1(
         // adapter bytes), then append the shadow result atomically.
         const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
 
+        // Section 8.2 step 4: candidate resolution runs inside the
+        // transaction, BEFORE step 5's target lock/parent FOR UPDATE below
+        // (reorder — #4612 gate3 P2-1 remediation, canonical freeze
+        // semantics judgment §6 "锁序倒置": the parent lock previously
+        // preceded this resolution, inverting the lock's numbered step
+        // order. Both calls are read-only queries under this transaction's
+        // SERIALIZABLE snapshot with no lock contention between them, so the
+        // reorder has no observable behavioral effect and no independently
+        // provable mutation leg is claimed for it — this is a structural
+        // realignment with §8.2's step numbering, not a correctness fix.
+        // `timezone` below is the exact PRE-resolution value the route
+        // itself fed its own resolver call (`input.requestTimezone`); the
+        // anchor is deliberately OMITTED so the resolver derives it itself
+        // from `(occurredAt, timezone)` — see `resolveLiveCandidate`'s own
+        // doc comment above for why `input.timezone`/`input.workDate`
+        // (POST-resolution) must never be used here. The legacy-only-time
+        // branch below never resolves a candidate at all, so this is skipped
+        // for it.
+        const nowIso = new Date().toISOString()
+        const resolution = legacyOnlyTime
+          ? null
+          : await adapters.resolveLiveCandidate(pluginTrx, {
+              orgId: envelope.orgId,
+              userId: input.userId,
+              occurredAt: input.occurredAtResolved,
+              timezone: input.requestTimezone,
+            })
+
         const parent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
         if (!parent) {
           // The legacy upsert always creates the parent; a missing row here is
@@ -1012,16 +1059,10 @@ export function createAttendanceLiveScheduledBoundaryV1(
           semanticFingerprint = inserted.semanticFingerprint
           provenanceFingerprint = inserted.provenanceFingerprint
         } else {
-          // Freeze W2 + context from the transaction snapshot, then calculate.
-          const nowIso = new Date().toISOString()
-          const resolution = await adapters.resolveLiveCandidate(pluginTrx, {
-            orgId: envelope.orgId,
-            userId: input.userId,
-            occurredAt: input.occurredAtResolved,
-            timezone: input.timezone,
-            calendarWorkDate: input.workDate,
-          })
-          const attribution = attributionFromResolution(resolution, {
+          // W2/context freeze: `resolution` was already re-run above (step
+          // 4, this transaction's snapshot) — build the frozen attribution
+          // and context from it.
+          const attribution = attributionFromResolution(resolution!, {
             orgId: envelope.orgId,
             userId: input.userId,
             source: 'live_resolution',
@@ -1034,20 +1075,51 @@ export function createAttendanceLiveScheduledBoundaryV1(
               userId: input.userId,
               workDate: attribution.value.workDate,
               shiftId: attribution.value.shiftId,
-              timezone: attribution.value.workDate === input.workDate ? input.timezone : input.timezone,
+              // Section 5.2/5.3 (Q16 §4.1 :562-567, Q17 §5.2 :924): the
+              // frozen context's timezone must come from THIS freeze step's
+              // own winner, never the route's (possibly stale) input.timezone
+              // — attributionFromResolution already required
+              // resolution.fullWinner.timezone to be a non-empty string
+              // whenever posture reached 'resolved_v2', so the fallback below
+              // is defensive only (unreachable on this branch in practice).
+              timezone: resolution!.fullWinner?.timezone ?? input.requestTimezone,
               isWorkday: input.isWorkday,
               holidayKind: input.holidayKind,
             })
           }
-          const evidence = await loadLivePunchEvidence(trx, envelope.orgId, input.userId, input.workDate)
+          // Section 5.3 (:936): evidence is anchored to the FROZEN
+          // attribution's own work date, not the boundary's (possibly
+          // stale, pre-transaction) `input.workDate` — the two coincide
+          // unless a genuine DB-state race occurred between the route's
+          // resolution and this transaction's snapshot (see the identity
+          // drift check below, which forces review whenever they diverge).
+          const evidenceAnchorWorkDate =
+            attribution.posture === 'resolved_v2' ? attribution.value.workDate : input.workDate
+          const evidence = await loadLivePunchEvidence(trx, envelope.orgId, input.userId, evidenceAnchorWorkDate)
           const calculation = calculateAttendanceSegmentsV1({
             attribution,
             context,
             evidence,
             approvedFacts: [],
           })
-          outcome = calculation.outcome
-          outcomeReasonCode = calculation.outcomeReasonCode
+          // Section 8.2 step 7: the re-run candidate identity must equal the
+          // identity already committed to when this operation was
+          // normalized (`input.workDate`, baked into `envelope.correlationId`
+          // above) — reachable only via a genuine DB-state race between the
+          // route's pre-transaction resolution and this transaction's
+          // snapshot (the legacy adapter's own in-transaction resolution
+          // above and this one share the SAME inputs/snapshot, so they
+          // always agree with EACH OTHER; this compares against the OUTER,
+          // pre-transaction identity instead). A completed V2 result may
+          // never attach to a parent record keyed by a DIFFERENT work date
+          // than its own frozen attribution — canonical freeze semantics
+          // judgment §4.2 candidate (i): review-required with the closed
+          // `context_mismatch` code, zero segments, no pointer change, the
+          // legacy projection already applied above left exactly as is.
+          const identityDrift =
+            attribution.posture === 'resolved_v2' && attribution.value.workDate !== input.workDate
+          outcome = identityDrift ? 'review_required' : calculation.outcome
+          outcomeReasonCode = identityDrift ? 'context_mismatch' : calculation.outcomeReasonCode
           const inserted = await insertShadowCalculation(trx, {
             orgId: envelope.orgId,
             recordId: parent.id,
@@ -1064,8 +1136,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
             mergePolicy: 'append',
             outcome,
             outcomeReasonCode,
-            segments: calculation.segments,
-            dailyProjection: calculation.dailyProjection,
+            segments: identityDrift ? [] : calculation.segments,
+            dailyProjection: identityDrift ? null : calculation.dailyProjection,
             actorId: authorization.actorId,
             correlationId,
           })
