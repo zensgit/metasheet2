@@ -90,6 +90,35 @@ function loadPlugin(): {
   return requireCjs('../../../../plugins/plugin-attendance/index.cjs')
 }
 
+// No DB needed — this just requires the CJS module directly, same as the
+// other __xyzForTests unit-level guards elsewhere in this codebase (e.g.
+// packages/core-backend/tests/unit/attendance-live-punch-work-date.test.ts).
+// Runs regardless of dbUrl availability (ungated `describe`, not `describeDb`).
+describe('__setAttendanceW4LivePunchPreBoundarySeamForTests env guard', () => {
+  it('forbids installing the race seam outside a test runtime (matches the __setAttendanceW4DigestSeamForTests precedent in w4c0-identity.ts)', () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    const savedVitest = process.env.VITEST
+    const savedNodeEnv = process.env.NODE_ENV
+    try {
+      delete process.env.VITEST
+      process.env.NODE_ENV = 'production'
+      expect(() => setSeam(async () => {})).toThrow('W4C2_LIVE_PUNCH_PRE_BOUNDARY_SEAM_FORBIDDEN')
+    } finally {
+      if (savedVitest === undefined) delete process.env.VITEST
+      else process.env.VITEST = savedVitest
+      if (savedNodeEnv === undefined) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = savedNodeEnv
+      // Leave the seam cleared regardless of outcome — this describe block
+      // runs before the DB-gated suite below in file order.
+      setSeam(null)
+    }
+  })
+})
+
 describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run authorization (real DB, route-level)', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
@@ -133,6 +162,14 @@ describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run a
     Number((await pool.query('SELECT count(*)::int AS n FROM attendance_records WHERE user_id = $1', [userId])).rows[0].n)
   const recordCountForOrgDate = async (orgId: string, workDate: string) =>
     Number((await pool.query('SELECT count(*)::int AS n FROM attendance_records WHERE org_id = $1 AND work_date = $2', [orgId, workDate])).rows[0].n)
+  // Third and fourth DML surfaces the task named alongside events/records: a
+  // future reordering that claims a result-operation row (or enqueues an
+  // outbox row) BEFORE the in-transaction re-derivation/permission check
+  // fires would be invisible to eventCount/recordCount alone.
+  const operationCountForOrg = async (orgId: string) =>
+    Number((await pool.query('SELECT count(*)::int AS n FROM attendance_result_operations WHERE org_id = $1', [orgId])).rows[0].n)
+  const outboxCountForOrg = async (orgId: string) =>
+    Number((await pool.query('SELECT count(*)::int AS n FROM attendance_result_event_outbox WHERE org_id = $1', [orgId])).rows[0].n)
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -257,11 +294,15 @@ describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run a
         const res = await punchPromise
         expect(res.status, res.raw).toBe(409)
         expect(res.body?.error?.code).toBe('W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION')
-        // Zero source DML: the throw happens BEFORE the attendance_events
-        // INSERT inside applyLivePunchProjectionLegacyV1 — prove it with
-        // row counts, not just the response code.
+        // Zero source/result DML: the throw happens BEFORE the
+        // attendance_events INSERT inside applyLivePunchProjectionLegacyV1,
+        // and this is the legacy_projection_only path (no operation/outbox
+        // row is ever minted for it even on success) — prove all three
+        // surfaces with row counts, not just the response code.
         expect(await eventCount(user)).toBe(0)
         expect(await recordCount(user)).toBe(0)
+        expect(await operationCountForOrg(org)).toBe(0)
+        expect(await outboxCountForOrg(org)).toBe(0)
       } finally {
         setSeam(null)
       }
@@ -288,6 +329,10 @@ describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run a
         expect(res.status, res.raw).toBe(403)
         expect(res.body?.error?.code).toBe('FORBIDDEN')
         expect(await recordCountForOrgDate(org, workDate)).toBe(0)
+        // withPermission 403s before runAutoAbsenceForOrgDate is ever called —
+        // no result-operation or outbox row can exist for this org either.
+        expect(await operationCountForOrg(org)).toBe(0)
+        expect(await outboxCountForOrg(org)).toBe(0)
       } finally {
         if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
         else process.env.RBAC_BYPASS = previousRbacBypass
