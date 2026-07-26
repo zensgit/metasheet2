@@ -244,6 +244,19 @@ jobs:
       - name: Approval data-closure CI wiring contract
         run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
 
+      # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
+      # only ever exercises the verify script against a NORMAL package — it never proves the
+      # loopback-config negative case. Without an automated caller, deleting the loopback
+      # regex or its main-flow call site in scripts/ops/multitable-onprem-package-verify.sh
+      # still left every PR required check green. This step is that automated caller: pure
+      # bash, no DB, no pnpm install needed, so it runs early in the no-DB block. Gated to the
+      # 20.x leg only so it lands inside the required `test (20.x)` context (18.x is not
+      # required) rather than doubling the run for no reason — a failure here reds a required
+      # check on any PR touching the verify script.
+      - name: Multitable on-prem loopback-verify CI wiring contract (#4604)
+        if: matrix.node-version == '20.x'
+        run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
+
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
