@@ -64,11 +64,15 @@
 # HARDENING (P1 x2, 2026-07-25 review of the above wiring slice — both closed here):
 #   1. The wiring above stops the workflow-never-runs false-green but did nothing to stop a job-level
 #      false-green: `jobs.integration-guard.if: false` or `continue-on-error: true` on a real test step
-#      both leave the job SUCCESS while running nothing (or ignoring a real failure). FIX: the job
-#      itself, the classifier step, and both real test steps are now contract-pinned to carry none of
-#      `if` (job-level only — step-level `if` gating relevant==true/false is the mechanism, not the
-#      vector), `needs`, or `continue-on-error`. See the contract test file for the five mutations this
-#      closes (owner's original two plus one per newly forbidden key).
+#      both leave the job SUCCESS while running nothing (or ignoring a real failure). A `needs:`
+#      pointing at a job that is itself skipped has the same effect (the skip propagates transitively,
+#      still SUCCESS) — distinct from `needs:` naming a nonexistent job, which is a validation error,
+#      not a skip; forbidding the key closes both. FIX: the job itself, the classifier step, both real
+#      test steps, the no-op step, and the terminal assertion step are now contract-pinned to carry
+#      none of `if` (job-level only — step-level `if` gating relevant==true/false is the mechanism, not
+#      the vector), `needs`, or `continue-on-error`. See the contract test file for the eight mutations
+#      this closes (owner's original two, plus one per newly forbidden key across the job and every
+#      load-bearing step).
 #   2. The in-job classifier was not itself load-bearing: renaming a guarded-path roster entry to a
 #      path that no longer exists, or defaulting the classification to an ambiguous "unknown" value,
 #      both left the job green — an out-of-scope-looking no-op that silently was actually an in-scope
@@ -189,6 +193,9 @@ on:
       - 'apps/web/tests/StockPreparationStageOverview.spec.ts'
       - 'apps/web/tests/StockPreparationStageStepper.spec.ts'
       - '.github/workflows/integration-guard.yml'
+      - 'scripts/ops/integration-guard-guarded-paths.mjs'
+      - 'scripts/ops/integration-guard-classify.mjs'
+      - 'scripts/ops/integration-guard-assert-branch.mjs'
 
 jobs:
   integration-guard:

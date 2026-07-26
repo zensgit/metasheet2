@@ -115,6 +115,14 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'apps/web/tests/StockPreparationStageOverview.spec.ts',
   'apps/web/tests/StockPreparationStageStepper.spec.ts',
   '.github/workflows/integration-guard.yml',
+  // Governance-slice self-coverage (2026-07-25): before extraction, ALL classification logic lived
+  // inside integration-guard.yml itself, which was already in this roster, so editing the classifier
+  // made the guard run itself. After extraction, a PR touching ONLY these three scripts would
+  // otherwise classify as not-relevant and hit the no-op branch — never actually running the suite
+  // whose own gating logic just changed. These three entries close that gap.
+  'scripts/ops/integration-guard-guarded-paths.mjs',
+  'scripts/ops/integration-guard-classify.mjs',
+  'scripts/ops/integration-guard-assert-branch.mjs',
 ])
 
 /**

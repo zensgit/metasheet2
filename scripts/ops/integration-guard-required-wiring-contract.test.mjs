@@ -26,7 +26,10 @@ import { assertBranch } from './integration-guard-assert-branch.mjs'
  *
  * Layer 2 (P1, first review): even with Layer 1 fixed, a JOB that GitHub skips via a job-level `if:`
  * condition reports SUCCESS — a skipped job DOES satisfy a required context, same as a real green one.
- * So `jobs.integration-guard.if: false`, a `needs:` on a job that never runs, or `continue-on-error:
+ * `needs:` has the identical effect whenever it points at a job that is itself skipped (the skip
+ * propagates transitively, still reporting SUCCESS) — distinct from `needs:` naming a job that does
+ * not exist, which is a workflow VALIDATION ERROR rather than a skip; forbidding the key closes both.
+ * So `jobs.integration-guard.if: false`, a `needs:` on a since-skipped job, or `continue-on-error:
  * true` on a real test step all leave the job green having run nothing (or ignored a real failure).
  * Fixed by contract-pinning the ABSENCE of `if`/`needs`/`continue-on-error` at the job level and the
  * ABSENCE of `continue-on-error` on every load-bearing step (classifier, both real branches, the noop,
@@ -321,10 +324,14 @@ test('the job producing the required context is present under the exact expected
 
 // ---------------------------------------------------------------------------
 // Pin 4 (P1, layer 2): the job itself must forbid `if`, `needs`, and `continue-on-error` at the JOB
-// level. A job-level `if: false` (or an unsatisfiable `needs`) makes GitHub report the job SKIPPED,
-// which — unlike a workflow that never runs — DOES satisfy a required context, exactly like a real
-// green run, having executed nothing. `continue-on-error: true` at the job level would similarly let
-// a hard failure inside the job still report the job overall as successful.
+// level. A job-level `if: false` makes GitHub report the job SKIPPED, which — unlike a workflow that
+// never runs — DOES satisfy a required context, exactly like a real green run, having executed
+// nothing. A `needs:` entry has the identical effect whenever the job(s) it points at are themselves
+// skipped (transitively propagating the skip, still reporting SUCCESS) — note this is distinct from
+// `needs:` naming a job that does not exist at all, which is a workflow VALIDATION ERROR, not a
+// skip; forbidding the key closes both failure modes without having to distinguish them.
+// `continue-on-error: true` at the job level would similarly let a hard failure inside the job still
+// report the job overall as successful.
 // ---------------------------------------------------------------------------
 
 test('jobs.integration-guard forbids job-level if/needs/continue-on-error', () => {
@@ -334,9 +341,9 @@ test('jobs.integration-guard forbids job-level if/needs/continue-on-error', () =
       Object.prototype.hasOwnProperty.call(job, forbiddenKey),
       false,
       `jobs.${JOB_ID} must not carry a job-level "${forbiddenKey}" key — GitHub reports a job ` +
-        `skipped by "if" (or one whose "needs" never runs) as SUCCESS, and "continue-on-error" ` +
-        `swallows a real failure, either of which produces a false-green required context having ` +
-        `run nothing`,
+        `skipped by "if" (or transitively via "needs" on a job that is itself skipped) as SUCCESS, ` +
+        `and "continue-on-error" swallows a real failure, either of which produces a false-green ` +
+        `required context having run nothing`,
     )
   }
 })
