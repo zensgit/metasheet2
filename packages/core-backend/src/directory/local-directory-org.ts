@@ -453,8 +453,8 @@ export interface CreateLocalAccountInput {
  * authenticate through the normal local login/session path, not an external-identity bind).
  *
  * `external_key = '<org_id>:<local_user_id>'` (design lock §5.3), so the same platform user can
- * hold one local directory account per org without colliding on the `(provider, external_key)`
- * unique index.
+ * hold one local directory account per org under both the legacy global key and the planned
+ * corp-scoped directory-account key.
  */
 export async function createLocalAccount(input: CreateLocalAccountInput): Promise<LocalAccountSummary> {
   const localUserId = normalizeText(input.localUserId)

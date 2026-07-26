@@ -1,0 +1,22 @@
+<!doctype html>
+<!-- Wave 5 收官验证 evidence harness page (copied to
+     apps/web/w5-metric-decision-trace-harness.html at capture time by
+     capture-decision-trace-metric.mjs — not part of the app build; vite only builds index.html).
+     Mounts the REAL AttendanceDecisionTrace.vue with the REAL tokens.css. Synthetic fixtures only
+     (lock P2-a: screenshots never carry real user data). Same mechanism as the W5-1 harness
+     (docs/development/assets/w5-1-vnext-20260723/capture-harness/decision-trace-harness.html). -->
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wave 5 verification decision-trace metric harness</title>
+    <style>
+      body { margin: 0; background: var(--ms-bg-page, #f5f6f7); padding: 24px 16px; }
+      #app { max-width: 1176px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 16px; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/dev-harness/w5MetricDecisionTraceHarness.ts"></script>
+  </body>
+</html>

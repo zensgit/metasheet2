@@ -65,7 +65,10 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: directory-sync 
     const id = (
       await query<{ id: string }>(
         `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, is_active)
-         VALUES ($1, 'dingtalk', 'corp', $2, $3, $4, $5, 'Fixture', true) RETURNING id::text AS id`,
+         SELECT $1, 'dingtalk', integration.corp_id, $2, $3, $4, $5, 'Fixture', true
+           FROM directory_integrations integration
+          WHERE integration.id = $1
+         RETURNING id::text AS id`,
         [integrationId, external, unionId, openId, external],
       )
     ).rows[0].id
@@ -214,11 +217,10 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: directory-sync 
       })
 
       expect(caught).not.toBeNull()
-      // W4-PRE-1b centralized org resolution (+ the user_orgs write) into
-      // `applyDirectoryAccountBindInTransaction` (shared by every bind-shaped writer) — the
-      // fail-closed guarantee this test proves is unchanged (no `users` row survives below),
-      // only the resolution failure message text moved with it.
-      expect((caught as unknown as Error).message).toBe('Directory integration not found for account org resolution')
+      // The authoritative bind read joins account + integration. A missing parent therefore
+      // produces no authoritative account row; the stable contract is still fail-closed with no
+      // admitted user, not an integration-existence oracle.
+      expect((caught as unknown as Error).message).toBe('Directory account not found')
       const userRow = await query(`SELECT id FROM users WHERE username = $1`, [username])
       expect(userRow.rows).toEqual([])
     })
