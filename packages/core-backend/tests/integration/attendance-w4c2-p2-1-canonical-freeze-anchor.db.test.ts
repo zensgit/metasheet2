@@ -257,6 +257,45 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const SID_DAY = '2026-07-21'
   const SID_OCCURRED_AT = '2026-07-21T10:00:00.000Z'
 
+  // ---------------------------------------------------------------------
+  // Group E (#4612 gate3 P2-1 self-report ③' closure — advisor-corrected
+  // construction): two zero-concurrency fixtures that each isolate ONE of
+  // the two P2-1 fix lines (L2 = freeze-step `timezone` argument, L3 =
+  // omitting the explicit `calendarWorkDate` re-derivation argument) so each
+  // mutation has an EXCLUSIVE (fires-alone) leg, closing the earlier
+  // (WRONG) "structurally indistinguishable" conclusion. Both use the SAME
+  // overnight shift shape (UTC 22:00-06:00, belongs to day D) so `winner.
+  // workDate` is always D — the shift differs only in occurredAt/client-tz,
+  // which changes which of {L2, L3} the mutation is meaningful on:
+  //  - eDay1 (`Etc/GMT+7`, occurredAt D+1 02:00Z): correct resolution is
+  //    `CURRENT_DAY_CONTAINING_SHIFT` (calendarWorkDate == winner.workDate).
+  //    Reverting L2's tz argument moves calendarWorkDate to D+1, flipping
+  //    the resolution to `PREVIOUS_NIGHT_CONTAINING_SHIFT` (L2 FIRES here).
+  //    Reverting L3 (re-adding the explicit `calendarWorkDate:
+  //    input.workDate` argument) re-supplies the SAME value the correct
+  //    code already derives on this fixture (D) — provably a no-op (L3 is
+  //    SILENT here).
+  //  - eDay2 (`Asia/Tokyo`, occurredAt D+1 03:00Z): correct resolution is
+  //    `PREVIOUS_NIGHT_CONTAINING_SHIFT`. Reverting L2 leaves
+  //    calendarWorkDate at D+1 (Tokyo and the shift's own UTC both derive
+  //    D+1 for this instant) — provably a no-op (L2 is SILENT here).
+  //    Reverting L3 re-supplies `input.workDate` (=D, the previous-night
+  //    winner) instead of D+1, flipping the resolution to
+  //    `CURRENT_DAY_CONTAINING_SHIFT` (L3 FIRES here).
+  // Both derivations verified with a standalone `node -e` direct call to
+  // `selectAmongMatchingCandidates` before wiring these real-DB fixtures
+  // (see the PR body's Group E section for the raw output).
+  // ---------------------------------------------------------------------
+  const eDay1Org = randomUUID()
+  const eDay1Shift = randomUUID()
+  const eDay1User = randomUUID()
+  const EDAY = '2026-07-19'
+  const EDAY1_OCCURRED_AT = '2026-07-20T02:00:00.000Z'
+  const eDay2Org = randomUUID()
+  const eDay2Shift = randomUUID()
+  const eDay2User = randomUUID()
+  const EDAY2_OCCURRED_AT = '2026-07-20T03:00:00.000Z'
+
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
@@ -269,7 +308,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
     priorAllowlistEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
-    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = [shadowOrgA, raceOrg, tzRaceOrg, sidOrg].join(',')
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED =
+      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, eDay1Org, eDay2Org].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
@@ -325,10 +365,23 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     await insertShift(sidShiftX, sidOrg, 'W4C2-P21-SidX', 'UTC', '09:00', '17:00', false)
     await insertShift(sidShiftY, sidOrg, 'W4C2-P21-SidY', 'UTC', '08:00', '18:00', false)
     await insertAssignment(randomUUID(), sidOrg, sidUser, sidShiftX, SID_DAY)
+
+    // Group E fixtures (L2/L3 exclusive discriminating legs). Both use the
+    // SAME overnight shift shape (belongs to day EDAY); only occurredAt and
+    // client tz differ between the two orgs.
+    await insertShadowRolloutRow(eDay1Org)
+    await insertActiveUser(eDay1User, eDay1Org)
+    await insertShift(eDay1Shift, eDay1Org, 'W4C2-P21-EDay1', 'UTC', '22:00', '06:00', true)
+    await insertAssignment(randomUUID(), eDay1Org, eDay1User, eDay1Shift, EDAY)
+
+    await insertShadowRolloutRow(eDay2Org)
+    await insertActiveUser(eDay2User, eDay2Org)
+    await insertShift(eDay2Shift, eDay2Org, 'W4C2-P21-EDay2', 'UTC', '22:00', '06:00', true)
+    await insertAssignment(randomUUID(), eDay2Org, eDay2User, eDay2Shift, EDAY)
   }, 120000)
 
   afterAll(async () => {
-    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser]) {
+    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, eDay1User, eDay2User]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -697,5 +750,51 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs[0].outcome).toBe('completed')
     expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
     expect(calcs[0].attribution_snapshot.value.shiftId).toBe(sidShiftX)
+  })
+
+  // Group E (#4612 gate3 P2-1 self-report ③' closure — advisor-corrected
+  // construction, superseding an earlier WRONG "structurally
+  // indistinguishable" claim for the case where L2/L3 are BOTH wrong on the
+  // SAME fixture). Zero concurrency — these are direct assertions on the
+  // resolved `reasonCode`, not races. `eDay1` isolates L2 (its correct
+  // resolution is `CURRENT_DAY_CONTAINING_SHIFT`); `eDay2` isolates L3 (its
+  // correct resolution is `PREVIOUS_NIGHT_CONTAINING_SHIFT`). Both legs'
+  // CORRECT values are asserted here; the mutation table in the PR body
+  // records the four fires/silent combinations (L2×eDay1 fires, L3×eDay1
+  // silent, L2×eDay2 silent, L3×eDay2 fires).
+  it('Group E: L2/L3 exclusive discriminating fixtures — correct resolution on each (mutation table in PR body records the fires/silent split)', async () => {
+    const token1 = await mintToken(eDay1User)
+    const res1 = await punch(token1, {
+      eventType: 'check_in', occurredAt: EDAY1_OCCURRED_AT, timezone: 'Etc/GMT+7', orgId: eDay1Org, operationId: randomUUID(),
+    })
+    expect(res1.status, res1.raw).toBe(200)
+    const calcs1 = await calculationRowsForUser(eDay1User)
+    expect(calcs1.length).toBe(1)
+    expect(calcs1[0].outcome).toBe('completed')
+    expect(calcs1[0].attribution_snapshot.value.workDate).toBe(EDAY)
+    expect(calcs1[0].attribution_snapshot.value.reasonCode).toBe('CURRENT_DAY_CONTAINING_SHIFT')
+
+    const token2 = await mintToken(eDay2User)
+    const res2 = await punch(token2, {
+      eventType: 'check_in', occurredAt: EDAY2_OCCURRED_AT, timezone: 'Asia/Tokyo', orgId: eDay2Org, operationId: randomUUID(),
+    })
+    expect(res2.status, res2.raw).toBe(200)
+    const calcs2 = await calculationRowsForUser(eDay2User)
+    expect(calcs2.length).toBe(1)
+    expect(calcs2[0].outcome).toBe('completed')
+    expect(calcs2[0].attribution_snapshot.value.workDate).toBe(EDAY)
+    // Not `PREVIOUS_NIGHT_CONTAINING_SHIFT` as first hand-derived: the
+    // legacy adapter's OWN in-transaction write (executed just before the
+    // freeze step's resolution, same punch) already created an open
+    // attendance_records row for EDAY (first_in_at set, no last_out_at) —
+    // `openPreviousMatches` (checked BEFORE `previousNightContaining` in
+    // `selectAmongMatchingCandidates`) matches it first. Corrected against
+    // the real DB run (not re-guessed): this branch still returns
+    // `workDate: EDAY` and is STILL excluded whenever `calendarWorkDate ==
+    // candidate.workDate` (the `candidate.workDate < calendarWorkDate`
+    // guard is shared by both the open-record and previous-night checks),
+    // so the L2/L3 exclusivity property below is unaffected by which of
+    // the two "previous night" reason codes fires.
+    expect(calcs2[0].attribution_snapshot.value.reasonCode).toBe('OPEN_PREVIOUS_NIGHT_RECORD')
   })
 })
