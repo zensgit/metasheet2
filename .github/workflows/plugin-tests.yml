@@ -257,6 +257,14 @@ jobs:
         if: matrix.node-version == '20.x'
         run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
 
+      # #4612 gate4 round 4 (P3-4): the seven W4C-2 real-DB attendance suites (including this
+      # PR's own primary evidence file) had no source-level two-point wiring guard — every OTHER
+      # real-DB family here already had one. Pins the attendance step's stable id + literal
+      # DATABASE_URL + vitest.integration.config.ts invocation, and that each of the seven files
+      # is (a) excluded from the no-DB job's default vitest.config.ts and (b) run as a whole-file
+      # arg of that step, and (c) exists on disk.
+      - name: Attendance W4C-2 CI wiring contract
+        run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
@@ -915,6 +923,15 @@ jobs:
           pnpm --filter @metasheet/web build
 
       - name: Run attendance integration tests
+        # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
+        # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
+        # title-prefix anchoring. Deliberately NO `if:` pin added here — this
+        # step already runs UNCONDITIONALLY on both matrix legs (18.x/20.x);
+        # copying the `if: matrix.node-version == '20.x'` pin from the
+        # approval/multitable siblings would NARROW coverage to one leg, a
+        # real behaviour change this round does not make. The wiring guard's
+        # own pin is loosened to match (see that file's comment).
+        id: attendance-real-db-integration
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test

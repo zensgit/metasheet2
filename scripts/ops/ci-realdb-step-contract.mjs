@@ -79,10 +79,20 @@
 
 import { spawnSync } from 'node:child_process'
 
-/** Stable `id:` values of the two real-DB steps in .github/workflows/plugin-tests.yml. */
+/**
+ * Stable `id:` values of the real-DB steps in .github/workflows/plugin-tests.yml.
+ *
+ * `attendance` (added #4612 gate4 round 4, P3-4) is a THIRD, distinct real-DB step ("Run
+ * attendance integration tests") — unlike `approval`/`multitable`, it runs UNCONDITIONALLY on
+ * both matrix legs (no `if: matrix.node-version == '20.x'` pin), so `requireExecutableRealDbStep`
+ * below (which hard-requires that exact `if:` string) does not apply to it as-is; the
+ * attendance-w4c2-ci-wiring guard composes its own equivalent pin from the lower-level exports
+ * instead of calling that function directly. See that guard file's own comment.
+ */
 export const REAL_DB_STEP_IDS = Object.freeze({
   approval: 'approval-real-db-integration',
   multitable: 'multitable-real-db-integration',
+  attendance: 'attendance-real-db-integration',
 })
 
 // ---------------------------------------------------------------------------

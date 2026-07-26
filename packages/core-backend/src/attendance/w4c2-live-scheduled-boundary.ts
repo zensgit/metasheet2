@@ -1339,47 +1339,95 @@ export function createAttendanceLiveScheduledBoundaryV1(
           //      — identity differs while the fingerprint conjunct stays
           //      SILENT — requires `context === null` on BOTH the outer and
           //      inner reads, i.e. `buildW4ShadowFrozenContextV1` rejecting
-          //      BOTH candidate shifts' shapes. The full enumeration of its
-          //      null-context paths (`index.cjs` ~L21451-21489): (i) no
-          //      matching shift row; (ii) more than 3 segment rows (ruled
-          //      out for a genuinely persisted shift —
-          //      `attendance_shift_segments`'s own
-          //      `chk_attendance_shift_segments_index_range` CHECK caps
-          //      `segment_index` at 0-2,
-          //      `zzzz20260724120000_create_attendance_shift_segments.ts` —
-          //      a 4th row cannot be inserted at all); (iii) a NON-DENSE
-          //      segment_index set (`index !== i` at ~L21479 — the CHECK
-          //      constraint bounds the RANGE, not the DENSITY, and the
-          //      per-shift uniqueness index does not require row 0 to
+          //      BOTH candidate shifts' shapes. The enumeration of its
+          //      null-context paths (`index.cjs` ~L21451-21489 — cross-
+          //      checked against the function's four `return null` sites,
+          //      one of which is the ~L21479 compound guard's five
+          //      disjuncts, so this list has seven entries, not five):
+          //      (i) no matching shift row; (ii) more than 3 segment rows
+          //      (ruled out for a genuinely persisted shift — the CHECK
+          //      bounds the RANGE (`chk_attendance_shift_segments_index_range`
+          //      caps `segment_index` at 0-2) and the per-shift UNIQUE index
+          //      (`uq_attendance_shift_segments_shift_index` on
+          //      `(shift_id, segment_index)`) bounds OCCUPANCY (each of the
+          //      three legal values can appear at most once) — CHECK alone
+          //      does not cap row count (four rows could all satisfy
+          //      `segment_index = 1`), the two constraints TOGETHER are
+          //      needed to conclude a 4th row cannot be inserted at all;
+          //      `zzzz20260724120000_create_attendance_shift_segments.ts`);
+          //      (iii) a NON-DENSE segment_index set (`index !== i` at
+          //      ~L21479 — the CHECK constraint bounds the range, not the
+          //      density, and the unique index does not require row 0 to
           //      exist, so a single `segment_index = 1` row with no row 0 IS
           //      insertable); (iv) `normalizeTimeString` failing on a
-          //      segment's own `start_time`/`end_time`; (v) blank legacy
-          //      `work_start_time`/`work_end_time` (only reachable via path
-          //      (iii)/(iv) once segment rows exist at all, or an
-          //      un-migrated/corrupted shift row). Paths (i)/(ii)/(iv)/(v)
-          //      require a MALFORMED or DELETED shift row and are not
-          //      pursued (no sanctioned production path produces one mid-
-          //      race — a different, unrelated defect class). Path (iii) —
-          //      a non-dense `segment_index` set — is DIFFERENT: it is
-          //      legal per every CHECK/uniqueness constraint this table
-          //      has, so it IS directly constructible in a real-DB test
-          //      fixture, even though the canonical shift service (the only
-          //      sanctioned writer) never produces one in production (its
-          //      own contract requires dense 0..2 — see the migration's
-          //      header comment).
+          //      segment's own `start_time`/`end_time` — e.g. a sub-second-
+          //      precision value (`'09:00:00.5'`, legal for the column's
+          //      `time` type, verified by direct INSERT: no CHECK on this
+          //      table constrains time-string format) fails the read-side
+          //      regex; this is NOT a "malformed row" case, it is legal per
+          //      every CHECK/uniqueness constraint the table has, so it IS
+          //      directly constructible in a real-DB test fixture, same as
+          //      (iii) — but the canonical writer's own input validation
+          //      (`SEGMENT_INPUT_TIME_PATTERN` in
+          //      `attendance-shift-service.cjs`, strict `HH:MM`, no seconds)
+          //      rejects anything but exact minute-granularity, so it never
+          //      produces one in production either; (v) a segment's
+          //      `start_day_offset !== 0` (ruled out the same way as (ii) —
+          //      `chk_attendance_shift_segments_start_day_offset` CHECK
+          //      forces `start_day_offset = 0`, so this disjunct of the
+          //      ~L21479 guard can never fire against a persisted row);
+          //      (vi) a segment's `end_day_offset` outside `{0, 1}` (ruled
+          //      out the same way — `chk_attendance_shift_segments_end_day_offset`
+          //      CHECK forces `end_day_offset IN (0, 1)`); (vii) blank
+          //      legacy `work_start_time`/`work_end_time`, reached ONLY via
+          //      the `else` branch taken when `segmentRows.length === 0`
+          //      (~L21492-21495) — NOT, as an earlier version of this
+          //      comment claimed, "via path (iii)/(iv) once segment rows
+          //      exist": that `else` branch is mutually exclusive with
+          //      (iii)/(iv)/(v)/(vi), which all `return null` from inside
+          //      the `segmentRows.length > 0` loop and can never fall
+          //      through to it. (vii) is reachable only when the shift has
+          //      zero persisted segment rows AND its own legacy time
+          //      columns fail `normalizeTimeString`; `NOT NULL` on
+          //      `attendance_shifts.work_start_time`/`work_end_time` rules
+          //      out a blank/NULL value for a persisted row, but (as with
+          //      (iv)) does not by itself rule out a sub-second-precision
+          //      value — that route is not analyzed here. Paths
+          //      (i)/(ii)/(v)/(vi) are blocked outright by a CHECK
+          //      constraint with no fixture, malformed or otherwise, able
+          //      to insert one; (vii) needs a deleted/never-created shift
+          //      row or an un-migrated/corrupted one to hit blank legacy
+          //      columns via the analyzed route. None of these is pursued
+          //      (no sanctioned production path produces one mid-race — a
+          //      different, unrelated defect class). Paths (iii) and (iv)
+          //      are DIFFERENT: both are legal per every CHECK/uniqueness
+          //      constraint this table has, so both ARE directly
+          //      constructible in a real-DB test fixture, even though the
+          //      canonical shift service (the only sanctioned writer) never
+          //      produces either shape in production (dense 0..2 for (iii)
+          //      — see the migration's header comment; strict `HH:MM` input
+          //      for (iv) — see above).
           //
           //  (c) CONCLUSION, corrected: an identity-only, fingerprint-silent
           //      leg is NOT reachable from two well-formed shifts (part a
-          //      still holds), and is NOT production-reachable (part b(iii)
-          //      requires a fixture the canonical shift service never
-          //      writes) — but it IS constructible as a deliberately
-          //      malformed real-DB test fixture, and the freeze-anchor
-          //      test's "Group G" leg now does exactly that, giving the
-          //      identity conjunct a genuine discriminating leg (closing the
-          //      untested-guard gap gate4 found; the fingerprint conjunct
-          //      remains the ONLY discriminator for every well-formed-shift
-          //      leg in the suite). See that test's own comment and the
-          //      leg-map atop the file for the mutation evidence.
+          //      still holds), and is NOT production-reachable (part b's
+          //      (iii) and (iv) both require a fixture the canonical shift
+          //      service never writes) — but it IS constructible as a
+          //      deliberately malformed real-DB test fixture, and the
+          //      freeze-anchor test's "Group G" leg now does exactly that
+          //      (via (iii)), giving the identity conjunct a genuine
+          //      discriminating leg (closing the untested-guard gap gate4
+          //      found; the fingerprint conjunct remains the only conjunct
+          //      that mutation-discriminates every well-formed-shift leg in
+          //      the suite). See that test's own comment and the leg-map
+          //      atop the file for the mutation evidence.
+          //
+          //  Letter note (#4612 gate4 round 3, P3-1/P3-2 fix): this
+          //  sub-enumeration was previously five items (i)-(v) and mis-
+          //  stated as "the full enumeration" while omitting the
+          //  start_day_offset/end_day_offset disjuncts, and its old (v)
+          //  claimed a false "only reachable via (iii)/(iv)" causal chain.
+          //  It is now seven items (i)-(vii); old (v) is renumbered (vii).
           const innerComparableSourceDefinitionFingerprint =
             attribution.posture === 'resolved_v2'
               ? computeAttendanceOuterComparableSourceDefinitionFingerprintV1({ attribution, context })
