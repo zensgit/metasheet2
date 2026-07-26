@@ -1313,40 +1313,73 @@ export function createAttendanceLiveScheduledBoundaryV1(
           // the full account of why excluding `reasonCode` is principled
           // (tie-break provenance, not identity or policy).
           //
-          // STRUCTURAL NOTE — SUBSUMPTION, proven, not merely argued (per
-          // `feedback_failclosed_doors_cover_for_each_other`'s bar for a
-          // "no independently discriminable leg" claim): the (narrowed)
-          // fingerprint domain still CONTAINS `workDate`/`shiftId` (only
-          // `resolvedAt`/`reasonCode` are excluded) — so any identity drift
-          // is necessarily ALSO a fingerprint drift. `FrozenAttendanceContextV1`
-          // (`context`) ALSO carries its own `shiftId` field independently
-          // (`w4c0-write-boundary-types.ts`), so a real shiftId swap changes
-          // BOTH `attribution.value.shiftId` AND `context.shiftId` — the two
-          // conjuncts are NOT symmetric opposites, but the ONLY theoretical
-          // escape (identity differs while the fingerprint conjunct stays
-          // SILENT) requires `context === null` on BOTH the outer and inner
-          // reads, which requires `buildW4ShadowFrozenContextV1` to reject
-          // BOTH candidate shifts' shapes. The obvious constructible
-          // rejection (a >3-segment winning shift, `index.cjs` ~L21450) is
-          // NOT reachable via a real DB fixture in THIS schema:
-          // `attendance_shift_segments`'s own
-          // `chk_attendance_shift_segments_index_range` CHECK constraint
-          // caps `segment_index` at 0-2 (`zzzz20260724120000_create_attendance_shift_segments.ts`)
-          // — a 4th segment row cannot be inserted at all, so `segmentRows.length
-          // > 3` can never be true for a genuinely persisted shift. The
-          // remaining `null`-context paths (missing shift row entirely,
-          // blank legacy work_start_time/work_end_time) require a MALFORMED
-          // or DELETED shift row, not an ordinary shiftId-only swap between
-          // two well-formed shifts — not pursued as a contrived fixture (no
-          // sanctioned production path deletes a shift mid-race; would be a
-          // different, unrelated defect class). CONCLUSION: in this
-          // codebase's constructible fixture space, an identity-only drift
-          // with the fingerprint conjunct silent could not be built — the
-          // identity conjunct's independent value is a STRUCTURAL argument
-          // here (fingerprint ⊇ identity by domain construction), not a
-          // constructed mutation leg; see the freeze-anchor test's own
-          // header comment and the PR body for the CHECK-constraint proof
-          // this claim rests on.
+          // STRUCTURAL NOTE — SUBSUMPTION for WELL-FORMED shifts, and a
+          // RETRACTION (#4612 gate4 P2, independent review): an earlier
+          // version of this comment claimed an "identity-only,
+          // fingerprint-silent" leg "could not be built" from a real DB
+          // fixture in this schema. That claim was WRONG AS STATED. What is
+          // actually true, in three parts:
+          //
+          //  (a) For any shiftId swap between two WELL-FORMED shifts (both
+          //      resolve a non-null `context`), subsumption holds: the
+          //      (narrowed) fingerprint domain still CONTAINS
+          //      `workDate`/`shiftId` (only `resolvedAt`/`reasonCode` are
+          //      excluded), and `FrozenAttendanceContextV1` (`context`) ALSO
+          //      carries its own `shiftId` independently
+          //      (`w4c0-write-boundary-types.ts`) — so a real shiftId swap
+          //      between two well-formed shifts changes BOTH
+          //      `attribution.value.shiftId` AND `context.shiftId`, tripping
+          //      the fingerprint conjunct too. This is confirmed by mutation
+          //      (see the freeze-anchor test's own header comment and the PR
+          //      body): neutering `identityMismatch` alone leaves every
+          //      well-formed-shift leg in this suite green — the fingerprint
+          //      conjunct independently catches the same race.
+          //
+          //  (b) The escape THIS well-formed-shift argument cannot rule out
+          //      — identity differs while the fingerprint conjunct stays
+          //      SILENT — requires `context === null` on BOTH the outer and
+          //      inner reads, i.e. `buildW4ShadowFrozenContextV1` rejecting
+          //      BOTH candidate shifts' shapes. The full enumeration of its
+          //      null-context paths (`index.cjs` ~L21451-21489): (i) no
+          //      matching shift row; (ii) more than 3 segment rows (ruled
+          //      out for a genuinely persisted shift —
+          //      `attendance_shift_segments`'s own
+          //      `chk_attendance_shift_segments_index_range` CHECK caps
+          //      `segment_index` at 0-2,
+          //      `zzzz20260724120000_create_attendance_shift_segments.ts` —
+          //      a 4th row cannot be inserted at all); (iii) a NON-DENSE
+          //      segment_index set (`index !== i` at ~L21479 — the CHECK
+          //      constraint bounds the RANGE, not the DENSITY, and the
+          //      per-shift uniqueness index does not require row 0 to
+          //      exist, so a single `segment_index = 1` row with no row 0 IS
+          //      insertable); (iv) `normalizeTimeString` failing on a
+          //      segment's own `start_time`/`end_time`; (v) blank legacy
+          //      `work_start_time`/`work_end_time` (only reachable via path
+          //      (iii)/(iv) once segment rows exist at all, or an
+          //      un-migrated/corrupted shift row). Paths (i)/(ii)/(iv)/(v)
+          //      require a MALFORMED or DELETED shift row and are not
+          //      pursued (no sanctioned production path produces one mid-
+          //      race — a different, unrelated defect class). Path (iii) —
+          //      a non-dense `segment_index` set — is DIFFERENT: it is
+          //      legal per every CHECK/uniqueness constraint this table
+          //      has, so it IS directly constructible in a real-DB test
+          //      fixture, even though the canonical shift service (the only
+          //      sanctioned writer) never produces one in production (its
+          //      own contract requires dense 0..2 — see the migration's
+          //      header comment).
+          //
+          //  (c) CONCLUSION, corrected: an identity-only, fingerprint-silent
+          //      leg is NOT reachable from two well-formed shifts (part a
+          //      still holds), and is NOT production-reachable (part b(iii)
+          //      requires a fixture the canonical shift service never
+          //      writes) — but it IS constructible as a deliberately
+          //      malformed real-DB test fixture, and the freeze-anchor
+          //      test's "Group G" leg now does exactly that, giving the
+          //      identity conjunct a genuine discriminating leg (closing the
+          //      untested-guard gap gate4 found; the fingerprint conjunct
+          //      remains the ONLY discriminator for every well-formed-shift
+          //      leg in the suite). See that test's own comment and the
+          //      leg-map atop the file for the mutation evidence.
           const innerComparableSourceDefinitionFingerprint =
             attribution.posture === 'resolved_v2'
               ? computeAttendanceOuterComparableSourceDefinitionFingerprintV1({ attribution, context })
