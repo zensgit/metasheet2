@@ -6,7 +6,17 @@
 
 **状态总览：Stage A + B + C + D + E + Stage F（第六棒，本次：mutation 汇总 + advisor 判定
 两项净新验证缺口补齐 + P02/P03/P04 collector marker 独立刀 + 全量回归 + PR）DONE。**
-**PR #TBD（open，not armed），base=main，head=本分支 HEAD。**
+**PR #4612（open，Draft，owner-authorization-hold），base=main，head=本分支 HEAD。**
+
+**Stage G — W4C-2 修复轮（DONE，2026-07-26）**：PR #4612 独立 Opus 门审
+（判定记录 #4612 `c-5082182541`，门审 MD `pr4612-w4c2-gate-20260725.md`）
+判 REQUEST_CHANGES；owner 于 #4595 c-5082275704 授权「仅限修复 + 新
+exact-head 独立门审」。本轮修复 P1-1/P1-3/P1-4/P2-1 四条 finding + NIT-1
+文档更正，**P1-2（scheduled 侧 outbox cutover）明确不做，待 owner 裁 G-2
+形状**（三条路后果不同，见 `attendance-issue-4556-w4c2-remediation-plan-20260726.md`
+§1）。详见各 finding 对应小节（P1-1 见下方「字节红线」、P1-3/P1-4 见新增
+`w4c2-live-scheduled-boundary.ts` 章节、P2-1 见 leg 5e、NIT-1 见下方 20 号
+呈裁点更正）。**本轮不合并、不 arm、不转 Ready、不开后续切片。**
 
 ---
 
@@ -50,16 +60,40 @@
   - **MF3b（~L1134 per-user re-check）：0 红，23/23 全绿**——**advisor 二轮复审
     点名的必做刀**（"removing any one shared resolver call fails" 是逐 call-site
     而非逐 predicate；`:1035`/`:1134` 是两处独立调用点，只刀一处不能代表另一处）。
-    结果是**真实的覆盖缺口**，非试验失败：probe（~L1035）跑在自己的
-    `runAttendanceResultOperationTransactionV1` 里，**提交后**共享 rollout 锁即
-    释放；per-user re-check（~L1134）跑在**另一个、之后开启的**事务里——这是
-    一条跨事务的真实 TOCTOU 防线（promotion 恰好落在 probe commit 之后、
-    per-user commit 之前），**不是死码**，只是没有任何 fixture 构造出这个窗口
-    去驱动它。（advisor 二轮复审纠正：本条最初误判为"probe 与 per-user 同一
-    SERIALIZABLE 事务、per-user 读不可能不同"从而可删——那是错的，两次读
-    在不同事务里，删除会移除一条活防线。）**如实记入呈裁点 20**（PR body
-    同步），不用 contrived fixture 硬凑绿，也不悄悄把 MF3b 并入 MF3a 冒充
-    "resolver 移除已证"，更不建议删除这行代码。
+    **【W4C-2 修复轮 NIT-1 更正，2026-07-26】本节此前的判断是错的**：下面原文
+    称 per-user re-check 与 probe 分别落在两个不同事务里、构成一条真实的跨事务
+    TOCTOU 防线（"不是死码"），并因此不建议删除该行。**PR #4612 独立门审
+    （c-5082182541 NIT-1）逐行读码推翻了这个结论**：`:1134`（即
+    `resolveSegmentCalculationPosture(trx, orgKey)`，本片修复后行号漂移，
+    参见 `w4c2-live-scheduled-boundary.ts` 内 `executeScheduledRun` per-user
+    循环体）与它比较的对象**从来不是** probe 事务（~L1035，那确实是另一个、
+    已提交的事务）——它是**同一个 per-user 事务内、`attendanceResultOperationPreflightV1`
+    自己的 step 2**（`w4c0-operation-registry.ts` preflight 内部，同样调用
+    `acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')` 后
+    `resolveSegmentCalculationPosture(trx, orgKey)`，用的是**同一个 `trx`**）。
+    该共享锁是 `pg_advisory_xact_lock_shared`——**事务作用域**，只在
+    commit/rollback 释放；整个 per-user 事务是 `BEGIN ISOLATION LEVEL SERIALIZABLE`。
+    因此 preflight 内部那次读、与 `:1134` 这次「re-check」读，是**同一事务、
+    同一共享锁、同一快照下的同一个值**——`org.acceptedWritePosture`
+    （preflight 已产出）与 `:1134` 重读的 `posture.effectiveState` 恒等。
+    MF3b 的「0 红」是**可证明的同事务冗余**，不是覆盖缺口；probe（~L1035）
+    与它无关——probe commit 之后、per-user commit 之前的窗口确实存在，但那个
+    窗口是被 preflight 自己（在 per-user 事务内、比 `:1134` 更早）挡住的，不是
+    被 `:1134` 挡住的。**结论**：`:1134` 保留或删除均可（防御性冗余），
+    但不应再以「真实跨事务 TOCTOU 防线，不要删」的措辞对待它；也**不建议**
+    为一个不存在的窗口构造 rendezvous 并发腿（会把错误认知固化进合同）。
+    下面缩进的原文按接力记账原样保留（供比对，不代表当前结论）：
+    > 结果是**真实的覆盖缺口**，非试验失败：probe（~L1035）跑在自己的
+    > `runAttendanceResultOperationTransactionV1` 里，**提交后**共享 rollout 锁即
+    > 释放；per-user re-check（~L1134）跑在**另一个、之后开启的**事务里——这是
+    > 一条跨事务的真实 TOCTOU 防线（promotion 恰好落在 probe commit 之后、
+    > per-user commit 之前），**不是死码**，只是没有任何 fixture 构造出这个窗口
+    > 去驱动它。（advisor 二轮复审纠正：本条最初误判为"probe 与 per-user 同一
+    > SERIALIZABLE 事务、per-user 读不可能不同"从而可删——那是错的，两次读
+    > 在不同事务里，删除会移除一条活防线。）如实记入呈裁点 20（PR body
+    > 同步），不用 contrived fixture 硬凑绿，也不悄悄把 MF3b 并入 MF3a 冒充
+    > "resolver 移除已证"，更不建议删除这行代码。
+    > （**以上三行"不建议删除""跨事务真实防线"的措辞已被推翻，见上方更正。**）
 
 ### collector P01-P04「removed independently」逐 marker 独立刀（Stage C 呈裁点未竟项清账）
 
@@ -76,7 +110,7 @@ claim 站点这一既有事实也不受影响）：
 四刀（含第三棒 P01/MC5）合起来证明 P01-P04 四个 debt id 的 `canonicalizedBy` 字段
 各自独立可判别——移除任一个只影响该 marker 自己的断言行，不掩护、不连坐。
 
-### 呈裁点 18-19（新增，PR body 必列）
+### 呈裁点 18-20（新增，PR body 必列；20 已于 W4C-2 修复轮 NIT-1 更正，见条目内文）
 
 18. **Cut A 的观测错误码非预期字面**：null-ID 落入 W4 registry 协议路径后表面
     码是 `ATTENDANCE_WRITE_NOT_AUTHORIZED`（403），不是最初设想的
@@ -89,18 +123,40 @@ claim 站点这一既有事实也不受影响）：
     已证；W4C-2 边界/frozen-attribution 代码零处引用 calculation_group 表
     （grep 零命中，含本棒复核）。本片不消费该字段，故不新增静态守卫，亦不新造
     mutation 腿——引用 W4C-1 既有证据而非重做。
-20. **scheduled-side per-user posture re-check（~L1134）未被任何 fixture 判别**
-    （MF3b，advisor 二轮复审要求的必做刀，结果 0 红/23 绿）：probe（~L1035）跑在
-    自己独立的 `runAttendanceResultOperationTransactionV1` 里并**提交**（共享
-    rollout 锁随之释放）；per-user re-check（~L1134）跑在**之后开启的另一个**
-    事务里——这是一条**真实的跨事务 TOCTOU 防线**（promotion 恰好落在 probe
-    commit 之后、per-user commit 之前），**不是死码**，只是没有任何 fixture
-    构造出这个窗口去驱动它。**不是「resolver 移除失败」被证过一半**——MF3a
-    （probe 侧，恰 3 红）与 MF3b 是两个独立调用点的两次独立判别，MF3b 的结果是
-    「有效防线、零覆盖」而非「通过」，也不是「可删的死码」。修复方向（未做，
-    留给 owner/下一片裁）：构造 promotion 在 probe 提交后、per-user 提交前发生
-    的真双连接 rendezvous 腿（同 §12.3 TOCTOU 纪律）——这是唯一站得住的判别
-    构造；**不要删除这行代码**，它守的窗口是真的。
+20. **【W4C-2 修复轮 NIT-1 更正，2026-07-26——本条原文已被推翻，见下】**
+    scheduled-side per-user posture re-check（~L1134，MF3b，0 红/23 绿）：
+    **PR #4612 独立门审（c-5082182541 NIT-1）逐行读码证明本条原判断错误。**
+    原文主张 `:1134` 与 probe（~L1035）分别落在两个不同事务里、构成一条真实
+    的跨事务 TOCTOU 防线——这个比较对象选错了。`:1134` 真正的比较对象是
+    **同一个 per-user 事务内、`attendanceResultOperationPreflightV1` 自己 step 2**
+    的 posture 读（`w4c0-operation-registry.ts`：`acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')`
+    后 `resolveSegmentCalculationPosture(trx, orgKey)`，同一个 `trx`）：该共享锁
+    是 `pg_advisory_xact_lock_shared`（事务作用域，commit/rollback 才释放），
+    整个 per-user 事务是 `BEGIN ISOLATION LEVEL SERIALIZABLE`。因此 preflight
+    内部那次读与 `:1134` 这次「re-check」，是**同一事务、同一共享锁、同一快照
+    下的同一个值**——`org.acceptedWritePosture`（preflight 已产出）恒等于
+    `:1134` 重读的 `posture.effectiveState`。**MF3b 的 0 红是可证明的同事务
+    冗余，不是覆盖缺口**；probe（~L1035）与它无关——probe commit 之后、
+    per-user commit 之前的窗口确实存在，但那个窗口在**per-user 事务内、比
+    `:1134` 更早**就已经被 preflight 自己挡住了，不是被 `:1134` 挡住的。
+    **结论**：`:1134` 保留或删除均可（防御性冗余），**不应**再以「真实跨事务
+    TOCTOU 防线，不要删」的措辞对待它；**不建议**为一个不存在的窗口构造
+    rendezvous 双连接判别腿（会把错误认知固化进合同，且徒然浪费——这与原文
+    倒数第二句「唯一站得住的判别构造」的建议相反）。原文（下方缩进）按接力
+    记账原样保留，供对比：
+    > probe（~L1035）跑在自己独立的 `runAttendanceResultOperationTransactionV1`
+    > 里并**提交**（共享 rollout 锁随之释放）；per-user re-check（~L1134）跑在
+    > **之后开启的另一个**事务里——这是一条**真实的跨事务 TOCTOU 防线**
+    > （promotion 恰好落在 probe commit 之后、per-user commit 之前），
+    > **不是死码**，只是没有任何 fixture 构造出这个窗口去驱动它。不是
+    > 「resolver 移除失败」被证过一半——MF3a（probe 侧，恰 3 红）与 MF3b 是
+    > 两个独立调用点的两次独立判别，MF3b 的结果是「有效防线、零覆盖」而非
+    > 「通过」，也不是「可删的死码」。修复方向（未做，留给 owner/下一片裁）：
+    > 构造 promotion 在 probe 提交后、per-user 提交前发生的真双连接 rendezvous
+    > 腿（同 §12.3 TOCTOU 纪律）——这是唯一站得住的判别构造；不要删除这行
+    > 代码，它守的窗口是真的。
+    > （**以上「真实跨事务防线」「唯一站得住的判别构造」「不要删除」的措辞
+    > 已被上方更正推翻。**）
 
 ### Stage F 实跑实数
 
@@ -120,7 +176,7 @@ claim 站点这一既有事实也不受影响）：
 | MF1 (Cut A) | boundary：null-ID + legacy_projection_only 短路条件恒 false（null-ID 落入完整 registry 协议） | **9 红/153 绿**（`attendance-plugin.test.ts` 单文件，全新库） | git checkout 还原 |
 | MF2 (Cut B) | index.cjs `applyLivePunchProjectionLegacyV1` 返回值丢弃 `workDateResolution` 键 | **恰 3 红**（boundary wiring 1 + posture-matrix legacy/shadow 2，两套件合跑 10 腿）；7 绿 | 同上 |
 | MF3a | boundary `executeScheduledRun` **probe**（~L1035）posture 解析改查恒定不存在 org key（live 侧 ~L698、per-user ~L1134 不动） | **恰 3 红**（三套件合跑 23 腿）：gate-matrix-e5 leg 6 admin_run 半面 + leg 9 + boundary wiring suspended-scheduled 腿；posture-matrix 5/5 与 live 腿全绿——排他 | 同上 |
-| MF3b | boundary `executeScheduledRun` **per-user re-check**（~L1134，跑在 probe 提交后**另开**的事务里）同一变异，probe~L1035/live~L698 不动 | **0 红/23 绿——未覆盖，非通过**（呈裁点 20：真实跨事务 TOCTOU 防线，非死码，只是无 fixture 构造 promotion-in-window） | 同上 |
+| MF3b | boundary `executeScheduledRun` **per-user re-check**（~L1134）同一变异，probe~L1035/live~L698 不动 | **0 红/23 绿——可证明的同事务冗余，非覆盖缺口**（【已更正，见上方 NIT-1】：`:1134` 与它比较的不是 probe 事务，是同一 per-user 事务内 preflight 自己 step 2 的同一次 posture 读——同一共享锁+SERIALIZABLE 快照下恒等；不是死码/非死码的问题，是「没有第二个值可比」） | 同上 |
 | MF4 | curated-debt-entries.cjs：删 P02 `canonicalizedBy` | **恰 1 红**（14 测试中 13/14，line 217） | 同上 |
 | MF5 | curated-debt-entries.cjs：删 P03 `canonicalizedBy` | **恰 1 红**（13/14，line 218） | 同上 |
 | MF6 | curated-debt-entries.cjs：删 P04 `canonicalizedBy` | **恰 1 红**（13/14，line 219） | 同上 |
@@ -149,7 +205,7 @@ claim 站点这一既有事实也不受影响）：
 | MF1 | F | **relay6（第六棒新跑）** | null-ID+legacy 短路 neuter（可达性） | 9红/153绿 | advisor 判定净新 |
 | MF2 | F | **relay6（新跑）** | legacy 响应丢 workDateResolution 键（字节保真） | 恰3红/7绿 | advisor 判定净新 |
 | MF3a | F | **relay6（新跑）** | scheduled-side posture resolver **probe** 调用点单独移除 | 恰3红（23腿合跑） | resolver 排他，本片自证 |
-| MF3b | F | **relay6（新跑，advisor 二轮要求）** | scheduled-side posture resolver **per-user re-check** 调用点单独移除 | **0红/23绿——未覆盖，呈裁点20** | 真实跨事务 TOCTOU 防线（非死码）零覆盖；owner/下一片裁——**不要删除该行** |
+| MF3b | F | **relay6（新跑，advisor 二轮要求）** | scheduled-side posture resolver **per-user re-check** 调用点单独移除 | **0红/23绿——可证明的同事务冗余（【W4C-2 修复轮 NIT-1 更正】非「未覆盖的活防线」，见上方长注）** | `:1134` 与同一 per-user 事务内 preflight 自己的 posture 读恒等；保留或删除该行均可，不必为不存在的窗口补测 |
 | MF4 | F | **relay6（新跑）** | 删 P02 marker | 恰1红（13/14） | 未竟项清账 |
 | MF5 | F | **relay6（新跑）** | 删 P03 marker | 恰1红（13/14） | 未竟项清账 |
 | MF6 | F | **relay6（新跑）** | 删 P04 marker | 恰1红（13/14） | 未竟项清账 |
