@@ -548,7 +548,14 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     // independently recompute each fingerprint (from the SAME persisted
     // inputs, via the real production functions, NOT reusing anything the
     // tested code path itself returned) and require the stored column to
-    // equal that recomputation exactly.
+    // equal that recomputation exactly. SCOPE (honest limit): this pins the
+    // stored column to "this production function's output on the stored
+    // inputs" — it does NOT pin the function's own DEFINITION. If
+    // `computeAttendanceSemanticInputFingerprintV1`/`computeAttendance
+    // SourceDefinitionFingerprintV1` themselves changed (e.g. a domain
+    // separator or a projected field), both sides of this comparison move
+    // together and this assertion stays green; it is not a substitute for a
+    // dedicated fingerprint-definition regression test (none exists here).
     const recomputedSemanticFingerprint = computeAttendanceSemanticInputFingerprintV1({
       attribution: driftCalcs[0].attribution_snapshot,
       context: driftCalcs[0].context_snapshot,
@@ -1244,13 +1251,20 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
 
     // Round 3 finding ⑤: "the reasonCode exclusion is only backed by a code
     // comment" — give it a leg. `computeAttendanceSourceDefinitionFingerprintV1`
-    // (the STORAGE domain) is, field-for-field, the EXACT SAME computation as
-    // `computeAttendanceOuterComparableSourceDefinitionFingerprintV1` (the
-    // OUTER-VS-INNER comparison domain) with `reasonCode` NOT in its
-    // exclusion set — i.e. it IS "the same code with reasonCode deleted from
-    // the exclusion set", not an analogous stand-in for it (compare the two
-    // functions' bodies in `w4c1-fingerprints.ts`: identical except the
-    // `Set([...])` literal). Using it here proves, on THIS operation's real
+    // (the STORAGE domain) is, field-projection-for-field-projection, the
+    // SAME computation as `computeAttendanceOuterComparableSourceDefinitionFingerprintV1`
+    // (the OUTER-VS-INNER comparison domain) with `reasonCode` NOT in its
+    // exclusion set — i.e. it IS "the same projection logic with reasonCode
+    // deleted from the exclusion set", not an analogous stand-in for it
+    // (compare the two functions' bodies in `w4c1-fingerprints.ts`: the
+    // `projectAttributionValue(...)` call and everything after it is
+    // identical except the `Set([...])` literal; the two functions ALSO use
+    // different domain-separator constants — `SOURCE_DEFINITION_DOMAIN` vs
+    // `OUTER_COMPARABLE_SOURCE_DEFINITION_DOMAIN` — which is irrelevant to
+    // this comparison: the separator is a fixed prefix hashed identically
+    // into BOTH the outer and inner call on each side, so it cancels out of
+    // an equal/not-equal comparison and cannot itself cause or hide an
+    // agree/disagree result). Using it here proves, on THIS operation's real
     // captured outer/inner values (not synthetic ones), that removing the
     // exclusion reproduces the zero-concurrency false positive: the narrow
     // (production) domain must agree outer-vs-inner; the wide (storage)
@@ -1283,5 +1297,99 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     })
     expect(wideOuter).not.toBeNull()
     expect(wideOuter).not.toBe(wideInner) // reasonCode reinstated -> the exact false positive the exclusion suppresses
+  })
+
+  // Group F2 (advisor-flagged escalation, #4612 gate3 P2-1 round 3): the ⑤
+  // literal source mutation (Set(['resolvedAt','reasonCode']) ->
+  // Set(['resolvedAt'])) turned up a SECOND self-observation shape beyond
+  // eDay2/Group F — `Group D-overnight positive control` (zero concurrency,
+  // connection B disarmed) ALSO flipped `completed` -> `review_required`
+  // under that mutation. Group F was built to REPRODUCE eDay2's shape
+  // (self-report ④'s own disclosed limitation: it is not an independently
+  // discovered shape) — the drift-set claim was therefore verified on ONE
+  // geometry. This leg runs the SAME full-field probe on the D-overnight
+  // geometry (own user on `osidOrg`/`osidShiftX` — reusing that shift row is
+  // safe: D-overnight's race swaps the per-user ASSIGNMENT row, never the
+  // shift row itself, unlike L6's `tzRaceShift`, see that const's own
+  // comment) to determine whether the drift set is STILL exactly
+  // {resolvedAt, reasonCode} on a mechanistically different fixture
+  // (overnight `openPreviousMatches` vs. eDay2's `openPreviousMatches` on a
+  // different window/instant shape), or whether a wider set needs to be
+  // reported (per the task's own hard constraint: a third drifting field is
+  // an escalation, not a silent set-widening).
+  it('Group F2 (O-5 probe, second geometry): outer-vs-inner attribution.value full-field diff on the D-overnight self-observation shape', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    const f2User = randomUUID()
+    await insertActiveUser(f2User, osidOrg)
+    await insertAssignment(randomUUID(), osidOrg, f2User, osidShiftX, OSID_DAY)
+
+    let captured: { outerResolution: unknown; outerContext: unknown } | null = null
+    setSeam(async (ctx: { outerResolution: unknown; outerContext: unknown }) => {
+      captured = { outerResolution: ctx.outerResolution, outerContext: ctx.outerContext }
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(f2User)
+      res = await punch(token, {
+        eventType: 'check_in', occurredAt: OSID_OCCURRED_AT, timezone: 'UTC', orgId: osidOrg, operationId: randomUUID(),
+      })
+    } finally {
+      setSeam(null)
+      await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [f2User]).catch(() => undefined)
+      await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [f2User]).catch(() => undefined)
+      await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [f2User]).catch(() => undefined)
+      await pool?.query('DELETE FROM users WHERE id = $1', [f2User]).catch(() => undefined)
+    }
+    expect(res.status, res.raw).toBe(200)
+    expect(captured).not.toBeNull()
+    const { outerResolution, outerContext } = captured as { outerResolution: unknown; outerContext: unknown }
+    expect(outerResolution && (outerResolution as { kind: string }).kind).toBe('resolved')
+
+    const calcs = await calculationRowsForUser(f2User)
+    expect(calcs.length).toBe(1)
+    const inner = calcs[0].attribution_snapshot.value as Record<string, unknown>
+
+    const outer = __computeAttendanceOuterAttributionValueForTestsV1({
+      orgId: osidOrg,
+      userId: f2User,
+      source: 'live_resolution',
+      nowIso: new Date().toISOString(),
+      resolution: outerResolution as Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['resolution'],
+      context: outerContext as Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['context'],
+    })
+    expect(outer).not.toBeNull()
+    const outerValue = outer as Record<string, unknown>
+
+    const allKeys = new Set([...Object.keys(outerValue), ...Object.keys(inner)])
+    const driftFields: string[] = []
+    for (const key of allKeys) {
+      if (canonicalAttendanceJsonV1(outerValue[key] ?? null) !== canonicalAttendanceJsonV1(inner[key] ?? null)) {
+        driftFields.push(key)
+      }
+    }
+    driftFields.sort()
+
+    // Same HARD CONSTRAINT as Group F: exact-equality, not subset — a third
+    // drifting field on THIS geometry fails loudly and is an escalation, not
+    // something to silently absorb into the exclusion set.
+    expect(driftFields).toEqual(['reasonCode', 'resolvedAt'])
+    // Mechanism confirmation: on this geometry, zero-concurrency
+    // self-observation still resolves via `openPreviousMatches` inner-side
+    // (matching the mutation-probe finding that this leg flips under ⑤'s
+    // mutation) — outer never sees step 3's own write.
+    expect(inner.reasonCode).toBe('OPEN_PREVIOUS_NIGHT_RECORD')
+    expect(outerValue.reasonCode).not.toBe('OPEN_PREVIOUS_NIGHT_RECORD')
+
+    for (const key of [
+      'workDate', 'shiftId', 'absoluteWindow', 'attributionWindow', 'attributionTailMinutes',
+      'extendedByApprovedOvertime', 'windowEvidenceFingerprint', 'source', 'schemaVersion', 'resolverVersion',
+      'orgId', 'userId',
+    ]) {
+      expect(outerValue[key], `field '${key}' expected byte-identical outer vs inner`).toEqual(inner[key])
+    }
   })
 })
