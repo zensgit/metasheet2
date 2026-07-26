@@ -22,6 +22,34 @@ const {
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-binding-qualification-spike.cjs'))
 
+// ── §4 step 1.5 RE-POINT (B1a-3) — WHICH TESTS MOVED, AND WHY ────────────────
+// This file used to build a probe-strategy registry through the EXPORTED
+// `createProbeStrategyRegistry` and drive `PROBER.probe({ query, keyColumns, ...tuple })`.
+// BOTH constructions are gone:
+//   * the caller-supplied-tuple entry point was REMOVED (§4 step 1.5). The frozen
+//     prober object's exact key set is now `{ probeFromResolution }`;
+//   * `createProbeStrategyRegistry` is now BUILD-ONLY (the V-7 fix) and reaches no
+//     probe path under δ=(c), so it can no longer mint a prober at all.
+// The affected tests are re-pointed at the SANCTIONED seam — a trusted resolution
+// from the approved-binding resolver plus a closure-bound HTTP executor — and NEVER
+// by re-granting trust to a public factory. Everything that still has a subject is
+// retained verbatim: the digest properties, the SQL builders and their read-only
+// guard, the whole envelope-MAC battery, the timestamp pins, the async-window
+// defensive key copy, and the real-driver count shapes (which now arrive through the
+// executor's answer plane instead of a pg summary row).
+const { createReadSourceConfigStore, __internals: storeInternals } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
+const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
+const {
+  createApprovedBindingResolver,
+  createHarnessSystemIdentityAuthorityForTests,
+  createHarnessCanonicalObjectAuthorityForTests,
+} = require(path.join(__dirname, '..', 'lib', 'gip-approved-binding-resolver.cjs'))
+const {
+  createHarnessHttpProbeActionRegistryForTests,
+  createHarnessSourceBinderForTests,
+  createServerBoundSourceExecutor,
+} = require(path.join(__dirname, '..', 'lib', 'gip-server-bound-source-executor.cjs'))
+
 function rejectsWith(fn, reason) {
   let caught = null
   try {
@@ -50,12 +78,16 @@ async function rejectsWithAsync(fn, reason) {
 // refused; short keys are offline-brute-forceable since message+MAC are public)
 const ENVELOPE_KEY = Object.freeze({ keyId: 'k2026a', secret: Buffer.alloc(32, 7) })
 const WRONG_KEY = Object.freeze({ keyId: 'k2026a', secret: Buffer.alloc(32, 9) })
-const REGISTRY = createProbeStrategyRegistry([{
+// BUILD-ONLY now: the product of this exported factory is trusted by nothing, and
+// no probe path resolves a SQL strategy under δ=(c). It is retained deliberately as
+// the untrusted seam, and its field hygiene is still asserted below.
+const BUILD_ONLY_REGISTRY = createProbeStrategyRegistry([{
   actionProfileVersion: 'fixture.paged_read.v1',
   ...postgresTotalOrderProbeStrategy,
 }])
-const PROBER = createBindingQualificationProber(REGISTRY)
 
+// BASE_INPUTS stays a plain object: it is the material for the PURE digest tests,
+// which take a tuple by value and are unaffected by §4 step 1.5.
 const BASE_INPUTS = Object.freeze({
   actionProfileVersion: 'fixture.paged_read.v1',
   systemContentKey: 'sck_fixture_1',
@@ -63,6 +95,82 @@ const BASE_INPUTS = Object.freeze({
   objectKey: 'fixture_view',
   canonicalObjectVersion: 'material.v1',
 })
+
+const FIXTURE_PROFILE = 'fixture.paged_read.v1'
+
+function fixtureConfigBody(objectKey) {
+  return {
+    version: 1,
+    systemId: 'sys-fixture',
+    object: objectKey,
+    mode: 'list_page',
+    requiredKind: 'erp_http',
+    operations: ['read'],
+    readPath: 'api/fixture',
+    readMethod: 'GET',
+    containerPaths: ['Data'],
+    fieldMap: [{ source: 'ItemNo', target: 'item_no' }, { source: 'Rev', target: 'rev' }],
+    orderingKeySpec: [{ fieldId: 'item_no', direction: 'ASC' }, { fieldId: 'rev', direction: 'ASC' }],
+    actionProfileVersion: FIXTURE_PROFILE,
+  }
+}
+
+// A fresh stack per probe, so each test configures its own source behaviour without
+// leaking state into the next. The resolution is minted by the REAL resolver over
+// the REAL store, so the tuple is never caller-supplied.
+async function buildProbe({ answer, onExecute, secretBuffer, objectKey = 'fixture_view' } = {}) {
+  const validated = validateReadSourceConfig(fixtureConfigBody(objectKey))
+  assert.ok(validated.valid, `fixture must validate: ${JSON.stringify(validated.errors)}`)
+  const stored = JSON.parse(JSON.stringify(validated.normalized))
+  stored.version = 1
+  const row = {
+    id: 'cfg-fixture', tenant_id: 't-1', workspace_id: null, system_id: 'sys-fixture',
+    object: objectKey, mode: 'list_page', config: stored,
+    content_key: storeInternals.contentKeyFor(validated.normalized), version: 1, status: 'approved',
+  }
+  const db = {
+    async selectOne(_t, where) { return Object.keys(where).every((k) => row[k] === where[k]) ? row : null },
+    async select() { return [] },
+    async insertOne() { return null },
+    async updateRow() { return null },
+    async transaction(fn) { return fn(this) },
+  }
+  const resolver = createApprovedBindingResolver({
+    configStore: createReadSourceConfigStore({ db }),
+    systemIdentityAuthority: createHarnessSystemIdentityAuthorityForTests({ 'sys-fixture': 'sck_fixture_1' }),
+    canonicalObjectAuthority: createHarnessCanonicalObjectAuthorityForTests([
+      { contractId: objectKey, contractVersion: FIXTURE_PROFILE, canonicalObjectVersion: 'material.v1' },
+    ]),
+  })
+  const resolution = await resolver.resolveApprovedBinding({
+    tenantId: 't-1', workspaceId: null, approvedConfigVersionId: 'cfg-fixture',
+  })
+  const actionRegistry = createHarnessHttpProbeActionRegistryForTests([{
+    actionProfileVersion: FIXTURE_PROFILE,
+    actionId: 'fixture.connector.total_order_probe',
+    actionVersion: 'v1',
+    connectorKind: 'erp_http',
+    sourceFieldFor(fieldId) {
+      const declared = { item_no: 'ItemNo', rev: 'Rev' }
+      if (!Object.prototype.hasOwnProperty.call(declared, fieldId)) throw new Error('undeclared')
+      return declared[fieldId]
+    },
+    execute: async () => { throw new Error('the handle executes, not the declaration') },
+  }])
+  const sourceBinder = createHarnessSourceBinderForTests([{
+    systemContentKey: 'sck_fixture_1',
+    credentialFactory: () => Object.freeze({
+      async execute() {
+        if (typeof onExecute === 'function') await onExecute()
+        if (typeof answer === 'function') return answer()
+        return answer || { duplicateGroupsSampled: 0, nullKeyRowsSampled: 0 }
+      },
+    }),
+  }])
+  const executor = createServerBoundSourceExecutor({ actionRegistry, sourceBinder })
+  const prober = createBindingQualificationProber({ executor })
+  return { prober, resolution, executor, secretBuffer }
+}
 
 // ── 1. Frozen vocabularies + source-level invariant ──
 function frozenVocabulary() {
@@ -78,6 +186,9 @@ function frozenVocabulary() {
     'QUALIFICATION_ENVELOPE_MISMATCH',
     'QUALIFICATION_EXPIRED',
     'QUALIFICATION_STATUS_INVALID',
+    'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED',
+    'PROBE_EXECUTOR_UNTRUSTED',
+    'PROBE_RESOLUTION_UNTRUSTED',
   ])
   assert.ok(Object.isFrozen(QUALIFICATION_ERROR_REASONS))
   const src = fs
@@ -139,15 +250,16 @@ function probeSqlReadOnly() {
   rejectsWith(() => buildOrderingKeyDuplicateProbeSql({ objectName: 'v', keyColumns: ['k', 'k'] }), 'QUALIFICATION_INPUT_INVALID')
 }
 
-// ── 4. Probe: uniqueness pass / duplicate fail-closed (values-free) ──
+// -- 4. Probe: uniqueness pass / duplicate fail-closed (values-free) --
+//    RE-POINTED: driven through the resolution-bound entry point and the
+//    closure-bound HTTP executor. The strategy-registry injection cases below are
+//    replaced by the stronger property they were approximating -- the run input is a
+//    CLOSED ALLOWLIST, so a registry/strategy/query is refused under ANY key.
 async function probeBehaviour() {
-  const seenSql = []
-  const okQuery = async (sql) => { seenSql.push(sql); return { rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] } }
-  const qualification = await PROBER.probe({
-    ...BASE_INPUTS,
+  const ok = await buildProbe()
+  const qualification = await ok.prober.probeFromResolution({
+    resolution: ok.resolution,
     envelopeKey: ENVELOPE_KEY,
-    query: okQuery,
-    keyColumns: ['item_no', 'rev'],
     probedAt: '2026-07-23T00:00:00Z',
     expiresAt: '2026-07-24T00:00:00Z',
   })
@@ -156,188 +268,222 @@ async function probeBehaviour() {
   assert.equal(qualification.evidence.duplicateGroupsFound, 0)
   assert.equal(qualification.evidence.nullKeyRowsFound, 0)
   assert.equal(qualification.evidence.checkedKeyColumnCount, 2)
-  assert.equal(qualification.evidence.probeStrategyId, 'gip.total_order_probe.postgres')
-  assert.equal(qualification.evidence.probeStrategyVersion, 'v1')
-  assert.equal(qualification.evidence.probeDialect, 'postgres')
-  assert.equal(qualification.evidence.snapshotSemantics, 'single_statement_mvcc')
+  // MOVED, not deleted: the four strategy-identity evidence fields
+  // (probeStrategyId / probeStrategyVersion / probeDialect / snapshotSemantics) are
+  // gone BY CONSTRUCTION under delta=(c) -- an HTTP action declares no dialect and no
+  // snapshot semantics, and decision (epsilon) is unruled. First-party ACTION identity
+  // replaces them, and the absence of any guarantee token is asserted as an exact
+  // key set so a re-addition reds.
+  assert.equal(qualification.evidence.probeTransport, 'http_certified_action')
+  assert.equal(qualification.evidence.probeActionId, 'fixture.connector.total_order_probe')
+  assert.equal(qualification.evidence.probeActionVersion, 'v1')
+  assert.equal(qualification.evidence.probeConnectorKind, 'erp_http')
+  assert.deepEqual(Object.keys(qualification.evidence).sort(), [
+    'checkedKeyColumnCount', 'duplicateGroupsFound', 'nullKeyRowsFound',
+    'probeActionId', 'probeActionVersion', 'probeConnectorKind', 'probeKind',
+    'probeTransport', 'probedAt',
+  ])
   assert.equal(qualification.envelopeKeyId, 'k2026a')
   assert.ok(typeof qualification.envelopeMac === 'string' && qualification.envelopeMac.length === 64)
   // the secret never appears anywhere in the qualification
   assert.ok(!JSON.stringify(qualification).includes(ENVELOPE_KEY.secret.toString('hex')))
-  // EXACTLY ONE statement (review P1: a second read would reopen the torn-check hole)
-  assert.equal(seenSql.length, 1)
-  assert.match(seenSql[0], /duplicate_groups_sampled/)
-  assert.match(seenSql[0], /null_key_rows/)
 
-  // duplicates ⇒ fail closed, values-free
+  // duplicates => fail closed, values-free
   const SECRET = 'secret_item_A17'
-  const dupQuery = async () => ({ rows: [{ duplicate_groups_sampled: 3, null_key_rows: 0, leak: SECRET }] })
-  const caught = await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: dupQuery, keyColumns: ['item_no', 'rev'], probedAt: '2026-07-23T00:00:00Z',
+  const dup = await buildProbe({ answer: () => ({ duplicateGroupsSampled: 3, nullKeyRowsSampled: 0 }) })
+  const caught = await rejectsWithAsync(() => dup.prober.probeFromResolution({
+    resolution: dup.resolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
   assert.ok(!JSON.stringify({ m: caught.message, d: caught.details }).includes(SECRET),
     'duplicate-key failure must stay values-free')
 
-  // NULL key components ⇒ fail closed (same single statement)
-  const nullQuery = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 2 }] })
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: nullQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+  // NULL key components => fail closed (same single answer)
+  const nul = await buildProbe({ answer: () => ({ duplicateGroupsSampled: 0, nullKeyRowsSampled: 2 }) })
+  await rejectsWithAsync(() => nul.prober.probeFromResolution({
+    resolution: nul.resolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_NULL_FOUND')
 
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => { throw new Error('boom') }, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'PROBE_QUERY_FAILED')
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [] }), keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'PROBE_QUERY_FAILED')
-  // no envelope key ⇒ fail closed before any probing
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
+  // no envelope key => fail closed before any probing
+  await rejectsWithAsync(() => ok.prober.probeFromResolution({
+    resolution: ok.resolution, probedAt: '2026-07-23T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
 
-  // REGISTRY IS FACTORY-BOUND (review P1): run input must NOT carry a strategy or a
-  // registry — a fake duck-typed registry can never enter the qualification chain.
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
-    strategyRegistry: { resolve: () => ({ buildTotalOrderProbeSql: () => 'SELECT 1', strategyId: 'EVIL', strategyVersion: 'v', dialect: 'evil', snapshotSemantics: 'marker' }) },
-    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'QUALIFICATION_INPUT_INVALID')
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
-    probeStrategy: { dialect: 'evil', snapshotSemantics: 'marker_smuggle', buildTotalOrderProbeSql: () => 'SELECT 1' },
-    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'QUALIFICATION_INPUT_INVALID')
-  // NEGATIVE CONTROL — trust is OBJECT IDENTITY, not a forgeable public field (review
-  // P1 round-6). A FULLY duck-typed registry — carrying __gipTrustedRegistry:true AND a
-  // resolve() that returns a working, attacker-authored strategy with a smuggled
-  // snapshotSemantics marker — is STILL rejected by the factory, because it was never
-  // constructed by createProbeStrategyRegistry (not in the module-private WeakSet). The
-  // owner's probe {"accepted":true,"markerLeaked":true} is closed: no prober is ever
-  // minted from a forged registry, so the marker path is unreachable.
-  const forgedRegistry = {
-    __gipTrustedRegistry: true,
-    resolve: () => ({
-      buildTotalOrderProbeSql: () => 'SELECT 0 AS duplicate_groups_sampled, 0 AS null_key_rows',
-      strategyId: 'gip.total_order_probe.postgres', strategyVersion: 'v1',
-      dialect: 'postgres', snapshotSemantics: 'ATTACKER_SMUGGLED_MARKER',
+  // EXECUTION IS FACTORY-BOUND (S4 step 1.5). Run input must NOT carry a strategy, a
+  // registry, a query or an executor -- under a KNOWN name or a NOVEL one. This is
+  // strictly stronger than the two denylist cases it replaces: the gate is an
+  // allowlist, so a novel key name is refused too.
+  for (const smuggled of [
+    { strategyRegistry: { resolve: () => ({ buildTotalOrderProbeSql: () => 'SELECT 1', strategyId: 'EVIL', strategyVersion: 'v', dialect: 'evil', snapshotSemantics: 'marker' }) } },
+    { probeStrategy: { dialect: 'evil', snapshotSemantics: 'marker_smuggle', buildTotalOrderProbeSql: () => 'SELECT 1' } },
+    { query: async () => ({ rows: [] }) },
+    { keyColumns: ['item_no'] },
+    { aCompletelyNovelKeyName: { execute: async () => ({}) } },
+  ]) {
+    await rejectsWithAsync(() => ok.prober.probeFromResolution({
+      resolution: ok.resolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z', ...smuggled,
+    }), 'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED')
+  }
+
+  // NEGATIVE CONTROL -- trust is OBJECT IDENTITY, not a forgeable public field. The
+  // forged-REGISTRY case is retired with the construction it attacked (the prober no
+  // longer takes a registry at all); the SAME property is now asserted one layer up,
+  // against a forged EXECUTOR carrying every expected public field.
+  const forgedExecutor = {
+    __gipTrustedExecutor: true,
+    executeOrderingKeyProbe: async () => ({
+      probeTransport: 'http_certified_action', probeActionId: 'FORGED', probeActionVersion: 'v1',
+      probeConnectorKind: 'evil', checkedKeyColumnCount: 1,
+      duplicateGroupsSampled: 0, nullKeyRowsSampled: 0,
     }),
   }
-  rejectsWith(() => createBindingQualificationProber(forgedRegistry), 'QUALIFICATION_INPUT_INVALID')
+  rejectsWith(() => createBindingQualificationProber({ executor: forgedExecutor }), 'PROBE_EXECUTOR_UNTRUSTED')
   // primitives / null are rejected too (WeakSet.has returns false, never throws through)
-  rejectsWith(() => createBindingQualificationProber(null), 'QUALIFICATION_INPUT_INVALID')
-  rejectsWith(() => createBindingQualificationProber('nope'), 'QUALIFICATION_INPUT_INVALID')
-  rejectsWith(() => createBindingQualificationProber({ resolve: () => null }), 'QUALIFICATION_INPUT_INVALID')
-  // a REAL registry (WeakSet member) yields a working prober — identity, not property
-  assert.equal(typeof createBindingQualificationProber(REGISTRY).probe, 'function')
-  // profile with NO bound strategy ⇒ PROBE_STRATEGY_UNBOUND (named fail-closed)
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, actionProfileVersion: 'fixture.unbound_read.v1', envelopeKey: ENVELOPE_KEY,
-    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'PROBE_STRATEGY_UNBOUND')
-  // strategy identity is a CLOSED evidence field sourced from the registry
-  // (the earlier fake-strategy marker path is gone by construction)
+  rejectsWith(() => createBindingQualificationProber({ executor: null }), 'PROBE_EXECUTOR_UNTRUSTED')
+  rejectsWith(() => createBindingQualificationProber({ executor: 'nope' }), 'PROBE_EXECUTOR_UNTRUSTED')
+  rejectsWith(() => createBindingQualificationProber(null), 'PROBE_EXECUTOR_UNTRUSTED')
+  // ...and a forged RESOLUTION carrying every public field is refused at probe time.
+  const forgedResolution = { ...ok.resolution }
+  await rejectsWithAsync(() => ok.prober.probeFromResolution({
+    resolution: forgedResolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z',
+  }), 'PROBE_RESOLUTION_UNTRUSTED')
+  // a REAL executor (WeakSet member) yields a working prober -- identity, not property
+  assert.equal(typeof createBindingQualificationProber({ executor: ok.executor }).probeFromResolution, 'function')
+
+  // RESIDUAL 1, retired as INEXPRESSIBLE: the frozen prober object's EXACT KEY SET.
+  // "probe() absent from the module's exports" would be vacuous -- probe never was
+  // a module export.
+  assert.deepEqual(Object.keys(ok.prober).sort(), ['probeFromResolution'])
+  assert.deepEqual(Object.getOwnPropertySymbols(ok.prober), [])
+  assert.equal(ok.prober.probe, undefined)
+
   // weak keys are refused: string secrets (any length) and short buffers
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'x' },
-    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'QUALIFICATION_INPUT_INVALID')
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: 'server_held_secret_material_1_long_enough_but_text' },
-    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'QUALIFICATION_INPUT_INVALID')
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'k', secret: Buffer.alloc(16, 1) },
-    query: okQuery, keyColumns: ['k'], probedAt: '2026-07-23T00:00:00Z',
-  }), 'QUALIFICATION_INPUT_INVALID')
+  for (const secret of ['x', 'server_held_secret_material_1_long_enough_but_text', Buffer.alloc(16, 1)]) {
+    await rejectsWithAsync(() => ok.prober.probeFromResolution({
+      resolution: ok.resolution, envelopeKey: { keyId: 'k', secret }, probedAt: '2026-07-23T00:00:00Z',
+    }), 'QUALIFICATION_INPUT_INVALID')
+  }
+
   // DEFENSIVE KEY COPY is LOAD-BEARING (review P2): the caller mutates its own key
-  // Buffer INSIDE the query callback — i.e. during the await window BETWEEN the key
-  // copy and the MAC computation. Because probe took a defensive copy up front, the
-  // MAC binds the ORIGINAL bytes, so verify with the original key succeeds. Without
-  // the copy the MAC would bind the mutated bytes (this exact test REDs on removal).
+  // Buffer INSIDE the executor callback -- i.e. during the await window BETWEEN the
+  // key copy and the MAC computation. Because probe took a defensive copy up front,
+  // the MAC binds the ORIGINAL bytes, so verify with the original key succeeds.
+  // Without the copy the MAC would bind the mutated bytes (this exact test REDs on
+  // removal).
   const original = Buffer.alloc(32, 7)
   const attackerControlled = Buffer.from(original) // the buffer probe receives
-  const windowQuery = async (sql) => {
-    attackerControlled.fill(9) // mutate DURING the await, after the copy was taken
-    return { rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }
-  }
-  const windowQual = await PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: { keyId: 'kx', secret: attackerControlled },
-    query: windowQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+  const windowStack = await buildProbe({
+    onExecute() { attackerControlled.fill(9) }, // mutate DURING the await, after the copy
+  })
+  const windowQual = await windowStack.prober.probeFromResolution({
+    resolution: windowStack.resolution,
+    envelopeKey: { keyId: 'kx', secret: attackerControlled },
+    probedAt: '2026-07-23T00:00:00Z',
+    expiresAt: '2026-07-24T00:00:00Z',
   })
   const verifiedOriginal = verifyBindingQualification({
-    qualification: windowQual, expectedInputs: { ...BASE_INPUTS }, envelopeKey: { keyId: 'kx', secret: original }, now: '2026-07-23T12:00:00Z',
+    qualification: windowQual, resolution: windowStack.resolution, envelopeKey: { keyId: 'kx', secret: original }, now: '2026-07-23T12:00:00Z',
   })
   assert.equal(verifiedOriginal.verified, true, 'MAC must bind the ORIGINAL key bytes (copy taken before await)')
-  // …and the mutated value must NOT verify (it never was the key)
+  // ...and the mutated value must NOT verify (it never was the key)
   rejectsWith(() => verifyBindingQualification({
-    qualification: windowQual, expectedInputs: { ...BASE_INPUTS }, envelopeKey: { keyId: 'kx', secret: Buffer.alloc(32, 9) }, now: '2026-07-23T12:00:00Z',
+    qualification: windowQual, resolution: windowStack.resolution, envelopeKey: { keyId: 'kx', secret: Buffer.alloc(32, 9) }, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
-  // registry field hygiene: control chars / oversize identity strings fail loud
+
+  // registry field hygiene: control chars / oversize identity strings fail loud.
+  // RETAINED against the now BUILD-ONLY factory -- its products are trusted by
+  // nothing, but a malformed registration must still fail loud rather than ship
+  // control chars into anything.
   assert.throws(() => createProbeStrategyRegistry([{ actionProfileVersion: 'x.y.v1', strategyId: 'a\nb', strategyVersion: 'v1', dialect: 'postgres', snapshotSemantics: 's', buildTotalOrderProbeSql: () => 'SELECT 1' }]))
   assert.throws(() => createProbeStrategyRegistry([{ actionProfileVersion: 'x.y.v1', strategyId: 'z'.repeat(200), strategyVersion: 'v1', dialect: 'postgres', snapshotSemantics: 's', buildTotalOrderProbeSql: () => 'SELECT 1' }]))
+  // ...and the V-7 FIX itself: the product of the exported factory is trusted by
+  // nothing, because the trust set it used to write into no longer exists.
+  assert.ok(BUILD_ONLY_REGISTRY && typeof BUILD_ONLY_REGISTRY.resolve === 'function')
+  rejectsWith(() => createBindingQualificationProber({ executor: BUILD_ONLY_REGISTRY }), 'PROBE_EXECUTOR_UNTRUSTED')
 
-  // REAL-DRIVER COUNT SHAPE (review P1): node-postgres returns int8 counts as
-  // STRINGS — a '0'/'0' summary row must qualify, not PROBE_QUERY_FAILED.
-  const pgShapeQuery = async () => ({ rows: [{ duplicate_groups_sampled: '0', null_key_rows: '0' }] })
-  const pgShaped = await PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
-    query: pgShapeQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
-  })
-  assert.equal(pgShaped.status, 'candidate')
-  // …string counts still trip the fail-closed branches
-  const pgDupQuery = async () => ({ rows: [{ duplicate_groups_sampled: '2', null_key_rows: '0' }] })
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
-    query: pgDupQuery, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
+  // REAL-DRIVER COUNT SHAPE (review P1): a driver may return int8 counts as STRINGS --
+  // a '0'/'0' answer must qualify, not PROBE_QUERY_FAILED.
+  const pgShaped = await buildProbe({ answer: () => ({ duplicateGroupsSampled: '0', nullKeyRowsSampled: '0' }) })
+  assert.equal((await pgShaped.prober.probeFromResolution({
+    resolution: pgShaped.resolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z',
+  })).status, 'candidate')
+  // ...string counts still trip the fail-closed branches
+  const pgDup = await buildProbe({ answer: () => ({ duplicateGroupsSampled: '2', nullKeyRowsSampled: '0' }) })
+  await rejectsWithAsync(() => pgDup.prober.probeFromResolution({
+    resolution: pgDup.resolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z',
   }), 'ORDERING_KEY_DUPLICATE_FOUND')
-  // …and junk shapes stay rejected ('007', '1e3', negative, non-decimal)
+  // ...and junk shapes stay rejected ('007', '1e3', negative, non-decimal). The refusal
+  // is now the EXECUTOR's answer-plane token, which is the door that sees them first.
   for (const bad of ['007', '1e3', '-1', 'abc']) {
-    const junk = async () => ({ rows: [{ duplicate_groups_sampled: bad, null_key_rows: '0' }] })
-    await rejectsWithAsync(() => PROBER.probe({
-      ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY,
-      query: junk, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z',
-    }), 'PROBE_QUERY_FAILED')
+    const junk = await buildProbe({ answer: () => ({ duplicateGroupsSampled: bad, nullKeyRowsSampled: '0' }) })
+    let caughtJunk = null
+    try {
+      await junk.prober.probeFromResolution({
+        resolution: junk.resolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z',
+      })
+    } catch (error) { caughtJunk = error }
+    assert.ok(caughtJunk, `junk count ${bad} must fail closed`)
+    assert.equal(caughtJunk.reason, 'PROBE_ANSWER_UNVERIFIABLE')
   }
 }
 
 // ── 5. Verify: pure-local, digest-bound, expiring, status-gated ──
 async function verifyBehaviour() {
-  const query = async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] })
-  const qualification = await PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query, keyColumns: ['item_no'], probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
+  // RE-POINTED (§3.1 L371): verify no longer takes a caller-supplied `expectedInputs`
+  // tuple — that parameter was a live counter-construction to "both probe AND verify
+  // re-enter through the resolver". The expected tuple is now the RESOLUTION's and
+  // nothing else.
+  const stack = await buildProbe()
+  const RESOLUTION = stack.resolution
+  const qualification = await stack.prober.probeFromResolution({
+    resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
 
   const ok = verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   })
   assert.equal(ok.verified, true)
 
-  // cross-object reuse ⇒ content digest mismatch (input binding is load-bearing)
+  // A caller-supplied tuple is no longer honoured on the verify path: the parameter
+  // is gone, and a hand-built object carrying every public field of a real
+  // resolution is refused BY NAME rather than used.
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS, objectKey: 'another_view' }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification, resolution: { ...RESOLUTION }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+  }), 'PROBE_RESOLUTION_UNTRUSTED')
+
+  // cross-object reuse ⇒ content digest mismatch (input binding is load-bearing).
+  // Demonstrated with a SECOND GENUINE resolution rather than by editing a caller
+  // tuple — strictly stronger, since the caller tuple no longer exists.
+  const otherStack = await buildProbe({ objectKey: 'another_view' })
+  const otherQualification = await otherStack.prober.probeFromResolution({
+    resolution: otherStack.resolution, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z',
+  })
+  assert.notEqual(otherQualification.qualificationDigest, qualification.qualificationDigest,
+    'two probes with different evidence must not share a digest')
+  rejectsWith(() => verifyBindingQualification({
+    qualification, resolution: otherStack.resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_DIGEST_MISMATCH')
 
   // expiry ⇒ fail closed: Run-start proper never probes — fresh Preflight required
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
+    qualification, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
   }), 'QUALIFICATION_EXPIRED')
 
   // tampered evidence ⇒ envelope holds (content digest unchanged in copy) then
   // content digest mismatch
   const tampered = { ...qualification, evidence: { ...qualification.evidence, duplicateGroupsFound: 1 } }
   rejectsWith(() => verifyBindingQualification({
-    qualification: tampered, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification: tampered, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_DIGEST_MISMATCH')
 
   // status gate: only 'candidate' verifiable
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, status: 'revoked' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification: { ...qualification, status: 'revoked' }, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_STATUS_INVALID')
 
   // ── LIFECYCLE AUTHENTICATION (review P1: keyed MAC, not a public checksum) ──
   // (a) postponed copy WITHOUT recompute ⇒ envelope mismatch
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, expiresAt: '2027-01-01T00:00:00Z' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
+    qualification: { ...qualification, expiresAt: '2027-01-01T00:00:00Z' }, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
   // (b) THE ATTACK: postponed copy + envelope RECOMPUTED from public values with a
   //     guessed secret — the server-held key defeats it (an unkeyed hash would not).
@@ -352,34 +498,34 @@ async function verifyBehaviour() {
     }),
   }
   rejectsWith(() => verifyBindingQualification({
-    qualification: forged, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
+    qualification: forged, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-25T00:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
   // (c) keyId mismatch ⇒ fail closed (rotation selects keys; unknown key never verifies)
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, envelopeKeyId: 'k2020x' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification: { ...qualification, envelopeKeyId: 'k2020x' }, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
 
   // malformed MAC (64 chars but non-hex) stays INSIDE the frozen vocabulary —
   // never ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH (review P2)
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, envelopeMac: 'z'.repeat(64) }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification: { ...qualification, envelopeMac: 'z'.repeat(64) }, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, envelopeMac: 'abc' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification: { ...qualification, envelopeMac: 'abc' }, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
 
   // a COPY with malformed expiresAt is a lifecycle tamper — envelope catches it
   rejectsWith(() => verifyBindingQualification({
-    qualification: { ...qualification, expiresAt: 'tomorrow' }, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
+    qualification: { ...qualification, expiresAt: 'tomorrow' }, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   }), 'QUALIFICATION_ENVELOPE_MISMATCH')
 
   // TIMESTAMP PIN — non-ISO `now` fails CLOSED
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '07/25/2026',
+    qualification, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '07/25/2026',
   }), 'QUALIFICATION_INPUT_INVALID')
   // probe-side pin: malformed probedAt fails closed at generation time
-  await rejectsWithAsync(() => PROBER.probe({
-    ...BASE_INPUTS, envelopeKey: ENVELOPE_KEY, query: async () => ({ rows: [{ duplicate_groups_sampled: 0, null_key_rows: 0 }] }), keyColumns: ['k'], probedAt: 'not-a-time',
+  await rejectsWithAsync(() => stack.prober.probeFromResolution({
+    resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, probedAt: 'not-a-time',
   }), 'QUALIFICATION_INPUT_INVALID')
 
   // digest material domain (shared codec): undefined / NaN / Date all fail closed
@@ -389,7 +535,7 @@ async function verifyBehaviour() {
 
   // impossible calendar dates are rejected even though Date.parse normalizes them
   rejectsWith(() => verifyBindingQualification({
-    qualification, expectedInputs: { ...BASE_INPUTS }, envelopeKey: ENVELOPE_KEY, now: '2026-02-30T00:00:00Z',
+    qualification, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-02-30T00:00:00Z',
   }), 'QUALIFICATION_INPUT_INVALID')
 
   // PURE-LOCAL invariant: verify takes no query fn — source-level pin
@@ -398,14 +544,24 @@ async function verifyBehaviour() {
   assert.ok(!/\bquery\b/.test(verifyBody) && !/\bawait\b/.test(verifyBody),
     'verifyBindingQualification must stay pure-local (no query fn, no await)')
 
-  // WIRING pin: probe routes its ONLY query through runReadOnlyProbe/assertReadOnlySql
-  const helperStart = src.indexOf('async function runReadOnlyProbe')
-  const probeStart = src.indexOf('async function probeWithTrustedRegistry')
-  const helperBody = src.slice(helperStart, probeStart)
+  // WIRING pin, RE-POINTED for S4 step 1.5. `runReadOnlyProbe` and
+  // `probeWithTrustedRegistry` are DELETED, so the old pins have no subject. The
+  // property that replaced them is stronger: the probe path takes no query fn at
+  // all, and every tuple field comes from the resolution.
+  assert.ok(!src.includes('async function runReadOnlyProbe'),
+    'the SQL execution path must be removed, not privatised')
+  assert.ok(!src.includes('async function probeWithTrustedRegistry'),
+    'the caller-supplied-tuple probe must be removed')
+  const probeStart = src.indexOf('async function probeFromTrustedResolution')
+  assert.ok(probeStart > 0, 'the resolution-bound probe path must exist')
   const probeBody = src.slice(probeStart, src.indexOf('function verifyBindingQualification'))
-  assert.ok(/assertReadOnlySql\(/.test(helperBody), 'runReadOnlyProbe must wire assertReadOnlySql')
-  assert.ok(/runReadOnlyProbe\(/.test(probeBody), 'probe must route every query through runReadOnlyProbe')
-  assert.ok(!/input\.query\(/.test(probeBody), 'probe must never call input.query directly (guard bypass)')
+  assert.ok(!/input\.query/.test(probeBody), 'the probe path must never take a caller query fn')
+  assert.ok(!/input\.keyColumns/.test(probeBody), 'the probe path must never take caller keyColumns')
+  assert.ok(/resolution\.systemContentKey/.test(probeBody), 'the digest must bind the RESOLUTION tuple')
+  assert.ok(/isTrustedBindingResolution\(/.test(probeBody), 'the probe path must gate on resolution identity')
+  // POSITIVE CONTROL for these source scans: they must be shown to FIND a token when
+  // it is present, otherwise every "absent" assertion above is grepping nothing.
+  assert.ok(`${src}\nasync function runReadOnlyProbe`.includes('async function runReadOnlyProbe'))
 }
 
 async function main() {

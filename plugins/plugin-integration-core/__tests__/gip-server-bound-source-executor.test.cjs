@@ -871,13 +871,45 @@ function latentByEnumeration() {
   // grep is not absence until the grep is shown to work.
   assert.ok(hits.length >= 4, `enumeration found too little — it is not reading the tree: ${JSON.stringify(hits)}`)
 
-  // The only permitted referrers are the modules themselves, their own tests, and
-  // the ONE first-party consumer this slice deliberately wires: the qualification
-  // prober, which is itself LATENT.
-  const permitted = /(lib\/gip-server-bound-source-executor\.cjs|lib\/gip-approved-binding-resolver\.cjs|lib\/gip-binding-qualification-spike\.cjs|__tests__\/gip-server-bound-source-executor\.test\.cjs|__tests__\/gip-binding-qualification-spike\.test\.cjs)::/
-  const unexpected = hits.filter((hit) => !permitted.test(hit))
+  // The permitted referrer set is stated as a RULE, not a filename list, so a new
+  // route or a scheduled run cannot be waved through by appending a name:
+  //   * anything under `plugins/plugin-integration-core/__tests__/` — tests are not
+  //     production consumers;
+  //   * within `plugins/plugin-integration-core/lib/`, ONLY the three modules of this
+  //     slice. `gip-binding-qualification-spike.cjs` is the one first-party consumer
+  //     the slice deliberately wires, and it is itself LATENT;
+  //   * NOTHING anywhere else in the tree — no route module, no scheduled run, no
+  //     runtime caller, in this package or any other.
+  const PLUGIN = 'plugins/plugin-integration-core/'
+  const LIB_ALLOWED = new Set([
+    'gip-server-bound-source-executor.cjs',
+    'gip-approved-binding-resolver.cjs',
+    'gip-binding-qualification-spike.cjs',
+  ])
+  const unexpected = hits.filter((hit) => {
+    const file = hit.split('::')[0]
+    if (!file.startsWith(PLUGIN)) return true
+    const rest = file.slice(PLUGIN.length)
+    if (rest.startsWith('__tests__/')) return false
+    if (rest.startsWith('lib/')) return !LIB_ALLOWED.has(rest.slice('lib/'.length))
+    return true
+  })
   assert.deepEqual(unexpected, [],
     `B1a-3 must ship LATENT — no route, no scheduled run, no runtime caller: ${JSON.stringify(unexpected)}`)
+
+  // POSITIVE CONTROL for the RULE (not just for the grep): a hypothetical production
+  // caller in a route module must be reported as unexpected. Without this, a filter
+  // that returns false for everything would pass the assertion above.
+  const plantedRoute = `${PLUGIN}lib/http-routes.cjs::gip-server-bound-source-executor`
+  const plantedOther = 'packages/core-backend/src/routes/x.ts::gip-approved-binding-resolver'
+  for (const planted of [plantedRoute, plantedOther]) {
+    const file = planted.split('::')[0]
+    const flagged = !file.startsWith(PLUGIN)
+      || !(file.slice(PLUGIN.length).startsWith('__tests__/')
+        || (file.slice(PLUGIN.length).startsWith('lib/')
+          && LIB_ALLOWED.has(file.slice(PLUGIN.length + 4))))
+    assert.ok(flagged, `the latency rule must flag a production caller: ${planted}`)
+  }
 
   // NO SQL is minted anywhere in this slice: neither new module reaches the SQL
   // builders, on any path.
