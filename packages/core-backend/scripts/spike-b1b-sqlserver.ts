@@ -553,7 +553,7 @@ async function main(): Promise<void> {
     // (the defect this replaces: comparing two adjacent identical string literals that never
     // read what either phase's actual `.batch()` call issued).
     async function readerSelectsProbeRow(phase: 'phaseA' | 'phaseB'): Promise<{ ok: true; name: string } | { ok: false; number: number | undefined }> {
-      const statementText = assertSelectOnly(`SELECT name FROM dbo.${SPIKE_TABLE} WHERE id = 1${phase === 'phaseA' ? ' -- TEMPORARY-L456-MUTATION-PROOF-DO-NOT-MERGE' : ''}`)
+      const statementText = assertSelectOnly(`SELECT name FROM dbo.${SPIKE_TABLE} WHERE id = 1`)
       issuedProbeStatements[phase].push(statementText)
       try {
         const result = await reader!.request().batch<{ name: string }>(statementText)
