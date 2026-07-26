@@ -862,6 +862,35 @@ export function computeAttendanceOuterSourceDefinitionFingerprintV1(input: {
   return computeAttendanceOuterComparableSourceDefinitionFingerprintV1({ attribution, context: input.context })
 }
 
+/**
+ * TEST-ONLY (#4612 O-5 self-observation probe): identical computation to
+ * `computeAttendanceOuterSourceDefinitionFingerprintV1` above, but returns the
+ * RAW `attribution.value` object instead of hashing it. Exists solely so a
+ * real-DB test can empirically diff the route's own PRE-step-3 (outer)
+ * resolution against the freeze step's POST-step-3 (inner) resolution
+ * field-by-field — not just compare their narrowed-domain fingerprints — to
+ * enumerate the actual self-observation drift set rather than assert it by
+ * argument. Not wired into any production call site; never imported outside
+ * `tests/`. `null` under the same conditions the sibling function returns
+ * `null` for (unsupported posture / absent context).
+ */
+export function __computeAttendanceOuterAttributionValueForTestsV1(input: {
+  readonly orgId: string
+  readonly userId: string
+  readonly source: 'live_resolution' | 'scheduled_resolution'
+  readonly nowIso: string
+  readonly resolution: AttendanceW4ResolvedCandidateV1
+  readonly context: FrozenAttendanceContextV1 | null
+}): Record<string, unknown> | null {
+  const attribution = attributionFromResolution(input.resolution, {
+    orgId: input.orgId,
+    userId: input.userId,
+    source: input.source,
+    nowIso: input.nowIso,
+  })
+  return attribution.posture === 'resolved_v2' ? (attribution.value as unknown as Record<string, unknown>) : null
+}
+
 async function loadLivePunchEvidence(
   client: AttendanceW4TransactionClientV1,
   orgId: string,
