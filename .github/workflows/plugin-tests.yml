@@ -258,11 +258,18 @@ jobs:
         run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
 
       # #4612 gate4 round 4 (P3-4): the seven W4C-2 real-DB attendance suites (including this
-      # PR's own primary evidence file) had no source-level two-point wiring guard — every OTHER
-      # real-DB family here already had one. Pins the attendance step's stable id + literal
-      # DATABASE_URL + vitest.integration.config.ts invocation, and that each of the seven files
-      # is (a) excluded from the no-DB job's default vitest.config.ts and (b) run as a whole-file
-      # arg of that step, and (c) exists on disk.
+      # PR's own primary evidence file) had no source-level two-point wiring guard of their own.
+      # #4612 gate4 round 5 correction: this is NOT "every other real-DB family already had one" —
+      # multitable, the largest real-DB family in this workflow (216 multitable-* files run by its
+      # real-DB step), has no suite-level *-ci-wiring.test.mjs guard of its own either (only 2 of
+      # its 216 files are incidentally named by a DIFFERENT family's guard). The accurate scope:
+      # 16 pre-existing *-ci-wiring.test.mjs guards together name 30 real-DB suite files (approval,
+      # PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's 7 W4C-2 files were not among them.
+      # Most real-DB suites in this workflow — including all of multitable — still have no
+      # suite-level two-point wiring guard; this closes attendance's gap, not "the last" gap.
+      # Pins the attendance step's stable id + literal DATABASE_URL + vitest.integration.config.ts
+      # invocation, and that each of the seven files is (a) excluded from the no-DB job's default
+      # vitest.config.ts and (b) run as a whole-file arg of that step, and (c) exists on disk.
       - name: Attendance W4C-2 CI wiring contract
         run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
 
