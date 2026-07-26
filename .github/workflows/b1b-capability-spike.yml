@@ -1,0 +1,255 @@
+name: B1b capability spike (evidence only)
+
+# EVIDENCE ONLY. This workflow mints NO certification, registers NO strategy, and does NOT
+# open the B1b certification gate — that remains §4 step 3 of
+# docs/development/database-system-integration-line-design-and-verification-20260724.md,
+# behind the owner. It establishes, empirically and on the SAME connection, whether real
+# MySQL / SQL Server engine instances offer the snapshot-consistency guarantees a later,
+# separately-gated certification step would need to cite.
+#
+# First-party engine instances ONLY: every service container here is an EPHEMERAL CI
+# instance, created and destroyed with the job, seeded from synthetic literals authored in
+# the two spike scripts — never a customer system. That is what satisfies the "first-party
+# engine instances only" constraint (§4 step 2's own note).
+#
+# NOT added to required checks (deliberately — battery §10(iv) leaves dispatch-only vs
+# path-filtered open to the owner; this workflow ships BOTH `workflow_dispatch` and a
+# path-filtered `pull_request` trigger — the latter mirrors sqlserver-smoke.yml's own shape
+# and additionally means a DRAFT PR touching these files gets a real run without any manual
+# step. Branch-protection / required-check changes are out of scope for this line and are not
+# performed here.)
+#
+# SQL Server side reuses sqlserver-smoke.yml's proven pattern (service container + env wiring
+# + retry-loop readiness wait); the MySQL side is the FIRST MySQL service container in this
+# repo (there was no precedent to reuse — added here for the first time).
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/scripts/spike-b1b-*.ts'
+      - 'packages/core-backend/package.json'
+      - '.github/workflows/b1b-capability-spike.yml'
+
+jobs:
+  mysql-spike:
+    name: B1b MySQL ${{ matrix.mysql }} preconditions spike
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # §10(i): matrix versions are an owner input the spike declares. "MySQL 8" is what
+        # this task named explicitly; broader matrix coverage (5.7, 8.4, …) stays open.
+        mysql: ['8.0']
+    services:
+      mysql:
+        image: mysql:${{ matrix.mysql }}
+        env:
+          # Ephemeral, throwaway container password (destroyed with the job) — not a real
+          # credential, same discipline as sqlserver-smoke.yml's MSSQL_SA_PASSWORD.
+          MYSQL_ROOT_PASSWORD: 'Spike!Probe2026'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -proot -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Wait for MySQL (safety net alongside the service healthcheck)
+        run: |
+          for i in $(seq 1 20); do
+            if mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -p'Spike!Probe2026' --silent 2>/dev/null; then
+              echo "MySQL ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: MySQL not ready yet; sleeping 3s"
+            sleep 3
+          done
+          echo "MySQL never became ready within timeout"
+          exit 1
+
+      - name: B1b MySQL capability spike (M-1..M-5, X-1/2/3/6/7 — every mutation runs in this one job)
+        env:
+          B1B_MYSQL_HOST: 127.0.0.1
+          B1B_MYSQL_PORT: '3306'
+          B1B_MYSQL_USERNAME: root
+          B1B_MYSQL_PASSWORD: 'Spike!Probe2026'
+          B1B_MYSQL_DECLARED_MAJOR_VERSION: ${{ matrix.mysql }}
+          # Explicit write opt-in (X-6a) — allowed ONLY here, against the throwaway service
+          # container.
+          B1B_SEED_ALLOW_WRITE: 'true'
+          B1B_EVIDENCE_DIR: ${{ github.workspace }}/b1b-evidence
+        run: pnpm --filter @metasheet/core-backend exec tsx scripts/spike-b1b-mysql.ts
+
+      - name: Upload MySQL evidence (values-free SpikeRecord JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b1b-evidence-mysql-${{ matrix.mysql }}
+          path: b1b-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  sqlserver-spike:
+    name: B1b SQL Server ${{ matrix.mssql }} snapshot-semantics spike
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches P-1 / the existing sqlserver-smoke.yml matrix exactly (2008R2/2012 have no
+        # Linux container image — untouched, same as that workflow).
+        mssql: ['2019', '2022']
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'Spike!Probe2026'
+          SA_PASSWORD: 'Spike!Probe2026'
+        ports:
+          - 1433:1433
+    env:
+      MSSQL_HOST: 127.0.0.1
+      MSSQL_PORT: '1433'
+      MSSQL_USERNAME: sa
+      MSSQL_PASSWORD: 'Spike!Probe2026'
+      MSSQL_ENCRYPT: 'true'
+      MSSQL_TRUST_SERVER_CERTIFICATE: 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Wait for SQL Server (retry loop — same shape as sqlserver-smoke.yml's readiness wait)
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter @metasheet/core-backend exec node -e "
+              const sql = require('mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:'Spike!Probe2026',database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: B1b SQL Server capability spike (S-0..S-8, X-1..X-7 — every mutation runs in this one job)
+        env:
+          B1B_MSSQL_DECLARED_MAJOR_VERSION: ${{ matrix.mssql }}
+          # Explicit write opt-in (X-6a) — allowed ONLY here, against the throwaway service
+          # container.
+          B1B_SEED_ALLOW_WRITE: 'true'
+          B1B_EVIDENCE_DIR: ${{ github.workspace }}/b1b-evidence
+        run: pnpm --filter @metasheet/core-backend exec tsx scripts/spike-b1b-sqlserver.ts
+
+      - name: Upload SQL Server evidence (values-free SpikeRecord JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b1b-evidence-sqlserver-${{ matrix.mssql }}
+          path: b1b-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  gate-check:
+    name: B1b gate-check (evidence only — computes open/non-open, does not open anything)
+    runs-on: ubuntu-latest
+    needs: [mysql-spike, sqlserver-spike]
+    # Always runs, even if a spike job failed — an ABSENT record is itself informative
+    # (non-open) and must never be hidden by an upstream failure (§1.2/§1.3).
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download all B1b evidence artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: b1b-evidence-*
+          path: b1b-evidence-combined
+          merge-multiple: true
+
+      - name: List downloaded evidence (values-free — file names and outcome tokens only)
+        run: |
+          echo "Evidence files:"
+          ls -la b1b-evidence-combined/ || echo "(none downloaded)"
+
+      - name: Run gate-check — EVIDENCE ONLY, computes open/non-open, does not itself open anything
+        env:
+          B1B_EVIDENCE_DIR: ${{ github.workspace }}/b1b-evidence-combined
+          # The FULL declared cell set this line's §4 step 2 currently covers. Absent cells
+          # (e.g. because an upstream spike job failed) report open=false, reason=ABSENT.
+          B1B_DECLARED_CELLS: >-
+            [
+              {"dialect":"mysql","engineMajorVersion":"8.0","capabilityPosture":"default"},
+              {"dialect":"sqlserver","engineMajorVersion":"2019","capabilityPosture":"default_rc_no_rcsi"},
+              {"dialect":"sqlserver","engineMajorVersion":"2019","capabilityPosture":"rcsi_on"},
+              {"dialect":"sqlserver","engineMajorVersion":"2022","capabilityPosture":"default_rc_no_rcsi"},
+              {"dialect":"sqlserver","engineMajorVersion":"2022","capabilityPosture":"rcsi_on"}
+            ]
+        run: pnpm --filter @metasheet/core-backend exec tsx scripts/spike-b1b-gate-check.ts
