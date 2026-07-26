@@ -284,6 +284,9 @@ function exportSurfaceIsPinned() {
     'evaluateCapabilityHandshake',
   ])
   assert.deepEqual(keySet(moduleExports.__internals), [
+    'COUNTER_SAMPLE_KEYS',
+    'EXPECTATION_KEY_SET',
+    'REQUEST_KEY_SET',
     'assertClosedKeySet',
     'hasControlCharacter',
     'isPlainObject',
@@ -341,11 +344,73 @@ function latentByEnumeration() {
   assert.deepEqual(consumers, [], `§4 step 1.6 must ship LATENT — found consumers: ${JSON.stringify(consumers)}`)
 }
 
+// ---------------------------------------------------------------------------
+// 1.6-F · OB-1 (B1a-3 round 3) — the ENFORCEMENT sets, pinned by MEMBERSHIP.
+//
+// RETRACTION-BEARING NOTE. Before this function existed, the handshake's closed key
+// set was pinned only by (a) the exported frozen array `CAPABILITY_HANDSHAKE_REQUEST_KEYS`
+// and (b) ONE literal extra-key name, `'nope'`, in a refusal case. Neither touches
+// the object the enforcement actually consults. Executed and confirmed: replacing
+//     const REQUEST_KEY_SET = new Set(CAPABILITY_HANDSHAKE_REQUEST_KEYS)
+// with
+//     const REQUEST_KEY_SET = new Set([...CAPABILITY_HANDSHAKE_REQUEST_KEYS, 'debugPayload'])
+// left THIS WHOLE SUITE GREEN — the array is unchanged, and `'nope'` still refuses.
+// A "novel / freshly-generated key name" case does NOT fix that either: a novel key
+// is not `'debugPayload'`, so it still refuses and stays green. It catches a
+// different, PERMISSIVE widening (`{ has: () => true }`), so both cases are kept —
+// they are not substitutes.
+// ---------------------------------------------------------------------------
+function enforcementSetsArePinnedByMembership() {
+  const { REQUEST_KEY_SET, EXPECTATION_KEY_SET, COUNTER_SAMPLE_KEYS } = moduleExports.__internals
+
+  // MEMBERSHIP EQUALITY against the exported frozen arrays — one extra member in the
+  // enforcement Set reds here, however plausible its name.
+  assert.deepEqual([...REQUEST_KEY_SET].sort(), [...CAPABILITY_HANDSHAKE_REQUEST_KEYS].sort())
+  assert.deepEqual([...EXPECTATION_KEY_SET].sort(), [...CAPABILITY_HANDSHAKE_EXPECTATION_KEYS].sort())
+  assert.deepEqual([...COUNTER_SAMPLE_KEYS].sort(), [...UNORDERED_OFFSET_ATTEMPT_COUNTER.sampleKeys].sort())
+  assert.equal(REQUEST_KEY_SET.size, CAPABILITY_HANDSHAKE_REQUEST_KEYS.length)
+  assert.equal(EXPECTATION_KEY_SET.size, CAPABILITY_HANDSHAKE_EXPECTATION_KEYS.length)
+  assert.equal(COUNTER_SAMPLE_KEYS.size, UNORDERED_OFFSET_ATTEMPT_COUNTER.sampleKeys.length)
+
+  // POSITIVE CONTROL for the membership assertions: the comparison must be shown to
+  // DISTINGUISH — an all-equal comparator would pass the three lines above vacuously.
+  assert.notDeepEqual([...REQUEST_KEY_SET].sort(),
+    [...CAPABILITY_HANDSHAKE_REQUEST_KEYS, 'debugPayload'].sort())
+
+  // BEHAVIOURAL, and complementary: a NOVEL key name generated at run time — a name
+  // no source file in this repo contains — is refused. This is what catches a
+  // permissive widening that keeps the membership listing honest.
+  const novelRequestKey = `k_${require('node:crypto').randomBytes(12).toString('hex')}`
+  const novelExpectationKey = `k_${require('node:crypto').randomBytes(12).toString('hex')}`
+  const novelSampleKey = `k_${require('node:crypto').randomBytes(12).toString('hex')}`
+  assert.ok(!REQUEST_KEY_SET.has(novelRequestKey))
+
+  const validRequest = { clientBuild: 'b', connectorProtocolVersion: 1, profileId: 'p', configVersion: 1 }
+  const validExpectation = { minimumConnectorProtocolVersion: 1, requiredConfigVersion: 1 }
+  refusesWith(
+    () => evaluateCapabilityHandshake({ ...validRequest, [novelRequestKey]: 1 }, validExpectation),
+    'HANDSHAKE_REQUEST_INVALID',
+  )
+  refusesWith(
+    () => evaluateCapabilityHandshake(validRequest, { ...validExpectation, [novelExpectationKey]: 1 }),
+    'HANDSHAKE_EXPECTATION_INVALID',
+  )
+  refusesWith(
+    () => assertValuesFreeCounterSample({ value: 1, [novelSampleKey]: 'x' }),
+    'COUNTER_SAMPLE_NOT_VALUES_FREE',
+  )
+  // POSITIVE CONTROL for the three refusals: the same inputs WITHOUT the novel key
+  // must succeed, so "refuses everything" cannot pass.
+  assert.equal(evaluateCapabilityHandshake(validRequest, validExpectation).outcome, 'READY')
+  assert.equal(assertValuesFreeCounterSample({ value: 1 }).value, 1)
+}
+
 function main() {
   counterContract()
   handshakeContract()
   noForeignTextEscapes()
   exportSurfaceIsPinned()
+  enforcementSetsArePinnedByMembership()
   latentByEnumeration()
   console.log('gip-read-observability-contracts.test.cjs OK')
 }

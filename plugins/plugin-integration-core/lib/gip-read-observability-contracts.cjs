@@ -142,6 +142,14 @@ const CAPABILITY_HANDSHAKE_REQUEST_KEYS = Object.freeze([
   'profileId',
   'configVersion',
 ])
+// The ENFORCEMENT set is DERIVED from the exported frozen array, and its MEMBERSHIP
+// is pinned in the suite (OB-1, B1a-3 round 3). Before that pin existed, the closed
+// key set was pinned only by (a) the exported array and (b) one literal extra-key
+// name in a refusal case — so widening this Set by ONE NAMED key
+// (`new Set([...CAPABILITY_HANDSHAKE_REQUEST_KEYS, 'debugPayload'])`) left the whole
+// suite GREEN: the array was unchanged and the named key still refused. Executed and
+// confirmed GREEN before the fix. The pin is now on this Set's exact membership, so
+// any widening — named or permissive — reds.
 const REQUEST_KEY_SET = new Set(CAPABILITY_HANDSHAKE_REQUEST_KEYS)
 
 const CAPABILITY_HANDSHAKE_EXPECTATION_KEYS = Object.freeze([
@@ -218,5 +226,11 @@ module.exports = {
     isPlainObject,
     assertClosedKeySet,
     hasControlCharacter,
+    // Exposed SO THAT THEIR MEMBERSHIP CAN BE PINNED (OB-1). These are the objects
+    // the enforcement actually consults; pinning only the exported arrays leaves a
+    // one-named-key widening of these Sets undetected.
+    REQUEST_KEY_SET,
+    EXPECTATION_KEY_SET,
+    COUNTER_SAMPLE_KEYS,
   },
 }

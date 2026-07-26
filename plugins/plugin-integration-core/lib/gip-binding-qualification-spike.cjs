@@ -249,7 +249,11 @@ function createProbeStrategyRegistry(entries) {
     fail('QUALIFICATION_INPUT_INVALID', 'a probe-strategy registry needs at least one entry', { field: 'entries' })
   }
   const byProfile = new Map()
-  for (const entry of entries) {
+  // INDEX LOOP, not `for...of` (P2-C, B1a-3 round 3): `entries` is a CALLER array, so
+  // `for...of` hands control to an attacker-reachable `Symbol.iterator` mid-loop —
+  // the same channel the two new modules already close by index-based iteration.
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]
     if (!isPlainObject(entry) || typeof entry.buildTotalOrderProbeSql !== 'function') {
       fail('QUALIFICATION_INPUT_INVALID', 'a registry entry needs a strategy implementation', { field: 'entries' })
     }
@@ -360,11 +364,16 @@ function normalizeEnvelopeKey(envelopeKey) {
   if (secretBytes === null || secretBytes.length < ENVELOPE_SECRET_MIN_BYTES) {
     fail('QUALIFICATION_INPUT_INVALID', 'envelope secret must be raw bytes (Buffer/Uint8Array) of at least 32 bytes', { field: 'envelopeKey.secret' })
   }
-  // OWN the bytes — LOAD-BEARING (review P2 round-5, corrected round-6): the probe path
-  // has an `await runReadOnlyProbe(...)` window BETWEEN this copy and computeEnvelopeMac.
-  // Without the copy, a caller mutating its own Buffer inside the query callback (during
-  // that await) would change the bytes the MAC is computed under — the async-window test
-  // REDs on removal. This is a correctness fix, not belt-and-braces.
+  // OWN the bytes — LOAD-BEARING (review P2 round-5, corrected round-6; the named
+  // await window CORRECTED again in round 3 of B1a-3). The comment used to name
+  // `await runReadOnlyProbe(...)` as the window, but THIS PR DELETED that symbol —
+  // the SQL execution path is gone. The window is now
+  // `await executor.executeOrderingKeyProbe(resolution)` in
+  // `probeFromTrustedResolution`, which sits BETWEEN this copy and
+  // computeEnvelopeMac. Without the copy, a caller mutating its own Buffer inside the
+  // connector's execute callback (during that await) would change the bytes the MAC
+  // is computed under — the async-window test REDs on removal. The invariant is
+  // unchanged and still tested; only the name of the await was stale.
   return { keyId, secret: Buffer.from(secretBytes) }
 }
 
@@ -387,6 +396,33 @@ function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresA
     status: requiredString(status, 'status'),
     expiresAt: expiresAt === undefined ? null : requiredString(expiresAt, 'expiresAt'),
   })).digest('hex')
+}
+
+// GUARDED READ of caller-supplied run input (B1a-3 round 3, P1-B).
+//
+// The allowlist below refuses an UNDECLARED key. It does NOT protect the four
+// ALLOWLISTED reads, because `Object.keys()` enumeration does not invoke getters:
+// a throwing getter parked on an allowlisted key NAME passes the allowlist intact
+// and then fires on READ. If that throw escapes, raw attacker text lands in the
+// caller's `message` and `stack` — the same leak channel the two new modules close.
+// A non-enumerable getter does not even appear in `Object.keys()`.
+//
+// Same SHAPE as `gip-server-bound-source-executor.cjs`'s `safeRead` (:91) and the
+// §4 step 1.6 read-observability contracts module's (:64) — that module's basename
+// is deliberately NOT written out here, because its own latency enumeration treats
+// any file mentioning it as a consumer. Catch, DISCARD UNCONDITIONALLY
+// (no `cause`, no `message`, no `stack`, no class exemption), fail closed under the
+// reason already declared for hostile run input. The signature differs only because
+// this module's `fail` is `fail(reason, message, details)`: the message is the
+// existing FIXED first-party string and `details` is `{}` — nothing is derived from
+// the discarded error.
+function safeReadRunInput(input, key) {
+  try {
+    return input[key]
+  } catch (_error) {
+    fail('PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED', 'run input must carry only resolution-bound lifecycle data', {})
+  }
+  return undefined
 }
 
 // INTERNAL, not exported. The RESOLUTION-BOUND probe path (§4 step 1.4 + 1.5).
@@ -426,13 +462,15 @@ async function probeFromTrustedResolution(executor, input) {
     fail('PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED', 'run input must carry only resolution-bound lifecycle data', {})
   }
 
-  const resolution = input.resolution
+  // GUARDED (P1-B): the allowlist above does not cover a getter parked on an
+  // ALLOWLISTED key name — enumeration never invokes it.
+  const resolution = safeReadRunInput(input, 'resolution')
   // Trust is OBJECT IDENTITY. A hand-built object carrying every expected public
   // field — and any plausible brand — is refused BY NAME.
   if (!isTrustedBindingResolution(resolution)) {
     fail('PROBE_RESOLUTION_UNTRUSTED', 'a resolution minted by the approved-binding resolver is required', {})
   }
-  const envelopeKey = normalizeEnvelopeKey(input.envelopeKey)
+  const envelopeKey = normalizeEnvelopeKey(safeReadRunInput(input, 'envelopeKey'))
 
   // Execution is the CLOSURE-BOUND executor's. Its answer is values-free counts plus
   // first-party action identity; it carries no dialect and no snapshot claim (δ=(c),
@@ -468,7 +506,7 @@ async function probeFromTrustedResolution(executor, input) {
     checkedKeyColumnCount: normalizeProbeCount(observation.checkedKeyColumnCount),
     duplicateGroupsFound: 0,
     nullKeyRowsFound: 0,
-    probedAt: requiredUtcInstant(input.probedAt, 'probedAt'),
+    probedAt: requiredUtcInstant(safeReadRunInput(input, 'probedAt'), 'probedAt'),
   })
   if (evidence.checkedKeyColumnCount === null) {
     fail('PROBE_QUERY_FAILED', 'qualification probe returned no verifiable observation', {})
@@ -481,8 +519,12 @@ async function probeFromTrustedResolution(executor, input) {
     canonicalObjectVersion: resolution.canonicalObjectVersion,
     evidence,
   })
-  const expiresAt = input.expiresAt !== undefined
-    ? requiredUtcInstant(input.expiresAt, 'expiresAt')
+  // READ ONCE into a local, then test and use the LOCAL. Reading `input.expiresAt`
+  // twice would fire an accessor twice and leave a differing-return channel open —
+  // a getter could answer `undefined` to the presence test and a value to the use.
+  const rawExpiresAt = safeReadRunInput(input, 'expiresAt')
+  const expiresAt = rawExpiresAt !== undefined
+    ? requiredUtcInstant(rawExpiresAt, 'expiresAt')
     : undefined
   return Object.freeze({
     status: 'candidate',
@@ -576,11 +618,38 @@ module.exports = {
   createBindingQualificationProber,
   verifyBindingQualification,
   __internals: {
-    // `fail` is deliberately ABSENT (B1a-3). While exported here, any importer —
-    // including a foreign callback — could mint a GENUINELY BRANDED
-    // GipQualificationError whose `reason` was vocabulary-pinned but whose
-    // `message` and `details` were arbitrary caller text. Pinned by the
-    // exact-key-set test, so re-adding it reds.
+    // `fail` is deliberately ABSENT (B1a-3).
+    //
+    // ── RETRACTION FIRST (B1a-3 round 3, P1-A) ──────────────────────────────────
+    // The earlier text here said that while `fail` was exported, any importer could
+    // mint a GENUINELY BRANDED GipQualificationError carrying arbitrary caller
+    // `message` and `details` — i.e. that removing `fail` CLOSED that channel.
+    // THAT CLAIM IS WITHDRAWN. It was false when it was written. `GipQualificationError`
+    // is itself EXPORTED, ten lines above, and it was ALREADY exported on `main`
+    // before this PR — the class body and its export line are byte-identical to
+    // `main` here. So `new GipQualificationError(<reason>, <attacker text>,
+    // { leak: <attacker text> })` is reachable from the PUBLIC exports with no
+    // `fail` at all. An importer never needed `fail` for this.
+    //
+    // WHAT REMOVING `fail` DOES BUY, stated exactly:
+    //   * one fewer reachable path to error-minting, and
+    //   * the INTERNAL path keeps its frozen-vocabulary validation — `fail()`
+    //     refuses a reason outside QUALIFICATION_ERROR_REASONS with a coarse fixed
+    //     token, which a direct `new GipQualificationError(...)` does NOT do.
+    // WHAT IT DOES NOT BUY: closure of the branded-error text channel. That channel
+    // is OPEN and this comment does not claim otherwise.
+    //
+    // THE RESIDUAL IS PINNED, NOT DROPPED. `brandedErrorChannelIsOpenOnTheSpikeClass()`
+    // in `__tests__/gip-server-bound-source-executor.test.cjs` asserts the channel
+    // EXISTS — that the attacker text IS carried in `.message` and `.details`.
+    // Hardening the class is OUT OF SCOPE for this PR (byte-identical to `main`;
+    // it belongs to the landed `bridge.bounded_read.v2` line and needs its own
+    // gate). When a future PR does harden it, that test REDs and forces this ledger
+    // entry to be updated rather than left stale. That is the point of asserting a
+    // residual positively.
+    //
+    // The ABSENCE of `fail` itself is pinned by the exact-key-set test, so re-adding
+    // it reds — that pin is unaffected by the retraction above.
     stableStringify,
     assertReadOnlySql,
     quoteIdentifier,
