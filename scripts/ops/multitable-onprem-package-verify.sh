@@ -12,6 +12,10 @@ list_file=""
 pkg_name=""
 pkg_root=""
 archive_type="unknown"
+# Derived (not hardcoded) — set by verify_no_loopback_frontend_config() itself on a
+# successful run; stays "SKIPPED" if that function's call site is ever removed from
+# the main flow below, so write_optional_report cannot report a check that never ran.
+loopback_status="SKIPPED"
 
 function die() {
   echo "[multitable-onprem-package-verify] ERROR: $*" >&2
@@ -32,6 +36,18 @@ function search_fixed_string() {
   fi
 
   grep -rIF -- "$needle" "$@" >/dev/null 2>&1
+}
+
+function search_extended_regex() {
+  local pattern="$1"
+  shift
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -- "$pattern" "$@" >/dev/null 2>&1
+    return
+  fi
+
+  grep -rIE -- "$pattern" "$@" >/dev/null 2>&1
 }
 
 function verify_windows_entrypoints() {
@@ -648,6 +664,10 @@ function write_optional_report() {
       '    {' \
       '      "name": "no-github-links",' \
       "      \"status\": \"${link_status}\"" \
+      '    },' \
+      '    {' \
+      '      "name": "loopback",' \
+      "      \"status\": \"${loopback_status}\"" \
       '    }' \
       '  ],' \
       "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
@@ -677,6 +697,11 @@ function write_optional_report() {
       echo "- Required content: \`PASS\` (${#required[@]} paths)"
       echo "- Deployability contract: \`PASS\` (deployable-onprem-app-package, directReplaceSafe=false, nodeModulesBundled=false)"
       echo "- No GitHub links in delivery docs: \`${link_status}\`"
+      if [[ "$loopback_status" == "PASS" ]]; then
+        echo "- Loopback frontend config: \`PASS\` (no loopback VITE_API_URL/BASE embedded in apps/web/dist)"
+      else
+        echo "- Loopback frontend config: \`${loopback_status}\`"
+      fi
     } > "$report_md_tmp"
     mv "$report_md_tmp" "$VERIFY_REPORT_MD"
   fi
@@ -710,6 +735,34 @@ function verify_no_github_links() {
     fi
     rm -f /tmp/multitable_onprem_link_hits.txt || true
   fi
+}
+
+# Ported from scripts/ops/attendance-onprem-package-verify.sh's loopback rule (same
+# pattern, same target: apps/web/dist). A frontend bundle that embeds a loopback
+# VITE_API_URL/BASE (baked in at web-build time, pointing at 127.0.0.1/localhost) would
+# be wired to the CI runner's own loopback instead of the operator's configured API host
+# once deployed on-prem — the multitable on-prem path never had this check; attendance's
+# did. `search_extended_regex` returns non-zero (no match, not "checked and clean") for a
+# target directory that does not exist at all — verified: `grep -rIE ... /nonexistent` and
+# ripgrep's `rg` both return non-zero on a missing path. In this script's own full run, an
+# earlier required-content check already fails closed on a missing apps/web/dist (its
+# `apps/web/dist/index.html` entry), so the full pipeline is not exposed today; the explicit
+# `[[ -d ... ]] || die` below guards the function itself so calling it standalone (as the
+# focused test does, and as any future reordering might) cannot silently report PASS on a
+# package missing its frontend bundle. Attendance's script has the identical required-content
+# entry for apps/web/dist/index.html ahead of its own loopback check, for the same reason —
+# this is not a claim that attendance's script has a live, unguarded exposure.
+function verify_no_loopback_frontend_config() {
+  local root="$1"
+  local web_dist="${root}/apps/web/dist"
+
+  [[ -d "$web_dist" ]] || die "apps/web/dist missing; cannot verify frontend bundle is loopback-free"
+
+  if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "$web_dist"; then
+    die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
+  fi
+
+  loopback_status="PASS"
 }
 
 function verify_sha() {
@@ -1006,6 +1059,7 @@ verify_migration_bridge_contract "$pkg_root"
 verify_stock_preparation_mvp_contract "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"
+verify_no_loopback_frontend_config "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
