@@ -1,5 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+// integration-guard flake fix (#4614 prerequisite): IntegrationWorkbenchView.vue is a ~5100-line SFC
+// with ~20 imported subcomponents. A dynamic `await import(...)` INSIDE a test body pays that whole
+// module graph's first-time resolve/transform cost against THAT test's own `testTimeout` (5000ms) —
+// every other test in this file reuses the cached module for free once the first one has paid it.
+// Under CI's default vitest thread-pool concurrency (47 spec files sharing a small runner's CPUs),
+// that first-import cost was measured (locally, under induced CPU contention) to scale from
+// ~600ms unloaded to 5000ms+ contended — reproducing the exact "Test timed out in 5000ms" failure
+// on "wires the seven rail groups to real section anchors" (the first test in this file to import
+// the view), while mount+flush measured 40-220ms regardless of contention (see PR body for the
+// before/after evidence). A STATIC top-level import moves this same one-time cost into the file's
+// collect/transform phase, which is NOT bounded by `testTimeout` — every test below now runs against
+// an already-resolved module, at effectively 0ms.
+import View from '../src/views/IntegrationWorkbenchView.vue'
 
 // IU-2a: minimal ElCard stub — IntegrationWorkbenchView.vue now wraps each section in
 // `<el-card shadow="never">` with the panel-head (title/description/action button) in the
@@ -127,7 +140,6 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
       throw new Error(`unexpected URL ${url}`)
     })
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -477,8 +489,6 @@ describe('IntegrationWorkbenchView', () => {
       }
       throw new Error(`unexpected URL ${url}`)
     })
-
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -911,8 +921,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1027,8 +1035,6 @@ describe('IntegrationWorkbenchView', () => {
       }
       throw new Error(`unexpected URL ${url}`)
     })
-
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -1173,8 +1179,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1213,8 +1217,6 @@ describe('IntegrationWorkbenchView', () => {
       }
       throw new Error(`unexpected URL ${url}`)
     })
-
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -1320,7 +1322,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1415,7 +1416,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1475,7 +1475,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1536,8 +1535,6 @@ describe('IntegrationWorkbenchView', () => {
       }
       throw new Error(`unexpected URL ${url}`)
     })
-
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -1605,8 +1602,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1662,8 +1657,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1708,8 +1701,6 @@ describe('IntegrationWorkbenchView', () => {
       }
       throw new Error(`unexpected URL ${url}`)
     })
-
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -1823,7 +1814,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -1928,7 +1918,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2023,7 +2012,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2108,7 +2096,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2165,7 +2152,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2214,7 +2200,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2262,7 +2247,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2314,7 +2298,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2393,7 +2376,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2535,7 +2517,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2635,7 +2616,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected apiGet ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2700,7 +2680,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2777,7 +2756,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2871,7 +2849,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2932,7 +2909,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -2993,7 +2969,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3061,7 +3036,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3171,7 +3145,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3306,7 +3279,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3450,7 +3422,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3515,7 +3486,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3587,7 +3557,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3658,7 +3627,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3711,7 +3679,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3777,7 +3744,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3840,7 +3806,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3889,7 +3854,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -3946,7 +3910,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4030,7 +3993,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4143,7 +4105,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4299,7 +4260,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4474,7 +4434,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4647,7 +4606,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4764,7 +4722,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4847,7 +4804,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -4945,7 +4901,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -5016,7 +4971,6 @@ describe('IntegrationWorkbenchView', () => {
       throw new Error(`unexpected URL ${url}`)
     })
 
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
