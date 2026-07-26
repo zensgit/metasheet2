@@ -41,10 +41,15 @@ No checksum was hand-typed or fabricated — the checksums recorded below are re
   frozen package's own CI-produced verify output includes a loopback check" — run `30148584851`'s own
   `verify.json` is immutable and still shows four checks (§3.1). §3.1a also records a known forward gap: a
   future A2 dispatch at the pinned ref (`build/m0a-rca-7bf2bd7a1`, still targeting source commit `7bf2bd7a1`)
-  will check out the **old**, four-check verify script, not this fix pass's five-check version — so A2's own
-  `verify.json` will also be four checks unless the owner separately revisits the ref/tooling situation. That
-  is not resolved here.
+  will check out the **old**, four-check verify script, not this fix pass's five-check version — so a Path-B
+  (§3.2, rebuild) A2's own `verify.json` will also be four checks unless the owner separately revisits the
+  ref/tooling situation. **This applies to a rebuild only; the owner's now-recommended Path A (§3.2a, freeze)
+  involves no dispatch at the pinned ref at all, so no fresh `verify.json` — four- or five-check — is produced
+  by A2 either way under that path.** Neither path's forward gap is resolved here.
 - **(ii) the owner-only A2 publish/freeze act** (§3.2) — unchanged from before this fix pass.
+  **Update (review #4604, this update):** the owner has since given guidance on *how* A2 should be executed
+  once authorized — freeze A1's already-verified original bytes rather than rebuild. See §3.2a. That guidance
+  is recorded, **not executed**; A2 itself is still open and still the owner's act.
 
 §3 gives the retraction, the A1 record, the loopback-check build + post-hoc execution (§3.1a), and the narrow
 residual (A2, owner-only, §3.2).
@@ -331,12 +336,25 @@ Downloaded the real artifact read-only (`gh run download 30148584851`) — not h
 
 **Two constraints the "done" framing must carry, or it misleads:**
 
-- **The Actions artifact (`multitable-onprem-package-30148584851-1`) is not a release.** It is unfrozen,
-  privately-scoped to this run, and has `retention-days: 14` set in the workflow — it expires around
-  **2026-08-08** (14 days from `createdAt` 2026-07-25T07:02:23Z). "Build+verify done" does not mean "package
-  available to deploy"; nothing here is a publicly-addressable checksummed asset until A2 runs.
-- If the owner's A2 act slips past the retention window, A1 must be re-run (cheap — no code changed, same
-  `expected_sha`, same ref) before A2, since A2's own build supersedes A1's bytes anyway.
+- **The Actions artifact (`multitable-onprem-package-30148584851-1`, id `8616890535`) is not a release.** It
+  is unfrozen, privately-scoped to this run, and has `retention-days: 14` set in the workflow — confirmed live
+  (not assumed from the 14-day setting), `gh api repos/zensgit/metasheet2/actions/runs/30148584851/artifacts`
+  →
+  `{"id":8616890535,"digest":"sha256:13c7aaa36a777786d75effa3b5ce2df7b1ce39ad47869a806638d57d5dbc0aea","expired":false,"expires_at":"2026-08-08T07:04:52Z"}`
+  (checked this update). "Build+verify done" does not mean "package available to deploy"; nothing here is a
+  publicly-addressable checksummed asset until A2 runs.
+- **Erratum (this update):** the sentence below originally assumed A2 = a fresh workflow dispatch, i.e. a
+  rebuild. The owner has since ruled the *recommended* A2 path is to freeze A1's still-unexpired original
+  bytes instead (§3.2a) — under that path A2 does not build anything, so "A2's own build supersedes A1's
+  bytes" does not apply. The retention-window risk described below is retained as-written because it is still
+  real under either path: if the window lapses *before* A2 (freeze or rebuild) executes, the artifact
+  downloaded here becomes permanently unrecoverable (Actions does not allow re-downloading an expired
+  artifact), and the only way forward is a fresh A1 run producing new, no-longer-A1-identical bytes to freeze
+  or rebuild from — kept below, historical framing, superseded by §3.2a's freeze-path framing where noted:
+  ~~If the owner's A2 act slips past the retention window, A1 must be re-run (cheap — no code changed, same
+  `expected_sha`, same ref) before A2, since A2's own build supersedes A1's bytes anyway.~~ (struck: "A2's own
+  build supersedes A1's bytes" is only true on the rebuild path §3.2, not the recommended freeze path §3.2a —
+  see §3.2a for the corrected statement of this same retention risk.)
 
 ### 3.1a Loopback verification — built, then run post-hoc/standalone against A1's real artifact (this fix pass)
 
@@ -597,7 +615,14 @@ forward (which `docs/development/database-system-integration-line-design-and-ver
 "Build SHA stays `7bf2bd7a1`... do not enlarge the runtime change surface" ruling weighs against, and this
 document does not decide). This gap is recorded, not closed.
 
-### 3.2 A2 — publish/freeze, `publish_release=true` (OWNER-ONLY — NOT inside M0-A's authorization)
+### 3.2 A2, Path B (rebuild) — publish/freeze via fresh dispatch, `publish_release=true` (OWNER-ONLY, NOT inside M0-A's authorization; not the owner's recommended path as of this update, see §3.2a)
+
+**Erratum (this update):** this subsection's original text (unchanged below) described the only path
+considered at the time — re-dispatch the build workflow. The owner has since ruled (review #4604) that the
+**recommended** A2 procedure is instead to freeze A1's already-verified original bytes without rebuilding —
+see §3.2a. This subsection (Path B) is kept, not struck, as the documented fallback for the case §3.2a itself
+names (A1's artifact expires before A2 is authorized, forcing a fresh run). Do not execute Path B as the
+default; §3.2a is the recommended default once A2 is authorized.
 
 This is the one remaining blocked step, and it is a narrow one: an owner (or someone the owner delegates to)
 re-dispatches the same workflow, on a ref at the same commit, with `publish_release=true`. This performs the
@@ -613,10 +638,16 @@ gh workflow run multitable-onprem-package-build.yml --repo zensgit/metasheet2 \
   -f release_tag=<OWNER TO CHOOSE — not pre-selected by this document> \
   -f release_name=<optional>
 ```
-Once A2 completes, §4's `<<PENDING FREEZE RUN>>` fields (release tag, `.tgz`/`.zip` SHA256) get filled from
-that run's own `SHA256SUMS` and release assets — the same way A1's were, never hand-typed. `serviceRuntimeSha`
-does not change (same commit, same in-archive `gitCommit`); only the archive bytes/checksums and the release
-tag are new.
+Once A2 completes **via this Path-B rebuild**, §4's `<<PENDING FREEZE RUN>>` fields (release tag, `.tgz`/`.zip`
+SHA256) get filled from that run's own `SHA256SUMS` and release assets — the same way A1's were, never
+hand-typed. `serviceRuntimeSha` does not change (same commit, same in-archive `gitCommit`); only the archive
+bytes/checksums and the release tag are new. **This is Path-B-specific — see §3.2a for what these same §4
+fields resolve to under the recommended Path A (freeze).** Also note (§6/§3.1a forward gap, restated for this
+path): the ref this dispatch targets (`build/m0a-rca-7bf2bd7a1`, pinned to commit `7bf2bd7a1`) checks out that
+commit's own copy of `multitable-onprem-package-verify.sh`, which is the pre-this-branch **four-check** script
+(verified this update — `git show 7bf2bd7a1f8cdf54cca83a733fcd89afb076848b:scripts/ops/multitable-onprem-package-verify.sh
+| grep -n loopback` → zero hits) — so a Path-B rebuild's own `verify.json` would still be four checks, not
+five, regardless of what this branch built in §3.1a/§6.
 
 **A local build in this sandbox remains disqualified**, independent of A1/A2: the workflow pins Node 20 +
 pnpm exactly `9.15.9` on `ubuntu-latest`. This environment runs Node `v25.9.0` / pnpm `10.33.0` on darwin — a
@@ -624,14 +655,93 @@ locally-built package would not be the artifact the CI pipeline produces, and pu
 SHA256 as "the RC-A checksum" would repeat the exact fabricated/self-certified-provenance failure mode this
 line exists to close. Not attempted.
 
+### 3.2a A2, Path A (freeze original bytes) — the owner's RECOMMENDED procedure (review #4604, this update) — NOT YET EXECUTED, still the owner's act
+
+**This section records the owner's ruling on how A2 should be carried out once authorized. It does not
+authorize, perform, or schedule A2. No release is published, no tag is chosen, and no artifact is downloaded
+or uploaded by this document.**
+
+**Why freeze instead of rebuild (Path B, §3.2), in the owner's own reasoning, verified here:**
+
+- **A1's artifact has not expired.** Live check this update, `gh api
+  repos/zensgit/metasheet2/actions/runs/30148584851/artifacts`:
+  ```
+  {"id":8616890535,"name":"multitable-onprem-package-30148584851-1",
+   "digest":"sha256:13c7aaa36a777786d75effa3b5ce2df7b1ce39ad47869a806638d57d5dbc0aea",
+   "expired":false,"expires_at":"2026-08-08T07:04:52Z"}
+  ```
+  Outer digest `sha256:13c7aaa3…c0aea`, valid until 2026-08-08. This is the same artifact §3.1 already
+  downloaded and recorded `SHA256SUMS`/provenance/verify-report evidence from.
+- **A rebuild (Path B) would not reproduce these bytes.** `scripts/ops/multitable-onprem-package-build.sh`
+  bakes `"ciRunId": "${GITHUB_RUN_ID:-local}"` (line ~508) and `"builtAt": "$(date -u ...)"` (line ~510) into
+  `BUILD_PROVENANCE.json` **inside the archive, before hashing** — both are per-run values. A fresh dispatch
+  gets a new `GITHUB_RUN_ID` and a new timestamp, therefore different archive bytes and a different `.tgz`/
+  `.zip` SHA256, even though `gitCommit` is identical (§3.1 already established this; it is why §3.1 calls
+  A1's checksums "run-scoped"). Freezing A1's own bytes is the only path whose published checksums are the
+  ones A1's evidence (§3.1) already documents.
+- **The historical ref still runs the old, four-check verifier — a rebuild gains nothing here either.**
+  Verified this update directly against the pinned commit, not assumed: `git show
+  7bf2bd7a1f8cdf54cca83a733fcd89afb076848b:scripts/ops/multitable-onprem-package-verify.sh | grep -n loopback`
+  → zero hits (16 `verify_*` functions total at that commit, none loopback-named). A Path-B rebuild at that
+  same ref would therefore still be verified by the **older, four-check** tool and would **not** pick up this
+  branch's five-check `multitable-onprem-package-verify.sh` (§3.1a/§6) — the forward gap those sections already
+  flag. Freezing sidesteps this entirely: under Path A there is no CI dispatch at the pinned ref at all, so the
+  four-check-tool gap doesn't arise (**moot for this path, not closed** — it would still apply if Path B were
+  chosen instead, or if the ref/tooling question is separately revisited per §3.1a).
+
+**Recommended procedure (fastest path, strongest evidence — not executed here):**
+
+1. **Download A1** — `gh run download 30148584851` (or `gh api .../artifacts/8616890535/zip`) — the exact
+   artifact §3.1 already recorded evidence from.
+2. **Re-verify the original hashes and provenance** — reconfirm `SHA256SUMS` and in-archive
+   `BUILD_PROVENANCE.json.gitCommit` against §3.1's recorded values (unchanged bytes, so this should
+   reproduce identically; §3.1a already did one round of this as part of the loopback-check work).
+3. **Re-verify the `.tgz`/`.zip` with the merged FIVE-check verifier** — run this branch's
+   `scripts/ops/multitable-onprem-package-verify.sh` (the version with `verify_no_loopback_frontend_config`,
+   §3.1a/§6) against the downloaded archive, and confirm `requiredCount`/checks match §3.1a's post-hoc run
+   (5/5, including the `loopback` check now PASS-backed by a real derived status, not a hardcoded literal —
+   §3.1a's P2 fix). This is what lets the eventual release claim the five-check result, honestly, for bytes
+   that were never run through the CI pipeline's own (still four-check) verify step.
+4. **Publish the ORIGINAL bytes** — a manual `gh release create <tag> <downloaded .tgz> <downloaded .zip>
+   <downloaded bootstrap .ps1/.bat> <downloaded SHA256SUMS> ...` (or `gh release upload` to an
+   already-created release) of the **exact files downloaded in step 1**, unmodified. **This is not the §3.2
+   Path-B `gh workflow run ... publish_release=true` command** — that command re-dispatches the build and
+   therefore rebuilds; publishing A1's original bytes means the workflow's own gated `Publish GitHub Release`
+   step is bypassed in favor of a manual release of files already produced and already verified. Tag choice
+   remains the owner's, not pre-selected here.
+5. **Upload round-trip check** — after publishing, download the release asset back
+   (`gh release download <tag>` or the release's browser-download URLs) and re-hash
+   (`shasum -a 256`), confirming it matches the corresponding line in A1's own `SHA256SUMS` (§3.1) exactly.
+   This is what makes "the published bytes are A1's original bytes" a verified claim rather than an assertion.
+
+**Under this path, §4's `<<PENDING FREEZE RUN>>` fields resolve to §3.1's own already-recorded values** — the
+four `SHA256SUMS` lines quoted in §3.1, and `gitCommit`/`ciRunId`/`builtAt` from §3.1's own
+`BUILD_PROVENANCE.json` excerpt — **not** a new run's output, because there is no new run. Only the release tag
+(owner's choice, step 4) is genuinely new.
+
+**Retention-window interaction:** if A1's artifact expires (after 2026-08-08) before A2 is authorized, step 1
+becomes impossible (Actions does not allow downloading an expired artifact), and this exact "original bytes"
+framing no longer applies — the operator would need a fresh A1 run (cheap, same `expected_sha`/ref, no code
+changed) to produce a new set of candidate bytes, then apply steps 2-5 to *those*. That re-run's bytes would
+carry a new `ciRunId`/`builtAt` of their own (same reasoning as the rebuild-produces-different-bytes point
+above) but would still be a freeze of *some* real A1-equivalent run's bytes, not a Path-B
+`publish_release=true` rebuild-and-simultaneously-publish in one step.
+
+**Status: recorded, not executed.** Nothing in this section downloads, re-verifies, publishes, or round-trips
+anything — that remains the owner's (or their delegate's) act, same authorization boundary as §3.2.
+
 ---
 
 ## 4. Draft — #4437 execution pointer v3 (NOT POSTED)
 
 Everything below is a draft only. It is not posted to #4437. `gitCommit` is now CONFIRMED (§3.1, A1, stable
-across rebuilds of the same commit). Fields that only A2's own freeze run can produce (release tag, `.tgz`/
-`.zip` SHA256 — **not reusable from A1**, see §3.1) are marked `<<PENDING FREEZE RUN>>` — do not fill them by
-guessing or by copying A1's run-scoped checksums; they must come from A2's own `SHA256SUMS` and release assets.
+across rebuilds of the same commit). Fields that require A2 to have happened (release tag, `.tgz`/`.zip`
+SHA256) are marked `<<PENDING FREEZE RUN>>` — do not fill them by guessing. **This paragraph and the two
+`<<PENDING FREEZE RUN>>` bullets below were written assuming Path B (§3.2, rebuild): "not reusable from A1;
+must come from A2's own SHA256SUMS." Erratum (this update): under the owner's now-recommended Path A (§3.2a,
+freeze), A2 produces no new `SHA256SUMS` — the checksums that end up in the release ARE A1's own §3.1 values,
+verified byte-identical by the round-trip check in §3.2a step 5. Which of the two applies depends on which
+path A2 is actually executed with; this document does not decide that in advance.**
 
 > **Execution pointer v3 (DATE-OF-ACTUAL-BUILD — draft). Supersedes execution pointer v2.**
 > Records the package's `serviceRuntimeSha` and `clientHelperSha` **separately** (per
@@ -649,8 +759,9 @@ guessing or by copying A1's run-scoped checksums; they must come from A2's own `
 >   closes the pre-hardening fabricated-`metadata.limit` gap the frozen `d87e086fd` package carries; P1a
 >   applied-limit echo-verification, P1b `.v2` qualification lineage). In-archive `BUILD_PROVENANCE.json.gitCommit`
 >   read-back **CONFIRMED** (A1, run 30148584851) = `7bf2bd7a1f8cdf54cca83a733fcd89afb076848b`, exact match.
->   `<<PENDING FREEZE RUN (A2): release tag, `.tgz`/`.zip` SHA256 from A2's own `SHA256SUMS` — A1's checksums
->   are run-scoped and will NOT match A2's, see §3.1>>`
+>   `<<PENDING FREEZE RUN (A2): release tag, `.tgz`/`.zip` SHA256>>` — **Path B (§3.2, rebuild): from a new
+>   run's own `SHA256SUMS`, will NOT match A1's, see §3.1. Path A (§3.2a, recommended, freeze): these ARE
+>   A1's own §3.1 `SHA256SUMS` values, republished — see §3.2a for the round-trip proof.**
 > - **`clientHelperSha`** (the two exact-SHA smoke harnesses the abort-provenance diagnostic and the sidecar
 >   wrapper import) — **unchanged, carried over from the frozen `d87e086fd` package**, independently verified
 >   blob-identical at `d87e086fd`, `7bf2bd7a1`, and current `main`:
@@ -666,15 +777,23 @@ guessing or by copying A1's run-scoped checksums; they must come from A2's own `
 >   immutable and still shows four checks) and will not come from a future A2 run at the pinned ref either,
 >   unless the ref/tooling question is separately revisited (§3.1a forward gap) — do not post this line to
 >   #4437 as if it were part of A2's own build output.
-> - **Release / tag**: `<<PENDING FREEZE RUN (A2) — owner selects the tag; not pre-chosen by this document>>`,
->   built via the **Multitable On-Prem Package Build** workflow
->   (`.github/workflows/multitable-onprem-package-build.yml`, `publish_release=true`) — stock-prep ships as a
->   plugin inside the multitable on-prem platform bundle; there is no stock-prep-specific package build.
->   `expected_sha=7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` must be set at dispatch time so the build fails
->   closed on an uncertain checkout (as A1's did, successfully); in-archive `BUILD_PROVENANCE.gitCommit` must
->   equal the same value; `.tgz`/`.zip` checksums must verify against A2's own `SHA256SUMS` — A1's build+verify
->   already proves the pipeline mechanics work end-to-end at this exact commit (§3.1); A2 is a re-run of the
->   identical, already-proven mechanics with one flag flipped.
+> - **Release / tag**: `<<PENDING FREEZE RUN (A2) — owner selects the tag; not pre-chosen by this document>>`.
+>   **Erratum (this update) — how the release gets built depends on which A2 path is used, recorded plainly so
+>   neither reads as "the" mechanism:**
+>   - **Path B (§3.2, rebuild):** built via the **Multitable On-Prem Package Build** workflow
+>     (`.github/workflows/multitable-onprem-package-build.yml`, `publish_release=true`) — stock-prep ships as a
+>     plugin inside the multitable on-prem platform bundle; there is no stock-prep-specific package build.
+>     `expected_sha=7bf2bd7a1f8cdf54cca83a733fcd89afb076848b` must be set at dispatch time so the build fails
+>     closed on an uncertain checkout (as A1's did, successfully); in-archive `BUILD_PROVENANCE.gitCommit` must
+>     equal the same value; `.tgz`/`.zip` checksums must verify against that run's own `SHA256SUMS`. A1's
+>     build+verify already proves the pipeline mechanics work end-to-end at this exact commit (§3.1); Path B is
+>     a re-run of the identical, already-proven mechanics with one flag flipped — but it is a re-run, so its
+>     bytes differ from A1's (§3.2a explains why).
+>   - **Path A (§3.2a, recommended):** built by a manual `gh release create`/`upload` of the exact bytes
+>     already downloaded from A1 (run `30148584851`, artifact `8616890535`) — the workflow's own gated
+>     `Publish GitHub Release` step is not invoked at all. `.tgz`/`.zip` checksums verify against A1's own
+>     `SHA256SUMS` (§3.1), confirmed by a post-publish round-trip re-download+re-hash (§3.2a step 5), not a
+>     fresh CI run's output.
 >
 > ### What did NOT change from the frozen `d87e086fd` package
 > - Both RC-A smoke helper client scripts (content-identical; `clientHelperSha` above).
@@ -724,16 +843,23 @@ guessing or by copying A1's run-scoped checksums; they must come from A2's own `
   (unchanged from the original investigation, no rebuild needed); a real loopback-verification check, built
   per owner ruling (§6) and run post-hoc/standalone against A1's real artifact bytes at a recorded, separate
   `verificationToolSha` (§3.1a), PASS, corroborated by an independent direct grep; a draft the operator/owner
-  can lift into #4437 once A2 (§3.2) exists.
-- It is not: a published release, a permanent/addressable checksummed artifact (A1's Actions artifact expires
-  ~2026-08-08, §3.1), the owner's freeze act, an edit to #4437 itself, or an edit to the RATIFIED ledger
-  (§6's ruling is recorded here, not written into the ledger's own text). Nothing here was posted to the
-  issue. A1's `.tgz`/`.zip` SHA256 values are recorded as run-scoped evidence only and must not be read as
-  "the" RC-A checksums — those come from A2. The post-hoc loopback PASS (§3.1a) is not the same claim as "run
-  30148584851's own `verify.json` has five checks" — that artifact is immutable and still has four (§3.1); a
-  future A2 dispatch at the pinned ref will also still emit four unless the ref/tooling question is
-  separately revisited (§3.1a's forward gap, not resolved here). **A1 PASS is not M0-A PASS** — M0-A remains
-  open pending A2 regardless.
+  can lift into #4437 once A2 (§3.2/§3.2a) exists; the owner's recorded (not executed) guidance on which A2
+  procedure to use (§3.2a, this update).
+- It is not: a published release, a permanent/addressable checksummed artifact (A1's Actions artifact, id
+  `8616890535`, has NOT yet expired as of this update — `expires_at 2026-08-08T07:04:52Z`, §3.2a — but is not
+  itself a release), the owner's freeze act, an edit to #4437 itself, or an edit to the RATIFIED ledger (§6's
+  ruling is recorded here, not written into the ledger's own text). Nothing here was posted to the issue.
+  **Erratum (this update):** the next sentence ("A1's checksums... must not be read as 'the' RC-A checksums —
+  those come from A2") was written assuming A2 = a rebuild (§3.2, Path B); it is retained as-written because it
+  is still correct for that path. Under the owner's now-recommended path (§3.2a, Path A, freeze) it is the
+  opposite: A1's `.tgz`/`.zip` SHA256 values, already recorded in §3.1, **are** what gets published as the RC-A
+  checksums, verified by a round-trip re-hash after publish (§3.2a step 5) — not reused by assertion. Which
+  applies depends on which path A2 is actually executed with; neither has happened yet. The post-hoc loopback
+  PASS (§3.1a) is not the same claim as "run 30148584851's own `verify.json` has five checks" — that artifact
+  is immutable and still has four (§3.1); a future Path-B A2 dispatch at the pinned ref will also still emit
+  four unless the ref/tooling question is separately revisited (§3.1a's forward gap, not resolved here) — this
+  gap does not arise under Path A, where there is no dispatch at all (§3.2a). **A1 PASS is not M0-A PASS** —
+  M0-A remains open pending A2 (either path) regardless.
 
 ## 6. Owner ruling on the escalation — build the check (option 2), not amend the ledger (option 1)
 
