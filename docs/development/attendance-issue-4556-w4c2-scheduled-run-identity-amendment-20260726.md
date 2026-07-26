@@ -62,6 +62,23 @@
 > (owner ruling **G-2 = (b2)**, which overturned `c-5082614287` = the
 > `(c)-plus` classification exemption).
 >
+> **Retraction (this pass).** A round-3 gate review found the previous
+> revision's `O-5`/section 3.2 `(ii-narrow)` cell claimed, unconditionally,
+> that excluding an operation's own just-written row from the resolver's
+> `openPreviousMatches` match "has now been verified semantically safe, in
+> general" and was "confirmed semantically safe." **Both claims are
+> retracted**, along with every downstream sentence in section 3.2 that
+> restated or relied on them (the "Consequences," "Gate shape," and
+> "Recommendation" text for `(ii-narrow)`, and the `O-5` ballot row in
+> section 3.1). An executed counterexample (section 3.2) shows the
+> mechanism as specified flips both the resolved `workDate` and `shiftId`,
+> not only `reasonCode`, when this operation's write touches — rather than
+> creates — a pre-existing open record on the resolved previous workDate.
+> `OD-W4C-53`/`O-5` is now a **two-token** ballot, `(i)` vs `(ii-wide)`;
+> `(ii-narrow)` is described in full but is not offered as a ratifiable
+> token this pass — see section 3.2 for the corrected scope and the
+> preconditions a follow-up round would need to supply.
+>
 > Runtime posture: PR #4612 stays **Draft** under
 > **OWNER-AUTHORIZATION-HOLD**. This amendment contains **no runtime code**
 > and authorizes **no** implementation, ready-for-review transition, arming,
@@ -1552,7 +1569,7 @@ one-pass ratification — see the scope note at the top of this document.
 | `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair to target rows (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a terminal outcome; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
 | `OD-W4C-51` (`O-2`) — canonical order for `ordinal` / resume-guard shape | (a) pin the membership resolution query to `ORDER BY user_id` (or another explicit total order); `ordinal` becomes a pure function of membership; narrow gate 4's "byte-identical to pre-amendment emit" claim to key/value-set equivalence plus the new canonical order; (b) leave resolution order undefined as today; change the resume guard (section 1.7 step 3) to an order-insensitive set fingerprint; withdraw gate 10's "or one ordinal" leg | **(a)**, because the ordered fingerprint this draft already specifies (section 1.3) cannot be satisfied on resume by an unpinned membership query, and pinning without owner sign-off is not available to the author alone — a one-time, disclosed change to `reasons` ordering is preferable to shipping a resume guard that spuriously fires on a benign restart |
 | `OD-W4C-52` (`O-4`) — does a `running` run block shadow/eligible promotion | (a) extend the lock's promotion-block predicate (lock lines 2689-2690, 2250) to treat a `running` `attendance_scheduled_runs` row as blocking, same as an incomplete operation; accept the operational cost that a promotion window must avoid colliding with an in-flight scheduled run; (b) do not block promotion; instead redefine finalization (section 1.8 step 1) to execute under the run's own frozen posture rather than the currently resolved one — a considered, narrow reversal of this draft's own "posture flip is remediation, never a rebase" stance, scoped to finalization only | no recommendation — this is an operational rollout-timing tradeoff ((a)) versus a semantic reversal of a stance this same draft asserts elsewhere ((b)); both are internally consistent, and the choice is the owner's to make, not the author's |
-| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column; (ii) eliminate the self-observation at its root instead — **(ii-narrow)** exclude the operation's own just-written row from the resolver's `openPreviousMatches` match (cheapest, but this document has not verified it is semantically safe), or **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface) | (i) over (ii-wide) specifically; **no recommendation** against (ii-narrow) — its cost is unknown until the semantic-safety question in section 3.2 is answered, and recommending (i) over an unverified cheaper option would be steering by omission |
+| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | **Two ratifiable tokens this pass:** (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column; **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface). **A third token, `(ii-narrow)`** (exclude the operation's own just-written row from the resolver's `openPreviousMatches` match), is **not ratifiable this pass**: section 3.2 demonstrates by executed counterexample that the mechanism as specified flips both `workDate` and `shiftId` (not only `reasonCode`) when this operation's write touches a pre-existing open record it did not create, and a corrected, gated mechanism has not been specified or tested. Ratifying `(ii-narrow)` requires a follow-up round that supplies the four preconditions listed in section 3.2's "Gate shape this option needs" | (i) over (ii-wide) specifically, among the two tokens this row offers — see reasoning in section 3.2. No recommendation is made on `(ii-narrow)` because it is not currently offered as a choice; once a follow-up round supplies a corrected, gated mechanism, this row must be revised before it can be voted |
 
 ### 3.2 `O-5`/`OD-W4C-53` — a fifth pending decision, bundled from outside this document's own schema
 
@@ -1658,16 +1675,21 @@ column's domain (`{resolvedAt}` only).
   on real PostgreSQL, per this document's own section 2 standard.
 
 **Option (ii) — eliminate the self-observation at its root, not a single
-fix but two sub-variants of differing cost.** `OD-W4C-53`'s ballot therefore
-has **three** valid tokens, not two: `(i)`, `(ii-narrow)`, `(ii-wide)`. If
-the owner rules `(ii-narrow)` or `(ii-wide)`, the storage-domain fingerprint
-(unchanged) is what step 7 compares, and the false positive is closed by
-removing its cause rather than by narrowing the comparison. There are two
-structurally different ways to do that, and this document's earlier draft
-of this section understated the cheaper one — stated here in full to avoid
-steering the owner toward (i) by omission, the same defect a prior advisor
-round caught in this document's `O-1` cell (section 3.1's table, `OD-W4C-49`
-history):
+fix but two sub-variants of differing cost and, as this addendum now
+establishes, differing readiness.** `OD-W4C-53`'s ballot has **two**
+ratifiable tokens this pass, `(i)` and `(ii-wide)`; a third,
+**`(ii-narrow)`**, is described in full below for the same reason a prior
+draft was faulted for understating it (a prior advisor round caught this
+document steering the owner toward `(i)` by omission in the `O-1` cell,
+section 3.1's table, `OD-W4C-49` history — this section still owes the
+owner the full shape of `(ii)`), but `(ii-narrow)` is **not itself a
+ratifiable token this pass**: the mechanism this document specifies for it
+is demonstrated unsafe below by an executed counterexample, and a
+corrected mechanism has not been specified or gated. If the owner rules
+`(ii-wide)` (or, in a follow-up round, a corrected `(ii-narrow)`), the
+storage-domain fingerprint (unchanged) is what step 7 compares, and the
+false positive is closed by removing its cause rather than by narrowing
+the comparison. There are two structurally different ways to do that:
   - **(ii-narrow) Exclude the operation's own just-written row from
     `openPreviousMatches`.** `selectAmongMatchingCandidates`
     (`plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs:~L371-428`)
@@ -1679,14 +1701,36 @@ history):
     re-reading `openRecords` past whatever step 3 last touched), the
     self-observation the commit message describes disappears without
     touching lock §8.2's step order at all — the smallest possible fix.
-    **Update (this addendum): this exclusion has now been verified
-    semantically safe, in general, not only on the one fixture PR #4612
-    exercised.** The prior draft of this cell left the question open,
-    citing this document's own precedent against a partial read standing in
-    for a full consumer inventory (section 0.1 reason 3). That precedent
-    governs *implementation* decisions an author might otherwise make
-    unilaterally; it does not bar reading code to settle a fact this same
-    section's ballot depends on being well-formed, which is what follows.
+    **Update (this addendum), superseding a RETRACTED claim.** A prior
+    revision of this addendum asserted here: "this exclusion has now been
+    verified semantically safe, in general, not only on the one fixture PR
+    #4612 exercised" and, further down this cell, "(ii-narrow) is confirmed
+    semantically safe" (both sentences, and every sentence downstream of
+    them in this cell and in the "Consequences"/"Gate shape"/
+    "Recommendation" subsections below, that restated or relied on that
+    conclusion). **Both are retracted.** A subsequent adversarial pass
+    constructed an executed counterexample (transcribed below, from this
+    repository's own fixture) in which the exclusion mechanism as specified
+    two paragraphs above — "by row ID," applied unconditionally — flips
+    both the resolved `workDate` **and** `shiftId`, not merely `reasonCode`.
+    The retracted argument's flaw, stated precisely so it is not repeated:
+    it proved a claim about the case where this operation's write **creates**
+    the previous-workDate open record, and then treated that as covering
+    the mechanism as specified, which excludes-by-row-ID **any** row this
+    operation wrote to — including a row that **already existed**, created by
+    an earlier, different operation, that this operation's own write only
+    *touches* (via `mode:'append'` upsert). Those are different sets; the
+    proof below is corrected to say only what it actually covers.
+
+    The code-reading work that follows (Fact 1, Fact 2) is unaffected by the
+    retraction — it establishes true, load-bearing properties of the
+    resolver and is kept. What is retracted is the step **after** those two
+    facts: the claim that they compose into an unconditional safety proof
+    for the exclusion mechanism as specified. Reading code to settle a fact
+    this ballot depends on remains within the precedent cited above
+    (section 0.1 reason 3 governs *implementation* choices, not fact-finding);
+    that precedent question is not what failed here — the composition step
+    that follows the facts is what failed, and is corrected below.
     The read covers `selectAmongMatchingCandidates`'s full body
     (`attendance-work-date-resolver.cjs:371-519`), its caller
     (`:982-1007`), the internal `calendarWorkDate` derivation
@@ -1749,62 +1793,120 @@ history):
       when a precedence step finds more than one candidate, or when no step
       resolves a unique winner and `matching.length !== 1` (the fallthrough
       at `:514-518`).
-    - **Putting the two together.** For step 3's (self-)write to ever
-      create a **previous-workDate** open record — the only shape that can
-      feed `openPreviousMatches` (`:397-403`, which requires
-      `candidate.workDate` strictly before `calendarWorkDate`) — the write
-      must have been driven by a *resolved*, non-ambiguous `punchWorkDate`
-      result whose winner has `workDate < calendarWorkDate`. Walking
-      `selectAmongMatchingCandidates`'s precedence (`:371-519`) **as
-      `punchWorkDate`'s own call evaluates it** (i.e. before step 3's write
-      exists, so no self-observation is even possible at this call): such a
-      winner can only come from step 1 (`:405-421`, which requires an
-      open record that already existed *before this resolve call ran* — by
-      construction not this operation's own not-yet-written row) or from
-      steps 3/4 (`:469-511`), both of which additionally gate on
-      `matching.length === 1`. There is no path by which a previous-workDate
-      winner is produced from a `matching` set of size > 1 without going
-      through step 1's pre-existing-record branch. So: whenever this
-      operation's own write *can* be the sole evidence for a
-      previous-workDate `openPreviousMatches` entry (i.e. it is what makes
-      step 1 newly match at the **later** freeze/inner call, the one
-      `openPreviousMatches` self-observation is actually about),
-      `matching.length` was already `1` at `punchWorkDate`'s
-      write-decision time — and, by Fact 1, `matching.length` is **still
-      1** at the freeze/inner re-resolution, because it is the same
-      candidate set. And when `matching.length === 1`,
-      `selectAmongMatchingCandidates`'s steps 1, 3, and 4 all resolve to
-      **the same sole candidate** (`matching[0]`) by construction — step 1
-      needs `openByWorkDate` to contain that one candidate's workDate, step
-      3 needs it to be overnight and previous-workDate with no cardinality
-      competitor, step 4 is the unconditional single-candidate fallback —
-      they differ only in which `reasonCode` is attached
+    - **Putting the two together — RETRACTED as a general claim; the
+      narrower claim it actually proves is kept.** The paragraph this
+      replaces argued: for step 3's (self-)write to ever **create** a
+      previous-workDate open record — the only shape that can feed
+      `openPreviousMatches` (`:397-403`, which requires `candidate.workDate`
+      strictly before `calendarWorkDate`) — the write must have been driven
+      by a *resolved*, non-ambiguous `punchWorkDate` result whose winner has
+      `workDate < calendarWorkDate`; walking
+      `selectAmongMatchingCandidates`'s precedence (`:371-519`) as
+      `punchWorkDate`'s own call evaluates it (before step 3's write exists,
+      so no self-observation is possible at that call), such a winner
+      reaching steps 3/4 requires `matching.length === 1`
+      (`:469-511`). **That narrower claim holds and is kept**: in the
+      specific case where this operation's own write is the *sole* evidence
+      that ever put a previous-workDate row into `openPreviousMatches` —
+      i.e. the row did not exist, in an open state, on the resolved previous
+      workDate before this operation ran — `matching.length` was `1` at
+      write-decision time, is still `1` at the freeze/inner re-resolution
+      (Fact 1), and `selectAmongMatchingCandidates`'s steps 1, 3, 4 then all
+      resolve to the same `matching[0]`, differing only in `reasonCode`
       (`OPEN_PREVIOUS_NIGHT_RECORD` vs `PREVIOUS_NIGHT_CONTAINING_SHIFT`/
-      `SINGLE_MATCHING_CANDIDATE`), never in the resolved `workDate`/
-      `shiftId`.
-    - **Conclusion.** The scenario this cell previously flagged as
+      `SINGLE_MATCHING_CANDIDATE`), never in `workDate`/`shiftId`.
+
+      **What the retracted paragraph did not prove, and then claimed anyway:**
+      it treated "sole evidence" (this write *creates* the row) as covering
+      the exclusion mechanism as specified two paragraphs above, which
+      excludes **by row ID**, unconditionally — any row this operation wrote
+      to, whether that write created the row or merely updated one that
+      **already existed**, in an open state, on the resolved previous
+      workDate, written by an *earlier, different* operation. Step 1
+      (`attendance-work-date-resolver.cjs:405-421`) gates only on
+      `openPreviousMatches.length === 1`; it places **no constraint** on
+      `matching.length`. So a pre-existing previous-workDate open record can
+      make step 1 the outer-resolve winner while `matching.length > 1` —
+      squarely outside the case the kept paragraph above analyses — and if
+      this operation's own write then also touches that same row (a
+      `mode:'append'` upsert onto it, per `plugin-attendance/index.cjs`
+      `:26575-26590`, is exactly such a touch), the by-row-ID exclusion
+      removes it from `openByWorkDate` at the freeze/inner re-resolution
+      regardless.
+
+      **Executed counterexample** (transcribed from this repository's own
+      unit fixture,
+      `packages/core-backend/tests/unit/attendance-work-date-resolver-w2.test.ts:222-276`,
+      run against `origin/main` `9fdf68fa5c34d2224fbe6bd0d71b14ca78263502`):
+      overnight shift `22:00→06:00` on `2026-07-15` plus morning shift
+      `06:00→14:00` on `2026-07-16`; a **pre-existing** open
+      `(org, user, 2026-07-15)` record from an earlier `22:05` check-in (a
+      *different* operation); a punch at `2026-07-16T06:00Z`. Both shift
+      windows contain the punch, so `matching.length === 2` at outer
+      resolve; step 1 wins on the pre-existing record (not ambiguous, so
+      Fact 2's 422 does not fire), resolving `workDate: 2026-07-15,
+      shiftId: shift-night, reasonCode: OPEN_PREVIOUS_NIGHT_RECORD` and the
+      write proceeds onto that `2026-07-15` row via `mode:'append'`. With
+      the exclusion applied at the freeze/inner re-resolution, that same row
+      — pre-existing, but now also written-to by this operation — is
+      excluded from `openByWorkDate`; step 1 no longer matches, and
+      resolution falls through to `workDate: 2026-07-16, shiftId:
+      shift-morning, reasonCode: CURRENT_DAY_CONTAINING_SHIFT`. **Both**
+      `workDate` and `shiftId` flip, not only `reasonCode`. (Control leg,
+      same fixture family, `matching.length === 1`: only `reasonCode`
+      moves, `workDate`/`shiftId` do not — consistent with the kept
+      narrower claim above.)
+
+      **A second, separately unanalysed direction (not covered by either
+      argument above).** For `eventType === 'check_out'`, this operation's
+      write *closes* an existing open row (`updateLastOutAt`), which removes
+      it from `loadOpenRecords`'s result set (`first_in_at IS NOT NULL AND
+      last_out_at IS NULL`, `:14815-14821`) independently of any exclusion
+      rule. Whether that disappearance can itself change which candidate
+      `openByWorkDate` resolves to between the outer and inner reads is a
+      question about record *disappearance*; every argument in this cell,
+      kept or retracted, analyses only record *appearance*. This document
+      does not know the answer and does not claim one.
+    - **Conclusion (corrected; supersedes the retracted "general case"
+      claim below it).** The scenario this cell previously flagged as
       unverified — "`openPreviousMatches` is the *only* path that finds a
       given candidate, so excluding the self-written row changes the
-      resolved candidate itself" — cannot occur, because the precondition
-      for the self-written row to matter (`matching.length === 1`) is
-      exactly the condition under which the resolved candidate is already
-      invariant to `openRecords`. This matches, and now *proves* rather than
-      merely observes, PR #4612's own empirical finding on the Group E /
-      eDay2 fixture (`workDate`/`shiftId` unchanged, only `reasonCode`
-      differed) — that finding was not a coincidence of one fixture, it is
-      the general case. **(ii-narrow) is confirmed semantically safe.**
+      resolved candidate itself" — **does occur**, in the pre-existing-row
+      shape above; it is not merely a hypothetical the retracted paragraph
+      failed to rule out, it is now an executed counterexample against the
+      exclusion mechanism exactly as this document specified it ("by row
+      ID," unconditionally). `(ii-narrow)`, as specified in the paragraph
+      that opens this bullet (`:1671-1681`), is **not** semantically safe in
+      general. What is established, precisely: safe when this operation's
+      write is the sole evidence creating the previous-workDate open record
+      (the narrower claim kept above); not safe, and demonstrated unsafe by
+      the counterexample above, when it instead touches a pre-existing open
+      record on that workDate; unanalysed for the check-out/disappearance
+      direction. A corrected mechanism that additionally required
+      `matching.length === 1` before applying the exclusion would avoid the
+      demonstrated counterexample (in that regime the resolved candidate is
+      already invariant per the kept claim, so gating on it costs nothing
+      there) — but that gated mechanism is not what `:1671-1681` specifies,
+      has not itself been gated or fixture-tested by this document, and
+      still leaves the check-out direction unanalysed. **The retracted
+      sentence that previously closed this cell — "(ii-narrow) is confirmed
+      semantically safe" — is withdrawn and is not replaced by an
+      unconditional substitute.**
   - **(ii-wide) Reorder or re-resolve lock §8.2 steps 3/4.** Re-run step
     4's candidate re-resolution **before** step 3's legacy write commits,
     or swap the order of lock §8.2 steps 3 and 4 outright.
 - *Consequences (both sub-variants).* No second fingerprint domain is ever
   introduced — the compared object stays exactly the object lock §8.2 step
   7 names, with no new dual-copy risk.
-  *(ii-narrow)* is confined to `selectAmongMatchingCandidates` and its
-  direct gates (the resolver already has its own gate suite this document
-  did not audit for this specific change). The semantic-safety question
-  above is now resolved in its favor (see the proof in the cell above), so
-  all **three** tokens — `(i)`, `(ii-narrow)`, `(ii-wide)` — are available
-  and the owner may rule any of the three.
+  *(ii-narrow)*, if a corrected form of it is eventually specified and
+  gated (see "Conclusion" above — the form this document specifies at
+  `:1671-1681` is retracted as unsafe), would be confined to
+  `selectAmongMatchingCandidates` and its direct gates (the resolver
+  already has its own gate suite this document did not audit for this
+  specific change). **Only two tokens are available for ratification from
+  this document as it stands: `(i)` and `(ii-wide)`.** `(ii-narrow)` is not
+  a ratifiable third token this pass — see the ballot-row correction in
+  section 3.1 and the deferred-status note at the end of this cell.
   *(ii-wide)*'s cost is structural: lock §8.2's numbered step sequence is
   cited by name elsewhere in the **already-RATIFIED** governing lock (e.g.
   lock lines 2177 "the section 8.2 order", 2283 "8.2 and performs zero
@@ -1819,43 +1921,62 @@ history):
   against whichever sub-variant is chosen, shows the **existing, unmodified**
   `computeAttendanceSourceDefinitionFingerprintV1` no longer flips between
   outer and inner reads — i.e., the fix is proven at the point of causation,
-  not papered over by a second comparison domain. *(ii-narrow)* additionally
-  needs a positive control proving the resolved candidate (not just
+  not papered over by a second comparison domain. *(ii-narrow)*, before it
+  can be offered as a ratifiable token at all, needs — as a **precondition**
+  to implementation, not a confirming regression test after the fact — (1)
+  a corrected mechanism specification (e.g. gating the row-ID exclusion on
+  `matching.length === 1` at the point it is applied, so it is a no-op
+  exactly where the kept narrower claim above already guarantees safety);
+  (2) a positive control proving the resolved candidate (not just
   `reasonCode`) is unchanged across a representative set of fixtures where
   the open-record path and the containing-shift path would otherwise
-  disagree — this is now a **confirming regression test** for the proof
-  above (the semantic-safety gap it was originally meant to close is
-  already closed by that proof), not a precondition for implementing
-  (ii-narrow). *(ii-wide)* needs a full
-  re-run of every other §8.2 gate in the governing lock and the
-  W4C-1/W4C-2 gate suites unaffected by the reorder, since a step-order
-  change is exactly the kind of edit this document's own precedent (section
-  0.1 reason 3) warns against making without checking every consumer.
+  disagree; (3) a **required failing-without-fix negative control** using
+  the pre-existing-open-previous-workDate-record shape from the
+  counterexample above (`matching.length === 2`, an open record on the
+  resolved previous workDate created by a *different, earlier* operation)
+  — this leg must fail on the mechanism as originally specified at
+  `:1671-1681` and pass on the corrected, gated mechanism; and (4) an
+  analysis (not merely a gate) of the check-out/disappearance direction
+  flagged above, since no gate can substitute for an argument that does not
+  yet exist. *(ii-wide)* needs a full re-run of every other §8.2 gate in the
+  governing lock and the W4C-1/W4C-2 gate suites unaffected by the reorder,
+  since a step-order change is exactly the kind of edit this document's own
+  precedent (section 0.1 reason 3) warns against making without checking
+  every consumer.
 
-**Recommendation, not a decision.** (i), on balance, against **(ii-wide)**
+**Recommendation, not a decision — restricted to the two tokens this
+document can currently offer.** (i), on balance, against **(ii-wide)**
 specifically: (i) is the smaller, more contained change — one new domain
 separator and function, fully gated both ways above — against (ii-wide)'s
 reopening of RATIFIED lock text whose citation surface has not been audited
-here. Against **(ii-narrow)**, this document still makes **no**
-recommendation, though the reason has changed: the semantic-safety question
-that previously left its cost unknown is now resolved favorably (see the
-proof above), so (ii-narrow) is confirmed both cheaper than (i) and confined
-in blast radius to `selectAmongMatchingCandidates` and its own gate suite.
-Whether that makes it preferable to (i) or (ii-wide) is a judgment about
-which kind of change the owner is willing to accept for this fix — a
-resolver-internal exclusion rule versus a new permanent dual-copy domain
-versus reopening RATIFIED step-numbering text — and this document does not
-get to make that tradeoff on the owner's behalf merely because it has now
-established that all three options are safe to execute. This is a weaker
-recommendation than `OD-W4C-49..51`'s (there, one option was already argued
-indefensible on its own terms); here, (ii-wide) is the architecturally
-cleaner fix and would be preferable if its blast radius were already
-bounded — it is not yet, and bounding it is a larger undertaking than this
-docs-only pass can responsibly claim to have scoped. The owner may prefer
-(ii-wide) or (ii-narrow) precisely because either keeps "the compared
-object is the object the lock names" true without carving an exception;
-that is a legitimate reading this document does not get to overrule by
-recommending against it.
+here. This is a weaker recommendation than `OD-W4C-49..51`'s (there, one
+option was already argued indefensible on its own terms); here, (ii-wide)
+is the architecturally cleaner fix and would be preferable if its blast
+radius were already bounded — it is not yet, and bounding it is a larger
+undertaking than this docs-only pass can responsibly claim to have scoped.
+
+**`(ii-narrow)` is not part of this recommendation and is not a token this
+document offers for ratification this pass.** A prior revision of this
+document claimed the semantic-safety question was resolved in
+`(ii-narrow)`'s favor and, on that basis, recommended (or withheld a
+recommendation on, but still offered as a selectable third option) all
+three tokens. That claim is retracted above: the mechanism this document
+specifies for `(ii-narrow)` is demonstrated unsafe by an executed
+counterexample (a pre-existing open record touched, not created, by the
+operation's own write flips both `workDate` and `shiftId`), and a
+corrected, gated form of the mechanism has not itself been specified,
+gated, or checked against the check-out/disappearance direction. Offering
+`(ii-narrow)` as a vote-now option under those conditions would be exactly
+the "vote that may be void" this document elsewhere warns against
+(section 3.1's framing of why `O-1..O-5` are not decided by omission). The
+owner may still prefer, in principle, the *shape* of eliminating the
+self-observation at its root over widening a comparison domain — that
+preference is legitimate and is not overruled here — but exercising it on
+`(ii-narrow)` requires a follow-up round that first supplies the corrected
+mechanism and its own gate suite (see the four preconditions listed just
+above), not a vote on the token as currently specified. `(ii-wide)`
+already delivers that same root-cause shape today, at the structural cost
+described above, without needing a follow-up round.
 
 ## 4. Execution sequence
 
@@ -1870,20 +1991,18 @@ recommending against it.
    run-scoped enqueue surface, the run/resume/finalization transactions, the
    two closed-set copies, and all of section 2's gates.
    `OD-W4C-53`/`O-5` is implemented separately from this step, and its
-   ballot has **three** valid tokens per section 3.2, each with its own
+   ballot has **two** ratifiable tokens per section 3.2, each with its own
    implementation branch: if ratified `(i)`, commit
    `64ea17d1931c142a080aeab9dabe2e8c1098c2cd` (already on the W4C-2 branch)
    needs only section 3.2's positive/negative gate pair added before it
-   counts as closed; if ratified `(ii-narrow)`, that commit is reverted and
-   `selectAmongMatchingCandidates`'s `openPreviousMatches` filter is changed
-   to exclude the operation's own just-written row, gated per section 3.2's
-   (ii-narrow) gate shape (including the candidate-unchanged positive
-   control, which confirms in a real-DB fixture the safety section 3.2
-   already establishes by proof); if
+   counts as closed; if
    ratified `(ii-wide)`, that commit is reverted and lock §8.2's steps 3/4
    are reordered or re-resolved and gated per section 3.2's (ii-wide) gate
-   shape, including the full §8.2 gate re-run it requires. Whichever token
-   is ratified, this item is governed by section 3.2's gate shape, not by
+   shape, including the full §8.2 gate re-run it requires. `(ii-narrow)` is
+   **not** a ratifiable token this pass (section 3.2's retraction) and has
+   no implementation branch here; ratifying it requires a follow-up round
+   that first supplies section 3.2's four listed preconditions. Whichever
+   token is ratified, this item is governed by section 3.2's gate shape, not by
    this step's run-identity gate list.
 4. New **exact-head** independent adversarial review of the resulting head.
 5. Even at zero P1/P2, the lane **stops**: merging PR #4612 remains an owner
