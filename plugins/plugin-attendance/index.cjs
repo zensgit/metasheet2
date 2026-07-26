@@ -27172,6 +27172,16 @@ module.exports = {
                 ? parsed.data.photoFileId.trim()
                 : null,
             workDate,
+            // W4C-2 remediation (#4612 gate3 P2-1 self-report ⑥): the route's
+            // OWN pre-transaction winning shift identity — same provenance as
+            // `workDate` above (`punchWorkDate`, not the reassigned
+            // `context`/`timezone` locals) — threaded through for the step-7
+            // candidate-identity gate. `null` only on the unresolved-fallback
+            // branch of `resolvePunchWorkDateByShiftWindow` (no shift
+            // resolved at all); the ambiguous branch already returned 422
+            // above and never reaches here.
+            shiftId:
+              typeof punchWorkDate.shiftId === 'string' && punchWorkDate.shiftId ? punchWorkDate.shiftId : null,
             isWorkday: context.isWorkingDay,
             holidayKind: null,
           })

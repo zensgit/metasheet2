@@ -242,6 +242,20 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const tzRaceUser = randomUUID()
   const TZ_RACE_OCCURRED_AT = '2026-07-19T12:00:00.000Z'
 
+  // ---------------------------------------------------------------------
+  // Group D (#4612 gate3 P2-1 self-report ⑥ closure): a shiftId-ONLY race —
+  // workDate held FIXED across the race, only the winning shift swaps. Both
+  // candidate shifts cover the SAME calendar day and BOTH windows contain the
+  // fixed punch instant, so this is the narrower race the pre-widening
+  // `identityDrift` (workDate-only) provably let through silently.
+  // ---------------------------------------------------------------------
+  const sidOrg = randomUUID()
+  const sidShiftX = randomUUID() // route-visible at read time
+  const sidShiftY = randomUUID() // race-installed, same day, different shift
+  const sidUser = randomUUID()
+  const SID_DAY = '2026-07-21'
+  const SID_OCCURRED_AT = '2026-07-21T10:00:00.000Z'
+
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
@@ -254,7 +268,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
     priorAllowlistEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
-    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = [shadowOrgA, raceOrg, tzRaceOrg].join(',')
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = [shadowOrgA, raceOrg, tzRaceOrg, sidOrg].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
@@ -301,10 +315,19 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     await insertActiveUser(tzRaceUser, tzRaceOrg)
     await insertShift(tzRaceShift, tzRaceOrg, 'W4C2-P21-TzRace', 'UTC', '06:00', '22:00', false)
     await insertAssignment(randomUUID(), tzRaceOrg, tzRaceUser, tzRaceShift, '2026-07-19')
+
+    // Group D fixtures (shiftId-only race). Both shifts non-overnight, SAME
+    // day (SID_DAY), both windows contain SID_OCCURRED_AT — only shiftX is
+    // assigned/active at route-read time.
+    await insertShadowRolloutRow(sidOrg)
+    await insertActiveUser(sidUser, sidOrg)
+    await insertShift(sidShiftX, sidOrg, 'W4C2-P21-SidX', 'UTC', '09:00', '17:00', false)
+    await insertShift(sidShiftY, sidOrg, 'W4C2-P21-SidY', 'UTC', '08:00', '18:00', false)
+    await insertAssignment(randomUUID(), sidOrg, sidUser, sidShiftX, SID_DAY)
   }, 120000)
 
   afterAll(async () => {
-    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser]) {
+    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -523,5 +546,129 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs[0].attribution_snapshot.value.workDate).toBe('2026-07-19')
     expect(calcs[0].attribution_snapshot.value.shiftId).toBe(tzRaceShift)
     expect(calcs[0].context_snapshot.timezone).toBe('Asia/Kolkata')
+  })
+
+  // Group D (#4612 gate3 P2-1 self-report ⑥ closure). Before the step-7 gate
+  // widening this leg observably slipped through: `identityDrift` compared
+  // ONLY `workDate` (unchanged by this race by construction), so the
+  // shadow calculation completed against the RACE-INSTALLED shift's context
+  // with `outcome='completed'` — a fail-open. Proven via the mutation table
+  // in the PR body (neutering the `shiftId` half of `identityDrift` flips
+  // this leg's `outcome` assertion back to `completed`, matching pre-fix
+  // behavior byte-for-byte).
+  it('Group D: a shiftId-ONLY race (workDate held fixed, only the winning shift swaps) hits the widened step-7 candidate-identity gate', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(sidUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: SID_OCCURRED_AT, timezone: 'UTC', orgId: sidOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B: swap the ACTIVE assignment from shiftX to shiftY —
+      // SAME user, SAME day (SID_DAY), a genuine committed write fully
+      // independent of connection A. Both shifts' windows contain
+      // SID_OCCURRED_AT, so the in-transaction re-resolution stays
+      // non-ambiguous (single matching candidate) throughout.
+      const asgX = (await pool.query(
+        'SELECT id::text AS id FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2 AND shift_id = $3',
+        [sidOrg, sidUser, sidShiftX],
+      )).rows[0].id
+      await pool.query('UPDATE attendance_shift_assignments SET is_active = false WHERE id = $1', [asgX])
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+         VALUES ($1, $2, $3, $4, $5, $5, true, 'published', 1)`,
+        [randomUUID(), sidOrg, sidUser, sidShiftY, SID_DAY],
+      )
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+    }
+
+    expect(res.status, res.raw).toBe(200)
+    expect(res.body?.ok).toBe(true)
+    // Legacy projection intact: still keyed at SID_DAY (the day never
+    // changed in this race), unaffected by the canonical-side downgrade.
+    const rows = await recordRow(sidUser)
+    expect(rows.length).toBe(1)
+    expect(rows[0].work_date).toBe(SID_DAY)
+
+    const calcs = await calculationRowsForUser(sidUser)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].outcome).toBe('review_required')
+    expect(calcs[0].outcome_reason_code).toBe('context_mismatch')
+    expect(calcs[0].expected_segment_count).toBe(0)
+    expect(await segmentCountForCalculation(calcs[0].id)).toBe(0)
+    // The freeze step genuinely re-resolved in-transaction to the
+    // race-installed winner (shiftY) — same day, DIFFERENT shift — proving
+    // the gate is driven by the transaction's own snapshot, not a stale
+    // route value.
+    expect(calcs[0].attribution_snapshot.posture).toBe('resolved_v2')
+    expect(calcs[0].attribution_snapshot.value.workDate).toBe(SID_DAY)
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(sidShiftY)
+  })
+
+  // Race-genuineness control for Group D (`feedback_toctou_needs_constructed_race`):
+  // with connection B's two writes (deactivate asgX / install shiftY) removed
+  // and the seam pause kept, the SAME punch must complete normally —
+  // otherwise Group D's `review_required` would be an artifact of fixture
+  // assembly order, not the constructed race.
+  it('Group D positive control: with connection B disarmed (no shift swap), the SAME punch shape completes normally', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    const controlUser = randomUUID()
+    await insertActiveUser(controlUser, sidOrg)
+    await insertAssignment(randomUUID(), sidOrg, controlUser, sidShiftX, SID_DAY)
+
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(controlUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: SID_OCCURRED_AT, timezone: 'UTC', orgId: sidOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B intentionally disarmed: no assignment mutation at all.
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+      await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
+    }
+
+    expect(res.status, res.raw).toBe(200)
+    const calcs = await calculationRowsForUser(controlUser)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].outcome).toBe('completed')
+    expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(sidShiftX)
   })
 })
