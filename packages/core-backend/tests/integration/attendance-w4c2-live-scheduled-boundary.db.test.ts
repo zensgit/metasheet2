@@ -192,6 +192,10 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     process.env.DATABASE_URL = dbUrl
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
+    // Stage D no-env leg precondition: this server activates WITHOUT the W4
+    // segment-calculation allowlist env, so the outbox drain worker must NOT
+    // exist (the paired env-present leg lives in the posture-matrix suite).
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [path.join(repoRoot, 'plugins', 'plugin-attendance')] })
@@ -306,6 +310,19 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect(res.body?.error?.message).toBe('SEGMENT_CALCULATION_SUSPENDED')
     expect(await eventCount(suspendedLiveUser)).toBe(0)
     expect(await recordCount(suspendedLiveUser)).toBe(0)
+  })
+
+  it('no allowlist env at activate => NO outbox drain worker exists (byte-identical runtime; paired env-present leg in the posture-matrix suite)', async () => {
+    const plugin = settingsRowRequireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+      __attendanceW4OutboxDrainForTests?: {
+        getState(): { gated: boolean }
+        runOnce(): Promise<unknown>
+      }
+    }
+    const probe = plugin.__attendanceW4OutboxDrainForTests
+    expect(probe).toBeTruthy()
+    expect(probe!.getState()).toEqual({ gated: false })
+    await expect(probe!.runOnce()).rejects.toThrow('W4_OUTBOX_DRAIN_NOT_GATED')
   })
 
   it('suspended rollout org: administrator absence run reports the closed suspended outcome and inserts NO absent row (positive control: legacy-state org generates)', async () => {

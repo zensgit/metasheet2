@@ -549,6 +549,12 @@ let autoShiftAutoWriteSchedulerUnregister = null
 let attendanceReportDigestSchedulerUnregister = null
 let reportSyncScheduledTriggerSchedulerUnregister = null
 let annualLeaveAccrualSchedulerUnregister = null
+// W4C-2 Stage D (#4556 lock 7.1a delivery side): the durable result-event outbox drain
+// worker. `w4OutboxDrainRunOnce` is non-null ONLY when the activate-time env gate passed
+// (ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED non-empty AND the host port present) — the
+// test probe reads it to prove "no env => no worker => byte-identical runtime".
+let w4OutboxDrainSchedulerUnregister = null
+let w4OutboxDrainRunOnce = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -22500,6 +22506,16 @@ module.exports = {
   // exported nested one bag down, so the top-level optional call silently no-op'd
   // and the 60s settings cache leaked across tests in the shared attendance suite.
   resetAttendanceSettingsCacheForTests,
+  // W4C-2 Stage D: runtime probe for the env-gated outbox drain worker. `getState().gated`
+  // is true ONLY when activate saw ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED non-empty
+  // (no env => no worker); `runOnce()` is the EXACT closure the shared scheduler ticks, so
+  // a test drain proves the production glue (port dispatcher + plugin emitEvent), not a copy.
+  __attendanceW4OutboxDrainForTests: {
+    getState: () => ({ gated: w4OutboxDrainRunOnce !== null }),
+    runOnce: () => (w4OutboxDrainRunOnce
+      ? w4OutboxDrainRunOnce()
+      : Promise.reject(new Error('W4_OUTBOX_DRAIN_NOT_GATED'))),
+  },
   __attendanceShiftServiceForTests: {
     lib: attendanceShiftServiceLib,
     getService: getAttendanceShiftService,
@@ -44902,6 +44918,35 @@ module.exports = {
 	        name: 'attendance-annual-leave-accrual',
 	        run: () => runAnnualLeaveAccrualScheduledTriggerOnce(db, logger, { emitEvent }),
 	      }) ?? null
+	      // W4C-2 Stage D (#4556 lock 7.1a delivery side): durable result-event outbox drain
+	      // worker. Unlike the dormant-run jobs above, REGISTRATION ITSELF is env-gated on the
+	      // SAME variable as the posture allowlist (ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+	      // non-empty): no env => no job object exists at all => byte-identical runtime (the
+	      // lock's disabled=byte-identical bar — shadow orgs cannot exist without this env, so
+	      // no outbox row can ever wait on a worker this gate withheld). The drain pass is the
+	      // host port's dispatcher (SKIP LOCKED claim -> emit -> same-transaction delivered
+	      // flip, per-row failure containment); this closure only glues it to the plugin's
+	      // emitEvent. Ticking cadence is owned by the shared attendance scheduler
+	      // (ATTENDANCE_SCHEDULER_ENABLED), same as every other job registered here.
+	      if (w4OutboxDrainSchedulerUnregister) {
+	        w4OutboxDrainSchedulerUnregister()
+	        w4OutboxDrainSchedulerUnregister = null
+	      }
+	      w4OutboxDrainRunOnce = null
+	      const w4OutboxDrainEnvGate = String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+	      if (
+	        w4OutboxDrainEnvGate
+	        && attendanceW4SegmentCalculationPort
+	        && typeof attendanceW4SegmentCalculationPort.drainResultEventOutbox === 'function'
+	      ) {
+	        w4OutboxDrainRunOnce = () => attendanceW4SegmentCalculationPort.drainResultEventOutbox({
+	          emit: (delivery) => { emitEvent(delivery.eventKind, delivery.payload) },
+	        })
+	        w4OutboxDrainSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	          name: 'attendance-w4-result-outbox-drain',
+	          run: w4OutboxDrainRunOnce,
+	        }) ?? null
+	      }
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -44932,6 +44977,11 @@ module.exports = {
 	      reportSyncScheduledTriggerSchedulerUnregister()
 	      reportSyncScheduledTriggerSchedulerUnregister = null
 	    }
+	    if (w4OutboxDrainSchedulerUnregister) {
+	      w4OutboxDrainSchedulerUnregister()
+	      w4OutboxDrainSchedulerUnregister = null
+	    }
+	    w4OutboxDrainRunOnce = null
 	    if (annualLeaveAccrualSchedulerUnregister) {
 	      annualLeaveAccrualSchedulerUnregister()
 	      annualLeaveAccrualSchedulerUnregister = null
