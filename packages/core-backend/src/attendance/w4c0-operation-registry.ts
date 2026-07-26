@@ -48,7 +48,7 @@ import {
 } from './w4c0-identity'
 import {
   requireAuthorizedCapabilityForEntrypointV1,
-  recheckAttendanceAuthorizationInTransactionV1,
+  recheckAttendanceActorLivenessInTransactionV1,
   type AuthorizedAttendanceWriteContextV1,
 } from './w4c0-authorization'
 import {
@@ -578,7 +578,7 @@ export async function attendanceResultOperationPreflightV1(
   if (auth.orgId !== plan.orgKey) {
     throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
   }
-  await recheckAttendanceAuthorizationInTransactionV1(trx, auth)
+  await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
 
   // Step 1 (cont.): non-locking read of exact keys in stable order — an
   // all-completed congruent replay returns with zero DML even under suspension.
