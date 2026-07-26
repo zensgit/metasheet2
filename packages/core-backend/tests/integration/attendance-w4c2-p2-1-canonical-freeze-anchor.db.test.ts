@@ -102,6 +102,15 @@ import { Pool } from 'pg'
 import {
   assertLegacyPunchResponseGoldenShapeResolvedV1,
 } from '../utils/attendance-w4c2-golden-response'
+import { __computeAttendanceOuterAttributionValueForTestsV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
+import {
+  canonicalAttendanceJsonV1,
+  computeAttendanceSemanticInputFingerprintV1,
+} from '../../src/attendance/w4c0-fingerprints'
+import {
+  computeAttendanceSourceDefinitionFingerprintV1,
+  computeAttendanceOuterComparableSourceDefinitionFingerprintV1,
+} from '../../src/attendance/w4c1-fingerprints'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -205,7 +214,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     (await pool.query(
       `SELECT c.id::text AS id, c.outcome, c.outcome_reason_code, c.expected_segment_count,
               c.semantic_input_fingerprint, c.source_definition_fingerprint,
-              c.attribution_snapshot, c.context_snapshot, c.evidence_snapshot
+              c.attribution_snapshot, c.context_snapshot, c.evidence_snapshot,
+              c.approved_facts_snapshot, c.manual_override_snapshot, c.merge_policy,
+              c.calculation_tier, c.engine_version, c.snapshot_schema_version
        FROM attendance_record_calculations c
        JOIN attendance_records r ON r.id = c.attendance_record_id
        WHERE r.user_id = $1
@@ -254,6 +265,15 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const tzRaceShift = randomUUID()
   const tzRaceUser = randomUUID()
   const TZ_RACE_OCCURRED_AT = '2026-07-19T12:00:00.000Z'
+  // L6's own race UPDATEs `attendance_shifts.timezone` on `tzRaceShift`
+  // ITSELF (not a per-user assignment row, unlike Group D/D-overnight) — a
+  // committed, non-transactional, shift-row-global mutation that persists
+  // for the rest of the suite once L6 runs. The L6 positive control
+  // therefore needs its OWN, never-raced shift row (round 3 finding ③,
+  // caught empirically: reusing `tzRaceShift` made the control observe
+  // 'Asia/Kolkata' regardless of connection B, because L6 had already
+  // mutated the shared row before the control ran).
+  const tzRaceControlShift = randomUUID()
 
   // ---------------------------------------------------------------------
   // Group D (#4612 gate3 P2-1 self-report ⑥ closure): a shiftId-ONLY race —
@@ -331,6 +351,29 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const eDay2User = randomUUID()
   const EDAY2_OCCURRED_AT = '2026-07-20T03:00:00.000Z'
 
+  // ---------------------------------------------------------------------
+  // Group F (O-5 decisive probe, #4612 gate3 P2-1 round 3): the SAME
+  // zero-concurrency self-observation shape as Group E / eDay2 (identical
+  // shift geometry + occurredAt/timezone — reproduces the SAME
+  // `OPEN_PREVIOUS_NIGHT_RECORD` (inner) vs `PREVIOUS_NIGHT_CONTAINING_SHIFT`
+  // (outer) reasonCode flip), but on its OWN fixture (fresh org/user/shift)
+  // so the seam-captured outer resolution and the persisted inner
+  // `attribution_snapshot` can both be read back for THIS one operation
+  // without colliding with eDay2's own assertions. Not a race — a genuine
+  // SAME-operation, SAME-connection, zero-concurrency self-observation:
+  // outer = the route's PRE-transaction read (before step 3's legacy write
+  // exists); inner = the freeze step's POST-step-3 read (same transaction,
+  // same snapshot, step 3 already committed within it). Every field of
+  // `attribution.value` is diffed, not just `reasonCode` — this is the
+  // decisive experiment the O-5 write-up in the PR body is based on, not an
+  // argued claim.
+  // ---------------------------------------------------------------------
+  const fProbeOrg = randomUUID()
+  const fProbeShift = randomUUID()
+  const fProbeUser = randomUUID()
+  const FPROBE_EDAY = EDAY
+  const FPROBE_OCCURRED_AT = EDAY2_OCCURRED_AT
+
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
@@ -344,7 +387,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     process.env.SKIP_PLUGINS = 'false'
     priorAllowlistEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED =
-      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, osidOrg, eDay1Org, eDay2Org].join(',')
+      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, osidOrg, eDay1Org, eDay2Org, fProbeOrg].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
@@ -391,6 +434,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     await insertActiveUser(tzRaceUser, tzRaceOrg)
     await insertShift(tzRaceShift, tzRaceOrg, 'W4C2-P21-TzRace', 'UTC', '06:00', '22:00', false)
     await insertAssignment(randomUUID(), tzRaceOrg, tzRaceUser, tzRaceShift, '2026-07-19')
+    await insertShift(tzRaceControlShift, tzRaceOrg, 'W4C2-P21-TzRaceControl', 'UTC', '06:00', '22:00', false)
 
     // Group D fixtures (shiftId-only race). Both shifts non-overnight, SAME
     // day (SID_DAY), both windows contain SID_OCCURRED_AT — only shiftX is
@@ -422,10 +466,17 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     await insertActiveUser(eDay2User, eDay2Org)
     await insertShift(eDay2Shift, eDay2Org, 'W4C2-P21-EDay2', 'UTC', '22:00', '06:00', true)
     await insertAssignment(randomUUID(), eDay2Org, eDay2User, eDay2Shift, EDAY)
+
+    // Group F fixtures (O-5 probe). Byte-identical shift geometry to Group E's
+    // eDay2, own org/user/shift so the two operations cannot interfere.
+    await insertShadowRolloutRow(fProbeOrg)
+    await insertActiveUser(fProbeUser, fProbeOrg)
+    await insertShift(fProbeShift, fProbeOrg, 'W4C2-P21-FProbe', 'UTC', '22:00', '06:00', true)
+    await insertAssignment(randomUUID(), fProbeOrg, fProbeUser, fProbeShift, FPROBE_EDAY)
   }, 120000)
 
   afterAll(async () => {
-    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User]) {
+    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User, fProbeUser]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -491,7 +542,25 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
         new Date(driftValue.absoluteWindow.endAt).getTime() + driftValue.attributionTailMinutes * 60_000,
       ).toISOString(),
     )
-    expect(driftCalcs[0].semantic_input_fingerprint).toMatch(/^[0-9a-f]{64}$/)
+    // #4612 gate3 P2-1 round 3 finding ②: `.toMatch(/^[0-9a-f]{64}$/)` has
+    // ZERO discriminating power — ANY 64-hex value satisfies it, including a
+    // completely wrong one. Replaced with VALUE-PROVENANCE assertions:
+    // independently recompute each fingerprint (from the SAME persisted
+    // inputs, via the real production functions, NOT reusing anything the
+    // tested code path itself returned) and require the stored column to
+    // equal that recomputation exactly.
+    const recomputedSemanticFingerprint = computeAttendanceSemanticInputFingerprintV1({
+      attribution: driftCalcs[0].attribution_snapshot,
+      context: driftCalcs[0].context_snapshot,
+      evidence: driftCalcs[0].evidence_snapshot,
+      approvedFacts: driftCalcs[0].approved_facts_snapshot,
+      manualOverride: driftCalcs[0].manual_override_snapshot,
+      mergePolicy: driftCalcs[0].merge_policy,
+      calculationTier: driftCalcs[0].calculation_tier,
+      engineVersion: driftCalcs[0].engine_version,
+      snapshotSchemaVersion: driftCalcs[0].snapshot_schema_version,
+    })
+    expect(driftCalcs[0].semantic_input_fingerprint).toBe(recomputedSemanticFingerprint)
     // #4612 gate3 P2-1 self-report ⑥ closure: `source_definition_fingerprint`
     // must be sealed from the dedicated W4C-1 domain
     // (`computeAttendanceSourceDefinitionFingerprintV1`), never aliased to
@@ -500,8 +569,29 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     // attribution/context inputs, because they hash under different
     // domain-separation prefixes and (semantic) additionally folds in
     // evidence/approvedFacts/mergePolicy/calculationTier/engineVersion.
-    expect(driftCalcs[0].source_definition_fingerprint).toMatch(/^[0-9a-f]{64}$/)
+    const recomputedSourceDefinitionFingerprint = computeAttendanceSourceDefinitionFingerprintV1({
+      attribution: driftCalcs[0].attribution_snapshot,
+      context: driftCalcs[0].context_snapshot,
+    })
+    expect(driftCalcs[0].source_definition_fingerprint).toBe(recomputedSourceDefinitionFingerprint)
     expect(driftCalcs[0].source_definition_fingerprint).not.toBe(driftCalcs[0].semantic_input_fingerprint)
+
+    // "Hex-swap knife" (round 3 finding ②): prove the equality assertions
+    // above actually discriminate. `attendance_record_calculations` is
+    // append-only (a real `UPDATE` against it was tried while drafting this
+    // probe and hit `W4C0_IMMUTABLE: UPDATE is not permitted` — the trigger
+    // `attendance_w4_deny_mutation`, itself a real invariant this suite does
+    // NOT want to bypass) — so the swap is demonstrated on a value, not by
+    // mutating the immutable row: a DIFFERENT, still-legal, 64-hex value is
+    // exactly what the old `.toMatch(/^[0-9a-f]{64}$/)` regex would have
+    // accepted (proving it had zero discriminating power), and is exactly
+    // what the NEW value-provenance assertion (`.toBe(recomputed...)`)
+    // rejects — i.e. this is the literal boolean the real assertion would
+    // evaluate to `false` on if the column ever held this value instead.
+    const wrongButLegalHex = (randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')).slice(0, 64)
+    expect(wrongButLegalHex).toMatch(/^[0-9a-f]{64}$/) // old regex: would have passed (zero discrimination)
+    expect(wrongButLegalHex).not.toBe(recomputedSourceDefinitionFingerprint) // new assertion: correctly rejects it
+
     expect(driftCalcs[0].context_snapshot.workDate).toBe('2026-07-19')
 
     // L4 positive control: client tz == shift tz (no drift) resolves
@@ -697,6 +787,66 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs[0].outcome_reason_code).toBe('context_mismatch')
     expect(calcs[0].expected_segment_count).toBe(0)
     expect(await segmentCountForCalculation(calcs[0].id)).toBe(0)
+  })
+
+  // Race-genuineness control for L6 (round 3 finding ③, `feedback_toctou_
+  // needs_constructed_race` / `feedback_positive_control_not_failclosed`):
+  // Group D, Group D-overnight, and Group E all have a positive control —
+  // L6, the ONLY leg that proves the NEW fingerprint-only conjunct on its
+  // own, did not. With connection B's timezone-swap UPDATE removed (seam
+  // pause kept, identical fixture shape, own user so it cannot collide with
+  // L6's own row), the SAME punch must complete normally — otherwise L6's
+  // `review_required` could be an artifact of fixture assembly order (e.g.
+  // an env/allowlist mismatch, a stale rollout row) rather than the
+  // constructed shift-definition race.
+  it('L6 positive control: with connection B disarmed (no timezone swap), the SAME punch shape completes normally', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    const controlUser = randomUUID()
+    await insertActiveUser(controlUser, tzRaceOrg)
+    // Uses `tzRaceControlShift` — its OWN, never-raced shift row — NOT
+    // `tzRaceShift` (see that const's own comment: L6's race committed a
+    // permanent `timezone='Asia/Kolkata'` mutation on `tzRaceShift` itself,
+    // which would make this control observe 'Asia/Kolkata' unconditionally
+    // regardless of connection B, independent of test declaration order).
+    await insertAssignment(randomUUID(), tzRaceOrg, controlUser, tzRaceControlShift, '2026-07-19')
+
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(controlUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: TZ_RACE_OCCURRED_AT, timezone: 'UTC', orgId: tzRaceOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B intentionally disarmed: no timezone mutation at all.
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+      await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [controlUser]).catch(() => undefined)
+      await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
+    }
+
+    expect(res.status, res.raw).toBe(200)
+    const calcs = await calculationRowsForUser(controlUser)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].outcome).toBe('completed')
+    expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
+    expect(calcs[0].context_snapshot.timezone).not.toBe('Asia/Kolkata')
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(tzRaceControlShift)
   })
 
   // Group D (#4612 gate3 P2-1 self-report ⑥ closure). Before the step-7 gate
@@ -995,5 +1145,143 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     // so the L2/L3 exclusivity property is unaffected by which of the two
     // "previous night" reason codes fires.
     expect(calcs2[0].attribution_snapshot.value.reasonCode).toBe('OPEN_PREVIOUS_NIGHT_RECORD')
+  })
+
+  // Group F (O-5 decisive probe, #4612 gate3 P2-1 round 3): full-field diff of
+  // the outer (PRE-step-3) vs inner (POST-step-3, persisted) attribution
+  // value on the SAME zero-concurrency self-observation shape as eDay2 —
+  // NOT just their `reasonCode`s, NOT just their fingerprints. This is the
+  // decisive experiment behind the O-5 write-up's "the drift set is exactly
+  // {resolvedAt, reasonCode}" claim: it is asserted here empirically, not
+  // argued. The seam fires AFTER the route's own outer resolution/context
+  // computation and BEFORE the canonical transaction (and therefore before
+  // step 3's legacy write) opens — capturing those raw objects lets the test
+  // reconstruct the outer `attribution.value` via the SAME public builder
+  // (`__computeAttendanceOuterAttributionValueForTestsV1`, a thin TEST-ONLY
+  // wrapper around the exact `attributionFromResolution` call the production
+  // outer-fingerprint computation itself makes) and diff it key-by-key
+  // against the persisted `attribution_snapshot.value` (the inner, freeze
+  // step's own result).
+  it('Group F (O-5 probe): outer-vs-inner attribution.value full-field diff on the eDay2 self-observation shape — drift set is EXACTLY {resolvedAt, reasonCode}, asserted per-field, not argued', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    let captured: { outerResolution: unknown; outerContext: unknown } | null = null
+    setSeam(async (ctx: { outerResolution: unknown; outerContext: unknown }) => {
+      captured = { outerResolution: ctx.outerResolution, outerContext: ctx.outerContext }
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(fProbeUser)
+      res = await punch(token, {
+        eventType: 'check_in', occurredAt: FPROBE_OCCURRED_AT, timezone: 'Asia/Tokyo', orgId: fProbeOrg, operationId: randomUUID(),
+      })
+    } finally {
+      setSeam(null)
+    }
+    expect(res.status, res.raw).toBe(200)
+    expect(captured).not.toBeNull()
+    const { outerResolution, outerContext } = captured as { outerResolution: unknown; outerContext: unknown }
+    expect(outerResolution && (outerResolution as { kind: string }).kind).toBe('resolved')
+
+    const calcs = await calculationRowsForUser(fProbeUser)
+    expect(calcs.length).toBe(1)
+    const inner = calcs[0].attribution_snapshot.value as Record<string, unknown>
+    expect(inner.reasonCode).toBe('OPEN_PREVIOUS_NIGHT_RECORD') // same self-observation flip as eDay2 (inner sees step 3's own write)
+
+    const outer = __computeAttendanceOuterAttributionValueForTestsV1({
+      orgId: fProbeOrg,
+      userId: fProbeUser,
+      source: 'live_resolution',
+      nowIso: new Date().toISOString(),
+      resolution: outerResolution as Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['resolution'],
+      context: outerContext as Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['context'],
+    })
+    expect(outer).not.toBeNull()
+    const outerValue = outer as Record<string, unknown>
+    expect(outerValue.reasonCode).toBe('PREVIOUS_NIGHT_CONTAINING_SHIFT') // outer never sees step 3's own write
+
+    // Enumerate the ACTUAL drift set (every key present on either side).
+    // Compared via `canonicalAttendanceJsonV1` (the SAME key-order-independent
+    // canonicalizer the production fingerprints hash over) — NOT raw
+    // `JSON.stringify`, which is key-order-sensitive and produced a false
+    // positive on `absoluteWindow`/`attributionWindow` here: `inner` is read
+    // back through a JSONB column (Postgres does not preserve JS insertion
+    // key order on round-trip) while `outerValue` is a freshly-built JS
+    // object literal — same field values, different JS key enumeration
+    // order. Confirmed via a raw diff dump before landing this canonicalized
+    // comparison (see the PR body's Group F section for the raw dump this
+    // caught).
+    const allKeys = new Set([...Object.keys(outerValue), ...Object.keys(inner)])
+    const driftFields: string[] = []
+    for (const key of allKeys) {
+      if (canonicalAttendanceJsonV1(outerValue[key] ?? null) !== canonicalAttendanceJsonV1(inner[key] ?? null)) {
+        driftFields.push(key)
+      }
+    }
+    driftFields.sort()
+
+    // HARD CONSTRAINT (task instruction): the exclusion set is FROZEN at
+    // {resolvedAt, reasonCode} for this round. If the empirical drift set is
+    // anything else, that is a finding to escalate, not a set to silently
+    // widen — this assertion is deliberately exact-equality, not
+    // "at-least"/subset, so a THIRD drifting field fails this test loudly.
+    expect(driftFields).toEqual(['reasonCode', 'resolvedAt'])
+
+    // Positive confirmation that the non-excluded fields are BYTE-IDENTICAL
+    // (not merely "not in driftFields" by omission) — the fields the
+    // narrowed comparison domain actually still relies on for its
+    // subsumption argument.
+    for (const key of [
+      'workDate', 'shiftId', 'absoluteWindow', 'attributionWindow', 'attributionTailMinutes',
+      'extendedByApprovedOvertime', 'windowEvidenceFingerprint', 'source', 'schemaVersion', 'resolverVersion',
+      'orgId', 'userId',
+    ]) {
+      expect(outerValue[key], `field '${key}' expected byte-identical outer vs inner`).toEqual(inner[key])
+    }
+
+    // Round 3 finding ⑤: "the reasonCode exclusion is only backed by a code
+    // comment" — give it a leg. `computeAttendanceSourceDefinitionFingerprintV1`
+    // (the STORAGE domain) is, field-for-field, the EXACT SAME computation as
+    // `computeAttendanceOuterComparableSourceDefinitionFingerprintV1` (the
+    // OUTER-VS-INNER comparison domain) with `reasonCode` NOT in its
+    // exclusion set — i.e. it IS "the same code with reasonCode deleted from
+    // the exclusion set", not an analogous stand-in for it (compare the two
+    // functions' bodies in `w4c1-fingerprints.ts`: identical except the
+    // `Set([...])` literal). Using it here proves, on THIS operation's real
+    // captured outer/inner values (not synthetic ones), that removing the
+    // exclusion reproduces the zero-concurrency false positive: the narrow
+    // (production) domain must agree outer-vs-inner; the wide (storage)
+    // domain, with `reasonCode` reinstated, must NOT — exactly the drift the
+    // exclusion exists to suppress. A companion real SOURCE mutation (`Set(
+    // ['resolvedAt', 'reasonCode'])` -> `Set(['resolvedAt'])`) was also run
+    // by hand against this same test file's Group E `eDay2` leg (which
+    // asserts `outcome === 'completed'`) and flipped it to
+    // `review_required`/`context_mismatch` — see the PR body's ⑤ section for
+    // that run's exact output; not re-run here as a standing test because it
+    // requires a source edit, but the assertion below is the SAME claim
+    // verified without one, and is what actually runs in CI.
+    const outerAttribution = { posture: 'resolved_v2' as const, value: outerValue as unknown }
+    const innerAttribution = { posture: 'resolved_v2' as const, value: inner as unknown }
+    const outerContextSnapshot = outerContext as unknown
+    const innerContextSnapshot = calcs[0].context_snapshot as unknown
+    const narrowOuter = computeAttendanceOuterComparableSourceDefinitionFingerprintV1({
+      attribution: outerAttribution, context: outerContextSnapshot,
+    })
+    const narrowInner = computeAttendanceOuterComparableSourceDefinitionFingerprintV1({
+      attribution: innerAttribution, context: innerContextSnapshot,
+    })
+    expect(narrowOuter).not.toBeNull()
+    expect(narrowOuter).toBe(narrowInner) // production domain: reasonCode excluded -> agrees (no false positive)
+    const wideOuter = computeAttendanceSourceDefinitionFingerprintV1({
+      attribution: outerAttribution, context: outerContextSnapshot,
+    })
+    const wideInner = computeAttendanceSourceDefinitionFingerprintV1({
+      attribution: innerAttribution, context: innerContextSnapshot,
+    })
+    expect(wideOuter).not.toBeNull()
+    expect(wideOuter).not.toBe(wideInner) // reasonCode reinstated -> the exact false positive the exclusion suppresses
   })
 })
