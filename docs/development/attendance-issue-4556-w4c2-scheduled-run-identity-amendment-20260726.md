@@ -115,10 +115,24 @@
 > "restricted to the two unconditional tokens," matching section 3.1's
 > row's own "(i) over (ii-wide) among the two unconditional tokens"
 > construction. This paragraph does not itself claim the resulting sweep
-> is now exhaustive; the current, word-pattern-based (not
-> hyphenation-specific) census of every ballot-cardinality wording site
-> in this document and the PR body is carried in the PR body's revision
-> record, not restated here.
+> is now exhaustive, and — correcting a further overclaim caught by the
+> readiness review — neither does the census it points at. That census is
+> **vocabulary-scoped, not exhaustive**: it is word-pattern-based rather
+> than hyphenation-specific, which is broader than the fourth pass's
+> sweep, but its adjacency patterns are still defeated by a qualifier
+> inserted between the count word and `tokens`. At least four cardinality
+> statements are therefore absent from it — those the readiness review
+> identified, which is itself a vocabulary-scoped result and not a proof
+> that no fifth exists: section 3.1's ballot row
+> (`Two unconditional tokens, one conditional token`), section 3.2's
+> `(i)`/`(ii-wide)` summary, section 4's per-token restatement, and the
+> retraction marker — precisely because each says `two unconditional
+> tokens` rather than `two tokens`. All four state the three-token
+> cardinality correctly, so the defect is in the census's claim to
+> completeness, not in the ballot: a reader re-running it must widen the
+> pattern past simple adjacency rather than treat its output as a closed
+> set. The census itself is carried in the PR body's revision record,
+> not restated here.
 >
 > This pass also tightens section 3.1's ballot row: its precondition (1)
 > reference said only "corrected, gated mechanism spec," looser than
