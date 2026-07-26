@@ -292,7 +292,11 @@ export function requireAuthorizedCapabilityForEntrypointV1(
 // `withPermission('attendance:admin', ...)` guarding the admin-run scheduled
 // trigger route (`plugins/plugin-attendance/index.cjs` ~L43739, whose handler
 // calls `runAutoAbsenceForOrgDate` -> `executeScheduledRun` -> this recheck)
-// and the equivalent live-punch `withPermission`/self-capability checks. This
+// and `withPermission('attendance:write', ...)` guarding the live-punch
+// route (`plugins/plugin-attendance/index.cjs` ~L26841, POST
+// `/api/attendance/punch`, whose handler calls `executeLivePunch` -> this
+// recheck). Both are real RBAC permission checks (verified by reading the
+// route registration, not assumed), not merely authentication/self-scope. This
 // function's own job is narrower: confirm the actor/subject identity a
 // witness was minted for is STILL live/a member by the time the transaction
 // actually runs (a directory deprovision or activation change between mint
