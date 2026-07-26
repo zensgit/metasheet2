@@ -1481,7 +1481,7 @@ one-pass ratification — see the scope note at the top of this document.
 | `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair to target rows (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a terminal outcome; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
 | `OD-W4C-51` (`O-2`) — canonical order for `ordinal` / resume-guard shape | (a) pin the membership resolution query to `ORDER BY user_id` (or another explicit total order); `ordinal` becomes a pure function of membership; narrow gate 4's "byte-identical to pre-amendment emit" claim to key/value-set equivalence plus the new canonical order; (b) leave resolution order undefined as today; change the resume guard (section 1.7 step 3) to an order-insensitive set fingerprint; withdraw gate 10's "or one ordinal" leg | **(a)**, because the ordered fingerprint this draft already specifies (section 1.3) cannot be satisfied on resume by an unpinned membership query, and pinning without owner sign-off is not available to the author alone — a one-time, disclosed change to `reasons` ordering is preferable to shipping a resume guard that spuriously fires on a benign restart |
 | `OD-W4C-52` (`O-4`) — does a `running` run block shadow/eligible promotion | (a) extend the lock's promotion-block predicate (lock lines 2689-2690, 2250) to treat a `running` `attendance_scheduled_runs` row as blocking, same as an incomplete operation; accept the operational cost that a promotion window must avoid colliding with an in-flight scheduled run; (b) do not block promotion; instead redefine finalization (section 1.8 step 1) to execute under the run's own frozen posture rather than the currently resolved one — a considered, narrow reversal of this draft's own "posture flip is remediation, never a rebase" stance, scoped to finalization only | no recommendation — this is an operational rollout-timing tradeoff ((a)) versus a semantic reversal of a stance this same draft asserts elsewhere ((b)); both are internally consistent, and the choice is the owner's to make, not the author's |
-| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column; (ii) eliminate the self-observation at its root by re-resolving before the legacy write or reordering lock §8.2 steps 3/4, so the **existing** storage-domain fingerprint (unchanged) satisfies step 7 without a second domain | (i), on balance — see section 3.2 for the full argument on both sides; this is **not** the same recommendation strength as `OD-W4C-49..51` above (single defensible option), because (ii) is not unreasonable, it is merely costlier to land safely |
+| `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column; (ii) eliminate the self-observation at its root instead — **(ii-narrow)** exclude the operation's own just-written row from the resolver's `openPreviousMatches` match (cheapest, but this document has not verified it is semantically safe), or **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface) | (i) over (ii-wide) specifically; **no recommendation** against (ii-narrow) — its cost is unknown until the semantic-safety question in section 3.2 is answered, and recommending (i) over an unverified cheaper option would be steering by omission |
 
 ### 3.2 `O-5`/`OD-W4C-53` — a fifth pending decision, bundled from outside this document's own schema
 
@@ -1498,10 +1498,12 @@ the same pass as `O-1..O-4` rather than in a second round-trip.
 **The clause in dispute.** Governing lock section 8.2 step 7 (lock line
 1821-1822): "re-run attribution/context selection from the transaction
 snapshot and require candidate identity plus **source-definition
-fingerprint** equality." Across this whole repository, exactly one thing is
-named "source-definition fingerprint": the storage column
-`attendance_record_calculations.source_definition_fingerprint` (lock
-section 7.3) and its sole producer,
+fingerprint** equality." As of `origin/main`
+`9fdf68fa5c34d2224fbe6bd0d71b14ca78263502` (re-checked at the time of this
+addendum, not the SHA cited elsewhere in this document's header), exactly
+one thing in this repository is named "source-definition fingerprint": the
+storage column `attendance_record_calculations.source_definition_fingerprint`
+(lock section 7.3) and its sole producer,
 `computeAttendanceSourceDefinitionFingerprintV1`
 (`packages/core-backend/src/attendance/w4c1-fingerprints.ts:34`, domain
 separator `SOURCE_DEFINITION_DOMAIN =
@@ -1531,9 +1533,14 @@ the W2 resolver's `openPreviousMatches` branch
 wrote, producing a different `reasonCode` (`OPEN_PREVIOUS_NIGHT_RECORD` vs
 `PREVIOUS_NIGHT_CONTAINING_SHIFT`) than the route's pre-transaction outer
 read could ever have seen — while `workDate` and `shiftId` (the identity
-conjunct) are unchanged. Compared against the storage-domain fingerprint,
-this is a false positive on step 7's equality gate with nothing wrong
-having happened.
+conjunct) are unchanged in the one fixture this was observed on. Compared
+against the storage-domain fingerprint, PR #4612's own diagnosis (its body,
+comment thread addendum 8, and the commit message cited above) treats this
+as a false positive: the resolved candidate did not actually change, only
+the code path/reasonCode that found it. **This document has not
+independently re-verified that diagnosis against the resolver's source**
+beyond the read in the next paragraph — it is reporting PR #4612's own
+claim, not an independent finding of this document's own testing.
 
 **The dispute, stated precisely.** The diagnosis of *why* a false positive
 occurs is not contested by this document. What is contested: lock §8.2 step
@@ -1578,47 +1585,97 @@ column's domain (`{resolvedAt}` only).
   field wide it claims to be, not wider). Both must be mutation-provable
   on real PostgreSQL, per this document's own section 2 standard.
 
-**Option (ii) — eliminate the self-observation at its root.** The owner
-rules, by `OD-W4C-53=(ii)`, that the storage-domain fingerprint (unchanged)
-is what step 7 compares, and the false positive is closed by removing its
-cause: either re-run step 4's candidate re-resolution **before** step 3's
-legacy write commits (so there is nothing to self-observe), or swap the
-order of lock §8.2 steps 3 and 4 outright.
-- *Consequences.* No second fingerprint domain is ever introduced — the
-  compared object stays exactly the object lock §8.2 step 7 names, with no
-  new dual-copy risk. The cost is structural: lock §8.2's numbered step
-  sequence is cited by name elsewhere in the **already-RATIFIED** governing
-  lock (e.g. lock lines 2177 "the section 8.2 order", 2283 "8.2 and
-  performs zero source/result DML"), so reordering steps 3/4 — or
-  re-running step 4's resolution an extra time — is a change to RATIFIED
-  lock text with a blast radius this document has not audited, not a
-  change confined to the W4C-2 branch. It also touches live-punch
-  behavior more broadly (step 3's legacy write timing relative to
-  candidate resolution), which this run-identity-focused document has no
-  standing to evaluate for side effects beyond this one fingerprint gate.
+**Option (ii) — eliminate the self-observation at its root, not a single
+fix but two sub-variants of differing cost.** The owner rules, by
+`OD-W4C-53=(ii)`, that the storage-domain fingerprint (unchanged) is what
+step 7 compares, and the false positive is closed by removing its cause
+rather than by narrowing the comparison. There are two structurally
+different ways to do that, and this document's earlier draft of this
+section understated the cheaper one — stated here in full to avoid
+steering the owner toward (i) by omission, the same defect a prior advisor
+round caught in this document's `O-1` cell (section 3.1's table, `OD-W4C-49`
+history):
+  - **(ii-narrow) Exclude the operation's own just-written row from
+    `openPreviousMatches`.** `selectAmongMatchingCandidates`
+    (`plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs:371-428`)
+    filters `openRecords` for `hasIn && !hasOut` rows matching the
+    candidate's `workDate` (`:384-395`), with no field in that filter
+    distinguishing "an open record from a prior, unrelated operation" from
+    "the row this same transaction's own step 3 just wrote." If step 4's
+    caller can identify and exclude the latter (by row ID, or by not
+    re-reading `openRecords` past whatever step 3 last touched), the
+    self-observation the commit message describes disappears without
+    touching lock §8.2's step order at all — the smallest possible fix.
+    **This document has not verified that this exclusion is semantically
+    safe.** The candidate the `openPreviousMatches` path finds and the
+    candidate the `PREVIOUS_NIGHT_CONTAINING_SHIFT` path finds converged on
+    the same `workDate`/`shiftId` in the one fixture PR #4612 exercised
+    (Group E / eDay2), but nothing in this document establishes that
+    convergence holds in general. If some real case exists where
+    `openPreviousMatches` is the *only* path that finds a given candidate —
+    i.e., the open record is not incidental corroboration but the sole
+    evidence — excluding the operation's own row would not just change
+    `reasonCode`, it would change the **resolved candidate itself**
+    (potentially to `unresolved`), which is a correctness regression, not a
+    fingerprint-domain fix. Confirming or ruling out that case requires
+    reading `selectAmongMatchingCandidates`'s full candidate-matching logic
+    (`:430-519`, not reproduced here) against real fixtures, which this
+    docs-only pass does not have standing to do unilaterally per this
+    document's own precedent (section 0.1 reason 3: a partial read must not
+    stand in for a full consumer inventory).
+  - **(ii-wide) Reorder or re-resolve lock §8.2 steps 3/4.** Re-run step
+    4's candidate re-resolution **before** step 3's legacy write commits,
+    or swap the order of lock §8.2 steps 3 and 4 outright.
+- *Consequences (both sub-variants).* No second fingerprint domain is ever
+  introduced — the compared object stays exactly the object lock §8.2 step
+  7 names, with no new dual-copy risk.
+  *(ii-narrow)* is confined to `selectAmongMatchingCandidates` and its
+  direct gates (the resolver already has its own gate suite this document
+  did not audit for this specific change), **if** the semantic-safety
+  question above resolves in its favor; if it does not, (ii-narrow) is not
+  available and only (ii-wide) or (i) remain.
+  *(ii-wide)*'s cost is structural: lock §8.2's numbered step sequence is
+  cited by name elsewhere in the **already-RATIFIED** governing lock (e.g.
+  lock lines 2177 "the section 8.2 order", 2283 "8.2 and performs zero
+  source/result DML"), so reordering steps 3/4 — or re-running step 4's
+  resolution an extra time — is a change to RATIFIED lock text with a blast
+  radius this document has not audited, not a change confined to the W4C-2
+  branch. It also touches live-punch behavior more broadly (step 3's legacy
+  write timing relative to candidate resolution), which this
+  run-identity-focused document has no standing to evaluate for side
+  effects beyond this one fingerprint gate.
 - *Gate shape this option needs.* The same Group E / eDay2 fixture, run
-  against the **reordered or re-resolved** transaction, shows the
-  **existing, unmodified** `computeAttendanceSourceDefinitionFingerprintV1`
-  no longer flips between outer and inner reads — i.e., the fix is proven
-  at the point of causation, not papered over by a second comparison
-  domain. Plus a full re-run of every other §8.2 gate in the governing
-  lock and the W4C-1/W4C-2 gate suites unaffected by the reorder, since a
-  step-order change is exactly the kind of edit this document's own
-  precedent (section 0.1 reason 3) warns against making without checking
-  every consumer.
+  against whichever sub-variant is chosen, shows the **existing, unmodified**
+  `computeAttendanceSourceDefinitionFingerprintV1` no longer flips between
+  outer and inner reads — i.e., the fix is proven at the point of causation,
+  not papered over by a second comparison domain. *(ii-narrow)* additionally
+  needs a positive control proving the resolved candidate (not just
+  `reasonCode`) is unchanged across a representative set of fixtures where
+  the open-record path and the containing-shift path would otherwise
+  disagree, to close the semantic-safety gap above. *(ii-wide)* needs a full
+  re-run of every other §8.2 gate in the governing lock and the
+  W4C-1/W4C-2 gate suites unaffected by the reorder, since a step-order
+  change is exactly the kind of edit this document's own precedent (section
+  0.1 reason 3) warns against making without checking every consumer.
 
-**Recommendation, not a decision.** (i), on balance: it is the smaller,
-more contained change — one new domain separator and function, fully
-gated both ways above — against (ii)'s reopening of RATIFIED lock text
-whose citation surface has not been audited here. This is a weaker
-recommendation than `OD-W4C-49..51`'s (there, one option was already
-argued indefensible on its own terms); here, (ii) is the architecturally
+**Recommendation, not a decision.** (i), on balance, against **(ii-wide)**
+specifically: (i) is the smaller, more contained change — one new domain
+separator and function, fully gated both ways above — against (ii-wide)'s
+reopening of RATIFIED lock text whose citation surface has not been audited
+here. Against **(ii-narrow)**, this document makes **no** recommendation:
+(ii-narrow) may be cheaper than (i) if its semantic-safety question resolves
+favorably, and this document has not done the read required to know either
+way — recommending (i) over an unverified cheaper alternative would repeat
+the steering-by-omission this section exists to avoid. This is a weaker
+recommendation than `OD-W4C-49..51`'s (there, one option was already argued
+indefensible on its own terms); here, (ii-wide) is the architecturally
 cleaner fix and would be preferable if its blast radius were already
 bounded — it is not yet, and bounding it is a larger undertaking than this
 docs-only pass can responsibly claim to have scoped. The owner may prefer
-(ii) precisely because it keeps "the compared object is the object the
-lock names" true without carving an exception; that is a legitimate
-reading this document does not get to overrule by recommending against it.
+(ii-wide) or (ii-narrow) precisely because either keeps "the compared
+object is the object the lock names" true without carving an exception;
+that is a legitimate reading this document does not get to overrule by
+recommending against it.
 
 ## 4. Execution sequence
 
