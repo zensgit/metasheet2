@@ -445,6 +445,42 @@ function hostileEntriesIteratorNeverEscapesRaw() {
 }
 
 // ---------------------------------------------------------------------------
+// (6f) P3-latent FIX (post-round-8 review of #4610): assertCanonicalObjectContractRegistryActivationReady's
+// FIRST call — assertTrustedRegistry(registry) — had NO test that ever fed it
+// an untrusted registry. Every existing (7)/(7b) test below calls this
+// function with the GENUINE trusted singleton, so commenting the call out
+// entirely left the full suite green (measured directly: it does — the
+// inventoryReport-side gate right after it, assertTrustedInventoryAttestation,
+// still refuses every caller-shaped inventoryReport those tests pass, so the
+// second door covered for the first going missing). createCanonicalObjectContractRegistry
+// is EXPORTED and grants no trust on its own (P1-1 fix, this same file's
+// forgedRegistryViaExportedFactoryIsRefused test) — calling it here produces
+// a real, well-formed, but UNTRUSTED registry, which is exactly the
+// untrusted-but-genuine-shaped input this gate must still refuse. Asserts
+// the reason, the `details.field` ('registry' — the SAME field name
+// assertTrustedRegistry's own fail() call uses, discriminating this from the
+// inventory-side UNATTESTED reason below, which never sets a `field`), and
+// the message text — reason alone is not enough here for the same reason
+// round 8's own caughtNull.message pin (above) was added: a message-only or
+// field-only assertion could pass against a DIFFERENT guard's failure that
+// happens to reuse the same reason token.
+// ---------------------------------------------------------------------------
+function activationGateRefusesUntrustedRegistry() {
+  const untrustedRegistry = createCanonicalObjectContractRegistry([])
+  const caught = rejects(
+    () => assertCanonicalObjectContractRegistryActivationReady(untrustedRegistry, { inventoryStatus: 'COMPLETE', references: [] }),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'an untrusted-but-genuine registry (built via the exported factory, never granted trust) must be refused by assertTrustedRegistry before the inventoryReport is ever inspected',
+  )
+  assert.equal(caught.details.field, 'registry', 'the registry-trust gate must report field "registry", distinguishing it from the inventory-attestation gate below')
+  assert.equal(
+    caught.message,
+    'a trusted canonical-object-contract registry (from createCanonicalObjectContractRegistry) is required',
+    'the registry-trust gate\'s message must be the exact fixed text assertTrustedRegistry throws — a generic pass/fail check could be satisfied by an unrelated guard sharing the same reason token',
+  )
+}
+
+// ---------------------------------------------------------------------------
 // (7) Activation gate — P1-3 FIX (owner HARD HOLD #4610). REPRODUCES THE
 // OWNER'S EXACT PROBE: a caller-supplied plain object
 // `{ inventoryStatus: 'COMPLETE', references: [] }` — exactly the shape and
@@ -753,6 +789,74 @@ function hasControlCharacterGuardsNonStringInput() {
 }
 
 // ---------------------------------------------------------------------------
+// (8c) P3 FIX (post-round-8 review of #4610) — RETRACTION: this module's own
+// comment and requiredIdentityToken's rejection message both used to claim
+// "printable ASCII is code point 0x20-0x7e"/"printable-char token". FALSE,
+// measured directly here. This function pins the TRUE invariant so the
+// description cannot silently drift from the behavior again: hasControlCharacter
+// rejects ONLY the C0 range (0x00-0x1f) and DEL (0x7f) — nothing else, no
+// matter how non-ASCII or non-"printable" — and requiredIdentityToken accepts
+// every one of those non-ASCII code points when they appear BETWEEN other
+// characters in a token, because trim() only strips LEADING/TRAILING runs.
+// ---------------------------------------------------------------------------
+function hasControlCharacterTrueInvariantIsPinned() {
+  // (a) C0/DEL boundary, exhaustively at the edges — the mutation this
+  // guards against is narrower than "delete the whole function": dropping
+  // JUST the `|| code === 0x7f` disjunct, or narrowing `code < 0x20` to
+  // `code < 0x02`, both left the suite green before these four assertions
+  // existed (measured directly: neither mutation was caught by 'bad\x01text'
+  // alone, since 0x01 is inside both the wide AND the narrowed range).
+  assert.equal(__internals.hasControlCharacter('\x00'), true, '0x00 (NUL) must be detected')
+  assert.equal(__internals.hasControlCharacter('\x1f'), true, '0x1f (US, the top of the C0 range) must be detected')
+  assert.equal(__internals.hasControlCharacter('\x7f'), true, '0x7f (DEL) must be detected — a distinct disjunct from the C0 range, not adjacent to it')
+  assert.equal(__internals.hasControlCharacter('\x20'), false, '0x20 (SPACE, one past the top of C0) must NOT be detected')
+  assert.equal(__internals.hasControlCharacter('\x7e'), false, '0x7e (~, one below DEL) must NOT be detected')
+
+  // (b) The four code points the retracted "printable ASCII 0x20-0x7e" claim
+  // said were rejected, but are not: none of these is inside 0x20-0x7e, and
+  // hasControlCharacter flags none of them.
+  const acceptedByHasControlCharacter = {
+    '0x85 NEL': '\x85',
+    '0xa0 NBSP': '\xa0',
+    'U+2028 LINE SEPARATOR': '\u2028',
+    'U+200b ZWSP': '\u200b',
+  }
+  for (const [name, ch] of Object.entries(acceptedByHasControlCharacter)) {
+    assert.equal(__internals.hasControlCharacter(ch), false, `${name} must NOT be detected as a control character — the retracted comment implied it would be`)
+  }
+
+  // (c) requiredIdentityToken, mid-token (trim only strips LEADING/TRAILING
+  // runs, so placing the character BETWEEN two other characters is the only
+  // shape that isolates hasControlCharacter's own behavior from trim()'s):
+  // all four survive whole, unmodified, inside the returned token.
+  for (const [name, ch] of Object.entries(acceptedByHasControlCharacter)) {
+    const token = `abc${ch}def`
+    const result = __internals.requiredIdentityToken(token, 'field')
+    assert.equal(result, token, `${name} embedded mid-token must be accepted verbatim by requiredIdentityToken`)
+  }
+
+  // (d) The trim() trap this correction names explicitly: NBSP and LINE
+  // SEPARATOR are both in ECMAScript's WhiteSpace/LineTerminator sets, so a
+  // token composed SOLELY of one of them trims to '' and is refused by the
+  // NON-EMPTY check — not by hasControlCharacter, which (per (b) above)
+  // never flags it. NEL and ZWSP are NOT in those sets and survive trim()
+  // unchanged, so a token composed solely of either is ACCEPTED (a single,
+  // one-character, non-empty token).
+  rejects(
+    () => __internals.requiredIdentityToken('\xa0', 'field'),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a token consisting solely of NBSP must be refused — but via the non-empty check after trim(), never via hasControlCharacter',
+  )
+  rejects(
+    () => __internals.requiredIdentityToken('\u2028', 'field'),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a token consisting solely of LINE SEPARATOR must be refused — but via the non-empty check after trim(), never via hasControlCharacter',
+  )
+  assert.equal(__internals.requiredIdentityToken('\x85', 'field'), '\x85', 'a token consisting solely of NEL survives trim() unchanged and must be accepted')
+  assert.equal(__internals.requiredIdentityToken('\u200b', 'field'), '\u200b', 'a token consisting solely of ZWSP survives trim() unchanged and must be accepted')
+}
+
+// ---------------------------------------------------------------------------
 // (9) Vocabulary discipline.
 // ---------------------------------------------------------------------------
 function frozenVocabularyIsExhaustive() {
@@ -783,10 +887,12 @@ function main() {
   hostileGetterOnContractIdVersionOrFieldsNeverEscapesRaw()
   hostileOwnKeysTrapOnFieldsNeverEscapesRaw()
   hostileEntriesIteratorNeverEscapesRaw()
+  activationGateRefusesUntrustedRegistry()
   activationGateRefusesCallerAssertedEvidence()
   activationReadinessMechanism()
   computeActivationReadinessNeverEscapesRawForeignErrors()
   hasControlCharacterGuardsNonStringInput()
+  hasControlCharacterTrueInvariantIsPinned()
   internalsExactKeySet()
   frozenVocabularyIsExhaustive()
   console.log('gip-canonical-object-contract-registry.test.cjs OK')

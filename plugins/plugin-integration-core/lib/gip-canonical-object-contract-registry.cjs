@@ -137,9 +137,33 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
-// Control-char check via explicit char-code comparison (never a regex escape
-// literal) — printable ASCII is code point 0x20-0x7e; anything below 0x20 or
-// exactly 0x7f (DEL) is a control character.
+// RETRACTION (P3 fix, post-round-8 review of #4610): this comment used to
+// read "printable ASCII is code point 0x20-0x7e; anything below 0x20 or
+// exactly 0x7f (DEL) is a control character" — FALSE as a description of
+// what this function accepts. Measured directly against the code as it
+// stands: 0x85 (NEL), 0xa0 (NBSP), U+2028 (LINE SEPARATOR) and U+200b (ZWSP)
+// are all ACCEPTED by hasControlCharacter — none of the four is in
+// 0x20-0x7e, and none of them is flagged. "Printable ASCII 0x20-0x7e" was
+// never an allow-list this code enforced; it was aspirational text that
+// drifted from the code underneath it. The TRUE invariant, measured: this
+// function rejects ONLY the C0 control range (code points 0x00-0x1f) and DEL
+// (0x7f) — every OTHER code point, including non-ASCII and non-printable
+// Unicode above 0x7e, passes through undetected. Control-char check via
+// explicit char-code comparison (never a regex escape literal).
+//
+// TRIM INTERACTION (documented here because it changes what a CALLER sees,
+// even though it happens one level up, in requiredIdentityToken below):
+// `String.prototype.trim()` strips ECMAScript's own WhiteSpace/LineTerminator
+// sets BEFORE this function ever runs. NBSP (0xa0) and LINE SEPARATOR
+// (U+2028) are both in those sets, so a token composed SOLELY of one of them
+// trims to '' and is refused by requiredIdentityToken's non-empty check —
+// not by hasControlCharacter, which never sees it. NEL (0x85) and ZWSP
+// (U+200b) are NOT in ECMAScript's WhiteSpace/LineTerminator sets (despite
+// the "space" in ZWSP's name) — a token composed solely of either survives
+// trim() unchanged and is accepted whole. All four survive untouched, and
+// are therefore accepted, when they appear BETWEEN other characters in an
+// otherwise-valid token (trim only strips leading/trailing runs) — see this
+// module's test file for both shapes measured directly.
 //
 // P1 FIX (owner HARD HOLD #4610, round 8 — closing a review-round-7 false
 // claim): round 7's own commit message asserted "Spot-checked the two
@@ -238,13 +262,21 @@ function readArrayElement(array, index, field) {
   }
 }
 
+// RETRACTION (P3 fix, post-round-8 review of #4610): the rejection message
+// below used to read "must be a non-empty, <=128 printable-char token" —
+// the SAME "printable" overclaim retracted above hasControlCharacter, at the
+// caller-visible surface this time. Corrected to name the actual gates this
+// function applies, in the order it applies them: type, then trim, then
+// non-empty, then length, then hasControlCharacter's C0/DEL check (see that
+// function's comment for what trim() does to whitespace-only tokens before
+// this check ever runs).
 function requiredIdentityToken(value, field) {
   if (typeof value !== 'string') {
     fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', `${field} must be a string`, { field })
   }
   const trimmed = value.trim()
   if (trimmed === '' || trimmed.length > 128 || hasControlCharacter(trimmed)) {
-    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', `${field} must be a non-empty, <=128 printable-char token`, { field })
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', `${field} must be a non-empty, <=128-character token after trimming, with no C0 control characters (0x00-0x1f) or DEL (0x7f)`, { field })
   }
   return trimmed
 }
