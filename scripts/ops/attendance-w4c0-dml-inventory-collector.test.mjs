@@ -202,3 +202,58 @@ test('canonical boundary helper agrees with the classifier on in/out-of-boundary
 test('this collector test file has an explicit CI execution step', () => {
   assert.match(readWorkflow(), new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
 })
+
+// -------------------------------------------------------------------------------------------
+// 6. W4C-2 cutover markers (lock §12.3: "P01 live, P02 merge second-pass, P03 cron absence,
+//    and P04 administrator-run absence inventory entries are removed independently"). Each of
+//    the four entries must INDEPENDENTLY carry the removed-by-adapter marker; no other entry
+//    may be silently marked; and the claim predicates still cover the adapter-owned sites so
+//    unclaimed=0 detection is not bypassed by the removal.
+// -------------------------------------------------------------------------------------------
+test('W4C-2: P01, P02, P03, P04 each independently carry canonicalizedBy=W4C-2 — and only they do', () => {
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  // Four independent assertions — removing any ONE marker fails on its own line.
+  assert.equal(byId.get('P01')?.canonicalizedBy, 'W4C-2', 'P01 (live punch) must be removed-by-adapter')
+  assert.equal(byId.get('P02')?.canonicalizedBy, 'W4C-2', 'P02 (merge second-pass) must be removed-by-adapter')
+  assert.equal(byId.get('P03')?.canonicalizedBy, 'W4C-2', 'P03 (cron absence) must be removed-by-adapter')
+  assert.equal(byId.get('P04')?.canonicalizedBy, 'W4C-2', 'P04 (administrator absence run) must be removed-by-adapter')
+  const marked = CURATED_DEBT_ENTRIES.filter((entry) => entry.canonicalizedBy != null)
+    .map((entry) => `${entry.id}:${entry.canonicalizedBy}`)
+    .sort()
+  assert.deepEqual(
+    marked,
+    ['P01:W4C-2', 'P02:W4C-2', 'P03:W4C-2', 'P04:W4C-2'],
+    'exactly the four W4C-2 entries are canonicalized — no other debt id may borrow the marker',
+  )
+})
+
+test('W4C-2: the canonical adapter symbols are claimed by exactly the expected entries', () => {
+  const syntheticLive = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'applyLivePunchProjectionLegacyV1',
+    table: 'attendance_events',
+    verb: 'insert',
+    bucket: 'business',
+    key: 'synthetic-live',
+    line: 1,
+  }
+  const syntheticAbsence = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'generateAbsenceRecords',
+    table: 'attendance_records',
+    verb: 'insert',
+    bucket: 'business',
+    key: 'synthetic-absence',
+    line: 2,
+  }
+  const { claimsByEntryId, unclaimed } = classifyTrackedSites([syntheticLive, syntheticAbsence])
+  assert.deepEqual(unclaimed, [], 'the adapter-owned sites must remain claimed (unclaimed=0 not bypassed)')
+  assert.deepEqual(
+    (claimsByEntryId.get('P01') || []).map((site) => site.key),
+    ['synthetic-live'],
+    'P01 claims the live adapter site',
+  )
+  // One function, two initiators, two debt ids (lock section 1.1): P03 AND P04 both claim it.
+  assert.deepEqual((claimsByEntryId.get('P03') || []).map((site) => site.key), ['synthetic-absence'])
+  assert.deepEqual((claimsByEntryId.get('P04') || []).map((site) => site.key), ['synthetic-absence'])
+})
