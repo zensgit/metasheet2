@@ -190,8 +190,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:272) is the SOLE writer into
-//      `trustedSourceBinders` (:305) and is publicly EXPORTED (:432) — there is no
+//   2. `createHarnessSourceBinderForTests` (:314) is the SOLE writer into
+//      `trustedSourceBinders` (:308, written :359) and is publicly EXPORTED (:486) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
@@ -337,6 +337,18 @@ function createHarnessSourceBinderForTests(entries) {
     if (!handle || typeof handle !== 'object' || typeof handle.execute !== 'function') {
       fail('EXECUTOR_COMPONENTS_INVALID')
     }
+    // FAIL CLOSED ON A DUPLICATE (B1a-3 round 4, NIT). This used to be a bare
+    // last-wins `set`, while the action registry ten lines up already refuses a
+    // duplicate with "a second action for the same profile is a wiring bug, never a
+    // fallback". The asymmetry sat on the component that carries the WHOLE of B-1:
+    // per this module's own header, this binder is the SOLE granting path into
+    // `trustedSourceBinders`, and the property B-1 rests on is that one executor
+    // answer cannot satisfy two differently-bound resolutions. Last-wins means a
+    // second entry silently re-points a systemContentKey at a different source
+    // handle. Not exploitable today — every registration is first-party and the
+    // module is LATENT — but it is aligned BEFORE any certified binder is ever
+    // written to this shape, not after.
+    if (bySystemContentKey.has(systemContentKey)) fail('EXECUTOR_COMPONENTS_INVALID')
     bySystemContentKey.set(systemContentKey, handle)
   }
   const binder = Object.freeze({
