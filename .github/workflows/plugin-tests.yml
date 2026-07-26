@@ -205,7 +205,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          MIN_CONTRACT_TESTS=56
+          MIN_CONTRACT_TESTS=59
           if ! contract_out="$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)"; then
             printf '%s\n' "$contract_out"
             echo "integration-guard contract: node --test exited non-zero (output above)" >&2

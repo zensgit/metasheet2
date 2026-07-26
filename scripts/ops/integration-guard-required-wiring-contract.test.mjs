@@ -424,11 +424,11 @@ const TERMINAL_RUN_EXACT = "node scripts/ops/integration-guard-assert-branch.mjs
 // its own constant, so mutating one workflow reds that workflow's own pin only (门级排他).
 // Captured the house way: `JSON.stringify(step.run)` dumped from a python3+PyYAML parse of the
 // current workflow files and pasted verbatim, never hand-typed.
-const CONTRACT_RUN_EXACT = "set -euo pipefail\nMIN_CONTRACT_TESTS=56\nif ! contract_out=\"$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)\"; then\n  printf '%s\\n' \"$contract_out\"\n  echo \"integration-guard contract: node --test exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$contract_out\"\ncontract_tests=\"$(printf '%s\\n' \"$contract_out\" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)\"\nif [ -z \"$contract_tests\" ]; then\n  echo \"integration-guard contract: no 'tests <N>' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$contract_tests\" -lt \"$MIN_CONTRACT_TESTS\" ]; then\n  echo \"integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file\" >&2\n  exit 1\nfi\necho \"integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS).\"\n"
+const CONTRACT_RUN_EXACT = "set -euo pipefail\nMIN_CONTRACT_TESTS=59\nif ! contract_out=\"$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)\"; then\n  printf '%s\\n' \"$contract_out\"\n  echo \"integration-guard contract: node --test exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$contract_out\"\ncontract_tests=\"$(printf '%s\\n' \"$contract_out\" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)\"\nif [ -z \"$contract_tests\" ]; then\n  echo \"integration-guard contract: no 'tests <N>' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$contract_tests\" -lt \"$MIN_CONTRACT_TESTS\" ]; then\n  echo \"integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file\" >&2\n  exit 1\nfi\necho \"integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS).\"\n"
 
 // The floor value the pinned block above declares. Pin 15 asserts this is the number both workflow
 // copies actually carry AND that it still tracks the tests this file really declares.
-const CONTRACT_MIN_TESTS = 56
+const CONTRACT_MIN_TESTS = 59
 
 // How far the floor may lag the declared test count before it must be bumped in BOTH workflows.
 // A floor left far below the real count would let a large deletion of tests pass unnoticed; a floor
@@ -1224,6 +1224,129 @@ test('the subtest-count floor both callers declare is the pinned value AND still
       `.github/workflows/integration-guard.yml and .github/workflows/plugin-tests.yml, and ` +
       `CONTRACT_MIN_TESTS plus the pinned run: literal here, or the floor rots into a no-op that ` +
       `no longer notices a large deletion of tests`,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// DOOR E (#4614 P1, sixth review round) — EXECUTE the floor, do not merely pin its text.
+//
+// Pins 13/14 pin the caller `run:` text and Pin 15 pins the NUMBER inside it, but neither RUNS the
+// block. That is exactly the gap this file already documents for the .sh extraction ("extract AND
+// pin, never extract alone", the fifth round's Door D): with text-pinning only, gutting the
+// comparison in all three places at once — `if [ "$contract_tests" -lt … ]` rewritten to `if false;
+// then`, with `MIN_CONTRACT_TESTS=` left declared — keeps Pins 13/14 green (the literal was updated
+// in step) and Pin 15 green (the declaration is still there, still tracking the count), while the
+// floor no longer exists. Door E closes that: it runs the pinned block under bash with a `node` shim
+// on PATH and asserts the outcome for each summary shape.
+//
+// NO RECURSION: the shim REPLACES `node` for the duration of the spawn, so the block never invokes
+// the real `node --test` on this file. The shim prints a fixture summary and exits with a fixture
+// code; nothing else in the block reaches the network, the repo, or a real test run.
+//
+// BOTH REPORTER FORMATS ARE PINNED, and this is load-bearing rather than belt-and-braces. This
+// contract runs on the `test (18.x)` and `test (20.x)` matrix legs and in integration-guard's own
+// job — three different node binaries — and `node --test`'s DEFAULT reporter is version- and
+// TTY-dependent (`tap` on the older lines when stdout is not a TTY, `spec` on the newer ones). The
+// block's parse must accept `# tests <N>` (TAP) and `ℹ tests <N>` (spec) alike; it deliberately
+// never matches the `ℹ` sigil itself, which is one character in a UTF-8 locale and three bytes under
+// LC_ALL=C. Measured shapes on the runner used to author this (v25.9.0): piped stdout still selected
+// spec (`ℹ tests 56`); `--test-reporter=tap` emitted `1..56` then `# tests 56`, no colon.
+// ---------------------------------------------------------------------------
+
+const FLOOR_SPEC_SUMMARY = (n) =>
+  `✔ scripts/ops/integration-guard-required-wiring-contract.test.mjs (1ms)\nℹ tests ${n}\nℹ suites 0\nℹ pass ${n}\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1`
+
+const FLOOR_TAP_SUMMARY = (n) =>
+  `TAP version 13\n# Subtest: scripts/ops/integration-guard-required-wiring-contract.test.mjs\nok 1 - scripts/ops/integration-guard-required-wiring-contract.test.mjs\n1..${n}\n# tests ${n}\n# suites 0\n# pass ${n}\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 1`
+
+// Runs the EXACT pinned caller block (the same literal Pins 13/14 assert both workflows carry) under
+// bash, with `node` shimmed to emit `stdout` and exit `exitCode`. LC_ALL=C is pinned so the parse is
+// exercised in the byte-oriented locale, where the spec reporter's `ℹ` is three bytes.
+function runPinnedFloorBlock({ stdout, exitCode }) {
+  const dir = mkdtempSync(join(tmpdir(), 'ig-floor-shim-'))
+  try {
+    const shim = join(dir, 'node')
+    writeFileSync(shim, `#!/bin/sh\ncat <<'__IG_FIXTURE_EOF__'\n${stdout}\n__IG_FIXTURE_EOF__\nexit ${exitCode}\n`)
+    chmodSync(shim, 0o755)
+    const result = spawnSync('bash', ['-c', CONTRACT_RUN_EXACT], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, LC_ALL: 'C' },
+    })
+    assert.equal(result.error, undefined, `spawning bash for the pinned floor block must succeed: ${result.error}`)
+    return result
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('Door E: the pinned caller block PASSES a healthy run — TAP and spec reporters, and exactly at the floor', () => {
+  for (const [label, summary] of [
+    ['spec', FLOOR_SPEC_SUMMARY(CONTRACT_MIN_TESTS)],
+    ['tap', FLOOR_TAP_SUMMARY(CONTRACT_MIN_TESTS)],
+    ['spec, well above the floor', FLOOR_SPEC_SUMMARY(CONTRACT_MIN_TESTS + 40)],
+    ['tap, well above the floor', FLOOR_TAP_SUMMARY(CONTRACT_MIN_TESTS + 40)],
+  ]) {
+    const r = runPinnedFloorBlock({ stdout: summary, exitCode: 0 })
+    assert.equal(
+      r.status,
+      0,
+      `the pinned floor block must PASS a healthy ${label} summary — a block that reds a legitimate ` +
+        `run is repaired by loosening the floor, which is how this guard dies. stderr: ${r.stderr}`,
+    )
+    assert.match(
+      r.stdout,
+      /subtests ran \(floor \d+\)\./,
+      `the pinned floor block must report the count it parsed on the ${label} success path — a silent ` +
+        `pass cannot be distinguished in the CI log from a parse that found nothing`,
+    )
+  }
+})
+
+test('Door E: the pinned caller block FAILS the import-abort collapse and anything under the floor — TAP and spec', () => {
+  for (const [label, summary] of [
+    ['spec, collapsed to 1 (the import-abort shape)', FLOOR_SPEC_SUMMARY(1)],
+    ['tap, collapsed to 1 (the import-abort shape)', FLOOR_TAP_SUMMARY(1)],
+    ['spec, one below the floor', FLOOR_SPEC_SUMMARY(CONTRACT_MIN_TESTS - 1)],
+    ['tap, one below the floor', FLOOR_TAP_SUMMARY(CONTRACT_MIN_TESTS - 1)],
+  ]) {
+    const r = runPinnedFloorBlock({ stdout: summary, exitCode: 0 })
+    assert.notEqual(
+      r.status,
+      0,
+      `the pinned floor block must FAIL a ${label} run even though node --test itself exited 0 — ` +
+        `that zero exit IS the defect (node --test reports a zero-exit child as a passing FILE). ` +
+        `stdout: ${r.stdout}`,
+    )
+    assert.match(
+      r.stderr,
+      /subtests ran, expected at least/,
+      `the ${label} failure must name the floor it violated, not fail anonymously`,
+    )
+  }
+})
+
+test('Door E: the pinned caller block fails CLOSED on a non-zero node --test and on an unparseable summary', () => {
+  const failed = runPinnedFloorBlock({ stdout: FLOOR_SPEC_SUMMARY(CONTRACT_MIN_TESTS), exitCode: 1 })
+  assert.notEqual(
+    failed.status,
+    0,
+    `a non-zero node --test must fail the step regardless of how many subtests it reported — the floor ` +
+      `is an ADDITIONAL door, never a replacement for the exit code`,
+  )
+
+  const unparseable = runPinnedFloorBlock({ stdout: '', exitCode: 0 })
+  assert.notEqual(
+    unparseable.status,
+    0,
+    `node --test exiting 0 with no parseable "tests <N>" summary must FAIL — an empty read is not ` +
+      `evidence of absence, and a missing-file ERR_MODULE_NOT_FOUND must not land in a branch that ` +
+      `finds no number and continues`,
+  )
+  assert.match(
+    unparseable.stderr,
+    /no 'tests <N>' summary line found/,
+    `the unparseable-summary path must say so explicitly rather than reusing the floor message`,
   )
 })
 
