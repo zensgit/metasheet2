@@ -292,6 +292,133 @@ function fieldsToctouGetterCannotBypassNonEmptyCheck() {
 }
 
 // ---------------------------------------------------------------------------
+// (6c) P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CONTRACT-ID): a hostile
+// GETTER on entry.contractId, entry.version, or entry.fields must never
+// escape this module as a raw foreign error — it must be discarded and
+// replaced with GipCanonicalObjectContractError, the SAME contract every
+// other reachable throw in this module now explicitly states (module
+// header's "CLOSED ERROR CONTRACT" paragraph). Proves values-free too: the
+// raw marker text must never leak into the branded error's message, details,
+// OR stack — a branded-but-message-echoing error would pass a class/reason
+// check but still be the leak the owner is describing.
+// ---------------------------------------------------------------------------
+function hostileGetterOnContractIdVersionOrFieldsNeverEscapesRaw() {
+  for (const field of ['contractId', 'version', 'fields']) {
+    const marker = `RAW-CONTRACT-ID-MARKER-${field}`
+    const base = { contractId: 'c', version: 'v1', fields: { a: 1 } }
+    delete base[field]
+    Object.defineProperty(base, field, {
+      enumerable: true,
+      configurable: true,
+      get() { throw new TypeError(marker) },
+    })
+    const caught = rejects(
+      () => createCanonicalObjectContractRegistry([base]),
+      'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+      `a hostile getter on ${field} must be discarded and converted to GipCanonicalObjectContractError, never escape as a raw foreign error`,
+    )
+    assert.equal(caught.details.field, field)
+    const serialized = String(caught.message) + JSON.stringify(caught.details) + String(caught.stack)
+    assert.ok(!serialized.includes(marker), `the raw marker text must never leak into the branded error (message/details/stack) for ${field}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (6d) P1 FIX (owner HARD HOLD #4610, round 7 — RAW-OWN-KEYS): a hostile
+// `ownKeys` trap on a Proxy passed as `fields` throws DURING ENUMERATION
+// itself (`Object.keys(proxy)`) — guarding the property READ of entry.fields
+// (6c above) is not enough, because the Proxy object itself is a perfectly
+// valid read result; the ENUMERATION of that value must be guarded
+// separately. A Proxy whose target is a plain, non-array object passes
+// isPlainObject cleanly (typeof/Array.isArray both resolve against the
+// target without invoking a trap) — only Object.keys's ownKeys trap exposes
+// the hostility.
+// ---------------------------------------------------------------------------
+function hostileOwnKeysTrapOnFieldsNeverEscapesRaw() {
+  const marker = 'RAW-OWN-KEYS-MARKER'
+  const hostileFields = new Proxy({ a: 1 }, {
+    ownKeys() { throw new TypeError(marker) },
+  })
+  const caught = rejects(
+    () => createCanonicalObjectContractRegistry([{ contractId: 'c', version: 'v1', fields: hostileFields }]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile ownKeys trap on fields must be discarded and converted to GipCanonicalObjectContractError, never escape as a raw foreign error',
+  )
+  assert.equal(caught.details.field, 'fields')
+  const serialized = String(caught.message) + JSON.stringify(caught.details) + String(caught.stack)
+  assert.ok(!serialized.includes(marker), 'the raw marker text must never leak into the branded error')
+
+  // Non-regression: the isPlainObject short-circuit for a non-object fields
+  // value must still fire FIRST, without ever attempting enumeration — only
+  // a Proxy can make Object.keys itself throw; null must still hit the
+  // ORIGINAL "must be a non-empty plain object" reason.
+  rejects(
+    () => createCanonicalObjectContractRegistry([{ contractId: 'c', version: 'v1', fields: null }]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'null fields must still be refused by the isPlainObject short-circuit, not the enumeration guard',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (6e) P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CANONICAL-ITERATOR): the
+// `entries` array's ITERATION is attacker-reachable — a hostile accessor at
+// one index (Object.defineProperty), or a hostile Symbol.iterator assigned
+// as an own property of a genuine array — neither breaks Array.isArray. Both
+// must never escape a raw foreign error. The Symbol.iterator variant
+// additionally proves the fix is STRUCTURAL, not merely a catch: the guarded
+// length+index loop never invokes the iterator protocol at all, so the
+// hostile Symbol.iterator is simply never CALLED (registration succeeds
+// normally) rather than merely having its throw caught.
+// ---------------------------------------------------------------------------
+function hostileEntriesIteratorNeverEscapesRaw() {
+  const marker = 'RAW-CANONICAL-ITERATOR-MARKER'
+  const validEntry = { contractId: 'c', version: 'v1', fields: { a: 1 } }
+
+  const indexHostile = [validEntry]
+  Object.defineProperty(indexHostile, 1, {
+    enumerable: true,
+    configurable: true,
+    get() { throw new TypeError(marker) },
+  })
+  indexHostile.length = 2
+  const caught = rejects(
+    () => createCanonicalObjectContractRegistry(indexHostile),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile getter at one entries index must be discarded and converted, never escape as a raw foreign error',
+  )
+  assert.equal(caught.details.field, 'entries')
+  const serialized = String(caught.message) + JSON.stringify(caught.details) + String(caught.stack)
+  assert.ok(!serialized.includes(marker), 'the raw marker text must never leak into the branded error')
+
+  const iteratorHostile = [validEntry]
+  iteratorHostile[Symbol.iterator] = function* () { throw new TypeError(marker) }
+  const registry = createCanonicalObjectContractRegistry(iteratorHostile)
+  assert.equal(registry.size(), 1, 'a hostile Symbol.iterator override must not prevent registration — the guarded loop never invokes it at all')
+
+  // (c) a Proxy WRAPPING a real array target, with a hostile `.length` trap.
+  // `Array.isArray` is true for such a Proxy (the spec's IsArray walks the
+  // proxy target chain without invoking any trap), so the direct-read form
+  // this guard replaces (`entries.length`) would throw raw the moment the
+  // length is actually read — a DIFFERENT read site than (a)'s per-index
+  // getter, pinned separately so neutering readArrayLength alone (leaving
+  // readArrayElement intact) also reds.
+  const lengthProxyHostile = new Proxy([validEntry], {
+    get(target, prop, receiver) {
+      if (prop === 'length') throw new TypeError(marker)
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const caughtLength = rejects(
+    () => createCanonicalObjectContractRegistry(lengthProxyHostile),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile length trap on a Proxy-wrapped entries array must be discarded, never escape as a raw foreign error',
+  )
+  assert.equal(caughtLength.details.field, 'entries')
+  const serializedLength = String(caughtLength.message) + JSON.stringify(caughtLength.details) + String(caughtLength.stack)
+  assert.ok(!serializedLength.includes(marker), 'the raw marker text must never leak into the branded error')
+}
+
+// ---------------------------------------------------------------------------
 // (7) Activation gate — P1-3 FIX (owner HARD HOLD #4610). REPRODUCES THE
 // OWNER'S EXACT PROBE: a caller-supplied plain object
 // `{ inventoryStatus: 'COMPLETE', references: [] }` — exactly the shape and
@@ -390,6 +517,68 @@ function activationReadinessMechanism() {
 }
 
 // ---------------------------------------------------------------------------
+// (7c) P1 FIX (owner HARD HOLD #4610, round 7): __internals.computeActivationReadiness
+// IS reachable from outside this module (this very test file calls it
+// directly, above) — the module header's "CLOSED ERROR CONTRACT" paragraph
+// therefore covers it too, unlike buildInventoryAttestation (which has ZERO
+// call sites and is provably unreachable). Three foreign-call sites: the
+// `references` array's ITERATION, each reference's `contractId`/`version`
+// PROPERTY READS, and `registry.lookup(...)` itself (an attacker-suppliable
+// FUNCTION on a duck-typed registry — this function takes no trust check on
+// `registry`, by design, so a hostile registry object is squarely its own
+// caller's responsibility to have excluded, but a raw throw must still never
+// escape THIS function).
+// ---------------------------------------------------------------------------
+function computeActivationReadinessNeverEscapesRawForeignErrors() {
+  const registry = createCanonicalObjectContractRegistry([
+    { contractId: 'bom_line', version: 'v1', fields: { materialCode: true } },
+  ])
+
+  // (a) hostile Symbol.iterator on the references array — structural proof:
+  // the guarded length+index loop never invokes the iterator protocol at
+  // all, so this SUCCEEDS (the hostile iterator is simply never called)
+  // rather than merely having its throw caught.
+  const iteratorMarker = 'ACTIVATION-READINESS-ITERATOR-MARKER'
+  const iteratorHostileRefs = [{ contractId: 'bom_line', version: 'v1' }]
+  iteratorHostileRefs[Symbol.iterator] = function* () { throw new TypeError(iteratorMarker) }
+  const okDespiteHostileIterator = __internals.computeActivationReadiness(registry, iteratorHostileRefs)
+  assert.deepEqual(okDespiteHostileIterator, { ready: true, backedCount: 1, totalReferences: 1 }, 'a hostile Symbol.iterator override on references must not prevent the readiness computation — the guarded loop never invokes it')
+
+  // (b) hostile getter on reference.contractId.
+  const getterMarker = 'ACTIVATION-READINESS-GETTER-MARKER'
+  const hostileRef = { version: 'v1', get contractId() { throw new TypeError(getterMarker) } }
+  const caughtGetter = rejects(
+    () => __internals.computeActivationReadiness(registry, [hostileRef]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile getter on a reference field must be discarded and converted, never escape as a raw foreign error',
+  )
+  const serializedGetter = String(caughtGetter.message) + JSON.stringify(caughtGetter.details) + String(caughtGetter.stack)
+  assert.ok(!serializedGetter.includes(getterMarker), 'the raw marker text must never leak into the branded error')
+
+  // (c) duck-typed registry whose .lookup() itself throws raw.
+  const lookupMarker = 'ACTIVATION-READINESS-LOOKUP-MARKER'
+  const hostileRegistry = { lookup() { throw new TypeError(lookupMarker) } }
+  const caughtLookup = rejects(
+    () => __internals.computeActivationReadiness(hostileRegistry, [{ contractId: 'bom_line', version: 'v1' }]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a hostile registry.lookup() must be discarded and converted, never escape as a raw foreign error',
+  )
+  assert.equal(caughtLookup.details.field, 'registry')
+  const serializedLookup = String(caughtLookup.message) + JSON.stringify(caughtLookup.details) + String(caughtLookup.stack)
+  assert.ok(!serializedLookup.includes(lookupMarker), 'the raw marker text must never leak into the branded error')
+
+  // Non-regression: a registry.lookup() call that throws its OWN legitimate
+  // branded error (e.g. a malformed contractId) must propagate UNCHANGED,
+  // never re-labeled as a `registry` failure.
+  const malformedRefCaught = rejects(
+    () => __internals.computeActivationReadiness(registry, [{ contractId: '', version: 'v1' }]),
+    'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
+    'a malformed reference contractId must propagate lookup()\'s own branded error unchanged',
+  )
+  assert.equal(malformedRefCaught.details.field, 'contractId', 'the branded error from inside registry.lookup() must keep its ORIGINAL field, not be re-labeled to "registry"')
+}
+
+// ---------------------------------------------------------------------------
 // (8) P2 FIX (review round 4 — blocking): __internals's own key set was never
 // pinned in this file — the same gap gip-connector-kind-registry.test.cjs had
 // (see that file's matching fix note). A junk key added under __internals, or
@@ -437,8 +626,12 @@ function main() {
   malformedEntriesRefused()
   nestedFieldsAreDeeplyFrozenAndOwned()
   fieldsToctouGetterCannotBypassNonEmptyCheck()
+  hostileGetterOnContractIdVersionOrFieldsNeverEscapesRaw()
+  hostileOwnKeysTrapOnFieldsNeverEscapesRaw()
+  hostileEntriesIteratorNeverEscapesRaw()
   activationGateRefusesCallerAssertedEvidence()
   activationReadinessMechanism()
+  computeActivationReadinessNeverEscapesRawForeignErrors()
   internalsExactKeySet()
   frozenVocabularyIsExhaustive()
   console.log('gip-canonical-object-contract-registry.test.cjs OK')

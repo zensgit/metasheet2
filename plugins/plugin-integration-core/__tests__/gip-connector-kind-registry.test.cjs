@@ -275,6 +275,93 @@ function hostileAliasArrayIndexGetterNeverEscapesRaw() {
 }
 
 // ---------------------------------------------------------------------------
+// (5d) P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CONNECTOR-ITERATOR): the
+// `entries` array's ITERATION is attacker-reachable exactly like a single
+// element read (5c above) — a hostile accessor at one index, or a hostile
+// Symbol.iterator assigned as an own property of a genuine array, neither of
+// which breaks Array.isArray. Mirrors
+// gip-canonical-object-contract-registry.test.cjs's
+// hostileEntriesIteratorNeverEscapesRaw exactly. The Symbol.iterator variant
+// proves the fix is STRUCTURAL: the guarded length+index loop never invokes
+// the iterator protocol, so registration SUCCEEDS (the hostile iterator is
+// simply never called) rather than merely having its throw caught.
+// ---------------------------------------------------------------------------
+function hostileEntriesIteratorNeverEscapesRaw() {
+  const marker = 'RAW-CONNECTOR-ITERATOR-MARKER'
+  const validDeclaration = harnessDeclaration()
+
+  const indexHostile = [validDeclaration]
+  Object.defineProperty(indexHostile, 1, {
+    enumerable: true,
+    configurable: true,
+    get() { throw new TypeError(marker) },
+  })
+  indexHostile.length = 2
+  const caught = rejects(
+    () => createConnectorKindRegistry(indexHostile),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'a hostile getter at one entries index must be discarded and converted, never escape as a raw foreign error',
+  )
+  assert.equal(caught.details.field, 'entries')
+  const serialized = String(caught.message) + JSON.stringify(caught.details) + String(caught.stack)
+  assert.ok(!serialized.includes(marker), 'the raw marker text must never leak into the branded error')
+
+  const iteratorHostile = [validDeclaration]
+  iteratorHostile[Symbol.iterator] = function* () { throw new TypeError(marker) }
+  const registry = createConnectorKindRegistry(iteratorHostile)
+  assert.equal(registry.size(), 1, 'a hostile Symbol.iterator override must not prevent registration — the guarded loop never invokes it at all')
+
+  // (c) a Proxy WRAPPING a real array target, with a hostile `.length` trap —
+  // a DIFFERENT read site than (a)'s per-index getter, pinned separately so
+  // neutering readArrayLength alone (leaving readArrayElement intact) also
+  // reds. Mirrors gip-canonical-object-contract-registry.test.cjs's matching
+  // case exactly.
+  const lengthProxyHostile = new Proxy([validDeclaration], {
+    get(target, prop, receiver) {
+      if (prop === 'length') throw new TypeError(marker)
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const caughtLength = rejects(
+    () => createConnectorKindRegistry(lengthProxyHostile),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'a hostile length trap on a Proxy-wrapped entries array must be discarded, never escape as a raw foreign error',
+  )
+  assert.equal(caughtLength.details.field, 'entries')
+  const serializedLength = String(caughtLength.message) + JSON.stringify(caughtLength.details) + String(caughtLength.stack)
+  assert.ok(!serializedLength.includes(marker), 'the raw marker text must never leak into the branded error')
+}
+
+// ---------------------------------------------------------------------------
+// (5e) BONUS FIX (found during round 7 while closing RAW-CONNECTOR-ITERATOR,
+// same class of hole, same file, one property over — fixed for symmetry
+// rather than left asymmetric): the aliases loop's `.length` read used to be
+// a DIRECT `aliasesInput.length`, unguarded, even though the per-ELEMENT
+// read right next to it was already guarded (5c). A Proxy WRAPPING a real
+// array target passes Array.isArray (the spec's IsArray walks the proxy
+// target chain without invoking any trap) and then throws raw the moment
+// `.length` is actually read through a hostile `get` trap.
+// ---------------------------------------------------------------------------
+function hostileAliasesLengthProxyNeverEscapesRaw() {
+  const marker = 'RAW-ALIASES-LENGTH-MARKER'
+  const hostileAliases = new Proxy(['legacy:harness'], {
+    get(target, prop, receiver) {
+      if (prop === 'length') throw new TypeError(marker)
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const declaration = harnessDeclaration({ aliases: hostileAliases })
+  const caught = rejects(
+    () => createConnectorKindRegistry([declaration]),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'a hostile length trap on a Proxy-wrapped aliases array must be discarded, never escape as a raw foreign error',
+  )
+  assert.equal(caught.details.field, 'aliases')
+  const serialized = String(caught.message) + JSON.stringify(caught.details) + String(caught.stack)
+  assert.ok(!serialized.includes(marker), 'the raw marker text must never leak into the branded error')
+}
+
+// ---------------------------------------------------------------------------
 // (6) NEGATIVE CONTROL — the clause the ledger names as most likely to break:
 // a system whose kind is uncertified for GIP binding must still work,
 // unaffected, on its pre-GIP external-systems.cjs (legacy) path.
@@ -385,6 +472,8 @@ async function main() {
   missingExtractorsRefusedAtRegistration()
   hostileGetterOnDeclarationFieldNeverEscapesRaw()
   hostileAliasArrayIndexGetterNeverEscapesRaw()
+  hostileEntriesIteratorNeverEscapesRaw()
+  hostileAliasesLengthProxyNeverEscapesRaw()
   malformedDeclarationsRefused()
   await legacyPathKeepsWorkingWhileGipBindingRefuses()
   internalsExactKeySet()

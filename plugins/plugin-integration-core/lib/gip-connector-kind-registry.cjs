@@ -114,6 +114,44 @@ function readDeclaredField(entry, field) {
   }
 }
 
+// P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CONNECTOR-ITERATOR): the
+// SAME class of hole as readDeclaredField above, one mechanism deeper. An
+// ARRAY's `.length` own-property read and its indexed element reads are
+// ordinary `[[Get]]` operations exactly like `entry[field]` — `Array.isArray`
+// is true for a Proxy WRAPPING a real array target (the spec's IsArray walks
+// the proxy target chain without invoking any trap), so a Proxy with a
+// hostile `get` trap passes `Array.isArray` and then throws raw the moment
+// `.length` or an index is actually read through it. Both `for...of` (which
+// additionally invokes the iterator protocol / Symbol.iterator — itself
+// overridable as an own property on a genuine array without breaking
+// Array.isArray) and a naive `for (let i = 0; i < arr.length; i++)` share
+// this exposure. These two helpers are the ONE guarded read path for both
+// this module's `entries` arrays (createConnectorKindRegistry) and its
+// `aliases` arrays (normalizeDeclaration) — every foreign throw crossing
+// either read is discarded and replaced with this module's own fixed,
+// values-free reason, never escaping raw. Module-private, not exported, not
+// under __internals — mirrors readDeclaredField's placement exactly.
+function readArrayLength(array, field) {
+  let length
+  try {
+    length = array.length
+  } catch {
+    fail('CONNECTOR_KIND_DECLARATION_INVALID', `${field} length could not be read from the declaration`, { field })
+  }
+  if (typeof length !== 'number' || !Number.isInteger(length) || length < 0 || length > Number.MAX_SAFE_INTEGER) {
+    fail('CONNECTOR_KIND_DECLARATION_INVALID', `${field} must have a valid array length`, { field })
+  }
+  return length
+}
+
+function readArrayElement(array, index, field) {
+  try {
+    return array[index]
+  } catch {
+    fail('CONNECTOR_KIND_DECLARATION_INVALID', `${field} element could not be read from the declaration`, { field })
+  }
+}
+
 // Normalizes and validates ONE connector-kind declaration. Every field the
 // GIP-D0 §6 formula needs beyond `kind` itself (endpoint identity,
 // authPrincipalKey, authTenantScopeKey) must be a declared extractor — no
@@ -144,13 +182,13 @@ function normalizeDeclaration(entry) {
   }
   const seenAliases = new Set()
   const aliases = []
-  for (let index = 0; index < aliasesInput.length; index += 1) {
-    let raw
-    try {
-      raw = aliasesInput[index]
-    } catch {
-      fail('CONNECTOR_KIND_DECLARATION_INVALID', 'aliases could not be read from the declaration', { field: 'aliases' })
-    }
+  // P1 FIX (round 7): `.length` read through readArrayLength, not a direct
+  // `aliasesInput.length` — see that helper's comment for why a Proxy-wrapped
+  // array made the direct read unsafe even though the per-element read below
+  // was already guarded.
+  const aliasesLength = readArrayLength(aliasesInput, 'aliases')
+  for (let index = 0; index < aliasesLength; index += 1) {
+    const raw = readArrayElement(aliasesInput, index, 'aliases')
     const alias = requiredIdentityToken(raw, 'aliases')
     if (alias === kind) {
       fail('CONNECTOR_KIND_DECLARATION_INVALID', 'an alias must not equal its own canonical kind', { field: 'aliases' })
@@ -234,9 +272,27 @@ function createConnectorKindRegistry(entries) {
   if (!Array.isArray(entries)) {
     fail('CONNECTOR_KIND_DECLARATION_INVALID', 'entries must be an array', { field: 'entries' })
   }
+  // P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CONNECTOR-ITERATOR): this
+  // used to be `for (const raw of entries)` — the array ITERATOR is
+  // attacker-reachable exactly like a single element read (a hostile
+  // accessor at one index via `Object.defineProperty`, or a hostile
+  // `Symbol.iterator` assigned as an own property of a genuine array —
+  // neither breaks `Array.isArray` above), and an unguarded `for...of` lets
+  // that raw throw escape this module verbatim. Replaced with the identical
+  // guarded-length + guarded-per-index-read shape normalizeDeclaration's own
+  // `aliases` loop already uses (readArrayLength/readArrayElement above) —
+  // deliberately a length+index loop, NEVER the iterator protocol, so a
+  // hostile Symbol.iterator is structurally unreachable, not merely caught.
+  // The loop BODY (normalizeDeclaration + the duplicate/collision checks
+  // below) stays OUTSIDE any try/catch — wrapping the body too would
+  // re-label this module's OWN branded errors (e.g. a duplicate-kind
+  // CONNECTOR_KIND_DECLARATION_INVALID with a specific `details.field`)
+  // as if they were foreign reads, collapsing reason discrimination.
+  const entriesLength = readArrayLength(entries, 'entries')
   const byKind = new Map()
   const aliasToKind = new Map()
-  for (const raw of entries) {
+  for (let index = 0; index < entriesLength; index += 1) {
+    const raw = readArrayElement(entries, index, 'entries')
     const declaration = normalizeDeclaration(raw)
     if (byKind.has(declaration.kind) || aliasToKind.has(declaration.kind)) {
       fail('CONNECTOR_KIND_DECLARATION_INVALID', 'duplicate kind declaration', { field: 'kind' })

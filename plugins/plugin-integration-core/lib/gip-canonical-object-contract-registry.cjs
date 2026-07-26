@@ -49,6 +49,39 @@
 // This module SHIPS its default registry EMPTY: no contract has been
 // registered by anyone yet. Only a future, separately-reviewed amendment may
 // extend the literal entries array passed to createCanonicalObjectContractRegistry below.
+//
+// CLOSED ERROR CONTRACT (owner HARD HOLD #4610, round 7 — adopted explicitly
+// here so this module stops being asymmetric with its sibling
+// gip-connector-kind-registry.cjs, which already states an equivalent
+// contract inline near its own readDeclaredField): every error this module
+// throws in response to CALLER-SUPPLIED input — a malformed declaration, a
+// hostile getter on a declared field, a hostile Proxy's ownKeys trap during
+// enumeration, a hostile array iterator or index accessor on an `entries`
+// array — is a GipCanonicalObjectContractError carrying one of the frozen
+// CANONICAL_OBJECT_CONTRACT_ERROR_REASONS tokens above, never a raw foreign
+// error (class, message, or stack) from whatever object supplied the input.
+// Two read paths this round closed to make that literally true:
+// readEntryField (guards `entry.contractId` / `entry.version` / `entry.fields`
+// reads — RAW-CONTRACT-ID — and the `Object.keys(rawFields)` ENUMERATION
+// itself — RAW-OWN-KEYS, a distinct step from the property read, since a
+// Proxy's `ownKeys` trap can throw during enumeration even when the read that
+// produced the Proxy succeeded) and readArrayLength/readArrayElement (guards
+// the `entries` array's iteration — RAW-CANONICAL-ITERATOR — a genuine array
+// with a hostile index accessor or an attacker-assigned `Symbol.iterator`
+// passes `Array.isArray` exactly like an ordinary array).
+// SCOPE, stated honestly (the same discipline this file already uses for
+// LATENT/unreachable paths): this contract covers every error reachable from
+// this module's EXPORTED surface today. It does NOT cover
+// buildInventoryAttestation's own `references` array reads, which have the
+// identical unguarded shape — that function is module-private with ZERO call
+// sites anywhere in this shipped module (see the LATENT note above it), so
+// there is no path, in production or in any test, that could exercise a fix
+// there; a future amendment wiring a real caller to it must close that same
+// gap before shipping. It also does not cover fail()'s own internal
+// undeclared-reason branch (a bare Error, deliberately NOT a
+// GipCanonicalObjectContractError) — that branch fires only on a PROGRAMMER
+// bug in this module's own source (a typo'd reason token in a call to fail()
+// added by a future edit), never on any caller-supplied input.
 
 const { deepCloneFrozenCanonical, CanonicalDomainError } = require('./gip-canonical-json.cjs')
 
@@ -94,6 +127,74 @@ function hasControlCharacter(text) {
     if (code < 0x20 || code === 0x7f) return true
   }
   return false
+}
+
+// P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CONTRACT-ID / a fourth,
+// closely-coupled `fields` read of the identical class): mirrors
+// gip-connector-kind-registry.cjs's readDeclaredField exactly. A plain data
+// property never throws on read; a hostile GETTER on `entry.contractId`,
+// `entry.version`, or `entry.fields` can — and unguarded, the raw foreign
+// error it throws would escape this module verbatim, breaking
+// normalizeContractEntry's own contract that every error it throws is a
+// GipCanonicalObjectContractError (see the module header's "closed error
+// contract" paragraph). Every foreign throw crossing this read is
+// unconditionally discarded and replaced with this module's own fixed,
+// values-free reason. Module-private — not exported, not under __internals
+// (the exact-key-set test below pins __internals's key set).
+function readEntryField(entry, field) {
+  try {
+    return entry[field]
+  } catch {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', `${field} could not be read from the declaration`, { field })
+  }
+}
+
+// P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CANONICAL-ITERATOR, and the
+// same fix applied to the pre-existing array reads in this module): the SAME
+// class of hole as readEntryField above, one mechanism deeper. An ARRAY's
+// `.length` own-property read and its indexed element reads are ordinary
+// `[[Get]]` operations exactly like `entry[field]` — `Array.isArray` is true
+// for a Proxy WRAPPING a real array target (the spec's IsArray walks the
+// proxy target chain without invoking any trap), so a Proxy with a hostile
+// `get` trap passes `Array.isArray` and then throws raw the moment `.length`
+// or an index is actually read through it. `for...of` additionally invokes
+// the iterator protocol / Symbol.iterator — itself overridable as an own
+// property on a genuine array without breaking Array.isArray, and without
+// tripping the own-property-symbol check `isStrictPlainObject`/
+// `isStrictDenseArray` run on `fields` values elsewhere in this file (this
+// `entries` array is validated only by `Array.isArray`, not by the strict
+// canonical-JSON codec). These two helpers are the guarded read path for
+// `entries` in createCanonicalObjectContractRegistry — the one array this
+// shipped module actually iterates over caller/first-party-authored input
+// today. (buildInventoryAttestation's own `references` array has the
+// identical unguarded-iteration shape and is NOT fixed here: that function
+// is module-private with ZERO call sites anywhere in this shipped module —
+// see the LATENT note above it — so there is no path, in production or in
+// any test, that could ever reach it; a change there would be unverifiable
+// by construction, not merely untested. A future amendment that wires a real
+// caller to buildInventoryAttestation must apply this SAME fix to its
+// `references` reads before that wiring ships.) Module-private, not
+// exported, not under __internals — mirrors readEntryField's placement
+// exactly.
+function readArrayLength(array, field) {
+  let length
+  try {
+    length = array.length
+  } catch {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', `${field} length could not be read from the declaration`, { field })
+  }
+  if (typeof length !== 'number' || !Number.isInteger(length) || length < 0 || length > Number.MAX_SAFE_INTEGER) {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', `${field} must have a valid array length`, { field })
+  }
+  return length
+}
+
+function readArrayElement(array, index, field) {
+  try {
+    return array[index]
+  } catch {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', `${field} element could not be read from the declaration`, { field })
+  }
 }
 
 function requiredIdentityToken(value, field) {
@@ -176,8 +277,16 @@ function normalizeContractEntry(entry) {
   if (!isPlainObject(entry)) {
     fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'a contract registration must be a plain object', {})
   }
-  const contractId = requiredIdentityToken(entry.contractId, 'contractId')
-  const version = requiredIdentityToken(entry.version, 'version')
+  // P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CONTRACT-ID): `entry.contractId`
+  // and `entry.version` used to be read DIRECTLY, unguarded — a hostile GETTER
+  // on either property throws raw straight out of this function (and out of
+  // createCanonicalObjectContractRegistry above it), verbatim, attacker text
+  // and all. readEntryField (see its comment above) is the SAME guarded-read
+  // shape gip-connector-kind-registry.cjs's readDeclaredField already uses for
+  // every one of ITS declaration fields — this module was asymmetric with its
+  // sibling until now.
+  const contractId = requiredIdentityToken(readEntryField(entry, 'contractId'), 'contractId')
+  const version = requiredIdentityToken(readEntryField(entry, 'version'), 'version')
   // P3 FIX (owner HARD HOLD #4610 residual, round 6) — TOCTOU on entry.fields:
   // this used to read `entry.fields` THREE separate times (the isPlainObject
   // check, the Object.keys().length check, and deepCloneFrozenCanonical
@@ -187,13 +296,34 @@ function normalizeContractEntry(entry) {
   // first two reads and then clones the THIRD (empty) read — registering an
   // EMPTY `fields` past the very guard meant to refuse it. Reading the
   // property ONCE into a local closes the window: every check below and the
-  // clone all observe the identical value. (Immaterial on the one production
-  // path today — the shipped registry's entries are the in-file literal `[]`
-  // — but this is the entry point a future amendment would wire to an
-  // externally-sourced entries array, so the TOCTOU should not survive
-  // silently into that amendment.)
-  const rawFields = entry.fields
-  if (!isPlainObject(rawFields) || Object.keys(rawFields).length === 0) {
+  // clone all observe the identical value. round 7: that single read now also
+  // goes through readEntryField (same reasoning as contractId/version just
+  // above — a hostile getter on `fields` itself was STILL a raw-escape route
+  // even after the TOCTOU fix, since the single read stayed unguarded).
+  const rawFields = readEntryField(entry, 'fields')
+  if (!isPlainObject(rawFields)) {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must be a non-empty plain object', { field: 'fields' })
+  }
+  // P1 FIX (owner HARD HOLD #4610, round 7 — RAW-OWN-KEYS): `Object.keys(rawFields)`
+  // used to run UNGUARDED right after the isPlainObject check above. A Proxy
+  // whose TARGET is a plain object (never an array) passes isPlainObject
+  // cleanly — `typeof proxy === 'object'` and `Array.isArray(proxy)` both
+  // resolve against the proxy's target without invoking a trap — but
+  // `Object.keys(proxy)` DOES invoke the proxy's `ownKeys` trap, and a hostile
+  // trap can throw during that enumeration itself. Guarding the property
+  // *read* (`entry.fields` above) is therefore not enough — the *enumeration*
+  // of the read value must be guarded too, separately. Kept strictly AFTER
+  // the isPlainObject short-circuit (not folded back into one `||`
+  // expression) so `fields: null` / `fields: undefined` / `fields: []` still
+  // hit the ORIGINAL "must be a non-empty plain object" reason via
+  // short-circuit, never a spurious "could not be enumerated".
+  let fieldKeyCount
+  try {
+    fieldKeyCount = Object.keys(rawFields).length
+  } catch {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields could not be enumerated', { field: 'fields' })
+  }
+  if (fieldKeyCount === 0) {
     fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must be a non-empty plain object', { field: 'fields' })
   }
   // P2 FIX (owner HARD HOLD #4610): `fields: Object.freeze({ ...entry.fields })`
@@ -239,8 +369,25 @@ function createCanonicalObjectContractRegistry(entries) {
   // single joined string key — no separator character is needed at all, so
   // there is no join-collision surface between (contractId, version) pairs
   // to reason about.
+  //
+  // P1 FIX (owner HARD HOLD #4610, round 7 — RAW-CANONICAL-ITERATOR): this
+  // used to be `for (const raw of entries)` — the array ITERATOR is
+  // attacker-reachable exactly like a single element read (a hostile
+  // accessor at one index, or a hostile `Symbol.iterator` assigned as an own
+  // property of a genuine array — neither breaks `Array.isArray` above), and
+  // an unguarded `for...of` lets that raw throw escape this module verbatim.
+  // Replaced with the guarded-length + guarded-per-index-read shape
+  // (readArrayLength/readArrayElement above) — deliberately a length+index
+  // loop, NEVER the iterator protocol, so a hostile Symbol.iterator is
+  // structurally unreachable, not merely caught. The loop BODY
+  // (normalizeContractEntry + the immutability check below) stays OUTSIDE
+  // any try/catch — wrapping the body too would re-label this module's OWN
+  // branded errors (e.g. CANONICAL_OBJECT_CONTRACT_VERSION_IMMUTABLE) as if
+  // they were foreign reads, collapsing reason discrimination.
+  const entriesLength = readArrayLength(entries, 'entries')
   const byContractId = new Map()
-  for (const raw of entries) {
+  for (let index = 0; index < entriesLength; index += 1) {
+    const raw = readArrayElement(entries, index, 'entries')
     const normalized = normalizeContractEntry(raw)
     let versions = byContractId.get(normalized.contractId)
     if (versions && versions.has(normalized.version)) {
@@ -349,21 +496,53 @@ function assertTrustedInventoryAttestation(inventoryReport) {
 // Confers no trust of its own (like computeSystemContentKey in the sibling
 // gip-system-identity-read.cjs module) — safe to expose for mechanism
 // testing via __internals, unlike buildInventoryAttestation above.
+//
+// P1 FIX (owner HARD HOLD #4610, round 7 — same class the module header's
+// "CLOSED ERROR CONTRACT" paragraph now commits to for the whole EXPORTED
+// surface, __internals included): this function IS reachable from outside
+// the module (via __internals — this file's own test file already calls it
+// directly), so its reads must be guarded exactly like every other entry
+// point, not merely "pure mechanism, trust assumed". Three foreign-call
+// sites: the `references` array's ITERATION (readArrayLength/readArrayElement
+// — the same RAW-*-ITERATOR class as createCanonicalObjectContractRegistry's
+// `entries` loop), each reference's `contractId`/`version` PROPERTY READS
+// (readEntryField — the same RAW-CONTRACT-ID class as normalizeContractEntry
+// above), and `registry.lookup(...)` itself, which is an attacker-suppliable
+// FUNCTION if the caller passes a duck-typed registry object (this function
+// takes no trust check on `registry` — that is the CALLER's job, per this
+// comment's own "ALREADY-TRUSTED" precondition — but "the caller is supposed
+// to have checked" does not stop a raw throw from a caller who didn't). The
+// `registry.lookup` catch re-throws unchanged when the caught error is
+// ALREADY a GipCanonicalObjectContractError — lookup()'s own internal
+// requiredIdentityToken validation legitimately throws that type for a
+// malformed contractId/version, and that branded throw must propagate as-is,
+// not be re-labeled as a `registry` failure.
 function computeActivationReadiness(registry, references) {
+  const referencesLength = readArrayLength(references, 'references')
   let backedCount = 0
   let unbackedCount = 0
-  for (const reference of references) {
-    if (registry.lookup(reference.contractId, reference.version)) backedCount += 1
+  for (let index = 0; index < referencesLength; index += 1) {
+    const reference = readArrayElement(references, index, 'references')
+    const contractId = readEntryField(reference, 'contractId')
+    const version = readEntryField(reference, 'version')
+    let found
+    try {
+      found = registry.lookup(contractId, version)
+    } catch (error) {
+      if (error instanceof GipCanonicalObjectContractError) throw error
+      fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'registry.lookup could not be evaluated', { field: 'registry' })
+    }
+    if (found) backedCount += 1
     else unbackedCount += 1
   }
   if (unbackedCount > 0) {
     fail('CANONICAL_OBJECT_CONTRACT_ACTIVATION_BLOCKED', 'canonical object contract registry has unbacked references; activation refused until backfill completes', {
       unbackedCount,
       backedCount,
-      totalReferences: references.length,
+      totalReferences: referencesLength,
     })
   }
-  return Object.freeze({ ready: true, backedCount, totalReferences: references.length })
+  return Object.freeze({ ready: true, backedCount, totalReferences: referencesLength })
 }
 
 // ---------------------------------------------------------------------------
