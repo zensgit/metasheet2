@@ -41,7 +41,10 @@ import {
   restoreAttendanceSettingsRow,
   type AttendanceSettingsRowSnapshot,
 } from '../utils/attendance-settings-row'
-import { assertLegacyPunchResponseGoldenShapeV1 } from '../utils/attendance-w4c2-golden-response'
+import {
+  assertLegacyPunchResponseGoldenShapeV1,
+  assertLegacyPunchResponseGoldenShapeResolvedV1,
+} from '../utils/attendance-w4c2-golden-response'
 
 // Shared-DB isolation for the deployment-wide 'attendance.settings' row: the replay leg turns
 // the min-punch-interval throttle off (the throttle fires on the ROUTE before the registry
@@ -116,6 +119,17 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
   const controlLiveOrg = randomUUID()
   const scheduledLegacyOrg = randomUUID()
   const scheduledSuspendedOrg = randomUUID()
+  // P2-1 / P1 remediation (#4612 gate2) fixtures: a single published shift,
+  // bounded to exactly one calendar day so BOTH the "no tz drift" and the
+  // "client tz != winning shift tz" legs resolve the SAME shift row via the
+  // SAME candidate set — the only things that can legitimately differ
+  // between the two legs are `reasonCode` and `evidenceSnapshot.calendarWorkDate`.
+  const resolvedFixtureOrg = randomUUID()
+  const resolvedFixtureShift = randomUUID()
+  const resolvedFixtureAssignmentA = randomUUID()
+  const resolvedFixtureAssignmentB = randomUUID()
+  const plainResolvedUser = randomUUID()
+  const driftResolvedUser = randomUUID()
 
   async function insertActiveUser(userId: string, orgId: string): Promise<void> {
     await pool.query(
@@ -214,6 +228,26 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
       body: JSON.stringify({ minPunchIntervalMinutes: 0 }),
     })
     if (putRes.status !== 200) throw new Error(`settings PUT failed: ${putRes.status}`)
+
+    // P2-1 / P1 remediation (#4612 gate2) fixtures: one org, one published
+    // shift bounded to a single calendar day (2026-07-19, UTC 20:00-23:00),
+    // two users each individually assigned to it.
+    await insertLegacyRolloutRow(resolvedFixtureOrg)
+    await insertActiveUser(plainResolvedUser, resolvedFixtureOrg)
+    await insertActiveUser(driftResolvedUser, resolvedFixtureOrg)
+    await pool.query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days)
+       VALUES ($1, $2, 'W4C2-P1-Resolved', 'UTC', '20:00', '23:00', false, '[0,1,2,3,4,5,6]'::jsonb)`,
+      [resolvedFixtureShift, resolvedFixtureOrg],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+       VALUES ($1, $3, $4, $5, '2026-07-19', '2026-07-19', true, 'published', 1),
+              ($2, $3, $6, $5, '2026-07-19', '2026-07-19', true, 'published', 1)`,
+      [resolvedFixtureAssignmentA, resolvedFixtureAssignmentB, resolvedFixtureOrg, plainResolvedUser, resolvedFixtureShift, driftResolvedUser],
+    )
   }, 120000)
 
   afterAll(async () => {
@@ -221,7 +255,7 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
       await restoreAttendanceSettingsRow(pool, settingsRowSnapshot).catch(() => undefined)
       resetAttendanceSettingsCacheAfterRestore()
     }
-    for (const userId of [legacyLiveUser, compatUser, suspendedLiveUser, controlLiveUser, scheduledLegacyUser, scheduledSuspendedUser]) {
+    for (const userId of [legacyLiveUser, compatUser, suspendedLiveUser, controlLiveUser, scheduledLegacyUser, scheduledSuspendedUser, plainResolvedUser, driftResolvedUser]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -277,7 +311,10 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
       __attendanceW4c2LegacyAttributionForTests?: {
         deriveLegacyLivePunchAttributionV1: (
           trx: unknown,
-          args: { orgId: string; userId: string; occurredAt: Date; timezone: string },
+          // P1 remediation (#4612 gate2): the function's param is `requestTimezone`,
+          // NOT `timezone` — see the module comment above
+          // `deriveLegacyLivePunchAttributionV1` in index.cjs.
+          args: { orgId: string; userId: string; occurredAt: Date; requestTimezone: string },
         ) => Promise<unknown>
         HttpError: new (status: number, code: string, message: string) => Error & { status: number; code: string }
       }
@@ -324,7 +361,7 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
         orgId: ambigOrg,
         userId: ambigUser,
         occurredAt: new Date('2026-07-17T13:30:00.000Z'),
-        timezone: 'UTC',
+        requestTimezone: 'UTC',
       })
     } catch (error) {
       caught = error as Error & { status?: number; code?: string }
@@ -348,7 +385,7 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
         orgId: ambigOrg,
         userId: cleanUser,
         occurredAt: new Date('2026-07-17T13:30:00.000Z'),
-        timezone: 'UTC',
+        requestTimezone: 'UTC',
       })
     } catch (error) {
       controlError = error
@@ -357,6 +394,79 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     }
     expect(controlError).toBeUndefined()
     expect(controlResult).toBeTruthy()
+  })
+
+  it('P2-1 remediation: legacy posture, `resolved` live punch (published shift, client tz == shift tz) is covered by the byte red-line pin', async () => {
+    // #4612 gate2 M10 finding: the ORIGINAL golden pin's two fixtures were
+    // both unscheduled (`unresolved`/`UNSCHEDULED_NO_SHIFT`), so
+    // `deriveLegacyLivePunchAttributionV1`'s `resolution.kind === 'resolved'`
+    // branch had ZERO coverage — shifting `calendarWorkDate` by a whole day
+    // left 794/795 green. This leg is the plain "shift actually resolves, no
+    // tz drift" fixture — see assertLegacyPunchResponseGoldenShapeResolvedV1's
+    // module comment for why both the response AND the frozen DB meta copy
+    // are asserted.
+    const token = await mintToken(plainResolvedUser, 'attendance:write')
+    const res = await punch(token, {
+      eventType: 'check_in',
+      occurredAt: '2026-07-19T22:00:00.000Z',
+      timezone: 'UTC',
+      orgId: resolvedFixtureOrg,
+    })
+    expect(res.status).toBe(200)
+    expect(res.body?.ok).toBe(true)
+    assertLegacyPunchResponseGoldenShapeResolvedV1(res.body.data, {
+      userId: plainResolvedUser,
+      status: 'partial',
+      workMinutes: 0,
+      lateMinutes: 0,
+      firstInAt: res.body.data.event.occurred_at,
+      lastOutAt: null,
+      calendarWorkDate: '2026-07-19',
+      reasonCode: 'CURRENT_DAY_CONTAINING_SHIFT',
+      shiftId: resolvedFixtureShift,
+      resolvedWorkDate: '2026-07-19',
+      matchingCount: 1,
+    })
+  })
+
+  it('P1 remediation (#4612 gate2 finding, exact-head `ad5541027`): zero-concurrency client-tz != winning-shift-tz drift no longer byte-flips the legacy response or the frozen DB evidence', async () => {
+    // Same published shift as the leg above (UTC 20:00-23:00, 2026-07-19),
+    // but the client explicitly sends `timezone: 'Asia/Tokyo'`. The route's
+    // PRE-resolution timezone is 'Asia/Tokyo' (client input wins the route's
+    // own resolvePunchWorkDateByShiftWindow call: `calendarWorkDate` =
+    // toWorkDate(2026-07-19T22:00:00Z, 'Asia/Tokyo') = '2026-07-20'); the
+    // POST-resolution timezone the route persists is 'UTC' (the winning
+    // shift's own rule timezone unconditionally overwrites it — see
+    // resolvePunchWorkDateByShiftWindow's `nextTimezone`, which does NOT
+    // re-consult the client's explicit choice). Before the P1 fix, the
+    // in-transaction re-derivation used the POST-resolution 'UTC' to
+    // recompute `calendarWorkDate`, landing on '2026-07-19' instead of the
+    // route's own '2026-07-20' — a DIFFERENT resolver call, DIFFERENT
+    // reasonCode (CURRENT_DAY_CONTAINING_SHIFT instead of
+    // SINGLE_MATCHING_CANDIDATE), permanently frozen into DB evidence. This
+    // leg pins the CORRECT (route-equivalent) values.
+    const token = await mintToken(driftResolvedUser, 'attendance:write')
+    const res = await punch(token, {
+      eventType: 'check_in',
+      occurredAt: '2026-07-19T22:00:00.000Z',
+      timezone: 'Asia/Tokyo',
+      orgId: resolvedFixtureOrg,
+    })
+    expect(res.status).toBe(200)
+    expect(res.body?.ok).toBe(true)
+    assertLegacyPunchResponseGoldenShapeResolvedV1(res.body.data, {
+      userId: driftResolvedUser,
+      status: 'partial',
+      workMinutes: 0,
+      lateMinutes: 0,
+      firstInAt: res.body.data.event.occurred_at,
+      lastOutAt: null,
+      calendarWorkDate: '2026-07-20',
+      reasonCode: 'SINGLE_MATCHING_CANDIDATE',
+      shiftId: resolvedFixtureShift,
+      resolvedWorkDate: '2026-07-19',
+      matchingCount: 1,
+    })
   })
 
   it('stable-ID legacy_compat: claim+seal, congruent replay returns stored response with zero new DML, incongruent same key is 409', async () => {
