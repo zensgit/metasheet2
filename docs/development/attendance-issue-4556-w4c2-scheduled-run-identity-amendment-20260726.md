@@ -90,9 +90,15 @@
 > while section 3.1's row and the rest of section 3.2 said three tokens,
 > two unconditional and one conditional. The two-token wording above and
 > at section 3.2's `(ii)` opening are corrected in this pass to match the
-> row; nothing else in section 3.1/3.2 changed. The PR body was updated in
-> the same pass to stop asserting the retracted safety claim above the
-> retraction's own text.
+> row. The same review also raised, and this pass separately fixes,
+> section 3.2's precondition (1) wording (aligned to section 4 step 3's
+> phrasing), precondition (4) (an explicit acceptance bar added), and one
+> overbroad "every argument … analyses only appearance" sentence (narrowed
+> to name its exception) — none of those three touch the ballot's token
+> count or shape, which is what this note documents. Section 3.1's ballot
+> row itself is unchanged. The PR body was updated in the same pass to
+> stop asserting the retracted safety claim above the retraction's own
+> text.
 >
 > Runtime posture: PR #4612 stays **Draft** under
 > **OWNER-AUTHORIZATION-HOLD**. This amendment contains **no runtime code**
