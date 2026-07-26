@@ -18,100 +18,34 @@
 #      sample-record/payload-template JSON textareas) whose own no-echo sentinel guarantees a
 #      JSON.parse SyntaxError's offending-text snippet is never rendered into the status line.
 # Expand the spec list as more integration web specs are added.
+#
+# WIRING FOR REQUIRED-CONTEXT SAFETY (owner ruling, promotion slice, 2026-07-25). A required status
+# check is matched by check/job name; if the workflow never runs, the context is never produced, and
+# a PR/merge-queue entry that never touches a path in the `paths:` filter waits FOREVER on a check
+# that will never report. This workflow used to trigger `pull_request` with a `paths:` filter and had
+# no `merge_group` trigger at all, so it could not safely be promoted to required. This slice fixes
+# the WIRING ONLY (promoting the produced context `integration-guard` to a required check on branch
+# protection remains the owner's separate, later step — not done here):
+#   - `pull_request` now has NO `paths:` filter and `merge_group:` is added, so the job runs — and the
+#     `integration-guard` context is produced — on EVERY pull_request and EVERY merge_group event.
+#   - the guarded-path scope check moves INSIDE the job (the "Detect relevant integration changes"
+#     step below): a change inside the guarded paths runs the full suite unchanged (identical
+#     `pnpm --filter plugin-integration-core test` / vitest commands as before); a change outside them
+#     hits an explicit no-op step that echoes it is a DELIBERATE no-op and exits 0 — a real, executed,
+#     green step, not a GitHub-`skipped` step/job (a `skipped` job does not satisfy a required context
+#     the same way).
+#   - the job id/produced check name (`integration-guard`) is unchanged byte-for-byte, and `push` to
+#     main keeps its own separate trigger-level `paths:` filter (untouched by this slice).
+# A YAML-shape contract for these properties (no `paths` on pull_request, `merge_group` present, the
+# job's exact name, both branches of the in-job scope check) lives in the already-required
+# `test (20.x)` job in .github/workflows/plugin-tests.yml, NOT a copy of the integration suite itself
+# — see scripts/ops/integration-guard-required-wiring-contract.test.mjs for the full rationale.
 name: Integration Guard
 
 on:
   pull_request:
-    paths:
-      - 'plugins/plugin-integration-core/**'
-      - 'apps/web/src/services/integration/readSourceConfigs.ts'
-      - 'apps/web/src/services/integration/readSourceCompositions.ts'
-      - 'apps/web/src/services/integration/errorCodeLabels.ts'
-      - 'apps/web/src/services/integration/fieldHints.ts'
-      - 'apps/web/src/services/integration/bridgeAgentConfigCheck.ts'
-      - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
-      - 'apps/web/src/components/integration/IntegrationReadSourceWizard.vue'
-      - 'apps/web/src/services/integration/readSourceModePresets.ts'
-      - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
-      - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
-      - 'apps/web/src/components/integration/IntegrationCompositionWizard.vue'
-      - 'apps/web/src/services/integration/readSourceTemplateCatalog.ts'
-      - 'apps/web/src/components/integration/IntegrationTemplateCatalogPicker.vue'
-      - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
-      - 'apps/web/src/components/integration/IntegrationMonitoringSection.vue'
-      - 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue'
-      - 'apps/web/src/components/integration/IntegrationMappingRulesSection.vue'
-      - 'apps/web/src/components/integration/IntegrationObjectTemplateSection.vue'
-      - 'apps/web/src/components/integration/IntegrationPayloadPreviewSection.vue'
-      - 'apps/web/src/components/integration/IntegrationConnectionSection.vue'
-      - 'apps/web/src/components/integration/IntegrationBridgeAgentSection.vue'
-      - 'apps/web/src/components/integration/IntegrationPipelineRunSection.vue'
-      - 'apps/web/src/components/integration/IntegrationStockPrepPanel.vue'
-      - 'apps/web/src/components/integration/IntegrationExternalWritePanel.vue'
-      - 'apps/web/src/components/integration/IntegrationTableActionsPanel.vue'
-      - 'apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue'
-      - 'apps/web/src/components/integration/IntegrationOptionSetsStructuredEditor.vue'
-      - 'apps/web/src/components/integration/JsonAssist.vue'
-      - 'apps/web/src/utils/jsonAssist.ts'
-      - 'apps/web/src/utils/optionSetsStructured.ts'
-      - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
-      - 'apps/web/src/components/integration/MetaIntegrationFieldRuleAuthoring.vue'
-      - 'apps/web/src/services/integration/workbench.ts'
-      - 'apps/web/src/components/integration/JsonAssist.vue'
-      - 'apps/web/src/utils/jsonAssist.ts'
-      - 'apps/web/src/views/IntegrationWorkbenchView.vue'
-      - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
-      - 'apps/web/src/views/IntegrationHelpView.vue'
-      - 'apps/web/tests/composition-vocab-mirror.spec.ts'
-      - 'apps/web/tests/multitable-resolver-vocab-mirror.spec.ts'
-      - 'apps/web/tests/integrationErrorCodeLabels.spec.ts'
-      - 'apps/web/tests/fieldHints.spec.ts'
-      - 'apps/web/tests/integrationWorkbench.spec.ts'
-      - 'apps/web/tests/MetaIntegrationFieldRuleAuthoring.spec.ts'
-      - 'apps/web/tests/bridgeAgentConfigCheck.spec.ts'
-      - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
-      - 'apps/web/tests/IntegrationReadSourceWizard.spec.ts'
-      - 'apps/web/tests/readSourceModePresets.spec.ts'
-      - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
-      - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
-      - 'apps/web/tests/IntegrationCompositionWizard.spec.ts'
-      - 'apps/web/tests/readSourceTemplateCatalog.spec.ts'
-      - 'apps/web/tests/IntegrationTemplateCatalogPicker.spec.ts'
-      - 'apps/web/tests/readSourceCompositions.service.spec.ts'
-      - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
-      - 'apps/web/tests/IntegrationWorkbenchRail.spec.ts'
-      - 'apps/web/tests/IntegrationMonitoringSection.spec.ts'
-      - 'apps/web/tests/IntegrationCleaningDatasetSection.spec.ts'
-      - 'apps/web/tests/IntegrationMappingRulesSection.spec.ts'
-      - 'apps/web/tests/IntegrationObjectTemplateSection.spec.ts'
-      - 'apps/web/tests/IntegrationPayloadPreviewSection.spec.ts'
-      - 'apps/web/tests/IntegrationConnectionSection.spec.ts'
-      - 'apps/web/tests/IntegrationBridgeAgentSection.spec.ts'
-      - 'apps/web/tests/IntegrationPipelineRunSection.spec.ts'
-      - 'apps/web/tests/IntegrationStockPrepPanel.spec.ts'
-      - 'apps/web/tests/IntegrationExternalWritePanel.spec.ts'
-      - 'apps/web/tests/IntegrationTableActionsPanel.spec.ts'
-      - 'apps/web/tests/IntegrationFieldOptionSyncPanel.spec.ts'
-      - 'apps/web/tests/IntegrationOptionSetsStructuredEditor.spec.ts'
-      - 'apps/web/tests/utils/optionSetsStructured.spec.ts'
-      - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
-      - 'apps/web/tests/IntegrationHelpView.spec.ts'
-      - 'apps/web/tests/JsonAssist.spec.ts'
-      - 'apps/web/tests/utils/jsonAssist.spec.ts'
-      - 'apps/web/src/components/integration/stockPreparation/**'
-      - 'apps/web/src/services/integration/stockPreparation/**'
-      - 'apps/web/tests/StockPreparationWorkspace.spec.ts'
-      - 'apps/web/tests/StockPreparationProjectWorkspaceView.spec.ts'
-      - 'apps/web/tests/StockPreparationSnapshotDiffView.spec.ts'
-      - 'apps/web/tests/bomSnapshotDiff.spec.ts'
-      - 'apps/web/tests/StockPreparationMappingConfirmView.spec.ts'
-      - 'apps/web/tests/StockPreparationUnitConfirmView.spec.ts'
-      - 'apps/web/tests/StockPreparationPrepLineView.spec.ts'
-      - 'apps/web/tests/StockPreparationExceptionQueueView.spec.ts'
-      - 'apps/web/tests/StockPreparationDashboardView.spec.ts'
-      - 'apps/web/tests/StockPreparationStageOverview.spec.ts'
-      - 'apps/web/tests/StockPreparationStageStepper.spec.ts'
-      - '.github/workflows/integration-guard.yml'
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
     paths:
@@ -211,29 +145,166 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect relevant integration changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${BASE_SHA:-}" || "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff-tree --root --no-commit-id --name-only -r "$HEAD_SHA")"
+          else
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          fi
+
+          relevant=false
+          while IFS= read -r path; do
+            case "$path" in
+              plugins/plugin-integration-core/*|\
+              apps/web/src/services/integration/readSourceConfigs.ts|\
+              apps/web/src/services/integration/readSourceCompositions.ts|\
+              apps/web/src/services/integration/errorCodeLabels.ts|\
+              apps/web/src/services/integration/fieldHints.ts|\
+              apps/web/src/services/integration/bridgeAgentConfigCheck.ts|\
+              apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue|\
+              apps/web/src/components/integration/IntegrationReadSourceWizard.vue|\
+              apps/web/src/services/integration/readSourceModePresets.ts|\
+              apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue|\
+              apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue|\
+              apps/web/src/components/integration/IntegrationCompositionWizard.vue|\
+              apps/web/src/services/integration/readSourceTemplateCatalog.ts|\
+              apps/web/src/components/integration/IntegrationTemplateCatalogPicker.vue|\
+              apps/web/src/components/integration/IntegrationWorkbenchRail.vue|\
+              apps/web/src/components/integration/IntegrationMonitoringSection.vue|\
+              apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue|\
+              apps/web/src/components/integration/IntegrationMappingRulesSection.vue|\
+              apps/web/src/components/integration/IntegrationObjectTemplateSection.vue|\
+              apps/web/src/components/integration/IntegrationPayloadPreviewSection.vue|\
+              apps/web/src/components/integration/IntegrationConnectionSection.vue|\
+              apps/web/src/components/integration/IntegrationBridgeAgentSection.vue|\
+              apps/web/src/components/integration/IntegrationPipelineRunSection.vue|\
+              apps/web/src/components/integration/IntegrationStockPrepPanel.vue|\
+              apps/web/src/components/integration/IntegrationExternalWritePanel.vue|\
+              apps/web/src/components/integration/IntegrationTableActionsPanel.vue|\
+              apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue|\
+              apps/web/src/components/integration/IntegrationOptionSetsStructuredEditor.vue|\
+              apps/web/src/components/integration/JsonAssist.vue|\
+              apps/web/src/utils/jsonAssist.ts|\
+              apps/web/src/utils/optionSetsStructured.ts|\
+              apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts|\
+              apps/web/src/components/integration/MetaIntegrationFieldRuleAuthoring.vue|\
+              apps/web/src/services/integration/workbench.ts|\
+              apps/web/src/components/integration/JsonAssist.vue|\
+              apps/web/src/utils/jsonAssist.ts|\
+              apps/web/src/views/IntegrationWorkbenchView.vue|\
+              apps/web/src/views/IntegrationK3WiseSetupView.vue|\
+              apps/web/src/views/IntegrationHelpView.vue|\
+              apps/web/tests/composition-vocab-mirror.spec.ts|\
+              apps/web/tests/multitable-resolver-vocab-mirror.spec.ts|\
+              apps/web/tests/integrationErrorCodeLabels.spec.ts|\
+              apps/web/tests/fieldHints.spec.ts|\
+              apps/web/tests/integrationWorkbench.spec.ts|\
+              apps/web/tests/MetaIntegrationFieldRuleAuthoring.spec.ts|\
+              apps/web/tests/bridgeAgentConfigCheck.spec.ts|\
+              apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts|\
+              apps/web/tests/IntegrationReadSourceWizard.spec.ts|\
+              apps/web/tests/readSourceModePresets.spec.ts|\
+              apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts|\
+              apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts|\
+              apps/web/tests/IntegrationCompositionWizard.spec.ts|\
+              apps/web/tests/readSourceTemplateCatalog.spec.ts|\
+              apps/web/tests/IntegrationTemplateCatalogPicker.spec.ts|\
+              apps/web/tests/readSourceCompositions.service.spec.ts|\
+              apps/web/tests/IntegrationWorkbenchView.spec.ts|\
+              apps/web/tests/IntegrationWorkbenchRail.spec.ts|\
+              apps/web/tests/IntegrationMonitoringSection.spec.ts|\
+              apps/web/tests/IntegrationCleaningDatasetSection.spec.ts|\
+              apps/web/tests/IntegrationMappingRulesSection.spec.ts|\
+              apps/web/tests/IntegrationObjectTemplateSection.spec.ts|\
+              apps/web/tests/IntegrationPayloadPreviewSection.spec.ts|\
+              apps/web/tests/IntegrationConnectionSection.spec.ts|\
+              apps/web/tests/IntegrationBridgeAgentSection.spec.ts|\
+              apps/web/tests/IntegrationPipelineRunSection.spec.ts|\
+              apps/web/tests/IntegrationStockPrepPanel.spec.ts|\
+              apps/web/tests/IntegrationExternalWritePanel.spec.ts|\
+              apps/web/tests/IntegrationTableActionsPanel.spec.ts|\
+              apps/web/tests/IntegrationFieldOptionSyncPanel.spec.ts|\
+              apps/web/tests/IntegrationOptionSetsStructuredEditor.spec.ts|\
+              apps/web/tests/utils/optionSetsStructured.spec.ts|\
+              apps/web/tests/IntegrationK3WiseSetupView.spec.ts|\
+              apps/web/tests/IntegrationHelpView.spec.ts|\
+              apps/web/tests/JsonAssist.spec.ts|\
+              apps/web/tests/utils/jsonAssist.spec.ts|\
+              apps/web/src/components/integration/stockPreparation/*|\
+              apps/web/src/services/integration/stockPreparation/*|\
+              apps/web/tests/StockPreparationWorkspace.spec.ts|\
+              apps/web/tests/StockPreparationProjectWorkspaceView.spec.ts|\
+              apps/web/tests/StockPreparationSnapshotDiffView.spec.ts|\
+              apps/web/tests/bomSnapshotDiff.spec.ts|\
+              apps/web/tests/StockPreparationMappingConfirmView.spec.ts|\
+              apps/web/tests/StockPreparationUnitConfirmView.spec.ts|\
+              apps/web/tests/StockPreparationPrepLineView.spec.ts|\
+              apps/web/tests/StockPreparationExceptionQueueView.spec.ts|\
+              apps/web/tests/StockPreparationDashboardView.spec.ts|\
+              apps/web/tests/StockPreparationStageOverview.spec.ts|\
+              apps/web/tests/StockPreparationStageStepper.spec.ts|\
+              .github/workflows/integration-guard.yml)
+                relevant=true
+                break
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [[ "$relevant" == true ]]; then
+            echo "Integration Guard: relevant changes detected for $EVENT_NAME."
+          else
+            echo "Integration Guard: no relevant changes detected for $EVENT_NAME."
+          fi
+
+      - name: No-op (out of scope) — deliberate success, not a skipped job
+        if: steps.changes.outputs.relevant == 'false'
+        run: |
+          echo "Integration Guard: no changes in guarded paths for this ${{ github.event_name }} event."
+          echo "This is a DELIBERATE NO-OP SUCCESS (exit 0) -- not a GitHub-skipped step/job -- so the"
+          echo "integration-guard required context is produced and green without running the"
+          echo "integration suite."
+          exit 0
 
       - name: Setup Node.js 20.x
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
 
       - name: Setup pnpm
+        if: steps.changes.outputs.relevant == 'true'
         uses: pnpm/action-setup@v4
         with:
           version: 10.16.1
           run_install: false
 
       - name: Use empty npmrc for pnpm
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           echo "" > /tmp/empty-npmrc
           echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
 
       - name: Get pnpm store directory
+        if: steps.changes.outputs.relevant == 'true'
         id: pnpm-cache
         shell: bash
         run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm cache
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -242,9 +313,11 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies
+        if: steps.changes.outputs.relevant == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Run plugin-integration-core CJS test chain (hermetic, no DB)
+        if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter plugin-integration-core test
 
       # NOTE (IU-4, #3803): this step previously had THREE duplicate `run:` keys in a single step —
@@ -255,4 +328,5 @@ jobs:
       # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
       # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
       - name: Run integration web guard specs (targeted)
+        if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper --reporter=dot

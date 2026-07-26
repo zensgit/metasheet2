@@ -158,6 +158,19 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
+      # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
+      # #4610 by owner instruction): pins the YAML-shape properties that make .github/workflows/
+      # integration-guard.yml's produced `integration-guard` check safe to later mark as a required
+      # context — on.pull_request has NO paths: filter, on.merge_group exists, the job is present
+      # under the exact expected name with no matrix suffix, and the in-job scope classifier has BOTH
+      # branches (relevant ⇒ runs the full suite unchanged, irrelevant ⇒ an explicit no-op exit 0,
+      # not a GitHub-skipped step). Deliberately NOT a copy of the integration suite itself — that
+      # stays in integration-guard.yml only (owner ruling: two copies would drift apart). See
+      # scripts/ops/integration-guard-required-wiring-contract.test.mjs for the full rationale and an
+      # explicit note on what a YAML-shape assertion can and cannot prove.
+      - name: Integration Guard required-wiring contract
+        run: node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs
+
       # PB4-2 CI two-point wiring contract (no DB): the archive-read-only two-connection suite must
       # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       # Dropping either point makes the whole barrier suite silently never run while CI stays green.
