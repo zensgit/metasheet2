@@ -171,11 +171,26 @@ export function assertLegacyPunchResponseGoldenShapeV1(
  * in `attendance-work-date-resolver.cjs`, called from
  * `applyLivePunchProjectionLegacyV1` in index.cjs) — the persisted DB
  * projection carries a SECOND, independent copy of the same resolution
- * fields. Both copies are recursive-key-path-pinned AND value-asserted here:
- * a P1-style bug that flips `reasonCode`/`evidenceSnapshot.calendarWorkDate`
- * only in ONE of the two copies (response vs. frozen DB meta) would still be
- * caught, because both are asserted independently against the SAME expected
- * values.
+ * fields. Both copies are recursive-key-path-pinned AND value-asserted here.
+ *
+ * Independence of the two copies' assertions is mutation-verified, not just
+ * asserted: a targeted mutation that corrupts ONLY the frozen copy's
+ * `reasonCode` (`buildFrozenWorkDateAttribution` fed a doctored
+ * `{ ...punchWorkDateResolution, reasonCode: 'MUTANT_FROZEN_ONLY' }` while
+ * the response's own `punchWorkDateResolution` is left untouched) turns both
+ * new legs red exactly at `frozen.reasonCode` below (`expected
+ * 'MUTANT_FROZEN_ONLY' to be '<real reasonCode>'`) — AFTER the response-side
+ * `workDateResolution.*`/`responseEvidence.*` assertions above have already
+ * passed, proving they do not mask a frozen-side break. Note the reverse
+ * direction (a P1-style bug that only corrupts the RESPONSE side) is proven
+ * by the P1 regression fix itself, which failed at the response-side
+ * `workDateResolution.reasonCode` check before ever reaching the frozen
+ * assertions — see the PR body's "P1 修复实数" section for those numbers.
+ * Both directions restored via `git checkout HEAD --`, porcelain re-verified
+ * empty. Caveat: only `reasonCode` (both copies) has a dedicated
+ * single-field mutation; `shiftId`/`workDate`/`evidenceSnapshot.
+ * calendarWorkDate`/`.matchingCount` are asserted and structurally exercised
+ * by every leg above but not each individually mutation-proven this round.
  */
 export const LEGACY_LIVE_PUNCH_GOLDEN_KEY_PATHS_RESOLVED_V1: readonly string[] = [
   'event',
