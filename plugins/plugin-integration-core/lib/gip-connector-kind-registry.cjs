@@ -140,11 +140,47 @@ function normalizeDeclaration(entry) {
 // `__internals.trustedConnectorKindRegistries.add(fakeRegistry)`, turning a
 // duck-typed forgery into something assertTrustedRegistry accepts — the
 // "unforgeable" claim above is true only because this stays private.
+//
+// P1-1 FIX (owner HARD HOLD #4610): round 3's fix above closed exactly ONE
+// door — `.add(fake)` on this WeakSet from outside the module — and left the
+// front door open: `createConnectorKindRegistry` itself was ALSO exported at
+// the bottom of this file, and every registry it built was unconditionally
+// added to this same WeakSet. That meant ANY importer, with zero source
+// edits, could do `createConnectorKindRegistry([{ kind: 'runtime:forged',
+// ... }])` and receive back an object `assertTrustedRegistry` accepts —
+// "trusted" was never actually gated by anything but calling an exported
+// function. The owner's demonstration: registering `runtime:forged` this way
+// passed the WeakSet; an extractor that treats the password as the principal
+// then lets rotating ONLY the secret change systemContentKey — decisions (α)
+// and (β), directly violated. "A public factory whose products are trusted
+// is equivalent to no trust check at all" (owner's words) — recorded here so
+// the next author does not reintroduce this shape.
+//
+// The fix: `createConnectorKindRegistry` below now ONLY builds a registry
+// object (resolve()/size(), same mechanics as always) — it no longer touches
+// this WeakSet at all, so calling it, from anywhere, confers NOTHING. Trust
+// is granted in EXACTLY one place: buildTrustedConnectorKindRegistry further
+// down, which is NEVER exported — not at the top level, and not under
+// __internals either (__internals is still a property of module.exports,
+// reachable by any require()-holding importer; a trust-granting constructor
+// placed there would be the identical hole one namespace deeper). Its only
+// caller is the literal invocation that builds CERTIFIED_CONNECTOR_KIND_REGISTRY
+// at module load, below. A future amendment that legitimately needs a SECOND
+// trusted registry (there is no known reason to) would have to add a second
+// call to buildTrustedConnectorKindRegistry from a line added to THIS FILE,
+// in a reviewed commit — never from a runtime call anywhere else in the
+// process. `createConnectorKindRegistry` stays exported deliberately: it is
+// now honestly just "build a registry-shaped object" — the seam tests use to
+// build UNTRUSTED registries and then assert resolveCertifiedConnectorKind
+// refuses them (see gip-connector-kind-registry.test.cjs's
+// forgedRegistryViaExportedFactoryIsRefused, which reproduces the owner's
+// exact probe).
 const trustedConnectorKindRegistries = new WeakSet()
 
-// Builds a CLOSED registry from a fixed, first-party entry list. `entries` MAY
-// be empty (and the shipped default below IS empty) — an empty registry is a
-// legal, honest "nothing certified yet" state, not an error.
+// Builds a registry object (resolve()/size()) from a fixed entry list.
+// `entries` MAY be empty. Calling this function grants NO trust — see the
+// P1-1 fix note above. Mechanically unchanged from before that fix: entries
+// are validated and inserted here, at construction, and never again.
 function createConnectorKindRegistry(entries) {
   if (!Array.isArray(entries)) {
     fail('CONNECTOR_KIND_DECLARATION_INVALID', 'entries must be an array', { field: 'entries' })
@@ -170,7 +206,7 @@ function createConnectorKindRegistry(entries) {
   // returned object that could extend it, checked by the exact-key-set test
   // (the same technique the ledger prescribes for the qualification prober's
   // residual-1 predicate) so a re-addition under ANY name reds that test.
-  const registry = Object.freeze({
+  return Object.freeze({
     resolve(rawKind) {
       if (typeof rawKind !== 'string') return null
       const trimmed = rawKind.trim()
@@ -182,6 +218,12 @@ function createConnectorKindRegistry(entries) {
       return byKind.size
     },
   })
+}
+
+// MODULE-PRIVATE. Never exported, under any name, anywhere. The ONLY place
+// that grants trust — see the P1-1 fix note above createConnectorKindRegistry.
+function buildTrustedConnectorKindRegistry(entries) {
+  const registry = createConnectorKindRegistry(entries)
   trustedConnectorKindRegistries.add(registry)
   return registry
 }
@@ -211,7 +253,9 @@ function resolveCertifiedConnectorKind(registry, rawKind) {
 // requires the alias map to come from a privately-authorized real inventory
 // run that has not happened — see #4609 / the ledger's ⟲OD2 amendment). Until
 // then every kind, certified-sounding or not, is uncertified for GIP binding.
-const CERTIFIED_CONNECTOR_KIND_REGISTRY = createConnectorKindRegistry([])
+// Built via buildTrustedConnectorKindRegistry (module-private, P1-1 fix) —
+// this is the ONE trusted registry instance that will ever exist.
+const CERTIFIED_CONNECTOR_KIND_REGISTRY = buildTrustedConnectorKindRegistry([])
 
 module.exports = {
   createConnectorKindRegistry,

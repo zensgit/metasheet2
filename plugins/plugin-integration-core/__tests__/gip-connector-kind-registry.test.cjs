@@ -75,11 +75,18 @@ function defaultRegistryIsEmptyAndClosed() {
 }
 
 // ---------------------------------------------------------------------------
-// (2) Positive control: a properly declared kind resolves and round-trips.
+// (2) Positive control (MECHANISM, not trust): a properly declared kind
+// resolves and round-trips. createConnectorKindRegistry's output is
+// UNTRUSTED (P1-1 fix) — resolve()/size() work identically regardless of
+// trust, so declaration/alias mechanics are tested by calling .resolve()
+// DIRECTLY on the built object, never through the trust-gated
+// resolveCertifiedConnectorKind. Trust-gate behavior itself is proven
+// separately below (forgedRegistryViaExportedFactoryIsRefused).
 // ---------------------------------------------------------------------------
 function positiveControlResolves() {
   const registry = createConnectorKindRegistry([harnessDeclaration()])
-  const declaration = resolveCertifiedConnectorKind(registry, 'test:harness')
+  const declaration = registry.resolve('test:harness')
+  assert.ok(declaration, 'a properly declared kind must resolve via the object\'s own resolve()')
   assert.equal(declaration.kind, 'test:harness')
   assert.equal(typeof declaration.extractEndpointIdentity, 'function')
   assert.equal(typeof declaration.extractAuthPrincipal, 'function')
@@ -88,25 +95,59 @@ function positiveControlResolves() {
 
 // ---------------------------------------------------------------------------
 // (3) Explicit alias mapping resolves to the SAME declaration as the
-// canonical kind — never a guess, never a fuzzy match.
+// canonical kind — never a guess, never a fuzzy match. MECHANISM-level, via
+// .resolve() directly — same rationale as (2) above.
 // ---------------------------------------------------------------------------
 function explicitAliasResolves() {
   const registry = createConnectorKindRegistry([harnessDeclaration()])
-  const byCanonical = resolveCertifiedConnectorKind(registry, 'test:harness')
-  const byAlias = resolveCertifiedConnectorKind(registry, 'legacy:harness')
+  const byCanonical = registry.resolve('test:harness')
+  const byAlias = registry.resolve('legacy:harness')
   assert.equal(byAlias, byCanonical, 'alias must resolve to the identical declaration object, not a re-derived copy')
 
   // An unmapped near-miss string must NOT silently resolve — aliases are
   // explicit, never fuzzy/prefix/substring matched.
-  rejects(
-    () => resolveCertifiedConnectorKind(registry, 'legacy:harnes'),
-    'SYSTEM_IDENTITY_KIND_UNCERTIFIED',
-    'a near-miss alias string must not resolve',
+  assert.equal(registry.resolve('legacy:harnes'), null, 'a near-miss alias string must not resolve')
+  assert.equal(registry.resolve('LEGACY:HARNESS'), null, 'alias resolution must not case-fold')
+}
+
+// ---------------------------------------------------------------------------
+// (3b) P1-1 FIX (owner HARD HOLD #4610) — reproduces the owner's EXACT probe:
+// registering a kind via the still-exported createConnectorKindRegistry
+// factory ("runtime:forged", with an extractor that treats the password as
+// the principal — the shape the owner used to show rotating only the secret
+// moves systemContentKey) must NOT pass the trust gate. Before this fix,
+// createConnectorKindRegistry unconditionally added its output to the
+// module-private trust WeakSet, so this exact call sequence returned a
+// declaration; now it must be refused as untrusted, never reaching
+// SYSTEM_IDENTITY_KIND_UNCERTIFIED (which would mean it passed the trust
+// check and merely wasn't found).
+// ---------------------------------------------------------------------------
+function forgedRegistryViaExportedFactoryIsRefused() {
+  const forged = createConnectorKindRegistry([{
+    kind: 'runtime:forged',
+    aliases: [],
+    extractEndpointIdentity: (config) => config.baseUrl,
+    extractAuthPrincipal: (creds) => creds.password, // the owner's exact "password as principal" shape
+    extractAuthTenantScope: (creds) => creds.acctId,
+  }])
+  // Mechanically, the forged registry works fine standalone — proving the
+  // refusal below is really about TRUST, not a shape defect.
+  assert.ok(forged.resolve('runtime:forged'), 'sanity: the forged registry must be well-formed and resolve its own kind via .resolve()')
+
+  const caught = rejects(
+    () => resolveCertifiedConnectorKind(forged, 'runtime:forged'),
+    'CONNECTOR_KIND_DECLARATION_INVALID',
+    'a registry built via the exported factory must be refused by the trust gate, exactly like a duck-typed forgery',
   )
+  assert.equal(caught.details.field, 'registry')
+
+  // Contrast with the GENUINE trusted singleton: it passes the trust gate
+  // (reaches "not found", never "untrusted") — the positive control that
+  // proves the gate isn't just refusing everything unconditionally.
   rejects(
-    () => resolveCertifiedConnectorKind(registry, 'LEGACY:HARNESS'),
+    () => resolveCertifiedConnectorKind(CERTIFIED_CONNECTOR_KIND_REGISTRY, 'runtime:forged'),
     'SYSTEM_IDENTITY_KIND_UNCERTIFIED',
-    'alias resolution must not case-fold',
+    'the genuine trusted singleton must pass the trust gate (fail at lookup, not at trust) — proves the gate discriminates, not merely refuses',
   )
 }
 
@@ -284,6 +325,7 @@ async function main() {
   defaultRegistryIsEmptyAndClosed()
   positiveControlResolves()
   explicitAliasResolves()
+  forgedRegistryViaExportedFactoryIsRefused()
   missingExtractorsRefusedAtRegistration()
   malformedDeclarationsRefused()
   await legacyPathKeepsWorkingWhileGipBindingRefuses()

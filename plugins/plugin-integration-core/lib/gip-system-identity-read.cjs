@@ -6,8 +6,14 @@
 //   systemContentKey = hash( system/connector kind + endpoint identity
 //                          + stable authPrincipalKey + authTenantScopeKey )
 //
-// LATENT: not wired to any runtime, route, scheduler or flag. No caller in this
-// tree invokes deriveSystemContentKey yet.
+// LATENT: not wired to any runtime, route, scheduler or flag. No caller in
+// this tree invokes deriveSystemContentKeyForSystemId (the gated, public
+// entry point — see the P1-2 fix note above buildSystemIdentityServiceObject
+// further down) yet, and it mints nothing today regardless: the
+// module-private trusted-service constructor has no call site anywhere in
+// this file, matching gip-connector-kind-registry.cjs's CERTIFIED_CONNECTOR_KIND_REGISTRY
+// shipping empty — "nothing to certify/build FROM yet" is the honest LATENT
+// state on both sides of this line.
 //
 // EXCLUDED from the four terms, per the lock and per owner ruling (ledger §3.0
 // B-2): object/filter/data-selection scope (belongs to configContentKey),
@@ -59,10 +65,13 @@
 
 const crypto = require('node:crypto')
 const { stableCanonicalStringify, CanonicalDomainError } = require('./gip-canonical-json.cjs')
-const {
-  resolveCertifiedConnectorKind,
-  GipConnectorKindRegistryError,
-} = require('./gip-connector-kind-registry.cjs')
+// P1-2 FIX (owner HARD HOLD #4610, see the fix note above deriveSystemContentKeyForSystemId
+// below): this module now imports the trusted CONNECTOR-KIND SINGLETON
+// directly — "closed by import, not by parameter" — rather than
+// resolveCertifiedConnectorKind/GipConnectorKindRegistryError, which existed
+// only to trust-gate a CALLER-SUPPLIED registry. There is no longer a
+// caller-supplied registry on the gated path at all.
+const { CERTIFIED_CONNECTOR_KIND_REGISTRY } = require('./gip-connector-kind-registry.cjs')
 const { SANITIZATION_MARKER_PATTERN, scrubSecretStringValue } = require('./payload-redaction.cjs')
 
 const SYSTEM_IDENTITY_ERROR_REASONS = Object.freeze([
@@ -72,6 +81,7 @@ const SYSTEM_IDENTITY_ERROR_REASONS = Object.freeze([
   'SYSTEM_IDENTITY_MATERIAL_MISSING',
   'SYSTEM_IDENTITY_DECRYPTION_FAILED',
   'SYSTEM_IDENTITY_ENDPOINT_NOT_CREDENTIAL_FREE',
+  'SYSTEM_IDENTITY_SERVICE_UNTRUSTED',
 ])
 const ERROR_REASON_SET = new Set(SYSTEM_IDENTITY_ERROR_REASONS)
 
@@ -349,8 +359,39 @@ function parseCredentialEnvelope(plaintext) {
   return parsed
 }
 
+// MECHANISM-LEVEL helper (P1-2 fix, owner HARD HOLD #4610): resolves a kind
+// against WHATEVER registry-shaped object is passed in — no trust check.
+// This is deliberate and safe HERE specifically because, after this fix,
+// this whole function (deriveSystemContentKey) is __internals-only (see
+// module.exports below) — it is not the production/gated entry point, so it
+// does not need to re-derive "is this registry genuinely first-party" the
+// way the OLD top-level-exported version did. The production entry point
+// (deriveSystemContentKeyForSystemId, further down) never accepts a registry
+// parameter at all — it is CLOSED BY IMPORT to CERTIFIED_CONNECTOR_KIND_REGISTRY,
+// which structurally cannot be forged (gip-connector-kind-registry.cjs's own
+// P1-1 fix). Letting this __internals-only mechanism accept any
+// resolve()-shaped object is what makes it usable for testing arbitrary
+// connector-kind declarations (rotation semantics, hashing terms, DSN
+// credential boundary, hostile-extractor probes, …) without needing those
+// declarations to ever enter the one real trusted registry, which SHIPS
+// EMPTY and stays that way in this LATENT slice.
+function resolveDeclarationForMechanism(registry, kind) {
+  if (!registry || typeof registry.resolve !== 'function') {
+    fail('SYSTEM_IDENTITY_INPUT_INVALID', 'registry must expose resolve()', { field: 'registry' })
+  }
+  const declaration = registry.resolve(kind)
+  if (!declaration) {
+    fail('SYSTEM_IDENTITY_KIND_UNCERTIFIED', 'connector kind is not certified for GIP binding', {})
+  }
+  return declaration
+}
+
 // ---------------------------------------------------------------------------
-// The one entry point. Inputs:
+// MECHANISM ONLY — see module.exports below: this function is exposed
+// exclusively via __internals, never at the top level. It is the four/five-
+// component formula implementation, unchanged in its own logic from prior
+// review rounds; what changed (P1-2 fix) is that it is no longer this
+// module's PUBLIC entry point. Inputs:
 //   system              - { kind, config } — the LOSSLESS stored record (the
 //                          adapter-shaped external-system row, never the
 //                          sanitized public projection)
@@ -361,8 +402,9 @@ function parseCredentialEnvelope(plaintext) {
 //                          the decrypt-then-discard boundary is contained in
 //                          ONE place rather than trusting an upstream caller
 //                          to have already discarded the plaintext correctly
-//   registry             - a trusted registry from
-//                          gip-connector-kind-registry.createConnectorKindRegistry
+//   registry             - ANY object exposing resolve(kind) — NOT trust-gated
+//                          here (see resolveDeclarationForMechanism above);
+//                          the production path never passes this at all
 //   hmacKey              - server-held Buffer/Uint8Array, >=32 bytes
 //
 // Returns { systemContentKey, kind } — nothing else. No plaintext credential
@@ -383,55 +425,24 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
     fail('SYSTEM_IDENTITY_INPUT_INVALID', 'a credentialStore exposing decrypt() is required', { field: 'credentialStore' })
   }
 
-  let declaration
-  try {
-    declaration = resolveCertifiedConnectorKind(registry, system.kind)
-  } catch (error) {
-    // FIX (review round 3, advisor-informed re-review): this used to `throw
-    // error` verbatim for any reason other than SYSTEM_IDENTITY_KIND_UNCERTIFIED
-    // — including CONNECTOR_KIND_DECLARATION_INVALID from an untrusted
-    // `registry` argument, which surfaced as a GipConnectorKindRegistryError,
-    // NOT this module's GipSystemIdentityError, breaking the "every error
-    // deriveSystemContentKey throws is a GipSystemIdentityError" contract
-    // every other guard in this file upholds. assertTrustedRegistry's own
-    // message/details are fixed constants (values-free already), so this was
-    // a contract-consistency defect on its own, not a leak — but
-    // gip-connector-kind-registry.cjs and gip-canonical-object-contract-registry.cjs
-    // no longer export their registry-trust WeakSets (P2 fix, review round
-    // 3): if they still did, a duck-typed forged registry could pass
-    // assertTrustedRegistry and make `registry.resolve` itself
-    // attacker-controlled, and this `throw error` would forward whatever it
-    // threw verbatim — the exact P1-b shape, one level up. Closed on both
-    // counts: every non-UNCERTIFIED failure here is relabeled with this
-    // module's own fixed, values-free reason, never forwarded.
-    if (error instanceof GipConnectorKindRegistryError && error.reason === 'SYSTEM_IDENTITY_KIND_UNCERTIFIED') {
-      fail('SYSTEM_IDENTITY_KIND_UNCERTIFIED', 'connector kind is not certified for GIP binding', {})
-    }
-    fail('SYSTEM_IDENTITY_INPUT_INVALID', 'registry must be a trusted connector-kind registry (from createConnectorKindRegistry)', { field: 'registry' })
-  }
+  const declaration = resolveDeclarationForMechanism(registry, system.kind)
 
-  // P3 NOTE (review round 4): "closed on both counts" two comments above names
-  // the catch-site relabel just above and the registries' un-exported trust
-  // WeakSets (P2, round 3) — it does not name a THIRD dependency this function
-  // also relies on. Every direct `declaration.*` property read below —
-  // `declaration.extractEndpointIdentity` (passed into runExtractor, not
-  // called inline, so a malicious GETTER on that property would run OUTSIDE
-  // runExtractor's try), the two extractor reads at the credential-store
-  // boundary, and `declaration.kind` at the two computeSystemContentKey/return
-  // sites — is not wrapped by any catch. This is safe TODAY only because (a)
-  // `normalizeDeclaration` (gip-connector-kind-registry.cjs) always returns a
-  // freshly `Object.freeze`d, plain-data-property copy, so reading any of its
-  // fields can never execute foreign code, and (b) the trust WeakSet stays
-  // module-private, so `assertTrustedRegistry` can only ever be satisfied by a
-  // registry whose `resolve()` returns one of THOSE frozen copies — a forged
-  // registry cannot substitute a raw object with a malicious getter in
-  // `declaration`'s place. Both (a) and (b) are exactly the mechanism the
-  // forged-registry attack this round's blocking fix (see the two registries'
-  // own `__internals` key-set pins) closes off. Not restructured here: this
-  // dependency is not reachable at head (LATENT slice, no runtime consumer,
-  // no forged registry can be constructed from outside this codebase today) —
-  // recorded so a future change to either registry's freeze/export discipline
-  // is reviewed with this function's reliance on it in view.
+  // NOTE (carried forward from review round 4, re-scoped for the P1-2 fix):
+  // every direct `declaration.*` property read below — `declaration.extractEndpointIdentity`
+  // (passed into runExtractor, not called inline, so a malicious GETTER on
+  // that property would run OUTSIDE runExtractor's try), the two extractor
+  // reads at the credential-store boundary, and `declaration.kind` at the
+  // two computeSystemContentKey/return sites — is not wrapped by any catch.
+  // On the PRODUCTION path (deriveSystemContentKeyForSystemId) this is safe
+  // because `registry` is always CERTIFIED_CONNECTOR_KIND_REGISTRY, whose
+  // declarations are always `normalizeDeclaration`'s frozen, plain-data
+  // copies (gip-connector-kind-registry.cjs) — reading any field can never
+  // execute foreign code, and no forged registry can substitute a raw object
+  // with a malicious getter in `declaration`'s place (P1-1 fix). On the
+  // MECHANISM/testing path (this function called directly via __internals),
+  // `registry` can be anything a test builds — that is intentional (see
+  // resolveDeclarationForMechanism above) and not a production exposure,
+  // since this function itself is __internals-only.
 
   // P3-a FIX (review round 2): a non-plain-object system.config used to
   // silently substitute {} (the `Number(x) || 0` class of bug) and the
@@ -527,14 +538,166 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
   return Object.freeze({ systemContentKey, kind: declaration.kind })
 }
 
+// ---------------------------------------------------------------------------
+// P1-2 FIX (owner HARD HOLD #4610): deriveSystemContentKey above used to be
+// this module's ONE top-level PUBLIC export, receiving system, credentialStore,
+// registry AND hmacKey on EVERY call — it could prove none of the four came
+// from the server DB, the real credential store, or a fixed service key. Any
+// importing module could call it with entirely self-sourced components.
+//
+// Required shape (owner's words): the trusted singleton registry, the
+// credential store, the HMAC key and a server-side system resolver are fixed
+// at CONSTRUCTION time; the per-call API then accepts ONLY a scoped system ID
+// — never the authority components.
+//
+// The trap the owner named explicitly: a PUBLIC factory that still takes
+// those components "simply moves the problem up one level". So
+// buildSystemIdentityService below is NEVER exported, under any name,
+// anywhere — not at the top level, and not under __internals either
+// (__internals is still a property of module.exports, reachable by any
+// require()-holding importer; a trust-granting constructor placed there
+// would be the identical hole one namespace deeper — the SAME reasoning
+// gip-connector-kind-registry.cjs's buildTrustedConnectorKindRegistry and
+// gip-canonical-object-contract-registry.cjs's buildInventoryAttestation
+// apply). The registry component specifically is closed a layer further
+// down still: it is not even a PARAMETER here — buildSystemIdentityService's
+// returned service always resolves kinds against CERTIFIED_CONNECTOR_KIND_REGISTRY,
+// imported directly at the top of this file, never supplied by a caller.
+//
+// Ships with ZERO trusted instances — buildSystemIdentityService has no call
+// site anywhere in this file today. That is the honest state: this repo has
+// no real server-side system resolver, no real credential-store singleton,
+// and no fixed service HMAC key yet (LATENT slice, no runtime wiring) — so
+// there is nothing legitimate to build one FROM, and inventing one now would
+// be new infrastructure this slice does not own. A future, separately-
+// reviewed amendment that wires real infrastructure must call
+// buildSystemIdentityService from a line ADDED TO THIS FILE — never from a
+// runtime call anywhere else in the process. Until then,
+// deriveSystemContentKeyForSystemId below refuses EVERY caller,
+// unconditionally — "the public path mints nothing in this slice" is a
+// precise description, not an approximation: reproduced directly by
+// publicPathNeverMintsInThisSlice in the test file.
+const trustedSystemIdentityServices = new WeakSet()
+
+function assertValidServiceComponents({ credentialStore, hmacKey, resolveSystem }) {
+  if (!credentialStore || typeof credentialStore.decrypt !== 'function') {
+    fail('SYSTEM_IDENTITY_INPUT_INVALID', 'a credentialStore exposing decrypt() is required', { field: 'credentialStore' })
+  }
+  assertHmacKey(hmacKey)
+  if (typeof resolveSystem !== 'function') {
+    fail('SYSTEM_IDENTITY_INPUT_INVALID', 'a resolveSystem(systemId) function is required', { field: 'resolveSystem' })
+  }
+}
+
+function assertTrustedSystemIdentityService(service) {
+  // WeakSet.has(primitive) returns false (never throws) — null/plain
+  // objects/strings all fail here too.
+  if (!trustedSystemIdentityServices.has(service)) {
+    fail('SYSTEM_IDENTITY_SERVICE_UNTRUSTED', 'a trusted system identity service (module-internally constructed) is required', { field: 'service' })
+  }
+}
+
+// Shared construction mechanics for BOTH the trusted builder and the
+// untrusted test seam below — the ONLY difference between them is whether
+// the result is added to trustedSystemIdentityServices, never the mechanics.
+//
+// TRUST-CHECK PLACEMENT (advisor-caught defect, fixed before this ever
+// shipped): the trust check must live INSIDE the returned method itself, not
+// only in the deriveSystemContentKeyForSystemId free-function wrapper below.
+// An earlier draft checked trust ONLY in that wrapper — so
+// `service.deriveSystemContentKeyForSystemId(systemId)`, called DIRECTLY on
+// an object from the untrusted seam (bypassing the wrapper entirely), never
+// touched the trust check at all, and "refused" only by the accident of
+// CERTIFIED_CONNECTOR_KIND_REGISTRY being empty today. The moment a future
+// amendment registers one kind, that direct call becomes fully
+// mint-capable from an importer's own credentialStore + hmacKey — the exact
+// P1-2 shape, reintroduced by the very seam meant to prove it closed. Fixed
+// by capturing `service` in closure BEFORE freezing and asserting trust on
+// it as the method's OWN first statement — the object's identity is
+// unaffected by Object.freeze, so this checks the SAME reference
+// buildSystemIdentityService below adds to the WeakSet.
+function buildSystemIdentityServiceObject({ credentialStore, hmacKey, resolveSystem }) {
+  assertValidServiceComponents({ credentialStore, hmacKey, resolveSystem })
+  const service = {
+    async deriveSystemContentKeyForSystemId(systemId) {
+      assertTrustedSystemIdentityService(service)
+      if (typeof systemId !== 'string' || systemId.trim() === '') {
+        fail('SYSTEM_IDENTITY_INPUT_INVALID', 'systemId must be a non-empty string', { field: 'systemId' })
+      }
+      let resolved
+      try {
+        resolved = await resolveSystem(systemId)
+      } catch {
+        // Same discipline as runExtractor / credentialStore.decrypt above:
+        // resolveSystem is an injected, foreign dependency (a THIRD foreign
+        // call site, alongside the two already-guarded ones) — this
+        // module's own code never runs inside this try, so every foreign
+        // throw is unconditionally discarded and replaced by this fixed,
+        // values-free reason.
+        fail('SYSTEM_IDENTITY_INPUT_INVALID', 'resolveSystem threw', { field: 'resolveSystem' })
+      }
+      if (!isPlainObject(resolved) || !isPlainObject(resolved.system) || typeof resolved.credentialCiphertext !== 'string') {
+        fail('SYSTEM_IDENTITY_INPUT_INVALID', 'resolveSystem must resolve to { system, credentialCiphertext }', { field: 'resolveSystem' })
+      }
+      // Registry is CLOSED BY IMPORT, never a parameter — CERTIFIED_CONNECTOR_KIND_REGISTRY
+      // is the only trusted connector-kind registry in existence (P1-1 fix,
+      // gip-connector-kind-registry.cjs).
+      return deriveSystemContentKey({
+        system: resolved.system,
+        credentialCiphertext: resolved.credentialCiphertext,
+        credentialStore,
+        registry: CERTIFIED_CONNECTOR_KIND_REGISTRY,
+        hmacKey,
+      })
+    },
+  }
+  return Object.freeze(service)
+}
+
+// MODULE-PRIVATE. Never exported, under any name, anywhere. The ONLY place
+// that grants trust — see the P1-2 fix note above.
+function buildSystemIdentityService(components) {
+  const service = buildSystemIdentityServiceObject(components)
+  trustedSystemIdentityServices.add(service)
+  return service
+}
+
+// The gated, closure-style PUBLIC entry point (owner's required shape).
+// Accepts ONLY a service reference + a scoped systemId — never raw authority
+// components. Refuses EVERY caller today (see the header note above) because
+// buildSystemIdentityService has no call site yet. This check is now
+// REDUNDANT with the one inside the method itself (defense in depth,
+// deliberately — see the fix note above buildSystemIdentityServiceObject),
+// not a substitute for it.
+async function deriveSystemContentKeyForSystemId(service, systemId) {
+  assertTrustedSystemIdentityService(service)
+  return service.deriveSystemContentKeyForSystemId(systemId)
+}
+
+// TEST SEAM (owner's words: "give them a seam that produces UNTRUSTED
+// [services] — and assert those are refused"). Builds the SAME shape as
+// buildSystemIdentityService but is NEVER added to trustedSystemIdentityServices
+// — calling deriveSystemContentKeyForSystemId with its output must always
+// refuse, WHETHER called through the free-function wrapper above OR directly
+// as a method on the object itself (see the fix note above
+// buildSystemIdentityServiceObject — both are tested, not just the wrapper).
+// This is the ONLY way an importing module can construct a service-shaped
+// object out of its own credentialStore/hmacKey/resolveSystem — and it is
+// refused BY DESIGN. This is the acceptance test this fix must satisfy: "an
+// importing module cannot construct a minting-capable identity service out
+// of its own registry / credential store / HMAC key" (the registry
+// component is not even a parameter here at all — see above).
+function createUntrustedSystemIdentityServiceForTests(components) {
+  return buildSystemIdentityServiceObject(components)
+}
+
 // P2-a FIX (review round 2): computeSystemContentKey used to be a TOP-LEVEL
 // public export — a bypass of BOTH the kind-certification gate (it takes a
 // raw `kind` string, never resolved through resolveCertifiedConnectorKind)
 // AND the HMAC boundary (it takes authPrincipalKey/authTenantScopeKey as
 // whatever string a caller hands it, raw or HMAC'd, no way to tell). The
 // module's only PUBLIC route to a systemContentKey must be the gated
-// deriveSystemContentKey above; computeSystemContentKey moves to
-// __internals.
+// entry point; computeSystemContentKey moves to __internals.
 //
 // P2 FIX (review round 3): the exact-export-key-set test used to pin only
 // the TOP-LEVEL export keys — "__internals" itself was one pinned key, but
@@ -549,18 +712,64 @@ async function deriveSystemContentKey({ system, credentialCiphertext, credential
 // tokens and a caller-controlled `field` LABEL, never with plaintext
 // identity/credential material — a materially different exposure than the
 // removed brand-forging path.
+//
+// P1-2 FIX (owner HARD HOLD #4610), CORRECTED (advisor-caught defect):
+// deriveSystemContentKey does NOT unconditionally join computeSystemContentKey
+// under __internals. computeSystemContentKey's round-2 demotion was safe
+// because it hashes four strings the caller already holds — anyone can
+// compute sha256, so an importer reaching it via require() gains nothing.
+// deriveSystemContentKey is different in kind: it resolves a kind, drives an
+// injected credential store, and emits a value that LOOKS like an authorized
+// systemContentKey — putting it in __internals unconditionally would let any
+// importer do `require(...).__internals.deriveSystemContentKey({ system,
+// credentialCiphertext, credentialStore: mine, registry:
+// createConnectorKindRegistry([...]), hmacKey: mine })` and mint one, the
+// exact P1-2 shape one namespace deeper (proven live during this fix's own
+// review: this exact call minted successfully before this env gate existed).
+//
+// Fixed with the SAME principle this codebase already applies to optional
+// side-effect channels elsewhere: an optional, test-only surface registers
+// only when its own env var is explicitly set — __internals.deriveSystemContentKey
+// exists ONLY when GIP_SYSTEM_IDENTITY_TEST_MECHANISM=1 is set in the
+// process environment BEFORE this module is first required (require()
+// caches the module and its exports object, so this is a load-time
+// decision, not a per-call check). The test file sets it at the very top,
+// before requiring this module. A production process has no reason to ever
+// set it, so in an UNCONFIGURED process __internals.deriveSystemContentKey
+// does not exist — an importing module cannot reach the mechanism via a
+// plain require() at all, not just "is refused by it". The module's only
+// PUBLIC route to a systemContentKey is deriveSystemContentKeyForSystemId,
+// which mints nothing today (no trusted service is ever built) — see the
+// fix note above buildSystemIdentityServiceObject.
+//
+// SCOPE LIMIT (state this plainly, do not overclaim it): this gate reduces
+// REACHABILITY from a plain require(), not authority. Code already executing
+// inside the process can set `process.env.GIP_SYSTEM_IDENTITY_TEST_MECHANISM
+// = '1'`, delete this module's entry from `require.cache`, and re-require it
+// to get the mechanism back. That is a materially higher bar than the
+// owner's stated concern ("any importer... no source edit required" — a
+// PLAIN require() with no further trickery) and this fix closes exactly that
+// bar, not a stronger one — it does not, and does not claim to, defend
+// against arbitrary in-process code execution.
+const GIP_SYSTEM_IDENTITY_TEST_MECHANISM_ENV_VAR = 'GIP_SYSTEM_IDENTITY_TEST_MECHANISM'
+const __internalsExports = {
+  domainSeparatedHmac,
+  containsSanitizationMarker,
+  assertLosslessIdentityMaterial,
+  assertEndpointIdentityHasNoEmbeddedCredential,
+  computeSystemContentKey,
+  parseCredentialEnvelope,
+  runExtractor,
+}
+if (process.env[GIP_SYSTEM_IDENTITY_TEST_MECHANISM_ENV_VAR] === '1') {
+  __internalsExports.deriveSystemContentKey = deriveSystemContentKey
+}
+
 module.exports = {
-  deriveSystemContentKey,
+  deriveSystemContentKeyForSystemId,
+  createUntrustedSystemIdentityServiceForTests,
   GipSystemIdentityError,
   SYSTEM_IDENTITY_ERROR_REASONS,
   IDENTITY_HMAC_DOMAINS,
-  __internals: {
-    domainSeparatedHmac,
-    containsSanitizationMarker,
-    assertLosslessIdentityMaterial,
-    assertEndpointIdentityHasNoEmbeddedCredential,
-    computeSystemContentKey,
-    parseCredentialEnvelope,
-    runExtractor,
-  },
+  __internals: __internalsExports,
 }

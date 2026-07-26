@@ -32,14 +32,41 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const childProcess = require('node:child_process')
+
+// P1-2 FIX (owner HARD HOLD #4610), CORRECTED (advisor-caught defect):
+// __internals.deriveSystemContentKey only exists on the module's exports
+// object when GIP_SYSTEM_IDENTITY_TEST_MECHANISM=1 is set BEFORE the module
+// is first require()'d — require() caches the module, so this MUST be set
+// before the require() call below, not after. This is deliberate: it means
+// a production process, which has no reason to ever set this variable,
+// cannot reach __internals.deriveSystemContentKey via require() AT ALL, not
+// merely "is refused by it" — see the fix note above
+// GIP_SYSTEM_IDENTITY_TEST_MECHANISM_ENV_VAR in the module for the full
+// account of why an unconditional __internals export was itself a live hole
+// during this fix's own review (a self-built registry + credentialStore +
+// hmacKey minted successfully through it before this gate existed).
+process.env.GIP_SYSTEM_IDENTITY_TEST_MECHANISM = '1'
 
 const {
-  deriveSystemContentKey,
+  deriveSystemContentKeyForSystemId,
+  createUntrustedSystemIdentityServiceForTests,
   GipSystemIdentityError,
   SYSTEM_IDENTITY_ERROR_REASONS,
   IDENTITY_HMAC_DOMAINS,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'gip-system-identity-read.cjs'))
+
+// deriveSystemContentKey is no longer this module's top-level public export
+// — it is MECHANISM ONLY now, reachable solely via the env-gated __internals
+// above. Pulling it in through __internals here, under its ORIGINAL name,
+// keeps every one of this file's existing deriveSystemContentKey({...}) call
+// sites below working UNCHANGED — they are testing the FORMULA MECHANISM
+// (hashing, HMAC, rotation, extraction, sanitization guards), which did not
+// change; what changed is that this is no longer the module's production
+// entry point (see publicPathNeverMintsInThisSlice further down for the NEW
+// gated-service tests that ARE about that).
+const { deriveSystemContentKey } = __internals
 
 const {
   createConnectorKindRegistry,
@@ -762,12 +789,27 @@ async function nonPlainObjectConfigFailsClosed() {
 // ---------------------------------------------------------------------------
 function exactPublicExportKeySet() {
   const moduleExports = require(path.join(__dirname, '..', 'lib', 'gip-system-identity-read.cjs'))
+  // P1-2 FIX (owner HARD HOLD #4610): deriveSystemContentKey is GONE from the
+  // top-level key set entirely (moved to __internals below) — the module's
+  // only public route to a systemContentKey is now the gated, closure-style
+  // deriveSystemContentKeyForSystemId, which accepts a (service, systemId)
+  // pair, never raw authority components. createUntrustedSystemIdentityServiceForTests
+  // is the ONLY seam that lets a caller build a service-shaped object, and it
+  // is documented, by name, as producing UNTRUSTED objects.
   assert.deepEqual(
     Object.keys(moduleExports).sort(),
-    ['GipSystemIdentityError', 'IDENTITY_HMAC_DOMAINS', 'SYSTEM_IDENTITY_ERROR_REASONS', '__internals', 'deriveSystemContentKey'],
-    'the module must expose no public route to a systemContentKey other than the gated deriveSystemContentKey',
+    [
+      'GipSystemIdentityError',
+      'IDENTITY_HMAC_DOMAINS',
+      'SYSTEM_IDENTITY_ERROR_REASONS',
+      '__internals',
+      'createUntrustedSystemIdentityServiceForTests',
+      'deriveSystemContentKeyForSystemId',
+    ],
+    'the module must expose no public route to a systemContentKey other than the gated deriveSystemContentKeyForSystemId',
   )
   assert.equal(typeof __internals.computeSystemContentKey, 'function', 'computeSystemContentKey must still be reachable for internal/testing use via __internals')
+  assert.equal(typeof __internals.deriveSystemContentKey, 'function', 'the mechanism-level deriveSystemContentKey must still be reachable for internal/testing use via __internals')
 
   // P2 FIX (review round 3): the check above only ever pinned the TOP-LEVEL
   // keys — "__internals" was one of them, but nothing pinned WHICH keys live
@@ -775,7 +817,11 @@ function exactPublicExportKeySet() {
   // reintroduced `fail`) reds nothing here. Pin __internals's own key set
   // too. `fail` must be ABSENT — round 3's whole point is that exporting it
   // was the exfiltration channel; keeping it out is exactly what a future
-  // regression here would catch.
+  // regression here would catch. P1-2 FIX (owner HARD HOLD #4610):
+  // `buildSystemIdentityService` — the TRUST-GRANTING constructor — must be
+  // ABSENT here too, for the exact same reason `fail` must be: a
+  // trust-conferring constructor reachable via __internals is the identical
+  // hole as one reachable at the top level, just one namespace deeper.
   assert.deepEqual(
     Object.keys(__internals).sort(),
     [
@@ -783,11 +829,12 @@ function exactPublicExportKeySet() {
       'assertLosslessIdentityMaterial',
       'computeSystemContentKey',
       'containsSanitizationMarker',
+      'deriveSystemContentKey',
       'domainSeparatedHmac',
       'parseCredentialEnvelope',
       'runExtractor',
     ],
-    '__internals must expose exactly this key set — in particular, `fail` must never be re-added (see the round-3 fix note above fail() in the module)',
+    '__internals must expose exactly this key set — in particular, `fail` and `buildSystemIdentityService` must never be re-added under any name',
   )
 }
 
@@ -806,15 +853,19 @@ async function inputValidationFailsClosed() {
   await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: Buffer.alloc(16) }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'hmacKey too short')
   await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: 'not-a-buffer' }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'hmacKey not a buffer')
 
-  // (advisor-informed re-review, round 3): a duck-typed object that is NOT
-  // the frozen result of createConnectorKindRegistry must be refused as
-  // SYSTEM_IDENTITY_INPUT_INVALID — a GipSystemIdentityError, like every
-  // other guard in this file — never surface as the sibling
-  // GipConnectorKindRegistryError the prior `throw error` verbatim-forwarded
-  // for any non-UNCERTIFIED reason (see the fix note on this catch site in
-  // the module).
-  await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry: { resolve: () => null, size: () => 0 }, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'untrusted/duck-typed registry object')
-  await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry: null, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'null registry')
+  // P1-2 FIX (owner HARD HOLD #4610) SEMANTIC SHIFT: __internals.deriveSystemContentKey
+  // is MECHANISM ONLY now — it no longer trust-gates its `registry` argument
+  // at all (that concern moved to the closure-bound gated service; see
+  // resolveDeclarationForMechanism's comment in the module). A well-formed,
+  // resolve()-shaped object that simply doesn't know this kind now legitimately
+  // reaches SYSTEM_IDENTITY_KIND_UNCERTIFIED, not a trust-flavored INPUT_INVALID
+  // — proving the mechanism accepts ANY registry-shaped object is exactly the
+  // point (it is what lets every OTHER test in this file build custom
+  // per-kind declarations without ever touching the one real trusted
+  // registry). Basic SHAPE validation (no resolve() at all) still refuses.
+  await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry: { resolve: () => null, size: () => 0 }, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_KIND_UNCERTIFIED', 'a registry-shaped object that legitimately does not know this kind — mechanism-level, no trust check anymore')
+  await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry: null, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'null registry (no resolve() at all) must still be refused as a shape defect')
+  await rejectsAsync(() => deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry: { size: () => 0 }, hmacKey: HMAC_KEY }), 'SYSTEM_IDENTITY_INPUT_INVALID', 'a registry object missing resolve() entirely must be refused as a shape defect')
 
   assert.deepEqual([...SYSTEM_IDENTITY_ERROR_REASONS].sort(), [
     'SYSTEM_IDENTITY_DECRYPTION_FAILED',
@@ -823,8 +874,117 @@ async function inputValidationFailsClosed() {
     'SYSTEM_IDENTITY_MATERIAL_MISSING',
     'SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS',
     'SYSTEM_IDENTITY_INPUT_INVALID',
+    'SYSTEM_IDENTITY_SERVICE_UNTRUSTED',
   ].sort())
   assert.ok(Object.isFrozen(SYSTEM_IDENTITY_ERROR_REASONS))
+}
+
+// ---------------------------------------------------------------------------
+// (15) P1-2 FIX (owner HARD HOLD #4610) — THE GATED SERVICE. Reproduces the
+// owner's exact concern end-to-end: an importing module supplying its OWN
+// registry (via the still-exported, now-untrusted createConnectorKindRegistry),
+// credentialStore, and hmacKey must not be able to mint a systemContentKey
+// through ANY exported surface of this module.
+// ---------------------------------------------------------------------------
+async function publicPathNeverMintsInThisSlice() {
+  const moduleExports = require(path.join(__dirname, '..', 'lib', 'gip-system-identity-read.cjs'))
+
+  // (a) There is no top-level function that even ACCEPTS raw authority
+  // components anymore — the shape the owner's finding named directly.
+  assert.equal(moduleExports.deriveSystemContentKey, undefined, 'deriveSystemContentKey must not be reachable at the top level')
+  assert.equal(typeof moduleExports.deriveSystemContentKeyForSystemId, 'function', 'the gated per-call entry point must exist')
+  assert.equal(moduleExports.deriveSystemContentKeyForSystemId.length, 2, 'the gated entry point must take exactly (service, systemId) — never a registry/credentialStore/hmacKey')
+
+  // (b) An importing module builds a service OUT OF ITS OWN components —
+  // its own registry declaration (via the untrusted seam), its own
+  // credentialStore, its own hmacKey. Note: registry is not even a
+  // parameter of createUntrustedSystemIdentityServiceForTests — closed by
+  // import structurally, not merely by a runtime check.
+  const attackerCredentialStore = fakeCredentialStore({ ct: envelope({ username: 'mallory', password: 'stolen', acctId: 'attacker-tenant' }) })
+  const attackerHmacKey = crypto.randomBytes(32)
+  const selfBuiltService = createUntrustedSystemIdentityServiceForTests({
+    credentialStore: attackerCredentialStore,
+    hmacKey: attackerHmacKey,
+    resolveSystem: async () => ({ system: { kind: 'attacker:kind', config: { baseUrl: 'https://attacker.example.internal' } }, credentialCiphertext: 'ct' }),
+  })
+
+  // Sanity: the self-built service is mechanically well-formed (has the
+  // right method) — proving the refusal below is about TRUST, not shape.
+  assert.equal(typeof selfBuiltService.deriveSystemContentKeyForSystemId, 'function')
+
+  await rejectsAsync(
+    () => deriveSystemContentKeyForSystemId(selfBuiltService, 'sys-1'),
+    'SYSTEM_IDENTITY_SERVICE_UNTRUSTED',
+    'NEGATIVE CONTROL — an importing module must not be able to construct a minting-capable identity service out of its own registry / credential store / HMAC key',
+  )
+
+  // (b2) DISCRIMINATING NEGATIVE CONTROL (advisor-caught defect during this
+  // fix's own review — recorded so it cannot silently regress): calling the
+  // method DIRECTLY on the self-built object, bypassing the free-function
+  // wrapper entirely, must ALSO refuse. An earlier draft checked trust ONLY
+  // in the deriveSystemContentKeyForSystemId wrapper above — this exact call
+  // then never touched the trust check at all, and "refused" only by the
+  // accident of CERTIFIED_CONNECTOR_KIND_REGISTRY being empty today (see the
+  // module's own fix note above buildSystemIdentityServiceObject for the
+  // full account, including the live-mint transcript from before this was
+  // caught).
+  await rejectsAsync(
+    () => selfBuiltService.deriveSystemContentKeyForSystemId('sys-1'),
+    'SYSTEM_IDENTITY_SERVICE_UNTRUSTED',
+    'DISCRIMINATING NEGATIVE CONTROL — calling the method DIRECTLY on a self-built object (bypassing the wrapper) must also refuse, not merely "happen to fail" via an empty registry',
+  )
+
+  // (c) POSITIVE CONTROL — the underlying MECHANISM (the same formula, now
+  // __internals-only) still genuinely mints given well-formed, legitimate
+  // inputs. This is `positiveControlSucceeds` again, restated here
+  // deliberately alongside the negative control so both are visible
+  // side-by-side: the fix refuses UNTRUSTED construction, not correctness.
+  const registry = harnessRegistry()
+  const store = fakeCredentialStore({ ct1: envelope({ username: 'alice', password: 'p1', acctId: 'tenantX' }) })
+  const system = { kind: 'test:harness', config: { baseUrl: 'https://erp.example.internal' } }
+  const mechanismResult = await deriveSystemContentKey({ system, credentialCiphertext: 'ct1', credentialStore: store, registry, hmacKey: HMAC_KEY })
+  assert.match(mechanismResult.systemContentKey, /^[0-9a-f]{64}$/, 'POSITIVE CONTROL — the mechanism must still genuinely mint given legitimate inputs')
+
+  // (d) Structural check: buildSystemIdentityService (the TRUSTED
+  // constructor) must not be reachable anywhere in module.exports, at any
+  // depth — not top-level, not under __internals.
+  assert.equal(moduleExports.buildSystemIdentityService, undefined)
+  assert.equal(moduleExports.__internals.buildSystemIdentityService, undefined)
+  const serialized = JSON.stringify(Object.keys(moduleExports)) + JSON.stringify(Object.keys(moduleExports.__internals))
+  assert.ok(!serialized.includes('buildSystemIdentityService'), 'the trust-granting constructor must never appear anywhere in module.exports, at any depth')
+}
+
+// ---------------------------------------------------------------------------
+// (16) P1-2 FIX (owner HARD HOLD #4610), CORRECTED (advisor-caught defect):
+// __internals.deriveSystemContentKey is env-gated — this test file sets
+// GIP_SYSTEM_IDENTITY_TEST_MECHANISM=1 itself (see the top of this file), so
+// every OTHER test above cannot tell the gate apart from "always on". This
+// test proves the gate itself by spawning a FRESH node process with that
+// variable explicitly ABSENT (Node's require() cache means the gate cannot
+// be exercised within this same process — the module is already loaded).
+// Reproduces, in a genuinely un-test-configured process, exactly the
+// construction the owner's finding named: an importing module reaching for
+// __internals.deriveSystemContentKey with its own registry/credentialStore/
+// hmacKey and expecting it to not even be a function.
+// ---------------------------------------------------------------------------
+function envGateHidesMechanismInAnUnconfiguredProcess() {
+  const childEnv = { ...process.env }
+  delete childEnv.GIP_SYSTEM_IDENTITY_TEST_MECHANISM
+  const script = `
+    const m = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'gip-system-identity-read.cjs'))});
+    const results = {
+      internalsHasDerive: typeof m.__internals.deriveSystemContentKey,
+      topLevelHasDerive: typeof m.deriveSystemContentKey,
+      internalsKeys: Object.keys(m.__internals).sort(),
+    };
+    process.stdout.write(JSON.stringify(results));
+  `
+  const child = childProcess.spawnSync(process.execPath, ['-e', script], { env: childEnv, encoding: 'utf8' })
+  assert.equal(child.status, 0, `child process must exit cleanly: ${child.stderr}`)
+  const results = JSON.parse(child.stdout)
+  assert.equal(results.internalsHasDerive, 'undefined', 'in a process that never sets the test env var, __internals.deriveSystemContentKey must not exist at all — not merely refuse when called')
+  assert.equal(results.topLevelHasDerive, 'undefined', 'deriveSystemContentKey must never be a top-level export either')
+  assert.ok(!results.internalsKeys.includes('deriveSystemContentKey'), 'the key itself must be absent from __internals, not merely undefined-valued')
 }
 
 async function main() {
@@ -844,6 +1004,8 @@ async function main() {
   await nonPlainObjectConfigFailsClosed()
   exactPublicExportKeySet()
   await inputValidationFailsClosed()
+  await publicPathNeverMintsInThisSlice()
+  envGateHidesMechanismInAnUnconfiguredProcess()
   console.log('gip-system-identity-read.test.cjs OK')
 }
 

@@ -50,12 +50,15 @@
 // registered by anyone yet. Only a future, separately-reviewed amendment may
 // extend the literal entries array passed to createCanonicalObjectContractRegistry below.
 
+const { deepCloneFrozenCanonical, CanonicalDomainError } = require('./gip-canonical-json.cjs')
+
 const CANONICAL_OBJECT_CONTRACT_ERROR_REASONS = Object.freeze([
   'CANONICAL_OBJECT_CONTRACT_UNREGISTERED',
   'CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID',
   'CANONICAL_OBJECT_CONTRACT_VERSION_IMMUTABLE',
   'CANONICAL_OBJECT_CONTRACT_ACTIVATION_BLOCKED',
   'CANONICAL_OBJECT_CONTRACT_INVENTORY_ABSENT',
+  'CANONICAL_OBJECT_CONTRACT_INVENTORY_UNATTESTED',
 ])
 const ERROR_REASON_SET = new Set(CANONICAL_OBJECT_CONTRACT_ERROR_REASONS)
 
@@ -118,7 +121,43 @@ function requiredIdentityToken(value, field) {
 // / assertCanonicalObjectContractRegistryActivationReady (neither wraps that
 // call in a discarding catch) — "unforgeable" above is true only because
 // this stays private.
+//
+// P1-1 FIX (owner HARD HOLD #4610 — the SAME finding as
+// gip-connector-kind-registry.cjs's sibling module, mirrored here exactly):
+// round 3's fix above closed only the `.add(fake)` door; the front door was
+// still open, because createCanonicalObjectContractRegistry — this module's
+// exported factory — unconditionally added every registry it built to this
+// WeakSet. Any importer could call it directly and receive back a "trusted"
+// object with no source edit at all. Fixed the same way as the sibling
+// module: createCanonicalObjectContractRegistry below now only builds a
+// registry object; trust is granted in EXACTLY one place,
+// buildTrustedCanonicalObjectContractRegistry, which is NEVER exported —
+// not at the top level, not under __internals (still reachable via
+// require() by any importer, so a trust-granting constructor there is the
+// identical hole one namespace deeper). Its only caller is the literal
+// invocation that builds CANONICAL_OBJECT_CONTRACT_REGISTRY at module load,
+// below.
 const trustedContractRegistries = new WeakSet()
+
+// P1-3 FIX (owner HARD HOLD #4610): assertCanonicalObjectContractRegistryActivationReady
+// used to accept a PLAIN, caller-supplied object as inventoryReport — a
+// caller could simply write `{ inventoryStatus: 'COMPLETE', references: [] }`
+// and get `ready: true` back. "A tool is not a result" (this line's own
+// ratified discipline, #4609's ⟲OD2 amendment) applies just as much to a
+// caller-asserted STRING as to a caller-asserted tool run: a string is not
+// evidence either. TRUST is, again, object identity — an inventory report is
+// "attested" only if it was built by buildInventoryAttestation below, which
+// is NEVER exported anywhere (not even __internals: unlike a pure function,
+// this constructor's mere output identity confers a security property a
+// later gate trusts, exactly the class of thing P1-1 above says must never
+// be reachable via require()). Nothing in this shipped module calls it —
+// there is no real inventory scanner in this repo yet (LATENT slice, no
+// wiring) — so assertCanonicalObjectContractRegistryActivationReady refuses
+// EVERY caller today, unconditionally. A future, separately-reviewed
+// amendment that wires a genuine server-side inventory scan must call
+// buildInventoryAttestation from a line added to THIS FILE — never from a
+// runtime call anywhere else in the process.
+const trustedInventoryAttestations = new WeakSet()
 
 function assertTrustedRegistry(registry) {
   if (!trustedContractRegistries.has(registry)) {
@@ -142,24 +181,41 @@ function normalizeContractEntry(entry) {
   if (!isPlainObject(entry.fields) || Object.keys(entry.fields).length === 0) {
     fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must be a non-empty plain object', { field: 'fields' })
   }
-  // Own, frozen copy — the registry's internal state can never be mutated
-  // through a reference the caller kept to the object it passed in.
-  return Object.freeze({
-    contractId,
-    version,
-    fields: Object.freeze({ ...entry.fields }),
-  })
+  // P2 FIX (owner HARD HOLD #4610): `fields: Object.freeze({ ...entry.fields })`
+  // was only a SHALLOW copy + SHALLOW freeze — Object.freeze only locks the
+  // top-level property bindings; any object/array VALUE inside `fields`
+  // stayed the identical reference the caller passed in. A caller that kept
+  // a reference to a nested structure could mutate it after registration and
+  // the registered version's content would change — owner measured
+  // `nestedFrozen: false`, `registeredVersionChanged: true`, defeating
+  // "immutable registration, append-only versions". Fixed using the
+  // primitive this line already ratified for exactly this domain (§3.1 ⟲R2):
+  // deepCloneFrozenCanonical (gip-canonical-json.cjs) — an OWNED clone in the
+  // strict canonical-JSON domain, recursively frozen, so no reference the
+  // caller retains can ever reach the registered copy.
+  let fields
+  try {
+    fields = deepCloneFrozenCanonical(entry.fields)
+  } catch (error) {
+    if (error instanceof CanonicalDomainError) {
+      fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'fields must stay in the strict canonical JSON domain', { field: 'fields' })
+    }
+    throw error
+  }
+  return Object.freeze({ contractId, version, fields })
 }
 
-// Builds a CLOSED registry from a fixed, first-party entries array — the
-// SAME structural shape as gip-connector-kind-registry.cjs's
-// createConnectorKindRegistry (P3-b fix, review round 2). `entries` MAY be
-// empty (and the shipped default below IS empty). Every entry is validated
-// and inserted HERE, at construction, and never again: the returned object
-// exposes no verb that could add, edit, or replace an entry after this
-// function returns — "append-only" now means a caller passes a LONGER
-// entries array to a NEW call of this function (a source-level, reviewed
-// change), never a runtime method call against an already-built registry.
+// Builds a registry object (lookup()/size()) from a fixed, first-party
+// entries array — the SAME structural shape as
+// gip-connector-kind-registry.cjs's createConnectorKindRegistry (P3-b fix,
+// review round 2). `entries` MAY be empty (and the shipped default below IS
+// empty). Every entry is validated and inserted HERE, at construction, and
+// never again: the returned object exposes no verb that could add, edit, or
+// replace an entry after this function returns — "append-only" now means a
+// caller passes a LONGER entries array to a NEW call of this function (a
+// source-level, reviewed change), never a runtime method call against an
+// already-built registry. P1-1 FIX (owner HARD HOLD #4610): calling this
+// function grants NO trust — see the fix note above trustedContractRegistries.
 function createCanonicalObjectContractRegistry(entries) {
   if (!Array.isArray(entries)) {
     fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'entries must be an array', { field: 'entries' })
@@ -199,7 +255,7 @@ function createCanonicalObjectContractRegistry(entries) {
   // the connector-kind registry's own resolve()/size() pin) are pinned, so a
   // future change cannot quietly add a synthesize/register/auto-register
   // verb under a different name.
-  const registry = Object.freeze({
+  return Object.freeze({
     lookup,
     size() {
       let total = 0
@@ -207,6 +263,12 @@ function createCanonicalObjectContractRegistry(entries) {
       return total
     },
   })
+}
+
+// MODULE-PRIVATE. Never exported, under any name, anywhere. The ONLY place
+// that grants trust — see the P1-1 fix note above trustedContractRegistries.
+function buildTrustedCanonicalObjectContractRegistry(entries) {
+  const registry = createCanonicalObjectContractRegistry(entries)
   trustedContractRegistries.add(registry)
   return registry
 }
@@ -227,47 +289,56 @@ function resolveCanonicalObjectContractVersion(registry, contractId, version) {
 // requires the backfill/reference inventory to come from a
 // privately-authorized real run that has not happened — #4609's ⟲OD2
 // amendment: an inventory TOOL is not an inventory RESULT). There is no
-// runtime register() call that could add to this instance once built.
-const CANONICAL_OBJECT_CONTRACT_REGISTRY = createCanonicalObjectContractRegistry([])
+// runtime register() call that could add to this instance once built. Built
+// via buildTrustedCanonicalObjectContractRegistry (module-private, P1-1 fix)
+// — this is the ONE trusted registry instance that will ever exist.
+const CANONICAL_OBJECT_CONTRACT_REGISTRY = buildTrustedCanonicalObjectContractRegistry([])
 
-// ---------------------------------------------------------------------------
-// Activation gate (owner decision γ: "inventory and backfill existing
-// references BEFORE activation"). This module performs NO inventory itself
-// and reads no database — it consumes an explicitly-provided report shape and
-// refuses to call the state "ready" unless that report both (a) affirmatively
-// claims a completed inventory and (b) shows zero unbacked references.
-//
-//   inventoryReport = {
-//     inventoryStatus: 'COMPLETE' | 'NOT_RUN',
-//     references: [{ contractId, version }, ...],   // only meaningful when COMPLETE
-//   }
-//
-// An omitted/'NOT_RUN' status refuses with CANONICAL_OBJECT_CONTRACT_INVENTORY_ABSENT
-// regardless of what `references` contains (including an empty array) — this
-// is the fix for the fail-OPEN shape an empty array alone would otherwise be:
-// "no inventory has run" and "inventory ran and found nothing" must not be
-// the same value, or a caller could accidentally activate on day zero.
-function assertCanonicalObjectContractRegistryActivationReady(registry, inventoryReport) {
-  assertTrustedRegistry(registry)
-  if (!isPlainObject(inventoryReport)) {
-    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'inventoryReport must be a plain object', { field: 'inventoryReport' })
+// MODULE-PRIVATE. Never exported, under any name, anywhere. The ONLY place
+// that grants attestation trust — see the P1-3 fix note above
+// trustedInventoryAttestations. Nothing in this shipped module calls this
+// today (no real inventory scanner exists yet) — see that note for the full
+// account of why that is the honest, correct state, not a gap.
+function buildInventoryAttestation({ inventoryStatus, references }) {
+  if (inventoryStatus !== 'COMPLETE' && inventoryStatus !== 'NOT_RUN') {
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'inventoryStatus must be COMPLETE or NOT_RUN', { field: 'inventoryStatus' })
   }
-  if (inventoryReport.inventoryStatus !== 'COMPLETE') {
-    fail('CANONICAL_OBJECT_CONTRACT_INVENTORY_ABSENT', 'no completed canonical-object-contract reference inventory has been supplied; activation refused', {})
-  }
-  const references = inventoryReport.references
   if (!Array.isArray(references)) {
-    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'inventoryReport.references must be an array', { field: 'references' })
+    fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'references must be an array', { field: 'references' })
   }
-  let backedCount = 0
-  let unbackedCount = 0
   for (const reference of references) {
     if (!isPlainObject(reference)) {
       fail('CANONICAL_OBJECT_CONTRACT_DECLARATION_INVALID', 'each reference must be a plain object', { field: 'references' })
     }
-    const contractId = requiredIdentityToken(reference.contractId, 'contractId')
-    const version = requiredIdentityToken(reference.version, 'version')
-    if (registry.lookup(contractId, version)) backedCount += 1
+    requiredIdentityToken(reference.contractId, 'contractId')
+    requiredIdentityToken(reference.version, 'version')
+  }
+  const attestation = Object.freeze({
+    inventoryStatus,
+    references: Object.freeze(references.map((reference) => Object.freeze({ contractId: reference.contractId, version: reference.version }))),
+  })
+  trustedInventoryAttestations.add(attestation)
+  return attestation
+}
+
+function assertTrustedInventoryAttestation(inventoryReport) {
+  // WeakSet.has(primitive) returns false (never throws) — null/plain objects/
+  // strings all fail here too, before any of their fields are ever read.
+  if (!trustedInventoryAttestations.has(inventoryReport)) {
+    fail('CANONICAL_OBJECT_CONTRACT_INVENTORY_UNATTESTED', 'inventoryReport must be server-attested evidence (from buildInventoryAttestation), a caller-supplied object is not evidence', {})
+  }
+}
+
+// Pure mechanism: given an ALREADY-TRUSTED registry and an ALREADY-VALIDATED
+// references array, computes backed/unbacked counts and reports readiness.
+// Confers no trust of its own (like computeSystemContentKey in the sibling
+// gip-system-identity-read.cjs module) — safe to expose for mechanism
+// testing via __internals, unlike buildInventoryAttestation above.
+function computeActivationReadiness(registry, references) {
+  let backedCount = 0
+  let unbackedCount = 0
+  for (const reference of references) {
+    if (registry.lookup(reference.contractId, reference.version)) backedCount += 1
     else unbackedCount += 1
   }
   if (unbackedCount > 0) {
@@ -278,6 +349,44 @@ function assertCanonicalObjectContractRegistryActivationReady(registry, inventor
     })
   }
   return Object.freeze({ ready: true, backedCount, totalReferences: references.length })
+}
+
+// ---------------------------------------------------------------------------
+// Activation gate (owner decision γ: "inventory and backfill existing
+// references BEFORE activation"). This module performs NO inventory itself
+// and reads no database — it consumes a report and refuses to call the state
+// "ready" unless that report is (a) genuinely server-attested evidence — not
+// a caller-supplied string, however plausible-looking (P1-3 fix, owner HARD
+// HOLD #4610: "a tool is not a result" applies to a caller-asserted STATUS
+// STRING exactly as much as to a caller-asserted tool run) — AND (b)
+// affirmatively claims a completed inventory with zero unbacked references.
+//
+// An attestation whose inventoryStatus is NOT_RUN (or a caller object that
+// isn't an attestation at all) refuses with a reason — the caller-object
+// case with CANONICAL_OBJECT_CONTRACT_INVENTORY_UNATTESTED (not evidence),
+// the genuinely-attested-but-NOT_RUN case with the pre-existing
+// CANONICAL_OBJECT_CONTRACT_INVENTORY_ABSENT (evidence says nothing has run)
+// — two DISTINCT reasons for two DISTINCT failure modes, so neither door can
+// quietly cover for the other going missing.
+//
+// HONESTY NOTE (state this plainly, do not let the frozen vocabulary imply
+// more than is true): CANONICAL_OBJECT_CONTRACT_INVENTORY_ABSENT is
+// CURRENTLY UNREACHABLE. Reaching it requires a genuinely-attested object
+// whose inventoryStatus is NOT_RUN, and buildInventoryAttestation — the only
+// function that can produce a trusted attestation at all — has ZERO call
+// sites anywhere in this shipped module (see the LATENT fix note above it),
+// so its own validation logic has never executed once, in production or in
+// any test. The reason token stays in the frozen vocabulary because the
+// SHAPE is correct and load-bearing the moment a future amendment adds a
+// real caller — but until then, only CANONICAL_OBJECT_CONTRACT_INVENTORY_UNATTESTED
+// is reachable from outside this module.
+function assertCanonicalObjectContractRegistryActivationReady(registry, inventoryReport) {
+  assertTrustedRegistry(registry)
+  assertTrustedInventoryAttestation(inventoryReport)
+  if (inventoryReport.inventoryStatus !== 'COMPLETE') {
+    fail('CANONICAL_OBJECT_CONTRACT_INVENTORY_ABSENT', 'no completed canonical-object-contract reference inventory has been supplied; activation refused', {})
+  }
+  return computeActivationReadiness(registry, inventoryReport.references)
 }
 
 module.exports = {
@@ -292,5 +401,6 @@ module.exports = {
     requiredIdentityToken,
     hasControlCharacter,
     normalizeContractEntry,
+    computeActivationReadiness,
   },
 }
