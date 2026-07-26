@@ -21125,22 +21125,75 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
 // POST-APPEND boundary VALUES, never a written intermediate row — the same single statement that
 // persists the record row also carries the merged boundaries, so the "no record row yet" branch
 // the pure policy cannot express is structurally unreachable here.
+//
+// W4C-2 remediation P1-3 (#4612 gate finding c-5082182541): `rule` and
+// `punchWorkDateResolution` are derived HERE, in-transaction, from the boundary's
+// closed args (orgId/userId/occurredAt/timezone) — they are NO LONGER accepted as
+// route-computed values crossing into the transaction (see
+// w4c2-live-scheduled-boundary.ts's module comment and
+// `AttendanceLivePunchLegacyArgsV1`). `calendarWorkDate` is recomputed fresh via
+// `toWorkDate(occurredAt, timezone)` on the SAME (occurredAt, timezone) pair the
+// punch route itself feeds its own final `resolvePunchWorkDateByShiftWindow` call
+// — NOT the boundary's post-resolution `workDate` field, which is a DIFFERENT
+// value for an overnight shift (see resolvePunchWorkDateByShiftWindow's own
+// workDate/timezone fixed-point property). `groupAttendanceType` is omitted, same
+// as the route's own final resolver call for this code path.
+async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurredAt, timezone }) {
+  const calendarWorkDate = toWorkDate(occurredAt, timezone)
+  const defaultRule = await loadDefaultRule(trx, orgId)
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  const resolution = await adapters.live.resolvePunchWorkDate({
+    orgId,
+    userId,
+    occurredAt,
+    timezone,
+    calendarWorkDate,
+  })
+  if (resolution.kind === 'resolved') {
+    const resolvedShift = await loadShiftById(trx, orgId, resolution.shiftId)
+    if (!resolvedShift) {
+      throw new Error('W4C2_LEGACY_RESOLVED_SHIFT_NOT_FOUND')
+    }
+    return { rule: resolvedShift, punchWorkDateResolution: resolution }
+  }
+  if (resolution.kind === 'ambiguous') {
+    // The route's own pre-boundary resolution already 422s a fresh ambiguity
+    // before ever calling into the boundary (WORK_DATE_ATTRIBUTION_AMBIGUOUS);
+    // reaching this branch means DB state changed between the route's read and
+    // this transaction (assignment edited mid-flight) — fail closed rather than
+    // silently pick a rule the route never validated.
+    throw new Error('W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION')
+  }
+  const context = await resolveWorkContext({
+    db: trx,
+    orgId,
+    userId,
+    workDate: calendarWorkDate,
+    defaultRule,
+  })
+  return { rule: context.rule, punchWorkDateResolution: resolution }
+}
+
 async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
   const {
     userId,
     orgId,
     workDate,
-    occurredAt,
     eventType,
     source,
     location,
     meta,
     timezone,
-    rule,
     isWorkday,
-    punchWorkDateResolution,
-    settings,
   } = args
+  const occurredAt = new Date(args.occurredAt)
+  const { rule, punchWorkDateResolution } = await deriveLegacyLivePunchAttributionV1(trx, {
+    orgId,
+    userId,
+    occurredAt,
+    timezone,
+  })
+  const settings = await getSettings(trx)
 
   const event = await trx.query(
     `INSERT INTO attendance_events
@@ -26772,7 +26825,13 @@ module.exports = {
           workDate = punchWorkDate.workDate
           context = punchWorkDate.context
           timezone = punchWorkDate.timezone
-          const punchWorkDateResolution = punchWorkDate.resolution || null
+          // W4C-2 remediation P1-3: punchWorkDate.resolution is no longer
+          // threaded into the canonical boundary as a route-prepared value —
+          // applyLivePunchProjectionLegacyV1 re-derives its own resolution
+          // in-transaction. The route still needs workDate/context/timezone
+          // above for its OWN pre-boundary gating (unscheduled-block check,
+          // outdoor-approval flow) — only the resolution OBJECT itself is no
+          // longer smuggled through.
 
           // Punch-policy S1 (#2203): block a punch on a day with no schedule when the org opted into
           // unscheduled.mode='block'. workDate is the FINAL (tz-recalculated) date. Default 'allow' and
@@ -26993,21 +27052,6 @@ module.exports = {
             workDate,
             isWorkday: context.isWorkingDay,
             holidayKind: null,
-            legacyArgs: {
-              userId,
-              orgId,
-              workDate,
-              occurredAt,
-              eventType: parsed.data.eventType,
-              source: parsed.data.source ?? 'manual',
-              location: parsed.data.location ?? {},
-              meta: parsed.data.meta ?? {},
-              timezone,
-              rule: context.rule,
-              isWorkday: context.isWorkingDay,
-              punchWorkDateResolution,
-              settings: punchPolicySettings,
-            },
           })
           if (boundaryOutcome.kind === 'legacy' || boundaryOutcome.kind === 'legacy_compat') {
             // Lock §12.3 legacy-posture leg: the same synchronous best-effort emit as before.
