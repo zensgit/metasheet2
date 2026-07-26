@@ -346,7 +346,10 @@ async function main(): Promise<void> {
     // SECOND mutation — an open writer transaction at the phase boundary must fail closed, not
     // hang — is proven for real by S-4c below, using a genuine open writer transaction as the
     // contending force; not duplicated here, cross-referenced there.)
-    await masterPool.request().batch(`ALTER DATABASE [${spikeDb}] SET READ_COMMITTED_SNAPSHOT ON`)
+    // Routed through toggleRcsi() (not a raw batch) so this ALSO stays behind X-6b's own
+    // database-name guard and uses WITH ROLLBACK IMMEDIATE — the same discipline as the real
+    // toggle a few lines below, not a second, weaker toggle path.
+    await toggleRcsi(masterPool, 'ON', spikeDb, true)
     const x7ContaminationProbe = await openPinnedPool(spikeDb)
     const x7Contaminated = await rcsiReadbackBound(x7ContaminationProbe)
     log.check(

@@ -320,8 +320,15 @@ async function main(): Promise<void> {
     const m2 = m2Baseline
 
     // ── M-3: session isolation >= READ COMMITTED (ordered-index compare, closed vocabulary) ─
-    async function isolationAtLeastReadCommitted(compare: 'ordered' | 'lexicographic-DEMO-ONLY'): Promise<boolean> {
-      const rows = await readerQuery(reader!, `SELECT @@SESSION.${isolationVariable} AS iso`)
+    // `connection` defaults to the reader (every M-3 call site) but X-7 below passes a genuinely
+    // FRESH connection through the SAME function — CP-1 discipline: a control pair's two halves
+    // must call the SAME probe function, not two code paths that happen to compute the same
+    // thing (this line's own note: door-level checks that don't share code can silently drift).
+    async function isolationAtLeastReadCommitted(
+      compare: 'ordered' | 'lexicographic-DEMO-ONLY',
+      connection: MySqlConnection = reader!
+    ): Promise<boolean> {
+      const rows = await readerQuery(connection, `SELECT @@SESSION.${isolationVariable} AS iso`)
       observationsTaken += 1
       const raw = String(rows[0]!.iso)
       // Diagnostic only (not part of the values-free evidence record — see §6): if this
@@ -361,18 +368,15 @@ async function main(): Promise<void> {
     // the CLEAN default isolation despite the mutated reader connection remaining open right
     // next to it: session-scoped state cannot leak across a connection boundary.
     const freshConnectionForX7 = await mysql.createConnection({ ...baseConfig, database: SPIKE_DATABASE })
-    const [freshIsoRows] = (await freshConnectionForX7.query(`SELECT @@SESSION.${isolationVariable} AS iso`)) as [
-      Array<{ iso: string }>,
-      unknown,
-    ]
-    const freshIsoIndex = ISOLATION_ORDER.indexOf(String(freshIsoRows[0]!.iso) as (typeof ISOLATION_ORDER)[number])
-    observationsTaken += 1
+    // SAME function as M-3's calls above (CP-1 discipline) — just pointed at the fresh
+    // connection instead of the (still-mutated) reader.
+    const freshConnectionClean = await isolationAtLeastReadCommitted('ordered', freshConnectionForX7)
     await freshConnectionForX7.end()
     log.check(
       'X-7-fresh-connection-not-contaminated',
-      "a FRESH connection opened while the reader sits mutated at READ UNCOMMITTED (M-3-mutation-discriminating-read-uncommitted, just above) reports the engine's own CLEAN default isolation -- session-scoped state cannot cross a connection boundary, proving teardown/reconnect is sufficient for X-7's no-contamination guarantee",
+      "a FRESH connection opened while the reader sits mutated at READ UNCOMMITTED (M-3-mutation-discriminating-read-uncommitted, just above) reports the engine's own CLEAN default isolation via the SAME isolationAtLeastReadCommitted() function M-3 uses -- session-scoped state cannot cross a connection boundary, proving teardown/reconnect is sufficient for X-7's no-contamination guarantee",
       'GREEN',
-      freshIsoIndex >= ISOLATION_ORDER.indexOf('READ-COMMITTED')
+      freshConnectionClean
     )
 
     log.check(
