@@ -21152,7 +21152,15 @@ async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurred
   if (resolution.kind === 'resolved') {
     const resolvedShift = await loadShiftById(trx, orgId, resolution.shiftId)
     if (!resolvedShift) {
-      throw new Error('W4C2_LEGACY_RESOLVED_SHIFT_NOT_FOUND')
+      // Assignment/shift row changed between the route's read and this
+      // transaction (deleted mid-flight) — a closed, values-free 409 (not a
+      // raw Error, which `respondIfW4BoundaryError`/`instanceof HttpError`
+      // would NOT recognize and which would fall through to a generic 500).
+      throw new HttpError(
+        409,
+        'W4C2_LEGACY_RESOLVED_SHIFT_NOT_FOUND',
+        'Resolved shift row changed during in-transaction legacy attribution re-derivation'
+      )
     }
     return { rule: resolvedShift, punchWorkDateResolution: resolution }
   }
@@ -21160,9 +21168,17 @@ async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurred
     // The route's own pre-boundary resolution already 422s a fresh ambiguity
     // before ever calling into the boundary (WORK_DATE_ATTRIBUTION_AMBIGUOUS);
     // reaching this branch means DB state changed between the route's read and
-    // this transaction (assignment edited mid-flight) — fail closed rather than
-    // silently pick a rule the route never validated.
-    throw new Error('W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION')
+    // this transaction (assignment edited mid-flight) — fail closed with a
+    // closed, values-free 409 rather than silently pick a rule the route never
+    // validated. (W4C-2 remediation: this IS a new narrow rejection surface,
+    // introduced deliberately by moving resolution in-transaction for P1-3 —
+    // it replaces the PRE-FIX silent behavior of writing against the route's
+    // stale resolution. See PR body §"W4C-2 修复轮" for the disclosure.)
+    throw new HttpError(
+      409,
+      'W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION',
+      'Work date attribution became ambiguous during in-transaction re-derivation; refusing silent choice'
+    )
   }
   const context = await resolveWorkContext({
     db: trx,
@@ -22585,6 +22601,17 @@ module.exports = {
     isPunchWithinShiftWindow,
     parseImportedPunchDateTimes,
     resolvePunchWorkDateByShiftWindow,
+  },
+  // W4C-2 remediation (advisor declare-item, PR #4612): direct-call seam for the
+  // in-transaction legacy attribution re-derivation added by P1-3, so its narrow
+  // ambiguous/shift-row-changed rejection branches can be proven without needing
+  // a genuine two-connection race (the branch is reachable only via a real
+  // concurrent modification between the route's pre-check and this transaction;
+  // this seam tests the branch's OWN behavior once hit, not end-to-end HTTP
+  // reachability of the race itself).
+  __attendanceW4c2LegacyAttributionForTests: {
+    deriveLegacyLivePunchAttributionV1,
+    HttpError,
   },
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
