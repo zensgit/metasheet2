@@ -21,8 +21,12 @@
 > current head (`git merge-base --is-ancestor b5db447ae1…
 > refs/pull/4612/head` fails) — GitHub still resolves the SHA by hash, but
 > it names a superseded historical commit, not current branch lineage.
-> Superseded by the current-head check above; retained nowhere else in
-> this document.
+> Superseded by the current-head check above. **Round-8 gate finding,
+> correcting an over-closed claim:** this SHA also appears at three other
+> spots in this document (the round-7 changelog entry summarizing this
+> same correction, and section 0.2's own re-verification bullet); all
+> three are this same retraction/correction language, restating that the
+> SHA is superseded — none is a live anchor.
 > `OD-W4C-1..42` were RATIFIED at `a3e5765727ca608e8c49c7a44a025e6e4aae5d40`.
 >
 > Companion amendment:
@@ -1364,7 +1368,19 @@ enqueueAttendanceScheduledRunEventOutboxV1(
   `VerifiedAttendanceScheduledRunIdentityV1`'s own type requires) and apply
   the same defensive rejection of a row that fails any of the table's own
   CHECK/FK invariants — this equalizes their trust level rather than
-  special-casing the second one.
+  special-casing the second one. **Round-8 gate disclosure, same standard
+  section 1.1.2 already applies to other module-encapsulation claims in
+  this document:** gate 22 (b)'s fabricated-object leg (section 2) proves
+  this only for `mintAttendanceScheduledRunIdentityFromInsertedRowV1`, via
+  the one exported entry point that accepts an identity parameter
+  (`enqueueAttendanceScheduledRunEventOutboxV1`). No gate exercises
+  `rehydrateVerifiedAttendanceScheduledRunIdentityV1` with a fabricated
+  row, because its only callers are internal, in-module reads under the
+  class-`01` lock with no externally-reachable parameter to inject
+  through — "equalizes their trust level" is a design assertion about the
+  code as written (both constructors apply the identical validation
+  logic, readable at the call sites this section names), not a claim
+  covered by test.
 
   **Equivalence argument, corrected from a prior overstatement.** A row
   produced by this transaction's own `INSERT ... RETURNING`, while
@@ -2262,15 +2278,33 @@ today, but the amendment must not implement `O-3`/`O-4` without them:**
     is absent from its defining module's compiled public surface — proven
     by importing that module's exports at test time and asserting the
     symbol is `undefined`, not by a source-text grep. **(b) Round-7
-    retargeting:** since section 1.4.1 states neither run-identity
+    retargeting, round-8 gate correction narrowing its injection
+    surface:** since section 1.4.1 states neither run-identity
     constructor is exported from its defining module, a caller-fabricated
     plain object (JSON clone, spread, prototype lookalike) with the same
     field shape cannot be handed to either constructor directly from a
-    test outside that module — this leg instead proves rejection at the
-    module's own exported entry points (run establishment, resume,
-    finalization, and the run-scoped enqueue surface, section 1.4.1):
-    passing the fabricated object through each of those surfaces is
-    rejected before it reaches either constructor. This stays a
+    test outside that module. Of the module's exported entry points named
+    in section 1.4.1, exactly one both is a named export and accepts a
+    `VerifiedAttendanceScheduledRunIdentityV1` parameter directly:
+    `enqueueAttendanceScheduledRunEventOutboxV1(trx, identity, events)`.
+    "Run establishment," "resume," and "finalization" are transaction
+    *shapes* (sections 1.1, 1.7, 1.8), not separately-named exported
+    functions that take an identity argument. Section 1.4.1's own surface
+    additionally exports `buildAttendanceScheduledRunAdvisoryKey` and
+    `acquireAttendanceScheduledRunLock`, neither of which takes an
+    identity parameter either (`key`/`trx, key` only). The one other
+    exported entry point that does take an actor-identity-shaped
+    parameter, `abandonAttendanceScheduledRunV1(trx, callerIdentity, key:
+    {orgId, runId}, reasonCode)` (section 1.1.2, not section 1.4.1's own
+    surface), takes `callerIdentity` (the actor invoking the abandon
+    transition, an unrelated type — who is calling, not which run) and a
+    raw `{orgId, runId}` key, not a `VerifiedAttendanceScheduledRunIdentityV1`.
+    This leg's fabricated-object
+    injection is therefore proven at `enqueueAttendanceScheduledRunEventOutboxV1`
+    only; it does not, and structurally cannot, exercise
+    `rehydrateVerifiedAttendanceScheduledRunIdentityV1`, whose only callers
+    are internal reads under the class-`01` lock with no external
+    parameter surface to inject through. This stays a
     compiled-module-boundary proof, not a source-text assertion, per this
     document's own standing rule — only the injection point moved from
     the (unreachable) constructors themselves to the module's actual
@@ -2345,7 +2379,7 @@ mutation-proven, not just read the gate's own assertions.
 
 | Decision | Options | Recommendation |
 | --- | --- | --- |
-| `OD-W4C-44` scheduled run identity — **its option (a) below names states that are themselves the subject of `OD-W4C-48`; see section 3.3 for the exact coupling and why this is wording, not a hidden second decision** | (a) durable `attendance_scheduled_runs` row with server-minted `run_id`, frozen posture/counts/target-set fingerprint, immutable target rows, and run-level outbox written in the same finalization transaction as `completed`, with closed states per whichever `OD-W4C-48` selects (`running|completed|abandoned` under `OD-W4C-48=(a)`, this document's default and the form section 1.1's SQL block shows; `running|completed` under `OD-W4C-48=(b)`, which additionally requires the schema/gate edits section 5 already flags); (b) keep the derived in-process run ID and add only outbox columns; (c) no run object — reduce the two run-level events to per-user events | **(a)** |
+| `OD-W4C-44` scheduled run identity — **its option (a) below names states that are themselves the subject of `OD-W4C-48`; see section 3.3 for the exact coupling and why this is wording, not a hidden second decision** | (a) durable `attendance_scheduled_runs` row with server-minted `run_id`, frozen posture/counts/target-set fingerprint, immutable target rows, and run-level outbox written in the same finalization transaction as `completed`, with closed states per whichever `OD-W4C-48` selects (`running|completed|abandoned` under `OD-W4C-48=(a)`, this document's default and the form section 1.1's SQL block shows; `running|completed` under `OD-W4C-48=(b)` — **round-8 gate correction:** per section 3.3's round-7 `D0c` fix, `48=(b)` is now a structural exclusion, not a live branch this document specifies for, so this conditional clause is retained only as the historical wording that motivated the `44`↔`48` decoupling fix, and no longer points at section 5, whose corresponding bullet round-7 rewrote as a precondition on ratifying `48=(b)` at all rather than as a to-do this option still owes); (b) keep the derived in-process run ID and add only outbox columns; (c) no run object — reduce the two run-level events to per-user events | **(a)** |
 | `OD-W4C-45` repeat invocation and roster drift — **its option (a) below names a serialization mechanism that is itself the subject of `OD-W4C-46`; see section 3.3** | (a) `generation` allocated under whichever serialization mechanism `OD-W4C-46` ultimately selects (class `01` under `OD-W4C-46=(a)`/`OD-W4C-49=(a)`; the fallback mechanism under `OD-W4C-46=(b)`/`(c)` if `OD-W4C-49=(b)`, not itself fully specified by this document — section 3.3); a fresh invocation after a terminal run starts generation `n+1` (today's re-emit behavior preserved), while the frozen `target_set_fingerprint` guards **resume** only and any drift on resume is fail-closed remediation; (b) one run per `(org, initiator, work_date)` forever — a repeat invocation is a zero-DML replay that emits nothing; (c) include the fingerprint in the run identity so a roster change mints a different run | **(a)** |
 | `OD-W4C-46` advisory class for the run lock — **conditional on `O-1`/`OD-W4C-49` (section 3.1): option (a) is only available if `O-1` resolves to `(a)`; if `O-1` resolves to `(b)`, this item cannot resolve to (a) and must instead be decided between (b)/(c) (see `OD-W4C-49`'s option (b) cell for the forcing argument)** | (a) assign the reserved class `01` over `(org, initiator, work_date)`, ordered `00 → 01 → 10 → 11`, with its own values-free `503 ATTENDANCE_SCHEDULED_RUN_BUSY`; (b) reuse class `10` with a third `kind` discriminant `scheduled_run`; (c) rely on the partial unique index and row locks alone | **(a)**, contingent on `O-1=(a)` |
 | `OD-W4C-47` run-level payload and delivery order — **its option (a) below is conditional on `OD-W4C-51`; see section 3.3 for the `47`↔`51` naming coupling (round-7 addition)** | (a) freeze both payloads byte-identically (narrowed to key/value-set equivalence plus the newly pinned canonical order for `reasons` under `OD-W4C-51=(a)`; holds as written under `51=(b)`), keep the closed `reasons` vector rebuilt in target `ordinal` order, and leave inter-event delivery order unconstrained (as today's two independent `emit` calls already are); (b) additionally add a stored `delivery_ordinal` and require `attendance.absence.generated` to be delivered before `attendance.work_date.review_required` for the same run; (c) reduce `reasons` to a count | **(a)** |
@@ -2404,10 +2438,20 @@ by hash — it names a superseded historical commit, not current branch
 lineage). The equivalent content on the current head is commit
 `8a3c7814d1d1ee5da16d54f4cb8629f0bf543457` — same commit message, and
 `git patch-id` confirms a byte-identical diff (only the parent commit
-differs, from the rebase). Every code citation below this paragraph is
-re-verified against the current head, not the superseded commit; where a
-line number moved, the corrected current-head line number is given
-alongside the original. It is placed here, in this document's decision
+differs, from the rebase). **Round-8 gate finding, scoping this claim.**
+The `w4c2-live-scheduled-boundary.ts` line-number citations below that had
+moved between the superseded commit and the current head are given as the
+corrected current-head numbers (that file is not diff-stable across the
+rebase, per the growth note further down). Citations into
+`attendance-work-date-resolver.cjs` and `index.cjs` are labeled by frame
+at each occurrence below; where a citation's frame is not otherwise
+obvious, it is `origin/main`
+`9fdf68fa5c34d2224fbe6bd0d71b14ca78263502`, and its current-head
+equivalent (offset by insertions this branch, not this document, makes)
+is given alongside it. This is a re-verification against the current
+head of the specific citations enumerated below, not a general claim that
+every line number anywhere in this section has been walked. It is placed
+here, in this document's decision
 table, solely so the owner can rule on it in the same pass as `O-1..O-4`
 rather than in a second round-trip.
 
@@ -2562,9 +2606,11 @@ the comparison. There are two structurally different ways to do that:
     that precedent question is not what failed here — the composition step
     that follows the facts is what failed, and is corrected below.
     The read covers `selectAmongMatchingCandidates`'s full body
-    (`attendance-work-date-resolver.cjs:371-519`), its caller
-    (`:982-1007`), the internal `calendarWorkDate` derivation
-    (`:792-814`), and — on PR #4612's branch — **all three** resolve
+    (`attendance-work-date-resolver.cjs:371-519`, identical on
+    `origin/main` and #4612 head), its caller (`:982-1007` on
+    `origin/main` / `:1006-1031` on #4612 head), the internal
+    `calendarWorkDate` derivation (`:792-814` on `origin/main` /
+    `:799-821` on #4612 head), and — on PR #4612's branch — **all three** resolve
     call sites: `punchWorkDate`'s own call to
     `resolvePunchWorkDateByShiftWindow` (`index.cjs:26933`, unchanged from
     `origin/main:26321`, using the route's `timezone` local variable
@@ -2582,11 +2628,19 @@ the comparison. There are two structurally different ways to do that:
     cited these last three sites against commit
     `64ea17d1931c142a080aeab9dabe2e8c1098c2cd`, since force-pushed away —
     see this section's provenance correction above): the resolver.cjs
-    citations above (`:371-519`, `:982-1007`, `:792-814`) are unchanged —
-    that file has zero diff between the superseded commit and the current
-    head. `index.cjs:26933` and the `requestTimezone` capture at
+    citations above are given on the `origin/main` frame (`:371-519`,
+    `:982-1007`, `:792-814`); `:371-519` is identical on #4612 head (it
+    predates this branch's own insertions into the file and does not
+    shift), while `:982-1007` and `:792-814` are at `:1006-1031` and
+    `:799-821` respectively on #4612 head (both sit after those
+    insertions). The file itself has zero diff between the superseded
+    commit and the current head — the insertions that offset these two
+    citations from `origin/main` were already present at the superseded
+    commit, so this offset is not new this round, only newly labeled by
+    frame. `index.cjs:26933` and the `requestTimezone` capture at
     `index.cjs:26931` are also unchanged. The `w4c2-live-scheduled-boundary.ts`
-    file grew **+210 lines** between the superseded commit and the current
+    file changed **210 lines** (`+174/−36`, net **+138**, 1728→1866)
+    between the superseded commit and the current
     head (unlike the resolver, this file is not diff-stable), and the two
     citations against it have moved: the freeze/inner re-resolution call
     is now at `w4c2-live-scheduled-boundary.ts:1138-1143` (was `:1109-1114`),
@@ -2598,11 +2652,14 @@ the comparison. There are two structurally different ways to do that:
     - **Fact 1 — the candidate universe (`matching`) never depends on
       `openRecords`, and all three calls share the same `occurredAt` and
       `timezone`.** `resolve()` computes `workDates` and `candidates`
-      (hence `matching`, via the `isInstantInWindow` filter at `:982-984`)
+      (hence `matching`, via the `isInstantInWindow` filter at `:982-984`
+      on `origin/main` / `:1006-1008` on #4612 head)
       purely from `occurredAt`, `timezone`, and the internally-derived
-      `calendarWorkDate` (`:792-796`: `input.calendarWorkDate ||
+      `calendarWorkDate` (`:792-796` on `origin/main` / `:799-803` on
+      #4612 head: `input.calendarWorkDate ||
       toWorkDate(occurredAt, timezone) || input.explicitWorkDate`).
-      `openRecords` is loaded separately, afterward (`:986-997`), and never
+      `openRecords` is loaded separately, afterward (`:986-997` on
+      `origin/main` / `:1010-1021` on #4612 head), and never
       feeds back into `matching`. The `timezone` argument is where this
       could still break — `punchWorkDate.timezone` overwrites the route's
       `timezone` variable after resolution (`index.cjs:26958` on the #4612
@@ -2612,14 +2669,14 @@ the comparison. There are two structurally different ways to do that:
       requestTimezone = timezone` (the PRE-resolution value) **before**
       `punchWorkDate` is computed, and both the outer read and the
       boundary's `resolveLiveCandidate` call are wired to use only that
-      captured `requestTimezone` (`index.cjs:27014`, threaded to the
-      boundary at `:27256` as `requestTimezone`, consumed at
-      `w4c2-live-scheduled-boundary.ts:1113` as `input.requestTimezone`) —
+      captured `requestTimezone` (`index.cjs:27021`, threaded to the
+      boundary at `:27273` as `requestTimezone`, consumed at
+      `w4c2-live-scheduled-boundary.ts:1142` as `input.requestTimezone`) —
       never the post-resolution `timezone` field, which the boundary's own
       doc comments (`:40-52`, `:263-274`, `:380-398`) flag by name as
       unsafe for exactly this recomputation. A separate call site on this
       same branch makes the rule explicit in one sentence
-      (`index.cjs:21275-21277`, the `deriveLegacyLivePunchAttributionV1`
+      (`index.cjs:21276-21278`, the `deriveLegacyLivePunchAttributionV1`
       caller): "P1 fix: requestTimezone (the route's PRE-resolution
       input), NEVER timezone (the route's POST-resolution persistence
       value)". `occurredAt` is likewise the
@@ -2632,7 +2689,9 @@ the comparison. There are two structurally different ways to do that:
       all.** The route fails closed with `422
       WORK_DATE_ATTRIBUTION_AMBIGUOUS` and **returns before any write**
       whenever `punchWorkDate.resolution.kind === 'ambiguous'`
-      (`index.cjs:26332-26343`, guarding the exact call at `:26321-26330`).
+      (`index.cjs:26332-26343` on `origin/main` / `:26944-26955` on
+      #4612 head, guarding the exact call at `:26321-26330` on
+      `origin/main` / `:26933-26942` on #4612 head).
       `selectAmongMatchingCandidates` only reaches its ambiguous branches
       when a precedence step finds more than one candidate, or when no step
       resolves a unique winner and `matching.length !== 1` (the fallthrough
@@ -2932,7 +2991,15 @@ branch** — sections 1/2 as written do not cover it, and a follow-up
 amendment round would be needed before implementation could proceed on
 that branch. This is a real, if softer, form of "not authorized by this
 document," distinct from a combination that is **structurally impossible
-no matter what is written** — of which this pass found exactly two.
+no matter what is written**. **Round-8 gate finding, correcting a stale
+count.** The structural-exclusions table below currently lists four rows
+(`D0a`, `D0b`, `D1`, `D0c`); of those, `D0a` (`44=(b)`), `D0b` (`44=(c)`),
+and, as of this round's `D0c` fix, `D0c` (`48=(b)`) are single-axis-value
+exclusions of the kind this paragraph contrasts against `44`/`45`/`47`'s
+merely-incomplete branches — three, not two, as of this pass. `D1` is a
+different shape (a specific *pair*, `46=(a)` with `49=(b)`, not any
+single value) and was not counted in the "two" this sentence previously
+named.
 `48` is deliberately **not** in this paragraph's list, unlike the
 round-6 draft: round-7's `D0c` fix (below) reclassifies `48=(b)` from
 "incomplete for that branch" to **structurally impossible**, so `48` no
@@ -2946,12 +3013,20 @@ asymmetry a prior pass left implicit).** `48=(b)` (`D0c` below) and
 `46=(c)` both make a sentence already written in section 1.1 literally
 false. They are classified differently because of what would close the
 contradiction. `48=(b)`'s contradiction cannot be closed by rewriting
-section 1.1's prose: `D0c`'s own reasoning (below) is that no state
-exists, and no wording change supplies one, that gives a `running` run
-stuck by resume-drift or posture-mismatch a legal exit once `abandoned`
-does not exist — the impossibility is about what states the schema can
-have, not about how this document currently describes them, so it holds
-for *any* possible spec (hence "structural"). `46=(c)`'s contradiction,
+section 1.1's prose alone: `D0c`'s own reasoning (below) is that no state
+this document specifies, and no wording change to section 1.1 by itself,
+supplies one that gives a `running` run stuck by resume-drift or
+posture-mismatch a legal exit once `abandoned` does not exist — the
+impossibility is about what states this draft's schema can have as
+specified here, not about how this document currently describes them, so
+it holds for any spec that leaves `44..53`'s other nine items as this
+pass resolves them (hence "structural" in this table's sense). **Round-8
+gate correction, aligning with section 5:** this is narrower than "for
+*any* possible spec" — section 5's corresponding residual states that the
+owner cannot ratify `48=(b)` *without* this document, or a superseding
+one, first specifying a legal exit for the resume-drift and
+posture-mismatch paths; this document does not attempt that, and has not
+shown one is impossible to write, only that none is written here. `46=(c)`'s contradiction,
 by contrast, is closable by rewriting section 1.1's sentence itself: a
 follow-up round could specify `46=(c)`'s missing lock-order/serialization
 shape and simultaneously narrow "raw `23505` is never a control path" to
@@ -2970,7 +3045,7 @@ draft's).**
 | D0a | `44=(b)`, any other value | This document's already-written sections 1.1-1.9 (durable row, frozen counts, resume-by-row-read, finalization-by-fold) presuppose a durable run row with an ID that outlives the process; `44(b)`'s derived in-process ID cannot carry any of that (section 3's own "fails because…" text). Not a bundling issue — `44` is not a free choice this document's own body leaves open. |
 | D0b | `44=(c)`, any other value | Foreclosed by an **external, already-ratified** decision: `44(c)` is verbatim the G-2 option `(a)` the owner already rejected (section 0.1) in favor of `(b2)`. Re-litigating it here would contradict a ruling this amendment itself takes as given. |
 | D1 | `46=(a)`, `49=(b)` | `OD-W4C-49(b)`'s own cell text states this directly: if the red line is not rewritten, class `01` remains forbidden, so `46` cannot be `(a)`. (Already annotated on `46`'s row before this pass; restated here for the matrix's completeness, not newly found.) |
-| D0c *(supersedes a narrower `D2` this table previously carried)* | `48=(b)`, any other value | **Round-7 gate finding, correcting `D2`'s narrower pairing.** The prior `D2` row excluded only the pair `(48=b, 50=b)`, reasoning that under `50=(a)` every `generate` target always reaches a recorded outcome so finalization is always eventually admitted — that argument only closes the *per-user permanent-failure* route to a stuck run, and says nothing about two other, independent fail-closed routes section 1.7's resume protocol already specifies, **neither of which involves `O-3`/`50` at all**: (i) **resume-drift** — step 3 recomputes the target set on every resume and requires byte equality with the frozen `target_set_fingerprint`; a membership change between one resume attempt and the next (e.g. a member's departure mid-run) makes step 3's guard fire on *every* subsequent resume attempt, forever, with zero DML each time; (ii) **posture-mismatch** — step 2 requires the frozen `accepted_write_posture` to equal the currently resolved posture; a posture flip that does not flip back makes step 2's guard fire on *every* subsequent resume attempt, forever, with zero DML each time. Both are fail-closed remediation **by this document's own design** (section 1.7: "Any difference is fail-closed remediation; the run is never silently re-planned"), and under `48=(b)` neither has a legal exit — section 1.7's own closing line states the run's **only** exit is the explicit `abandoned` transition, which `48=(b)` removes. An exhaustive scan of section 1.10 ("Migration and rollback") and section 5 ("Declared residuals") for `remediation\|repair\|abandon\|stuck\|drift` finds **zero** hits in section 1.10 and only reverse-confirming hits in section 5 ("`abandoned` … exists **solely** to prevent a stuck state"; "must be closed by the explicit `abandoned` transition") — this document names no other recovery path anywhere. Under `48=(b)`, both the resume-drift and posture-mismatch branches therefore pin the `(org, initiator, work_date)` partial unique index **permanently**, independent of `50`'s value; if `52=(a)` is also selected, the same permanently-`running` row also permanently blocks that org's shadow-to-authoritative promotion. `48=(b)` is therefore excluded **unconditionally**, for any value of the other nine items, not merely when paired with `50=(b)` — the prior `D2` pairing is retired; the per-user-failure path it diagnosed is subsumed here as one instance of the broader argument, not a separate, narrower exclusion standing alongside it. |
+| D0c *(supersedes a narrower `D2` this table previously carried)* | `48=(b)`, any other value | **Round-7 gate finding, correcting `D2`'s narrower pairing.** The prior `D2` row excluded only the pair `(48=b, 50=b)`, reasoning that under `50=(a)` every `generate` target always reaches a recorded outcome so finalization is always eventually admitted — that argument only closes the *per-user permanent-failure* route to a stuck run, and says nothing about two other, independent fail-closed routes section 1.7's resume protocol already specifies, **neither of which involves `O-3`/`50` at all**: (i) **resume-drift** — step 3 recomputes the target set on every resume and requires byte equality with the frozen `target_set_fingerprint`; a membership change between one resume attempt and the next (e.g. a member's departure mid-run) makes step 3's guard fire on *every* subsequent resume attempt, forever **while at least one target remains non-terminal** (once every target is terminal, the resume scan proceeds directly to finalization and does not recheck the fingerprint — section 1.7/1.8's own branching), with zero DML each time; (ii) **posture-mismatch** — step 2 requires the frozen `accepted_write_posture` to equal the currently resolved posture; a posture flip that does not flip back makes step 2's guard fire on *every* subsequent resume attempt, forever, with zero DML each time; **unlike resume-drift, this one has no all-terminal escape** — section 1.8 step 1's own third bullet re-implements the identical frozen-vs-resolved posture equality check inside finalization itself (not merely inside the resume protocol), fail-closed as a backstop under option (a) pending `O-4`, so reaching the recovery sweep's all-terminal branch does not bypass it the way it bypasses the fingerprint recheck. Both are fail-closed remediation **by this document's own design** (section 1.7: "Any difference is fail-closed remediation; the run is never silently re-planned"), and under `48=(b)` neither has a legal exit — **round-8 gate correction, quoting precisely:** section 1.7's own closing line reads "A run that cannot progress (section 1.1.1) is closed by the explicit `abandoned` transition" (no "only" in the original), and the exhaustiveness this argument needs comes from the scan in the next sentence, not from that sentence's own wording. An exhaustive scan of section 1.10 ("Migration and rollback") and section 5 ("Declared residuals") for `remediation\|repair\|abandon\|stuck\|drift` finds **zero** hits in section 1.10 and only reverse-confirming hits in section 5 ("`abandoned` … exists **solely** to prevent a stuck state"; "must be closed by the explicit `abandoned` transition") — this document names no other recovery path anywhere, which is what makes `abandoned` the run's only exit. Under `48=(b)`, both the resume-drift and posture-mismatch branches therefore pin the `(org, initiator, work_date)` partial unique index **permanently**, independent of `50`'s value; if `52=(a)` is also selected, the same permanently-`running` row also permanently blocks that org's shadow-to-authoritative promotion. `48=(b)` is therefore excluded **unconditionally**, for any value of the other nine items, not merely when paired with `50=(b)` — the prior `D2` pairing is retired; the per-user-failure path it diagnosed is subsumed here as one instance of the broader argument, not a separate, narrower exclusion standing alongside it. |
 
 **Interaction (not an exclusion — a cost multiplier the ballot should
 see together, not on two separate rows).**
