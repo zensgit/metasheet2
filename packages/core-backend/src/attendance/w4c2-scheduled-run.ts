@@ -765,6 +765,14 @@ export type AttendanceScheduledRunTargetOutcomeInputV1 =
  * an outcome through this helper for a target whose operation it does not already hold a
  * verified witness for. This is a TypeScript-encapsulation guarantee (module export
  * boundary), not a DB-level one — the disclosure section 1.1.1 states explicitly.
+ *
+ * P1-2 remediation (gate 12, second clause / section 1.7's fail-closed rule): a straggler
+ * seal — a per-user operation transaction that reaches this writer after the run has already
+ * left `running` (abandoned, or completed once every other target already finalized it) — is
+ * rejected BEFORE this function's own `INSERT`, never silently recorded against a run the
+ * state machine has already closed. This closes the writer's own DML, not the earlier,
+ * per-user source DML gate 12 also names — that half lives on the still-uncut legacy
+ * scheduled caller (`w4c2-live-scheduled-boundary.ts`), a separate, disclosed gap.
  */
 export async function recordAttendanceScheduledRunTargetOutcomeV1(
   trx: AttendanceW4TransactionClientV1,
@@ -796,12 +804,18 @@ export async function recordAttendanceScheduledRunTargetOutcomeV1(
   }
 
   const targetResult = await trx.query(
-    `SELECT id::text AS id, run_id::text AS run_id FROM attendance_scheduled_run_targets
-      WHERE org_id = $1 AND operation_id = $2::uuid AND target_kind = 'generate'`,
+    `SELECT t.id::text AS id, t.run_id::text AS run_id, r.state AS run_state
+       FROM attendance_scheduled_run_targets t
+       JOIN attendance_scheduled_runs r ON r.run_id = t.run_id AND r.org_id = t.org_id
+      WHERE t.org_id = $1 AND t.operation_id = $2::uuid AND t.target_kind = 'generate'`,
     [verified.org.orgId, verified.id],
   )
   if (targetResult.rows.length !== 1) fail('W4C2_SCHEDULED_RUN_OUTCOME_TARGET_NOT_FOUND')
-  const targetRow = targetResult.rows[0] as { id: string; run_id: string }
+  const targetRow = targetResult.rows[0] as { id: string; run_id: string; run_state: string }
+  // Gate 12 / section 1.7: a target row can only ever reference a run that exists (fk_asrt_run)
+  // — the DB enforces "non-existent run" for us — but the run's CURRENT state is not part of
+  // that FK, so "non-`running` run" must be checked here, before the INSERT below.
+  if (targetRow.run_state !== 'running') fail('W4C2_SCHEDULED_RUN_OUTCOME_RUN_NOT_RUNNING')
 
   await trx.query(
     `INSERT INTO attendance_scheduled_run_target_outcomes (

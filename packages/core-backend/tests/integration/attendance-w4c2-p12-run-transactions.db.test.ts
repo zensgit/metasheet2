@@ -816,6 +816,169 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
   })
 
   // ===========================================================================================
+  // 7b. P1-2 remediation P2-3/P2-4 — section 1.1.1's outcome writer: fail-closed on a
+  //     non-`running` run (gate 12's second clause, applied at this writer's own DML), and the
+  //     witness guard's own two independently-neuterable legs.
+  // ===========================================================================================
+  describe('section 1.1.1 — outcome writer run-state guard and witness guard (P2-3/P2-4)', () => {
+    interface RecordedStatement {
+      readonly sql: string
+      readonly params: readonly unknown[]
+    }
+    function recordingTrx(inner: AttendanceW4TransactionClientV1, log: RecordedStatement[]): AttendanceW4TransactionClientV1 {
+      return {
+        async query(sql: string, params?: unknown[]) {
+          log.push({ sql, params: params ?? [] })
+          return inner.query(sql, params as unknown[])
+        },
+      } as AttendanceW4TransactionClientV1
+    }
+
+    it('P2-3: a straggler seal arriving after the run was abandoned is rejected BEFORE the outcome INSERT, zero rows written, run state/counts untouched', async () => {
+      const orgId = orgIdFor('outcomenonrun1')
+      await setRolloutState(orgId, 'shadow')
+      const workDate = '2026-02-15'
+      const userA = uuid()
+      const created = await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          createOrResumeAttendanceScheduledRunV1(
+            trx,
+            { orgId, initiator: 'cron', workDate },
+            memberResolverFor([{ userId: userA, targetKind: 'generate', reviewReasonCode: null }]),
+          ),
+        ),
+      )
+      if (created.kind !== 'created_running') throw new Error('expected created_running')
+
+      // Operator abandons BEFORE userA's operation completes — completed_user_count folds to 0.
+      const abandonCaller = createAuthorizedAttendanceWriteContextV1({
+        actorId: 'w4c2p12txn-p23-operator',
+        actorPosture: 'platform_admin',
+        tokenSubjectUserId: null,
+        orgId,
+        subjectScope: { kind: 'explicit_users', userIds: ['w4c2p12txn-p23-abandon-caller'] },
+        capability: 'retirement',
+        sourceRef: 'ref:w4c2p12txn-p23-abandon',
+      })
+      const abandonOutcome = await withTxn((trx) =>
+        abandonAttendanceScheduledRunV1(trx, abandonCaller, { orgId, runId: created.runId }, 'ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED'),
+      )
+      expect(abandonOutcome).toEqual({ kind: 'abandoned', runId: created.runId, completedUserCount: 0 })
+
+      // The straggler's per-user operation transaction was already in flight (claimed before the
+      // abandon committed) and now attempts to seal — reproduces the verdict's real-DB probe
+      // through the actual production writer, not a raw-SQL bypass.
+      const t = await pool.query(
+        `SELECT operation_id::text AS operation_id FROM attendance_scheduled_run_targets
+          WHERE org_id = $1 AND run_id = $2::uuid AND user_id = $3::uuid AND target_kind = 'generate'`,
+        [orgId, created.runId, userA],
+      )
+      const operationId = t.rows[0].operation_id as string
+
+      const err = await catchAsync(() =>
+        withTxn(async (trx) => {
+          await trx.query(
+            `INSERT INTO attendance_result_operations (
+                org_id, entrypoint, operation_id, identity_source_kind, source_root_id, proof_user_id, proof_work_date,
+                source_ref, actor_id, actor_posture, capability, subject_scope, command_fingerprint, accepted_write_posture, state
+              ) VALUES ($1,'scheduled',$2,'scheduled',$3,$4,$5,'ref:w4c2p12txn-p23','actor-w4c2p12txn-p23','scheduler','scheduled','{}'::jsonb,$6,'shadow','claimed')`,
+            [orgId, operationId, created.runId, userA, workDate, 'b'.repeat(64)],
+          )
+          const org = createVerifiedAttendanceOrgIdentityV1({
+            orgKey: orgId,
+            posture: await resolveSegmentCalculationPosture(trx, orgId),
+          })
+          const identity = createVerifiedAttendanceOperationIdentityV1({
+            org,
+            kind: 'item',
+            entrypoint: 'scheduled',
+            source: { sourceKind: 'scheduled', scheduledRunId: created.runId, userId: userA, workDate },
+          })
+          await trx.query(
+            `UPDATE attendance_result_operations
+                SET state = 'completed', response_snapshot = $3::jsonb, version = version + 1, updated_at = now()
+              WHERE org_id = $1 AND entrypoint = 'scheduled' AND operation_id = $2::uuid AND state = 'claimed'`,
+            [orgId, operationId, JSON.stringify({ inserted: true })],
+          )
+          await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, { terminalOutcome: 'completed' })
+        }),
+      )
+      expect(String((err as { code?: string })?.code)).toBe('W4C2_SCHEDULED_RUN_OUTCOME_RUN_NOT_RUNNING')
+
+      const outcomeRows = await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_scheduled_run_target_outcomes WHERE org_id = $1 AND run_id = $2::uuid`,
+        [orgId, created.runId],
+      )
+      expect(outcomeRows.rows[0].n).toBe(0)
+      const runRow = await pool.query(
+        `SELECT state, completed_user_count FROM attendance_scheduled_runs WHERE run_id = $1::uuid`,
+        [created.runId],
+      )
+      expect(runRow.rows[0]).toEqual({ state: 'abandoned', completed_user_count: 0 })
+    })
+
+    it('P2-4 leg (a): a caller-fabricated plain object shaped like a real witness is rejected by the witness-registration check itself, zero trx queries', async () => {
+      const orgId = orgIdFor('outcomewitness1')
+      await setRolloutState(orgId, 'shadow')
+      // Shaped exactly like a real `entrypoint: 'scheduled', kind: 'item'` witness so this leg
+      // isolates the witness-REGISTRATION check from the downstream entrypoint/kind check below
+      // — a bare-cast neuter of `requireVerifiedAttendanceOperationIdentityV1` would let this
+      // exact object fall through to the entrypoint/kind check (which it would pass) and reach
+      // a `trx.query` call, so "zero queries" only holds under the real guard.
+      const fabricated = Object.freeze({
+        kind: 'item',
+        org: Object.freeze({ orgId, acceptedWritePosture: 'shadow' }),
+        entrypoint: 'scheduled',
+        id: uuid(),
+        sourceProof: Object.freeze({
+          sourceKind: 'scheduled',
+          sourceRootId: uuid(),
+          ordinal: null,
+          semanticFingerprint: null,
+          userId: uuid(),
+          workDate: '2026-02-16',
+        }),
+      })
+      const log: RecordedStatement[] = []
+      const err = await catchAsync(() =>
+        withTxn((trx) =>
+          recordAttendanceScheduledRunTargetOutcomeV1(recordingTrx(trx, log), fabricated, { terminalOutcome: 'completed' }),
+        ),
+      )
+      expect(String((err as { code?: string })?.code)).toBe('W4C0_OPERATION_WITNESS_REQUIRED')
+      expect(log.length).toBe(0)
+    })
+
+    it('P2-4 leg (b): a REAL witness of the wrong entrypoint/kind (live_punch, not scheduled) is rejected by the entrypoint/kind check, zero trx queries', async () => {
+      const orgId = orgIdFor('outcomewitness2')
+      await setRolloutState(orgId, 'shadow')
+      const log: RecordedStatement[] = []
+      const err = await catchAsync(() =>
+        withTxn(async (trx) => {
+          const org = createVerifiedAttendanceOrgIdentityV1({
+            orgKey: orgId,
+            posture: await resolveSegmentCalculationPosture(trx, orgId),
+          })
+          // A genuinely MINTED, real witness (passes `requireVerifiedAttendanceOperationIdentityV1`
+          // cleanly) — but for `live_punch`, not `scheduled`. This leg only proves something if
+          // leg (a)'s guard stays intact and this witness reaches the entrypoint/kind branch.
+          const wrongEntrypointWitness = createVerifiedAttendanceOperationIdentityV1({
+            org,
+            kind: 'item',
+            entrypoint: 'live_punch',
+            source: { sourceKind: 'direct_live_punch', clientOperationId: uuid() },
+          })
+          await recordAttendanceScheduledRunTargetOutcomeV1(recordingTrx(trx, log), wrongEntrypointWitness, {
+            terminalOutcome: 'completed',
+          })
+        }),
+      )
+      expect(String((err as { code?: string })?.code)).toBe('W4C2_SCHEDULED_RUN_OUTCOME_WITNESS_INVALID')
+      expect(log.length).toBe(0)
+    })
+  })
+
+  // ===========================================================================================
   // 8. Terminal-failure does not stall an unrelated org's own run (positive control).
   // ===========================================================================================
   describe('terminal-failure blast radius', () => {

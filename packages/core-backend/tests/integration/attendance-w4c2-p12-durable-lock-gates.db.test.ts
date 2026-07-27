@@ -733,6 +733,90 @@ describeIfDatabase('W4C-2 P1-2 — durable delivery / lock-order / atomicity gat
   })
 
   // ===========================================================================================
+  // 4b. P1-2 remediation P2-7 — gate 7's `FOR UPDATE` clause, abandon instance: a racer that
+  //     never takes class-01 at all (a raw SQL running->completed transition) is the ONLY
+  //     competitor that can expose this clause — two class-01 holders are already serialized by
+  //     the advisory lock itself, which is why removing class-01 (not FOR UPDATE) is what the
+  //     "abandon commits while a finalizer waits" leg above already covers.
+  // ===========================================================================================
+  describe('gate 7 (P2-7) — abandon\'s SELECT ... FOR UPDATE is load-bearing against a racer outside class-01', () => {
+    it('the abandoner blocks on the racer\'s uncommitted row lock, re-reads fresh under the lock, and returns not_running/completed — never a false-positive abandoned', async () => {
+      const orgId = orgIdFor('abandonfu1')
+      await setRolloutState(orgId, 'shadow')
+      const workDate = '2026-03-09'
+      const initiator = 'cron'
+      const runId = uuid()
+      // Inserted directly (bypassing createOrResumeAttendanceScheduledRunV1, which would
+      // auto-finalize a zero-generate-target run inline per section 1.9) with ZERO targets —
+      // expected_user_count=0/review_count=0 keeps the deferred frozen-counts and
+      // completion-outcome guards trivially satisfied for the racer's own legal completion
+      // below, isolating this leg to abandon's own FOR UPDATE clause, nothing else.
+      await pool.query(
+        `INSERT INTO attendance_scheduled_runs (
+            run_id, org_id, entrypoint, initiator, work_date, generation, accepted_write_posture,
+            target_set_fingerprint, expected_user_count, review_count, state
+          ) VALUES ($1::uuid,$2,'scheduled',$3,$4::date,1,'shadow',$5,0,0,'running')`,
+        [runId, orgId, initiator, workDate, 'f'.repeat(64)],
+      )
+
+      const cA: PoolClient = await pool.connect()
+      const cB: PoolClient = await pool.connect()
+      try {
+        // B: a raw-SQL competitor that NEVER acquires class-01 — a legal running->completed
+        // transition, held open (uncommitted) so it exclusively locks the run row.
+        await cB.query('BEGIN')
+        await cB.query(
+          `UPDATE attendance_scheduled_runs
+              SET state = 'completed', completed_user_count = 0, generated_count = 0, finalized_at = now()
+            WHERE org_id = $1 AND run_id = $2::uuid AND state = 'running'`,
+          [orgId, runId],
+        )
+
+        // A: the REAL abandon transition, its own connection (bare BEGIN, no SERIALIZABLE
+        // retry wrapper — the wrapper's own 40001 retry would otherwise re-run this call AFTER
+        // B commits and mask the very race this leg exists to expose), starting NOW and
+        // contending with B's held row lock on whichever statement reaches the row first.
+        await cA.query('BEGIN')
+        const abandonPromise = abandonAttendanceScheduledRunV1(
+          cA as unknown as AttendanceW4TransactionClientV1,
+          abandonCallerFor(orgId, 'platform_admin'),
+          { orgId, runId },
+          'ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED',
+        )
+
+        let waited = false
+        for (let i = 0; i < 200; i += 1) {
+          const waiting = await pool.query(
+            `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted`,
+          )
+          if (waiting.rows[0].n >= 1) {
+            waited = true
+            break
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        expect(
+          waited,
+          "the abandoner must actually contend on the racer's uncommitted row lock (constructed race, not sequential)",
+        ).toBe(true)
+        await cB.query('COMMIT')
+
+        const abandonOutcome = await abandonPromise
+        await cA.query('COMMIT')
+        expect(abandonOutcome).toEqual({ kind: 'not_running', state: 'completed' })
+      } finally {
+        await cA.query('ROLLBACK').catch(() => undefined)
+        await cB.query('ROLLBACK').catch(() => undefined)
+        cA.release()
+        cB.release()
+      }
+
+      const runRow = await pool.query(`SELECT state FROM attendance_scheduled_runs WHERE run_id = $1::uuid`, [runId])
+      expect(runRow.rows[0].state).toBe('completed')
+    })
+  })
+
+  // ===========================================================================================
   // 5. Gate 8 — finalization atomicity: injected failures + one-txid witness.
   // ===========================================================================================
   describe('gate 8 — finalization atomicity (standalone path)', () => {
