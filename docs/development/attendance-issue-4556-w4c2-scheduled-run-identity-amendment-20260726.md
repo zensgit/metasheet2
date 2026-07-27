@@ -193,13 +193,20 @@
 > outcome `W4C-R43` separates from suspension — both are fixed in place,
 > and section 0.5 gained the cross-reference its own "confined to" claim
 > already asserted but the first draft of this paragraph had not yet made
-> true. This round's diff is confined to sections 0.5, 1.1, 1.1.1 (new
-> 1.1.2), 1.2, 1.4.1, 1.7 (step 4 and the recovery-sweep branches), 1.7.1,
-> 1.8 steps 4-5, 1.9, 1.10, section 2 (gates 11's cross-reference, 20, 22,
-> 23, 2.1), section 3 (`OD-W4C-44`/`45` rows), 3.1 (`OD-W4C-50` row), new
-> 3.3, section 4 step 3, and section 5 — it does not touch section
-> 3.2/`O-5`'s ballot text, which this round did not review and does not
-> alter.
+> true. A second pass of the same self-scan then found section 1's own
+> supersession-list preamble was itself understated by the P2 addition —
+> its "one new, strictly non-source finalization transaction shape"
+> bullet did not count `abandoned` as a second such shape, and its section
+> 7.1 bullet did not name the `O-3=(a)` outcome rows — fixed in the same
+> place, together with section 5's matching "finalization is a new
+> transaction shape" residual and section 1.9's `suspended` row. This
+> round's diff is confined to section 1's supersession-list preamble, 0.5,
+> 1.1, 1.1.1 (new 1.1.2), 1.2, 1.4.1, 1.7 (step 4 and the recovery-sweep
+> branches), 1.7.1, 1.8 steps 4-5, 1.9, 1.10, section 2 (gates 11's
+> cross-reference, 20, 22, 23, 2.1), section 3 (`OD-W4C-44`/`45` rows), 3.1
+> (`OD-W4C-50` row), new 3.3, section 4 step 3, and section 5 — it does not
+> touch section 3.2/`O-5`'s ballot text, which this round did not review
+> and does not alter.
 >
 > Runtime posture: PR #4612 stays **Draft** under
 > **OWNER-AUTHORIZATION-HOLD**. This amendment contains **no runtime code**
@@ -384,10 +391,19 @@ This amendment supersedes these parts of the governing lock:
   `W4C-R27` as written;
 - section 7.1's sentence "Scheduled absence gains a durable
   scheduled-run/user/date source row", which is refined into a durable run
-  row plus immutable target rows plus the unchanged per-user operations;
+  row plus immutable target rows plus the unchanged per-user operations
+  (plus, **if `O-3`/`OD-W4C-50` ratifies `(a)`**, the append-only
+  per-target outcome rows section 1.1.1 specifies — an addition to this
+  refinement, not a further change to the per-user operations themselves);
 - section 8.2's lock order and step 14, by inserting the reserved class-`01`
-  run lock and by adding one new, strictly non-source **finalization
-  transaction** shape;
+  run lock and by adding **two** new, strictly non-source transaction
+  shapes: the **finalization transaction** (section 1.8) and the
+  **`abandoned` transition** (section 1.1.2) — same lock order (class-`00`
+  shared, then class-`01`, then `FOR UPDATE`) as finalization, but a
+  distinct shape (it updates the run row to a different terminal state,
+  inserts no outbox row, and folds no `generated_count`), which is why
+  section 1.1.2 states its own gate (23) rather than reusing finalization's
+  (15) wholesale;
 - `OD-W4C-40`'s "class `01` is reserved", which this amendment assigns —
   **subject to `O-1`/`OD-W4C-49` ratifying the red-line rewrite immediately
   below**;
@@ -1657,7 +1673,7 @@ payload keys, and one event per run.
 | Effective posture | Run row | Target rows | Per-user operations | Outbox | Emit |
 | --- | --- | --- | --- | --- | --- |
 | `legacy_projection_only` | none | none | none (null-ID legacy) | **none** | unchanged synchronous best-effort, unchanged bytes |
-| `suspended` | none created; an existing `running` run is not advanced | unchanged | none | none | none |
+| `suspended` | none created; an existing `running` run is not advanced **and cannot be abandoned** (section 1.1.2 step 1's blocked branch) | unchanged | none | none | none |
 | `shadow` / `eligible`(→`shadow`) | created | created | per user | run-level rows at finalization | only via dispatcher |
 | `authoritative` | created | created | per user | run-level rows at finalization | only via dispatcher |
 
@@ -2823,9 +2839,14 @@ an accepted bound:
   operation ID by derivation CHECK rather than by FK, because target rows are
   written before the operation rows exist. The operation row's own
   `chk_aro_derived_identity` is the other half of that binding.
-- **Finalization is a new transaction shape** in section 8.2's world: it holds
-  class-`00` and class-`01` only, and is forbidden from source DML and from
-  class-`11`. Section 2 gate 15 is the only thing that keeps that honest.
+- **Finalization and the `abandoned` transition (section 1.1.2) are two new
+  transaction shapes** in section 8.2's world, not one: both hold
+  class-`00` and class-`01` only and are forbidden from source DML and
+  from class-`11`, but they are otherwise distinct (different terminal
+  state, different fold, no outbox insert on the `abandoned` path).
+  Section 2 gates 15 and 23 together are what keep that honest — gate 15
+  alone was written against finalization only and does not, by itself,
+  cover the `abandoned` path's no-source-DML/no-class-`11` legs.
 - **`abandoned` has no consumer today.** It exists solely to prevent a stuck
   non-terminal run; if the owner picks `OD-W4C-48(b)`, gate 11 and section 1.1
   must be edited accordingly before implementation.
