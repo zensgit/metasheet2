@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -139,6 +140,81 @@ function requireAttendanceRealDbStepExecutable() {
 
 test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integration) is executable', () => {
   assert.doesNotThrow(() => requireAttendanceRealDbStepExecutable())
+})
+
+// ---------------------------------------------------------------------------------------------
+// #4612 final-gate P2-6: `extractStepById` scans EVERY job in document order, so all the legs
+// above stay green if the step is moved wholesale into a job whose check is NOT required on main
+// (verified mutation: the entire step block relocated into `after-sales-integration` — which has
+// its own Postgres service and db:migrate, so it would even run green there — left this guard
+// 31/31 while the 10 suites silently left the required `test (20.x)` gate). The leg below pins
+// JOB MEMBERSHIP structurally: the same python3+PyYAML bridge shape as the shared contract
+// (these guards run pre-install, so no npm YAML parser is importable; the bridge FAILS CLOSED —
+// missing python3, missing PyYAML, or a parse error all redden). Kept LOCAL to this file, not
+// added to the shared `extractStepById`: the shared module's first-match-wins scan is an owner
+// stop-line residual for the OTHER two step ids, and the header above already records why this
+// step must not join the shared frozen allowlist.
+// ---------------------------------------------------------------------------------------------
+const REQUIRED_JOB = 'test' // the job whose matrix leg produces the required `test (20.x)` context
+
+/**
+ * Names of ALL jobs whose `steps` contain a step with the given `id:`, read off the PARSED
+ * YAML structure (python3 + PyYAML, fail-closed) — never a substring/indentation heuristic.
+ * Returning the full list (not first match) makes a duplicate-id decoy in another job visible.
+ */
+function jobsContainingStepId(stepId) {
+  const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  const py = [
+    'import json, sys',
+    'try:',
+    '    import yaml',
+    'except Exception as exc:',
+    "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
+    '    sys.exit(3)',
+    'try:',
+    '    doc = yaml.safe_load(sys.stdin.read())',
+    'except Exception as exc:',
+    "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
+    '    sys.exit(4)',
+    'jobs = doc.get("jobs") if isinstance(doc, dict) else None',
+    'hits = []',
+    'if isinstance(jobs, dict):',
+    '    for job_name, job in jobs.items():',
+    '        steps = job.get("steps") if isinstance(job, dict) else None',
+    '        if not isinstance(steps, list):',
+    '            continue',
+    '        for step in steps:',
+    '            if isinstance(step, dict) and step.get("id") == sys.argv[1]:',
+    '                hits.append(str(job_name))',
+    'json.dump(hits, sys.stdout)',
+  ].join('\n')
+  const res = spawnSync('python3', ['-c', py, stepId], {
+    input: wf,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 120_000,
+  })
+  if (res.error) {
+    throw new Error(`job-scope guard: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+  }
+  if (res.status !== 0) {
+    throw new Error(
+      `job-scope guard: failing CLOSED — PyYAML bridge exited ${res.status}: `
+        + `${(res.stderr || '').trim() || '(no stderr)'}`,
+    )
+  }
+  return JSON.parse(res.stdout)
+}
+
+test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" — the job that produces the required test (20.x) context — and in no other job`, () => {
+  assert.deepEqual(
+    jobsContainingStepId(STEP_ID),
+    [REQUIRED_JOB],
+    `the step carrying id "${STEP_ID}" must appear in EXACTLY the job "${REQUIRED_JOB}": moved to any `
+      + `other job (even one where it would run green, e.g. after-sales-integration) the 10 suites `
+      + `silently leave the required test (20.x) gate; duplicated into a second job, a decoy copy `
+      + `could anchor the shared first-match-wins step lookup`,
+  )
 })
 
 for (const file of FILES) {
