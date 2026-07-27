@@ -88,6 +88,11 @@ artifacts/integration-k3wise-onprem-preflight/
 # masked admin signoff metadata, and per-check evidence; operator-only.
 artifacts/integration-k3wise/internal-trial/
 
+# gip-authority-substrate-inventory.mjs (β/γ probes) private artefact: raw
+# connector-kind / objectKey strings observed in a deployment. Aggregate
+# counts only belong in committed output; the raw values are operator-local.
+artifacts/gip-authority-inventory/
+
 # Multitable on-prem release bundles are generated delivery artifacts. Keep
 # source manifests/runbooks in Git, not built archives and verification output.
 output/delivery/multitable-onprem/

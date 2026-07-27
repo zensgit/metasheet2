@@ -219,9 +219,8 @@ export default defineConfig({
       // wired into the approval real-DB step (both points asserted by
       // scripts/ops/directory-grant-table-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-grant-table.db.test.ts',
-      // T2-Gate evidence (§3.4): the (provider, external_key) collision MECHANISM — unique-index
-      // pin, bare-unionId derivation pin, and the end-to-end wholesale second-corp sync failure
-      // signature the staging two-corp runbook greps for. Real sync + mocked DingTalk client.
+      // DingTalk multi-corp external-key isolation: corp-scoped uniqueness, upgrade migration,
+      // real-sync coexistence, and same-corp/cross-corp identity matching controls.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
       // WHOLE FILE into the approval real-DB step in plugin-tests.yml (both points asserted by
       // t2gate-collision-mechanism-ci-wiring.test.mjs).

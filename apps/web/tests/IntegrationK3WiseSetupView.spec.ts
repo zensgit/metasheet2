@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+// integration-guard flake fix (sibling of the IntegrationWorkbenchView.spec.ts fix, same root cause):
+// a dynamic `await import(...)` inside a test body charges the imported SFC's first-time
+// resolve/transform cost against THAT test's own testTimeout. Hoisting to a static top-level import
+// moves the one-time cost into the file's collect/transform phase instead (not testTimeout-bounded).
+import View from '../src/views/IntegrationK3WiseSetupView.vue'
 
 const apiFetchMock = vi.fn()
 
@@ -135,8 +140,6 @@ describe('IntegrationK3WiseSetupView', () => {
   })
 
   it('keeps first-run K3 setup focused while folding expert controls', async () => {
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -231,8 +234,6 @@ describe('IntegrationK3WiseSetupView', () => {
       return jsonResponse({})
     })
 
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -295,8 +296,6 @@ describe('IntegrationK3WiseSetupView', () => {
       return jsonResponse({})
     })
 
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -321,8 +320,6 @@ describe('IntegrationK3WiseSetupView', () => {
   })
 
   it('warns and normalizes a plain Project ID on the K3 setup page', async () => {
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -357,8 +354,6 @@ describe('IntegrationK3WiseSetupView', () => {
   })
 
   it('shows a dedicated SQL Server port field and splits pasted host-port input', async () => {
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -389,8 +384,6 @@ describe('IntegrationK3WiseSetupView', () => {
   })
 
   it('opens installed staging multitable sheets from the setup page', async () => {
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
-
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -463,7 +456,6 @@ describe('IntegrationK3WiseSetupView', () => {
       return jsonResponse({})
     })
 
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -528,7 +520,6 @@ describe('IntegrationK3WiseSetupView', () => {
       return jsonResponse({})
     })
 
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -603,7 +594,6 @@ describe('IntegrationK3WiseSetupView', () => {
       return jsonResponse({})
     })
 
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
@@ -660,7 +650,6 @@ describe('IntegrationK3WiseSetupView', () => {
       return jsonResponse({})
     })
 
-    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)

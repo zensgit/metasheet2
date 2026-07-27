@@ -386,6 +386,79 @@ async function testAuditTrailIsValuesFree() {
   assert.deepEqual({ ...statusChange.detail }, { from: 'draft', to: 'approved' })
 }
 
+// B1a §4 step 1.1 acceptance predicate — MANDATED by the ledger (two enforcement points: the allowlist
+// decides acceptance, normalizeReadSourceConfig decides persistence, and contentKeyFor hashes the
+// normalize OUTPUT — so both must be exercised through the real save → re-read path, not the S1 validator
+// alone, or an allowlist-only change would satisfy a save/accept test while silently discarding the fields).
+async function testConfigV2OrderingKeySpecAndActionProfileVersion() {
+  const { db, store } = newStore()
+
+  // (i) save a body carrying BOTH new fields, re-read the STORED ROW, assert both survive into `config`.
+  const withBoth = validConfig({
+    orderingKeySpec: [{ fieldId: DISTINCTIVE.fieldTarget, direction: 'ASC' }],
+    actionProfileVersion: 'erp.material_single_record.v1',
+  })
+  const saved = await store.saveVersion({ ...SCOPE, config: withBoth, actor: 'consultant_1' })
+  assert.equal(saved.reused, false)
+  const reread = await store.get({ ...SCOPE, id: saved.id })
+  // rowToPublicReadSourceConfig runs the config through sanitizeIntegrationPayload, which returns a
+  // null-prototype clone (same idiom as testAuditTrailIsValuesFree's `{ ...statusChange.detail }` above) —
+  // round-trip through JSON so the comparison is about VALUE survival, not prototype identity.
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(reread.config.orderingKeySpec)), [{ fieldId: DISTINCTIVE.fieldTarget, direction: 'ASC' }],
+    'orderingKeySpec must survive save → re-read',
+  )
+  assert.equal(reread.config.actionProfileVersion, 'erp.material_single_record.v1', 'actionProfileVersion must survive save → re-read')
+  // Also assert directly against the raw stored row (bypasses rowToPublicReadSourceConfig's sanitize pass).
+  const row = db.tables[CONFIG_TABLE].find((r) => r.id === saved.id)
+  assert.deepEqual(row.config.orderingKeySpec, [{ fieldId: DISTINCTIVE.fieldTarget, direction: 'ASC' }])
+  assert.equal(row.config.actionProfileVersion, 'erp.material_single_record.v1')
+
+  // (ii) two bodies in the SAME family differing ONLY in orderingKeySpec must mint DIFFERENT content_keys
+  // and DIFFERENT versions — otherwise they collapse and the idempotent-save path returns the OLDER
+  // version, i.e. configContentKey silently stops pinning ordering behaviour.
+  const variant = await store.saveVersion({
+    ...SCOPE,
+    config: validConfig({
+      orderingKeySpec: [{ fieldId: DISTINCTIVE.fieldTarget, direction: 'DESC' }],
+      actionProfileVersion: 'erp.material_single_record.v1',
+    }),
+    actor: 'consultant_1',
+  })
+  assert.equal(variant.reused, false, 'a body differing only in orderingKeySpec must NOT be treated as a reuse of the earlier version')
+  assert.notEqual(variant.contentKey, saved.contentKey, 'orderingKeySpec must participate in the content key')
+  assert.notEqual(variant.version, saved.version, 'an orderingKeySpec-only change must mint a NEW version, not collapse onto the existing one')
+  assert.equal(db.tables[CONFIG_TABLE].length, 2, 'two distinct orderingKeySpec bodies must be two distinct rows')
+
+  // (iii) — added in the fix pass for PR #4601: a body differing ONLY in actionProfileVersion (orderingKeySpec
+  // held IDENTICAL to `withBoth`) must ALSO mint a different content_key/version. Without this, contentKeyFor
+  // could drop actionProfileVersion from its hash entirely and (i)+(ii) above would not notice — (i) only
+  // proves actionProfileVersion SURVIVES persistence, and (ii) only pins orderingKeySpec's participation.
+  // Adversarial mutation probe (reviewer, re-verified in the fix pass): editing contentKeyFor to
+  // `const { version, actionProfileVersion, ...content } = normalizedConfig` left BOTH suites green before
+  // this case existed.
+  const actionProfileVariant = await store.saveVersion({
+    ...SCOPE,
+    config: validConfig({
+      orderingKeySpec: [{ fieldId: DISTINCTIVE.fieldTarget, direction: 'ASC' }], // identical to withBoth
+      actionProfileVersion: 'erp.material_single_record.v2', // ONLY this differs from withBoth
+    }),
+    actor: 'consultant_1',
+  })
+  assert.equal(actionProfileVariant.reused, false, 'a body differing only in actionProfileVersion must NOT be treated as a reuse')
+  assert.notEqual(actionProfileVariant.contentKey, saved.contentKey, 'actionProfileVersion must participate in the content key')
+  assert.notEqual(actionProfileVariant.version, saved.version, 'an actionProfileVersion-only change must mint a NEW version, not collapse onto the existing one')
+  assert.equal(db.tables[CONFIG_TABLE].length, 3, 'three distinct bodies (base, orderingKeySpec variant, actionProfileVersion variant) must be three distinct rows')
+
+  // Sanity control: the SAME body saved again is still correctly reused — this predicate is about
+  // orderingKeySpec/actionProfileVersion PARTICIPATING in the content key, not about breaking idempotency
+  // generally.
+  const repeat = await store.saveVersion({ ...SCOPE, config: withBoth, actor: 'consultant_2' })
+  assert.equal(repeat.reused, true)
+  assert.equal(repeat.id, saved.id)
+  assert.equal(db.tables[CONFIG_TABLE].length, 3, 'the repeat save of the original body is a no-op on the config table')
+}
+
 async function testContentKeyHelperIsStable() {
   const key1 = __internals.contentKeyFor({ b: 2, a: [1, { d: 4, c: 3 }] })
   const key2 = __internals.contentKeyFor({ a: [1, { c: 3, d: 4 }], b: 2 })
@@ -409,6 +482,7 @@ async function main() {
   await testUniqueViolationRouting()
   await testScopingAndNotFound()
   await testAuditTrailIsValuesFree()
+  await testConfigV2OrderingKeySpecAndActionProfileVersion()
   await testContentKeyHelperIsStable()
   console.log('read-source-config-store.test.cjs OK')
 }
