@@ -1,16 +1,19 @@
 # Stock-preparation sealed-export manifest capability spike
 
 **Date:** 2026-07-27
-**Status:** **PROPOSED / SPIKE ONLY**
+**Status:** **RATIFIED / DESIGN BASELINE ONLY**
 **Issue:** [#4633](https://github.com/zensgit/metasheet2/issues/4633)
 **Source baseline:** `origin/main` at `e4509ab71e6061e7d1188d24f9b30f09fb71c435`
+**Ratified semantics:** owner decision at exact head
+`5e52cbf2b98cfe54d1dab479c095fb9e7def64ef`, 2026-07-27
 **Issue snapshot checked:** 2026-07-27, issue open, no implementation authorization
 
-This document is an owner-decision-grade capability comparison. It does not
-authorize implementation, runtime wiring, a concrete profile certification,
-deployment, flag enablement, an external write, or rollout. The existing
-bounded approved-config route may still complete #4628 independently if a
-genuinely bounded source is found.
+This document is the ratified S0 capability-comparison baseline. Ratification
+authorizes only this documentation baseline; it does not authorize
+implementation, runtime wiring, a concrete profile certification, deployment,
+flag enablement, an external write, or rollout. The existing bounded
+approved-config route may still complete #4628 independently if a genuinely
+bounded source is found.
 
 ## 1. Decision
 
@@ -632,7 +635,7 @@ The spike recommends the following owner ruling:
 
 ## 14. Boundaries
 
-- PROPOSED / SPIKE ONLY.
+- RATIFIED / DESIGN BASELINE ONLY; implementation remains separately gated.
 - No runtime code or workflow changed.
 - No concrete profile is certified.
 - No new route, storage schema, migration, key, package, or artifact is created.
