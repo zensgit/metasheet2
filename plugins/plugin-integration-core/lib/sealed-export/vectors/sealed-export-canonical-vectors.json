@@ -406,7 +406,8 @@
     },
     {
       "id": "refused.exponent_fraction",
-      "family": "NON_INTEGER_NUMBER",
+      "family": "NON_CANONICAL_BYTES",
+      "note": "1.5e1 denotes the INTEGER 15, which this codec accepts; only the bytes are refused, by the byte-equality rule. Corrected from NON_INTEGER_NUMBER, which the harness disproved.",
       "jsonText": "{\"n\":1.5e1}"
     },
     {
@@ -441,7 +442,8 @@
     },
     {
       "id": "refused.trailing_content",
-      "family": "PARSE_REFUSED",
+      "family": "NON_CANONICAL_BYTES",
+      "note": "JSON.parse ACCEPTS trailing whitespace, so this is not a parse refusal; the byte-equality rule is what refuses it. Corrected from PARSE_REFUSED, which the harness disproved.",
       "jsonText": "{\"a\":1} "
     },
     {

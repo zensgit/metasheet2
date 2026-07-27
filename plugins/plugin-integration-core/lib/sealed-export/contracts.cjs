@@ -79,8 +79,18 @@ const SEALED_EXPORT_SUBMISSION_DECISIONS = Object.freeze(['ACCEPT', 'IDEMPOTENT_
 
 const IDENTIFIER_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-'
 const BASE64ISH_CHARSET = IDENTIFIER_CHARSET + '+/='
+// S1 harness finding: `canonicalizationVersion` is pinned by validateSignedManifest
+// to equal SEALED_EXPORT_CANONICALIZATION_VERSION, whose frozen value is
+// 'sealed-export/canonical-json/v1' — and '/' is NOT in IDENTIFIER_CHARSET. Under the
+// plain TOKEN spec the SIGNED_MANIFEST contract was UNSATISFIABLE: the field rule and
+// the cross-field rule contradicted each other, so no manifest could ever validate.
+// No test had ever executed the accepting path, so nothing caught it. The narrowest
+// repair is a version-shaped charset for that one field; the codec's frozen version
+// identifier is a cross-language constant and must not be renamed to fit a charset.
+const VERSION_CHARSET = IDENTIFIER_CHARSET + '/'
 
 const TOKEN = Object.freeze({ kind: 'token', charset: IDENTIFIER_CHARSET, maxLength: 128 })
+const VERSION_TOKEN = Object.freeze({ kind: 'token', charset: VERSION_CHARSET, maxLength: 128 })
 const OPAQUE = Object.freeze({ kind: 'token', charset: BASE64ISH_CHARSET, maxLength: 2048 })
 const DIGEST = Object.freeze({ kind: 'digest' })
 const COUNT = Object.freeze({ kind: 'count' })
@@ -130,7 +140,7 @@ const SIGNED_MANIFEST_SCHEMA = Object.freeze({
   agentImplementationVersion: TOKEN,
   agentProtocolVersion: TOKEN,
   encodingVersion: TOKEN,
-  canonicalizationVersion: TOKEN,
+  canonicalizationVersion: VERSION_TOKEN,
   sourceSchemaDigest: DIGEST,
   totalRows: COUNT,
   totalBytes: COUNT,
@@ -520,6 +530,33 @@ const SEALED_EXPORT_BINDING_TERMS = Object.freeze([
 // §6.1: the manifest carries the "exact digest of the export request envelope", so
 // every envelope term is bound transitively through that digest.
 function verifyManifestBinding(envelope, manifest) {
+  // S1 harness finding: the budget comparisons below are `>` against values this
+  // function never checked. An envelope whose `rowBudget` was absent made
+  // `manifest.totalRows > undefined` evaluate FALSE, so the guard passed a manifest
+  // of any size — a check that did not happen was indistinguishable from a check
+  // that came back clean. The operands are now preconditions, refused through the
+  // existing origin mapping (envelope = server-issued, manifest = connector-sent).
+  if (!canonicalCodec.__internals.isStrictPlainObject(envelope)) {
+    refuseStructure('EXPORT_REQUEST_ENVELOPE')
+  }
+  if (!canonicalCodec.__internals.isStrictPlainObject(manifest)) {
+    refuseStructure('SIGNED_MANIFEST')
+  }
+  const budgetFields = ['rowBudget', 'byteBudget', 'chunkBudget']
+  for (let index = 0; index < budgetFields.length; index += 1) {
+    if (!isCountValue(envelope[budgetFields[index]])) {
+      refuseStructure('EXPORT_REQUEST_ENVELOPE', budgetFields[index])
+    }
+  }
+  const countFields = ['totalRows', 'totalBytes']
+  for (let index = 0; index < countFields.length; index += 1) {
+    if (!isCountValue(manifest[countFields[index]])) {
+      refuseStructure('SIGNED_MANIFEST', countFields[index])
+    }
+  }
+  if (!canonicalCodec.__internals.isStrictDenseArray(manifest.chunks)) {
+    refuseStructure('SIGNED_MANIFEST', 'chunks')
+  }
   const expectedEnvelopeDigest = computeExportRequestEnvelopeDigest(envelope)
   if (!constantTimeEqualDigest(expectedEnvelopeDigest, manifest.exportRequestEnvelopeDigest)) {
     failSealedExport('SEALED_EXPORT_MANIFEST_BINDING_MISMATCH', {
@@ -717,7 +754,19 @@ function assertChunkSetComplete(manifest, acceptedReceipts) {
     failSealedExport('SEALED_EXPORT_CHUNK_SET_INCOMPLETE', { declaredCount: manifest.chunks.length })
   }
   for (let index = 0; index < acceptedReceipts.length; index += 1) {
-    seen.add(validateChunkReceipt(acceptedReceipts[index]).chunkIndex)
+    const receiptIndex = validateChunkReceipt(acceptedReceipts[index]).chunkIndex
+    // S1 harness finding: a bare Set silently COLLAPSED a duplicated receipt index,
+    // so [0,0,1] against a two-chunk manifest returned complete. §10 names
+    // CHUNK_DUPLICATE_CONFLICT for exactly this; closed means refused, not deduped.
+    if (seen.has(receiptIndex)) {
+      failSealedExport('SEALED_EXPORT_CHUNK_DUPLICATE_CONFLICT', { chunkIndex: receiptIndex })
+    }
+    // S1 harness finding: a receipt for an index the manifest never declared was
+    // silently tolerated because the completeness loop only walked manifest indexes.
+    if (receiptIndex >= manifest.chunks.length) {
+      failSealedExport('SEALED_EXPORT_CHUNK_UNDECLARED', { chunkIndex: receiptIndex })
+    }
+    seen.add(receiptIndex)
   }
   for (let index = 0; index < manifest.chunks.length; index += 1) {
     if (!seen.has(index)) {

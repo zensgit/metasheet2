@@ -183,6 +183,12 @@ const SEALED_EXPORT_SAFE_DETAIL_TOKENS = Object.freeze([
   'agentProtocolVersion',
   'applyProfileVersion',
   'approvedConfigVersionId',
+  // S1 harness finding: `bindingVersion` is an EXPORT_REQUEST_ENVELOPE schema field
+  // and therefore a legal `field` detail value, but was absent here — so a refusal
+  // naming it lost its whole details object. Added; the mirror assertion in
+  // __tests__/sealed-export-failure-vocabulary.test.cjs now derives this set's
+  // obligations from the sibling modules' exports instead of trusting the list.
+  'bindingVersion',
   'byteBudget',
   'byteCount',
   'canonicalObjectVersion',
@@ -231,8 +237,14 @@ const SEALED_EXPORT_SAFE_DETAIL_TOKENS = Object.freeze([
   'sourceCaptureIdentity',
   'sourceCaptureProofClass',
   'sourceSchemaDigest',
+  // S1 harness finding: lifecycle.cjs refuses an unknown state with
+  // `{ field: 'state' }` / `{ field: 'targetState' }`, so these two detail-field
+  // names are also detail VALUES. Both were absent, so both refusals arrived with
+  // empty details.
+  'state',
   'status',
   'systemContentKey',
+  'targetState',
   'tenantDomainBinding',
   'totalBytes',
   'totalRows',
