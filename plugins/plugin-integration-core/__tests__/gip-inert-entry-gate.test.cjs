@@ -429,9 +429,13 @@ async function entryTableIsGated() {
 // deliberately skips the gate on one export, and it must report a violation NAMING
 // that export.
 //
-// This runs on every CI run. It is NOT a substitute for mutating the real modules —
-// that is done separately and recorded in the PR body — it is what stops this file
-// from decaying into a vacuous pass.
+// WHERE THIS RUNS, STATED PRECISELY (round 7). This file is in `plugin-integration-core`'s
+// `&&` chain, and that chain is executed in CI by the `integration-guard` check — VERIFIED
+// from that check's log, not from the workflow file. `integration-guard` is NOT one of
+// `main`'s required contexts, so this is COVERAGE, NOT A GATE: it runs on every push to a
+// PR and reports, but a red here does not block a merge. It is also NOT a substitute for
+// mutating the real modules — that is done separately and recorded in the PR body — it is
+// what stops this file from decaying into a vacuous pass.
 // ---------------------------------------------------------------------------
 async function checkerHasTeeth() {
   // Mirrors the real classes' shape: one FIXED message per declared reason, plus a
@@ -1019,6 +1023,11 @@ async function brandedErrorsAreRemintedAtTheAsynchronousSite() {
 // two fail-closed doors that only ever fail together are the exact shape this package's
 // own review history keeps rejecting. So both cells run, both outcomes print, and the
 // failures are raised TOGETHER at the end. One mutation, one run, both facts visible.
+//
+// WHERE "one run" IS, precisely: this file sits in `plugin-integration-core`'s `&&` chain,
+// which CI executes in the `integration-guard` check — VERIFIED from that check's log, not
+// from the workflow file. `integration-guard` is NOT one of `main`'s required contexts, so
+// this is COVERAGE, NOT A GATE.
 // ---------------------------------------------------------------------------
 async function bothRemintSitesReportSeparately() {
   const cells = [

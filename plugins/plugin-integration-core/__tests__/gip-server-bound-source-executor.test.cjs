@@ -1700,10 +1700,12 @@ function libSources() {
 // or values. The four `createHarness*ForTests` entries DO carry caller-controlled
 // behaviour and values, and that is the class ITEM 2 asks to be closed.
 //
-// ROUND 7 adds the NINTH row, for the SEVENTH brand: `createReadSourceConfigStore` mints
-// `firstPartyReadSourceConfigStores`. It is not a defect either — the checker it feeds is
-// what lets a consumer refuse a duck-typed store — but it was UNCOUNTED, and an uncounted
-// minting path is exactly what this ledger exists to make impossible.
+// ROUND 7 takes the ledger from EIGHT rows to NINE, for the SEVENTH brand:
+// `createReadSourceConfigStore` mints `firstPartyReadSourceConfigStores`. (The new row sorts
+// EIGHTH and is the ninth by count; both framings turn up in review, so both are written
+// here once.) It is not a defect either — the checker it feeds is what lets a consumer
+// refuse a duck-typed store — but it was UNCOUNTED, and an uncounted minting path is
+// exactly what this ledger exists to make impossible.
 const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
   'executor.createHarnessHttpProbeActionRegistryForTests': 'httpProbeActionRegistry',
   'executor.createHarnessSourceBinderForTests': 'sourceBinder',
